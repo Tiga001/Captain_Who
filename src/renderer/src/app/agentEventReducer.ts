@@ -386,15 +386,27 @@ function getMessageContentAfterDelta(content: string, delta: string) {
 }
 
 function getFinalMessageContent(currentContent: string, finalContent?: string) {
-  if (!finalContent) {
+  if (finalContent === undefined) {
     return currentContent === THINKING_PLACEHOLDER ? '' : currentContent
   }
 
-  if (!currentContent || currentContent === THINKING_PLACEHOLDER) {
-    return finalContent
+  return finalContent
+}
+
+function getFinalTimeline(run: ChatAgentRunView, finalContent?: string) {
+  const timeline = removeTransientToolTimelineItems(run.timeline)
+
+  if (finalContent === undefined) {
+    return timeline
   }
 
-  return currentContent
+  return appendMessageToTimeline(
+    {
+      ...run,
+      timeline
+    },
+    finalContent
+  )
 }
 
 function getRunResponseTimestamps(run: ChatAgentRunView, receivedAt: number) {
@@ -617,8 +629,9 @@ export function applyAgentEventToChatMessage(
   const completedAt = isFinishedAgentOutputStatus(nextStatus)
     ? (currentRun.completedAt ?? Date.now())
     : currentRun.completedAt
+  const finalContent = getFinalMessageContent(message.content, agentEvent.content)
   const finalResponseAt =
-    agentEvent.content && !currentRun.firstResponseAt
+    finalContent && !currentRun.firstResponseAt
       ? (completedAt ?? Date.now())
       : currentRun.firstResponseAt
 
@@ -627,14 +640,15 @@ export function applyAgentEventToChatMessage(
       ...currentRun,
       status: nextStatus,
       firstResponseAt: finalResponseAt,
-      lastResponseAt: agentEvent.content
-        ? (currentRun.lastResponseAt ?? finalResponseAt)
-        : currentRun.lastResponseAt,
+      lastResponseAt:
+        agentEvent.content !== undefined
+          ? (currentRun.lastResponseAt ?? finalResponseAt)
+          : currentRun.lastResponseAt,
       completedAt,
       usage: agentEvent.usage ?? currentRun.usage,
       finishReason: agentEvent.finishReason,
       approvals: getApprovalsForStatus(nextStatus, currentRun.approvals, proposedActions),
-      timeline: removeTransientToolTimelineItems(currentRun.timeline)
+      timeline: getFinalTimeline(currentRun, agentEvent.content)
     },
     nextStatus,
     completedAt ?? Date.now()
@@ -642,7 +656,7 @@ export function applyAgentEventToChatMessage(
 
   return {
     ...message,
-    content: getFinalMessageContent(message.content, agentEvent.content),
+    content: finalContent,
     status:
       nextStatus === 'waiting_for_approval'
         ? 'pending'
@@ -657,18 +671,11 @@ export function applyAgentOutputToChatMessage(
   message: ChatMessage,
   output: AgentChatOutput
 ): ChatMessage {
-  const streamedContentEvents = output.events.some(
-    (event) => event.type === 'message' || event.type === 'message_delta'
-  )
   const messageWithEvents = output.events.reduce(applyAgentEventToChatMessage, message)
   const currentRun = ensureAgentRun(messageWithEvents.agentRun, output.runId, output.status)
-  const nextContent =
-    output.content &&
-    (!streamedContentEvents ||
-      !messageWithEvents.content ||
-      messageWithEvents.content === THINKING_PLACEHOLDER)
-      ? output.content
-      : messageWithEvents.content
+  const outputFinalContent =
+    output.status === 'completed' || output.content ? output.content : undefined
+  const nextContent = getFinalMessageContent(messageWithEvents.content, outputFinalContent)
   const outputCompletedAt = isFinishedAgentOutputStatus(output.status)
     ? (currentRun.completedAt ?? Date.now())
     : currentRun.completedAt
@@ -689,7 +696,7 @@ export function applyAgentOutputToChatMessage(
       usage: output.usage ?? currentRun.usage,
       finishReason: output.finishReason,
       approvals: getApprovalsForStatus(output.status, currentRun.approvals, output.proposedActions),
-      timeline: removeTransientToolTimelineItems(currentRun.timeline)
+      timeline: getFinalTimeline(currentRun, outputFinalContent)
     },
     output.status,
     outputCompletedAt ?? Date.now()

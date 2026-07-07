@@ -67,6 +67,20 @@ import { useShellLayout } from './useShellLayout'
 type AppView = 'workspace' | 'settings'
 const SUPPORTS_NATIVE_FONT_SMOOTHING = isMacOS()
 const DEFAULT_AGENT_MAX_TOKENS = 30000
+const STREAM_DELTA_FLUSH_MS = 80
+const STREAM_DELTA_MAX_BUFFER_CHARS = 360
+
+type PendingMessageSave = {
+  conversationId: string
+  message: ChatMessage
+}
+
+type PendingMessageDelta = {
+  conversationId: string
+  delta: string
+  messageId: string
+  timerId: number
+}
 
 function SidebarToggleIcon({ open, side }: { open: boolean; side: 'left' | 'right' }) {
   return (
@@ -106,6 +120,9 @@ export function AppShell() {
   const activeConversationIdRef = useRef<string | null>(null)
   const activeRunBindingsRef = useRef<Map<string, ActiveRunBinding>>(new Map())
   const bufferedAgentEventsRef = useRef<Map<string, AgentEvent[]>>(new Map())
+  const pendingMessageDeltasRef = useRef<Map<string, PendingMessageDelta>>(new Map())
+  const messageSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
+  const pendingMessageSavesRef = useRef<Map<string, PendingMessageSave>>(new Map())
   const pendingActionsHydratedRef = useRef(false)
   const cancelledPendingMessageIdsRef = useRef<Set<string>>(new Set())
   const cancelledRunIdsRef = useRef<Set<string>>(new Set())
@@ -178,16 +195,59 @@ export function AppShell() {
     void saveComposerDraft(scopeId, draft)
   }, [])
 
-  const cleanupRunBinding = useCallback((runId: string) => {
-    activeRunBindingsRef.current.delete(runId)
-    bufferedAgentEventsRef.current.delete(runId)
+  const clearPendingMessageDelta = useCallback((runId: string) => {
+    const pendingDelta = pendingMessageDeltasRef.current.get(runId)
+    if (!pendingDelta) return
+
+    window.clearTimeout(pendingDelta.timerId)
+    pendingMessageDeltasRef.current.delete(runId)
   }, [])
+
+  const cleanupRunBinding = useCallback(
+    (runId: string) => {
+      activeRunBindingsRef.current.delete(runId)
+      bufferedAgentEventsRef.current.delete(runId)
+      clearPendingMessageDelta(runId)
+    },
+    [clearPendingMessageDelta]
+  )
 
   const cancelBackendAgentRun = useCallback((runId: string) => {
     void cancelAgentRun(runId).catch((error) => {
       console.error('Failed to cancel agent run', error)
     })
   }, [])
+
+  const enqueueChatMessageStateSave = useCallback(
+    (conversationId: string, message: ChatMessage) => {
+      const key = `${conversationId}:${message.id}`
+      pendingMessageSavesRef.current.set(key, { conversationId, message })
+
+      if (messageSaveQueuesRef.current.has(key)) {
+        return
+      }
+
+      const drainSaves = async () => {
+        while (true) {
+          const payload = pendingMessageSavesRef.current.get(key)
+          if (!payload) return
+
+          pendingMessageSavesRef.current.delete(key)
+          try {
+            await saveChatMessageState(payload.conversationId, payload.message)
+          } catch (error) {
+            console.error('Failed to save chat message state to SQLite', error)
+          }
+        }
+      }
+
+      const nextSave = drainSaves().finally(() => {
+        messageSaveQueuesRef.current.delete(key)
+      })
+      messageSaveQueuesRef.current.set(key, nextSave)
+    },
+    []
+  )
 
   const updateAssistantMessage = useCallback(
     (
@@ -221,13 +281,70 @@ export function AppShell() {
       setConversations(nextConversations)
 
       if (messageToSave) {
-        void saveChatMessageState(conversationId, messageToSave)
+        enqueueChatMessageStateSave(conversationId, messageToSave)
       }
       if (options.touchConversation && conversationMetaToSave) {
         void saveConversationMeta(conversationMetaToSave)
       }
     },
-    []
+    [enqueueChatMessageStateSave]
+  )
+
+  const flushPendingMessageDelta = useCallback(
+    (runId: string) => {
+      const pendingDelta = pendingMessageDeltasRef.current.get(runId)
+      if (!pendingDelta) return
+
+      window.clearTimeout(pendingDelta.timerId)
+      pendingMessageDeltasRef.current.delete(runId)
+      updateAssistantMessage(
+        pendingDelta.conversationId,
+        pendingDelta.messageId,
+        (message) =>
+          applyAgentEventToChatMessage(message, {
+            type: 'message_delta',
+            runId,
+            delta: pendingDelta.delta
+          }),
+        { touchConversation: false }
+      )
+    },
+    [updateAssistantMessage]
+  )
+
+  const bufferMessageDelta = useCallback(
+    (
+      conversationId: string,
+      messageId: string,
+      agentEvent: AgentEvent & { type: 'message_delta' }
+    ) => {
+      const pendingDelta = pendingMessageDeltasRef.current.get(agentEvent.runId)
+
+      if (pendingDelta) {
+        pendingDelta.conversationId = conversationId
+        pendingDelta.messageId = messageId
+        pendingDelta.delta += agentEvent.delta
+
+        if (
+          pendingDelta.delta.includes('\n') ||
+          pendingDelta.delta.length >= STREAM_DELTA_MAX_BUFFER_CHARS
+        ) {
+          flushPendingMessageDelta(agentEvent.runId)
+        }
+        return
+      }
+
+      const timerId = window.setTimeout(() => {
+        flushPendingMessageDelta(agentEvent.runId)
+      }, STREAM_DELTA_FLUSH_MS)
+      pendingMessageDeltasRef.current.set(agentEvent.runId, {
+        conversationId,
+        delta: agentEvent.delta,
+        messageId,
+        timerId
+      })
+    },
+    [flushPendingMessageDelta]
   )
 
   useEffect(() => {
@@ -269,6 +386,15 @@ export function AppShell() {
     (conversationId: string, assistantMessageId: string, agentEvent: AgentEvent) => {
       if (agentEvent.runId && cancelledRunIdsRef.current.has(agentEvent.runId)) return
       if (cancelledPendingMessageIdsRef.current.has(assistantMessageId)) return
+
+      if (agentEvent.type === 'message_delta') {
+        bufferMessageDelta(conversationId, assistantMessageId, agentEvent)
+        return
+      }
+
+      if (agentEvent.runId) {
+        flushPendingMessageDelta(agentEvent.runId)
+      }
 
       updateAssistantMessage(
         conversationId,
@@ -312,7 +438,7 @@ export function AppShell() {
         cleanupRunBinding(agentEvent.runId)
       }
     },
-    [cleanupRunBinding, updateAssistantMessage]
+    [bufferMessageDelta, cleanupRunBinding, flushPendingMessageDelta, updateAssistantMessage]
   )
 
   useEffect(() => {
@@ -331,6 +457,15 @@ export function AppShell() {
       handleBoundAgentEvent(binding.conversationId, binding.pendingMessageId, agentEvent)
     })
   }, [handleBoundAgentEvent])
+
+  useEffect(() => {
+    return () => {
+      for (const pendingDelta of pendingMessageDeltasRef.current.values()) {
+        window.clearTimeout(pendingDelta.timerId)
+      }
+      pendingMessageDeltasRef.current.clear()
+    }
+  }, [])
 
   const requestAssistantResponse = useCallback(
     async (
@@ -874,7 +1009,7 @@ export function AppShell() {
                   )
                 )
                 if (messageToSave) {
-                  void saveChatMessageState(activeConversation.id, messageToSave)
+                  enqueueChatMessageStateSave(activeConversation.id, messageToSave)
                 }
               }}
               onRejectAgentAction={handleRejectAgentAction}

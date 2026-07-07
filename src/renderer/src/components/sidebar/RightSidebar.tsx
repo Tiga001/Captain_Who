@@ -38,12 +38,12 @@ interface RightSidebarProps {
   workspacePath?: string
 }
 
-function createPageId(moduleId: RightSidebarModuleId) {
+function createPageId(moduleId: RightSidebarModuleId): string {
   const randomValue = Math.random().toString(36).slice(2, 8)
   return `${moduleId}-${Date.now().toString(36)}-${randomValue}`
 }
 
-function RestoreFromMaximizedIcon() {
+function RestoreFromMaximizedIcon(): ReactNode {
   return (
     <svg
       aria-hidden="true"
@@ -64,7 +64,7 @@ function RestoreFromMaximizedIcon() {
 function getWorkspaceTabTitle(
   workspacePath: string | undefined,
   workspaceName: string | null | undefined
-) {
+): string | null {
   const pathName = workspacePath?.split(/[\\/]/).filter(Boolean).at(-1)?.trim()
 
   return pathName || workspaceName || null
@@ -73,7 +73,7 @@ function getWorkspaceTabTitle(
 function getWorkspaceKey(
   workspacePath: string | undefined,
   workspaceName: string | null | undefined
-) {
+): string {
   return workspacePath || workspaceName || 'home'
 }
 
@@ -82,7 +82,7 @@ function getTerminalPageTitle(
   workspacePath: string | undefined,
   workspaceName: string | null | undefined,
   fallbackTitle: string
-) {
+): string {
   const workspaceKey = getWorkspaceKey(workspacePath, workspaceName)
   const baseTitle = getWorkspaceTabTitle(workspacePath, workspaceName) || fallbackTitle
   const existingCount = pages.filter(
@@ -98,7 +98,7 @@ function getPageTitle(
   workspacePath: string | undefined,
   workspaceName: string | null | undefined,
   fallbackTitle: string
-) {
+): string {
   if (moduleId === 'terminal') {
     return getTerminalPageTitle(pages, workspacePath, workspaceName, fallbackTitle)
   }
@@ -113,7 +113,7 @@ export function RightSidebar({
   onToggleMaximized,
   workspaceName,
   workspacePath
-}: RightSidebarProps) {
+}: RightSidebarProps): ReactNode {
   const { t } = useFrontendConfig()
   const moduleMenuRef = useRef<HTMLDivElement>(null)
   const moduleMenuButtonRef = useRef<HTMLButtonElement>(null)
@@ -127,7 +127,7 @@ export function RightSidebar({
   useEffect(() => {
     if (!isModuleMenuOpen) return
 
-    const handlePointerDown = (event: PointerEvent) => {
+    const handlePointerDown = (event: PointerEvent): void => {
       const target = event.target
       if (!(target instanceof Node)) return
       if (moduleMenuRef.current?.contains(target)) return
@@ -168,6 +168,7 @@ export function RightSidebar({
               ? t('browser.newTab')
               : t(module.titleKey)
         const page: RightSidebarPage = {
+          iconUrl: moduleId === 'browser' ? null : undefined,
           id: pageId,
           moduleId,
           title: getPageTitle(moduleId, currentPages, workspacePath, workspaceName, fallbackTitle),
@@ -204,20 +205,28 @@ export function RightSidebar({
   }, [])
 
   const updateBrowserPageMetadata = useCallback((pageId: string, metadata: BrowserPageMetadata) => {
-    setPages((currentPages) =>
-      currentPages.map((page) => {
+    setPages((currentPages) => {
+      let didUpdate = false
+      const nextPages = currentPages.map((page) => {
         if (page.id !== pageId || page.moduleId !== 'browser') return page
 
+        const nextIconUrl = metadata.iconUrl
+        const nextTitle = metadata.title?.trim() || page.title
+        if (page.iconUrl === nextIconUrl && page.title === nextTitle) return page
+
+        didUpdate = true
         return {
           ...page,
-          iconUrl: metadata.iconUrl,
-          title: metadata.title?.trim() || page.title
+          iconUrl: nextIconUrl,
+          title: nextTitle
         }
       })
-    )
+
+      return didUpdate ? nextPages : currentPages
+    })
   }, [])
 
-  const renderPageContent = (page: RightSidebarPage, isActive: boolean) => {
+  const renderPageContent = (page: RightSidebarPage, isActive: boolean): ReactNode => {
     if (page.moduleId === 'terminal') {
       return (
         <Suspense

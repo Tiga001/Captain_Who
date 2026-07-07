@@ -214,10 +214,12 @@ export class BrowserWebContentsViewManager {
     })
 
     webContents.on('page-title-updated', (_event, title) => {
-      const nextTitle = title.trim() || getFallbackPageTitle(record.state.metadata.url)
+      const currentUrl = webContents.getURL() || record.state.metadata.url
+      const nextTitle = title.trim() || getFallbackPageTitle(currentUrl)
       this.updateRecordState(record, {
         metadata: {
           ...record.state.metadata,
+          url: currentUrl,
           title: nextTitle
         }
       })
@@ -243,7 +245,7 @@ export class BrowserWebContentsViewManager {
           url
         }
       })
-      this.emit({ state: this.refreshNavigationState(record), type: 'browser.navigation' })
+      this.emitMetadata(record)
     })
 
     webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
@@ -255,7 +257,7 @@ export class BrowserWebContentsViewManager {
           url
         }
       })
-      this.emit({ state: this.refreshNavigationState(record), type: 'browser.navigation' })
+      this.emitMetadata(record)
     })
 
     webContents.on('did-start-loading', () => {
