@@ -5,6 +5,13 @@ import type {
   AgentStartRunRequest,
   AgentStartRunResponse,
   AppVersionResponse,
+  BrowserBounds,
+  BrowserCreateViewRequest,
+  BrowserNavigateRequest,
+  BrowserNavigationState,
+  BrowserViewEvent,
+  BrowserViewId,
+  BrowserZoomState,
   CorePingRequest,
   CorePingResponse,
   StorageAgentPromptPreferencesRecord,
@@ -24,17 +31,18 @@ import type {
 } from '@mycopilot/protocol'
 
 export interface BrowserHostApi {
-  create(input?: { id?: string; bounds?: ElectronRectangle }): Promise<{ id: string }>
-  navigate(input: { id: string; url: string }): Promise<{ id: string; url: string }>
-  setBounds(input: { id: string; bounds: ElectronRectangle }): Promise<{ id: string }>
-  destroy(input: { id: string }): Promise<{ id: string }>
-}
-
-export interface ElectronRectangle {
-  x: number
-  y: number
-  width: number
-  height: number
+  createView(request: BrowserCreateViewRequest): Promise<BrowserNavigationState>
+  destroyView(id: BrowserViewId): Promise<void>
+  setBounds(id: BrowserViewId, bounds: BrowserBounds): Promise<void>
+  showView(id: BrowserViewId): Promise<BrowserNavigationState>
+  hideView(id: BrowserViewId): Promise<void>
+  navigate(request: BrowserNavigateRequest): Promise<BrowserNavigationState>
+  reload(id: BrowserViewId): Promise<BrowserNavigationState>
+  goBack(id: BrowserViewId): Promise<BrowserNavigationState>
+  goForward(id: BrowserViewId): Promise<BrowserNavigationState>
+  setZoom(id: BrowserViewId, zoomFactor: number): Promise<BrowserZoomState>
+  clearBrowsingData(id: BrowserViewId): Promise<void>
+  onEvent(handler: (event: BrowserViewEvent) => void): () => void
 }
 
 export interface StorageHostApi {

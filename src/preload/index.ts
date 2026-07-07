@@ -2,10 +2,17 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type { HostApi } from '@mycopilot/host-api'
-import type { TerminalExitEvent, TerminalOutputEvent } from '@mycopilot/protocol'
+import type { BrowserViewEvent, TerminalExitEvent, TerminalOutputEvent } from '@mycopilot/protocol'
 
+const BROWSER_EVENT_CHANNEL = 'host:browser.event'
 const TERMINAL_OUTPUT_CHANNEL = 'host:terminal.output'
 const TERMINAL_EXIT_CHANNEL = 'host:terminal.exit'
+
+function onBrowserEvent(handler: (event: BrowserViewEvent) => void): () => void {
+  const listener = (_event: IpcRendererEvent, payload: BrowserViewEvent): void => handler(payload)
+  ipcRenderer.on(BROWSER_EVENT_CHANNEL, listener)
+  return () => ipcRenderer.removeListener(BROWSER_EVENT_CHANNEL, listener)
+}
 
 function onTerminalOutput(handler: (event: TerminalOutputEvent) => void): () => void {
   const listener = (_event: IpcRendererEvent, payload: TerminalOutputEvent): void =>
@@ -32,10 +39,18 @@ const host: HostApi = {
     cancelRun: (input) => ipcRenderer.invoke('host:agent.cancelRun', input)
   },
   browser: {
-    create: (input) => ipcRenderer.invoke('host:browser.create', input),
-    navigate: (input) => ipcRenderer.invoke('host:browser.navigate', input),
-    setBounds: (input) => ipcRenderer.invoke('host:browser.setBounds', input),
-    destroy: (input) => ipcRenderer.invoke('host:browser.destroy', input)
+    createView: (request) => ipcRenderer.invoke('host:browser.createView', request),
+    destroyView: (id) => ipcRenderer.invoke('host:browser.destroyView', id),
+    setBounds: (id, bounds) => ipcRenderer.invoke('host:browser.setBounds', id, bounds),
+    showView: (id) => ipcRenderer.invoke('host:browser.showView', id),
+    hideView: (id) => ipcRenderer.invoke('host:browser.hideView', id),
+    navigate: (request) => ipcRenderer.invoke('host:browser.navigate', request),
+    reload: (id) => ipcRenderer.invoke('host:browser.reload', id),
+    goBack: (id) => ipcRenderer.invoke('host:browser.goBack', id),
+    goForward: (id) => ipcRenderer.invoke('host:browser.goForward', id),
+    setZoom: (id, zoomFactor) => ipcRenderer.invoke('host:browser.setZoom', id, zoomFactor),
+    clearBrowsingData: (id) => ipcRenderer.invoke('host:browser.clearBrowsingData', id),
+    onEvent: onBrowserEvent
   },
   storage: {
     loadAppData: () => ipcRenderer.invoke('host:storage.loadAppData'),

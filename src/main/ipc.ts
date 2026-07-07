@@ -14,10 +14,27 @@ export function registerHostIpc(
   ipcMain.handle('host:app.getVersion', () => coreServer.getVersion())
   ipcMain.handle('host:agent.startRun', (_event, input) => coreServer.startRun(input))
   ipcMain.handle('host:agent.cancelRun', (_event, input) => coreServer.cancelRun(input))
-  ipcMain.handle('host:browser.create', (_event, input) => getBrowserManager().create(input))
-  ipcMain.handle('host:browser.navigate', (_event, input) => getBrowserManager().navigate(input))
-  ipcMain.handle('host:browser.setBounds', (_event, input) => getBrowserManager().setBounds(input))
-  ipcMain.handle('host:browser.destroy', (_event, input) => getBrowserManager().destroy(input))
+  ipcMain.handle('host:browser.createView', (_event, request) =>
+    getBrowserManager().createView(request)
+  )
+  ipcMain.handle('host:browser.destroyView', (_event, id) => getBrowserManager().destroyView(id))
+  ipcMain.handle('host:browser.setBounds', (_event, id, bounds) =>
+    getBrowserManager().setBounds(id, bounds)
+  )
+  ipcMain.handle('host:browser.showView', (_event, id) => getBrowserManager().showView(id))
+  ipcMain.handle('host:browser.hideView', (_event, id) => getBrowserManager().hideView(id))
+  ipcMain.handle('host:browser.navigate', (_event, request) =>
+    getBrowserManager().navigate(request)
+  )
+  ipcMain.handle('host:browser.reload', (_event, id) => getBrowserManager().reload(id))
+  ipcMain.handle('host:browser.goBack', (_event, id) => getBrowserManager().goBack(id))
+  ipcMain.handle('host:browser.goForward', (_event, id) => getBrowserManager().goForward(id))
+  ipcMain.handle('host:browser.setZoom', (_event, id, zoomFactor) =>
+    getBrowserManager().setZoom(id, zoomFactor)
+  )
+  ipcMain.handle('host:browser.clearBrowsingData', (_event, id) =>
+    getBrowserManager().clearBrowsingData(id)
+  )
   ipcMain.handle('host:storage.loadAppData', () => coreServer.loadAppData())
   ipcMain.handle('host:storage.loadModelSettings', () => coreServer.loadModelSettings())
   ipcMain.handle('host:storage.saveModelSettings', (_event, settings) =>

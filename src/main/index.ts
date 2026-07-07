@@ -94,6 +94,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', (event) => {
   if (isQuittingAfterTerminalShutdown) {
+    browserManager?.destroyAll()
     terminalBridge.killNow()
     coreServer.stop()
     return
@@ -108,6 +109,7 @@ app.on('before-quit', (event) => {
 })
 
 app.on('will-quit', () => {
+  browserManager?.destroyAll()
   terminalBridge.killNow()
   coreServer.stop()
 })

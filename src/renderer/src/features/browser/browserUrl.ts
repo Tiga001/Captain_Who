@@ -1,0 +1,42 @@
+// Renderer browser UI.
+const EXPLICIT_PROTOCOL_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/
+const LOCAL_HTTP_PATTERN = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::|\/|$)/i
+const SAFE_BROWSER_PROTOCOLS = new Set(['http:', 'https:'])
+
+export function normalizeBrowserUrl(input: string): string | null {
+  const trimmedInput = input.trim()
+  if (!trimmedInput) return null
+
+  if (EXPLICIT_PROTOCOL_PATTERN.test(trimmedInput)) {
+    return normalizeHttpUrl(trimmedInput)
+  }
+
+  const candidate = LOCAL_HTTP_PATTERN.test(trimmedInput)
+    ? `http://${trimmedInput}`
+    : `https://${trimmedInput}`
+
+  return normalizeHttpUrl(candidate)
+}
+
+export function getFallbackPageTitle(url: string | null): string | null {
+  if (!url) return null
+
+  try {
+    return new URL(url).hostname.replace(/^www\./, '') || url
+  } catch {
+    return url
+  }
+}
+
+function normalizeHttpUrl(input: string): string | null {
+  try {
+    const url = new URL(input)
+    if (!SAFE_BROWSER_PROTOCOLS.has(url.protocol)) {
+      return null
+    }
+
+    return url.href
+  } catch {
+    return null
+  }
+}

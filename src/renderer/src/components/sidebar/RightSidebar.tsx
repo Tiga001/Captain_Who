@@ -236,6 +236,7 @@ export function RightSidebar({
           fallback={<div className="right-sidebar__panel-loading">{t('browser.title')}</div>}
         >
           <BrowserPanel
+            isObscured={isModuleMenuOpen}
             isActive={isActive}
             onPageMetadataChange={(metadata) => updateBrowserPageMetadata(page.id, metadata)}
             pageId={page.id}
