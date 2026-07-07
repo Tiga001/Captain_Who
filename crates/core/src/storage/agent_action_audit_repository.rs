@@ -24,9 +24,14 @@ pub fn upsert_action_audit_record(
             error,
             created_at,
             decided_at,
-            completed_at
+            completed_at,
+            effective_permissions_json,
+            path_scope,
+            command_cwd_scope,
+            blocked_reason,
+            decision_source
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
         ON CONFLICT(action_id) DO UPDATE SET
             run_id = excluded.run_id,
             conversation_id = excluded.conversation_id,
@@ -42,7 +47,12 @@ pub fn upsert_action_audit_record(
             error = excluded.error,
             created_at = excluded.created_at,
             decided_at = excluded.decided_at,
-            completed_at = excluded.completed_at
+            completed_at = excluded.completed_at,
+            effective_permissions_json = excluded.effective_permissions_json,
+            path_scope = excluded.path_scope,
+            command_cwd_scope = excluded.command_cwd_scope,
+            blocked_reason = excluded.blocked_reason,
+            decision_source = excluded.decision_source
         ",
         params![
             &record.action_id,
@@ -61,6 +71,11 @@ pub fn upsert_action_audit_record(
             record.created_at,
             record.decided_at,
             record.completed_at,
+            &record.effective_permissions_json,
+            &record.path_scope,
+            &record.command_cwd_scope,
+            &record.blocked_reason,
+            &record.decision_source,
         ],
     )?;
     Ok(())
@@ -93,6 +108,11 @@ mod tests {
             created_at: 1,
             decided_at: Some(2),
             completed_at: None,
+            effective_permissions_json: Some(r#"{"write":"workspace_only"}"#.to_string()),
+            path_scope: Some("workspace".to_string()),
+            command_cwd_scope: Some("workspace".to_string()),
+            blocked_reason: None,
+            decision_source: Some("manual".to_string()),
         };
         upsert_action_audit_record(&connection, &record).unwrap();
 
@@ -100,13 +120,14 @@ mod tests {
         record.completed_at = Some(3);
         upsert_action_audit_record(&connection, &record).unwrap();
 
-        let status: String = connection
+        let (status, decision_source): (String, Option<String>) = connection
             .query_row(
-                "SELECT status FROM agent_action_audit WHERE action_id = 'action-1'",
+                "SELECT status, decision_source FROM agent_action_audit WHERE action_id = 'action-1'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         assert_eq!(status, "completed");
+        assert_eq!(decision_source.as_deref(), Some("manual"));
     }
 }

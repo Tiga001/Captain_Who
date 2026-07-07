@@ -2,14 +2,15 @@
 use std::path::Path;
 
 use crate::storage::models::{
-    AgentActionAuditRecord, AgentPromptPreferencesRecord, AgentUsageRecordInsert, AppDataSnapshot,
-    ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ChatMessageStateRecord,
-    ComposerDraftRecord, ModelSettingsRecord, ProjectRecord, UiPreferencesRecord,
+    AgentActionAuditRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
+    AgentUsageRecordInsert, AppDataSnapshot, ChatConversationMetaRecord, ChatConversationRecord,
+    ChatMessageRecord, ChatMessageStateRecord, ComposerDraftRecord, ModelSettingsRecord,
+    ProjectRecord, UiPreferencesRecord,
 };
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, chat_repository,
-    composer_draft_repository, config_repository, preferences_repository, project_repository,
-    storage_error, usage_repository, StorageState,
+    composer_draft_repository, config_repository, pending_action_repository,
+    preferences_repository, project_repository, storage_error, usage_repository, StorageState,
 };
 use crate::{
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
@@ -238,5 +239,36 @@ impl StorageService {
         let connection = self.state.connection()?;
         agent_action_audit_repository::upsert_action_audit_record(&connection, &record)
             .map_err(storage_error)
+    }
+
+    pub fn upsert_pending_agent_action(
+        &self,
+        record: AgentPendingActionRecord,
+    ) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        pending_action_repository::upsert_pending_action(&connection, &record)
+            .map_err(storage_error)
+    }
+
+    pub fn list_pending_agent_actions(&self) -> Result<Vec<AgentPendingActionRecord>, String> {
+        let connection = self.state.connection()?;
+        pending_action_repository::list_pending_actions(&connection).map_err(storage_error)
+    }
+
+    pub fn update_pending_agent_action_status(
+        &self,
+        action_id: &str,
+        status: &str,
+        updated_at: i64,
+    ) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        pending_action_repository::update_pending_action_status(
+            &connection,
+            action_id,
+            status,
+            updated_at,
+        )
+        .map(|_| ())
+        .map_err(storage_error)
     }
 }

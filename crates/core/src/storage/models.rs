@@ -212,4 +212,25 @@ pub struct AgentActionAuditRecord {
     pub created_at: i64,
     pub decided_at: Option<i64>,
     pub completed_at: Option<i64>,
+    pub effective_permissions_json: Option<String>,
+    pub path_scope: Option<String>,
+    pub command_cwd_scope: Option<String>,
+    pub blocked_reason: Option<String>,
+    pub decision_source: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentPendingActionRecord {
+    pub action_id: String,
+    pub run_id: String,
+    pub conversation_id: Option<String>,
+    pub assistant_message_id: Option<String>,
+    pub action_type: String,
+    pub tool_name: String,
+    pub tool_call_id: Option<String>,
+    pub status: String,
+    pub action_json: String,
+    pub agent_input_json: String,
+    pub created_at: i64,
+    pub updated_at: i64,
 }

@@ -41,6 +41,12 @@ function getApprovalCode(action: AgentProposedAction) {
   return action.call.tool
 }
 
+function getApprovalPolicyHint(action: AgentProposedAction, t: Translate) {
+  if (action.type === 'command') return t('agent.approval.dialog.commandPolicyHint')
+  if (action.type === 'diff') return t('agent.approval.dialog.diffPolicyHint')
+  return t('agent.approval.dialog.toolPolicyHint')
+}
+
 function getRememberCommandPrefix(action: AgentProposedAction) {
   if (action.type !== 'command') return ''
   return action.command.command.trim()
@@ -58,6 +64,7 @@ export function AgentApprovalDialog({ target, onApprove, onReject }: AgentApprov
   const { action, messageId } = target
   const request = getApprovalRequest(action, t)
   const code = getApprovalCode(action)
+  const policyHint = getApprovalPolicyHint(action, t)
   const rememberPrefix = getRememberCommandPrefix(action)
   const showRememberChoice = canRememberForRun(action)
 
@@ -85,6 +92,7 @@ export function AgentApprovalDialog({ target, onApprove, onReject }: AgentApprov
       </h2>
 
       {code ? <code className="agent-approval-dialog__command">{code}</code> : null}
+      <p className="agent-approval-dialog__policy">{policyHint}</p>
 
       <button
         className="agent-approval-dialog__choice"

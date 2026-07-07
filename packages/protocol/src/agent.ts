@@ -28,12 +28,33 @@ export type AgentApiStyle = "openai_compatible" | "anthropic_compatible";
 
 export type AgentSearchMode = "auto" | "disabled" | "tavily";
 
+/**
+ * Controls which local paths read-only tools may inspect.
+ * - workspace_only: selected workspace and registered attachment paths only.
+ * - all: workspace plus absolute local paths and supported aliases such as
+ *   @home, @desktop, @documents, and @downloads.
+ */
 export type AgentReadPermission = "workspace_only" | "all";
 
+/**
+ * Controls where file-changing tools may write.
+ * - denied: hide/disable file edit tools and reject patch execution.
+ * - workspace_only: safe writes inside the selected workspace only.
+ * - all: safe writes inside or outside the workspace, including absolute paths and supported aliases.
+ */
 export type AgentWritePermission = "denied" | "workspace_only" | "all";
 
+/**
+ * Controls whether run_command requires a human click.
+ * auto_approve only skips the prompt; backend command validation and dangerous-command blocking
+ * still apply.
+ */
 export type AgentCommandPermission = "require_approval" | "auto_approve";
 
+/**
+ * Controls whether apply_patch requires a human click.
+ * auto_approve only skips the prompt; backend path, symlink, binary, and revision checks still apply.
+ */
 export type AgentPatchPermission = "require_approval" | "auto_approve";
 
 export interface AgentPermissions {

@@ -5,16 +5,19 @@ pub use crate::agent_support::{
     PendingActionStatus, PendingAgentActionSnapshot,
 };
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use mycopilot_core::command::{run_approved_command, AgentCommandExecutionResult, CommandRunState};
-use mycopilot_core::storage::models::{AgentActionAuditRecord, AgentUsageRecordInsert};
+use mycopilot_core::storage::models::{
+    AgentActionAuditRecord, AgentPendingActionRecord, AgentUsageRecordInsert,
+};
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
-    next_run_id, send_chat_with_events_and_cancellation, AgentApprovalDecision,
-    AgentApprovalDecisionStatus, AgentApprovalStatus, AgentCancellationToken, AgentChatInput,
-    AgentChatOutput, AgentEvent, AgentEventEmitter, AgentPatchResult, AgentProposedAction,
+    next_run_id, send_chat_with_host_executor, AgentApprovalDecision, AgentApprovalDecisionStatus,
+    AgentApprovalStatus, AgentCancellationToken, AgentChatInput, AgentChatOutput, AgentEvent,
+    AgentEventEmitter, AgentHostActionExecutor, AgentPatchResult, AgentProposedAction, AgentResult,
     AgentRunStatus, AgentToolCall, AgentToolContinuation, AgentToolResult, AgentUsage,
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
 };
@@ -38,10 +41,11 @@ pub struct AgentService {
 
 impl AgentService {
     pub fn new(storage: Arc<StorageService>) -> Self {
+        let pending_actions = load_persisted_pending_actions(&storage);
         Self {
             storage,
             cancellations: Arc::new(Mutex::new(HashMap::new())),
-            pending_actions: Arc::new(Mutex::new(HashMap::new())),
+            pending_actions: Arc::new(Mutex::new(pending_actions)),
             usage_contexts: Arc::new(Mutex::new(HashMap::new())),
             command_runs: CommandRunState::default(),
         }
@@ -92,11 +96,18 @@ impl AgentService {
                 let _ = emitter_notifications.send(agent_event_notification(event));
             });
 
-            let result = send_chat_with_events_and_cancellation(
+            let host_executor = service.host_action_executor(
+                pending_agent_input.clone(),
+                worker_run_id.clone(),
+                Some(worker_conversation_id.clone()),
+                Some(worker_assistant_message_id.clone()),
+            );
+            let result = send_chat_with_host_executor(
                 prepared.agent_input,
                 worker_run_id.clone(),
                 emitter,
                 cancellation_token,
+                host_executor,
             )
             .await;
 
@@ -151,6 +162,106 @@ impl AgentService {
         };
         let cancelled_commands = self.command_runs.cancel_run(run_id);
         cancelled_run || cancelled_commands > 0
+    }
+
+    fn host_action_executor(
+        &self,
+        agent_input: AgentChatInput,
+        run_id: String,
+        conversation_id: Option<String>,
+        assistant_message_id: Option<String>,
+    ) -> AgentHostActionExecutor {
+        let service = self.clone();
+        Arc::new(move |action, cancellation_token| {
+            service.execute_auto_approved_action(
+                agent_input.clone(),
+                run_id.clone(),
+                conversation_id.clone(),
+                assistant_message_id.clone(),
+                action,
+                cancellation_token,
+            )
+        })
+    }
+
+    fn execute_auto_approved_action(
+        &self,
+        agent_input: AgentChatInput,
+        run_id: String,
+        conversation_id: Option<String>,
+        assistant_message_id: Option<String>,
+        action: AgentProposedAction,
+        cancellation_token: AgentCancellationToken,
+    ) -> AgentResult<AgentToolResult> {
+        let created_at = now_ms();
+        match action {
+            AgentProposedAction::Diff { diff } => {
+                let action_id = diff.id.clone();
+                let execution = approved_patch_execution_for_input(&agent_input, &action_id, &diff);
+                self.record_auto_action_audit(
+                    &run_id,
+                    conversation_id,
+                    assistant_message_id,
+                    &agent_input,
+                    AgentProposedAction::Diff { diff },
+                    &execution.status,
+                    execution.patch_result.as_ref(),
+                    None,
+                    Some(&execution.tool_result),
+                    execution.tool_result.error.as_deref(),
+                    created_at,
+                    now_ms(),
+                );
+                Ok(execution.tool_result)
+            }
+            AgentProposedAction::Command { command } => {
+                let workspace_root = workspace_root_optional(&agent_input);
+                let permissions = permissions_from_input(&agent_input);
+                let command_for_error = command.clone();
+                let command_result = run_approved_command(
+                    workspace_root.as_deref(),
+                    &command,
+                    permissions,
+                    cancellation_token,
+                    None,
+                )
+                .unwrap_or_else(|error| failed_command_result(&command_for_error, error));
+                let command_succeeded = command_result.error.is_none()
+                    && !command_result.timed_out
+                    && !command_result.cancelled
+                    && command_result.exit_code == Some(0);
+                let tool_result =
+                    command_tool_result(&command.id, command_succeeded, &command_result);
+                self.record_auto_action_audit(
+                    &run_id,
+                    conversation_id,
+                    assistant_message_id,
+                    &agent_input,
+                    AgentProposedAction::Command { command },
+                    if command_succeeded {
+                        "completed"
+                    } else {
+                        "failed"
+                    },
+                    None,
+                    Some(&command_result),
+                    Some(&tool_result),
+                    tool_result.error.as_deref(),
+                    created_at,
+                    now_ms(),
+                );
+                Ok(tool_result)
+            }
+            AgentProposedAction::ToolCall { call } => Ok(AgentToolResult {
+                call_id: call.id,
+                tool: call.tool,
+                ok: false,
+                result: None,
+                error: Some(
+                    "自动批准执行器只支持结构化 apply_patch diff 和 run_command。".to_string(),
+                ),
+            }),
+        }
     }
 
     pub fn list_pending_actions(&self) -> Vec<PendingAgentActionSnapshot> {
@@ -210,6 +321,7 @@ impl AgentService {
             let cancelled = self.command_runs.cancel(action_id);
             if cancelled {
                 record.snapshot.status = PendingActionStatus::Cancelled;
+                self.persist_pending_status(action_id, PendingActionStatus::Cancelled);
                 self.record_action_audit(
                     record,
                     Some("cancelled"),
@@ -228,6 +340,7 @@ impl AgentService {
             return Ok(false);
         }
         record.snapshot.status = PendingActionStatus::Cancelled;
+        self.persist_pending_status(action_id, PendingActionStatus::Cancelled);
         self.record_action_audit(
             record,
             Some("cancelled"),
@@ -262,6 +375,7 @@ impl AgentService {
                 return Err(format!("待审批操作已经处理：{action_id}"));
             }
             record.snapshot.status = pending_status;
+            self.persist_pending_status(action_id, pending_status);
             record.clone()
         };
 
@@ -499,11 +613,18 @@ impl AgentService {
             let _ = emitter_notifications.send(agent_event_notification(event));
         });
 
-        let result = send_chat_with_events_and_cancellation(
+        let host_executor = self.host_action_executor(
+            agent_input.clone(),
+            run_id.clone(),
+            record.snapshot.conversation_id.clone(),
+            record.snapshot.assistant_message_id.clone(),
+        );
+        let result = send_chat_with_host_executor(
             agent_input,
             run_id.clone(),
             emitter,
             cancellation_token,
+            host_executor,
         )
         .await;
 
@@ -586,6 +707,9 @@ impl AgentService {
                 .unwrap_or_else(|error| error.into_inner());
             pending_actions.insert(action_id, pending_record.clone());
         }
+        if let Err(error) = self.persist_pending_action(&pending_record) {
+            eprintln!("failed to persist pending agent action: {error}");
+        }
         self.record_action_audit(
             &pending_record,
             None,
@@ -606,6 +730,23 @@ impl AgentService {
             .unwrap_or_else(|error| error.into_inner());
         if let Some(record) = pending_actions.get_mut(action_id) {
             record.snapshot.status = status;
+        }
+        drop(pending_actions);
+        self.persist_pending_status(action_id, status);
+    }
+
+    fn persist_pending_action(&self, record: &PendingActionRecord) -> Result<(), String> {
+        self.storage
+            .upsert_pending_agent_action(pending_storage_record(record, now_ms()))
+    }
+
+    fn persist_pending_status(&self, action_id: &str, status: PendingActionStatus) {
+        if let Err(error) = self.storage.update_pending_agent_action_status(
+            action_id,
+            pending_status_label(status),
+            now_ms(),
+        ) {
+            eprintln!("failed to update pending agent action status: {error}");
         }
     }
 
@@ -639,9 +780,70 @@ impl AgentService {
             created_at: record.snapshot.created_at,
             decided_at,
             completed_at,
+            effective_permissions_json: Some(serialize_json(&permissions_from_input(
+                &record.agent_input,
+            ))),
+            path_scope: path_scope_for_action(&record.agent_input, &record.snapshot.action),
+            command_cwd_scope: command_cwd_scope_for_action(
+                &record.agent_input,
+                &record.snapshot.action,
+            ),
+            blocked_reason: error.map(ToString::to_string),
+            decision_source: Some(
+                if decision.is_none() && status == "pending" {
+                    "manual_pending"
+                } else {
+                    "manual"
+                }
+                .to_string(),
+            ),
         };
         if let Err(error) = self.storage.upsert_agent_action_audit(audit) {
             eprintln!("failed to write agent action audit log: {error}");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_auto_action_audit(
+        &self,
+        run_id: &str,
+        conversation_id: Option<String>,
+        assistant_message_id: Option<String>,
+        agent_input: &AgentChatInput,
+        action: AgentProposedAction,
+        status: &str,
+        patch_result: Option<&AgentPatchResult>,
+        command_result: Option<&AgentCommandExecutionResult>,
+        tool_result: Option<&AgentToolResult>,
+        error: Option<&str>,
+        created_at: i64,
+        completed_at: i64,
+    ) {
+        let audit = AgentActionAuditRecord {
+            action_id: action_id_for_action(&action),
+            run_id: run_id.to_string(),
+            conversation_id,
+            assistant_message_id,
+            action_type: action_type_for_action(&action).to_string(),
+            tool_name: tool_name_for_action(&action),
+            decision: Some("approved".to_string()),
+            status: status.to_string(),
+            action_json: serialize_json(&action),
+            patch_result_json: patch_result.map(serialize_json),
+            command_result_json: command_result.map(serialize_json),
+            tool_result_json: tool_result.map(serialize_json),
+            error: error.map(ToString::to_string),
+            created_at,
+            decided_at: Some(created_at),
+            completed_at: Some(completed_at),
+            effective_permissions_json: Some(serialize_json(&permissions_from_input(agent_input))),
+            path_scope: path_scope_for_action(agent_input, &action),
+            command_cwd_scope: command_cwd_scope_for_action(agent_input, &action),
+            blocked_reason: error.map(ToString::to_string),
+            decision_source: Some("auto".to_string()),
+        };
+        if let Err(error) = self.storage.upsert_agent_action_audit(audit) {
+            eprintln!("failed to write auto agent action audit log: {error}");
         }
     }
 
@@ -827,5 +1029,162 @@ impl AgentService {
         input: &AgentUsageClearInput,
     ) -> Result<AgentUsageClearOutput, String> {
         self.storage.clear_usage_records(input)
+    }
+}
+
+fn load_persisted_pending_actions(
+    storage: &Arc<StorageService>,
+) -> HashMap<String, PendingActionRecord> {
+    let records = match storage.list_pending_agent_actions() {
+        Ok(records) => records,
+        Err(error) => {
+            eprintln!("failed to load persisted pending actions: {error}");
+            return HashMap::new();
+        }
+    };
+
+    records
+        .into_iter()
+        .filter_map(|record| {
+            let action = serde_json::from_str::<AgentProposedAction>(&record.action_json)
+                .map_err(|error| {
+                    eprintln!(
+                        "failed to parse persisted pending action {}: {error}",
+                        record.action_id
+                    );
+                    error
+                })
+                .ok()?;
+            let agent_input = serde_json::from_str::<AgentChatInput>(&record.agent_input_json)
+                .map_err(|error| {
+                    eprintln!(
+                        "failed to parse persisted pending action input {}: {error}",
+                        record.action_id
+                    );
+                    error
+                })
+                .ok()?;
+            let agent_input = restore_agent_input_secrets(storage, agent_input);
+            let status = pending_status_from_label(&record.status)?;
+            let snapshot = PendingAgentActionSnapshot {
+                action_id: record.action_id.clone(),
+                action_type: record.action_type,
+                tool_name: record.tool_name,
+                tool_call_id: record.tool_call_id,
+                run_id: record.run_id,
+                conversation_id: record.conversation_id,
+                assistant_message_id: record.assistant_message_id,
+                action,
+                created_at: record.created_at,
+                status,
+            };
+            Some((
+                record.action_id,
+                PendingActionRecord {
+                    snapshot,
+                    agent_input,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn pending_storage_record(
+    record: &PendingActionRecord,
+    updated_at: i64,
+) -> AgentPendingActionRecord {
+    let mut persisted_agent_input = record.agent_input.clone();
+    persisted_agent_input.api_token.clear();
+    AgentPendingActionRecord {
+        action_id: record.snapshot.action_id.clone(),
+        run_id: record.snapshot.run_id.clone(),
+        conversation_id: record.snapshot.conversation_id.clone(),
+        assistant_message_id: record.snapshot.assistant_message_id.clone(),
+        action_type: record.snapshot.action_type.clone(),
+        tool_name: record.snapshot.tool_name.clone(),
+        tool_call_id: record.snapshot.tool_call_id.clone(),
+        status: pending_status_label(record.snapshot.status).to_string(),
+        action_json: serialize_json(&record.snapshot.action),
+        agent_input_json: serialize_json(&persisted_agent_input),
+        created_at: record.snapshot.created_at,
+        updated_at,
+    }
+}
+
+fn restore_agent_input_secrets(
+    storage: &Arc<StorageService>,
+    mut agent_input: AgentChatInput,
+) -> AgentChatInput {
+    if !agent_input.api_token.trim().is_empty() {
+        return agent_input;
+    }
+
+    let Ok(Some(settings)) = storage.load_model_settings() else {
+        return agent_input;
+    };
+    agent_input.api_url = settings.api_url.trim().to_string();
+    agent_input.api_token = settings.api_token.trim().to_string();
+    agent_input
+}
+
+fn pending_status_from_label(value: &str) -> Option<PendingActionStatus> {
+    match value {
+        "pending" => Some(PendingActionStatus::Pending),
+        "approved" => Some(PendingActionStatus::Approved),
+        "rejected" => Some(PendingActionStatus::Rejected),
+        "cancelled" => Some(PendingActionStatus::Cancelled),
+        "completed" => Some(PendingActionStatus::Completed),
+        "failed" => Some(PendingActionStatus::Failed),
+        _ => None,
+    }
+}
+
+fn path_scope_for_action(input: &AgentChatInput, action: &AgentProposedAction) -> Option<String> {
+    let path = match action {
+        AgentProposedAction::Diff { diff } => Some(diff.file_path.as_str()),
+        AgentProposedAction::ToolCall { call } if call.tool == "apply_patch" => call
+            .args
+            .get("filePath")
+            .and_then(serde_json::Value::as_str),
+        _ => None,
+    }?;
+    Some(scope_for_path(input, path))
+}
+
+fn command_cwd_scope_for_action(
+    input: &AgentChatInput,
+    action: &AgentProposedAction,
+) -> Option<String> {
+    let cwd = match action {
+        AgentProposedAction::Command { command } => command.cwd.as_deref().unwrap_or("."),
+        AgentProposedAction::ToolCall { call } if call.tool == "run_command" => call
+            .args
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("."),
+        _ => return None,
+    };
+    Some(scope_for_path(input, cwd))
+}
+
+fn scope_for_path(input: &AgentChatInput, path: &str) -> String {
+    let Some(root) = workspace_root_optional(input) else {
+        return "no_workspace".to_string();
+    };
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        return "workspace".to_string();
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        if path.starts_with(root) {
+            "workspace".to_string()
+        } else {
+            "outside_workspace".to_string()
+        }
+    } else if trimmed.starts_with('@') {
+        "system_alias".to_string()
+    } else {
+        "workspace".to_string()
     }
 }

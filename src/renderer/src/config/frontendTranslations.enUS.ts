@@ -376,6 +376,12 @@ export const enUSTranslations = {
   'agent.approval.dialog.commandTitle': 'Allow me to run this command?',
   'agent.approval.dialog.diffTitle': 'Allow me to apply this change?',
   'agent.approval.dialog.toolTitle': 'Allow me to use {tool}?',
+  'agent.approval.dialog.commandPolicyHint':
+    'Current permissions require confirmation before running commands. Dangerous commands are still blocked after approval.',
+  'agent.approval.dialog.diffPolicyHint':
+    'Current permissions require confirmation before file edits. Approval still checks path scope, symlinks, file type, and revision.',
+  'agent.approval.dialog.toolPolicyHint':
+    'This tool needs manual confirmation and will still run under the current permission policy.',
   'agent.approval.dialog.approve': 'Yes',
   'agent.approval.dialog.approveRemember':
     'Yes, and do not ask again this turn for commands starting with this',

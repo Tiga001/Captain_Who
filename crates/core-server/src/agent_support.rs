@@ -711,8 +711,16 @@ pub(super) fn approved_patch_execution(
     record: &PendingActionRecord,
     diff: &mycopilot_core::AgentDiffProposal,
 ) -> ActionExecutionDecision {
-    let workspace_root = workspace_root_optional(&record.agent_input);
-    let permissions = permissions_from_input(&record.agent_input);
+    approved_patch_execution_for_input(&record.agent_input, &record.snapshot.action_id, diff)
+}
+
+pub(super) fn approved_patch_execution_for_input(
+    agent_input: &AgentChatInput,
+    action_id: &str,
+    diff: &mycopilot_core::AgentDiffProposal,
+) -> ActionExecutionDecision {
+    let workspace_root = workspace_root_optional(agent_input);
+    let permissions = permissions_from_input(agent_input);
     let patch_result = match apply_unified_diff_in_workspace(
         workspace_root.as_deref(),
         diff.operation,
@@ -745,7 +753,7 @@ pub(super) fn approved_patch_execution(
 
     let applied = patch_result.status == AgentPatchResultStatus::Applied;
     let conflict = patch_result.status == AgentPatchResultStatus::Conflict;
-    let tool_result = patch_tool_result(&record.snapshot.action_id, applied, &patch_result);
+    let tool_result = patch_tool_result(action_id, applied, &patch_result);
     ActionExecutionDecision {
         status: if applied {
             "applied".to_string()

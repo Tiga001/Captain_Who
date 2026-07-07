@@ -84,6 +84,15 @@
   white-space: nowrap;
 }
 
+.agent-approval-dialog__policy {
+  margin: 0;
+  padding: 0 12px;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-relaxed);
+}
+
 .agent-approval-dialog__choice,
 .agent-approval-dialog__reject-row,
 .agent-approval-dialog__reject {

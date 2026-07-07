@@ -34,26 +34,24 @@ pub fn apply_unified_diff_in_workspace(
         return Err("patch 不能包含空字符。".to_string());
     }
 
-    require_workspace_write(permissions)?;
-    let root = workspace_root
-        .ok_or_else(|| "当前没有 workspace，不能应用 patch。".to_string())
-        .and_then(canonical_workspace_root)?;
-    let target = resolve_workspace_patch_target(&root, expected_file_path)?;
+    require_write_permission(permissions)?;
+    let target = resolve_patch_target(workspace_root, expected_file_path, permissions)?;
     reject_unsupported_extension(&target.display_path)?;
     reject_hidden_system_path(&target.display_path)?;
     validate_patch_operation(&target, operation, patch)?;
     validate_base_revision(&target, operation, expected_base_revision)?;
-    let paths = validate_patch_paths(&root, &target, patch)?;
+    let paths = validate_patch_paths(&target, patch)?;
+    let apply_patch = rewrite_patch_for_apply_root(patch, &target);
 
-    run_git_apply(&root, patch, true)?;
-    run_git_apply(&root, patch, false)?;
+    run_git_apply(&target.apply_root, &apply_patch, true)?;
+    run_git_apply(&target.apply_root, &apply_patch, false)?;
 
     Ok(PatchApplyResult {
         file_paths: paths.into_iter().collect(),
     })
 }
 
-fn require_workspace_write(permissions: AgentPermissions) -> Result<(), String> {
+fn require_write_permission(permissions: AgentPermissions) -> Result<(), String> {
     if permissions.write == AgentWritePermission::Denied {
         return Err("当前写入权限为 denied，不能应用文件修改。".to_string());
     }
@@ -72,25 +70,62 @@ fn canonical_workspace_root(workspace_root: &Path) -> Result<PathBuf, String> {
 
 struct ResolvedPatchTarget {
     absolute_path: PathBuf,
+    apply_path: String,
+    apply_root: PathBuf,
     display_path: String,
 }
 
-fn resolve_workspace_patch_target(root: &Path, path: &str) -> Result<ResolvedPatchTarget, String> {
+fn resolve_patch_target(
+    workspace_root: Option<&Path>,
+    path: &str,
+    permissions: AgentPermissions,
+) -> Result<ResolvedPatchTarget, String> {
     let path = path.trim();
     if path.is_empty() {
         return Err("patch 目标路径不能为空。".to_string());
     }
 
-    let relative_path = if Path::new(path).is_absolute() {
-        let absolute = normalize_absolute_workspace_path(path)?;
-        absolute
-            .strip_prefix(root)
-            .map(Path::to_path_buf)
-            .map_err(|_| "patch 目标路径必须位于当前 workspace 内。".to_string())?
-    } else {
-        clean_relative_path(path)?
-    };
+    let root = workspace_root.map(canonical_workspace_root).transpose()?;
+    if let Some(absolute) = normalize_absolute_patch_target(path)? {
+        if let Some(root) = root.as_deref() {
+            if let Ok(relative_path) = absolute.strip_prefix(root) {
+                let display_path = relative_display(relative_path);
+                if display_path.is_empty() {
+                    return Err("patch 目标路径不能为空。".to_string());
+                }
+                return Ok(ResolvedPatchTarget {
+                    absolute_path: root.join(relative_path),
+                    apply_path: display_path.clone(),
+                    apply_root: root.to_path_buf(),
+                    display_path,
+                });
+            }
+        }
 
+        if permissions.write != AgentWritePermission::All {
+            return Err(
+                "patch 目标路径必须位于当前 workspace 内；写入 workspace 外需要 write=all 权限。"
+                    .to_string(),
+            );
+        }
+        let apply_root = nearest_existing_directory(&absolute)?;
+        let apply_path = absolute
+            .strip_prefix(&apply_root)
+            .map(relative_display)
+            .map_err(|_| "无法计算 patch 应用路径。".to_string())?;
+        if apply_path.is_empty() {
+            return Err("patch 目标路径不能为空。".to_string());
+        }
+        return Ok(ResolvedPatchTarget {
+            absolute_path: absolute.clone(),
+            apply_path,
+            apply_root,
+            display_path: absolute.to_string_lossy().to_string(),
+        });
+    }
+
+    let root = root.ok_or_else(|| "当前没有 workspace，不能对相对路径应用 patch。".to_string())?;
+    let relative_path = clean_relative_path(path)?;
     let display_path = relative_display(&relative_path);
     if display_path.is_empty() {
         return Err("patch 目标路径不能为空。".to_string());
@@ -98,13 +133,25 @@ fn resolve_workspace_patch_target(root: &Path, path: &str) -> Result<ResolvedPat
 
     Ok(ResolvedPatchTarget {
         absolute_path: root.join(&relative_path),
+        apply_path: display_path.clone(),
+        apply_root: root,
         display_path,
     })
 }
 
-fn normalize_absolute_workspace_path(path: &str) -> Result<PathBuf, String> {
+fn normalize_absolute_patch_target(path: &str) -> Result<Option<PathBuf>, String> {
+    if let Some(expanded) = crate::system_paths::expand_system_path(path)? {
+        return Ok(Some(normalize_absolute_path(&expanded)?));
+    }
+    if Path::new(path).is_absolute() {
+        return Ok(Some(normalize_absolute_path(Path::new(path))?));
+    }
+    Ok(None)
+}
+
+fn normalize_absolute_path(path: &Path) -> Result<PathBuf, String> {
     let mut normalized = PathBuf::new();
-    for component in Path::new(path).components() {
+    for component in path.components() {
         match component {
             Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
             Component::RootDir => normalized.push(component.as_os_str()),
@@ -117,6 +164,28 @@ fn normalize_absolute_workspace_path(path: &str) -> Result<PathBuf, String> {
         return Err("绝对路径解析失败。".to_string());
     }
     Ok(normalized)
+}
+
+fn nearest_existing_directory(path: &Path) -> Result<PathBuf, String> {
+    let mut candidate = path
+        .parent()
+        .ok_or_else(|| "patch 目标路径缺少父目录。".to_string())?
+        .to_path_buf();
+    while !candidate.exists() {
+        candidate = candidate
+            .parent()
+            .ok_or_else(|| "找不到可用的 patch 父目录。".to_string())?
+            .to_path_buf();
+    }
+    let metadata = std::fs::symlink_metadata(&candidate)
+        .map_err(|error| format!("读取 patch 父目录元数据失败：{error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err("patch 父目录不能是符号链接。".to_string());
+    }
+    if !metadata.is_dir() {
+        return Err("patch 父路径不是目录。".to_string());
+    }
+    Ok(candidate)
 }
 
 fn clean_relative_path(input_path: &str) -> Result<PathBuf, String> {
@@ -241,7 +310,6 @@ fn patch_header_path(patch: &str, prefix: &str) -> Result<String, String> {
 }
 
 fn validate_patch_paths(
-    root: &Path,
     target: &ResolvedPatchTarget,
     patch: &str,
 ) -> Result<BTreeSet<String>, String> {
@@ -252,17 +320,17 @@ fn validate_patch_paths(
 
     let mut normalized_paths = BTreeSet::new();
     for path in paths {
-        let normalized = normalize_declared_patch_path(root, &path)?;
+        let normalized = normalize_declared_patch_path(&target.apply_root, &path)?;
         reject_unsupported_extension(&normalized)?;
         reject_hidden_system_path(&normalized)?;
-        if normalized != target.display_path {
+        if normalized != target.apply_path {
             return Err(format!(
                 "patch 只能修改声明的文件：expected `{}`，found `{normalized}`。",
                 target.display_path
             ));
         }
-        validate_no_symlink_parent(root, &normalized)?;
-        normalized_paths.insert(normalized);
+        validate_no_symlink_parent(&target.apply_root, &normalized)?;
+        normalized_paths.insert(target.display_path.clone());
     }
 
     Ok(normalized_paths)
@@ -331,13 +399,52 @@ fn add_patch_path(paths: &mut BTreeSet<String>, candidate: &str) -> Result<(), S
 fn normalize_declared_patch_path(root: &Path, path: &str) -> Result<String, String> {
     let declared = Path::new(path);
     if declared.is_absolute() {
-        let absolute = normalize_absolute_workspace_path(path)?;
+        let absolute = normalize_absolute_path(Path::new(path))?;
         return absolute
             .strip_prefix(root)
             .map(relative_display)
-            .map_err(|_| "patch header 路径不在 workspace 内。".to_string());
+            .map_err(|_| "patch header 路径不在允许的应用目录内。".to_string());
     }
     clean_relative_path(path).map(|path| relative_display(&path))
+}
+
+fn rewrite_patch_for_apply_root(patch: &str, target: &ResolvedPatchTarget) -> String {
+    let mut rewritten = String::with_capacity(patch.len());
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            rewritten.push_str(&format!(
+                "diff --git a/{path} b/{path}\n",
+                path = target.apply_path
+            ));
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("--- ") {
+            rewritten.push_str("--- ");
+            rewritten.push_str(&rewrite_patch_header_value(value, "a", &target.apply_path));
+            rewritten.push('\n');
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("+++ ") {
+            rewritten.push_str("+++ ");
+            rewritten.push_str(&rewrite_patch_header_value(value, "b", &target.apply_path));
+            rewritten.push('\n');
+            continue;
+        }
+        rewritten.push_str(line);
+        rewritten.push('\n');
+    }
+    rewritten
+}
+
+fn rewrite_patch_header_value(value: &str, side_prefix: &str, apply_path: &str) -> String {
+    let (path, suffix) = value
+        .split_once('\t')
+        .map(|(path, suffix)| (path.trim(), format!("\t{suffix}")))
+        .unwrap_or_else(|| (value.trim(), String::new()));
+    if path.trim_matches('"') == "/dev/null" {
+        return value.to_string();
+    }
+    format!("{side_prefix}/{apply_path}{suffix}")
 }
 
 fn reject_unsupported_extension(path: &str) -> Result<(), String> {
@@ -538,6 +645,88 @@ mod tests {
     }
 
     #[test]
+    fn rejects_patch_when_write_is_denied() {
+        let workspace = TestWorkspace::new();
+        let target = workspace.path.join("src/notes.txt");
+        std::fs::write(&target, "old\n").unwrap();
+        let patch = "--- a/src/notes.txt\n+++ b/src/notes.txt\n@@ -1 +1 @@\n-old\n+new\n";
+
+        let error = apply_unified_diff_in_workspace(
+            Some(&workspace.path),
+            AgentPatchOperation::Update,
+            "src/notes.txt",
+            patch,
+            None,
+            AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::Denied,
+                command: AgentCommandPermission::RequireApproval,
+                patch: AgentPatchPermission::RequireApproval,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("denied"));
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "old\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_patch_target() {
+        let workspace = TestWorkspace::new();
+        let real = workspace.path.join("src/real.txt");
+        let link = workspace.path.join("src/link.txt");
+        std::fs::write(&real, "old\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let patch = "--- a/src/link.txt\n+++ b/src/link.txt\n@@ -1 +1 @@\n-old\n+new\n";
+
+        let error = apply_unified_diff_in_workspace(
+            Some(&workspace.path),
+            AgentPatchOperation::Update,
+            "src/link.txt",
+            patch,
+            None,
+            workspace_permissions(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("符号链接"));
+        assert_eq!(std::fs::read_to_string(real).unwrap(), "old\n");
+    }
+
+    #[test]
+    fn applies_absolute_path_outside_workspace_with_full_write() {
+        let workspace = TestWorkspace::new();
+        let outside = std::env::temp_dir().join(format!(
+            "mycopilot-outside-patch-{}",
+            TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&outside, "old\n").unwrap();
+        let revision = content_revision(b"old\n");
+        let patch = format!(
+            "--- {path}\n+++ {path}\n@@ -1 +1 @@\n-old\n+new\n",
+            path = outside.to_string_lossy()
+        );
+
+        let result = apply_unified_diff_in_workspace(
+            Some(&workspace.path),
+            AgentPatchOperation::Update,
+            &outside.to_string_lossy(),
+            &patch,
+            Some(&revision),
+            full_permissions(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.file_paths,
+            vec![outside.to_string_lossy().to_string()]
+        );
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "new\n");
+        let _ = std::fs::remove_file(outside);
+    }
+
+    #[test]
     fn applies_create_and_delete_patch() {
         let workspace = TestWorkspace::new();
         let create = "--- /dev/null\n+++ b/src/new.txt\n@@ -0,0 +1 @@\n+created\n";
@@ -573,6 +762,15 @@ mod tests {
         AgentPermissions {
             read: AgentReadPermission::WorkspaceOnly,
             write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::RequireApproval,
+            patch: AgentPatchPermission::RequireApproval,
+        }
+    }
+
+    fn full_permissions() -> AgentPermissions {
+        AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
             command: AgentCommandPermission::RequireApproval,
             patch: AgentPatchPermission::RequireApproval,
         }

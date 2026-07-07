@@ -197,8 +197,11 @@ fn resolve_command_cwd(
     }
 
     if let Some(root) = root {
-        if !canonical.starts_with(root) {
-            return Err("命令工作目录必须位于已选择的 workspace 内。".to_string());
+        if !canonical.starts_with(root) && write_permission != AgentWritePermission::All {
+            return Err(
+                "命令工作目录必须位于已选择的 workspace 内；workspace 外 cwd 需要 write=all 权限。"
+                    .to_string(),
+            );
         }
     } else if write_permission != AgentWritePermission::All {
         return Err("没有 workspace 时，命令 cwd 需要 write=all 权限。".to_string());
@@ -527,6 +530,36 @@ mod tests {
     }
 
     #[test]
+    fn rejects_absolute_cwd_outside_workspace_without_full_write() {
+        let workspace = TestWorkspace::new();
+        let outside = TestWorkspace::new();
+
+        let error = resolve_command_cwd(
+            Some(&workspace.path),
+            Some(&outside.path.to_string_lossy()),
+            AgentWritePermission::WorkspaceOnly,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("write=all"));
+    }
+
+    #[test]
+    fn allows_absolute_cwd_outside_workspace_with_full_write() {
+        let workspace = TestWorkspace::new();
+        let outside = TestWorkspace::new();
+
+        let resolved = resolve_command_cwd(
+            Some(&workspace.path),
+            Some(&outside.path.to_string_lossy()),
+            AgentWritePermission::All,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, outside.path);
+    }
+
+    #[test]
     fn blocks_dangerous_commands() {
         for command in [
             "rm -rf /",
@@ -568,6 +601,32 @@ mod tests {
         assert_eq!(result.stdout, "hello");
         assert_eq!(result.cwd, ".");
         assert!(!result.cancelled);
+    }
+
+    #[test]
+    fn runs_simple_command_outside_workspace_with_full_write() {
+        let workspace = TestWorkspace::new();
+        let outside = TestWorkspace::new();
+        let mut request = request("printf outside", Some(5_000));
+        request.cwd = Some(outside.path.to_string_lossy().to_string());
+
+        let result = run_approved_command(
+            Some(&workspace.path),
+            &request,
+            AgentPermissions {
+                read: AgentReadPermission::All,
+                write: AgentWritePermission::All,
+                command: AgentCommandPermission::RequireApproval,
+                ..Default::default()
+            },
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.stdout, "outside");
+        assert_eq!(result.cwd, outside.path.to_string_lossy());
     }
 
     #[test]

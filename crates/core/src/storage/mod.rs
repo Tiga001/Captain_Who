@@ -7,6 +7,7 @@ pub mod composer_draft_repository;
 pub mod config_repository;
 pub mod migrations;
 pub mod models;
+pub mod pending_action_repository;
 pub mod preferences_repository;
 pub mod project_repository;
 pub mod service;

@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentChatInput {
     pub api_url: String,
@@ -118,6 +118,11 @@ pub enum AgentSearchMode {
     Tavily,
 }
 
+/// Controls which local paths read-only tools may inspect.
+///
+/// `WorkspaceOnly` restricts file reads and searches to the selected workspace plus registered
+/// attachment paths. `All` allows absolute local paths and supported system aliases such as
+/// `@home`, `@desktop`, `@documents`, and `@downloads`.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentReadPermission {
@@ -125,6 +130,11 @@ pub enum AgentReadPermission {
     All,
 }
 
+/// Controls where file-changing tools may write.
+///
+/// `Denied` removes file-edit tools from the agent tool set and blocks patch execution.
+/// `WorkspaceOnly` allows safe writes only inside the selected workspace. `All` also allows
+/// safe writes outside the workspace through absolute paths or supported system aliases.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentWritePermission {
@@ -133,6 +143,11 @@ pub enum AgentWritePermission {
     All,
 }
 
+/// Controls whether approved command proposals require a human click.
+///
+/// `AutoApprove` only skips the approval prompt. It still runs through the same command
+/// validation, cwd scope checks, timeout, cancellation, and dangerous-command blocking as manual
+/// approval.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentCommandPermission {
@@ -140,6 +155,11 @@ pub enum AgentCommandPermission {
     AutoApprove,
 }
 
+/// Controls whether file edit proposals require a human click.
+///
+/// `AutoApprove` only skips the approval prompt. It still runs through the same safe patch
+/// executor, write scope checks, symlink/path traversal checks, and revision conflict checks as
+/// manual approval.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPatchPermission {

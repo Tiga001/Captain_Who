@@ -156,6 +156,21 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             completed_at INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS agent_pending_actions (
+            action_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            conversation_id TEXT,
+            assistant_message_id TEXT,
+            action_type TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            tool_call_id TEXT,
+            status TEXT NOT NULL,
+            action_json TEXT NOT NULL,
+            agent_input_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS maintenance_tasks (
             id TEXT PRIMARY KEY,
             completed_at INTEGER NOT NULL
@@ -279,6 +294,9 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_action_audit_conversation_id ON agent_action_audit(conversation_id);
         CREATE INDEX IF NOT EXISTS idx_agent_action_audit_created_at ON agent_action_audit(created_at);
         CREATE INDEX IF NOT EXISTS idx_agent_action_audit_status ON agent_action_audit(status);
+        CREATE INDEX IF NOT EXISTS idx_agent_pending_actions_status ON agent_pending_actions(status);
+        CREATE INDEX IF NOT EXISTS idx_agent_pending_actions_run_id ON agent_pending_actions(run_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_pending_actions_conversation_id ON agent_pending_actions(conversation_id);
         CREATE INDEX IF NOT EXISTS idx_composer_drafts_updated_at ON composer_drafts(updated_at);
         ",
     )?;
@@ -289,6 +307,21 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "agent_usage_records", "completed_at", "INTEGER")?;
     add_column_if_missing(connection, "agent_usage_records", "status", "TEXT")?;
     add_column_if_missing(connection, "agent_usage_records", "error", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "agent_action_audit",
+        "effective_permissions_json",
+        "TEXT",
+    )?;
+    add_column_if_missing(connection, "agent_action_audit", "path_scope", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "agent_action_audit",
+        "command_cwd_scope",
+        "TEXT",
+    )?;
+    add_column_if_missing(connection, "agent_action_audit", "blocked_reason", "TEXT")?;
+    add_column_if_missing(connection, "agent_action_audit", "decision_source", "TEXT")?;
 
     Ok(())
 }
