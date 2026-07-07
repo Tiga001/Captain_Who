@@ -2,9 +2,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type { HostApi } from '@mycopilot/host-api'
-import type { BrowserViewEvent, TerminalExitEvent, TerminalOutputEvent } from '@mycopilot/protocol'
+import type { AgentEvent, BrowserViewEvent, TerminalExitEvent, TerminalOutputEvent } from '@mycopilot/protocol'
 
 const BROWSER_EVENT_CHANNEL = 'host:browser.event'
+const AGENT_EVENT_CHANNEL = 'host:agent.event'
 const TERMINAL_OUTPUT_CHANNEL = 'host:terminal.output'
 const TERMINAL_EXIT_CHANNEL = 'host:terminal.exit'
 
@@ -12,6 +13,12 @@ function onBrowserEvent(handler: (event: BrowserViewEvent) => void): () => void 
   const listener = (_event: IpcRendererEvent, payload: BrowserViewEvent): void => handler(payload)
   ipcRenderer.on(BROWSER_EVENT_CHANNEL, listener)
   return () => ipcRenderer.removeListener(BROWSER_EVENT_CHANNEL, listener)
+}
+
+function onAgentEvent(handler: (event: AgentEvent) => void): () => void {
+  const listener = (_event: IpcRendererEvent, payload: AgentEvent): void => handler(payload)
+  ipcRenderer.on(AGENT_EVENT_CHANNEL, listener)
+  return () => ipcRenderer.removeListener(AGENT_EVENT_CHANNEL, listener)
 }
 
 function onTerminalOutput(handler: (event: TerminalOutputEvent) => void): () => void {
@@ -36,7 +43,16 @@ const host: HostApi = {
   },
   agent: {
     startRun: (input) => ipcRenderer.invoke('host:agent.startRun', input),
-    cancelRun: (input) => ipcRenderer.invoke('host:agent.cancelRun', input)
+    startConversationTurn: (input) =>
+      ipcRenderer.invoke('host:agent.startConversationTurn', input),
+    cancelRun: (input) => ipcRenderer.invoke('host:agent.cancelRun', input),
+    listPendingActions: () => ipcRenderer.invoke('host:agent.listPendingActions'),
+    approveAction: (input) => ipcRenderer.invoke('host:agent.approveAction', input),
+    rejectAction: (input) => ipcRenderer.invoke('host:agent.rejectAction', input),
+    cancelAction: (input) => ipcRenderer.invoke('host:agent.cancelAction', input),
+    getUsageSummary: (input) => ipcRenderer.invoke('host:agent.getUsageSummary', input),
+    clearUsageRecords: (input) => ipcRenderer.invoke('host:agent.clearUsageRecords', input),
+    onEvent: onAgentEvent
   },
   browser: {
     createView: (request) => ipcRenderer.invoke('host:browser.createView', request),

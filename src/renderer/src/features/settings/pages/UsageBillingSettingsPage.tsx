@@ -1,208 +1,208 @@
 // Renderer UI.
-import { useEffect, useMemo, useState } from "react";
-import type { FocusEvent } from "react";
-import { Check, ChevronDown } from "lucide-react";
-import type {
-  AgentUsageModelSummary,
-  AgentUsageSummaryOutput,
-} from "@mycopilot/protocol";
-import { useFrontendConfig } from "../../../config/FrontendConfigProvider";
-import { clearAgentUsageRecords, getAgentUsageSummary } from "../../agent/agentClient";
-import type { UiPreferencesSnapshot } from "../../storage/storageClient";
-import "./UsageBillingSettingsPage.css";
+import { useEffect, useMemo, useState } from 'react'
+import type { FocusEvent } from 'react'
+import { Check, ChevronDown } from 'lucide-react'
+import type { AgentUsageModelSummary, AgentUsageSummaryOutput } from '@mycopilot/protocol'
+import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { clearAgentUsageRecords, getAgentUsageSummary } from '../../agent/agentClient'
+import type { UiPreferencesSnapshot } from '../../storage/storageClient'
+import './UsageBillingSettingsPage.css'
 
 interface UsageBillingSettingsPageProps {
-  onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void;
-  uiPreferences: UiPreferencesSnapshot;
+  onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
+  uiPreferences: UiPreferencesSnapshot
 }
 
 const USAGE_RANGE_OPTIONS: Array<{
   labelKey:
-    | "usageBilling.rangeLast7Days"
-    | "usageBilling.rangeLast30Days"
-    | "usageBilling.rangeLastYear";
-  value: UsageChartRange;
+    'usageBilling.rangeLast7Days' | 'usageBilling.rangeLast30Days' | 'usageBilling.rangeLastYear'
+  value: UsageChartRange
 }> = [
-  { labelKey: "usageBilling.rangeLast7Days", value: "last7Days" },
-  { labelKey: "usageBilling.rangeLast30Days", value: "last30Days" },
-  { labelKey: "usageBilling.rangeLastYear", value: "lastYear" },
-];
+  { labelKey: 'usageBilling.rangeLast7Days', value: 'last7Days' },
+  { labelKey: 'usageBilling.rangeLast30Days', value: 'last30Days' },
+  { labelKey: 'usageBilling.rangeLastYear', value: 'lastYear' }
+]
 
-type UsageChartRange = "last7Days" | "last30Days" | "lastYear";
+type UsageChartRange = 'last7Days' | 'last30Days' | 'lastYear'
 type UsageChartTokenKey =
-  | "inputTokens"
-  | "cachedInputTokens"
-  | "outputTokens"
-  | "cacheCreationInputTokens";
+  'inputTokens' | 'cachedInputTokens' | 'outputTokens' | 'cacheCreationInputTokens'
 
 type UsageChartSeries = {
-  key: UsageChartTokenKey;
+  key: UsageChartTokenKey
   labelKey:
-    | "usageBilling.inputTokens"
-    | "usageBilling.cachedInputTokens"
-    | "usageBilling.outputTokens"
-    | "usageBilling.cacheCreationInputTokens";
-  className: string;
-};
+    | 'usageBilling.inputTokens'
+    | 'usageBilling.cachedInputTokens'
+    | 'usageBilling.outputTokens'
+    | 'usageBilling.cacheCreationInputTokens'
+  className: string
+}
 
 type UsageChartBucket = {
-  dateLabel: string;
-  fullDateLabel: string;
-  from: number;
-  to: number;
-  summary: AgentUsageSummaryOutput;
-};
+  dateLabel: string
+  fullDateLabel: string
+  from: number
+  to: number
+  summary: AgentUsageSummaryOutput
+}
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-const ALL_MODELS_KEY = "__all_models__";
+const DAY_MS = 24 * 60 * 60 * 1000
+const ALL_MODELS_KEY = '__all_models__'
 const USAGE_CHART_SERIES: UsageChartSeries[] = [
-  { key: "inputTokens", labelKey: "usageBilling.inputTokens", className: "usage-chart-bar--input" },
+  { key: 'inputTokens', labelKey: 'usageBilling.inputTokens', className: 'usage-chart-bar--input' },
   {
-    key: "cachedInputTokens",
-    labelKey: "usageBilling.cachedInputTokens",
-    className: "usage-chart-bar--cached-input",
+    key: 'cachedInputTokens',
+    labelKey: 'usageBilling.cachedInputTokens',
+    className: 'usage-chart-bar--cached-input'
   },
-  { key: "outputTokens", labelKey: "usageBilling.outputTokens", className: "usage-chart-bar--output" },
   {
-    key: "cacheCreationInputTokens",
-    labelKey: "usageBilling.cacheCreationInputTokens",
-    className: "usage-chart-bar--cache-write",
+    key: 'outputTokens',
+    labelKey: 'usageBilling.outputTokens',
+    className: 'usage-chart-bar--output'
   },
-];
+  {
+    key: 'cacheCreationInputTokens',
+    labelKey: 'usageBilling.cacheCreationInputTokens',
+    className: 'usage-chart-bar--cache-write'
+  }
+]
 
 function formatCount(value: number | undefined, language: string) {
-  if (typeof value !== "number") return "—";
-  return new Intl.NumberFormat(language).format(value);
+  if (typeof value !== 'number') return '—'
+  return new Intl.NumberFormat(language).format(value)
 }
 
 function formatEstimatedCost(value: number | undefined, language: string) {
-  if (typeof value !== "number") return "—";
+  if (typeof value !== 'number') return '—'
   return new Intl.NumberFormat(language, {
     maximumFractionDigits: 6,
-    minimumFractionDigits: value > 0 && value < 0.01 ? 6 : 2,
-  }).format(value);
+    minimumFractionDigits: value > 0 && value < 0.01 ? 6 : 2
+  }).format(value)
 }
 
 function formatEstimatedCostInteger(value: number | undefined, language: string) {
-  if (typeof value !== "number") return "—";
+  if (typeof value !== 'number') return '—'
   return new Intl.NumberFormat(language, {
     maximumFractionDigits: 0,
-    minimumFractionDigits: 0,
-  }).format(value);
+    minimumFractionDigits: 0
+  }).format(value)
 }
 
 function formatTokenCount(value: number | undefined, language: string, tokenLabel: string) {
-  if (typeof value !== "number") return `— ${tokenLabel}`;
-  return `${formatCount(value, language)} ${tokenLabel}`;
+  if (typeof value !== 'number') return `— ${tokenLabel}`
+  return `${formatCount(value, language)} ${tokenLabel}`
 }
 
 function formatDateLabel(timestamp: number, language: string) {
   return new Intl.DateTimeFormat(language, {
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(timestamp));
+    month: '2-digit',
+    day: '2-digit'
+  }).format(new Date(timestamp))
 }
 
 function formatFullDateLabel(timestamp: number, language: string) {
   return new Intl.DateTimeFormat(language, {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(timestamp));
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(new Date(timestamp))
 }
 
 function formatMonthLabel(timestamp: number) {
-  const date = new Date(timestamp);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+  const date = new Date(timestamp)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
 }
 
 function getModelSubtitle(model: AgentUsageModelSummary) {
-  if (model.providerPath && model.providerPath !== model.modelId) return model.providerPath;
-  if (model.modelId !== model.modelName) return model.modelId;
-  return "/protocol";
+  if (model.providerPath && model.providerPath !== model.modelId) return model.providerPath
+  if (model.modelId !== model.modelName) return model.modelId
+  return ''
 }
 
 function getModelKey(model: AgentUsageModelSummary) {
-  return `${model.modelId}::${model.providerPath ?? "/protocol"}`;
+  return `${model.modelId}::${model.providerPath ?? ''}`
 }
 
 function getRangeDayCount(range: UsageChartRange) {
-  return range === "last7Days" ? 7 : 30;
+  return range === 'last7Days' ? 7 : 30
 }
 
 function startOfLocalDay(timestamp: number) {
-  const date = new Date(timestamp);
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const date = new Date(timestamp)
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
 }
 
 function startOfLocalMonth(timestamp: number) {
-  const date = new Date(timestamp);
-  return new Date(date.getFullYear(), date.getMonth(), 1).getTime();
+  const date = new Date(timestamp)
+  return new Date(date.getFullYear(), date.getMonth(), 1).getTime()
 }
 
 function addLocalMonths(timestamp: number, monthDelta: number) {
-  const date = new Date(timestamp);
-  return new Date(date.getFullYear(), date.getMonth() + monthDelta, 1).getTime();
+  const date = new Date(timestamp)
+  return new Date(date.getFullYear(), date.getMonth() + monthDelta, 1).getTime()
 }
 
 function getUsageChartWindows(range: UsageChartRange, language: string) {
-  if (range === "lastYear") {
-    const currentMonthStart = startOfLocalMonth(Date.now());
-    const firstMonthStart = addLocalMonths(currentMonthStart, -11);
+  if (range === 'lastYear') {
+    const currentMonthStart = startOfLocalMonth(Date.now())
+    const firstMonthStart = addLocalMonths(currentMonthStart, -11)
 
     return Array.from({ length: 12 }, (_, index) => {
-      const from = addLocalMonths(firstMonthStart, index);
-      const nextMonth = addLocalMonths(from, 1);
-      const monthLabel = formatMonthLabel(from);
+      const from = addLocalMonths(firstMonthStart, index)
+      const nextMonth = addLocalMonths(from, 1)
+      const monthLabel = formatMonthLabel(from)
       return {
         from,
         to: nextMonth - 1,
         dateLabel: monthLabel,
-        fullDateLabel: monthLabel,
-      };
-    });
+        fullDateLabel: monthLabel
+      }
+    })
   }
 
-  const dayCount = getRangeDayCount(range);
-  const todayStart = startOfLocalDay(Date.now());
-  const firstDayStart = todayStart - (dayCount - 1) * DAY_MS;
+  const dayCount = getRangeDayCount(range)
+  const todayStart = startOfLocalDay(Date.now())
+  const firstDayStart = todayStart - (dayCount - 1) * DAY_MS
   return Array.from({ length: dayCount }, (_, index) => {
-    const from = firstDayStart + index * DAY_MS;
+    const from = firstDayStart + index * DAY_MS
     return {
       from,
       to: from + DAY_MS - 1,
       dateLabel: formatDateLabel(from, language),
-      fullDateLabel: formatFullDateLabel(from, language),
-    };
-  });
+      fullDateLabel: formatFullDateLabel(from, language)
+    }
+  })
 }
 
-function getChartRangeSummaryInput(
-  buckets: Array<Pick<UsageChartBucket, "from" | "to">>,
-): { range: "custom"; from?: number; to?: number } {
-  const firstBucket = buckets[0];
-  const lastBucket = buckets[buckets.length - 1];
-  return { range: "custom", from: firstBucket?.from, to: lastBucket?.to };
+function getChartRangeSummaryInput(buckets: Array<Pick<UsageChartBucket, 'from' | 'to'>>): {
+  range: 'custom'
+  from?: number
+  to?: number
+} {
+  const firstBucket = buckets[0]
+  const lastBucket = buckets[buckets.length - 1]
+  return { range: 'custom', from: firstBucket?.from, to: lastBucket?.to }
 }
 
 async function loadUsageChartBuckets(range: UsageChartRange, language: string) {
-  const windows = getUsageChartWindows(range, language);
+  const windows = getUsageChartWindows(range, language)
   const summaries = await Promise.all(
-    windows.map((window) => getAgentUsageSummary({ range: "custom", from: window.from, to: window.to })),
-  );
+    windows.map((window) =>
+      getAgentUsageSummary({ range: 'custom', from: window.from, to: window.to })
+    )
+  )
 
   return windows.map((window, index) => ({
     ...window,
-    summary: summaries[index],
-  }));
+    summary: summaries[index]
+  }))
 }
 
 function getNiceChartMax(value: number) {
-  if (value <= 0) return 0;
-  const magnitude = 10 ** Math.floor(Math.log10(value));
-  const normalized = value / magnitude;
-  const niceNormalized = normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
-  return niceNormalized * magnitude;
+  if (value <= 0) return 0
+  const magnitude = 10 ** Math.floor(Math.log10(value))
+  const normalized = value / magnitude
+  const niceNormalized = normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10
+  return niceNormalized * magnitude
 }
 
 function getUsageValues(source: AgentUsageSummaryOutput | AgentUsageModelSummary | undefined) {
@@ -211,136 +211,142 @@ function getUsageValues(source: AgentUsageSummaryOutput | AgentUsageModelSummary
     cachedInputTokens: source?.cachedInputTokens,
     outputTokens: source?.outputTokens,
     cacheCreationInputTokens: source?.cacheCreationInputTokens,
-    estimatedCost: source?.estimatedCost,
-  };
+    estimatedCost: source?.estimatedCost
+  }
 }
 
 export function UsageBillingSettingsPage({
   onUiPreferencesChange,
-  uiPreferences,
+  uiPreferences
 }: UsageBillingSettingsPageProps) {
-  const { language, t } = useFrontendConfig();
-  const [range, setRange] = useState<UsageChartRange>("last7Days");
-  const [summary, setSummary] = useState<AgentUsageSummaryOutput | null>(null);
-  const [chartBuckets, setChartBuckets] = useState<UsageChartBucket[]>([]);
-  const [selectedModelKey, setSelectedModelKey] = useState(ALL_MODELS_KEY);
-  const [isModelMenuOpen, setModelMenuOpen] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isClearing, setIsClearing] = useState(false);
-  const [isClearDialogOpen, setClearDialogOpen] = useState(false);
-  const [statusMessage, setStatusMessage] = useState("/protocol");
-  const [errorMessage, setErrorMessage] = useState("/protocol");
+  const { language, t } = useFrontendConfig()
+  const [range, setRange] = useState<UsageChartRange>('last7Days')
+  const [summary, setSummary] = useState<AgentUsageSummaryOutput | null>(null)
+  const [chartBuckets, setChartBuckets] = useState<UsageChartBucket[]>([])
+  const [selectedModelKey, setSelectedModelKey] = useState(ALL_MODELS_KEY)
+  const [isModelMenuOpen, setModelMenuOpen] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
+  const [isClearing, setIsClearing] = useState(false)
+  const [isClearDialogOpen, setClearDialogOpen] = useState(false)
+  const [statusMessage, setStatusMessage] = useState('')
+  const [errorMessage, setErrorMessage] = useState('')
   const sortedModels = useMemo(
-    () => [...(summary?.models ?? [])].sort((first, second) => second.requestCount - first.requestCount),
-    [summary?.models],
-  );
+    () =>
+      [...(summary?.models ?? [])].sort(
+        (first, second) => second.requestCount - first.requestCount
+      ),
+    [summary?.models]
+  )
   const selectedModel = useMemo(
     () => sortedModels.find((model) => getModelKey(model) === selectedModelKey),
-    [selectedModelKey, sortedModels],
-  );
+    [selectedModelKey, sortedModels]
+  )
   const chartData = useMemo(
     () =>
       chartBuckets.map((chartBucket) => {
         const source =
           selectedModelKey === ALL_MODELS_KEY
             ? chartBucket.summary
-            : chartBucket.summary.models.find((model) => getModelKey(model) === selectedModelKey);
+            : chartBucket.summary.models.find((model) => getModelKey(model) === selectedModelKey)
 
         return {
           dateLabel: chartBucket.dateLabel,
           fullDateLabel: chartBucket.fullDateLabel,
-          values: getUsageValues(source),
-        };
+          values: getUsageValues(source)
+        }
       }),
-    [chartBuckets, selectedModelKey],
-  );
+    [chartBuckets, selectedModelKey]
+  )
   const chartMaxValue = useMemo(() => {
     const maxValue = chartData.reduce((currentMax, day) => {
       const dayMax = USAGE_CHART_SERIES.reduce((seriesMax, series) => {
-        const value = day.values[series.key];
-        return typeof value === "number" ? Math.max(seriesMax, value) : seriesMax;
-      }, 0);
-      return Math.max(currentMax, dayMax);
-    }, 0);
+        const value = day.values[series.key]
+        return typeof value === 'number' ? Math.max(seriesMax, value) : seriesMax
+      }, 0)
+      return Math.max(currentMax, dayMax)
+    }, 0)
 
-    return getNiceChartMax(maxValue);
-  }, [chartData]);
+    return getNiceChartMax(maxValue)
+  }, [chartData])
   const chartTicks = useMemo(
     () => [chartMaxValue, chartMaxValue * 0.75, chartMaxValue * 0.5, chartMaxValue * 0.25, 0],
-    [chartMaxValue],
-  );
-  const hasChartData = chartMaxValue > 0;
+    [chartMaxValue]
+  )
+  const hasChartData = chartMaxValue > 0
 
   useEffect(() => {
-    let isCancelled = false;
+    let isCancelled = false
 
     async function loadUsageData() {
-      setIsLoading(true);
-      setErrorMessage("/protocol");
+      setIsLoading(true)
+      setErrorMessage('')
       try {
-        const nextChartBuckets = await loadUsageChartBuckets(range, language);
-        const nextSummary = await getAgentUsageSummary(getChartRangeSummaryInput(nextChartBuckets));
-        if (isCancelled) return;
-        setSummary(nextSummary);
-        setChartBuckets(nextChartBuckets);
+        const nextChartBuckets = await loadUsageChartBuckets(range, language)
+        const nextSummary = await getAgentUsageSummary(getChartRangeSummaryInput(nextChartBuckets))
+        if (isCancelled) return
+        setSummary(nextSummary)
+        setChartBuckets(nextChartBuckets)
       } catch (error) {
         if (!isCancelled) {
-          setSummary(null);
-          setChartBuckets([]);
-          setErrorMessage(error instanceof Error ? error.message : t("usageBilling.loadFailed"));
+          setSummary(null)
+          setChartBuckets([])
+          setErrorMessage(error instanceof Error ? error.message : t('usageBilling.loadFailed'))
         }
       } finally {
-        if (!isCancelled) setIsLoading(false);
+        if (!isCancelled) setIsLoading(false)
       }
     }
 
-    void loadUsageData();
+    void loadUsageData()
 
     return () => {
-      isCancelled = true;
-    };
-  }, [language, range, t]);
+      isCancelled = true
+    }
+  }, [language, range, t])
 
   useEffect(() => {
-    if (selectedModelKey === ALL_MODELS_KEY) return;
-    if (sortedModels.some((model) => getModelKey(model) === selectedModelKey)) return;
-    setSelectedModelKey(ALL_MODELS_KEY);
-  }, [selectedModelKey, sortedModels]);
+    if (selectedModelKey === ALL_MODELS_KEY) return
+    if (sortedModels.some((model) => getModelKey(model) === selectedModelKey)) return
+    setSelectedModelKey(ALL_MODELS_KEY)
+  }, [selectedModelKey, sortedModels])
 
   const closeModelMenuOnBlur = (event: FocusEvent<HTMLDivElement>) => {
     if (!event.currentTarget.contains(event.relatedTarget)) {
-      setModelMenuOpen(false);
+      setModelMenuOpen(false)
     }
-  };
+  }
 
   const clearAllUsageRecords = async () => {
-    setIsClearing(true);
-    setErrorMessage("/protocol");
-    setStatusMessage("/protocol");
+    setIsClearing(true)
+    setErrorMessage('')
+    setStatusMessage('')
     try {
-      const output = await clearAgentUsageRecords({});
-      setClearDialogOpen(false);
+      const output = await clearAgentUsageRecords({})
+      setClearDialogOpen(false)
       setStatusMessage(
-        `${t("usageBilling.clearCompleted")} ${formatCount(output.deletedRecords, language)}`,
-      );
-      const nextChartBuckets = await loadUsageChartBuckets(range, language);
-      const nextSummary = await getAgentUsageSummary(getChartRangeSummaryInput(nextChartBuckets));
-      setSummary(nextSummary);
-      setChartBuckets(nextChartBuckets);
+        `${t('usageBilling.clearCompleted')} ${formatCount(output.deletedRecords, language)}`
+      )
+      const nextChartBuckets = await loadUsageChartBuckets(range, language)
+      const nextSummary = await getAgentUsageSummary(getChartRangeSummaryInput(nextChartBuckets))
+      setSummary(nextSummary)
+      setChartBuckets(nextChartBuckets)
     } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : t("usageBilling.clearFailed"));
+      setErrorMessage(error instanceof Error ? error.message : t('usageBilling.clearFailed'))
     } finally {
-      setIsClearing(false);
+      setIsClearing(false)
     }
-  };
+  }
 
   return (
     <article className="settings-list-page usage-billing-settings-page">
-      <h1>{t("settings.page.usageBilling")}</h1>
+      <h1>{t('settings.page.usageBilling')}</h1>
 
-      <section className="settings-list-section usage-summary-section" aria-labelledby="usage-summary-heading">
+      <section
+        className="settings-list-section usage-summary-section"
+        aria-labelledby="usage-summary-heading"
+      >
         <div className="usage-summary-header">
-          <h2 id="usage-summary-heading">{t("usageBilling.summary")}</h2>
+          <h2 id="usage-summary-heading">{t('usageBilling.summary')}</h2>
 
           <div className="usage-summary-actions">
             <button
@@ -348,23 +354,23 @@ export function UsageBillingSettingsPage({
               type="button"
               onClick={() => setClearDialogOpen(true)}
             >
-              {t("usageBilling.clear")}
+              {t('usageBilling.clear')}
             </button>
           </div>
         </div>
 
         <div className="usage-chart-controls">
           <div className="usage-chart-filter">
-            <span>{t("usageBilling.usageTime")}:</span>
-            <div className="usage-range-control" aria-label={t("usageBilling.range")}>
+            <span>{t('usageBilling.usageTime')}:</span>
+            <div className="usage-range-control" aria-label={t('usageBilling.range')}>
               {USAGE_RANGE_OPTIONS.map((option) => (
                 <button
                   data-active={range === option.value || undefined}
                   type="button"
                   key={option.value}
                   onClick={() => {
-                    setRange(option.value);
-                    setStatusMessage("/protocol");
+                    setRange(option.value)
+                    setStatusMessage('')
                   }}
                 >
                   {t(option.labelKey)}
@@ -374,7 +380,7 @@ export function UsageBillingSettingsPage({
           </div>
 
           <div className="usage-chart-filter usage-chart-filter--model">
-            <span>{t("usageBilling.model")}:</span>
+            <span>{t('usageBilling.model')}:</span>
             <div className="usage-model-filter-control" onBlur={closeModelMenuOnBlur}>
               <button
                 className="usage-model-filter-button"
@@ -383,12 +389,16 @@ export function UsageBillingSettingsPage({
                 aria-expanded={isModelMenuOpen}
                 onClick={() => setModelMenuOpen((current) => !current)}
               >
-                <span>{selectedModel?.modelName ?? t("usageBilling.allModels")}</span>
+                <span>{selectedModel?.modelName ?? t('usageBilling.allModels')}</span>
                 <ChevronDown aria-hidden="true" />
               </button>
 
               {isModelMenuOpen && (
-                <div className="usage-model-filter-menu" role="listbox" aria-label={t("usageBilling.model")}>
+                <div
+                  className="usage-model-filter-menu"
+                  role="listbox"
+                  aria-label={t('usageBilling.model')}
+                >
                   <button
                     className="usage-model-filter-option"
                     data-selected={selectedModelKey === ALL_MODELS_KEY || undefined}
@@ -397,17 +407,17 @@ export function UsageBillingSettingsPage({
                     aria-selected={selectedModelKey === ALL_MODELS_KEY}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => {
-                      setSelectedModelKey(ALL_MODELS_KEY);
-                      setModelMenuOpen(false);
+                      setSelectedModelKey(ALL_MODELS_KEY)
+                      setModelMenuOpen(false)
                     }}
                   >
-                    <span>{t("usageBilling.allModels")}</span>
+                    <span>{t('usageBilling.allModels')}</span>
                     {selectedModelKey === ALL_MODELS_KEY && <Check aria-hidden="true" />}
                   </button>
 
                   {sortedModels.map((model) => {
-                    const modelKey = getModelKey(model);
-                    const isSelected = selectedModelKey === modelKey;
+                    const modelKey = getModelKey(model)
+                    const isSelected = selectedModelKey === modelKey
                     return (
                       <button
                         className="usage-model-filter-option"
@@ -418,14 +428,14 @@ export function UsageBillingSettingsPage({
                         key={modelKey}
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => {
-                          setSelectedModelKey(modelKey);
-                          setModelMenuOpen(false);
+                          setSelectedModelKey(modelKey)
+                          setModelMenuOpen(false)
                         }}
                       >
                         <span>{model.modelName}</span>
                         {isSelected && <Check aria-hidden="true" />}
                       </button>
-                    );
+                    )
                   })}
                 </div>
               )}
@@ -434,7 +444,7 @@ export function UsageBillingSettingsPage({
         </div>
 
         <div className="usage-chart-panel" aria-busy={isLoading}>
-          <div className="usage-chart-legend" aria-label={t("usageBilling.chartLegend")}>
+          <div className="usage-chart-legend" aria-label={t('usageBilling.chartLegend')}>
             {USAGE_CHART_SERIES.map((series) => (
               <span key={series.key}>
                 <i className={series.className} aria-hidden="true" />
@@ -444,7 +454,7 @@ export function UsageBillingSettingsPage({
           </div>
 
           {isLoading ? (
-            <div className="usage-chart-empty">{t("usageBilling.loading")}</div>
+            <div className="usage-chart-empty">{t('usageBilling.loading')}</div>
           ) : hasChartData ? (
             <div className="usage-chart-scroller">
               <div
@@ -459,36 +469,47 @@ export function UsageBillingSettingsPage({
 
                 <div className="usage-chart-plot">
                   {chartTicks.map((tick, index) => (
-                    <span className="usage-chart-grid-line" key={`${tick}-${index}`} aria-hidden="true" />
+                    <span
+                      className="usage-chart-grid-line"
+                      key={`${tick}-${index}`}
+                      aria-hidden="true"
+                    />
                   ))}
 
                   <div className="usage-chart-bars">
                     {chartData.map((day) => {
                       const dayMaxValue = USAGE_CHART_SERIES.reduce((currentMax, series) => {
-                        const value = day.values[series.key];
-                        return typeof value === "number" ? Math.max(currentMax, value) : currentMax;
-                      }, 0);
-                      const dayMaxRatio = chartMaxValue > 0 && dayMaxValue > 0 ? dayMaxValue / chartMaxValue : 0;
-                      const costBottom = dayMaxRatio > 0 ? `${Math.min(dayMaxRatio * 100 + 2, 92)}%` : "8px";
+                        const value = day.values[series.key]
+                        return typeof value === 'number' ? Math.max(currentMax, value) : currentMax
+                      }, 0)
+                      const dayMaxRatio =
+                        chartMaxValue > 0 && dayMaxValue > 0 ? dayMaxValue / chartMaxValue : 0
+                      const costBottom =
+                        dayMaxRatio > 0 ? `${Math.min(dayMaxRatio * 100 + 2, 92)}%` : '8px'
                       const ariaLabel = [
                         day.fullDateLabel,
-                        `${t("usageBilling.estimatedCost")} ${formatEstimatedCostInteger(day.values.estimatedCost, language)}`,
-                        `${t("usageBilling.inputTokens")} ${formatTokenCount(day.values.inputTokens, language, t("usageBilling.tokens"))}`,
-                        `${t("usageBilling.cachedInputTokens")} ${formatTokenCount(day.values.cachedInputTokens, language, t("usageBilling.tokens"))}`,
-                        `${t("usageBilling.outputTokens")} ${formatTokenCount(day.values.outputTokens, language, t("usageBilling.tokens"))}`,
-                        `${t("usageBilling.cacheCreationInputTokens")} ${formatTokenCount(day.values.cacheCreationInputTokens, language, t("usageBilling.tokens"))}`,
-                      ].join(", ");
+                        `${t('usageBilling.estimatedCost')} ${formatEstimatedCostInteger(day.values.estimatedCost, language)}`,
+                        `${t('usageBilling.inputTokens')} ${formatTokenCount(day.values.inputTokens, language, t('usageBilling.tokens'))}`,
+                        `${t('usageBilling.cachedInputTokens')} ${formatTokenCount(day.values.cachedInputTokens, language, t('usageBilling.tokens'))}`,
+                        `${t('usageBilling.outputTokens')} ${formatTokenCount(day.values.outputTokens, language, t('usageBilling.tokens'))}`,
+                        `${t('usageBilling.cacheCreationInputTokens')} ${formatTokenCount(day.values.cacheCreationInputTokens, language, t('usageBilling.tokens'))}`
+                      ].join(', ')
 
                       return (
-                        <div className="usage-chart-day" key={day.fullDateLabel} tabIndex={0} aria-label={ariaLabel}>
+                        <div
+                          className="usage-chart-day"
+                          key={day.fullDateLabel}
+                          tabIndex={0}
+                          aria-label={ariaLabel}
+                        >
                           <div className="usage-chart-day__bars">
                             {USAGE_CHART_SERIES.map((series) => {
-                              const value = day.values[series.key];
+                              const value = day.values[series.key]
                               const ratio =
-                                chartMaxValue > 0 && typeof value === "number" && value > 0
+                                chartMaxValue > 0 && typeof value === 'number' && value > 0
                                   ? value / chartMaxValue
-                                  : 0;
-                              const height = ratio > 0 ? `${Math.max(ratio * 100, 2)}%` : "0%";
+                                  : 0
+                              const height = ratio > 0 ? `${Math.max(ratio * 100, 2)}%` : '0%'
 
                               return (
                                 <span
@@ -496,7 +517,7 @@ export function UsageBillingSettingsPage({
                                   style={{ height }}
                                   key={series.key}
                                 />
-                              );
+                              )
                             })}
                             <span className="usage-chart-cost" style={{ bottom: costBottom }}>
                               {formatEstimatedCostInteger(day.values.estimatedCost, language)}
@@ -504,50 +525,66 @@ export function UsageBillingSettingsPage({
                           </div>
 
                           <div className="usage-chart-tooltip" role="tooltip">
-                            <strong className="usage-chart-tooltip__date">{day.fullDateLabel}</strong>
+                            <strong className="usage-chart-tooltip__date">
+                              {day.fullDateLabel}
+                            </strong>
                             <span className="usage-chart-tooltip__row">
-                              <span>{t("usageBilling.estimatedCost")}</span>
-                              <strong>{formatEstimatedCostInteger(day.values.estimatedCost, language)}</strong>
+                              <span>{t('usageBilling.estimatedCost')}</span>
+                              <strong>
+                                {formatEstimatedCostInteger(day.values.estimatedCost, language)}
+                              </strong>
                             </span>
 
                             <span className="usage-chart-tooltip__row">
                               <span>
                                 <i className="usage-chart-bar--input" aria-hidden="true" />
-                                {t("usageBilling.inputTokens")}
+                                {t('usageBilling.inputTokens')}
                               </span>
                               <strong>
-                                {formatTokenCount(day.values.inputTokens, language, t("usageBilling.tokens"))}
+                                {formatTokenCount(
+                                  day.values.inputTokens,
+                                  language,
+                                  t('usageBilling.tokens')
+                                )}
                               </strong>
                             </span>
                             <span className="usage-chart-tooltip__row">
                               <span>
                                 <i className="usage-chart-bar--cached-input" aria-hidden="true" />
-                                {t("usageBilling.cachedInputTokens")}
+                                {t('usageBilling.cachedInputTokens')}
                               </span>
                               <strong>
-                                {formatTokenCount(day.values.cachedInputTokens, language, t("usageBilling.tokens"))}
+                                {formatTokenCount(
+                                  day.values.cachedInputTokens,
+                                  language,
+                                  t('usageBilling.tokens')
+                                )}
                               </strong>
                             </span>
 
                             <span className="usage-chart-tooltip__row">
                               <span>
                                 <i className="usage-chart-bar--output" aria-hidden="true" />
-                                {t("usageBilling.outputTokens")}
+                                {t('usageBilling.outputTokens')}
                               </span>
                               <strong>
-                                {formatTokenCount(day.values.outputTokens, language, t("usageBilling.tokens"))}
+                                {formatTokenCount(
+                                  day.values.outputTokens,
+                                  language,
+                                  t('usageBilling.tokens')
+                                )}
                               </strong>
                             </span>
                             <span className="usage-chart-tooltip__row">
                               <span>
                                 <i className="usage-chart-bar--cache-write" aria-hidden="true" />
-                                {t("usageBilling.cacheCreationInputTokens")}
+                                {t('usageBilling.cacheCreationInputTokens')}
                               </span>
                               <strong>
                                 {formatTokenCount(
                                   day.values.cacheCreationInputTokens,
                                   language,
-                                  t("usageBilling.tokens"),
+                                  t('usageBilling.tokens')
                                 )}
                               </strong>
                             </span>
@@ -557,51 +594,51 @@ export function UsageBillingSettingsPage({
                             {day.dateLabel}
                           </span>
                         </div>
-                      );
+                      )
                     })}
                   </div>
                 </div>
               </div>
             </div>
           ) : (
-            <div className="usage-chart-empty">{t("usageBilling.chartEmpty")}</div>
+            <div className="usage-chart-empty">{t('usageBilling.chartEmpty')}</div>
           )}
         </div>
 
         <div className="usage-summary-grid" aria-busy={isLoading}>
           <div className="usage-summary-card">
-            <span>{t("usageBilling.requestCount")}</span>
+            <span>{t('usageBilling.requestCount')}</span>
             <strong>{formatCount(summary?.requestCount, language)}</strong>
           </div>
           <div className="usage-summary-card">
-            <span>{t("usageBilling.messageCount")}</span>
+            <span>{t('usageBilling.messageCount')}</span>
             <strong>{formatCount(summary?.messageCount, language)}</strong>
           </div>
           <div className="usage-summary-card">
-            <span>{t("usageBilling.inputTokens")}</span>
+            <span>{t('usageBilling.inputTokens')}</span>
             <strong>{formatCount(summary?.inputTokens, language)}</strong>
           </div>
           <div className="usage-summary-card">
-            <span>{t("usageBilling.outputTokens")}</span>
+            <span>{t('usageBilling.outputTokens')}</span>
             <strong>{formatCount(summary?.outputTokens, language)}</strong>
           </div>
           <div className="usage-summary-card">
-            <span>{t("usageBilling.totalTokens")}</span>
+            <span>{t('usageBilling.totalTokens')}</span>
             <strong>{formatCount(summary?.totalTokens, language)}</strong>
           </div>
           <div className="usage-summary-card">
-            <span>{t("usageBilling.estimatedCost")}</span>
+            <span>{t('usageBilling.estimatedCost')}</span>
             <strong>{formatEstimatedCost(summary?.estimatedCost, language)}</strong>
           </div>
         </div>
 
         <div className="usage-secondary-grid">
           <div className="usage-secondary-stat">
-            <span>{t("usageBilling.cachedInputTokens")}</span>
+            <span>{t('usageBilling.cachedInputTokens')}</span>
             <strong>{formatCount(summary?.cachedInputTokens, language)}</strong>
           </div>
           <div className="usage-secondary-stat">
-            <span>{t("usageBilling.cacheCreationInputTokens")}</span>
+            <span>{t('usageBilling.cacheCreationInputTokens')}</span>
             <strong>{formatCount(summary?.cacheCreationInputTokens, language)}</strong>
           </div>
         </div>
@@ -610,56 +647,65 @@ export function UsageBillingSettingsPage({
         {errorMessage && <p className="usage-error-message">{errorMessage}</p>}
 
         <div className="usage-models-panel">
-          <h2>{t("usageBilling.models")}</h2>
+          <h2>{t('usageBilling.models')}</h2>
 
           {sortedModels.length > 0 ? (
             <div className="usage-model-list">
               {sortedModels.map((model) => {
-                const subtitle = getModelSubtitle(model);
+                const subtitle = getModelSubtitle(model)
                 return (
-                  <div className="usage-model-row" key={`${model.modelId}-${model.providerPath ?? "/protocol"}`}>
+                  <div
+                    className="usage-model-row"
+                    key={`${model.modelId}-${model.providerPath ?? ''}`}
+                  >
                     <div className="usage-model-row__name">
                       <strong>{model.modelName}</strong>
                       {subtitle && <span>{subtitle}</span>}
                     </div>
                     <div className="usage-model-row__metrics">
                       <span>
-                        {t("usageBilling.requestCount")} {formatCount(model.requestCount, language)}
+                        {t('usageBilling.requestCount')} {formatCount(model.requestCount, language)}
                       </span>
                       <span>
-                        {t("usageBilling.messageCount")} {formatCount(model.messageCount, language)}
+                        {t('usageBilling.messageCount')} {formatCount(model.messageCount, language)}
                       </span>
                       <span>
-                        {t("usageBilling.totalTokens")} {formatCount(model.totalTokens, language)}
+                        {t('usageBilling.totalTokens')} {formatCount(model.totalTokens, language)}
                       </span>
                       <span>
-                        {t("usageBilling.estimatedCost")} {formatEstimatedCost(model.estimatedCost, language)}
+                        {t('usageBilling.estimatedCost')}{' '}
+                        {formatEstimatedCost(model.estimatedCost, language)}
                       </span>
                     </div>
                   </div>
-                );
+                )
               })}
             </div>
           ) : (
             <div className="usage-empty-state">
-              {isLoading ? t("usageBilling.loading") : t("usageBilling.empty")}
+              {isLoading ? t('usageBilling.loading') : t('usageBilling.empty')}
             </div>
           )}
         </div>
       </section>
 
-      <section className="settings-list-section usage-display-section" aria-labelledby="usage-display-heading">
+      <section
+        className="settings-list-section usage-display-section"
+        aria-labelledby="usage-display-heading"
+      >
         <div className="settings-list-section__header">
-          <h2 id="usage-display-heading">{t("usageBilling.displaySettings")}</h2>
+          <h2 id="usage-display-heading">{t('usageBilling.displaySettings')}</h2>
         </div>
 
         <div className="settings-list">
           <div className="settings-list-row">
             <div className="settings-list-row__text">
               <h3 className="settings-list-row__title" id="usage-token-details-heading">
-                {t("usageBilling.tokenDetails")}
+                {t('usageBilling.tokenDetails')}
               </h3>
-              <p className="settings-list-row__description">{t("usageBilling.tokenDetailsDescription")}</p>
+              <p className="settings-list-row__description">
+                {t('usageBilling.tokenDetailsDescription')}
+              </p>
             </div>
 
             <button
@@ -667,12 +713,14 @@ export function UsageBillingSettingsPage({
               type="button"
               role="switch"
               aria-checked={uiPreferences.showTokenUsageDetails}
-              data-state={uiPreferences.showTokenUsageDetails ? "on" : "off"}
+              data-state={uiPreferences.showTokenUsageDetails ? 'on' : 'off'}
               onClick={() =>
-                onUiPreferencesChange({ showTokenUsageDetails: !uiPreferences.showTokenUsageDetails })
+                onUiPreferencesChange({
+                  showTokenUsageDetails: !uiPreferences.showTokenUsageDetails
+                })
               }
             >
-              <span className="sr-only">{t("usageBilling.tokenDetails")}</span>
+              <span className="sr-only">{t('usageBilling.tokenDetails')}</span>
               <span className="settings-switch__thumb" aria-hidden="true" />
             </button>
           </div>
@@ -687,11 +735,15 @@ export function UsageBillingSettingsPage({
           aria-labelledby="usage-clear-dialog-title"
         >
           <div className="usage-clear-dialog__card">
-            <h2 id="usage-clear-dialog-title">{t("usageBilling.clearTitle")}</h2>
-            <p>{t("usageBilling.clearDescription")}</p>
+            <h2 id="usage-clear-dialog-title">{t('usageBilling.clearTitle')}</h2>
+            <p>{t('usageBilling.clearDescription')}</p>
             <div className="usage-clear-dialog__actions">
-              <button className="secondary-settings-button" type="button" onClick={() => setClearDialogOpen(false)}>
-                {t("usageBilling.cancel")}
+              <button
+                className="secondary-settings-button"
+                type="button"
+                onClick={() => setClearDialogOpen(false)}
+              >
+                {t('usageBilling.cancel')}
               </button>
               <button
                 className="danger-settings-button"
@@ -699,12 +751,12 @@ export function UsageBillingSettingsPage({
                 disabled={isClearing}
                 onClick={clearAllUsageRecords}
               >
-                {t("usageBilling.clearConfirm")}
+                {t('usageBilling.clearConfirm')}
               </button>
             </div>
           </div>
         </div>
       )}
     </article>
-  );
+  )
 }

@@ -1,9 +1,20 @@
 // Electron main client.
 import type {
+  AgentActionExecutionOutput,
+  AgentActionIdRequest,
   AgentCancelRunRequest,
   AgentCancelRunResponse,
+  AgentConversationTurnInput,
+  AgentConversationTurnOutput,
+  AgentEvent,
+  AgentRejectActionRequest,
   AgentStartRunRequest,
   AgentStartRunResponse,
+  AgentUsageClearInput,
+  AgentUsageClearOutput,
+  AgentUsageSummaryInput,
+  AgentUsageSummaryOutput,
+  PendingAgentActionSnapshot,
   AppVersionResponse,
   CorePingRequest,
   CorePingResponse,
@@ -25,6 +36,14 @@ const CORE_PING_METHOD = 'core.ping'
 const APP_GET_VERSION_METHOD = 'app.getVersion'
 const AGENT_START_RUN_METHOD = 'agent.startRun'
 const AGENT_CANCEL_RUN_METHOD = 'agent.cancelRun'
+const AGENT_START_CONVERSATION_TURN_METHOD = 'agent.startConversationTurn'
+const AGENT_LIST_PENDING_ACTIONS_METHOD = 'agent.listPendingActions'
+const AGENT_APPROVE_ACTION_METHOD = 'agent.approveAction'
+const AGENT_REJECT_ACTION_METHOD = 'agent.rejectAction'
+const AGENT_CANCEL_ACTION_METHOD = 'agent.cancelAction'
+const AGENT_GET_USAGE_SUMMARY_METHOD = 'agent.getUsageSummary'
+const AGENT_CLEAR_USAGE_RECORDS_METHOD = 'agent.clearUsageRecords'
+const AGENT_EVENT_NOTIFICATION_METHOD = 'agent.event'
 const STORAGE_LOAD_APP_DATA_METHOD = 'storage.loadAppData'
 const STORAGE_LOAD_MODEL_SETTINGS_METHOD = 'storage.loadModelSettings'
 const STORAGE_SAVE_MODEL_SETTINGS_METHOD = 'storage.saveModelSettings'
@@ -72,8 +91,43 @@ export class CoreServer {
     return this.rpc.request<AgentStartRunResponse, AgentStartRunRequest>(AGENT_START_RUN_METHOD, input)
   }
 
+  startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput> {
+    return this.rpc.request<AgentConversationTurnOutput, AgentConversationTurnInput>(
+      AGENT_START_CONVERSATION_TURN_METHOD,
+      input
+    )
+  }
+
   cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse> {
     return this.rpc.request<AgentCancelRunResponse, AgentCancelRunRequest>(AGENT_CANCEL_RUN_METHOD, input)
+  }
+
+  listPendingActions(): Promise<PendingAgentActionSnapshot[]> {
+    return this.rpc.request<PendingAgentActionSnapshot[]>(AGENT_LIST_PENDING_ACTIONS_METHOD)
+  }
+
+  approveAction(input: AgentActionIdRequest): Promise<AgentActionExecutionOutput> {
+    return this.rpc.request<AgentActionExecutionOutput, AgentActionIdRequest>(AGENT_APPROVE_ACTION_METHOD, input)
+  }
+
+  rejectAction(input: AgentRejectActionRequest): Promise<AgentActionExecutionOutput> {
+    return this.rpc.request<AgentActionExecutionOutput, AgentRejectActionRequest>(AGENT_REJECT_ACTION_METHOD, input)
+  }
+
+  cancelAction(input: AgentActionIdRequest): Promise<boolean> {
+    return this.rpc.request<boolean, AgentActionIdRequest>(AGENT_CANCEL_ACTION_METHOD, input)
+  }
+
+  getUsageSummary(input: AgentUsageSummaryInput): Promise<AgentUsageSummaryOutput> {
+    return this.rpc.request<AgentUsageSummaryOutput, AgentUsageSummaryInput>(AGENT_GET_USAGE_SUMMARY_METHOD, input)
+  }
+
+  clearUsageRecords(input: AgentUsageClearInput): Promise<AgentUsageClearOutput> {
+    return this.rpc.request<AgentUsageClearOutput, AgentUsageClearInput>(AGENT_CLEAR_USAGE_RECORDS_METHOD, input)
+  }
+
+  onAgentEvent(handler: (event: AgentEvent) => void): () => void {
+    return this.rpc.onNotification(AGENT_EVENT_NOTIFICATION_METHOD, (params) => handler(params as AgentEvent))
   }
 
   loadAppData(): Promise<StorageAppDataSnapshot> {

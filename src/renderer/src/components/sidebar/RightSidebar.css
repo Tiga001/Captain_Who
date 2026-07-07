@@ -176,6 +176,7 @@
 
 .right-sidebar__new-tab-button,
 .right-sidebar__icon-button {
+  position: relative;
   display: grid;
   width: 34px;
   height: 34px;
@@ -188,6 +189,17 @@
   cursor: pointer;
   -webkit-app-region: no-drag;
   transition: background-color 120ms ease;
+}
+
+.right-sidebar__icon-button[data-has-unread="true"]::after {
+  position: absolute;
+  top: 7px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  content: "";
+  background: var(--mc-color-text-accent);
+  border-radius: 50%;
 }
 
 .right-sidebar__new-tab-button:hover,

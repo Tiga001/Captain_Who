@@ -1,16 +1,16 @@
 // Renderer UI.
-import { ChevronDown, type LucideIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { ChevronDown, type LucideIcon } from 'lucide-react'
+import type { ReactNode } from 'react'
 
 interface AgentActivityDisclosureProps {
-  children?: ReactNode;
-  className?: string;
-  hasDetails: boolean;
-  icon: LucideIcon;
-  iconBadge?: ReactNode;
-  iconBadgeTone?: "danger" | "blocked";
-  isPending?: boolean;
-  label: string;
+  children?: ReactNode
+  className?: string
+  hasDetails: boolean
+  icon: LucideIcon
+  iconBadge?: ReactNode
+  iconBadgeTone?: 'danger' | 'blocked'
+  isPending?: boolean
+  label: string
 }
 
 export function AgentActivityDisclosure({
@@ -21,13 +21,13 @@ export function AgentActivityDisclosure({
   iconBadge,
   iconBadgeTone,
   isPending = false,
-  label,
+  label
 }: AgentActivityDisclosureProps) {
-  const activityClassName = ["agent-activity", className].filter(Boolean).join(" ");
-  const labelClassName = ["agent-activity__label", isPending ? "agent-running-text" : ""]
+  const activityClassName = ['agent-activity', className].filter(Boolean).join(' ')
+  const labelClassName = ['agent-activity__label', isPending ? 'agent-running-text' : '']
     .filter(Boolean)
-    .join(" ");
-  const labelNode = <span className={labelClassName}>{label}</span>;
+    .join(' ')
+  const labelNode = <span className={labelClassName}>{label}</span>
   const iconNode = (
     <span className="agent-activity__icon">
       <Icon aria-hidden="true" />
@@ -37,7 +37,7 @@ export function AgentActivityDisclosure({
         </span>
       ) : null}
     </span>
-  );
+  )
 
   if (!hasDetails) {
     return (
@@ -47,7 +47,7 @@ export function AgentActivityDisclosure({
           {labelNode}
         </div>
       </div>
-    );
+    )
   }
 
   return (
@@ -59,5 +59,5 @@ export function AgentActivityDisclosure({
       </summary>
       {children}
     </details>
-  );
+  )
 }

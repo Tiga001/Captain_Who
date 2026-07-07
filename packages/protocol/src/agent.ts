@@ -1,6 +1,14 @@
 // Protocol layer.
 export const AGENT_START_RUN_METHOD = 'agent.startRun'
 export const AGENT_CANCEL_RUN_METHOD = 'agent.cancelRun'
+export const AGENT_START_CONVERSATION_TURN_METHOD = 'agent.startConversationTurn'
+export const AGENT_LIST_PENDING_ACTIONS_METHOD = 'agent.listPendingActions'
+export const AGENT_APPROVE_ACTION_METHOD = 'agent.approveAction'
+export const AGENT_REJECT_ACTION_METHOD = 'agent.rejectAction'
+export const AGENT_CANCEL_ACTION_METHOD = 'agent.cancelAction'
+export const AGENT_GET_USAGE_SUMMARY_METHOD = 'agent.getUsageSummary'
+export const AGENT_CLEAR_USAGE_RECORDS_METHOD = 'agent.clearUsageRecords'
+export const AGENT_EVENT_NOTIFICATION_METHOD = 'agent.event'
 
 export type AgentMessageRole = "system" | "user" | "assistant";
 
@@ -68,7 +76,7 @@ export type AgentApprovalDecisionStatus = "approved" | "rejected";
 
 export type AgentPatchOperation = "create" | "update" | "delete";
 
-export type AgentPatchResultStatus = "applied" | "failed" | "rejected";
+export type AgentPatchResultStatus = "applied" | "failed" | "conflict" | "rejected";
 
 export type AgentCommandOutputStream = "stdout" | "stderr";
 
@@ -217,7 +225,7 @@ export interface AgentUsageClearOutput {
   deletedRecords: number;
 }
 
-export type AgentActionExecutionStatus = "applied" | "approved" | "failed" | "rejected";
+export type AgentActionExecutionStatus = "applied" | "approved" | "failed" | "conflict" | "rejected";
 
 export interface AgentCommandExecutionResult {
   command: string;
@@ -308,6 +316,36 @@ export interface AgentCancelRunRequest {
 export interface AgentCancelRunResponse {
   runId: string;
   cancelled: boolean;
+}
+
+export interface AgentActionIdRequest {
+  actionId: string;
+}
+
+export interface AgentRejectActionRequest {
+  actionId: string;
+  message?: string;
+}
+
+export type PendingAgentActionStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "cancelled"
+  | "completed"
+  | "failed";
+
+export interface PendingAgentActionSnapshot {
+  actionId: string;
+  actionType: string;
+  toolName: string;
+  toolCallId?: string | null;
+  runId: string;
+  conversationId?: string | null;
+  assistantMessageId?: string | null;
+  action: AgentProposedAction;
+  createdAt: number;
+  status: PendingAgentActionStatus;
 }
 
 export interface AgentStateSnapshot {

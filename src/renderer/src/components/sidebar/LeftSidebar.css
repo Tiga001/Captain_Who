@@ -2,6 +2,7 @@
 .left-sidebar {
   --left-sidebar-footer-height: 64px;
   --left-sidebar-header-height: calc(var(--titlebar-height) + var(--mc-layout-sidebar-action-height) + 24px);
+  --left-sidebar-popover-z-index: 1100;
   position: relative;
   display: block;
   width: 100%;
@@ -181,7 +182,7 @@
 
 .left-sidebar__account-menu {
   position: absolute;
-  z-index: 900;
+  z-index: var(--left-sidebar-popover-z-index);
   right: 12px;
   bottom: calc(100% - 6px);
   left: 12px;
@@ -391,8 +392,7 @@
 
 .left-sidebar__section-menu,
 .left-sidebar__section-submenu {
-  position: absolute;
-  z-index: 45;
+  z-index: var(--left-sidebar-popover-z-index);
   display: grid;
   width: min(224px, calc(100vw - 48px));
   padding: 10px;
@@ -406,11 +406,11 @@
 }
 
 .left-sidebar__section-menu {
-  top: 34px;
-  left: 0;
+  position: fixed;
 }
 
 .left-sidebar__section-submenu {
+  position: absolute;
   top: 48px;
   left: calc(100% - 8px);
 }
@@ -649,12 +649,10 @@
 }
 
 .left-sidebar__project-menu {
-  position: absolute;
-  z-index: 40;
-  top: 35px;
-  left: 42px;
+  position: fixed;
+  z-index: var(--left-sidebar-popover-z-index);
   display: grid;
-  width: min(224px, calc(100% - 48px));
+  width: min(224px, calc(100vw - 48px));
   padding: 10px;
   gap: 2px;
   color: var(--mc-color-sidebar-text-secondary);
@@ -667,7 +665,7 @@
 
 .left-sidebar__conversation-menu {
   position: fixed;
-  z-index: 140;
+  z-index: var(--left-sidebar-popover-z-index);
   display: grid;
   width: min(224px, calc(100vw - 48px));
   padding: 10px;
@@ -992,7 +990,7 @@
 
 .left-sidebar__conversation-item-action::after {
   position: absolute;
-  z-index: 120;
+  z-index: var(--left-sidebar-popover-z-index);
   bottom: calc(100% + 8px);
   left: 50%;
   padding: 7px 11px;

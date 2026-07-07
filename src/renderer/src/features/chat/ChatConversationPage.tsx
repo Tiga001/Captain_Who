@@ -1,61 +1,64 @@
 // Renderer UI.
-import { useEffect, useMemo, useRef } from "react";
-import type { AgentProposedAction } from "@mycopilot/protocol";
-import { ChatComposer } from "./components/ChatComposer";
-import { AgentApprovalDialog } from "./components/AgentApprovalDialog";
-import { ChatMessageItem } from "./components/ChatMessageItem";
-import type { ChatComposerDraft, ChatConversation, ChatSubmitOptions } from "./chatTypes";
-import "./ChatConversationPage.css";
+import { useEffect, useMemo, useRef } from 'react'
+import type { AgentProposedAction } from '@mycopilot/protocol'
+import { ChatComposer } from './components/ChatComposer'
+import { AgentApprovalDialog } from './components/AgentApprovalDialog'
+import { ChatMessageItem } from './components/ChatMessageItem'
+import type { ChatComposerDraft, ChatConversation, ChatSubmitOptions } from './chatTypes'
+import './ChatConversationPage.css'
 
 interface AgentApprovalOptions {
-  rememberForRun?: boolean;
+  rememberForRun?: boolean
 }
 
 interface ChatConversationPageProps {
-  conversation: ChatConversation;
-  composerDraft: ChatComposerDraft;
+  conversation: ChatConversation
+  composerDraft: ChatComposerDraft
   onApproveAgentAction?: (
     messageId: string,
     action: AgentProposedAction,
-    options?: AgentApprovalOptions,
-  ) => void;
-  onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void;
-  onComposerDraftChange: (draft: ChatComposerDraft) => void;
-  onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void;
-  onStopGenerating?: () => void;
-  onSubmitMessage: (message: string, options: ChatSubmitOptions) => void;
-  onMessageUiStateChange?: (messageId: string, uiState: ChatConversation["messages"][number]["uiState"]) => void;
+    options?: AgentApprovalOptions
+  ) => void
+  onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void
+  onComposerDraftChange: (draft: ChatComposerDraft) => void
+  onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
+  onStopGenerating?: () => void
+  onSubmitMessage: (message: string, options: ChatSubmitOptions) => void
+  onMessageUiStateChange?: (
+    messageId: string,
+    uiState: ChatConversation['messages'][number]['uiState']
+  ) => void
   permissionModeAvailability: {
-    custom: boolean;
-    full: boolean;
-  };
-  showTokenUsageDetails: boolean;
+    custom: boolean
+    full: boolean
+  }
+  showTokenUsageDetails: boolean
 }
 
 function getActionApprovalStatus(action: AgentProposedAction) {
-  if (action.type === "diff") return action.diff.approvalStatus;
-  if (action.type === "command") return action.command.approvalStatus;
-  return action.call.approvalStatus;
+  if (action.type === 'diff') return action.diff.approvalStatus
+  if (action.type === 'command') return action.command.approvalStatus
+  return action.call.approvalStatus
 }
 
 function getPendingApprovalTarget(conversation: ChatConversation) {
   for (let messageIndex = conversation.messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-    const message = conversation.messages[messageIndex];
-    const run = message.agentRun;
-    if (message.role !== "assistant" || run?.status !== "waiting_for_approval") continue;
+    const message = conversation.messages[messageIndex]
+    const run = message.agentRun
+    if (message.role !== 'assistant' || run?.status !== 'waiting_for_approval') continue
 
     const action = [...run.approvals]
       .reverse()
-      .find((candidate) => getActionApprovalStatus(candidate) === "required");
+      .find((candidate) => getActionApprovalStatus(candidate) === 'required')
     if (action) {
       return {
         action,
-        messageId: message.id,
-      };
+        messageId: message.id
+      }
     }
   }
 
-  return null;
+  return null
 }
 
 export function ChatConversationPage({
@@ -69,33 +72,33 @@ export function ChatConversationPage({
   onSubmitMessage,
   onMessageUiStateChange,
   permissionModeAvailability,
-  showTokenUsageDetails,
+  showTokenUsageDetails
 }: ChatConversationPageProps) {
-  const messagesRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null)
   const isGenerating = conversation.messages.some(
-    (message) => message.role === "assistant" && message.status === "pending",
-  );
+    (message) => message.role === 'assistant' && message.status === 'pending'
+  )
   const lastAssistantMessageId = [...conversation.messages]
     .reverse()
-    .find((message) => message.role === "assistant")?.id;
+    .find((message) => message.role === 'assistant')?.id
   const pendingApprovalTarget = useMemo(
     () => getPendingApprovalTarget(conversation),
-    [conversation],
-  );
-  const hasPendingApproval = Boolean(pendingApprovalTarget);
+    [conversation]
+  )
+  const hasPendingApproval = Boolean(pendingApprovalTarget)
 
   useEffect(() => {
-    if (!hasPendingApproval) return;
-    const messagesElement = messagesRef.current;
-    if (!messagesElement) return;
-    messagesElement.scrollTop = messagesElement.scrollHeight;
-  }, [conversation.messages, hasPendingApproval]);
+    if (!hasPendingApproval) return
+    const messagesElement = messagesRef.current
+    if (!messagesElement) return
+    messagesElement.scrollTop = messagesElement.scrollHeight
+  }, [conversation.messages, hasPendingApproval])
 
   return (
     <section
       className="chat-conversation-page"
       aria-label={conversation.title}
-      data-approval-pending={hasPendingApproval ? "true" : undefined}
+      data-approval-pending={hasPendingApproval ? 'true' : undefined}
     >
       <div className="chat-conversation-page__messages" ref={messagesRef}>
         {conversation.messages.map((message) => (
@@ -133,5 +136,5 @@ export function ChatConversationPage({
         )}
       </div>
     </section>
-  );
+  )
 }

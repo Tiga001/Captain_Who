@@ -1,20 +1,20 @@
 // Renderer UI.
-import type { AgentConversationMessage, AgentInputAttachment } from "@mycopilot/protocol";
-import { modelConfig } from "../config/modelConfig";
-import type { ChatComposerDraft, ChatMessage } from "../features/chat/chatTypes";
+import type { AgentConversationMessage, AgentInputAttachment } from '@mycopilot/protocol'
+import { modelConfig } from '../config/modelConfig'
+import type { ChatComposerDraft, ChatMessage } from '../features/chat/chatTypes'
 
 export function createId(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
 export function createConversationTitle(message: string) {
-  const firstLine = message.split(/\r?\n/)[0]?.replace(/\s+/g, " ").trim() || "新对话";
-  return firstLine.length > 24 ? `${firstLine.slice(0, 24)}...` : firstLine;
+  const firstLine = message.split(/\r?\n/)[0]?.replace(/\s+/g, ' ').trim() || '新对话'
+  return firstLine.length > 24 ? `${firstLine.slice(0, 24)}...` : firstLine
 }
 
 function mapInputAttachmentToMessageAttachment(
-  attachment: AgentInputAttachment,
-): NonNullable<ChatMessage["attachments"]>[number] {
+  attachment: AgentInputAttachment
+): NonNullable<ChatMessage['attachments']>[number] {
   return {
     id: attachment.id,
     kind: attachment.kind,
@@ -22,70 +22,68 @@ function mapInputAttachmentToMessageAttachment(
     mimeType: attachment.mimeType,
     sizeBytes: attachment.sizeBytes,
     encoding: attachment.encoding,
-    data: attachment.data,
-  };
+    data: attachment.data
+  }
 }
 
 export function createUserMessage(
   content: string,
-  attachments: AgentInputAttachment[] = [],
+  attachments: AgentInputAttachment[] = []
 ): ChatMessage {
   return {
-    id: createId("message"),
-    role: "user",
+    id: createId('message'),
+    role: 'user',
     content,
     createdAt: Date.now(),
-    status: "sent",
-    attachments: attachments.map(mapInputAttachmentToMessageAttachment),
-  };
+    status: 'sent',
+    attachments: attachments.map(mapInputAttachmentToMessageAttachment)
+  }
 }
 
 export function createAssistantMessage(
   content: string,
-  status: ChatMessage["status"] = "sent",
+  status: ChatMessage['status'] = 'sent'
 ): ChatMessage {
   return {
-    id: createId("message"),
-    role: "assistant",
+    id: createId('message'),
+    role: 'assistant',
     content,
     createdAt: Date.now(),
-    status,
-  };
+    status
+  }
 }
 
-export function createComposerDraft(
-  overrides: Partial<ChatComposerDraft> = {},
-): ChatComposerDraft {
+export function createComposerDraft(overrides: Partial<ChatComposerDraft> = {}): ChatComposerDraft {
   const draft = {
-    message: "/protocol",
-    permissionMode: "full",
+    message: '',
+    permissionMode: 'full',
     modelId: modelConfig.defaults.selectedModelId,
     projectId: null,
     attachments: [],
     updatedAt: Date.now(),
-    ...overrides,
-  };
+    ...overrides
+  }
 
   return {
     ...draft,
     modelId: draft.modelId || modelConfig.defaults.selectedModelId,
     permissionMode:
-      draft.permissionMode === "default" || draft.permissionMode === "custom"
+      draft.permissionMode === 'default' || draft.permissionMode === 'custom'
         ? draft.permissionMode
-        : "full",
-    attachments: draft.attachments ?? [],
-  };
+        : 'full',
+    attachments: draft.attachments ?? []
+  }
 }
 
 function getChatMessageStatusFromConversationMessage(
-  status: AgentConversationMessage["status"],
-): ChatMessage["status"] {
-  return status ?? undefined;
+  status: AgentConversationMessage['status']
+): ChatMessage['status'] {
+  return status ?? undefined
 }
 
 export function mergeConversationMessageFromBackend(
   currentMessage: ChatMessage,
-  backendMessage: AgentConversationMessage,
+  backendMessage: AgentConversationMessage
 ): ChatMessage {
   return {
     ...currentMessage,
@@ -96,6 +94,6 @@ export function mergeConversationMessageFromBackend(
     status: getChatMessageStatusFromConversationMessage(backendMessage.status),
     attachments: backendMessage.attachments?.length
       ? backendMessage.attachments
-      : currentMessage.attachments,
-  };
+      : currentMessage.attachments
+  }
 }

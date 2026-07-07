@@ -119,6 +119,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             model_id TEXT NOT NULL,
             model_name TEXT NOT NULL,
             provider_path TEXT,
+            started_at INTEGER,
+            completed_at INTEGER,
+            status TEXT,
+            error TEXT,
             created_at INTEGER NOT NULL,
             input_tokens INTEGER,
             output_tokens INTEGER,
@@ -131,6 +135,25 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             estimated_cost REAL,
             UNIQUE(conversation_id, message_id),
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_action_audit (
+            action_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            conversation_id TEXT,
+            assistant_message_id TEXT,
+            action_type TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            decision TEXT,
+            status TEXT NOT NULL,
+            action_json TEXT NOT NULL,
+            patch_result_json TEXT,
+            command_result_json TEXT,
+            tool_result_json TEXT,
+            error TEXT,
+            created_at INTEGER NOT NULL,
+            decided_at INTEGER,
+            completed_at INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS maintenance_tasks (
@@ -252,12 +275,20 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_usage_records_created_at ON agent_usage_records(created_at);
         CREATE INDEX IF NOT EXISTS idx_agent_usage_records_model_id ON agent_usage_records(model_id);
         CREATE INDEX IF NOT EXISTS idx_agent_usage_records_project_id ON agent_usage_records(project_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_action_audit_run_id ON agent_action_audit(run_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_action_audit_conversation_id ON agent_action_audit(conversation_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_action_audit_created_at ON agent_action_audit(created_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_action_audit_status ON agent_action_audit(status);
         CREATE INDEX IF NOT EXISTS idx_composer_drafts_updated_at ON composer_drafts(updated_at);
         ",
     )?;
 
     add_column_if_missing(connection, "messages", "agent_run_json", "TEXT")?;
     add_column_if_missing(connection, "messages", "ui_state_json", "TEXT")?;
+    add_column_if_missing(connection, "agent_usage_records", "started_at", "INTEGER")?;
+    add_column_if_missing(connection, "agent_usage_records", "completed_at", "INTEGER")?;
+    add_column_if_missing(connection, "agent_usage_records", "status", "TEXT")?;
+    add_column_if_missing(connection, "agent_usage_records", "error", "TEXT")?;
 
     Ok(())
 }

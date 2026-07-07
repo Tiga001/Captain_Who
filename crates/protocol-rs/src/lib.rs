@@ -6,6 +6,14 @@ pub const CORE_PING_METHOD: &str = "core.ping";
 pub const APP_GET_VERSION_METHOD: &str = "app.getVersion";
 pub const AGENT_START_RUN_METHOD: &str = "agent.startRun";
 pub const AGENT_CANCEL_RUN_METHOD: &str = "agent.cancelRun";
+pub const AGENT_START_CONVERSATION_TURN_METHOD: &str = "agent.startConversationTurn";
+pub const AGENT_LIST_PENDING_ACTIONS_METHOD: &str = "agent.listPendingActions";
+pub const AGENT_APPROVE_ACTION_METHOD: &str = "agent.approveAction";
+pub const AGENT_REJECT_ACTION_METHOD: &str = "agent.rejectAction";
+pub const AGENT_CANCEL_ACTION_METHOD: &str = "agent.cancelAction";
+pub const AGENT_GET_USAGE_SUMMARY_METHOD: &str = "agent.getUsageSummary";
+pub const AGENT_CLEAR_USAGE_RECORDS_METHOD: &str = "agent.clearUsageRecords";
+pub const AGENT_EVENT_NOTIFICATION_METHOD: &str = "agent.event";
 pub const STORAGE_LOAD_APP_DATA_METHOD: &str = "storage.loadAppData";
 pub const STORAGE_LOAD_MODEL_SETTINGS_METHOD: &str = "storage.loadModelSettings";
 pub const STORAGE_SAVE_MODEL_SETTINGS_METHOD: &str = "storage.saveModelSettings";
@@ -117,6 +125,19 @@ pub struct AgentCancelRunRequest {
 pub struct AgentCancelRunResponse {
     pub run_id: String,
     pub cancelled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActionIdRequest {
+    pub action_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRejectActionRequest {
+    pub action_id: String,
+    pub message: Option<String>,
 }
 
 pub fn success<T>(id: JsonRpcId, result: T) -> JsonRpcSuccessResponse<T>

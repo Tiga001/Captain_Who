@@ -2,13 +2,17 @@
 use std::path::Path;
 
 use crate::storage::models::{
-    AgentPromptPreferencesRecord, AppDataSnapshot, ChatConversationMetaRecord,
-    ChatConversationRecord, ChatMessageRecord, ChatMessageStateRecord, ComposerDraftRecord,
-    ModelSettingsRecord, ProjectRecord, UiPreferencesRecord,
+    AgentActionAuditRecord, AgentPromptPreferencesRecord, AgentUsageRecordInsert, AppDataSnapshot,
+    ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ChatMessageStateRecord,
+    ComposerDraftRecord, ModelSettingsRecord, ProjectRecord, UiPreferencesRecord,
 };
 use crate::storage::{
-    agent_prompt_preferences_repository, chat_repository, composer_draft_repository,
-    config_repository, preferences_repository, project_repository, storage_error, StorageState,
+    agent_action_audit_repository, agent_prompt_preferences_repository, chat_repository,
+    composer_draft_repository, config_repository, preferences_repository, project_repository,
+    storage_error, usage_repository, StorageState,
+};
+use crate::{
+    AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
 };
 
 pub struct StorageService {
@@ -139,6 +143,26 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    pub fn update_chat_message_status_and_content(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        content: &str,
+        status: Option<&str>,
+        updated_at: i64,
+    ) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        chat_repository::update_message_status_and_content(
+            &connection,
+            conversation_id,
+            message_id,
+            content,
+            status,
+            updated_at,
+        )
+        .map_err(storage_error)
+    }
+
     pub fn load_composer_drafts(&self) -> Result<Vec<ComposerDraftRecord>, String> {
         let connection = self.state.connection()?;
         composer_draft_repository::list_composer_drafts(&connection).map_err(storage_error)
@@ -171,5 +195,48 @@ impl StorageService {
     ) -> Result<UiPreferencesRecord, String> {
         let connection = self.state.connection()?;
         preferences_repository::save_ui_preferences(&connection, preferences).map_err(storage_error)
+    }
+
+    pub fn upsert_agent_usage(&self, record: AgentUsageRecordInsert) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        usage_repository::upsert_usage_record(&connection, &record).map_err(storage_error)
+    }
+
+    pub fn get_usage_summary(
+        &self,
+        input: &AgentUsageSummaryInput,
+        now_ms: i64,
+    ) -> Result<AgentUsageSummaryOutput, String> {
+        let connection = self.state.connection()?;
+        usage_repository::usage_summary(&connection, input, now_ms).map_err(storage_error)
+    }
+
+    pub fn clear_usage_records(
+        &self,
+        input: &AgentUsageClearInput,
+    ) -> Result<AgentUsageClearOutput, String> {
+        let connection = self.state.connection()?;
+        usage_repository::clear_usage_records(&connection, input).map_err(storage_error)
+    }
+
+    pub fn estimate_usage_cost(
+        &self,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+        input_price: &str,
+        output_price: &str,
+    ) -> Option<f64> {
+        usage_repository::estimate_usage_cost(
+            input_tokens,
+            output_tokens,
+            input_price,
+            output_price,
+        )
+    }
+
+    pub fn upsert_agent_action_audit(&self, record: AgentActionAuditRecord) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        agent_action_audit_repository::upsert_action_audit_record(&connection, &record)
+            .map_err(storage_error)
     }
 }

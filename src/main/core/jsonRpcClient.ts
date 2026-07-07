@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import type {
   JsonRpcErrorResponse,
   JsonRpcId,
+  JsonRpcNotification,
   JsonRpcRequest,
   JsonRpcResponse,
   JsonRpcSuccessResponse
@@ -17,9 +18,12 @@ interface PendingRequest {
   reject(reason: Error): void
 }
 
+type NotificationHandler = (params: unknown) => void
+
 export class CoreJsonRpcClient {
   private child: ChildProcessWithoutNullStreams | null = null
   private nextId = 1
+  private readonly notificationHandlers = new Map<string, Set<NotificationHandler>>()
   private readonly pendingRequests = new Map<JsonRpcId, PendingRequest>()
 
   start(): void {
@@ -90,15 +94,35 @@ export class CoreJsonRpcClient {
     })
   }
 
+  onNotification(method: string, handler: NotificationHandler): () => void {
+    const handlers = this.notificationHandlers.get(method) ?? new Set<NotificationHandler>()
+    handlers.add(handler)
+    this.notificationHandlers.set(method, handlers)
+
+    return () => {
+      handlers.delete(handler)
+      if (handlers.size === 0) {
+        this.notificationHandlers.delete(method)
+      }
+    }
+  }
+
   private handleLine(line: string): void {
-    let response: JsonRpcResponse
+    let message: JsonRpcResponse | JsonRpcNotification
 
     try {
-      response = JSON.parse(line) as JsonRpcResponse
+      message = JSON.parse(line) as JsonRpcResponse | JsonRpcNotification
     } catch (error) {
       console.error('[core-server] invalid JSON-RPC response', error)
       return
     }
+
+    if (this.isNotification(message)) {
+      this.handleNotification(message)
+      return
+    }
+
+    const response = message
 
     if (response.id === null) {
       return
@@ -128,6 +152,21 @@ export class CoreJsonRpcClient {
 
   private isErrorResponse(response: JsonRpcResponse): response is JsonRpcErrorResponse {
     return 'error' in response
+  }
+
+  private isNotification(message: JsonRpcResponse | JsonRpcNotification): message is JsonRpcNotification {
+    return 'method' in message && !('id' in message)
+  }
+
+  private handleNotification(notification: JsonRpcNotification): void {
+    const handlers = this.notificationHandlers.get(notification.method)
+    if (!handlers) {
+      return
+    }
+
+    for (const handler of handlers) {
+      handler(notification.params)
+    }
   }
 
   private resolveCommand(): { executable: string; args: string[]; cwd: string } {

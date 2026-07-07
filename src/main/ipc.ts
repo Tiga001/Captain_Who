@@ -1,19 +1,154 @@
 // Electron main client.
-import { ipcMain } from 'electron'
+import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import type { IpcMainInvokeEvent, OpenDialogOptions } from 'electron'
+import { basename, extname, isAbsolute, join } from 'path'
+import { readFile } from 'fs/promises'
+import type { StorageProjectRecord } from '@mycopilot/protocol'
 
 import { CoreServer } from './core/coreServer'
 import { BrowserWebContentsViewManager } from './browser/BrowserWebContentsViewManager'
 import { TerminalBridge } from './terminal/TerminalBridge'
+
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  '.gif': 'image/gif',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp'
+}
+
+function getInvokeWindow(event: IpcMainInvokeEvent): BrowserWindow | undefined {
+  return BrowserWindow.fromWebContents(event.sender) ?? undefined
+}
+
+function showOpenDialog(event: IpcMainInvokeEvent, options: OpenDialogOptions) {
+  const window = getInvokeWindow(event)
+  return window ? dialog.showOpenDialog(window, options) : dialog.showOpenDialog(options)
+}
+
+function createProjectRecord(directoryPath: string): StorageProjectRecord {
+  const now = Date.now()
+  const name = basename(directoryPath) || directoryPath
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  return {
+    id: `project-${slug || 'workspace'}-${now}`,
+    name,
+    path: directoryPath,
+    createdAt: now,
+    pinnedAt: null
+  }
+}
+
+async function selectProjectDirectory(
+  event: IpcMainInvokeEvent
+): Promise<StorageProjectRecord | null> {
+  const result = await showOpenDialog(event, {
+    title: 'Select project directory',
+    properties: ['openDirectory', 'createDirectory']
+  })
+
+  if (result.canceled || !result.filePaths[0]) {
+    return null
+  }
+
+  return createProjectRecord(result.filePaths[0])
+}
+
+async function selectProfileAvatar(event: IpcMainInvokeEvent): Promise<string | null> {
+  const result = await showOpenDialog(event, {
+    title: 'Select profile avatar',
+    properties: ['openFile'],
+    filters: [
+      {
+        name: 'Images',
+        extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif']
+      }
+    ]
+  })
+
+  if (result.canceled || !result.filePaths[0]) {
+    return null
+  }
+
+  const filePath = result.filePaths[0]
+  const mimeType = IMAGE_MIME_BY_EXTENSION[extname(filePath).toLowerCase()] ?? 'image/png'
+  const data = await readFile(filePath)
+  return `data:${mimeType};base64,${data.toString('base64')}`
+}
+
+async function getProjectPath(coreServer: CoreServer, projectId: string): Promise<string | null> {
+  const projects = await coreServer.loadProjects()
+  return projects.find((project) => project.id === projectId)?.path ?? null
+}
+
+async function showProjectInFolder(coreServer: CoreServer, projectId: string): Promise<void> {
+  const projectPath = await getProjectPath(coreServer, projectId)
+  if (!projectPath) {
+    throw new Error('Project path is not available')
+  }
+
+  shell.showItemInFolder(projectPath)
+}
+
+async function revealProjectFile(
+  coreServer: CoreServer,
+  input: { projectId?: string | null; filePath: string }
+): Promise<void> {
+  const rawFilePath = input.filePath.trim()
+  if (!rawFilePath) {
+    throw new Error('File path is required')
+  }
+
+  if (isAbsolute(rawFilePath)) {
+    shell.showItemInFolder(rawFilePath)
+    return
+  }
+
+  if (!input.projectId) {
+    throw new Error('Project id is required for relative file paths')
+  }
+
+  const projectPath = await getProjectPath(coreServer, input.projectId)
+  if (!projectPath) {
+    throw new Error('Project path is not available')
+  }
+
+  shell.showItemInFolder(join(projectPath, rawFilePath))
+}
 
 export function registerHostIpc(
   coreServer: CoreServer,
   terminalBridge: TerminalBridge,
   getBrowserManager: () => BrowserWebContentsViewManager
 ): void {
+  coreServer.onAgentEvent((event) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) {
+        window.webContents.send('host:agent.event', event)
+      }
+    }
+  })
+
   ipcMain.handle('host:core.ping', (_event, input) => coreServer.ping(input))
   ipcMain.handle('host:app.getVersion', () => coreServer.getVersion())
   ipcMain.handle('host:agent.startRun', (_event, input) => coreServer.startRun(input))
+  ipcMain.handle('host:agent.startConversationTurn', (_event, input) =>
+    coreServer.startConversationTurn(input)
+  )
   ipcMain.handle('host:agent.cancelRun', (_event, input) => coreServer.cancelRun(input))
+  ipcMain.handle('host:agent.listPendingActions', () => coreServer.listPendingActions())
+  ipcMain.handle('host:agent.approveAction', (_event, input) => coreServer.approveAction(input))
+  ipcMain.handle('host:agent.rejectAction', (_event, input) => coreServer.rejectAction(input))
+  ipcMain.handle('host:agent.cancelAction', (_event, input) => coreServer.cancelAction(input))
+  ipcMain.handle('host:agent.getUsageSummary', (_event, input) => coreServer.getUsageSummary(input))
+  ipcMain.handle('host:agent.clearUsageRecords', (_event, input) =>
+    coreServer.clearUsageRecords(input)
+  )
   ipcMain.handle('host:browser.createView', (_event, request) =>
     getBrowserManager().createView(request)
   )
@@ -47,16 +182,16 @@ export function registerHostIpc(
     coreServer.saveAgentPromptPreferences(preferences)
   )
   ipcMain.handle('host:storage.loadProjects', () => coreServer.loadProjects())
-  ipcMain.handle('host:storage.selectProjectDirectory', () => coreServer.selectProjectDirectory())
+  ipcMain.handle('host:storage.selectProjectDirectory', (event) => selectProjectDirectory(event))
   ipcMain.handle('host:storage.saveProject', (_event, project) => coreServer.saveProject(project))
   ipcMain.handle('host:storage.deleteProject', (_event, projectId) =>
     coreServer.deleteProject(projectId)
   )
   ipcMain.handle('host:storage.showProjectInFolder', (_event, projectId) =>
-    coreServer.showProjectInFolder(projectId)
+    showProjectInFolder(coreServer, projectId)
   )
   ipcMain.handle('host:storage.revealProjectFile', (_event, input) =>
-    coreServer.revealProjectFile(input)
+    revealProjectFile(coreServer, input)
   )
   ipcMain.handle('host:storage.loadConversations', () => coreServer.loadConversations())
   ipcMain.handle('host:storage.saveConversation', (_event, conversation) =>
@@ -85,7 +220,7 @@ export function registerHostIpc(
   ipcMain.handle('host:storage.saveUiPreferences', (_event, preferences) =>
     coreServer.saveUiPreferences(preferences)
   )
-  ipcMain.handle('host:storage.selectProfileAvatar', () => coreServer.selectProfileAvatar())
+  ipcMain.handle('host:storage.selectProfileAvatar', (event) => selectProfileAvatar(event))
   ipcMain.handle('host:terminal.createSession', (_event, request) =>
     terminalBridge.createSession(request)
   )

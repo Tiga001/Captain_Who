@@ -1,6 +1,8 @@
 // Rust agent core.
 mod cancellation;
+pub mod command;
 mod llm;
+pub mod patch;
 mod prompts;
 pub mod protocol;
 mod revision;

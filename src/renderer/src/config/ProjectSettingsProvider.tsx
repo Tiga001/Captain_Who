@@ -1,76 +1,76 @@
 // Renderer UI.
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import {
   deleteStoredProject,
   loadProjects,
   saveProject as saveStoredProject,
   selectProjectDirectory as selectStoredProjectDirectory,
-  showStoredProjectInFolder,
-} from "../features/storage/storageClient";
-import { createProjectId, projectConfig } from "./projectConfig";
-import type { AppProject } from "./projectConfig";
+  showStoredProjectInFolder
+} from '../features/storage/storageClient'
+import { createProjectId, projectConfig } from './projectConfig'
+import type { AppProject } from './projectConfig'
 
 interface ProjectSettingsContextValue {
-  addProject: (name: string, path?: string) => AppProject;
-  deleteProject: (projectId: string) => void;
-  hasLoadedProjects: boolean;
-  projects: AppProject[];
-  renameProject: (projectId: string, name: string) => void;
-  selectProjectDirectory: () => Promise<AppProject | null>;
-  showProjectInFolder: (projectId: string) => Promise<void>;
-  togglePinProject: (projectId: string) => void;
+  addProject: (name: string, path?: string) => AppProject
+  deleteProject: (projectId: string) => void
+  hasLoadedProjects: boolean
+  projects: AppProject[]
+  renameProject: (projectId: string, name: string) => void
+  selectProjectDirectory: () => Promise<AppProject | null>
+  showProjectInFolder: (projectId: string) => Promise<void>
+  togglePinProject: (projectId: string) => void
 }
 
-const ProjectSettingsContext = createContext<ProjectSettingsContextValue | null>(null);
+const ProjectSettingsContext = createContext<ProjectSettingsContextValue | null>(null)
 
 export function ProjectSettingsProvider({ children }: { children: ReactNode }) {
-  const [projects, setProjects] = useState<AppProject[]>(projectConfig.initialProjects);
-  const [hasLoadedProjects, setHasLoadedProjects] = useState(false);
+  const [projects, setProjects] = useState<AppProject[]>(projectConfig.initialProjects)
+  const [hasLoadedProjects, setHasLoadedProjects] = useState(false)
 
   useEffect(() => {
-    let isCancelled = false;
+    let isCancelled = false
 
     void loadProjects()
       .then((storedProjects) => {
         if (!isCancelled) {
-          setProjects(storedProjects);
+          setProjects(storedProjects)
         }
       })
       .catch((error) => {
-        console.error("Failed to load projects from SQLite", error);
+        console.error('Failed to load projects from SQLite', error)
       })
       .finally(() => {
         if (!isCancelled) {
-          setHasLoadedProjects(true);
+          setHasLoadedProjects(true)
         }
-      });
+      })
 
     return () => {
-      isCancelled = true;
-    };
-  }, []);
+      isCancelled = true
+    }
+  }, [])
 
   const value = useMemo<ProjectSettingsContextValue>(
     () => ({
       addProject: (name, path) => {
-        const normalizedName = name.trim();
-        const existingProject = projects.find((project) => project.name === normalizedName);
+        const normalizedName = name.trim()
+        const existingProject = projects.find((project) => project.name === normalizedName)
         if (existingProject) {
           if (path && existingProject.path !== path) {
-            const updatedProject = { ...existingProject, path };
+            const updatedProject = { ...existingProject, path }
             setProjects((currentProjects) =>
               currentProjects.map((project) =>
-                project.id === existingProject.id ? updatedProject : project,
-              ),
-            );
+                project.id === existingProject.id ? updatedProject : project
+              )
+            )
             void saveStoredProject(updatedProject).catch((error) => {
-              console.error("Failed to save project to SQLite", error);
-            });
-            return updatedProject;
+              console.error('Failed to save project to SQLite', error)
+            })
+            return updatedProject
           }
 
-          return existingProject;
+          return existingProject
         }
 
         const project: AppProject = {
@@ -78,97 +78,112 @@ export function ProjectSettingsProvider({ children }: { children: ReactNode }) {
           name: normalizedName,
           path,
           createdAt: Date.now(),
-          pinnedAt: null,
-        };
+          pinnedAt: null
+        }
 
-        setProjects((currentProjects) => [...currentProjects, project]);
+        setProjects((currentProjects) => [...currentProjects, project])
         void saveStoredProject(project).catch((error) => {
-          console.error("Failed to save project to SQLite", error);
-        });
-        return project;
+          console.error('Failed to save project to SQLite', error)
+        })
+        return project
       },
       deleteProject: (projectId) => {
-        setProjects((currentProjects) => currentProjects.filter((project) => project.id !== projectId));
+        setProjects((currentProjects) =>
+          currentProjects.filter((project) => project.id !== projectId)
+        )
         void deleteStoredProject(projectId).catch((error) => {
-          console.error("Failed to delete project from SQLite", error);
-        });
+          console.error('Failed to delete project from SQLite', error)
+        })
       },
       hasLoadedProjects,
       projects,
       renameProject: (projectId, name) => {
-        const normalizedName = name.trim();
-        if (!normalizedName) return;
+        const normalizedName = name.trim()
+        if (!normalizedName) return
 
         setProjects((currentProjects) =>
           currentProjects.map((project) => {
-            if (project.id !== projectId) return project;
+            if (project.id !== projectId) return project
 
             const updatedProject = {
               ...project,
-              name: normalizedName,
-            };
+              name: normalizedName
+            }
 
             void saveStoredProject(updatedProject).catch((error) => {
-              console.error("Failed to rename project in SQLite", error);
-            });
+              console.error('Failed to rename project in SQLite', error)
+            })
 
-            return updatedProject;
-          }),
-        );
+            return updatedProject
+          })
+        )
       },
       selectProjectDirectory: async () => {
-        const project = await selectStoredProjectDirectory();
-        if (!project) return null;
+        const selectedProject = await selectStoredProjectDirectory()
+        if (!selectedProject) return null
+
+        const project =
+          projects.find(
+            (currentProject) => currentProject.path && currentProject.path === selectedProject.path
+          ) ?? selectedProject
 
         setProjects((currentProjects) => {
-          const existingIndex = currentProjects.findIndex((currentProject) => currentProject.id === project.id);
+          const existingIndex = currentProjects.findIndex(
+            (currentProject) => currentProject.id === project.id
+          )
           if (existingIndex >= 0) {
             return currentProjects.map((currentProject) =>
-              currentProject.id === project.id ? project : currentProject,
-            );
+              currentProject.id === project.id ? project : currentProject
+            )
           }
 
-          return [...currentProjects.filter((currentProject) => currentProject.path !== project.path), project];
-        });
+          return [
+            ...currentProjects.filter((currentProject) => currentProject.path !== project.path),
+            project
+          ]
+        })
+        void saveStoredProject(project).catch((error) => {
+          console.error('Failed to save selected project to SQLite', error)
+        })
 
-        return project;
+        return project
       },
       showProjectInFolder: async (projectId) => {
-        await showStoredProjectInFolder(projectId);
+        await showStoredProjectInFolder(projectId)
       },
       togglePinProject: (projectId) => {
-        const now = Date.now();
+        const now = Date.now()
 
         setProjects((currentProjects) =>
           currentProjects.map((project) => {
-            if (project.id !== projectId) return project;
+            if (project.id !== projectId) return project
 
             const updatedProject = {
               ...project,
-              pinnedAt: project.pinnedAt ? null : now,
-            };
+              pinnedAt: project.pinnedAt ? null : now
+            }
 
             void saveStoredProject(updatedProject).catch((error) => {
-              console.error("Failed to save project pin state to SQLite", error);
-            });
+              console.error('Failed to save project pin state to SQLite', error)
+            })
 
-            return updatedProject;
-          }),
-        );
-      },
+            return updatedProject
+          })
+        )
+      }
     }),
-    [hasLoadedProjects, projects],
-  );
+    [hasLoadedProjects, projects]
+  )
 
-  return <ProjectSettingsContext.Provider value={value}>{children}</ProjectSettingsContext.Provider>;
+  return <ProjectSettingsContext.Provider value={value}>{children}</ProjectSettingsContext.Provider>
 }
 
 export function useProjectSettings() {
-  const context = useContext(ProjectSettingsContext);
+  const context = useContext(ProjectSettingsContext)
 
   if (!context) {
-    throw new Error("useProjectSettings must be used within ProjectSettingsProvider");
+    throw new Error('useProjectSettings must be used within ProjectSettingsProvider')
   }
 
-  return context;
+  return context
 }

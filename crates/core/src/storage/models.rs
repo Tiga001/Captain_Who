@@ -167,3 +167,49 @@ pub struct AppDataSnapshot {
     pub ui_preferences: UiPreferencesRecord,
     pub agent_prompt_preferences: AgentPromptPreferencesRecord,
 }
+
+#[derive(Debug, Clone)]
+pub struct AgentUsageRecordInsert {
+    pub id: String,
+    pub conversation_id: String,
+    pub message_id: String,
+    pub run_id: String,
+    pub project_id: Option<String>,
+    pub model_id: String,
+    pub model_name: String,
+    pub provider_path: Option<String>,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub status: Option<String>,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub billable_request_count: u64,
+    pub input_price: Option<String>,
+    pub output_price: Option<String>,
+    pub estimated_cost: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentActionAuditRecord {
+    pub action_id: String,
+    pub run_id: String,
+    pub conversation_id: Option<String>,
+    pub assistant_message_id: Option<String>,
+    pub action_type: String,
+    pub tool_name: String,
+    pub decision: Option<String>,
+    pub status: String,
+    pub action_json: String,
+    pub patch_result_json: Option<String>,
+    pub command_result_json: Option<String>,
+    pub tool_result_json: Option<String>,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub decided_at: Option<i64>,
+    pub completed_at: Option<i64>,
+}

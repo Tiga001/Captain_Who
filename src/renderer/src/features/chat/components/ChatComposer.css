@@ -17,7 +17,7 @@
 .chat-composer::after {
   position: absolute;
   inset: 5px;
-  content: "";
+  content: '';
   border-radius: calc(var(--mc-radius-composer) - 5px);
   pointer-events: none;
   transition:
@@ -25,7 +25,7 @@
     background 120ms ease;
 }
 
-.chat-composer[data-drag-active="true"]::after {
+.chat-composer[data-drag-active='true']::after {
   background: color-mix(in srgb, var(--mc-color-text-accent) 4%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mc-color-text-accent) 22%, transparent);
 }
@@ -86,7 +86,8 @@
   padding: 10px 12px 10px;
   margin: 8px -12px -4px -16px;
   background: var(--mc-color-surface-muted);
-  border-radius: var(--mc-radius-none) var(--mc-radius-none) var(--mc-radius-composer) var(--mc-radius-composer);
+  border-radius: var(--mc-radius-none) var(--mc-radius-none) var(--mc-radius-composer)
+    var(--mc-radius-composer);
 }
 
 .chat-composer__toolbar svg {
@@ -118,7 +119,7 @@
   box-shadow: var(--mc-shadow-none);
 }
 
-.composer-attachment[data-kind="file"] {
+.composer-attachment[data-kind='file'] {
   grid-template-columns: auto minmax(0, 1fr);
   width: 244px;
   height: 72px;
@@ -127,7 +128,7 @@
   border-radius: var(--mc-radius-2xl);
 }
 
-.composer-attachment[data-kind="image"] {
+.composer-attachment[data-kind='image'] {
   width: 118px;
   height: 126px;
   overflow: hidden;
@@ -322,15 +323,15 @@
   color: var(--mc-color-icon-muted);
 }
 
-.composer-permission-button[data-permission="default"] {
+.composer-permission-button[data-permission='default'] {
   color: var(--mc-color-icon-subtle);
 }
 
-.composer-permission-button[data-permission="full"] {
+.composer-permission-button[data-permission='full'] {
   color: var(--mc-color-icon-danger);
 }
 
-.composer-permission-button[data-permission="custom"] {
+.composer-permission-button[data-permission='custom'] {
   color: var(--mc-color-text-accent);
 }
 
@@ -512,7 +513,7 @@
 
 .composer-project-option:hover,
 .composer-project-command:hover,
-.composer-project-option[data-selected="true"] {
+.composer-project-option[data-selected='true'] {
   background: var(--mc-color-state-hover);
 }
 
@@ -572,8 +573,8 @@
   border-radius: var(--mc-radius-control);
 }
 
-.composer-model-option[data-selected="true"],
-.composer-permission-option[data-selected="true"] {
+.composer-model-option[data-selected='true'],
+.composer-permission-option[data-selected='true'] {
   background: var(--mc-color-surface-selected-subtle);
 }
 
@@ -602,7 +603,7 @@
   line-height: var(--mc-line-height-none);
 }
 
-.composer-model-option__capability[data-supported="true"] {
+.composer-model-option__capability[data-supported='true'] {
   color: var(--mc-color-text-accent);
   background: var(--mc-color-surface-info-subtle);
 }
@@ -614,19 +615,19 @@
   font-size: var(--mc-font-size-md);
 }
 
-.composer-permission-option[data-permission="default"] {
+.composer-permission-option[data-permission='default'] {
   color: var(--mc-color-text-secondary);
 }
 
-.composer-permission-option[data-permission="default"] > svg:first-child {
+.composer-permission-option[data-permission='default'] > svg:first-child {
   color: var(--mc-color-icon-subtle);
 }
 
-.composer-permission-option[data-permission="full"] {
+.composer-permission-option[data-permission='full'] {
   color: var(--mc-color-icon-danger);
 }
 
-.composer-permission-option[data-permission="custom"] {
+.composer-permission-option[data-permission='custom'] {
   color: var(--mc-color-text-accent);
 }
 
@@ -667,17 +668,17 @@
   border-radius: var(--mc-radius-pill);
 }
 
-.composer-submit-button[data-state="ready"] {
+.composer-submit-button[data-state='ready'] {
   color: var(--mc-color-text-inverse);
   background: var(--mc-color-text-primary);
 }
 
-.composer-submit-button[data-state="disabled"] {
+.composer-submit-button[data-state='disabled'] {
   color: var(--mc-color-icon-subtle);
   background: var(--mc-color-surface-disabled);
 }
 
-.composer-submit-button[data-state="stop"] {
+.composer-submit-button[data-state='stop'] {
   color: var(--mc-color-text-inverse);
   background: var(--mc-color-text-primary);
 }

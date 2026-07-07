@@ -1,9 +1,20 @@
 // Host API.
 import type {
+  AgentActionExecutionOutput,
+  AgentActionIdRequest,
   AgentCancelRunRequest,
   AgentCancelRunResponse,
+  AgentConversationTurnInput,
+  AgentConversationTurnOutput,
+  AgentEvent,
+  PendingAgentActionSnapshot,
+  AgentRejectActionRequest,
   AgentStartRunRequest,
   AgentStartRunResponse,
+  AgentUsageClearInput,
+  AgentUsageClearOutput,
+  AgentUsageSummaryInput,
+  AgentUsageSummaryOutput,
   AppVersionResponse,
   BrowserBounds,
   BrowserCreateViewRequest,
@@ -93,6 +104,19 @@ export interface TerminalHostApi {
   onExit(handler: (event: TerminalExitEvent) => void): () => void
 }
 
+export interface AgentHostApi {
+  startRun(input: AgentStartRunRequest): Promise<AgentStartRunResponse>
+  startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput>
+  cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse>
+  listPendingActions(): Promise<PendingAgentActionSnapshot[]>
+  approveAction(input: AgentActionIdRequest): Promise<AgentActionExecutionOutput>
+  rejectAction(input: AgentRejectActionRequest): Promise<AgentActionExecutionOutput>
+  cancelAction(input: AgentActionIdRequest): Promise<boolean>
+  getUsageSummary(input: AgentUsageSummaryInput): Promise<AgentUsageSummaryOutput>
+  clearUsageRecords(input: AgentUsageClearInput): Promise<AgentUsageClearOutput>
+  onEvent(handler: (event: AgentEvent) => void): () => void
+}
+
 export interface HostApi {
   core: {
     ping(input?: CorePingRequest): Promise<CorePingResponse>
@@ -100,10 +124,7 @@ export interface HostApi {
   app: {
     getVersion(): Promise<AppVersionResponse>
   }
-  agent: {
-    startRun(input: AgentStartRunRequest): Promise<AgentStartRunResponse>
-    cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse>
-  }
+  agent: AgentHostApi
   browser: BrowserHostApi
   storage: StorageHostApi
   terminal: TerminalHostApi

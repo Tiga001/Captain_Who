@@ -408,6 +408,7 @@ pub enum AgentPatchOperation {
 pub enum AgentPatchResultStatus {
     Applied,
     Failed,
+    Conflict,
     Rejected,
 }
 

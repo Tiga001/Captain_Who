@@ -149,8 +149,8 @@
   border-radius: var(--mc-radius-row);
   cursor: pointer;
   font: inherit;
-  font-size: var(--mc-font-size-settings-section-title);
-  font-weight: var(--mc-font-weight-strong);
+  font-size: var(--mc-font-size-settings-body);
+  font-weight: var(--mc-font-weight-select);
   line-height: var(--mc-line-height-control);
 }
 
@@ -200,8 +200,8 @@
   border: 0;
   cursor: pointer;
   font: inherit;
-  font-size: var(--mc-font-size-settings-section-title);
-  font-weight: var(--mc-font-weight-strong);
+  font-size: var(--mc-font-size-settings-body);
+  font-weight: var(--mc-font-weight-select);
   line-height: var(--mc-line-height-control);
 }
 

@@ -1,4 +1,5 @@
 // Rust core storage.
+pub mod agent_action_audit_repository;
 pub mod agent_prompt_preferences_repository;
 pub mod attachment_repository;
 pub mod chat_repository;
@@ -9,6 +10,7 @@ pub mod models;
 pub mod preferences_repository;
 pub mod project_repository;
 pub mod service;
+pub mod usage_repository;
 
 use rusqlite::Connection;
 use std::path::Path;

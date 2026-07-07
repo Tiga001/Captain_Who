@@ -1,17 +1,25 @@
 // Rust core server.
+mod agent;
+
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agent::{AgentConversationTurnInput, AgentService};
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatConversationRecord,
     ChatMessageRecord, ChatMessageStateRecord, ComposerDraftRecord, ModelSettingsRecord,
     ProjectRecord, UiPreferencesRecord,
 };
 use mycopilot_core::storage::service::StorageService;
+use mycopilot_core::{AgentUsageClearInput, AgentUsageSummaryInput};
 use mycopilot_protocol_rs::{
-    error, success, AgentCancelRunRequest, AgentCancelRunResponse, AgentStartRunRequest,
-    AgentStartRunResponse, AppVersionResponse, CorePingRequest, CorePingResponse, JsonRpcId,
-    JsonRpcRequest, AGENT_CANCEL_RUN_METHOD, AGENT_START_RUN_METHOD, APP_GET_VERSION_METHOD,
+    error, success, AgentActionIdRequest, AgentCancelRunRequest, AgentCancelRunResponse,
+    AgentRejectActionRequest, AgentStartRunRequest, AgentStartRunResponse, AppVersionResponse,
+    CorePingRequest, CorePingResponse, JsonRpcId, JsonRpcRequest, AGENT_APPROVE_ACTION_METHOD,
+    AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD, AGENT_CLEAR_USAGE_RECORDS_METHOD,
+    AGENT_GET_USAGE_SUMMARY_METHOD, AGENT_LIST_PENDING_ACTIONS_METHOD, AGENT_REJECT_ACTION_METHOD,
+    AGENT_START_CONVERSATION_TURN_METHOD, AGENT_START_RUN_METHOD, APP_GET_VERSION_METHOD,
     CORE_PING_METHOD, STORAGE_DELETE_COMPOSER_DRAFT_METHOD, STORAGE_DELETE_CONVERSATION_METHOD,
     STORAGE_DELETE_PROJECT_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
     STORAGE_LOAD_APP_DATA_METHOD, STORAGE_LOAD_COMPOSER_DRAFTS_METHOD,
@@ -28,40 +36,70 @@ use mycopilot_protocol_rs::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let storage = StorageService::open(&database_path()).map_err(|error| {
+    let storage = Arc::new(StorageService::open(&database_path()).map_err(|error| {
         io::Error::new(
             io::ErrorKind::Other,
             format!("failed to initialize storage: {error}"),
         )
-    })?;
+    })?);
+    let agent_service = AgentService::new(storage.clone());
     let stdin = BufReader::new(io::stdin());
     let mut lines = stdin.lines();
     let mut stdout = io::stdout();
+    let (notification_tx, mut notification_rx) = mpsc::unbounded_channel::<Value>();
 
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                let Some(line) = line? else {
+                    break;
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
+                    Ok(request) => handle_request(
+                        &storage,
+                        &agent_service,
+                        notification_tx.clone(),
+                        request,
+                    ),
+                    Err(err) => serde_json::to_value(error(None, -32700, format!("Parse error: {err}")))
+                        .expect("JSON-RPC parse error response must serialize"),
+                };
+
+                write_json_line(&mut stdout, response).await?;
+            }
+            notification = notification_rx.recv() => {
+                let Some(notification) = notification else {
+                    break;
+                };
+                write_json_line(&mut stdout, notification).await?;
+            }
         }
-
-        let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
-            Ok(request) => handle_request(&storage, request),
-            Err(err) => serde_json::to_value(error(None, -32700, format!("Parse error: {err}")))
-                .expect("JSON-RPC parse error response must serialize"),
-        };
-
-        stdout.write_all(response.to_string().as_bytes()).await?;
-        stdout.write_all(b"\n").await?;
-        stdout.flush().await?;
     }
 
     Ok(())
 }
 
-fn handle_request(storage: &StorageService, request: JsonRpcRequest) -> Value {
+async fn write_json_line(stdout: &mut io::Stdout, message: Value) -> io::Result<()> {
+    stdout.write_all(message.to_string().as_bytes()).await?;
+    stdout.write_all(b"\n").await?;
+    stdout.flush().await
+}
+
+fn handle_request(
+    storage: &StorageService,
+    agent_service: &AgentService,
+    notification_tx: agent::CoreServerNotificationSender,
+    request: JsonRpcRequest,
+) -> Value {
     if request.jsonrpc != "2.0" {
         return response_error(Some(request.id), -32600, "Invalid JSON-RPC version");
     }
@@ -76,7 +114,33 @@ fn handle_request(storage: &StorageService, request: JsonRpcRequest) -> Value {
             },
         ),
         AGENT_START_RUN_METHOD => handle_agent_start_run(request.id, request.params),
-        AGENT_CANCEL_RUN_METHOD => handle_agent_cancel_run(request.id, request.params),
+        AGENT_START_CONVERSATION_TURN_METHOD => handle_agent_start_conversation_turn(
+            agent_service,
+            notification_tx,
+            request.id,
+            request.params,
+        ),
+        AGENT_CANCEL_RUN_METHOD => {
+            handle_agent_cancel_run(agent_service, request.id, request.params)
+        }
+        AGENT_LIST_PENDING_ACTIONS_METHOD => {
+            response_success(request.id, agent_service.list_pending_actions())
+        }
+        AGENT_APPROVE_ACTION_METHOD => {
+            handle_agent_approve_action(agent_service, notification_tx, request.id, request.params)
+        }
+        AGENT_REJECT_ACTION_METHOD => {
+            handle_agent_reject_action(agent_service, notification_tx, request.id, request.params)
+        }
+        AGENT_CANCEL_ACTION_METHOD => {
+            handle_agent_cancel_action(agent_service, request.id, request.params)
+        }
+        AGENT_GET_USAGE_SUMMARY_METHOD => {
+            handle_agent_usage_summary(agent_service, request.id, request.params)
+        }
+        AGENT_CLEAR_USAGE_RECORDS_METHOD => {
+            handle_agent_clear_usage_records(agent_service, request.id, request.params)
+        }
         STORAGE_LOAD_APP_DATA_METHOD => storage_response(request.id, storage.load_app_data()),
         STORAGE_LOAD_MODEL_SETTINGS_METHOD => {
             storage_response(request.id, storage.load_model_settings())
@@ -246,19 +310,123 @@ fn handle_agent_start_run(id: JsonRpcId, params: Option<Value>) -> Value {
     )
 }
 
-fn handle_agent_cancel_run(id: JsonRpcId, params: Option<Value>) -> Value {
+fn handle_agent_start_conversation_turn(
+    agent_service: &AgentService,
+    notification_tx: agent::CoreServerNotificationSender,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentConversationTurnInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+
+    match agent_service.start_conversation_turn(input, notification_tx) {
+        Ok(output) => response_success(id, output),
+        Err(message) => response_error(Some(id), -32000, message),
+    }
+}
+
+fn handle_agent_cancel_run(
+    agent_service: &AgentService,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
     let input = match parse_params::<AgentCancelRunRequest>(params) {
         Ok(input) => input,
         Err(message) => return response_error(Some(id), -32602, message),
     };
 
+    let cancelled = agent_service.cancel_run(&input.run_id);
     response_success(
         id,
         AgentCancelRunResponse {
             run_id: input.run_id,
-            cancelled: false,
+            cancelled,
         },
     )
+}
+
+fn handle_agent_approve_action(
+    agent_service: &AgentService,
+    notification_tx: agent::CoreServerNotificationSender,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentActionIdRequest>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+
+    match agent_service.approve_action(&input.action_id, notification_tx) {
+        Ok(output) => response_success(id, output),
+        Err(message) => response_error(Some(id), -32000, message),
+    }
+}
+
+fn handle_agent_reject_action(
+    agent_service: &AgentService,
+    notification_tx: agent::CoreServerNotificationSender,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentRejectActionRequest>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+
+    match agent_service.reject_action(&input.action_id, input.message, notification_tx) {
+        Ok(output) => response_success(id, output),
+        Err(message) => response_error(Some(id), -32000, message),
+    }
+}
+
+fn handle_agent_cancel_action(
+    agent_service: &AgentService,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentActionIdRequest>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+
+    match agent_service.cancel_action(&input.action_id) {
+        Ok(cancelled) => response_success(id, cancelled),
+        Err(message) => response_error(Some(id), -32000, message),
+    }
+}
+
+fn handle_agent_usage_summary(
+    agent_service: &AgentService,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentUsageSummaryInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+
+    match agent_service.get_usage_summary(&input) {
+        Ok(summary) => response_success(id, summary),
+        Err(message) => response_error(Some(id), -32000, message),
+    }
+}
+
+fn handle_agent_clear_usage_records(
+    agent_service: &AgentService,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentUsageClearInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+
+    match agent_service.clear_usage_records(&input) {
+        Ok(output) => response_success(id, output),
+        Err(message) => response_error(Some(id), -32000, message),
+    }
 }
 
 fn parse_params<T>(params: Option<Value>) -> Result<T, String>

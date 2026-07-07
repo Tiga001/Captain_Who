@@ -42,11 +42,16 @@ type SidebarSectionSubmenu = "organize" | "sort";
 type BulkArchiveScope = "projects" | "root";
 type ProjectDragPosition = "before" | "after";
 type ConversationListStage = "collapsed" | "preview" | "expanded";
+type SidebarMenuPosition = { left: number; top: number };
 
 const COLLAPSED_CONVERSATION_COUNT = 5;
 const PREVIEW_CONVERSATION_COUNT = 10;
 const PREVIEW_CONVERSATION_THRESHOLD = 12;
 const ROOT_CONVERSATION_LIST_KEY = "root";
+const SIDEBAR_MENU_MARGIN = 12;
+const SIDEBAR_MENU_WIDTH = 224;
+const SIDEBAR_SECTION_MENU_ESTIMATED_HEIGHT = 172;
+const SIDEBAR_PROJECT_MENU_ESTIMATED_HEIGHT = 224;
 
 interface ProjectDragTarget {
   projectId: string;
@@ -136,6 +141,23 @@ function sortConversations(conversations: ChatConversation[], sort: SidebarConve
     if (sort === "created") return b.createdAt - a.createdAt;
     return b.updatedAt - a.updatedAt;
   });
+}
+
+function clampMenuPosition(
+  left: number,
+  top: number,
+  estimatedHeight: number,
+): SidebarMenuPosition {
+  return {
+    left: Math.max(
+      SIDEBAR_MENU_MARGIN,
+      Math.min(left, window.innerWidth - SIDEBAR_MENU_WIDTH - SIDEBAR_MENU_MARGIN),
+    ),
+    top: Math.max(
+      SIDEBAR_MENU_MARGIN,
+      Math.min(top, window.innerHeight - estimatedHeight - SIDEBAR_MENU_MARGIN),
+    ),
+  };
 }
 
 function sortPinnedProjects(projects: AppProject[]) {
@@ -417,7 +439,9 @@ export function LeftSidebar({
   const [areConversationsOpen, setAreConversationsOpen] = useState(true);
   const [openProjectIds, setOpenProjectIds] = useState<Set<string>>(new Set());
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
+  const [projectMenuPosition, setProjectMenuPosition] = useState<SidebarMenuPosition | null>(null);
   const [openSectionMenu, setOpenSectionMenu] = useState<SidebarSectionScope | null>(null);
+  const [sectionMenuPosition, setSectionMenuPosition] = useState<SidebarMenuPosition | null>(null);
   const [openSectionSubmenu, setOpenSectionSubmenu] = useState<SidebarSectionSubmenu | null>(null);
   const [renamingProject, setRenamingProject] = useState<AppProject | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -488,11 +512,13 @@ export function LeftSidebar({
 
   const closeProjectMenu = () => {
     setOpenProjectMenuId(null);
+    setProjectMenuPosition(null);
   };
 
   useDismissOnOutsidePointer(projectMenuRef, Boolean(openProjectMenuId), closeProjectMenu);
   useDismissOnOutsidePointer(sectionMenuRef, Boolean(openSectionMenu), () => {
     setOpenSectionMenu(null);
+    setSectionMenuPosition(null);
     setOpenSectionSubmenu(null);
   });
   useDismissOnOutsidePointer(accountMenuRef, isAccountMenuOpen, () => setAccountMenuOpen(false));
@@ -588,13 +614,65 @@ export function LeftSidebar({
 
   const closeSectionMenu = () => {
     setOpenSectionMenu(null);
+    setSectionMenuPosition(null);
     setOpenSectionSubmenu(null);
   };
 
-  const openSectionActions = (scope: SidebarSectionScope) => {
-    setOpenSectionMenu((currentScope) => (currentScope === scope ? null : scope));
+  const openSectionActions = (scope: SidebarSectionScope, anchorElement: HTMLElement) => {
+    if (openSectionMenu === scope) {
+      closeSectionMenu();
+      return;
+    }
+
+    const sectionElement = anchorElement.closest(".left-sidebar__section");
+    const sectionRect =
+      sectionElement instanceof HTMLElement
+        ? sectionElement.getBoundingClientRect()
+        : anchorElement.getBoundingClientRect();
+
+    setOpenSectionMenu(scope);
+    setSectionMenuPosition(
+      clampMenuPosition(
+        sectionRect.left,
+        sectionRect.top + 34,
+        SIDEBAR_SECTION_MENU_ESTIMATED_HEIGHT,
+      ),
+    );
     setOpenSectionSubmenu(null);
     closeProjectMenu();
+  };
+
+  const openProjectActions = (
+    projectId: string,
+    anchorElement: HTMLElement,
+    pointerPosition?: SidebarMenuPosition,
+  ) => {
+    closeSectionMenu();
+
+    if (!pointerPosition && openProjectMenuId === projectId) {
+      closeProjectMenu();
+      return;
+    }
+
+    const rowElement = anchorElement.closest(".left-sidebar__project-row");
+    const rowRect =
+      rowElement instanceof HTMLElement
+        ? rowElement.getBoundingClientRect()
+        : anchorElement.getBoundingClientRect();
+    const nextPosition = pointerPosition
+      ? clampMenuPosition(
+          pointerPosition.left,
+          pointerPosition.top,
+          SIDEBAR_PROJECT_MENU_ESTIMATED_HEIGHT,
+        )
+      : clampMenuPosition(
+          rowRect.left + 42,
+          rowRect.bottom + 1,
+          SIDEBAR_PROJECT_MENU_ESTIMATED_HEIGHT,
+        );
+
+    setProjectMenuPosition(nextPosition);
+    setOpenProjectMenuId(projectId);
   };
 
   const setConversationSort = (sort: SidebarConversationSort) => {
@@ -887,7 +965,12 @@ export function LeftSidebar({
     const MoveIcon = moveDown ? ArrowDown : ArrowUp;
 
     return (
-      <div className="left-sidebar__section-menu" role="menu" ref={sectionMenuRef}>
+      <div
+        className="left-sidebar__section-menu"
+        role="menu"
+        ref={sectionMenuRef}
+        style={sectionMenuPosition ?? undefined}
+      >
         <button
           className="left-sidebar__section-menu-item"
           type="button"
@@ -1041,8 +1124,10 @@ export function LeftSidebar({
           }}
           onContextMenu={(event) => {
             event.preventDefault();
-            closeSectionMenu();
-            setOpenProjectMenuId(project.id);
+            openProjectActions(project.id, event.currentTarget, {
+              left: event.clientX,
+              top: event.clientY,
+            });
           }}
         >
           <button
@@ -1087,15 +1172,7 @@ export function LeftSidebar({
               type="button"
               aria-label={t("project.moreActions")}
               data-menu-open={openProjectMenuId === project.id || undefined}
-              onClick={() => {
-                closeSectionMenu();
-                if (openProjectMenuId === project.id) {
-                  closeProjectMenu();
-                  return;
-                }
-
-                setOpenProjectMenuId(project.id);
-              }}
+              onClick={(event) => openProjectActions(project.id, event.currentTarget)}
             >
               <MoreHorizontal aria-hidden="true" />
             </button>
@@ -1110,8 +1187,13 @@ export function LeftSidebar({
           </div>
         </div>
 
-        {openProjectMenuId === project.id && (
-          <div className="left-sidebar__project-menu" role="menu" ref={projectMenuRef}>
+        {openProjectMenuId === project.id && projectMenuPosition && (
+          <div
+            className="left-sidebar__project-menu"
+            role="menu"
+            ref={projectMenuRef}
+            style={projectMenuPosition}
+          >
             <button
               className="left-sidebar__project-menu-item"
               type="button"
@@ -1208,14 +1290,14 @@ export function LeftSidebar({
             type="button"
             aria-label={t("project.moreActions")}
             data-open={openSectionMenu === "projects" || undefined}
-            onClick={() => openSectionActions("projects")}
+            onClick={(event) => openSectionActions("projects", event.currentTarget)}
           >
             <MoreHorizontal aria-hidden="true" />
           </button>
         </div>
       </div>
 
-      {openSectionMenu === "projects" && renderSectionMenu("projects")}
+      {openSectionMenu === "projects" && sectionMenuPosition && renderSectionMenu("projects")}
 
       {areProjectsOpen && displayRegularProjects.length > 0 && (
         <div className="left-sidebar__project-list">
@@ -1250,7 +1332,7 @@ export function LeftSidebar({
             type="button"
             aria-label={t("sidebar.moreConversationActions")}
             data-open={openSectionMenu === "conversations" || undefined}
-            onClick={() => openSectionActions("conversations")}
+            onClick={(event) => openSectionActions("conversations", event.currentTarget)}
           >
             <MoreHorizontal aria-hidden="true" />
           </button>
@@ -1265,7 +1347,7 @@ export function LeftSidebar({
         </div>
       </div>
 
-      {openSectionMenu === "conversations" && renderSectionMenu("conversations")}
+      {openSectionMenu === "conversations" && sectionMenuPosition && renderSectionMenu("conversations")}
 
       {areConversationsOpen &&
         (rootConversations.length === 0 ? (
