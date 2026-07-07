@@ -1,5 +1,6 @@
 // Rust core server.
 mod agent;
+mod agent_support;
 
 use std::path::PathBuf;
 use std::sync::Arc;

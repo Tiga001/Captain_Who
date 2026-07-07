@@ -1,0 +1,272 @@
+/* Base layout, account, and shared controls for the left sidebar. */
+.left-sidebar {
+  --left-sidebar-footer-height: 64px;
+  --left-sidebar-header-height: calc(
+    var(--titlebar-height) + var(--mc-layout-sidebar-action-height) + 24px
+  );
+  --left-sidebar-popover-z-index: 1100;
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  color: var(--mc-color-sidebar-text-secondary);
+  font-family: var(--mc-font-family);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.left-sidebar__header {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: var(--left-sidebar-header-height);
+  padding: calc(var(--titlebar-height) + 12px) 18px 24px;
+}
+
+.left-sidebar__scroll {
+  position: absolute;
+  top: var(--left-sidebar-header-height);
+  right: 0;
+  bottom: var(--left-sidebar-footer-height);
+  left: 0;
+  padding: 0 18px 24px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--mc-color-border-default) transparent;
+  scrollbar-width: thin;
+}
+
+.left-sidebar__footer {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: var(--left-sidebar-footer-height);
+  padding: 0;
+  border-top: 1px solid var(--mc-color-border-hairline);
+  transition: background-color 120ms ease;
+}
+
+.left-sidebar__footer:hover,
+.left-sidebar__footer:focus-within,
+.left-sidebar__footer[data-menu-open='true'] {
+  background: var(--mc-color-state-hover);
+}
+
+.left-sidebar * {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.left-sidebar input,
+.left-sidebar textarea {
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
+
+.left-sidebar button {
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.left-sidebar__primary-action,
+.left-sidebar__settings,
+.left-sidebar__conversation-title-button,
+.left-sidebar__section-title-button {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  min-width: 0;
+  height: var(--mc-layout-sidebar-action-height);
+  width: calc(100% + 12px);
+  padding: 0 8px;
+  margin-left: -6px;
+  gap: 12px;
+  border-radius: var(--mc-radius-row);
+  font-size: var(--mc-font-size-sidebar-action);
+  font-weight: var(--mc-font-weight-strong);
+  line-height: var(--mc-line-height-sidebar);
+  white-space: nowrap;
+  transition: background-color 120ms ease;
+}
+
+.left-sidebar__primary-action:hover,
+.left-sidebar__settings:hover,
+.left-sidebar__conversation-header:hover,
+.left-sidebar__conversation-header:focus-within,
+.left-sidebar__section-header:hover,
+.left-sidebar__section-header:focus-within {
+  background: var(--mc-color-state-hover);
+}
+
+.left-sidebar__account-button {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  padding: 0 24px;
+  margin: 0;
+  gap: 12px;
+  color: var(--mc-color-sidebar-text-secondary);
+  text-align: left;
+  border-radius: 0;
+}
+
+.left-sidebar__account-avatar {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  overflow: hidden;
+  color: var(--mc-color-text-inverse);
+  background: var(--mc-color-avatar-background);
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: var(--mc-font-weight-control);
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
+.left-sidebar__account-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.left-sidebar__account-avatar--small {
+  width: 30px;
+  height: 30px;
+  font-size: 11px;
+}
+
+.left-sidebar__account-text,
+.left-sidebar__account-menu-profile-text {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.left-sidebar__account-text span,
+.left-sidebar__account-menu-profile-text span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.left-sidebar__account-text span:first-child,
+.left-sidebar__account-menu-profile-text span:first-child {
+  color: var(--mc-color-sidebar-text-active);
+  font-size: 13px;
+  font-weight: var(--mc-font-weight-control);
+  line-height: 17px;
+}
+
+.left-sidebar__account-text span:last-child,
+.left-sidebar__account-menu-profile-text span:last-child {
+  color: var(--mc-color-text-muted);
+  font-size: 12px;
+  font-weight: var(--mc-font-weight-control);
+  line-height: 16px;
+}
+
+.left-sidebar__account-menu {
+  position: absolute;
+  z-index: var(--left-sidebar-popover-z-index);
+  right: 12px;
+  bottom: calc(100% - 6px);
+  left: 12px;
+  display: grid;
+  padding: 10px;
+  gap: 4px;
+  color: var(--mc-color-sidebar-text-secondary);
+  background: var(--mc-color-surface-glass-strong);
+  border: 1px solid var(--mc-color-border-hairline);
+  border-radius: var(--mc-radius-card);
+  box-shadow: var(--mc-shadow-sidebar-menu);
+  backdrop-filter: var(--mc-effect-blur-popover);
+  -webkit-backdrop-filter: var(--mc-effect-blur-popover);
+}
+
+.left-sidebar__account-menu-profile {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  min-width: 0;
+  min-height: 42px;
+  padding: 4px 6px;
+  gap: 10px;
+}
+
+.left-sidebar__account-menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--mc-color-border-hairline);
+}
+
+.left-sidebar__account-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 8px;
+  gap: 10px;
+  color: var(--mc-color-sidebar-text-secondary);
+  text-align: left;
+  border-radius: var(--mc-radius-row);
+  font-size: var(--mc-font-size-sidebar-action);
+  font-weight: var(--mc-font-weight-control);
+  line-height: var(--mc-line-height-sidebar);
+}
+
+.left-sidebar__account-menu-item:hover {
+  background: var(--mc-color-state-hover);
+}
+
+.left-sidebar__primary-action:focus-visible,
+.left-sidebar__settings:focus-visible,
+.left-sidebar__account-button:focus-visible,
+.left-sidebar__account-menu-item:focus-visible,
+.left-sidebar__conversation-title-button:focus-visible,
+.left-sidebar__section-title-button:focus-visible,
+.left-sidebar__section-action:focus-visible,
+.left-sidebar__section-menu-item:focus-visible,
+.left-sidebar__project-main:focus-visible,
+.left-sidebar__project-action:focus-visible,
+.left-sidebar__project-menu-item:focus-visible,
+.left-sidebar__conversation-action:focus-visible,
+.left-sidebar__conversation-main:focus-visible,
+.left-sidebar__conversation-item-action:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 1px;
+}
+
+.left-sidebar__primary-action svg,
+.left-sidebar__settings svg,
+.left-sidebar__account-menu-item svg,
+.left-sidebar__conversation-title-button svg,
+.left-sidebar__section-title-button svg,
+.left-sidebar__section-action svg,
+.left-sidebar__project-main svg,
+.left-sidebar__project-action svg,
+.left-sidebar__conversation-action svg,
+.left-sidebar__project-menu-item svg {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  color: var(--mc-color-icon-subtle);
+  stroke-width: var(--mc-icon-stroke-regular);
+}

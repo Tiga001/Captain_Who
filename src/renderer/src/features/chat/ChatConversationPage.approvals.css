@@ -1,0 +1,268 @@
+/* Agent approval cards, approval dialog, composer placement, and responsive rules. */
+.agent-approval-card {
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  width: min(100%, 720px);
+  min-height: 30px;
+  align-items: start;
+  gap: 10px;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-chat-activity);
+  font-weight: var(--mc-font-weight-strong);
+}
+
+.agent-approval-card > svg {
+  width: var(--mc-icon-size-base);
+  height: var(--mc-icon-size-base);
+  margin-top: 0.18em;
+  color: currentColor;
+  stroke-width: var(--mc-icon-stroke-medium);
+}
+
+.agent-approval-card strong {
+  display: block;
+  overflow: hidden;
+  color: var(--mc-color-text-muted);
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: var(--mc-line-height-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-approval-card p {
+  display: -webkit-box;
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-chat-activity-detail);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-relaxed);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.agent-approval-dialog {
+  display: grid;
+  width: 100%;
+  min-height: 194px;
+  padding: 18px 12px 9px 16px;
+  gap: 8px;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-elevated);
+  border: 0.5px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-composer);
+  box-shadow: var(--mc-shadow-composer);
+  -webkit-app-region: no-drag;
+}
+
+.agent-approval-dialog__request {
+  margin: 0;
+  padding: 0 10px 0 12px;
+  overflow: hidden;
+  color: var(--mc-color-text-primary);
+  font-size: var(--mc-font-size-base);
+  font-weight: var(--mc-font-weight-heavy);
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-approval-dialog__command {
+  display: block;
+  min-width: 0;
+  padding: 10px 12px;
+  overflow: hidden;
+  color: var(--mc-color-text-muted);
+  background: var(--mc-color-surface-muted);
+  border: 0;
+  border-radius: var(--mc-radius-lg);
+  font-family: var(--mc-mono-font-family);
+  font-size: var(--mc-font-size-sm);
+  line-height: var(--mc-line-height-relaxed);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-approval-dialog__choice,
+.agent-approval-dialog__reject-row,
+.agent-approval-dialog__reject {
+  min-width: 0;
+  color: var(--mc-color-text-secondary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-lg);
+  font: inherit;
+  font-size: var(--mc-font-size-sm);
+  font-weight: var(--mc-font-weight-heavy);
+  cursor: pointer;
+}
+
+.agent-approval-dialog__choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: 38px;
+  align-items: center;
+  padding: 0 12px;
+  gap: 11px;
+  text-align: left;
+}
+
+.agent-approval-dialog__choice[data-choice='remember'] {
+  color: var(--mc-color-text-muted);
+}
+
+.agent-approval-dialog__choice:hover,
+.agent-approval-dialog__choice:focus-visible,
+.agent-approval-dialog__reject-row:hover,
+.agent-approval-dialog__reject-row:focus-within {
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-state-hover);
+}
+
+.agent-approval-dialog__index {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  color: var(--mc-color-text-muted);
+  background: transparent;
+  border: 1px solid var(--mc-color-border-default);
+  border-radius: 999px;
+  font-size: var(--mc-font-size-sm);
+  font-weight: var(--mc-font-weight-heavy);
+  line-height: 1;
+}
+
+.agent-approval-dialog__choice:hover .agent-approval-dialog__index,
+.agent-approval-dialog__choice:focus-visible .agent-approval-dialog__index {
+  color: var(--mc-color-text-inverse);
+  background: var(--mc-color-text-primary);
+  border-color: var(--mc-color-text-primary);
+}
+
+.agent-approval-dialog__choice-text {
+  display: inline-flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.agent-approval-dialog__choice-text small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-sm);
+  font-weight: var(--mc-font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-approval-dialog__reject-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 38px;
+  align-items: center;
+  padding: 0 0 0 12px;
+  gap: 9px;
+  color: var(--mc-color-text-muted);
+  border-radius: var(--mc-radius-lg);
+  cursor: text;
+}
+
+.agent-approval-dialog__reject-row input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0;
+  color: var(--mc-color-text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  font: inherit;
+  font-size: var(--mc-font-size-sm);
+  font-weight: var(--mc-font-weight-medium);
+}
+
+.agent-approval-dialog__reject-row input::placeholder {
+  color: var(--mc-color-text-muted);
+}
+
+.agent-approval-dialog__reject-row input:focus {
+  box-shadow: none;
+}
+
+.agent-approval-dialog__reject-icon {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  color: var(--mc-color-icon-muted);
+  border: 1px solid var(--mc-color-border-default);
+  border-radius: 999px;
+}
+
+.agent-approval-dialog__reject-row:hover .agent-approval-dialog__reject-icon,
+.agent-approval-dialog__reject-row:focus-within .agent-approval-dialog__reject-icon {
+  color: var(--mc-color-text-inverse);
+  background: var(--mc-color-text-primary);
+  border-color: var(--mc-color-text-primary);
+}
+
+.agent-approval-dialog__reject-icon svg {
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+  stroke-width: var(--mc-icon-stroke-medium);
+}
+
+.agent-approval-dialog__reject {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  padding: 0 10px 0 14px;
+  gap: 7px;
+  color: var(--mc-color-text-inverse);
+  background: var(--mc-color-text-primary);
+  border-radius: var(--mc-radius-pill);
+}
+
+.agent-approval-dialog__reject svg {
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+  stroke-width: var(--mc-icon-stroke-medium);
+}
+
+.agent-approval-dialog__choice:disabled,
+.agent-approval-dialog__reject:disabled,
+.agent-approval-dialog__reject-row input:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.agent-approval-dialog__choice:focus-visible,
+.agent-approval-dialog__reject:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.chat-conversation-page__composer {
+  width: min(100%, 760px);
+  padding: 14px 28px 28px;
+  margin: 0 auto;
+}
+
+@media (max-width: 760px) {
+  .chat-conversation-page__messages {
+    padding-right: 24px;
+    padding-left: 24px;
+  }
+
+  .chat-message--user {
+    max-width: 100%;
+  }
+
+  .chat-message--user .chat-message__body {
+    max-width: min(82%, 620px);
+  }
+}

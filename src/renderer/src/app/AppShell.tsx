@@ -1,6 +1,5 @@
 // Renderer UI.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
 import type { AgentEvent, AgentProposedAction } from '@mycopilot/protocol'
 import { ResizeHandle } from '../components/layout/ResizeHandle'
 import { LeftSidebar } from '../components/sidebar/LeftSidebar'
@@ -9,7 +8,6 @@ import { useProjectSettings } from '../config/ProjectSettingsProvider'
 import { useFrontendConfig } from '../config/FrontendConfigProvider'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
 import { NewConversationPage } from '../features/chat/NewConversationPage'
-import { SettingsPage } from '../features/settings/SettingsPage'
 import type { SettingsPageId } from '../features/settings/SettingsPage'
 import type {
   ChatComposerDraft,
@@ -31,7 +29,6 @@ import {
 import { resolveChatPermissions } from '../features/chat/chatPermissions'
 import {
   defaultUiPreferences,
-  deleteStoredConversation,
   loadComposerDrafts,
   loadConversations,
   loadUiPreferences,
@@ -61,37 +58,19 @@ import {
   createUserMessage,
   mergeConversationMessageFromBackend
 } from './chatMessageFactory'
-import { isMacOS } from '../lib/platform'
 import { useShellLayout } from './useShellLayout'
-
-type AppView = 'workspace' | 'settings'
-const SUPPORTS_NATIVE_FONT_SMOOTHING = isMacOS()
-const DEFAULT_AGENT_MAX_TOKENS = 30000
-const STREAM_DELTA_FLUSH_MS = 80
-const STREAM_DELTA_MAX_BUFFER_CHARS = 360
-
-type PendingMessageSave = {
-  conversationId: string
-  message: ChatMessage
-}
-
-type PendingMessageDelta = {
-  conversationId: string
-  delta: string
-  messageId: string
-  timerId: number
-}
-
-function SidebarToggleIcon({ open, side }: { open: boolean; side: 'left' | 'right' }) {
-  return (
-    <span
-      aria-hidden="true"
-      className="panel-toggle__icon"
-      data-open={open ? 'true' : 'false'}
-      data-side={side}
-    />
-  )
-}
+import { AppShellSettingsView } from './AppShellSettingsView'
+import {
+  DEFAULT_AGENT_MAX_TOKENS,
+  getAppShellPanelStyle,
+  getPermissionModeAvailability,
+  MainPanelToolbar,
+  MaximizedSidebarControls,
+  STREAM_DELTA_FLUSH_MS,
+  STREAM_DELTA_MAX_BUFFER_CHARS,
+  SUPPORTS_NATIVE_FONT_SMOOTHING
+} from './AppShellSupport'
+import type { PendingMessageDelta, PendingMessageSave } from './AppShellSupport'
 
 export function AppShell() {
   const { t } = useFrontendConfig()
@@ -109,7 +88,7 @@ export function AppShell() {
     toggleRightSidebar,
     toggleRightSidebarMaximized
   } = useShellLayout()
-  const [view, setView] = useState<AppView>('workspace')
+  const [view, setView] = useState<'workspace' | 'settings'>('workspace')
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPageId>('general')
   const [uiPreferences, setUiPreferences] = useState<UiPreferencesSnapshot>(() =>
     defaultUiPreferences()
@@ -137,10 +116,7 @@ export function AppShell() {
   const activeDraft =
     drafts[activeDraftId] ??
     createComposerDraft({ projectId: activeConversation?.projectId ?? null })
-  const permissionModeAvailability = {
-    custom: uiPreferences.customPermissionEnabled,
-    full: uiPreferences.fullPermissionEnabled
-  }
+  const permissionModeAvailability = getPermissionModeAvailability(uiPreferences)
   const hasUnreadConversations = conversations.some(
     (conversation) => !conversation.archivedAt && Boolean(conversation.unreadAt)
   )
@@ -850,30 +826,15 @@ export function AppShell() {
 
   if (view === 'settings') {
     return (
-      <SettingsPage
+      <AppShellSettingsView
         conversations={conversations}
         initialPage={settingsInitialPage}
+        onBack={() => setView('workspace')}
+        onConversationPatch={patchConversation}
+        onConversationsChange={setConversations}
+        onUiPreferencesChange={updateUiPreferences}
         projects={projects}
         uiPreferences={uiPreferences}
-        onBack={() => setView('workspace')}
-        onDeleteAllArchivedConversations={() =>
-          setConversations((currentConversations) => {
-            currentConversations
-              .filter((conversation) => conversation.archivedAt)
-              .forEach((conversation) => void deleteStoredConversation(conversation.id))
-            return currentConversations.filter((conversation) => !conversation.archivedAt)
-          })
-        }
-        onDeleteConversation={(conversationId) => {
-          setConversations((currentConversations) =>
-            currentConversations.filter((conversation) => conversation.id !== conversationId)
-          )
-          void deleteStoredConversation(conversationId)
-        }}
-        onUnarchiveConversation={(conversationId) =>
-          patchConversation(conversationId, { archivedAt: null })
-        }
-        onUiPreferencesChange={updateUiPreferences}
       />
     )
   }
@@ -889,12 +850,7 @@ export function AppShell() {
       data-right-maximized={rightMaximized ? 'true' : undefined}
       data-right-open={rightOpen ? 'true' : 'false'}
       data-translucent-sidebar={uiPreferences.translucentSidebar ? 'true' : undefined}
-      style={
-        {
-          '--left-panel-width': `${leftOpen ? leftWidth : 0}px`,
-          '--right-panel-width': `${rightOpen ? rightWidth : 0}px`
-        } as CSSProperties
-      }
+      style={getAppShellPanelStyle(leftOpen, leftWidth, rightOpen, rightWidth)}
     >
       <header className="window-toolbar" data-drag-region />
 
@@ -957,27 +913,14 @@ export function AppShell() {
       {leftOpen && <ResizeHandle side="left" onResize={(deltaX) => resizeSide('left', deltaX)} />}
 
       <main className="main-panel" aria-label={t('app.mainWorkspace')}>
-        <div className="main-panel__toolbar" data-drag-region>
-          <button
-            className="panel-toggle panel-toggle--left"
-            data-has-unread={!leftOpen && hasUnreadConversations ? 'true' : undefined}
-            type="button"
-            aria-label={leftOpen ? t('app.collapseLeftSidebar') : t('app.expandLeftSidebar')}
-            aria-pressed={leftOpen}
-            onClick={toggleLeftSidebar}
-          >
-            <SidebarToggleIcon open={leftOpen} side="left" />
-          </button>
-          <button
-            className="panel-toggle panel-toggle--right"
-            type="button"
-            aria-label={rightOpen ? t('app.collapseRightSidebar') : t('app.expandRightSidebar')}
-            aria-pressed={rightOpen}
-            onClick={toggleRightSidebar}
-          >
-            <SidebarToggleIcon open={rightOpen} side="right" />
-          </button>
-        </div>
+        <MainPanelToolbar
+          hasUnreadConversations={hasUnreadConversations}
+          leftOpen={leftOpen}
+          onToggleLeftSidebar={toggleLeftSidebar}
+          onToggleRightSidebar={toggleRightSidebar}
+          rightOpen={rightOpen}
+          t={t}
+        />
 
         <div className="main-panel__surface">
           {activeConversation ? (
@@ -1039,31 +982,14 @@ export function AppShell() {
           onToggleMaximized={toggleRightSidebarMaximized}
           maximizedToolbarControls={
             rightMaximized ? (
-              <>
-                <button
-                  className="right-sidebar__icon-button"
-                  data-has-unread={!leftOpen && hasUnreadConversations ? 'true' : undefined}
-                  type="button"
-                  aria-label={leftOpen ? t('app.collapseLeftSidebar') : t('app.expandLeftSidebar')}
-                  aria-pressed={leftOpen}
-                  onClick={toggleLeftSidebar}
-                  title={leftOpen ? t('app.collapseLeftSidebar') : t('app.expandLeftSidebar')}
-                >
-                  <SidebarToggleIcon open={leftOpen} side="left" />
-                </button>
-                <button
-                  className="right-sidebar__icon-button"
-                  type="button"
-                  aria-label={
-                    rightOpen ? t('app.collapseRightSidebar') : t('app.expandRightSidebar')
-                  }
-                  aria-pressed={rightOpen}
-                  onClick={toggleRightSidebar}
-                  title={rightOpen ? t('app.collapseRightSidebar') : t('app.expandRightSidebar')}
-                >
-                  <SidebarToggleIcon open={rightOpen} side="right" />
-                </button>
-              </>
+              <MaximizedSidebarControls
+                hasUnreadConversations={hasUnreadConversations}
+                leftOpen={leftOpen}
+                onToggleLeftSidebar={toggleLeftSidebar}
+                onToggleRightSidebar={toggleRightSidebar}
+                rightOpen={rightOpen}
+                t={t}
+              />
             ) : null
           }
         />
