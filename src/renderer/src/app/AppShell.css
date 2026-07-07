@@ -1,0 +1,70 @@
+/* Renderer UI. */
+.core-status {
+  position: absolute;
+  top: 8px;
+  left: 68px;
+  right: 68px;
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 0;
+  height: 36px;
+  color: var(--mc-color-text-secondary);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.core-status div {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 4px 8px;
+  background: var(--mc-color-surface-elevated);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-pill);
+}
+
+.core-status strong {
+  overflow: hidden;
+  max-width: 110px;
+  color: var(--mc-color-text-primary);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.core-status strong[data-state='ready'] {
+  color: var(--mc-color-success);
+}
+
+.core-status strong[data-state='error'] {
+  color: var(--mc-color-danger);
+}
+
+.core-status__label {
+  color: var(--mc-color-text-tertiary);
+}
+
+.core-status button {
+  height: 26px;
+  padding: 0 10px;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-state-hover);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-pill);
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+
+.core-status p {
+  overflow: hidden;
+  max-width: 220px;
+  margin: 0;
+  color: var(--mc-color-danger);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

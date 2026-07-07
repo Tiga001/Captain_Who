@@ -1,0 +1,26 @@
+/* Renderer UI. */
+.browser-panel {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  background: var(--app-panel-bg, #15171d);
+}
+
+.browser-panel__placeholder {
+  display: grid;
+  gap: 8px;
+  max-width: 280px;
+  text-align: center;
+  color: var(--app-muted-fg, #8c95a3);
+}
+
+.browser-panel__placeholder h2 {
+  color: var(--app-fg, #f3f1ea);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.browser-panel__placeholder code {
+  color: inherit;
+  font-size: 11px;
+}

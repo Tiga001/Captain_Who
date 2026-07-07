@@ -1,0 +1,13 @@
+# Protocol layer.
+[package]
+name = "mycopilot-protocol-rs"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "mycopilot_protocol_rs"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

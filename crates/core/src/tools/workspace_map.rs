@@ -1,0 +1,742 @@
+// Rust agent core.
+use super::{relative_display, walk_workspace_with_cancellation, AgentTool, ToolExecutionContext};
+use crate::cancellation::AgentCancellationToken;
+use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+const DEFAULT_MAX_DEPTH: usize = 4;
+const MAX_MAP_DEPTH: usize = 8;
+const DEFAULT_MAX_ENTRIES: usize = 200;
+const MAX_MAP_ENTRIES: usize = 1_000;
+const MAX_LANGUAGE_STATS: usize = 20;
+const MAX_IMPORTANT_FILES: usize = 80;
+const MAX_CANDIDATES: usize = 40;
+const MAX_TOP_DIRECTORIES: usize = 30;
+
+pub(super) struct WorkspaceMapTool;
+
+impl AgentTool for WorkspaceMapTool {
+    fn definition(&self) -> AgentToolDefinition {
+        AgentToolDefinition {
+            name: "workspace_map".to_string(),
+            description: "Summarize the selected workspace structure: bounded file tree, language statistics, important files, entrypoint candidates, tests, and documentation candidates without reading file contents.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "focusPath": {
+                        "type": "string",
+                        "description": "Optional workspace-relative directory to summarize. Defaults to the workspace root."
+                    },
+                    "maxDepth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_MAP_DEPTH,
+                        "description": "Maximum tree depth relative to focusPath. Defaults to 4."
+                    },
+                    "maxEntries": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_MAP_ENTRIES,
+                        "description": "Maximum number of tree entries to return. Defaults to 200."
+                    },
+                    "includeFiles": {
+                        "type": "boolean",
+                        "description": "Whether tree output should include files. Defaults to true. Summary statistics still count files."
+                    }
+                }
+            }),
+            safety: AgentToolSafety::ReadOnly,
+            requires_workspace: false,
+            requires_approval: false,
+        }
+    }
+
+    fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value> {
+        let args: WorkspaceMapArgs = serde_json::from_value(args)
+            .map_err(|error| AgentError::new(format!("workspace_map 参数无效：{error}")))?;
+        let max_depth = args
+            .max_depth
+            .unwrap_or(DEFAULT_MAX_DEPTH)
+            .clamp(1, MAX_MAP_DEPTH);
+        let max_entries = args
+            .max_entries
+            .unwrap_or(DEFAULT_MAX_ENTRIES)
+            .clamp(1, MAX_MAP_ENTRIES);
+        let include_files = args.include_files.unwrap_or(true);
+
+        let workspace_root = context.workspace_root_optional()?;
+        let focus_root = resolve_focus_root(
+            context,
+            workspace_root.as_deref(),
+            args.focus_path.as_deref(),
+        )?;
+        let cancellation_token = context.cancellation_token();
+        let focus_path =
+            context.display_path(args.focus_path.as_deref().unwrap_or("."), &focus_root)?;
+        let focus_path = if focus_path.is_empty() {
+            ".".to_string()
+        } else {
+            focus_path
+        };
+        let display_root = workspace_root
+            .as_deref()
+            .filter(|workspace_root| focus_root.starts_with(workspace_root))
+            .unwrap_or(focus_root.as_path());
+
+        let walk = walk_workspace_with_cancellation(&focus_root, &cancellation_token)?;
+        let summary = build_summary(
+            display_root,
+            &focus_root,
+            &walk.entries,
+            &cancellation_token,
+        )?;
+        let tree = build_tree(
+            display_root,
+            &focus_root,
+            &walk.entries,
+            max_depth,
+            max_entries,
+            include_files,
+            &cancellation_token,
+        )?;
+
+        Ok(json!({
+            "workspace": {
+                "focusPath": focus_path,
+                "maxDepth": max_depth,
+                "maxEntries": max_entries,
+                "includeFiles": include_files
+            },
+            "summary": summary,
+            "tree": tree.entries,
+            "treeText": tree.text,
+            "truncated": {
+                "walk": walk.truncated,
+                "tree": tree.truncated
+            }
+        }))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceMapArgs {
+    focus_path: Option<String>,
+    max_depth: Option<usize>,
+    max_entries: Option<usize>,
+    include_files: Option<bool>,
+}
+
+struct TreeOutput {
+    entries: Vec<Value>,
+    text: String,
+    truncated: bool,
+}
+
+#[derive(Default)]
+struct LanguageStat {
+    files: usize,
+    bytes: u64,
+    extensions: BTreeSet<String>,
+}
+
+#[derive(Default)]
+struct DirectoryStat {
+    files: usize,
+    directories: usize,
+    bytes: u64,
+}
+
+#[derive(Clone)]
+struct FileCandidate {
+    path: String,
+    size_bytes: u64,
+    kind: Option<&'static str>,
+    reason: Option<&'static str>,
+}
+
+fn resolve_focus_root(
+    context: &ToolExecutionContext,
+    workspace_root: Option<&Path>,
+    focus_path: Option<&str>,
+) -> AgentResult<PathBuf> {
+    let Some(focus_path) = focus_path.map(str::trim).filter(|path| !path.is_empty()) else {
+        return workspace_root.map(Path::to_path_buf).ok_or_else(|| {
+            AgentError::new(
+                "当前没有 workspace；请使用 focusPath 指定绝对目录或 @desktop、@documents、@downloads、@home。",
+            )
+        });
+    };
+
+    let focus_root = context.resolve_existing_path(focus_path)?;
+    if !focus_root.is_dir() {
+        return Err(AgentError::new(
+            "workspace_map.focusPath 必须是可访问的目录。",
+        ));
+    }
+
+    Ok(focus_root)
+}
+
+fn build_summary(
+    workspace_root: &Path,
+    focus_root: &Path,
+    entries: &[super::WalkEntry],
+    cancellation_token: &AgentCancellationToken,
+) -> AgentResult<Value> {
+    let mut file_count = 0usize;
+    let mut directory_count = 0usize;
+    let mut total_file_bytes = 0u64;
+    let mut language_stats = BTreeMap::<String, LanguageStat>::new();
+    let mut directory_stats = BTreeMap::<String, DirectoryStat>::new();
+    let mut important_files = Vec::<FileCandidate>::new();
+    let mut entrypoint_candidates = Vec::<FileCandidate>::new();
+    let mut test_candidates = Vec::<FileCandidate>::new();
+    let mut documentation_files = Vec::<FileCandidate>::new();
+
+    for entry in entries {
+        cancellation_token.check()?;
+        if entry.is_dir {
+            directory_count += 1;
+            bump_top_directory(
+                workspace_root,
+                focus_root,
+                &entry.path,
+                entry.is_dir,
+                entry.size_bytes,
+                &mut directory_stats,
+            );
+            continue;
+        }
+
+        file_count += 1;
+        total_file_bytes = total_file_bytes.saturating_add(entry.size_bytes);
+        bump_language_stat(&entry.path, entry.size_bytes, &mut language_stats);
+        bump_top_directory(
+            workspace_root,
+            focus_root,
+            &entry.path,
+            entry.is_dir,
+            entry.size_bytes,
+            &mut directory_stats,
+        );
+
+        let display_path = relative_display(workspace_root, &entry.path);
+        if let Some(kind) = important_file_kind(&display_path, &entry.path) {
+            important_files.push(FileCandidate {
+                path: display_path.clone(),
+                size_bytes: entry.size_bytes,
+                kind: Some(kind),
+                reason: None,
+            });
+        }
+        if let Some(reason) = entrypoint_reason(&display_path, &entry.path) {
+            entrypoint_candidates.push(FileCandidate {
+                path: display_path.clone(),
+                size_bytes: entry.size_bytes,
+                kind: None,
+                reason: Some(reason),
+            });
+        }
+        if let Some(reason) = test_reason(&display_path, &entry.path) {
+            test_candidates.push(FileCandidate {
+                path: display_path.clone(),
+                size_bytes: entry.size_bytes,
+                kind: None,
+                reason: Some(reason),
+            });
+        }
+        if let Some(reason) = documentation_reason(&display_path, &entry.path) {
+            documentation_files.push(FileCandidate {
+                path: display_path,
+                size_bytes: entry.size_bytes,
+                kind: None,
+                reason: Some(reason),
+            });
+        }
+    }
+
+    Ok(json!({
+        "fileCount": file_count,
+        "directoryCount": directory_count,
+        "totalFileBytes": total_file_bytes,
+        "languages": language_stats_json(language_stats),
+        "topDirectories": top_directories_json(directory_stats),
+        "importantFiles": candidates_json(important_files, MAX_IMPORTANT_FILES),
+        "entrypointCandidates": candidates_json(entrypoint_candidates, MAX_CANDIDATES),
+        "testCandidates": candidates_json(test_candidates, MAX_CANDIDATES),
+        "documentationFiles": candidates_json(documentation_files, MAX_CANDIDATES)
+    }))
+}
+
+fn build_tree(
+    workspace_root: &Path,
+    focus_root: &Path,
+    entries: &[super::WalkEntry],
+    max_depth: usize,
+    max_entries: usize,
+    include_files: bool,
+    cancellation_token: &AgentCancellationToken,
+) -> AgentResult<TreeOutput> {
+    let mut output_entries = Vec::new();
+    let mut lines = Vec::new();
+    let mut truncated = false;
+
+    for entry in entries {
+        cancellation_token.check()?;
+        if !include_files && !entry.is_dir {
+            continue;
+        }
+
+        let depth = depth_relative_to(focus_root, &entry.path);
+        if depth == 0 || depth > max_depth {
+            truncated = true;
+            continue;
+        }
+        if output_entries.len() >= max_entries {
+            truncated = true;
+            break;
+        }
+
+        let path = relative_display(workspace_root, &entry.path);
+        let kind = if entry.is_dir { "directory" } else { "file" };
+        let name = entry
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+
+        output_entries.push(json!({
+            "path": path,
+            "name": name,
+            "kind": kind,
+            "depth": depth,
+            "sizeBytes": if entry.is_dir { Value::Null } else { json!(entry.size_bytes) }
+        }));
+
+        let indent = "  ".repeat(depth.saturating_sub(1));
+        let suffix = if entry.is_dir { "/" } else { "" };
+        lines.push(format!("{indent}{name}{suffix}"));
+    }
+
+    Ok(TreeOutput {
+        entries: output_entries,
+        text: lines.join("\n"),
+        truncated,
+    })
+}
+
+fn bump_language_stat(
+    path: &Path,
+    size_bytes: u64,
+    language_stats: &mut BTreeMap<String, LanguageStat>,
+) {
+    let language = language_for_path(path);
+    let extension = extension_for_path(path);
+    let stat = language_stats.entry(language).or_default();
+    stat.files += 1;
+    stat.bytes = stat.bytes.saturating_add(size_bytes);
+    if let Some(extension) = extension {
+        stat.extensions.insert(extension);
+    }
+}
+
+fn bump_top_directory(
+    workspace_root: &Path,
+    focus_root: &Path,
+    path: &Path,
+    is_dir: bool,
+    size_bytes: u64,
+    directory_stats: &mut BTreeMap<String, DirectoryStat>,
+) {
+    let relative_to_focus = path.strip_prefix(focus_root).unwrap_or(path);
+    let Some(first_component) = relative_to_focus.components().next() else {
+        return;
+    };
+    let first_component = first_component.as_os_str().to_string_lossy();
+    if first_component.is_empty() {
+        return;
+    }
+
+    let directory_path = focus_root.join(first_component.as_ref());
+    let display_path = relative_display(workspace_root, &directory_path);
+    let stat = directory_stats.entry(display_path).or_default();
+    if is_dir {
+        stat.directories += 1;
+    } else {
+        stat.files += 1;
+        stat.bytes = stat.bytes.saturating_add(size_bytes);
+    }
+}
+
+fn language_stats_json(language_stats: BTreeMap<String, LanguageStat>) -> Vec<Value> {
+    let mut stats = language_stats.into_iter().collect::<Vec<_>>();
+    stats.sort_by_key(|(name, stat)| (Reverse(stat.files), Reverse(stat.bytes), name.clone()));
+
+    stats
+        .into_iter()
+        .take(MAX_LANGUAGE_STATS)
+        .map(|(language, stat)| {
+            json!({
+                "language": language,
+                "files": stat.files,
+                "bytes": stat.bytes,
+                "extensions": stat.extensions.into_iter().collect::<Vec<_>>()
+            })
+        })
+        .collect()
+}
+
+fn top_directories_json(directory_stats: BTreeMap<String, DirectoryStat>) -> Vec<Value> {
+    let mut stats = directory_stats.into_iter().collect::<Vec<_>>();
+    stats.sort_by_key(|(path, stat)| {
+        (
+            Reverse(stat.files + stat.directories),
+            Reverse(stat.bytes),
+            path.clone(),
+        )
+    });
+
+    stats
+        .into_iter()
+        .take(MAX_TOP_DIRECTORIES)
+        .map(|(path, stat)| {
+            json!({
+                "path": if path.is_empty() { ".".to_string() } else { path },
+                "files": stat.files,
+                "directories": stat.directories,
+                "bytes": stat.bytes
+            })
+        })
+        .collect()
+}
+
+fn candidates_json(mut candidates: Vec<FileCandidate>, limit: usize) -> Vec<Value> {
+    candidates.sort_by(|left, right| left.path.cmp(&right.path));
+    candidates
+        .into_iter()
+        .take(limit)
+        .map(|candidate| {
+            let mut value = json!({
+                "path": candidate.path,
+                "sizeBytes": candidate.size_bytes
+            });
+            if let Some(kind) = candidate.kind {
+                value["kind"] = json!(kind);
+            }
+            if let Some(reason) = candidate.reason {
+                value["reason"] = json!(reason);
+            }
+            value
+        })
+        .collect()
+}
+
+fn depth_relative_to(root: &Path, path: &Path) -> usize {
+    path.strip_prefix(root).unwrap_or(path).components().count()
+}
+
+fn important_file_kind(display_path: &str, path: &Path) -> Option<&'static str> {
+    let name = file_name_lower(path);
+    let path = display_path.to_ascii_lowercase();
+
+    if is_documentation_name(&name) {
+        return Some("documentation");
+    }
+    if matches!(
+        name.as_str(),
+        "package.json"
+            | "pnpm-workspace.yaml"
+            | "yarn.lock"
+            | "package-lock.json"
+            | "bun.lockb"
+            | "cargo.toml"
+            | "cargo.lock"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "uv.lock"
+            | "go.mod"
+            | "go.sum"
+            | "pom.xml"
+            | "build.gradle"
+            | "settings.gradle"
+            | "dockerfile"
+            | "docker-compose.yml"
+            | "docker-compose.yaml"
+            | "makefile"
+            | "tsconfig.json"
+            | "vite.config.ts"
+            | "vite.config.js"
+            | "next.config.js"
+            | "next.config.mjs"
+            | "eslint.config.js"
+            | "prettier.config.js"
+            | "tailwind.config.js"
+            | "tailwind.config.ts"
+    ) {
+        return Some("config");
+    }
+    if path.ends_with("/src/main.rs")
+        || path.ends_with("/src/lib.rs")
+        || path.ends_with("/src/main.ts")
+        || path.ends_with("/src/main.tsx")
+        || path.ends_with("/src/index.ts")
+        || path.ends_with("/src/index.tsx")
+        || path.ends_with("/src/app.tsx")
+        || path.ends_with("/main.py")
+    {
+        return Some("entrypoint");
+    }
+
+    None
+}
+
+fn entrypoint_reason(display_path: &str, path: &Path) -> Option<&'static str> {
+    let name = file_name_lower(path);
+    let path = display_path.to_ascii_lowercase();
+    if matches!(
+        name.as_str(),
+        "main.rs"
+            | "lib.rs"
+            | "main.ts"
+            | "main.tsx"
+            | "main.js"
+            | "main.jsx"
+            | "index.ts"
+            | "index.tsx"
+            | "index.js"
+            | "index.jsx"
+            | "app.tsx"
+            | "app.jsx"
+            | "main.py"
+            | "app.py"
+            | "server.py"
+            | "main.go"
+            | "main.java"
+    ) {
+        return Some("common application or library entry file name");
+    }
+    if path.contains("/src/bin/") {
+        return Some("Rust binary entrypoint directory");
+    }
+    None
+}
+
+fn test_reason(display_path: &str, path: &Path) -> Option<&'static str> {
+    let name = file_name_lower(path);
+    let path = display_path.to_ascii_lowercase();
+    if path.contains("/__tests__/") || path.contains("/tests/") {
+        return Some("test directory");
+    }
+    if name.contains(".test.") || name.contains(".spec.") || name.ends_with("_test.go") {
+        return Some("test file naming pattern");
+    }
+    None
+}
+
+fn documentation_reason(display_path: &str, path: &Path) -> Option<&'static str> {
+    let name = file_name_lower(path);
+    if is_documentation_name(&name) {
+        return Some("documentation file name");
+    }
+    let path = display_path.to_ascii_lowercase();
+    if path.starts_with("docs/") || path.contains("/docs/") {
+        return Some("docs directory");
+    }
+    None
+}
+
+fn is_documentation_name(name: &str) -> bool {
+    name == "readme"
+        || name.starts_with("readme.")
+        || name.starts_with("changelog.")
+        || name.starts_with("contributing.")
+        || name.starts_with("license.")
+        || name == "license"
+}
+
+fn language_for_path(path: &Path) -> String {
+    let name = file_name_lower(path);
+    if matches!(name.as_str(), "dockerfile" | "containerfile") {
+        return "Dockerfile".to_string();
+    }
+    if matches!(name.as_str(), "makefile" | "gnumakefile") {
+        return "Makefile".to_string();
+    }
+
+    match extension_for_path(path).as_deref() {
+        Some("rs") => "Rust",
+        Some("ts") | Some("tsx") | Some("mts") | Some("cts") => "TypeScript",
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => "JavaScript",
+        Some("py") | Some("pyi") | Some("ipynb") => "Python",
+        Some("go") => "Go",
+        Some("java") => "Java",
+        Some("kt") | Some("kts") => "Kotlin",
+        Some("swift") => "Swift",
+        Some("c") | Some("h") => "C/C++",
+        Some("cc") | Some("cpp") | Some("cxx") | Some("hpp") | Some("hh") | Some("hxx") => "C/C++",
+        Some("cs") => "C#",
+        Some("rb") => "Ruby",
+        Some("php") => "PHP",
+        Some("sh") | Some("bash") | Some("zsh") | Some("fish") => "Shell",
+        Some("ps1") => "PowerShell",
+        Some("html") | Some("htm") => "HTML",
+        Some("css") | Some("scss") | Some("sass") | Some("less") => "CSS",
+        Some("vue") => "Vue",
+        Some("svelte") => "Svelte",
+        Some("astro") => "Astro",
+        Some("json") | Some("jsonl") => "JSON",
+        Some("yaml") | Some("yml") => "YAML",
+        Some("toml") => "TOML",
+        Some("xml") | Some("svg") => "XML",
+        Some("md") | Some("markdown") | Some("mdx") | Some("rst") => "Documentation",
+        Some("sql") => "SQL",
+        Some("graphql") | Some("gql") => "GraphQL",
+        Some("proto") => "Protocol Buffers",
+        Some("prisma") => "Prisma",
+        Some("tf") | Some("tfvars") | Some("hcl") => "HCL/Terraform",
+        Some("csv") | Some("tsv") | Some("xlsx") | Some("xls") => "Spreadsheet",
+        Some("pdf") => "PDF",
+        Some("doc") | Some("docx") => "Word",
+        Some("ppt") | Some("pptx") => "Presentation",
+        Some("lock") => "Lockfile",
+        Some(extension) if !extension.is_empty() => "Other",
+        _ => "Other",
+    }
+    .to_string()
+}
+
+fn extension_for_path(path: &Path) -> Option<String> {
+    path.extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+        .filter(|extension| !extension.is_empty())
+}
+
+fn file_name_lower(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{ToolExecutionContext, ToolRegistry};
+    use crate::protocol::{
+        AgentApprovalStatus, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
+    };
+    use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn workspace_map_summarizes_project_structure() {
+        let fixture = TestWorkspace::new();
+        fixture.write_file("package.json", "{}");
+        fixture.write_file("README.md", "# Demo");
+        fixture.write_file("src/main.tsx", "export function main() {}");
+        fixture.write_file("src/App.test.tsx", "test('ok', () => {})");
+        fixture.write_file("node_modules/ignored/index.js", "ignored");
+        let context = fixture.context();
+        let registry = ToolRegistry::read_only_defaults_with_search(None);
+
+        let result = registry.execute(
+            &context,
+            &AgentToolCall {
+                id: "call-1".to_string(),
+                tool: "workspace_map".to_string(),
+                args: json!({ "maxDepth": 3, "maxEntries": 20 }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
+
+        assert!(result.ok, "{:?}", result.error);
+        let value = result.result.as_ref().unwrap();
+        assert_eq!(value["summary"]["fileCount"], 4);
+        assert!(value["treeText"].as_str().unwrap().contains("src/"));
+        assert!(value["treeText"].as_str().unwrap().contains("main.tsx"));
+        assert!(!value["treeText"].as_str().unwrap().contains("node_modules"));
+        assert_eq!(
+            value["summary"]["entrypointCandidates"][0]["path"],
+            "src/main.tsx"
+        );
+        assert_eq!(
+            value["summary"]["testCandidates"][0]["path"],
+            "src/App.test.tsx"
+        );
+    }
+
+    #[test]
+    fn workspace_map_can_focus_on_subdirectory() {
+        let fixture = TestWorkspace::new();
+        fixture.write_file("agent/rust/src/lib.rs", "pub fn lib() {}");
+        fixture.write_file("apps/desktop/src/main.tsx", "main()");
+        let context = fixture.context();
+        let registry = ToolRegistry::read_only_defaults_with_search(None);
+
+        let result = registry.execute(
+            &context,
+            &AgentToolCall {
+                id: "call-1".to_string(),
+                tool: "workspace_map".to_string(),
+                args: json!({ "focusPath": "agent", "maxDepth": 4 }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
+
+        assert!(result.ok, "{:?}", result.error);
+        let value = result.result.as_ref().unwrap();
+        assert_eq!(value["workspace"]["focusPath"], "agent");
+        assert!(value["treeText"].as_str().unwrap().contains("rust/"));
+        assert!(!value["treeText"].as_str().unwrap().contains("desktop"));
+    }
+
+    struct TestWorkspace {
+        root: PathBuf,
+    }
+
+    impl TestWorkspace {
+        fn new() -> Self {
+            let unique = TEST_WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let root =
+                std::env::temp_dir().join(format!("my-copilot-agent-test-workspace-map-{unique}"));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        fn write_file(&self, path: &str, content: &str) {
+            let file_path = self.root.join(path);
+            fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+            fs::write(file_path, content).unwrap();
+        }
+
+        fn context(&self) -> ToolExecutionContext {
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: None,
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("test".to_string()),
+                    root_path: Some(self.root.to_string_lossy().to_string()),
+                }),
+                attachment_library: None,
+                permissions: Default::default(),
+            }))
+        }
+    }
+
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}

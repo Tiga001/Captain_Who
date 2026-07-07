@@ -1,0 +1,186 @@
+/* Renderer UI. */
+.profile-settings-page {
+  max-width: 860px;
+}
+
+.profile-settings-hero {
+  display: grid;
+  justify-items: center;
+  margin-top: 36px;
+  margin-bottom: 34px;
+  text-align: center;
+}
+
+.profile-settings-avatar {
+  display: grid;
+  width: 128px;
+  height: 128px;
+  place-items: center;
+  overflow: hidden;
+  color: var(--mc-color-text-inverse);
+  background: var(--mc-color-avatar-background);
+  border-radius: 50%;
+  font-size: 42px;
+  font-weight: var(--mc-font-weight-control);
+  letter-spacing: 0.02em;
+}
+
+.profile-settings-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.profile-settings-hero__text h2 {
+  margin: 18px 0 0;
+  color: var(--settings-content-title-color);
+  font-size: 24px;
+  font-weight: var(--mc-font-weight-control);
+  line-height: var(--mc-line-height-title);
+}
+
+.profile-settings-hero__text p {
+  margin: 8px 0 0;
+  color: var(--settings-content-muted-color);
+  font-size: var(--mc-font-size-settings-body);
+  line-height: var(--mc-line-height-normal);
+}
+
+.profile-settings-avatar-row {
+  align-items: start;
+}
+
+.profile-settings-avatar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.profile-settings-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 14px;
+  gap: 8px;
+  color: var(--settings-content-text-color);
+  background: var(--mc-color-surface-muted);
+  border: 0;
+  border-radius: var(--mc-radius-row);
+  cursor: pointer;
+  font: inherit;
+  font-size: calc(var(--mc-font-size-sidebar-action) - 1px);
+  line-height: var(--mc-line-height-sidebar);
+}
+
+.profile-settings-button:hover {
+  background: var(--mc-color-state-hover);
+}
+
+.profile-settings-button:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.profile-settings-button svg {
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+  stroke-width: var(--mc-icon-stroke-thin);
+}
+
+.profile-settings-button--secondary {
+  color: var(--settings-content-muted-color);
+}
+
+.profile-settings-error {
+  margin: 8px 0 0;
+  color: var(--mc-color-text-danger);
+  font-size: var(--mc-font-size-xs);
+  line-height: var(--mc-line-height-normal);
+}
+
+.profile-remove-avatar-dialog {
+  position: fixed;
+  z-index: 1200;
+  inset: 0;
+  display: grid;
+  padding: 24px;
+  place-items: center;
+  background: var(--mc-color-overlay);
+}
+
+.profile-remove-avatar-dialog__card {
+  display: grid;
+  width: min(520px, calc(100vw - 48px));
+  padding: 30px 32px 28px;
+  gap: 14px;
+  color: var(--settings-content-text-color);
+  background: var(--mc-color-surface-glass-strong);
+  border: 1px solid var(--mc-color-border-hairline);
+  border-radius: var(--mc-radius-dialog);
+  box-shadow: var(--mc-shadow-dialog);
+  backdrop-filter: var(--mc-effect-blur-dialog);
+  -webkit-backdrop-filter: var(--mc-effect-blur-dialog);
+}
+
+.profile-remove-avatar-dialog__card h2 {
+  margin: 0;
+  color: var(--settings-content-title-color);
+  font-size: var(--mc-font-size-dialog-title);
+  font-weight: var(--mc-font-weight-display);
+  line-height: var(--mc-line-height-compact);
+}
+
+.profile-remove-avatar-dialog__card p {
+  margin: 0;
+  color: var(--settings-content-muted-color);
+  font-size: var(--mc-font-size-lg);
+  line-height: var(--mc-line-height-dialog-body);
+}
+
+.profile-remove-avatar-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.profile-remove-avatar-dialog__cancel,
+.profile-remove-avatar-dialog__confirm {
+  min-width: 88px;
+  height: 42px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: var(--mc-radius-row);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--mc-font-size-settings-body);
+}
+
+.profile-remove-avatar-dialog__cancel {
+  color: var(--settings-content-muted-color);
+  background: transparent;
+}
+
+.profile-remove-avatar-dialog__confirm {
+  color: var(--mc-color-button-danger-soft-text);
+  background: var(--mc-color-button-danger-soft-bg);
+}
+
+.profile-remove-avatar-dialog__cancel:hover,
+.profile-remove-avatar-dialog__confirm:hover {
+  background: var(--mc-color-button-danger-soft-bg-hover);
+}
+
+.profile-remove-avatar-dialog__cancel:focus-visible,
+.profile-remove-avatar-dialog__confirm:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
+@media (max-width: 760px) {
+  .profile-settings-avatar-actions {
+    justify-content: flex-start;
+  }
+}

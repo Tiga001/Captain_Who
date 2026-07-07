@@ -1,0 +1,143 @@
+// Protocol layer.
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub const CORE_PING_METHOD: &str = "core.ping";
+pub const APP_GET_VERSION_METHOD: &str = "app.getVersion";
+pub const AGENT_START_RUN_METHOD: &str = "agent.startRun";
+pub const AGENT_CANCEL_RUN_METHOD: &str = "agent.cancelRun";
+pub const STORAGE_LOAD_APP_DATA_METHOD: &str = "storage.loadAppData";
+pub const STORAGE_LOAD_MODEL_SETTINGS_METHOD: &str = "storage.loadModelSettings";
+pub const STORAGE_SAVE_MODEL_SETTINGS_METHOD: &str = "storage.saveModelSettings";
+pub const STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD: &str = "storage.loadAgentPromptPreferences";
+pub const STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD: &str = "storage.saveAgentPromptPreferences";
+pub const STORAGE_LOAD_PROJECTS_METHOD: &str = "storage.loadProjects";
+pub const STORAGE_SAVE_PROJECT_METHOD: &str = "storage.saveProject";
+pub const STORAGE_DELETE_PROJECT_METHOD: &str = "storage.deleteProject";
+pub const STORAGE_SHOW_PROJECT_IN_FOLDER_METHOD: &str = "storage.showProjectInFolder";
+pub const STORAGE_REVEAL_PROJECT_FILE_METHOD: &str = "storage.revealProjectFile";
+pub const STORAGE_SELECT_PROJECT_DIRECTORY_METHOD: &str = "storage.selectProjectDirectory";
+pub const STORAGE_LOAD_CONVERSATIONS_METHOD: &str = "storage.loadConversations";
+pub const STORAGE_SAVE_CONVERSATION_METHOD: &str = "storage.saveConversation";
+pub const STORAGE_SAVE_CONVERSATION_META_METHOD: &str = "storage.saveConversationMeta";
+pub const STORAGE_DELETE_CONVERSATION_METHOD: &str = "storage.deleteConversation";
+pub const STORAGE_UPSERT_CHAT_MESSAGES_METHOD: &str = "storage.upsertChatMessages";
+pub const STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD: &str = "storage.saveChatMessageState";
+pub const STORAGE_LOAD_COMPOSER_DRAFTS_METHOD: &str = "storage.loadComposerDrafts";
+pub const STORAGE_SAVE_COMPOSER_DRAFT_METHOD: &str = "storage.saveComposerDraft";
+pub const STORAGE_DELETE_COMPOSER_DRAFT_METHOD: &str = "storage.deleteComposerDraft";
+pub const STORAGE_LOAD_UI_PREFERENCES_METHOD: &str = "storage.loadUiPreferences";
+pub const STORAGE_SAVE_UI_PREFERENCES_METHOD: &str = "storage.saveUiPreferences";
+pub const STORAGE_SELECT_PROFILE_AVATAR_METHOD: &str = "storage.selectProfileAvatar";
+
+#[derive(Debug, Deserialize)]
+pub struct JsonRpcRequest {
+    pub jsonrpc: String,
+    pub id: JsonRpcId,
+    pub method: String,
+    #[serde(default)]
+    pub params: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum JsonRpcId {
+    String(String),
+    Number(i64),
+}
+
+#[derive(Debug, Serialize)]
+pub struct JsonRpcSuccessResponse<T>
+where
+    T: Serialize,
+{
+    pub jsonrpc: &'static str,
+    pub id: JsonRpcId,
+    pub result: T,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JsonRpcErrorResponse {
+    pub jsonrpc: &'static str,
+    pub id: Option<JsonRpcId>,
+    pub error: JsonRpcErrorObject,
+}
+
+#[derive(Debug, Serialize)]
+pub struct JsonRpcErrorObject {
+    pub code: i64,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CorePingRequest {
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorePingResponse {
+    pub message: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub echo: Option<String>,
+    pub server_time_ms: u128,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AppVersionResponse {
+    pub name: &'static str,
+    pub version: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStartRunRequest {
+    pub conversation_id: Option<String>,
+    pub prompt: Option<String>,
+    pub workspace_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStartRunResponse {
+    pub run_id: String,
+    pub status: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCancelRunRequest {
+    pub run_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCancelRunResponse {
+    pub run_id: String,
+    pub cancelled: bool,
+}
+
+pub fn success<T>(id: JsonRpcId, result: T) -> JsonRpcSuccessResponse<T>
+where
+    T: Serialize,
+{
+    JsonRpcSuccessResponse {
+        jsonrpc: "2.0",
+        id,
+        result,
+    }
+}
+
+pub fn error(id: Option<JsonRpcId>, code: i64, message: impl Into<String>) -> JsonRpcErrorResponse {
+    JsonRpcErrorResponse {
+        jsonrpc: "2.0",
+        id,
+        error: JsonRpcErrorObject {
+            code,
+            message: message.into(),
+            data: None,
+        },
+    }
+}

@@ -1,0 +1,88 @@
+// Electron preload host API.
+import { contextBridge, ipcRenderer } from 'electron'
+import type { IpcRendererEvent } from 'electron'
+import type { HostApi } from '@mycopilot/host-api'
+import type { TerminalExitEvent, TerminalOutputEvent } from '@mycopilot/protocol'
+
+const TERMINAL_OUTPUT_CHANNEL = 'host:terminal.output'
+const TERMINAL_EXIT_CHANNEL = 'host:terminal.exit'
+
+function onTerminalOutput(handler: (event: TerminalOutputEvent) => void): () => void {
+  const listener = (_event: IpcRendererEvent, payload: TerminalOutputEvent): void =>
+    handler(payload)
+  ipcRenderer.on(TERMINAL_OUTPUT_CHANNEL, listener)
+  return () => ipcRenderer.removeListener(TERMINAL_OUTPUT_CHANNEL, listener)
+}
+
+function onTerminalExit(handler: (event: TerminalExitEvent) => void): () => void {
+  const listener = (_event: IpcRendererEvent, payload: TerminalExitEvent): void => handler(payload)
+  ipcRenderer.on(TERMINAL_EXIT_CHANNEL, listener)
+  return () => ipcRenderer.removeListener(TERMINAL_EXIT_CHANNEL, listener)
+}
+
+const host: HostApi = {
+  core: {
+    ping: (input) => ipcRenderer.invoke('host:core.ping', input)
+  },
+  app: {
+    getVersion: () => ipcRenderer.invoke('host:app.getVersion')
+  },
+  agent: {
+    startRun: (input) => ipcRenderer.invoke('host:agent.startRun', input),
+    cancelRun: (input) => ipcRenderer.invoke('host:agent.cancelRun', input)
+  },
+  browser: {
+    create: (input) => ipcRenderer.invoke('host:browser.create', input),
+    navigate: (input) => ipcRenderer.invoke('host:browser.navigate', input),
+    setBounds: (input) => ipcRenderer.invoke('host:browser.setBounds', input),
+    destroy: (input) => ipcRenderer.invoke('host:browser.destroy', input)
+  },
+  storage: {
+    loadAppData: () => ipcRenderer.invoke('host:storage.loadAppData'),
+    loadModelSettings: () => ipcRenderer.invoke('host:storage.loadModelSettings'),
+    saveModelSettings: (settings) => ipcRenderer.invoke('host:storage.saveModelSettings', settings),
+    loadAgentPromptPreferences: () => ipcRenderer.invoke('host:storage.loadAgentPromptPreferences'),
+    saveAgentPromptPreferences: (preferences) =>
+      ipcRenderer.invoke('host:storage.saveAgentPromptPreferences', preferences),
+    loadProjects: () => ipcRenderer.invoke('host:storage.loadProjects'),
+    selectProjectDirectory: () => ipcRenderer.invoke('host:storage.selectProjectDirectory'),
+    saveProject: (project) => ipcRenderer.invoke('host:storage.saveProject', project),
+    deleteProject: (projectId) => ipcRenderer.invoke('host:storage.deleteProject', projectId),
+    showProjectInFolder: (projectId) =>
+      ipcRenderer.invoke('host:storage.showProjectInFolder', projectId),
+    revealProjectFile: (input) => ipcRenderer.invoke('host:storage.revealProjectFile', input),
+    loadConversations: () => ipcRenderer.invoke('host:storage.loadConversations'),
+    saveConversation: (conversation) =>
+      ipcRenderer.invoke('host:storage.saveConversation', conversation),
+    saveConversationMeta: (conversation) =>
+      ipcRenderer.invoke('host:storage.saveConversationMeta', conversation),
+    deleteConversation: (conversationId) =>
+      ipcRenderer.invoke('host:storage.deleteConversation', conversationId),
+    upsertChatMessages: (input) => ipcRenderer.invoke('host:storage.upsertChatMessages', input),
+    saveChatMessageState: (input) => ipcRenderer.invoke('host:storage.saveChatMessageState', input),
+    loadComposerDrafts: () => ipcRenderer.invoke('host:storage.loadComposerDrafts'),
+    saveComposerDraft: (draft) => ipcRenderer.invoke('host:storage.saveComposerDraft', draft),
+    deleteComposerDraft: (scopeId) =>
+      ipcRenderer.invoke('host:storage.deleteComposerDraft', scopeId),
+    loadUiPreferences: () => ipcRenderer.invoke('host:storage.loadUiPreferences'),
+    saveUiPreferences: (preferences) =>
+      ipcRenderer.invoke('host:storage.saveUiPreferences', preferences),
+    selectProfileAvatar: () => ipcRenderer.invoke('host:storage.selectProfileAvatar')
+  },
+  terminal: {
+    createSession: (request) => ipcRenderer.invoke('host:terminal.createSession', request),
+    writeInput: (sessionId, data) =>
+      ipcRenderer.invoke('host:terminal.writeInput', sessionId, data),
+    resizeSession: (sessionId, cols, rows) =>
+      ipcRenderer.invoke('host:terminal.resizeSession', sessionId, cols, rows),
+    killSession: (sessionId) => ipcRenderer.invoke('host:terminal.killSession', sessionId),
+    onOutput: onTerminalOutput,
+    onExit: onTerminalExit
+  }
+}
+
+if (process.contextIsolated) {
+  contextBridge.exposeInMainWorld('mycopilot', { host })
+} else {
+  throw new Error('MyCopilot preload requires context isolation')
+}

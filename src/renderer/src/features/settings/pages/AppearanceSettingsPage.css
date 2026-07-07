@@ -1,0 +1,185 @@
+/* Renderer UI. */
+.appearance-settings-page {
+  max-width: min(100%, 1120px);
+}
+
+.appearance-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: clamp(42px, 7vw, 82px);
+  gap: clamp(10px, 2.2vw, 24px);
+}
+
+.appearance-theme-option {
+  display: grid;
+  min-width: 0;
+  padding: 0;
+  gap: clamp(10px, 1.8vw, 18px);
+  color: var(--settings-content-muted-color);
+  text-align: center;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.appearance-theme-option:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 6px;
+  border-radius: var(--mc-radius-card);
+}
+
+.appearance-theme-preview {
+  --preview-shell: #f2f2f2;
+  --preview-window: #ffffff;
+  --preview-panel: #ffffff;
+  --preview-line: #d8d8d8;
+  --preview-divider: #eeeeee;
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 440 / 324;
+  overflow: hidden;
+  background: var(--preview-shell);
+  border: 3px solid transparent;
+  border-radius: var(--mc-radius-card);
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.appearance-theme-option:hover .appearance-theme-preview {
+  transform: translateY(-1px);
+}
+
+.appearance-theme-option[data-active="true"] {
+  color: var(--settings-content-title-color);
+}
+
+.appearance-theme-option[data-active="true"] .appearance-theme-preview {
+  border-color: var(--mc-color-focus-ring);
+  box-shadow: 0 0 0 1px var(--mc-color-focus-ring);
+}
+
+.appearance-theme-preview[data-preview="system"] {
+  --preview-shell: linear-gradient(90deg, #aaaaaa 0 50%, #5d5d5d 50%);
+  --preview-window: linear-gradient(90deg, #f8f8f8 0 50%, #323232 50%);
+  --preview-panel: linear-gradient(90deg, #ffffff 0 50%, #404040 50%);
+  --preview-line: rgba(165, 165, 165, 0.78);
+  --preview-divider: rgba(255, 255, 255, 0.16);
+}
+
+.appearance-theme-preview[data-preview="light"] {
+  --preview-shell: #f4f4f4;
+  --preview-window: #ffffff;
+  --preview-panel: #ffffff;
+  --preview-line: #d8d8d8;
+  --preview-divider: #eeeeee;
+}
+
+.appearance-theme-preview[data-preview="dark"] {
+  --preview-shell: #5a5a58;
+  --preview-window: #ffffff;
+  --preview-panel: #ffffff;
+  --preview-line: #d7d7d7;
+  --preview-divider: #ededed;
+}
+
+.appearance-theme-preview__window {
+  position: absolute;
+  right: 4%;
+  bottom: -4px;
+  left: 8%;
+  height: 72%;
+  background: var(--preview-window);
+  border-radius: var(--mc-radius-card) var(--mc-radius-card) 0 0;
+}
+
+.appearance-theme-preview__header {
+  position: absolute;
+  top: 22%;
+  left: 18%;
+  right: 18%;
+  display: grid;
+  gap: 3.1%;
+  justify-items: center;
+}
+
+.appearance-theme-preview__header span:first-child {
+  width: 48%;
+  height: 3.2%;
+  background: var(--preview-line);
+  border-radius: var(--mc-radius-pill);
+}
+
+.appearance-theme-preview__header span:last-child {
+  width: 72%;
+  height: 2.2%;
+  background: var(--preview-line);
+  border-radius: var(--mc-radius-pill);
+  opacity: 0.64;
+}
+
+.appearance-theme-preview__panel {
+  position: absolute;
+  right: 9%;
+  bottom: -5px;
+  left: 9%;
+  display: grid;
+  height: 53%;
+  overflow: hidden;
+  background: var(--preview-panel);
+  border-radius: var(--mc-radius-card) var(--mc-radius-card) 0 0;
+}
+
+.appearance-theme-preview__panel span {
+  position: relative;
+  display: block;
+  border-bottom: 1px solid var(--preview-divider);
+}
+
+.appearance-theme-preview__panel span::before,
+.appearance-theme-preview__panel span::after {
+  position: absolute;
+  left: 6.5%;
+  content: "";
+  background: var(--preview-line);
+  border-radius: var(--mc-radius-pill);
+}
+
+.appearance-theme-preview__panel span::before {
+  top: 23%;
+  width: 32%;
+  height: 8.8%;
+}
+
+.appearance-theme-preview__panel span::after {
+  top: 58%;
+  width: 46%;
+  height: 4.3%;
+  opacity: 0.42;
+}
+
+.appearance-theme-option__label {
+  color: currentColor;
+  font-size: var(--mc-font-size-settings-section-title);
+  font-weight: var(--mc-font-weight-strong);
+  line-height: var(--mc-line-height-control);
+}
+
+.appearance-settings-section {
+  margin-top: 42px;
+}
+
+@media (max-width: 980px) {
+  .appearance-theme-grid {
+    margin-top: 42px;
+  }
+}
+
+@media (max-width: 760px) {
+  .appearance-settings-switch {
+    justify-self: start;
+  }
+}

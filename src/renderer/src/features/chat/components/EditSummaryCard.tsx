@@ -1,0 +1,186 @@
+// Renderer UI.
+import { ChevronDown, ChevronUp, FileDiff, Undo2 } from "lucide-react";
+import { useState } from "react";
+import { useFrontendConfig } from "../../../config/FrontendConfigProvider";
+import { formatTranslation } from "../../../config/translationFormat";
+import type { ChatAgentRunView } from "../chatTypes";
+import { revealStoredProjectFile } from "../../storage/storageClient";
+import {
+  getApplyPatchItemView,
+  isAbsoluteLocalPath,
+} from "./toolActivities/ApplyPatchToolActivity";
+
+interface EditSummaryCardProps {
+  projectId?: string | null;
+  run: ChatAgentRunView;
+}
+
+interface EditSummaryEntry {
+  additions: number;
+  deletions: number;
+  filePath: string;
+  id: string;
+}
+
+const COLLAPSED_FILE_COUNT = 3;
+
+function splitFilePath(filePath: string) {
+  const normalized = filePath.replace(/\\/g, "/");
+  const separatorIndex = normalized.lastIndexOf("/");
+  if (separatorIndex < 0) {
+    return { directory: "", fileName: filePath };
+  }
+
+  return {
+    directory: `${normalized.slice(0, separatorIndex + 1)}`,
+    fileName: normalized.slice(separatorIndex + 1),
+  };
+}
+
+function getAppliedEditEntries(run: ChatAgentRunView) {
+  const entries = new Map<string, EditSummaryEntry>();
+
+  run.toolCalls.forEach((call) => {
+    if (call.tool !== "apply_patch") return;
+
+    const result = run.toolResults.find((candidate) => candidate.callId === call.id);
+    const view = getApplyPatchItemView({
+      call,
+      diff: run.diffs.find((candidate) => candidate.id === call.id),
+      result,
+    });
+
+    if (view.status !== "applied" || !view.filePath) return;
+
+    const existing = entries.get(view.filePath);
+    if (existing) {
+      existing.additions += view.additions;
+      existing.deletions += view.deletions;
+      return;
+    }
+
+    entries.set(view.filePath, {
+      additions: view.additions,
+      deletions: view.deletions,
+      filePath: view.filePath,
+      id: call.id,
+    });
+  });
+
+  return [...entries.values()];
+}
+
+function EditSummaryPath({
+  entry,
+  projectId,
+}: {
+  entry: EditSummaryEntry;
+  projectId?: string | null;
+}) {
+  const { t } = useFrontendConfig();
+  const { directory, fileName } = splitFilePath(entry.filePath);
+  const canReveal = Boolean(projectId || isAbsoluteLocalPath(entry.filePath));
+  const content = (
+    <>
+      {directory && <span className="edit-summary-card__file-directory">{directory}</span>}
+      <span className="edit-summary-card__file-name">{fileName || entry.filePath}</span>
+    </>
+  );
+
+  if (!canReveal) {
+    return (
+      <span className="edit-summary-card__file-path" title={entry.filePath}>
+        {content}
+      </span>
+    );
+  }
+
+  return (
+    <button
+      aria-label={formatTranslation(t, "agent.patch.revealFile", {
+        filePath: entry.filePath,
+      })}
+      className="edit-summary-card__file-path edit-summary-card__file-button"
+      onClick={() => {
+        void revealStoredProjectFile(projectId, entry.filePath).catch((error) => {
+          console.error("Failed to reveal edited file", error);
+        });
+      }}
+      title={formatTranslation(t, "agent.patch.revealFile", {
+        filePath: entry.filePath,
+      })}
+      type="button"
+    >
+      {content}
+    </button>
+  );
+}
+
+export function EditSummaryCard({ projectId, run }: EditSummaryCardProps) {
+  const { t } = useFrontendConfig();
+  const [expanded, setExpanded] = useState(false);
+  const entries = getAppliedEditEntries(run);
+
+  if (entries.length === 0) return null;
+
+  const visibleEntries = expanded ? entries : entries.slice(0, COLLAPSED_FILE_COUNT);
+  const hiddenCount = entries.length - visibleEntries.length;
+  const totals = entries.reduce(
+    (counts, entry) => ({
+      additions: counts.additions + entry.additions,
+      deletions: counts.deletions + entry.deletions,
+    }),
+    { additions: 0, deletions: 0 },
+  );
+
+  return (
+    <section className="edit-summary-card" aria-label={t("agent.editSummary.title")}>
+      <div className="edit-summary-card__header">
+        <span className="edit-summary-card__icon" aria-hidden="true">
+          <FileDiff />
+        </span>
+        <div className="edit-summary-card__overview">
+          <p>{formatTranslation(t, "agent.editSummary.editedFiles", { count: String(entries.length) })}</p>
+          <div className="edit-summary-card__totals" aria-label={t("agent.editSummary.lineStats")}>
+            <span className="edit-summary-card__additions">+{totals.additions}</span>
+            <span className="edit-summary-card__deletions">-{totals.deletions}</span>
+          </div>
+        </div>
+        <div className="edit-summary-card__actions" aria-label={t("agent.editSummary.actions")}>
+          <button className="edit-summary-card__undo" type="button">
+            <span>{t("agent.editSummary.undo")}</span>
+            <Undo2 aria-hidden="true" />
+          </button>
+          <button className="edit-summary-card__review" type="button">
+            {t("agent.editSummary.review")}
+          </button>
+        </div>
+      </div>
+      <div className="edit-summary-card__files">
+        {visibleEntries.map((entry) => (
+          <div className="edit-summary-card__file-row" key={entry.id}>
+            <EditSummaryPath entry={entry} projectId={projectId} />
+            <span className="edit-summary-card__file-stats" aria-label={t("agent.editSummary.lineStats")}>
+              <span className="edit-summary-card__additions">+{entry.additions}</span>
+              <span className="edit-summary-card__deletions">-{entry.deletions}</span>
+            </span>
+          </div>
+        ))}
+      </div>
+      {(hiddenCount > 0 || expanded) && (
+        <button
+          className="edit-summary-card__more"
+          onClick={() => setExpanded((current) => !current)}
+          type="button"
+        >
+          <span>
+            {expanded
+              ? t("agent.editSummary.showLess")
+              : formatTranslation(t, "agent.editSummary.showMore", { count: String(hiddenCount) })}
+          </span>
+          {expanded ? <ChevronUp aria-hidden="true" /> : <ChevronDown aria-hidden="true" />}
+        </button>
+      )}
+    </section>
+  );
+}

@@ -1,0 +1,10 @@
+# Protocol layer.
+packages:
+  - packages/*
+  - apps/*
+
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+  node-pty: true

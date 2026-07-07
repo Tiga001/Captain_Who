@@ -1,0 +1,4 @@
+# Rust core server.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
