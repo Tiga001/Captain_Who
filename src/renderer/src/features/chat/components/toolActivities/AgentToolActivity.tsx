@@ -61,6 +61,7 @@ export function AgentToolActivity({
       <ReadToolActivity
         activity={readActivity}
         call={call}
+        projectId={projectId}
         result={result}
         settledStatus={settledStatus}
       />

@@ -8,6 +8,7 @@ import type {
   StorageChatMessageRecord,
   StorageChatMessageStateRecord,
   StorageComposerDraftRecord,
+  StorageImageFileRecord,
   StorageModelConfigRecord,
   StorageModelSettingsRecord,
   StorageProjectRecord,
@@ -192,6 +193,15 @@ export async function loadAttachmentImage(
   const normalizedId = attachmentId.trim();
   if (!normalizedId) return null;
   return hostClient.storage.loadAttachmentImage({ attachmentId: normalizedId });
+}
+
+export async function loadImageFile(input: {
+  projectId?: string | null;
+  filePath: string;
+}): Promise<StorageImageFileRecord | null> {
+  const filePath = input.filePath.trim();
+  if (!filePath) return null;
+  return hostClient.storage.loadImageFile({ projectId: input.projectId, filePath });
 }
 
 export function defaultAgentPromptPreferences(): AgentPromptPreferencesSnapshot {

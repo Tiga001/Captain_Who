@@ -1,8 +1,13 @@
 // Electron main client.
 import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
-import type { IpcMainInvokeEvent, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
-import { basename, extname, isAbsolute, join } from 'path'
-import { readFile } from 'fs/promises'
+import type { IpcMainInvokeEvent, NativeImage, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
+import { execFile } from 'child_process'
+import { homedir, tmpdir } from 'os'
+import { promisify } from 'util'
+import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
+import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
+import { fileURLToPath } from 'url'
+import type { StorageImageFileRecord } from '@mycopilot/protocol'
 import type { StorageProjectRecord } from '@mycopilot/protocol'
 
 import { CoreServer } from './core/coreServer'
@@ -11,12 +16,19 @@ import { TerminalBridge } from './terminal/TerminalBridge'
 import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
   '.gif': 'image/gif',
   '.jpeg': 'image/jpeg',
   '.jpg': 'image/jpeg',
   '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.tif': 'image/tiff',
+  '.tiff': 'image/tiff',
   '.webp': 'image/webp'
 }
+
+const execFileAsync = promisify(execFile)
 
 function getInvokeWindow(event: IpcMainInvokeEvent): BrowserWindow | undefined {
   return BrowserWindow.fromWebContents(event.sender) ?? undefined
@@ -85,20 +97,143 @@ async function selectProfileAvatar(event: IpcMainInvokeEvent): Promise<string | 
   return `data:${mimeType};base64,${data.toString('base64')}`
 }
 
-async function writeImageToClipboard(input: { dataUrl?: string }): Promise<void> {
-  const dataUrl = input.dataUrl?.trim()
-  if (!dataUrl?.startsWith('data:image/')) {
-    throw new Error('Image data URL is required')
-  }
-
-  const image = nativeImage.createFromDataURL(dataUrl)
+async function writeImageToClipboard(input: {
+  dataUrl?: string
+  imageUrl?: string
+}): Promise<{ formats: string[]; width: number; height: number; method: string }> {
+  const imageBuffer = await imageBufferFromClipboardInput(input)
+  const image = nativeImage.createFromBuffer(imageBuffer)
   if (image.isEmpty()) {
     throw new Error('Image data is invalid')
   }
+  const pngBuffer = image.toPNG()
+  if (pngBuffer.length === 0) {
+    throw new Error('Image PNG data is invalid')
+  }
 
+  if (process.platform === 'darwin') {
+    return writeMacImageToClipboard(image, pngBuffer)
+  }
+
+  return writeElectronImageToClipboard(image)
+}
+
+async function imageBufferFromClipboardInput(input: {
+  dataUrl?: string
+  imageUrl?: string
+}): Promise<Buffer> {
+  const dataUrl = input.dataUrl?.trim()
+  if (dataUrl) {
+    if (!dataUrl.startsWith('data:image/')) {
+      throw new Error('Image data URL is required')
+    }
+    return bufferFromDataUrl(dataUrl)
+  }
+
+  const imageUrl = input.imageUrl?.trim()
+  if (!imageUrl) {
+    throw new Error('Image source is required')
+  }
+
+  let url: URL
+  try {
+    url = new URL(imageUrl)
+  } catch {
+    throw new Error('Image URL is invalid')
+  }
+
+  if (url.protocol === 'file:') {
+    return readFile(fileURLToPath(url))
+  }
+
+  if (url.protocol === 'http:' || url.protocol === 'https:') {
+    const response = await fetch(url.toString())
+    if (!response.ok) {
+      throw new Error(`Image request failed with status ${response.status}`)
+    }
+    return Buffer.from(await response.arrayBuffer())
+  }
+
+  throw new Error(`Unsupported image URL protocol: ${url.protocol}`)
+}
+
+async function writeMacImageToClipboard(
+  image: NativeImage,
+  pngBuffer: Buffer
+): Promise<{ formats: string[]; width: number; height: number; method: string }> {
+  clipboard.clear()
+  clipboard.writeBuffer('public.png', pngBuffer)
+  let method = 'public.png'
+
+  if (clipboard.readBuffer('public.png').length === 0) {
+    await writePngToMacPasteboard(pngBuffer)
+    method = 'osascript-pngf'
+  }
+
+  const formats = clipboard.availableFormats()
+  const hasPng = clipboard.readBuffer('public.png').length > 0 || formats.includes('image/png')
+  if (!hasPng) {
+    throw new Error(`Image clipboard write failed: ${clipboard.availableFormats().join(', ')}`)
+  }
+
+  const size = image.getSize()
+  return {
+    formats,
+    width: size.width,
+    height: size.height,
+    method
+  }
+}
+
+function writeElectronImageToClipboard(
+  image: NativeImage
+): { formats: string[]; width: number; height: number; method: string } {
+  clipboard.clear()
   clipboard.writeImage(image)
-  if (clipboard.readImage().isEmpty()) {
-    throw new Error('Image clipboard write failed')
+
+  const clipboardImage = clipboard.readImage()
+  if (clipboardImage.isEmpty()) {
+    throw new Error(`Image clipboard write failed: ${clipboard.availableFormats().join(', ')}`)
+  }
+
+  const size = clipboardImage.getSize()
+  return {
+    formats: clipboard.availableFormats(),
+    width: size.width,
+    height: size.height,
+    method: 'electron-write-image'
+  }
+}
+
+function bufferFromDataUrl(dataUrl: string): Buffer {
+  const match = /^data:(image\/[-+.\w]+)((?:;[-\w=.+]+)*),(.*)$/s.exec(dataUrl)
+  if (!match) {
+    throw new Error('Image data URL is invalid')
+  }
+  const metadata = match[2].toLowerCase()
+  const payload = match[3]
+  if (metadata.split(';').includes('base64')) {
+    return Buffer.from(payload, 'base64')
+  }
+  return Buffer.from(decodeURIComponent(payload), 'utf8')
+}
+
+function escapeAppleScriptString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+async function writePngToMacPasteboard(pngBuffer: Buffer): Promise<void> {
+  const directory = await mkdtemp(join(tmpdir(), 'mycopilot-clipboard-'))
+  const filePath = join(directory, 'image.png')
+
+  try {
+    await writeFile(filePath, pngBuffer)
+    await execFileAsync('/usr/bin/osascript', [
+      '-e',
+      `set imageFile to POSIX file "${escapeAppleScriptString(filePath)}"\nset the clipboard to (read imageFile as «class PNGf»)`
+    ])
+  } finally {
+    await rm(directory, { recursive: true, force: true }).catch(() => undefined)
   }
 }
 
@@ -140,6 +275,90 @@ async function revealProjectFile(
   }
 
   shell.showItemInFolder(join(projectPath, rawFilePath))
+}
+
+async function loadImageFile(
+  coreServer: CoreServer,
+  input: { projectId?: string | null; filePath?: string }
+): Promise<StorageImageFileRecord | null> {
+  const rawFilePath = input.filePath?.trim()
+  if (!rawFilePath) return null
+
+  const attachmentId = attachmentIdFromReadPath(rawFilePath)
+  if (attachmentId) {
+    const attachment = await coreServer.loadAttachmentImage({ attachmentId })
+    return attachment
+      ? {
+          name: attachment.name,
+          mimeType: attachment.mimeType,
+          sizeBytes: attachment.sizeBytes,
+          data: attachment.data
+        }
+      : null
+  }
+
+  const filePath = await resolveReadableImageFilePath(coreServer, input.projectId, rawFilePath)
+  if (!filePath) return null
+
+  const mimeType = IMAGE_MIME_BY_EXTENSION[extname(filePath).toLowerCase()]
+  if (!mimeType?.startsWith('image/')) return null
+
+  try {
+    const data = await readFile(filePath)
+    return {
+      name: basename(filePath),
+      mimeType,
+      sizeBytes: data.byteLength,
+      data: data.toString('base64')
+    }
+  } catch (error) {
+    if (typeof error === 'object' && error && 'code' in error && error.code === 'ENOENT') {
+      return null
+    }
+    throw error
+  }
+}
+
+function attachmentIdFromReadPath(filePath: string): string | null {
+  const match = /^@attachments\/([^/\\]+)/.exec(filePath.trim())
+  return match ? decodeURIComponent(match[1]) : null
+}
+
+async function resolveReadableImageFilePath(
+  coreServer: CoreServer,
+  projectId: string | null | undefined,
+  rawFilePath: string
+): Promise<string | null> {
+  if (isAbsolute(rawFilePath)) return rawFilePath
+
+  const aliasPath = expandSystemPathAlias(rawFilePath)
+  if (aliasPath) return aliasPath
+
+  if (!projectId) return null
+  const projectPath = await getProjectPath(coreServer, projectId)
+  if (!projectPath) return null
+
+  const root = resolve(projectPath)
+  const candidate = resolve(root, rawFilePath)
+  const candidateRelative = relative(root, candidate)
+  if (candidateRelative.startsWith('..') || isAbsolute(candidateRelative)) {
+    return null
+  }
+  return candidate
+}
+
+function expandSystemPathAlias(rawFilePath: string): string | null {
+  const aliases: Record<string, string> = {
+    '@desktop': join(homedir(), 'Desktop'),
+    '@documents': join(homedir(), 'Documents'),
+    '@downloads': join(homedir(), 'Downloads'),
+    '@home': homedir()
+  }
+  const normalized = rawFilePath.trim()
+  const [alias, ...rest] = normalized.split(/[\\/]+/)
+  const root = aliases[alias.toLowerCase()]
+  if (!root) return null
+  return rest.length > 0 ? join(root, ...rest) : root
 }
 
 export function registerHostIpc(
@@ -253,6 +472,9 @@ export function registerHostIpc(
   ipcMain.handle('host:storage.selectProfileAvatar', (event) => selectProfileAvatar(event))
   ipcMain.handle('host:storage.loadAttachmentImage', (_event, input) =>
     coreServer.loadAttachmentImage(input)
+  )
+  ipcMain.handle('host:storage.loadImageFile', (_event, input) =>
+    loadImageFile(coreServer, input)
   )
   ipcMain.handle('host:terminal.createSession', (_event, request) =>
     terminalBridge.createSession(request)

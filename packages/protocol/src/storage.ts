@@ -73,6 +73,13 @@ export interface StorageAttachmentImageRecord {
   createdAt: number;
 }
 
+export interface StorageImageFileRecord {
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  data: string;
+}
+
 export interface StorageChatMessageRecord {
   id: string;
   role: "user" | "assistant" | (string & {});

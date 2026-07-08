@@ -36,6 +36,7 @@ import type {
   StorageChatMessageRecord,
   StorageChatMessageStateRecord,
   StorageComposerDraftRecord,
+  StorageImageFileRecord,
   StorageModelSettingsRecord,
   StorageProjectRecord,
   StorageUiPreferencesRecord,
@@ -105,6 +106,10 @@ export interface StorageHostApi {
   saveUiPreferences(preferences: StorageUiPreferencesRecord): Promise<StorageUiPreferencesRecord>
   selectProfileAvatar(): Promise<string | null>
   loadAttachmentImage(input: { attachmentId: string }): Promise<StorageAttachmentImageRecord | null>
+  loadImageFile(input: {
+    projectId?: string | null
+    filePath: string
+  }): Promise<StorageImageFileRecord | null>
 }
 
 export interface TerminalHostApi {
@@ -130,7 +135,12 @@ export interface AgentHostApi {
 }
 
 export interface ClipboardHostApi {
-  writeImage(input: { dataUrl: string }): Promise<void>
+  writeImage(input: { dataUrl?: string; imageUrl?: string }): Promise<{
+    formats: string[]
+    width: number
+    height: number
+    method: string
+  }>
 }
 
 export interface HostApi {

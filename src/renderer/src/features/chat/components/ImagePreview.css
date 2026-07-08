@@ -150,20 +150,6 @@
   flex: 0 0 auto;
 }
 
-.image-preview__status {
-  position: fixed;
-  z-index: 5;
-  right: 24px;
-  bottom: 28px;
-  max-width: min(360px, calc(100vw - 48px));
-  padding: 10px 14px;
-  color: rgba(255, 255, 255, 0.94);
-  background: rgba(44, 44, 44, 0.94);
-  border-radius: var(--mc-radius-pill);
-  font-size: var(--mc-font-size-sm);
-  font-weight: var(--mc-font-weight-strong);
-}
-
 @media (max-width: 720px) {
   .image-preview__toolbar {
     top: 12px;

@@ -112,7 +112,8 @@ const host: HostApi = {
     saveUiPreferences: (preferences) =>
       ipcRenderer.invoke('host:storage.saveUiPreferences', preferences),
     selectProfileAvatar: () => ipcRenderer.invoke('host:storage.selectProfileAvatar'),
-    loadAttachmentImage: (input) => ipcRenderer.invoke('host:storage.loadAttachmentImage', input)
+    loadAttachmentImage: (input) => ipcRenderer.invoke('host:storage.loadAttachmentImage', input),
+    loadImageFile: (input) => ipcRenderer.invoke('host:storage.loadImageFile', input)
   },
   terminal: {
     createSession: (request) => ipcRenderer.invoke('host:terminal.createSession', request),

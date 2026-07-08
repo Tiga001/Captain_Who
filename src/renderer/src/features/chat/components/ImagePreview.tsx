@@ -12,6 +12,7 @@ import {
   type WheelEvent as ReactWheelEvent
 } from 'react'
 import { Copy, Download, Minus, Plus, X } from 'lucide-react'
+import { useToast } from '../../../components/toast/ToastContext'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { hostClient } from '../../../host/hostClient'
 import './ImagePreview.css'
@@ -25,7 +26,6 @@ interface ImagePreviewInput {
 interface ImagePreviewContextValue {
   copyImageToClipboard: (src: string) => Promise<boolean>
   openImagePreview: (input: ImagePreviewInput) => void
-  showImagePreviewNotice: (message: string) => void
 }
 
 type CopyState = 'idle' | 'copying' | 'copied' | 'failed'
@@ -86,49 +86,6 @@ async function fetchImageBlob(src: string) {
   return response.blob()
 }
 
-function imageBlobToPngBlob(blob: Blob) {
-  return new Promise<Blob>((resolve, reject) => {
-    const image = new Image()
-    const objectUrl = URL.createObjectURL(blob)
-
-    image.onload = () => {
-      const canvas = document.createElement('canvas')
-      canvas.width = image.naturalWidth || image.width
-      canvas.height = image.naturalHeight || image.height
-      const context = canvas.getContext('2d')
-
-      if (!context) {
-        URL.revokeObjectURL(objectUrl)
-        reject(new Error('Canvas is not available'))
-        return
-      }
-
-      context.drawImage(image, 0, 0)
-      canvas.toBlob((pngBlob) => {
-        URL.revokeObjectURL(objectUrl)
-        if (pngBlob) {
-          resolve(pngBlob)
-        } else {
-          reject(new Error('Unable to convert image'))
-        }
-      }, 'image/png')
-    }
-
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl)
-      reject(new Error('Unable to load image'))
-    }
-
-    image.src = objectUrl
-  })
-}
-
-async function getClipboardImageBlob(src: string) {
-  const blob = await fetchImageBlob(src)
-  if (blob.type === 'image/png') return blob
-  return imageBlobToPngBlob(blob)
-}
-
 function blobToDataUrl(blob: Blob) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
@@ -144,28 +101,43 @@ function blobToDataUrl(blob: Blob) {
   })
 }
 
+function getHostReadableImageSource(src: string) {
+  const trimmedSource = src.trim()
+  if (trimmedSource.startsWith('data:image/')) {
+    return { dataUrl: trimmedSource }
+  }
+
+  try {
+    const url = new URL(trimmedSource, window.location.href)
+    if (url.protocol === 'file:' || url.protocol === 'http:' || url.protocol === 'https:') {
+      return { imageUrl: url.toString() }
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
 async function copyImageWithHostClipboard(src: string) {
-  const blob = await getClipboardImageBlob(src)
+  const hostReadableSource = getHostReadableImageSource(src)
+  if (hostReadableSource) {
+    await hostClient.clipboard.writeImage(hostReadableSource)
+    return
+  }
+
+  const blob = await fetchImageBlob(src)
   const dataUrl = await blobToDataUrl(blob)
   await hostClient.clipboard.writeImage({ dataUrl })
 }
 
-async function copyImageWithBrowserClipboard(src: string) {
-  if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
-    throw new Error('Image clipboard is not available')
-  }
-
-  const blob = await getClipboardImageBlob(src)
-  await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })])
-}
-
 export function ImagePreviewProvider({ children }: { children: ReactNode }) {
   const { t } = useFrontendConfig()
+  const { showToast } = useToast()
   const dialogRef = useRef<HTMLDivElement>(null)
   const [preview, setPreview] = useState<ImagePreviewInput | null>(null)
   const [zoom, setZoom] = useState(1)
   const [copyState, setCopyState] = useState<CopyState>('idle')
-  const [noticeMessage, setNoticeMessage] = useState('')
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
 
   const openImagePreview = useCallback((input: ImagePreviewInput) => {
@@ -173,21 +145,19 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
     setPreview(input)
     setZoom(1)
     setCopyState('idle')
-    setNoticeMessage('')
     setContextMenu(null)
   }, [])
 
   const closeImagePreview = useCallback(() => {
     setPreview(null)
     setCopyState('idle')
-    setNoticeMessage('')
     setContextMenu(null)
   }, [])
 
   const showImagePreviewNotice = useCallback((message: string) => {
     setCopyState('idle')
-    setNoticeMessage(message)
-  }, [])
+    showToast(message, { tone: 'accent' })
+  }, [showToast])
 
   const zoomOut = useCallback(() => {
     setZoom((currentZoom) => clampZoom(currentZoom - ZOOM_STEP))
@@ -232,25 +202,21 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
   const copyImageToClipboard = useCallback(async (src: string) => {
     if (!src || copyState === 'copying') return false
     setCopyState('copying')
-    setNoticeMessage('')
     setContextMenu(null)
+    showToast(t('imagePreview.copying'), { durationMs: 1000, tone: 'accent' })
 
     try {
       await copyImageWithHostClipboard(src)
       setCopyState('copied')
+      showToast(t('imagePreview.copied'), { tone: 'accent' })
       return true
     } catch (error) {
-      try {
-        await copyImageWithBrowserClipboard(src)
-        setCopyState('copied')
-        return true
-      } catch (fallbackError) {
-        console.error('Failed to copy image', error, fallbackError)
-        setCopyState('failed')
-        return false
-      }
+      console.error('Failed to copy image', error)
+      setCopyState('failed')
+      showToast(t('imagePreview.copyFailed'), { tone: 'accent' })
+      return false
     }
-  }, [copyState])
+  }, [copyState, showToast, t])
 
   const copyImage = useCallback(async () => {
     if (!preview) return
@@ -258,8 +224,8 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
   }, [copyImageToClipboard, preview])
 
   const value = useMemo(
-    () => ({ copyImageToClipboard, openImagePreview, showImagePreviewNotice }),
-    [copyImageToClipboard, openImagePreview, showImagePreviewNotice]
+    () => ({ copyImageToClipboard, openImagePreview }),
+    [copyImageToClipboard, openImagePreview]
   )
 
   useEffect(() => {
@@ -306,22 +272,6 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
     const timeoutId = window.setTimeout(() => setCopyState('idle'), 1600)
     return () => window.clearTimeout(timeoutId)
   }, [copyState])
-
-  useEffect(() => {
-    if (!noticeMessage) return
-    const timeoutId = window.setTimeout(() => setNoticeMessage(''), 1600)
-    return () => window.clearTimeout(timeoutId)
-  }, [noticeMessage])
-
-  const statusMessage =
-    noticeMessage ||
-    (copyState === 'copying'
-      ? t('imagePreview.copying')
-      : copyState === 'copied'
-        ? t('imagePreview.copied')
-        : copyState === 'failed'
-          ? t('imagePreview.copyFailed')
-          : '')
 
   const handleBackdropMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
     setContextMenu(null)
@@ -445,11 +395,6 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
 
         </div>
       )}
-      {statusMessage && (
-        <div className="image-preview__status" role="status">
-          {statusMessage}
-        </div>
-      )}
     </ImagePreviewContext.Provider>
   )
 }
@@ -465,6 +410,8 @@ export function useImageClipboard() {
 }
 
 export function useImagePreviewNotice() {
-  const context = useContext(ImagePreviewContext)
-  return context?.showImagePreviewNotice ?? (() => {})
+  const { showToast } = useToast()
+  return useCallback((message: string) => {
+    showToast(message, { tone: 'accent' })
+  }, [showToast])
 }

@@ -4,17 +4,20 @@ import { ModelSettingsProvider } from "./config/ModelSettingsProvider";
 import { ProjectSettingsProvider } from "./config/ProjectSettingsProvider";
 import { AppShell } from "./app/AppShell";
 import { ImagePreviewProvider } from "./features/chat/components/ImagePreview";
+import { ToastProvider } from "./components/toast/ToastProvider";
 
 function App(): React.JSX.Element {
   return (
     <FrontendConfigProvider>
-      <ImagePreviewProvider>
-        <ModelSettingsProvider>
-          <ProjectSettingsProvider>
-            <AppShell />
-          </ProjectSettingsProvider>
-        </ModelSettingsProvider>
-      </ImagePreviewProvider>
+      <ToastProvider>
+        <ImagePreviewProvider>
+          <ModelSettingsProvider>
+            <ProjectSettingsProvider>
+              <AppShell />
+            </ProjectSettingsProvider>
+          </ModelSettingsProvider>
+        </ImagePreviewProvider>
+      </ToastProvider>
     </FrontendConfigProvider>
   );
 }

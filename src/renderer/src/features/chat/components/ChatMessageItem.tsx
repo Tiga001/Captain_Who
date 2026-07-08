@@ -654,7 +654,7 @@ function AgentTimelineItemView({
   if (item.type === 'read_group') {
     const items = getReadGroupItems(run, item.callIds)
     if (items.length === 0) return null
-    return <ReadToolActivityGroup items={items} />
+    return <ReadToolActivityGroup items={items} projectId={projectId} />
   }
 
   if (item.type === 'search_group') {

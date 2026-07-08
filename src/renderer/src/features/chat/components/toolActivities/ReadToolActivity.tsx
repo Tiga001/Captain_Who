@@ -4,6 +4,7 @@ import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../../config/translationFormat'
+import { loadImageFile } from '../../../storage/storageClient'
 import type { ChatReadActivity, ChatReadActivityKind } from '../../chatTypes'
 import { useImagePreview, useImagePreviewNotice } from '../ImagePreview'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
@@ -12,6 +13,7 @@ import type { SettledToolStatus } from './toolActivityUtils'
 interface ReadToolActivityProps {
   activity?: ChatReadActivity
   call: AgentToolCall
+  projectId?: string | null
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
 }
@@ -20,6 +22,7 @@ export interface ReadToolActivityGroupItem extends ReadToolActivityProps {}
 
 interface ReadToolActivityGroupProps {
   items: ReadToolActivityGroupItem[]
+  projectId?: string | null
 }
 
 const TOOL_KINDS: Partial<Record<string, ChatReadActivityKind>> = {
@@ -130,6 +133,10 @@ function normalizeFullDataUrl(activity: ChatReadActivity | undefined) {
   return fullDataUrl?.startsWith('data:image/') ? fullDataUrl : undefined
 }
 
+function imageDataUrlFromRecord(image: { data: string; mimeType: string }) {
+  return `data:${image.mimeType};base64,${image.data}`
+}
+
 function getReadCountLabel(t: Translate, kind: ChatReadActivityKind, count: number) {
   return formatTranslation(t, `agent.read.count.${kind}` as TranslationKey, { count })
 }
@@ -228,7 +235,7 @@ function ReadTextRow({ activity, call, result }: ReadToolActivityProps) {
   )
 }
 
-function ReadActivityCard({ activity, call, result }: ReadToolActivityProps) {
+function ReadActivityCard({ activity, call, projectId, result }: ReadToolActivityProps) {
   const { t } = useFrontendConfig()
   const openImagePreview = useImagePreview()
   const showImagePreviewNotice = useImagePreviewNotice()
@@ -237,22 +244,46 @@ function ReadActivityCard({ activity, call, result }: ReadToolActivityProps) {
   const fullDataUrl = kind === 'image' ? normalizeFullDataUrl(activity) : undefined
   const error = activity?.error ?? result?.error
   const displayName = getDisplayName(activity, call, t)
+  const sourcePath = activity?.path || getPathFromCall(call)
+
+  const openReadImagePreview = async () => {
+    if (fullDataUrl) {
+      openImagePreview({
+        alt: displayName,
+        fileName: displayName,
+        src: fullDataUrl
+      })
+      return
+    }
+
+    if (!sourcePath) {
+      showImagePreviewNotice(t('imagePreview.originalMissing'))
+      return
+    }
+
+    try {
+      const image = await loadImageFile({ projectId, filePath: sourcePath })
+      if (!image?.mimeType.startsWith('image/') || !image.data) {
+        showImagePreviewNotice(t('imagePreview.originalMissing'))
+        return
+      }
+
+      openImagePreview({
+        alt: image.name || displayName,
+        fileName: image.name || displayName,
+        src: imageDataUrlFromRecord(image)
+      })
+    } catch (error) {
+      console.error('Failed to load read_image source', error)
+      showImagePreviewNotice(t('imagePreview.originalMissing'))
+    }
+  }
 
   if (thumbnailDataUrl && !error) {
     return (
       <button
         className="read-activity__image"
-        onClick={() => {
-          if (!fullDataUrl) {
-            showImagePreviewNotice(t('imagePreview.originalMissing'))
-            return
-          }
-          openImagePreview({
-            alt: displayName,
-            fileName: displayName,
-            src: fullDataUrl
-          })
-        }}
+        onClick={() => void openReadImagePreview()}
         title={activity?.path || getPathFromCall(call) || getDisplayName(activity, call, t)}
         type="button"
       >
@@ -264,7 +295,13 @@ function ReadActivityCard({ activity, call, result }: ReadToolActivityProps) {
   return <ReadTextRow activity={activity} call={call} result={result} />
 }
 
-function ReadActivityDetails({ activity, call, result, settledStatus }: ReadToolActivityProps) {
+function ReadActivityDetails({
+  activity,
+  call,
+  projectId,
+  result,
+  settledStatus
+}: ReadToolActivityProps) {
   const error = activity?.error ?? result?.error
 
   return (
@@ -274,6 +311,7 @@ function ReadActivityDetails({ activity, call, result, settledStatus }: ReadTool
         <ReadActivityCard
           activity={activity}
           call={call}
+          projectId={projectId}
           result={result}
           settledStatus={settledStatus}
         />
@@ -282,7 +320,13 @@ function ReadActivityDetails({ activity, call, result, settledStatus }: ReadTool
   )
 }
 
-export function ReadToolActivity({ activity, call, result, settledStatus }: ReadToolActivityProps) {
+export function ReadToolActivity({
+  activity,
+  call,
+  projectId,
+  result,
+  settledStatus
+}: ReadToolActivityProps) {
   const { t } = useFrontendConfig()
   const kind = getKind(call, activity)
   const status = getStatus(activity, result, settledStatus)
@@ -302,6 +346,7 @@ export function ReadToolActivity({ activity, call, result, settledStatus }: Read
       <ReadActivityDetails
         activity={activity}
         call={call}
+        projectId={projectId}
         result={result}
         settledStatus={settledStatus}
       />
@@ -309,7 +354,7 @@ export function ReadToolActivity({ activity, call, result, settledStatus }: Read
   )
 }
 
-export function ReadToolActivityGroup({ items }: ReadToolActivityGroupProps) {
+export function ReadToolActivityGroup({ items, projectId }: ReadToolActivityGroupProps) {
   const { t } = useFrontendConfig()
   const firstItem = items[0]
   if (!firstItem) return null
@@ -318,6 +363,7 @@ export function ReadToolActivityGroup({ items }: ReadToolActivityGroupProps) {
       <ReadToolActivity
         activity={firstItem.activity}
         call={firstItem.call}
+        projectId={projectId}
         result={firstItem.result}
         settledStatus={firstItem.settledStatus}
       />
@@ -349,6 +395,7 @@ export function ReadToolActivityGroup({ items }: ReadToolActivityGroupProps) {
               activity={item.activity}
               call={item.call}
               key={item.call.id}
+              projectId={projectId}
               result={item.result}
               settledStatus={item.settledStatus}
             />
