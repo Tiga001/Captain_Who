@@ -16,8 +16,12 @@ let isQuittingAfterTerminalShutdown = false
 const macWindowChromeOptions =
   process.platform === 'darwin'
     ? {
+        backgroundColor: '#00000000',
         titleBarStyle: 'hidden' as const,
-        trafficLightPosition: { x: 18, y: 18 }
+        trafficLightPosition: { x: 18, y: 18 },
+        transparent: true,
+        vibrancy: 'sidebar' as const,
+        visualEffectState: 'active' as const
       }
     : {}
 

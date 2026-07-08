@@ -1,5 +1,5 @@
 // Electron main client.
-import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
+import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
 import type { IpcMainInvokeEvent, NativeImage, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
 import { execFile } from 'child_process'
 import { homedir, tmpdir } from 'os'
@@ -29,6 +29,12 @@ const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
 }
 
 const execFileAsync = promisify(execFile)
+
+type NativeThemeSource = 'system' | 'light' | 'dark'
+
+function isNativeThemeSource(value: unknown): value is NativeThemeSource {
+  return value === 'system' || value === 'light' || value === 'dark'
+}
 
 function getInvokeWindow(event: IpcMainInvokeEvent): BrowserWindow | undefined {
   return BrowserWindow.fromWebContents(event.sender) ?? undefined
@@ -378,6 +384,12 @@ export function registerHostIpc(
 
   ipcMain.handle('host:core.ping', (_event, input) => coreServer.ping(input))
   ipcMain.handle('host:app.getVersion', () => coreServer.getVersion())
+  ipcMain.handle('host:app.setNativeThemeSource', (_event, themeSource) => {
+    if (!isNativeThemeSource(themeSource)) {
+      throw new Error('Invalid native theme source')
+    }
+    nativeTheme.themeSource = themeSource
+  })
   ipcMain.handle('host:agent.startRun', (_event, input) => coreServer.startRun(input))
   ipcMain.handle('host:agent.startConversationTurn', (_event, input) =>
     coreServer.startConversationTurn(input)
@@ -452,6 +464,9 @@ export function registerHostIpc(
   ipcMain.handle('host:storage.deleteConversation', (_event, conversationId) =>
     coreServer.deleteConversation(conversationId)
   )
+  ipcMain.handle('host:storage.deleteChatMessages', (_event, input) =>
+    coreServer.deleteChatMessages(input)
+  )
   ipcMain.handle('host:storage.upsertChatMessages', (_event, input) =>
     coreServer.upsertChatMessages(input)
   )
@@ -472,6 +487,9 @@ export function registerHostIpc(
   ipcMain.handle('host:storage.selectProfileAvatar', (event) => selectProfileAvatar(event))
   ipcMain.handle('host:storage.loadAttachmentImage', (_event, input) =>
     coreServer.loadAttachmentImage(input)
+  )
+  ipcMain.handle('host:storage.loadInputAttachments', (_event, input) =>
+    coreServer.loadInputAttachments(input)
   )
   ipcMain.handle('host:storage.loadImageFile', (_event, input) =>
     loadImageFile(coreServer, input)

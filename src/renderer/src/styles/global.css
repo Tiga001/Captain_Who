@@ -11,6 +11,12 @@
   --main-panel: var(--mc-color-surface-main-panel);
   --right-panel: var(--mc-color-surface-right-panel);
   --mac-window-control-safe-width: 84px;
+  --mc-sidebar-translucent-opacity: 46%;
+  --mc-sidebar-translucent-tint: var(--mc-color-surface-left-panel);
+}
+
+:root[data-theme="dark"] {
+  --mc-sidebar-translucent-tint: #000000;
 }
 
 * {
@@ -118,7 +124,11 @@ button {
 }
 
 .app-shell[data-translucent-sidebar="true"] .side-panel--left {
-  background: var(--mc-color-surface-left-panel-translucent);
+  background: color-mix(
+    in srgb,
+    var(--mc-sidebar-translucent-tint) var(--mc-sidebar-translucent-opacity),
+    transparent
+  );
   backdrop-filter: saturate(1.45) var(--mc-effect-blur-sidebar);
   -webkit-backdrop-filter: saturate(1.45) var(--mc-effect-blur-sidebar);
 }

@@ -23,6 +23,9 @@ import type {
   StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
+  StorageDeleteChatMessagesRequest,
+  StorageInputAttachment,
+  StorageLoadInputAttachmentsRequest,
   StorageChatMessageRecord,
   StorageChatMessageStateRecord,
   StorageComposerDraftRecord,
@@ -60,6 +63,7 @@ const STORAGE_LOAD_CONVERSATIONS_METHOD = 'storage.loadConversations'
 const STORAGE_SAVE_CONVERSATION_METHOD = 'storage.saveConversation'
 const STORAGE_SAVE_CONVERSATION_META_METHOD = 'storage.saveConversationMeta'
 const STORAGE_DELETE_CONVERSATION_METHOD = 'storage.deleteConversation'
+const STORAGE_DELETE_CHAT_MESSAGES_METHOD = 'storage.deleteChatMessages'
 const STORAGE_UPSERT_CHAT_MESSAGES_METHOD = 'storage.upsertChatMessages'
 const STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD = 'storage.saveChatMessageState'
 const STORAGE_LOAD_COMPOSER_DRAFTS_METHOD = 'storage.loadComposerDrafts'
@@ -69,6 +73,7 @@ const STORAGE_LOAD_UI_PREFERENCES_METHOD = 'storage.loadUiPreferences'
 const STORAGE_SAVE_UI_PREFERENCES_METHOD = 'storage.saveUiPreferences'
 const STORAGE_SELECT_PROFILE_AVATAR_METHOD = 'storage.selectProfileAvatar'
 const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD = 'storage.loadAttachmentImage'
+const STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD = 'storage.loadInputAttachments'
 
 export class CoreServer {
   private readonly rpc = new CoreJsonRpcClient()
@@ -208,6 +213,10 @@ export class CoreServer {
     return this.rpc.request<void, { conversationId: string }>(STORAGE_DELETE_CONVERSATION_METHOD, { conversationId })
   }
 
+  deleteChatMessages(input: StorageDeleteChatMessagesRequest): Promise<void> {
+    return this.rpc.request<void, StorageDeleteChatMessagesRequest>(STORAGE_DELETE_CHAT_MESSAGES_METHOD, input)
+  }
+
   upsertChatMessages(input: {
     conversationId: string
     messages: StorageChatMessageRecord[]
@@ -256,6 +265,13 @@ export class CoreServer {
   loadAttachmentImage(input: { attachmentId: string }): Promise<StorageAttachmentImageRecord | null> {
     return this.rpc.request<StorageAttachmentImageRecord | null, typeof input>(
       STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
+      input
+    )
+  }
+
+  loadInputAttachments(input: StorageLoadInputAttachmentsRequest): Promise<StorageInputAttachment[]> {
+    return this.rpc.request<StorageInputAttachment[], StorageLoadInputAttachmentsRequest>(
+      STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD,
       input
     )
   }

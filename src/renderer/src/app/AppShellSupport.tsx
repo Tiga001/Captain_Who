@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react'
 import type { TranslationKey } from '../config/frontendTranslations'
 import type { ChatMessage } from '../features/chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
+import { getTranslucentSidebarOpacityPercent } from '../features/storage/storageClient'
 import { isMacOS } from '../lib/platform'
 
 export const SUPPORTS_NATIVE_FONT_SMOOTHING = isMacOS()
@@ -26,11 +27,15 @@ export function getAppShellPanelStyle(
   leftOpen: boolean,
   leftWidth: number,
   rightOpen: boolean,
-  rightWidth: number
+  rightWidth: number,
+  uiPreferences: UiPreferencesSnapshot
 ): CSSProperties {
   return {
     '--left-panel-width': `${leftOpen ? leftWidth : 0}px`,
-    '--right-panel-width': `${rightOpen ? rightWidth : 0}px`
+    '--right-panel-width': `${rightOpen ? rightWidth : 0}px`,
+    '--mc-sidebar-translucent-opacity': getTranslucentSidebarOpacityPercent(
+      uiPreferences.translucentSidebarTransparency
+    )
   } as CSSProperties
 }
 

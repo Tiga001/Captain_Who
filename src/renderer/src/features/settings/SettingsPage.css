@@ -4,6 +4,7 @@
   --settings-content-title-color: var(--mc-color-settings-content-title);
   --settings-content-text-color: var(--mc-color-settings-content-text);
   --settings-content-muted-color: var(--mc-color-settings-content-muted);
+  --mc-sidebar-translucent-opacity: 46%;
   position: fixed;
   inset: 0;
   z-index: 100;
@@ -68,7 +69,11 @@
 }
 
 .settings-page[data-translucent-sidebar="true"] .settings-nav {
-  background: var(--mc-color-surface-left-panel-translucent);
+  background: color-mix(
+    in srgb,
+    var(--mc-sidebar-translucent-tint) var(--mc-sidebar-translucent-opacity),
+    transparent
+  );
   backdrop-filter: saturate(1.45) var(--mc-effect-blur-sidebar);
   -webkit-backdrop-filter: saturate(1.45) var(--mc-effect-blur-sidebar);
 }

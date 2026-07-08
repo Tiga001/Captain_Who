@@ -198,6 +198,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(
         connection,
         "ui_preferences",
+        "translucent_sidebar_transparency",
+        "INTEGER NOT NULL DEFAULT 54",
+    )?;
+    add_column_if_missing(
+        connection,
+        "ui_preferences",
         "native_font_smoothing",
         "INTEGER NOT NULL DEFAULT 0",
     )?;

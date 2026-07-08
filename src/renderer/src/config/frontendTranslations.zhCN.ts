@@ -206,6 +206,7 @@ export const zhCNTranslations = {
   'appearance.nativeFontSmoothingDescription': '使用 macOS/WebKit 字体抗锯齿，让文字边缘更平滑。',
   'appearance.translucentSidebar': '半透明侧边栏',
   'appearance.translucentSidebarDescription': '打开后左侧栏使用半透明背景和模糊效果。',
+  'appearance.translucentSidebarTransparency': '侧边栏透明度',
   'environment.selectProject': '选择项目',
   'environment.addProject': '添加项目',
   'environment.deleteProject': '删除项目',
@@ -287,6 +288,9 @@ export const zhCNTranslations = {
   'chat.copy': '复制',
   'chat.copyMessage': '复制消息',
   'chat.copied': '已复制',
+  'chat.edit': '编辑',
+  'chat.editMessage': '编辑消息',
+  'chat.cancel': '取消',
   'chat.usage': 'Token 用量',
   'chat.usageTitle': 'Token 消耗',
   'chat.usageInputTokens': '输入',
@@ -372,9 +376,12 @@ export const zhCNTranslations = {
   'agent.approval.dialog.commandTitle': '是否允许我运行这个命令？',
   'agent.approval.dialog.diffTitle': '是否允许我应用这处修改？',
   'agent.approval.dialog.toolTitle': '是否允许我使用 {tool}？',
-  'agent.approval.dialog.commandPolicyHint': '当前权限要求命令执行前确认；即使批准，危险命令仍会被后端安全策略阻止。',
-  'agent.approval.dialog.diffPolicyHint': '当前权限要求文件修改前确认；批准后仍会校验路径范围、符号链接、文件类型和文件版本。',
-  'agent.approval.dialog.toolPolicyHint': '这个工具需要人工确认；批准后仍会按当前权限和后端安全策略执行。',
+  'agent.approval.dialog.commandPolicyHint':
+    '当前权限要求命令执行前确认；即使批准，危险命令仍会被后端安全策略阻止。',
+  'agent.approval.dialog.diffPolicyHint':
+    '当前权限要求文件修改前确认；批准后仍会校验路径范围、符号链接、文件类型和文件版本。',
+  'agent.approval.dialog.toolPolicyHint':
+    '这个工具需要人工确认；批准后仍会按当前权限和后端安全策略执行。',
   'agent.approval.dialog.approve': '是',
   'agent.approval.dialog.approveRemember': '是，且本轮后续以此开头的命令不再询问',
   'agent.approval.dialog.approvePatchRemember': '是，且本轮编辑文件无需审批',

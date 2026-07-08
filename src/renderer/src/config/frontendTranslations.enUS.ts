@@ -218,6 +218,7 @@ export const enUSTranslations = {
   'appearance.translucentSidebar': 'Translucent sidebar',
   'appearance.translucentSidebarDescription':
     'Use a translucent blurred background for the left sidebar.',
+  'appearance.translucentSidebarTransparency': 'Sidebar transparency',
   'environment.selectProject': 'Select project',
   'environment.addProject': 'Add project',
   'environment.deleteProject': 'Delete project',
@@ -301,6 +302,9 @@ export const enUSTranslations = {
   'chat.copy': 'Copy',
   'chat.copyMessage': 'Copy message',
   'chat.copied': 'Copied',
+  'chat.edit': 'Edit',
+  'chat.editMessage': 'Edit message',
+  'chat.cancel': 'Cancel',
   'chat.usage': 'Token usage',
   'chat.usageTitle': 'Token usage',
   'chat.usageInputTokens': 'Input',

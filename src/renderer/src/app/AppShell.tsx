@@ -1,9 +1,11 @@
 // Renderer UI.
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react'
 import type { AgentEvent, AgentProposedAction } from '@mycopilot/protocol'
+import type { AgentInputAttachment } from '@mycopilot/protocol'
 import { ResizeHandle } from '../components/layout/ResizeHandle'
 import { LeftSidebar } from '../components/sidebar/LeftSidebar'
 import { RightSidebar } from '../components/sidebar/RightSidebar'
+import { useModelSettings } from '../config/ModelSettingsProvider'
 import { useProjectSettings } from '../config/ProjectSettingsProvider'
 import { useFrontendConfig } from '../config/FrontendConfigProvider'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
@@ -29,12 +31,13 @@ import {
 import { resolveChatPermissions } from '../features/chat/chatPermissions'
 import {
   defaultUiPreferences,
+  deleteChatMessages,
   loadComposerDrafts,
   loadConversations,
+  loadInputAttachments,
   loadUiPreferences,
   saveChatMessageState,
   saveComposerDraft,
-  saveConversation,
   saveConversationMeta,
   saveUiPreferences,
   upsertChatMessages
@@ -78,8 +81,48 @@ type PendingMessageUpsert = {
   positionOffset: number
 }
 
+function getAttachmentSummaryFromInput(attachments: AgentInputAttachment[]): string {
+  if (attachments.length === 0) return ''
+  return `附件：${attachments.map((attachment) => attachment.name).join('、')}`
+}
+
+function buildMessageContentWithAttachments(content: string, attachments: AgentInputAttachment[]) {
+  const trimmedContent = content.trim()
+  const attachmentSummary = getAttachmentSummaryFromInput(attachments)
+  return [trimmedContent, attachmentSummary].filter(Boolean).join('\n\n')
+}
+
+function getEditableLastTurn(conversation: ChatConversation) {
+  const messages = conversation.messages
+  if (messages.length < 2) return null
+
+  const userIndex = messages.length - 2
+  const assistantIndex = messages.length - 1
+  const userMessage = messages[userIndex]
+  const assistantMessage = messages[assistantIndex]
+  if (userMessage?.role !== 'user' || assistantMessage?.role !== 'assistant') return null
+  if (assistantMessage.status !== 'sent') return null
+
+  const assistantRunStatus = assistantMessage.agentRun?.status
+  const assistantSettled =
+    !assistantRunStatus ||
+    assistantRunStatus === 'completed' ||
+    assistantRunStatus === 'failed' ||
+    assistantRunStatus === 'cancelled' ||
+    assistantRunStatus === 'idle'
+  if (!assistantSettled) return null
+
+  return {
+    assistantIndex,
+    assistantMessage,
+    userIndex,
+    userMessage
+  }
+}
+
 export function AppShell() {
   const { t } = useFrontendConfig()
+  const { enabledModels } = useModelSettings()
   const { projects, deleteProject, renameProject, showProjectInFolder, togglePinProject } =
     useProjectSettings()
   const {
@@ -115,6 +158,7 @@ export function AppShell() {
   const pendingActionsHydratedRef = useRef(false)
   const cancelledPendingMessageIdsRef = useRef<Set<string>>(new Set())
   const cancelledRunIdsRef = useRef<Set<string>>(new Set())
+  const editSubmissionSeqRef = useRef(0)
   const [drafts, setDrafts] = useState<Record<string, ChatComposerDraft>>({
     [NEW_CONVERSATION_DRAFT_ID]: createComposerDraft()
   })
@@ -126,6 +170,10 @@ export function AppShell() {
   const activeDraft =
     drafts[activeDraftId] ??
     createComposerDraft({ projectId: activeConversation?.projectId ?? null })
+  const activeDraftSelectedModel = useMemo(
+    () => enabledModels.find((model) => model.id === activeDraft.modelId) ?? enabledModels[0] ?? null,
+    [activeDraft.modelId, enabledModels]
+  )
   const permissionModeAvailability = getPermissionModeAvailability(uiPreferences)
   const hasUnreadConversations = conversations.some(
     (conversation) => !conversation.archivedAt && Boolean(conversation.unreadAt)
@@ -230,7 +278,9 @@ export function AppShell() {
     }
   }, [])
 
-  const enqueueConversationSave = useCallback((conversation: ChatConversation) => {
+  // Sending a message only needs conversation metadata here; full conversation saves delete and
+  // reinsert all messages, which can overwrite concurrent agent/tool message-state updates.
+  const enqueueConversationMetaSave = useCallback((conversation: ChatConversation) => {
     const conversationId = conversation.id
     pendingConversationSavesRef.current.set(conversationId, conversation)
 
@@ -245,9 +295,9 @@ export function AppShell() {
 
         pendingConversationSavesRef.current.delete(conversationId)
         try {
-          await saveConversation(payload)
+          await saveConversationMeta(payload)
         } catch (error) {
-          console.error('Failed to save conversation to SQLite', error)
+          console.error('Failed to save conversation metadata to SQLite', error)
         }
       }
     }
@@ -719,7 +769,7 @@ export function AppShell() {
         : [conversationToSave, ...conversationsRef.current]
 
       setConversationsWithRef(nextConversations)
-      enqueueConversationSave(conversationToSave)
+      enqueueConversationMetaSave(conversationToSave)
       enqueueChatMessagesUpsert(
         conversationId,
         [userMessage, assistantMessage],
@@ -750,10 +800,156 @@ export function AppShell() {
     [
       activeConversation,
       enqueueChatMessagesUpsert,
-      enqueueConversationSave,
+      enqueueConversationMetaSave,
       requestAssistantResponse,
       setConversationsWithRef,
       updateDraft
+    ]
+  )
+
+  const submitEditedLastUserMessage = useCallback(
+    async (messageId: string, content: string) => {
+      const conversationId = activeConversationIdRef.current
+      if (!conversationId) {
+        throw new Error('当前没有可编辑的对话。')
+      }
+
+      const conversation = conversationsRef.current.find((candidate) => candidate.id === conversationId)
+      if (!conversation) {
+        throw new Error('当前对话不存在。')
+      }
+
+      const editableTurn = getEditableLastTurn(conversation)
+      if (!editableTurn || editableTurn.userMessage.id !== messageId) {
+        throw new Error('这条消息已经不能编辑，请刷新当前对话后再试。')
+      }
+
+      const attachmentIds = editableTurn.userMessage.attachments?.map((attachment) => attachment.id) ?? []
+      const attachments = await loadInputAttachments(attachmentIds)
+
+      await waitForConversationSaves(conversationId)
+      await waitForMessageUpserts(conversationId)
+
+      const latestConversation = conversationsRef.current.find(
+        (candidate) => candidate.id === conversationId
+      )
+      if (!latestConversation) {
+        throw new Error('当前对话不存在。')
+      }
+
+      const latestEditableTurn = getEditableLastTurn(latestConversation)
+      if (!latestEditableTurn || latestEditableTurn.userMessage.id !== messageId) {
+        throw new Error('对话已发生变化，请重新编辑最后一条消息。')
+      }
+
+      const messageContent = buildMessageContentWithAttachments(content, attachments)
+      if (!messageContent.trim()) {
+        throw new Error('消息内容不能为空。')
+      }
+      if (!activeDraftSelectedModel) {
+        throw new Error(t('chat.noEnabledModels'))
+      }
+      if (
+        attachments.some((attachment) => attachment.kind === 'image') &&
+        !activeDraftSelectedModel.supportsImage
+      ) {
+        throw new Error(t('chat.unsupportedImageWarning'))
+      }
+
+      const now = Date.now()
+      const modelId = activeDraftSelectedModel.id
+      const permissionMode = activeDraft.permissionMode
+      const userMessage = createUserMessage(messageContent, attachments)
+      const assistantMessage = createAssistantMessage(THINKING_PLACEHOLDER, 'pending')
+      const messagesBeforeEditedTurn = latestConversation.messages.slice(0, latestEditableTurn.userIndex)
+      const nextConversation: ChatConversation = {
+        ...latestConversation,
+        messages: [...messagesBeforeEditedTurn, userMessage, assistantMessage],
+        modelId,
+        updatedAt: now,
+        unreadAt: null
+      }
+
+      const oldRunId = latestEditableTurn.assistantMessage.agentRun?.runId
+      if (oldRunId) {
+        cancelledRunIdsRef.current.add(oldRunId)
+        cleanupRunBinding(oldRunId)
+      }
+
+      cancelledPendingMessageIdsRef.current.add(latestEditableTurn.assistantMessage.id)
+      const submissionSeq = (editSubmissionSeqRef.current += 1)
+      setConversationsWithRef((currentConversations) =>
+        currentConversations.map((candidate) =>
+          candidate.id === conversationId ? nextConversation : candidate
+        )
+      )
+      updateDraft(
+        conversationId,
+        createComposerDraft({
+          modelId,
+          permissionMode,
+          projectId: latestConversation.projectId
+        })
+      )
+
+      void (async () => {
+        try {
+          await saveConversationMeta(nextConversation)
+          await deleteChatMessages(conversationId, [
+            latestEditableTurn.userMessage.id,
+            latestEditableTurn.assistantMessage.id
+          ])
+          await upsertChatMessages(
+            conversationId,
+            [userMessage, assistantMessage],
+            latestEditableTurn.userIndex
+          )
+
+          if (editSubmissionSeqRef.current !== submissionSeq) return
+
+          await requestAssistantResponse(
+            conversationId,
+            userMessage.id,
+            assistantMessage.id,
+            content,
+            modelId,
+            latestConversation.projectId,
+            permissionMode,
+            attachments,
+            undefined
+          )
+        } catch (error) {
+          if (editSubmissionSeqRef.current !== submissionSeq) return
+          const errorMessage = error instanceof Error ? error.message : String(error)
+          updateAssistantMessage(
+            conversationId,
+            assistantMessage.id,
+            (currentMessage) => ({
+              ...currentMessage,
+              content: errorMessage,
+              status: 'error',
+              agentRun: {
+                ...ensureAgentRun(currentMessage.agentRun, null, 'failed'),
+                error: errorMessage
+              }
+            }),
+            { touchConversation: true }
+          )
+        }
+      })()
+    },
+    [
+      activeDraft.modelId,
+      activeDraft.permissionMode,
+      activeDraftSelectedModel,
+      cleanupRunBinding,
+      requestAssistantResponse,
+      setConversationsWithRef,
+      t,
+      updateDraft,
+      updateAssistantMessage,
+      waitForConversationSaves,
+      waitForMessageUpserts
     ]
   )
 
@@ -973,7 +1169,7 @@ export function AppShell() {
       data-right-maximized={rightMaximized ? 'true' : undefined}
       data-right-open={rightOpen ? 'true' : 'false'}
       data-translucent-sidebar={uiPreferences.translucentSidebar ? 'true' : undefined}
-      style={getAppShellPanelStyle(leftOpen, leftWidth, rightOpen, rightWidth)}
+      style={getAppShellPanelStyle(leftOpen, leftWidth, rightOpen, rightWidth, uiPreferences)}
     >
       <header className="window-toolbar" data-drag-region />
 
@@ -1050,11 +1246,14 @@ export function AppShell() {
             <ChatConversationPage
               composerDraft={activeDraft}
               conversation={activeConversation}
+              editSelectedModelAvailable={Boolean(activeDraftSelectedModel)}
+              editSelectedModelSupportsImage={Boolean(activeDraftSelectedModel?.supportsImage)}
               permissionModeAvailability={permissionModeAvailability}
               showTokenUsageDetails={uiPreferences.showTokenUsageDetails}
               onApproveAgentAction={handleApproveAgentAction}
               onCancelAgentAction={handleCancelAgentAction}
               onComposerDraftChange={(draft) => updateDraft(activeConversation.id, draft)}
+              onEditLastUserMessage={submitEditedLastUserMessage}
               onMessageUiStateChange={(messageId, uiState: ChatMessageUiState | undefined) => {
                 const currentMessage = activeConversation.messages.find(
                   (message) => message.id === messageId

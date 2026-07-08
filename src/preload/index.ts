@@ -44,7 +44,9 @@ const host: HostApi = {
     ping: (input) => ipcRenderer.invoke('host:core.ping', input)
   },
   app: {
-    getVersion: () => ipcRenderer.invoke('host:app.getVersion')
+    getVersion: () => ipcRenderer.invoke('host:app.getVersion'),
+    setNativeThemeSource: (themeSource) =>
+      ipcRenderer.invoke('host:app.setNativeThemeSource', themeSource)
   },
   agent: {
     startRun: (input) => ipcRenderer.invoke('host:agent.startRun', input),
@@ -102,6 +104,7 @@ const host: HostApi = {
       ipcRenderer.invoke('host:storage.saveConversationMeta', conversation),
     deleteConversation: (conversationId) =>
       ipcRenderer.invoke('host:storage.deleteConversation', conversationId),
+    deleteChatMessages: (input) => ipcRenderer.invoke('host:storage.deleteChatMessages', input),
     upsertChatMessages: (input) => ipcRenderer.invoke('host:storage.upsertChatMessages', input),
     saveChatMessageState: (input) => ipcRenderer.invoke('host:storage.saveChatMessageState', input),
     loadComposerDrafts: () => ipcRenderer.invoke('host:storage.loadComposerDrafts'),
@@ -113,6 +116,7 @@ const host: HostApi = {
       ipcRenderer.invoke('host:storage.saveUiPreferences', preferences),
     selectProfileAvatar: () => ipcRenderer.invoke('host:storage.selectProfileAvatar'),
     loadAttachmentImage: (input) => ipcRenderer.invoke('host:storage.loadAttachmentImage', input),
+    loadInputAttachments: (input) => ipcRenderer.invoke('host:storage.loadInputAttachments', input),
     loadImageFile: (input) => ipcRenderer.invoke('host:storage.loadImageFile', input)
   },
   terminal: {

@@ -11,6 +11,7 @@ import { languageOptions, translations } from "./frontendTranslations";
 import type { FrontendConfig } from "./frontendConfig";
 import type { FrontendThemeName, ThemePreference } from "./frontendTheme";
 import type { AppLanguage, TranslationKey } from "./frontendTranslations";
+import { hostClient } from "../host/hostClient";
 
 interface StoredFrontendConfig {
   language?: AppLanguage;
@@ -85,6 +86,10 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
     document.documentElement.dataset.themePreference = themePreference;
     document.documentElement.style.colorScheme = resolvedTheme;
   }, [resolvedTheme, themePreference]);
+
+  useEffect(() => {
+    void hostClient.app.setNativeThemeSource(themePreference);
+  }, [themePreference]);
 
   useEffect(() => {
     if (!window.matchMedia) return;

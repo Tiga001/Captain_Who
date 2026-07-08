@@ -193,6 +193,57 @@ pub fn get_attachment(
     attachment_from_row(row).map(Some)
 }
 
+pub fn list_message_attachments(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids: &[String],
+) -> rusqlite::Result<Vec<AttachmentRecord>> {
+    let mut attachments = Vec::new();
+
+    for message_id in message_ids {
+        let mut statement = connection.prepare(
+            "
+            SELECT
+                id,
+                conversation_id,
+                message_id,
+                project_id,
+                kind,
+                original_name,
+                mime_type,
+                size_bytes,
+                storage_rel_path,
+                created_at
+            FROM attachments
+            WHERE conversation_id = ?1 AND message_id = ?2
+            ORDER BY created_at ASC, id ASC
+            ",
+        )?;
+
+        let mut message_attachments = statement
+            .query_map(params![conversation_id, message_id], attachment_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        attachments.append(&mut message_attachments);
+    }
+
+    Ok(attachments)
+}
+
+pub fn delete_message_attachments(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids: &[String],
+) -> rusqlite::Result<()> {
+    for message_id in message_ids {
+        connection.execute(
+            "DELETE FROM attachments WHERE conversation_id = ?1 AND message_id = ?2",
+            params![conversation_id, message_id],
+        )?;
+    }
+
+    Ok(())
+}
+
 fn attachment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttachmentRecord> {
     Ok(AttachmentRecord {
         id: row.get(0)?,

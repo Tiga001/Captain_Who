@@ -16,6 +16,7 @@ export const STORAGE_LOAD_CONVERSATIONS_METHOD = "storage.loadConversations";
 export const STORAGE_SAVE_CONVERSATION_METHOD = "storage.saveConversation";
 export const STORAGE_SAVE_CONVERSATION_META_METHOD = "storage.saveConversationMeta";
 export const STORAGE_DELETE_CONVERSATION_METHOD = "storage.deleteConversation";
+export const STORAGE_DELETE_CHAT_MESSAGES_METHOD = "storage.deleteChatMessages";
 export const STORAGE_UPSERT_CHAT_MESSAGES_METHOD = "storage.upsertChatMessages";
 export const STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD = "storage.saveChatMessageState";
 export const STORAGE_LOAD_COMPOSER_DRAFTS_METHOD = "storage.loadComposerDrafts";
@@ -25,6 +26,7 @@ export const STORAGE_LOAD_UI_PREFERENCES_METHOD = "storage.loadUiPreferences";
 export const STORAGE_SAVE_UI_PREFERENCES_METHOD = "storage.saveUiPreferences";
 export const STORAGE_SELECT_PROFILE_AVATAR_METHOD = "storage.selectProfileAvatar";
 export const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD = "storage.loadAttachmentImage";
+export const STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD = "storage.loadInputAttachments";
 
 export interface StorageModelConfigRecord {
   id: string;
@@ -136,6 +138,7 @@ export interface StorageUiPreferencesRecord {
   nativeFontSmoothing: boolean;
   showTokenUsageDetails: boolean;
   translucentSidebar: boolean;
+  translucentSidebarTransparency: number;
   fullPermissionEnabled: boolean;
   customPermissionEnabled: boolean;
   customPermissions: AgentPermissions;
@@ -172,6 +175,11 @@ export interface StorageDeleteConversationRequest {
   conversationId: string;
 }
 
+export interface StorageDeleteChatMessagesRequest {
+  conversationId: string;
+  messageIds: string[];
+}
+
 export interface StorageUpsertChatMessagesRequest {
   conversationId: string;
   messages: StorageChatMessageRecord[];
@@ -192,3 +200,7 @@ export interface StorageSaveComposerDraftRequest {
 }
 
 export type StorageInputAttachment = AgentInputAttachment;
+
+export interface StorageLoadInputAttachmentsRequest {
+  attachmentIds: string[];
+}

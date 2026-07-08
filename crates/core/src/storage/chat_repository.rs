@@ -250,6 +250,46 @@ pub fn upsert_messages(
     transaction.commit()
 }
 
+pub fn delete_messages(
+    connection: &mut Connection,
+    conversation_id: &str,
+    message_ids: &[String],
+) -> rusqlite::Result<()> {
+    let transaction = connection.transaction()?;
+
+    for message_id in message_ids {
+        transaction.execute(
+            "DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2",
+            params![conversation_id, message_id],
+        )?;
+    }
+
+    let ordered_message_ids = {
+        let mut statement = transaction.prepare(
+            "
+            SELECT id
+            FROM messages
+            WHERE conversation_id = ?1
+            ORDER BY position ASC, created_at ASC
+            ",
+        )?;
+
+        let ordered_ids = statement
+            .query_map(params![conversation_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ordered_ids
+    };
+
+    for (position, message_id) in ordered_message_ids.iter().enumerate() {
+        transaction.execute(
+            "UPDATE messages SET position = ?1 WHERE conversation_id = ?2 AND id = ?3",
+            params![position as i64, conversation_id, message_id],
+        )?;
+    }
+
+    transaction.commit()
+}
+
 pub fn delete_conversation(connection: &Connection, conversation_id: &str) -> rusqlite::Result<()> {
     connection.execute(
         "DELETE FROM conversations WHERE id = ?1",

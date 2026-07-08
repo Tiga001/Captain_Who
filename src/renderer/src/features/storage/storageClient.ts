@@ -46,6 +46,10 @@ export type SidebarConversationSort = "created" | "updated";
 export type SidebarProjectSort = "created" | "recent" | "manual";
 export type SidebarSectionOrder = "projects_first" | "conversations_first";
 
+export const MIN_TRANSLUCENT_SIDEBAR_TRANSPARENCY = 50;
+export const MAX_TRANSLUCENT_SIDEBAR_TRANSPARENCY = 100;
+export const DEFAULT_TRANSLUCENT_SIDEBAR_TRANSPARENCY = 54;
+
 export interface UiPreferencesSnapshot {
   profileAvatarDataUrl: string | null;
   profileDisplayName: string;
@@ -57,6 +61,7 @@ export interface UiPreferencesSnapshot {
   nativeFontSmoothing: boolean;
   showTokenUsageDetails: boolean;
   translucentSidebar: boolean;
+  translucentSidebarTransparency: number;
   fullPermissionEnabled: boolean;
   customPermissionEnabled: boolean;
   customPermissions: AgentPermissions;
@@ -161,6 +166,11 @@ export async function deleteStoredConversation(conversationId: string): Promise<
   await hostClient.storage.deleteConversation(conversationId);
 }
 
+export async function deleteChatMessages(conversationId: string, messageIds: string[]): Promise<void> {
+  if (messageIds.length === 0) return;
+  await hostClient.storage.deleteChatMessages({ conversationId, messageIds });
+}
+
 export async function loadComposerDrafts(): Promise<Record<string, ChatComposerDraft>> {
   return mapDraftsFromStorage(await hostClient.storage.loadComposerDrafts());
 }
@@ -195,6 +205,12 @@ export async function loadAttachmentImage(
   return hostClient.storage.loadAttachmentImage({ attachmentId: normalizedId });
 }
 
+export async function loadInputAttachments(attachmentIds: string[]): Promise<AgentInputAttachment[]> {
+  const normalizedIds = attachmentIds.map((id) => id.trim()).filter(Boolean);
+  if (normalizedIds.length === 0) return [];
+  return hostClient.storage.loadInputAttachments({ attachmentIds: normalizedIds });
+}
+
 export async function loadImageFile(input: {
   projectId?: string | null;
   filePath: string;
@@ -226,6 +242,7 @@ export function defaultUiPreferences(): UiPreferencesSnapshot {
     nativeFontSmoothing: false,
     showTokenUsageDetails: true,
     translucentSidebar: false,
+    translucentSidebarTransparency: DEFAULT_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
     fullPermissionEnabled: true,
     customPermissionEnabled: true,
     customPermissions: {
@@ -459,12 +476,30 @@ function normalizeUiPreferences(preferences: StorageUiPreferencesRecord | null |
       : [],
     sidebarSectionOrder:
       preferences?.sidebarSectionOrder === "conversations_first" ? "conversations_first" : "projects_first",
+    translucentSidebarTransparency: normalizeTranslucentSidebarTransparency(
+      preferences?.translucentSidebarTransparency,
+    ),
     customPermissions: {
       ...defaultUiPreferences().customPermissions,
       ...preferences?.customPermissions,
     },
     updatedAt: typeof preferences?.updatedAt === "number" ? preferences.updatedAt : Date.now(),
   };
+}
+
+export function normalizeTranslucentSidebarTransparency(value: unknown): number {
+  const numericValue =
+    typeof value === "number" && Number.isFinite(value)
+      ? Math.round(value)
+      : DEFAULT_TRANSLUCENT_SIDEBAR_TRANSPARENCY;
+  return Math.min(
+    MAX_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
+    Math.max(MIN_TRANSLUCENT_SIDEBAR_TRANSPARENCY, numericValue),
+  );
+}
+
+export function getTranslucentSidebarOpacityPercent(transparency: unknown): string {
+  return `${100 - normalizeTranslucentSidebarTransparency(transparency)}%`;
 }
 
 function parseDraftAttachments(value: string): AgentInputAttachment[] {

@@ -21,10 +21,11 @@ use mycopilot_protocol_rs::{
     AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD, AGENT_CLEAR_USAGE_RECORDS_METHOD,
     AGENT_GET_USAGE_SUMMARY_METHOD, AGENT_LIST_PENDING_ACTIONS_METHOD, AGENT_REJECT_ACTION_METHOD,
     AGENT_START_CONVERSATION_TURN_METHOD, AGENT_START_RUN_METHOD, APP_GET_VERSION_METHOD,
-    CORE_PING_METHOD, STORAGE_DELETE_COMPOSER_DRAFT_METHOD, STORAGE_DELETE_CONVERSATION_METHOD,
-    STORAGE_DELETE_PROJECT_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
-    STORAGE_LOAD_APP_DATA_METHOD, STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
-    STORAGE_LOAD_COMPOSER_DRAFTS_METHOD, STORAGE_LOAD_CONVERSATIONS_METHOD,
+    CORE_PING_METHOD, STORAGE_DELETE_CHAT_MESSAGES_METHOD, STORAGE_DELETE_COMPOSER_DRAFT_METHOD,
+    STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
+    STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_LOAD_APP_DATA_METHOD,
+    STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD, STORAGE_LOAD_COMPOSER_DRAFTS_METHOD,
+    STORAGE_LOAD_CONVERSATIONS_METHOD, STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD,
     STORAGE_LOAD_MODEL_SETTINGS_METHOD, STORAGE_LOAD_PROJECTS_METHOD,
     STORAGE_LOAD_UI_PREFERENCES_METHOD, STORAGE_REVEAL_PROJECT_FILE_METHOD,
     STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD,
@@ -205,6 +206,16 @@ fn handle_request(
                 storage.load_attachment_image(&input.attachment_id),
             )
         }
+        STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD => {
+            let input = match parse_params::<LoadInputAttachmentsRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage.load_input_attachments(&input.attachment_ids),
+            )
+        }
         STORAGE_SAVE_CONVERSATION_METHOD => {
             let conversation = match parse_params::<ChatConversationRecord>(request.params) {
                 Ok(conversation) => conversation,
@@ -228,6 +239,18 @@ fn handle_request(
                 request.id,
                 storage
                     .delete_conversation(&input.conversation_id)
+                    .map(|_| json!(null)),
+            )
+        }
+        STORAGE_DELETE_CHAT_MESSAGES_METHOD => {
+            let input = match parse_params::<DeleteChatMessagesRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage
+                    .delete_chat_messages(&input.conversation_id, &input.message_ids)
                     .map(|_| json!(null)),
             )
         }
@@ -491,6 +514,19 @@ struct ScopeIdRequest {
 #[serde(rename_all = "camelCase")]
 struct AttachmentIdRequest {
     attachment_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadInputAttachmentsRequest {
+    attachment_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteChatMessagesRequest {
+    conversation_id: String,
+    message_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

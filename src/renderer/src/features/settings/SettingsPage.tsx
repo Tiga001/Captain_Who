@@ -1,5 +1,5 @@
 // Renderer UI.
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
   Archive,
@@ -19,6 +19,7 @@ import type { AppProject } from '../../config/projectConfig'
 import type { TranslationKey } from '../../config/frontendTranslations'
 import type { ChatConversation } from '../chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../storage/storageClient'
+import { getTranslucentSidebarOpacityPercent } from '../storage/storageClient'
 import { AppearanceSettingsPage } from './pages/AppearanceSettingsPage'
 import { ArchivedConversationsSettingsPage } from './pages/ArchivedConversationsSettingsPage'
 import { ConfigurationSettingsPage } from './pages/ConfigurationSettingsPage'
@@ -261,6 +262,13 @@ export function SettingsPage({
         SUPPORTS_NATIVE_FONT_SMOOTHING && uiPreferences.nativeFontSmoothing ? 'true' : undefined
       }
       data-translucent-sidebar={uiPreferences.translucentSidebar || undefined}
+      style={
+        {
+          '--mc-sidebar-translucent-opacity': getTranslucentSidebarOpacityPercent(
+            uiPreferences.translucentSidebarTransparency
+          )
+        } as CSSProperties
+      }
       onContextMenu={(event) => {
         event.preventDefault()
       }}

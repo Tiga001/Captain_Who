@@ -14,6 +14,8 @@ interface AgentApprovalOptions {
 interface ChatConversationPageProps {
   conversation: ChatConversation
   composerDraft: ChatComposerDraft
+  editSelectedModelAvailable: boolean
+  editSelectedModelSupportsImage: boolean
   onApproveAgentAction?: (
     messageId: string,
     action: AgentProposedAction,
@@ -21,6 +23,7 @@ interface ChatConversationPageProps {
   ) => void
   onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void
   onComposerDraftChange: (draft: ChatComposerDraft) => void
+  onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onStopGenerating?: () => void
   onSubmitMessage: (message: string, options: ChatSubmitOptions) => void
@@ -61,12 +64,39 @@ function getPendingApprovalTarget(conversation: ChatConversation) {
   return null
 }
 
+function isAssistantReplyComplete(message: ChatConversation['messages'][number] | undefined) {
+  if (!message || message.role !== 'assistant' || message.status !== 'sent') return false
+  const status = message.agentRun?.status
+  return (
+    !status ||
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'idle'
+  )
+}
+
+function getEditableLastUserMessageId(conversation: ChatConversation) {
+  const messages = conversation.messages
+  if (messages.length < 2) return null
+
+  const userMessage = messages[messages.length - 2]
+  const assistantMessage = messages[messages.length - 1]
+  if (userMessage?.role !== 'user') return null
+  if (!isAssistantReplyComplete(assistantMessage)) return null
+
+  return userMessage.id
+}
+
 export function ChatConversationPage({
   composerDraft,
   conversation,
+  editSelectedModelAvailable,
+  editSelectedModelSupportsImage,
   onApproveAgentAction,
   onCancelAgentAction,
   onComposerDraftChange,
+  onEditLastUserMessage,
   onRejectAgentAction,
   onStopGenerating,
   onSubmitMessage,
@@ -86,6 +116,9 @@ export function ChatConversationPage({
     [conversation]
   )
   const hasPendingApproval = Boolean(pendingApprovalTarget)
+  const editableLastUserMessageId = hasPendingApproval
+    ? null
+    : getEditableLastUserMessageId(conversation)
 
   useEffect(() => {
     if (!hasPendingApproval) return
@@ -108,6 +141,11 @@ export function ChatConversationPage({
             message={message}
             onApprove={onApproveAgentAction}
             onCancel={onCancelAgentAction}
+            editSelectedModelAvailable={editSelectedModelAvailable}
+            editSelectedModelSupportsImage={editSelectedModelSupportsImage}
+            onEditSubmit={
+              message.id === editableLastUserMessageId ? onEditLastUserMessage : undefined
+            }
             onReject={onRejectAgentAction}
             onUiStateChange={onMessageUiStateChange}
             projectId={conversation.projectId}

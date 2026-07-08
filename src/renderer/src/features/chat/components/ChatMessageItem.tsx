@@ -1,6 +1,6 @@
 // Renderer UI.
-import { useEffect, useId, useMemo, useState } from 'react'
-import { AlertTriangle, ChevronDown, Check, Copy, Database } from 'lucide-react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { AlertTriangle, ChevronDown, Check, Copy, Database, Pencil } from 'lucide-react'
 import type { AgentProposedAction, AgentToolCall, AgentUsage } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../config/translationFormat'
@@ -49,6 +49,8 @@ const ACTIVE_STREAMING_GRACE_MS = 1200
 const COPIED_INDICATOR_MS = 1300
 
 interface ChatMessageItemProps {
+  editSelectedModelAvailable?: boolean
+  editSelectedModelSupportsImage?: boolean
   isLastAssistantMessage?: boolean
   message: ChatMessage
   projectId?: string | null
@@ -58,6 +60,7 @@ interface ChatMessageItemProps {
     options?: { rememberForRun?: boolean }
   ) => void
   onCancel?: (messageId: string, action: AgentProposedAction) => void
+  onEditSubmit?: (messageId: string, content: string) => void | Promise<void>
   onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   showTokenUsageDetails: boolean
@@ -579,12 +582,16 @@ function UsageAction({ usage }: { usage: AgentUsage | undefined }) {
 }
 
 function ChatMessageActions({
+  canEdit = false,
   content,
+  onEdit,
   showTokenUsageDetails,
   timestamp,
   usage
 }: {
+  canEdit?: boolean
   content: string
+  onEdit?: () => void
   showTokenUsageDetails: boolean
   timestamp: number | undefined
   usage?: AgentUsage
@@ -627,6 +634,19 @@ function ChatMessageActions({
           {copied ? t('chat.copied') : t('chat.copy')}
         </span>
       </button>
+      {canEdit && (
+        <button
+          aria-label={t('chat.editMessage')}
+          onClick={onEdit}
+          title={t('chat.editMessage')}
+          type="button"
+        >
+          <Pencil aria-hidden="true" />
+          <span className="chat-message__action-tooltip" role="tooltip">
+            {t('chat.edit')}
+          </span>
+        </button>
+      )}
       {showTokenUsageDetails && <UsageAction usage={usage} />}
     </div>
   )
@@ -773,6 +793,10 @@ function AgentRunView({
       })
     }
   }, [message.createdAt, now, run, t])
+  const displayTimeline = useMemo(
+    () => (run ? groupTimelineItems(run, timeline) : []),
+    [run, timeline]
+  )
 
   if (!run) {
     return hasDisplayableContent(message.content) ? (
@@ -797,7 +821,6 @@ function AgentRunView({
     shouldShowThinkingActivity(run, timeline)
   const showTokenLimitNotice = isRunSettled(run) && isTokenLimitFinishReason(run.finishReason)
   const webSearchSources = getUniqueWebSearchSources(run)
-  const displayTimeline = useMemo(() => groupTimelineItems(run, timeline), [run, timeline])
 
   return (
     <div className="agent-run">
@@ -844,6 +867,90 @@ function MessageContent({ message, onUiStateChange, projectId }: ChatMessageItem
   }
 
   return <ChatMarkdown content={getUserVisibleContent(message)} />
+}
+
+function EditableUserMessage({
+  hasAttachments,
+  hasImageAttachments,
+  initialContent,
+  selectedModelAvailable,
+  selectedModelSupportsImage,
+  onCancel,
+  onSubmit
+}: {
+  hasAttachments: boolean
+  hasImageAttachments: boolean
+  initialContent: string
+  selectedModelAvailable: boolean
+  selectedModelSupportsImage: boolean
+  onCancel: () => void
+  onSubmit: (content: string) => void | Promise<void>
+}) {
+  const { t } = useFrontendConfig()
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [content, setContent] = useState(initialContent)
+  const [error, setError] = useState<string | null>(null)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const validationMessage = !selectedModelAvailable
+    ? t('chat.noEnabledModels')
+    : hasImageAttachments && !selectedModelSupportsImage
+      ? t('chat.unsupportedImageWarning')
+      : null
+  const canSend = (content.trim().length > 0 || hasAttachments) && !validationMessage
+
+  useEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+
+    textarea.style.height = 'auto'
+    textarea.style.height = `${textarea.scrollHeight}px`
+  }, [content])
+
+  const submit = async () => {
+    if (!canSend || isSubmitting) return
+
+    setIsSubmitting(true)
+    setError(null)
+    try {
+      await onSubmit(content.trim())
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : String(submitError))
+      setIsSubmitting(false)
+    }
+  }
+
+  return (
+    <form
+      className="chat-message-edit"
+      onSubmit={(event) => {
+        event.preventDefault()
+        void submit()
+      }}
+    >
+      <textarea
+        ref={textareaRef}
+        aria-label={t('chat.editMessage')}
+        autoFocus
+        value={content}
+        onChange={(event) => setContent(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== 'Enter' || event.shiftKey) return
+          event.preventDefault()
+          void submit()
+        }}
+      />
+      {validationMessage && <p className="chat-message-edit__warning">{validationMessage}</p>}
+      {error && <p className="chat-message-edit__error">{error}</p>}
+      <div className="chat-message-edit__actions">
+        <button disabled={isSubmitting} onClick={onCancel} type="button">
+          {t('chat.cancel')}
+        </button>
+        <button disabled={!canSend || isSubmitting} type="submit">
+          {t('chat.send')}
+        </button>
+      </div>
+    </form>
+  )
 }
 
 function MessageAttachments({
@@ -957,15 +1064,19 @@ function MessageAttachments({
 }
 
 export function ChatMessageItem({
+  editSelectedModelAvailable = true,
+  editSelectedModelSupportsImage = true,
   isLastAssistantMessage = false,
   message,
   onApprove,
   onCancel,
+  onEditSubmit,
   onReject,
   onUiStateChange,
   projectId,
   showTokenUsageDetails
 }: ChatMessageItemProps) {
+  const [isEditing, setIsEditing] = useState(false)
   const isAssistantActionsVisible = shouldShowAssistantActions(message)
   const userVisibleContent = getUserVisibleContent(message)
   const actionContent =
@@ -976,14 +1087,20 @@ export function ChatMessageItem({
       : message.createdAt
   const actionUsage = message.role === 'assistant' ? message.agentRun?.usage : undefined
   const showActions = message.role === 'user' || isAssistantActionsVisible
+  const canEdit = message.role === 'user' && Boolean(onEditSubmit)
   const pinCopyAction =
     message.role === 'assistant' && isLastAssistantMessage && isAssistantActionsVisible
   const showBody = message.role === 'assistant' || Boolean(userVisibleContent.trim())
+
+  useEffect(() => {
+    setIsEditing(false)
+  }, [canEdit, message.id])
 
   return (
     <article
       className={`chat-message chat-message--${message.role}`}
       data-copy-pinned={pinCopyAction ? 'true' : undefined}
+      data-editing={isEditing ? 'true' : undefined}
       data-message-id={message.id}
       data-status={message.status}
       key={message.id}
@@ -991,7 +1108,21 @@ export function ChatMessageItem({
       {message.role === 'user' && (
         <MessageAttachments attachments={message.attachments} messageId={message.id} />
       )}
-      {showBody && (
+      {isEditing ? (
+        <div className="chat-message__body">
+          <EditableUserMessage
+            hasAttachments={Boolean(message.attachments?.length)}
+            hasImageAttachments={Boolean(
+              message.attachments?.some((attachment) => attachment.kind === 'image')
+            )}
+            initialContent={userVisibleContent}
+            onCancel={() => setIsEditing(false)}
+            onSubmit={(content) => onEditSubmit?.(message.id, content)}
+            selectedModelAvailable={editSelectedModelAvailable}
+            selectedModelSupportsImage={editSelectedModelSupportsImage}
+          />
+        </div>
+      ) : showBody ? (
         <div className="chat-message__body">
           <MessageContent
             message={message}
@@ -1003,10 +1134,12 @@ export function ChatMessageItem({
             showTokenUsageDetails={showTokenUsageDetails}
           />
         </div>
-      )}
-      {showActions && (
+      ) : null}
+      {showActions && !isEditing && (
         <ChatMessageActions
+          canEdit={canEdit}
           content={actionContent}
+          onEdit={() => setIsEditing(true)}
           showTokenUsageDetails={showTokenUsageDetails}
           timestamp={actionTimestamp}
           usage={actionUsage}

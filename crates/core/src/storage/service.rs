@@ -189,6 +189,33 @@ impl StorageService {
         self.cleanup_attachment_files(attachments)
     }
 
+    pub fn delete_chat_messages(
+        &self,
+        conversation_id: &str,
+        message_ids: &[String],
+    ) -> Result<(), String> {
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut connection = self.state.connection()?;
+        let attachments = attachment_repository::list_message_attachments(
+            &connection,
+            conversation_id,
+            message_ids,
+        )
+        .map_err(storage_error)?;
+        attachment_repository::delete_message_attachments(
+            &connection,
+            conversation_id,
+            message_ids,
+        )
+        .map_err(storage_error)?;
+        chat_repository::delete_messages(&mut connection, conversation_id, message_ids)
+            .map_err(storage_error)?;
+        self.cleanup_attachment_files(attachments)
+    }
+
     pub fn save_input_attachments(
         &self,
         conversation_id: &str,
@@ -237,6 +264,40 @@ impl StorageService {
         }
 
         Ok(())
+    }
+
+    pub fn load_input_attachments(
+        &self,
+        attachment_ids: &[String],
+    ) -> Result<Vec<AgentInputAttachment>, String> {
+        let connection = self.state.connection()?;
+        let mut attachments = Vec::new();
+
+        for attachment_id in attachment_ids {
+            let attachment = attachment_repository::get_attachment(&connection, attachment_id)
+                .map_err(storage_error)?
+                .ok_or_else(|| format!("附件不存在：{attachment_id}"))?;
+            let storage_path = safe_existing_attachment_storage_path(
+                &self.attachment_root,
+                &attachment.storage_rel_path,
+            )
+            .ok_or_else(|| format!("附件文件不存在：{}", attachment.original_name))?;
+            let bytes = fs::read(&storage_path)
+                .map_err(|error| format!("读取附件失败 {}: {error}", storage_path.display()))?;
+
+            attachments.push(AgentInputAttachment {
+                id: attachment.id,
+                kind: agent_attachment_kind(&attachment.kind),
+                name: attachment.original_name,
+                mime_type: attachment.mime_type,
+                size_bytes: attachment.size_bytes,
+                encoding: AgentInputAttachmentEncoding::Base64,
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                truncated: None,
+            });
+        }
+
+        Ok(attachments)
     }
 
     pub fn build_attachment_library_context(

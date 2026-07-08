@@ -13,6 +13,9 @@ const DEFAULT_PROJECT_SORT: &str = "created";
 const DEFAULT_SECTION_ORDER: &str = "projects_first";
 const DEFAULT_PROFILE_DISPLAY_NAME: &str = "";
 const DEFAULT_PROFILE_HANDLE: &str = "USER";
+const DEFAULT_TRANSLUCENT_SIDEBAR_TRANSPARENCY: i64 = 54;
+const MIN_TRANSLUCENT_SIDEBAR_TRANSPARENCY: i64 = 50;
+const MAX_TRANSLUCENT_SIDEBAR_TRANSPARENCY: i64 = 100;
 
 pub fn load_ui_preferences(connection: &Connection) -> rusqlite::Result<UiPreferencesRecord> {
     let preferences = connection
@@ -24,6 +27,7 @@ pub fn load_ui_preferences(connection: &Connection) -> rusqlite::Result<UiPrefer
                 sidebar_project_order_json,
                 sidebar_section_order,
                 translucent_sidebar,
+                translucent_sidebar_transparency,
                 native_font_smoothing,
                 show_token_usage_details,
                 profile_display_name,
@@ -49,20 +53,21 @@ pub fn load_ui_preferences(connection: &Connection) -> rusqlite::Result<UiPrefer
                     ),
                     sidebar_section_order: row.get(3)?,
                     translucent_sidebar: row.get::<_, i64>(4)? != 0,
-                    native_font_smoothing: row.get::<_, i64>(5)? != 0,
-                    show_token_usage_details: row.get::<_, i64>(6)? != 0,
-                    profile_display_name: row.get(7)?,
-                    profile_handle: row.get(8)?,
-                    profile_avatar_data_url: row.get(9)?,
+                    translucent_sidebar_transparency: row.get(5)?,
+                    native_font_smoothing: row.get::<_, i64>(6)? != 0,
+                    show_token_usage_details: row.get::<_, i64>(7)? != 0,
+                    profile_display_name: row.get(8)?,
+                    profile_handle: row.get(9)?,
+                    profile_avatar_data_url: row.get(10)?,
                     custom_permissions: AgentPermissions {
-                        read: parse_read_permission(row.get::<_, String>(10)?.as_str()),
-                        write: parse_write_permission(row.get::<_, String>(11)?.as_str()),
-                        command: parse_command_permission(row.get::<_, String>(12)?.as_str()),
-                        patch: parse_patch_permission(row.get::<_, String>(13)?.as_str()),
+                        read: parse_read_permission(row.get::<_, String>(11)?.as_str()),
+                        write: parse_write_permission(row.get::<_, String>(12)?.as_str()),
+                        command: parse_command_permission(row.get::<_, String>(13)?.as_str()),
+                        patch: parse_patch_permission(row.get::<_, String>(14)?.as_str()),
                     },
-                    full_permission_enabled: row.get::<_, i64>(14)? != 0,
-                    custom_permission_enabled: row.get::<_, i64>(15)? != 0,
-                    updated_at: row.get(16)?,
+                    full_permission_enabled: row.get::<_, i64>(15)? != 0,
+                    custom_permission_enabled: row.get::<_, i64>(16)? != 0,
+                    updated_at: row.get(17)?,
                 })
             },
         )
@@ -91,6 +96,7 @@ pub fn save_ui_preferences(
             sidebar_project_order_json,
             sidebar_section_order,
             translucent_sidebar,
+            translucent_sidebar_transparency,
             native_font_smoothing,
             show_token_usage_details,
             profile_display_name,
@@ -104,13 +110,14 @@ pub fn save_ui_preferences(
             custom_permission_enabled,
             updated_at
         )
-        VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+        VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
         ON CONFLICT(id) DO UPDATE SET
             sidebar_conversation_sort = excluded.sidebar_conversation_sort,
             sidebar_project_sort = excluded.sidebar_project_sort,
             sidebar_project_order_json = excluded.sidebar_project_order_json,
             sidebar_section_order = excluded.sidebar_section_order,
             translucent_sidebar = excluded.translucent_sidebar,
+            translucent_sidebar_transparency = excluded.translucent_sidebar_transparency,
             native_font_smoothing = excluded.native_font_smoothing,
             show_token_usage_details = excluded.show_token_usage_details,
             profile_display_name = excluded.profile_display_name,
@@ -134,6 +141,7 @@ pub fn save_ui_preferences(
             } else {
                 0
             },
+            preferences.translucent_sidebar_transparency,
             if preferences.native_font_smoothing {
                 1
             } else {
@@ -175,6 +183,7 @@ fn default_ui_preferences() -> UiPreferencesRecord {
         native_font_smoothing: false,
         show_token_usage_details: true,
         translucent_sidebar: false,
+        translucent_sidebar_transparency: DEFAULT_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
         full_permission_enabled: true,
         custom_permission_enabled: true,
         custom_permissions: AgentPermissions {
@@ -214,6 +223,10 @@ fn normalize_preferences(preferences: UiPreferencesRecord) -> UiPreferencesRecor
         native_font_smoothing: preferences.native_font_smoothing,
         show_token_usage_details: preferences.show_token_usage_details,
         translucent_sidebar: preferences.translucent_sidebar,
+        translucent_sidebar_transparency: preferences.translucent_sidebar_transparency.clamp(
+            MIN_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
+            MAX_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
+        ),
         full_permission_enabled: preferences.full_permission_enabled,
         custom_permission_enabled: preferences.custom_permission_enabled,
         custom_permissions: preferences.custom_permissions,

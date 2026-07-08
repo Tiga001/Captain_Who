@@ -29,6 +29,7 @@ pub const STORAGE_LOAD_CONVERSATIONS_METHOD: &str = "storage.loadConversations";
 pub const STORAGE_SAVE_CONVERSATION_METHOD: &str = "storage.saveConversation";
 pub const STORAGE_SAVE_CONVERSATION_META_METHOD: &str = "storage.saveConversationMeta";
 pub const STORAGE_DELETE_CONVERSATION_METHOD: &str = "storage.deleteConversation";
+pub const STORAGE_DELETE_CHAT_MESSAGES_METHOD: &str = "storage.deleteChatMessages";
 pub const STORAGE_UPSERT_CHAT_MESSAGES_METHOD: &str = "storage.upsertChatMessages";
 pub const STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD: &str = "storage.saveChatMessageState";
 pub const STORAGE_LOAD_COMPOSER_DRAFTS_METHOD: &str = "storage.loadComposerDrafts";
@@ -38,6 +39,7 @@ pub const STORAGE_LOAD_UI_PREFERENCES_METHOD: &str = "storage.loadUiPreferences"
 pub const STORAGE_SAVE_UI_PREFERENCES_METHOD: &str = "storage.saveUiPreferences";
 pub const STORAGE_SELECT_PROFILE_AVATAR_METHOD: &str = "storage.selectProfileAvatar";
 pub const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD: &str = "storage.loadAttachmentImage";
+pub const STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD: &str = "storage.loadInputAttachments";
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {

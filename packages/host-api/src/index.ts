@@ -33,6 +33,9 @@ import type {
   StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
+  StorageDeleteChatMessagesRequest,
+  StorageInputAttachment,
+  StorageLoadInputAttachmentsRequest,
   StorageChatMessageRecord,
   StorageChatMessageStateRecord,
   StorageComposerDraftRecord,
@@ -90,6 +93,7 @@ export interface StorageHostApi {
     conversation: StorageChatConversationMetaRecord
   ): Promise<StorageChatConversationMetaRecord>
   deleteConversation(conversationId: string): Promise<void>
+  deleteChatMessages(input: StorageDeleteChatMessagesRequest): Promise<void>
   upsertChatMessages(input: {
     conversationId: string
     messages: StorageChatMessageRecord[]
@@ -106,6 +110,7 @@ export interface StorageHostApi {
   saveUiPreferences(preferences: StorageUiPreferencesRecord): Promise<StorageUiPreferencesRecord>
   selectProfileAvatar(): Promise<string | null>
   loadAttachmentImage(input: { attachmentId: string }): Promise<StorageAttachmentImageRecord | null>
+  loadInputAttachments(input: StorageLoadInputAttachmentsRequest): Promise<StorageInputAttachment[]>
   loadImageFile(input: {
     projectId?: string | null
     filePath: string
@@ -143,12 +148,15 @@ export interface ClipboardHostApi {
   }>
 }
 
+export type NativeThemeSource = 'system' | 'light' | 'dark'
+
 export interface HostApi {
   core: {
     ping(input?: CorePingRequest): Promise<CorePingResponse>
   }
   app: {
     getVersion(): Promise<AppVersionResponse>
+    setNativeThemeSource(themeSource: NativeThemeSource): Promise<void>
   }
   agent: AgentHostApi
   attachments: AttachmentsHostApi
