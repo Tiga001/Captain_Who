@@ -24,6 +24,7 @@ export const STORAGE_DELETE_COMPOSER_DRAFT_METHOD = "storage.deleteComposerDraft
 export const STORAGE_LOAD_UI_PREFERENCES_METHOD = "storage.loadUiPreferences";
 export const STORAGE_SAVE_UI_PREFERENCES_METHOD = "storage.saveUiPreferences";
 export const STORAGE_SELECT_PROFILE_AVATAR_METHOD = "storage.selectProfileAvatar";
+export const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD = "storage.loadAttachmentImage";
 
 export interface StorageModelConfigRecord {
   id: string;
@@ -60,6 +61,15 @@ export interface StorageChatMessageAttachmentRecord {
   sizeBytes: number;
   previewData?: string | null;
   previewMimeType?: string | null;
+  createdAt: number;
+}
+
+export interface StorageAttachmentImageRecord {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  data: string;
   createdAt: number;
 }
 

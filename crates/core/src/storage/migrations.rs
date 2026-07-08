@@ -126,6 +126,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             created_at INTEGER NOT NULL,
             input_tokens INTEGER,
             output_tokens INTEGER,
+            output_thinking_tokens INTEGER,
             total_tokens INTEGER,
             cached_input_tokens INTEGER,
             cache_creation_input_tokens INTEGER,
@@ -307,6 +308,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "agent_usage_records", "completed_at", "INTEGER")?;
     add_column_if_missing(connection, "agent_usage_records", "status", "TEXT")?;
     add_column_if_missing(connection, "agent_usage_records", "error", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "agent_usage_records",
+        "output_thinking_tokens",
+        "INTEGER",
+    )?;
     add_column_if_missing(
         connection,
         "agent_action_audit",

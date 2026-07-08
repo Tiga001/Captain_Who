@@ -1,6 +1,6 @@
 // Renderer UI.
 import { useEffect, useMemo, useState } from 'react'
-import type { FocusEvent } from 'react'
+import type { FocusEvent, ReactElement } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
 import type { AgentUsageModelSummary, AgentUsageSummaryOutput } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
@@ -24,16 +24,12 @@ const USAGE_RANGE_OPTIONS: Array<{
 ]
 
 type UsageChartRange = 'last7Days' | 'last30Days' | 'lastYear'
-type UsageChartTokenKey =
-  'inputTokens' | 'cachedInputTokens' | 'outputTokens' | 'cacheCreationInputTokens'
+type UsageChartTokenKey = 'inputTokens' | 'outputTokens' | 'outputThinkingTokens'
 
 type UsageChartSeries = {
   key: UsageChartTokenKey
   labelKey:
-    | 'usageBilling.inputTokens'
-    | 'usageBilling.cachedInputTokens'
-    | 'usageBilling.outputTokens'
-    | 'usageBilling.cacheCreationInputTokens'
+    'usageBilling.inputTokens' | 'usageBilling.outputTokens' | 'usageBilling.outputThinkingTokens'
   className: string
 }
 
@@ -45,33 +41,34 @@ type UsageChartBucket = {
   summary: AgentUsageSummaryOutput
 }
 
+type UsageChartWindow = Omit<UsageChartBucket, 'summary'>
+
+type UsageValues = Partial<Record<UsageChartTokenKey, number>> & {
+  estimatedCost?: number
+}
+
 const DAY_MS = 24 * 60 * 60 * 1000
 const ALL_MODELS_KEY = '__all_models__'
 const USAGE_CHART_SERIES: UsageChartSeries[] = [
   { key: 'inputTokens', labelKey: 'usageBilling.inputTokens', className: 'usage-chart-bar--input' },
-  {
-    key: 'cachedInputTokens',
-    labelKey: 'usageBilling.cachedInputTokens',
-    className: 'usage-chart-bar--cached-input'
-  },
   {
     key: 'outputTokens',
     labelKey: 'usageBilling.outputTokens',
     className: 'usage-chart-bar--output'
   },
   {
-    key: 'cacheCreationInputTokens',
-    labelKey: 'usageBilling.cacheCreationInputTokens',
-    className: 'usage-chart-bar--cache-write'
+    key: 'outputThinkingTokens',
+    labelKey: 'usageBilling.outputThinkingTokens',
+    className: 'usage-chart-bar--output-thinking'
   }
 ]
 
-function formatCount(value: number | undefined, language: string) {
+function formatCount(value: number | undefined, language: string): string {
   if (typeof value !== 'number') return '—'
   return new Intl.NumberFormat(language).format(value)
 }
 
-function formatEstimatedCost(value: number | undefined, language: string) {
+function formatEstimatedCost(value: number | undefined, language: string): string {
   if (typeof value !== 'number') return '—'
   return new Intl.NumberFormat(language, {
     maximumFractionDigits: 6,
@@ -79,7 +76,7 @@ function formatEstimatedCost(value: number | undefined, language: string) {
   }).format(value)
 }
 
-function formatEstimatedCostInteger(value: number | undefined, language: string) {
+function formatEstimatedCostInteger(value: number | undefined, language: string): string {
   if (typeof value !== 'number') return '—'
   return new Intl.NumberFormat(language, {
     maximumFractionDigits: 0,
@@ -87,19 +84,19 @@ function formatEstimatedCostInteger(value: number | undefined, language: string)
   }).format(value)
 }
 
-function formatTokenCount(value: number | undefined, language: string, tokenLabel: string) {
+function formatTokenCount(value: number | undefined, language: string, tokenLabel: string): string {
   if (typeof value !== 'number') return `— ${tokenLabel}`
   return `${formatCount(value, language)} ${tokenLabel}`
 }
 
-function formatDateLabel(timestamp: number, language: string) {
+function formatDateLabel(timestamp: number, language: string): string {
   return new Intl.DateTimeFormat(language, {
     month: '2-digit',
     day: '2-digit'
   }).format(new Date(timestamp))
 }
 
-function formatFullDateLabel(timestamp: number, language: string) {
+function formatFullDateLabel(timestamp: number, language: string): string {
   return new Intl.DateTimeFormat(language, {
     year: 'numeric',
     month: '2-digit',
@@ -107,41 +104,41 @@ function formatFullDateLabel(timestamp: number, language: string) {
   }).format(new Date(timestamp))
 }
 
-function formatMonthLabel(timestamp: number) {
+function formatMonthLabel(timestamp: number): string {
   const date = new Date(timestamp)
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
 }
 
-function getModelSubtitle(model: AgentUsageModelSummary) {
+function getModelSubtitle(model: AgentUsageModelSummary): string {
   if (model.providerPath && model.providerPath !== model.modelId) return model.providerPath
   if (model.modelId !== model.modelName) return model.modelId
   return ''
 }
 
-function getModelKey(model: AgentUsageModelSummary) {
+function getModelKey(model: AgentUsageModelSummary): string {
   return `${model.modelId}::${model.providerPath ?? ''}`
 }
 
-function getRangeDayCount(range: UsageChartRange) {
+function getRangeDayCount(range: UsageChartRange): number {
   return range === 'last7Days' ? 7 : 30
 }
 
-function startOfLocalDay(timestamp: number) {
+function startOfLocalDay(timestamp: number): number {
   const date = new Date(timestamp)
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
 }
 
-function startOfLocalMonth(timestamp: number) {
+function startOfLocalMonth(timestamp: number): number {
   const date = new Date(timestamp)
   return new Date(date.getFullYear(), date.getMonth(), 1).getTime()
 }
 
-function addLocalMonths(timestamp: number, monthDelta: number) {
+function addLocalMonths(timestamp: number, monthDelta: number): number {
   const date = new Date(timestamp)
   return new Date(date.getFullYear(), date.getMonth() + monthDelta, 1).getTime()
 }
 
-function getUsageChartWindows(range: UsageChartRange, language: string) {
+function getUsageChartWindows(range: UsageChartRange, language: string): UsageChartWindow[] {
   if (range === 'lastYear') {
     const currentMonthStart = startOfLocalMonth(Date.now())
     const firstMonthStart = addLocalMonths(currentMonthStart, -11)
@@ -183,7 +180,10 @@ function getChartRangeSummaryInput(buckets: Array<Pick<UsageChartBucket, 'from' 
   return { range: 'custom', from: firstBucket?.from, to: lastBucket?.to }
 }
 
-async function loadUsageChartBuckets(range: UsageChartRange, language: string) {
+async function loadUsageChartBuckets(
+  range: UsageChartRange,
+  language: string
+): Promise<UsageChartBucket[]> {
   const windows = getUsageChartWindows(range, language)
   const summaries = await Promise.all(
     windows.map((window) =>
@@ -197,7 +197,7 @@ async function loadUsageChartBuckets(range: UsageChartRange, language: string) {
   }))
 }
 
-function getNiceChartMax(value: number) {
+function getNiceChartMax(value: number): number {
   if (value <= 0) return 0
   const magnitude = 10 ** Math.floor(Math.log10(value))
   const normalized = value / magnitude
@@ -205,12 +205,13 @@ function getNiceChartMax(value: number) {
   return niceNormalized * magnitude
 }
 
-function getUsageValues(source: AgentUsageSummaryOutput | AgentUsageModelSummary | undefined) {
+function getUsageValues(
+  source: AgentUsageSummaryOutput | AgentUsageModelSummary | undefined
+): UsageValues {
   return {
     inputTokens: source?.inputTokens,
-    cachedInputTokens: source?.cachedInputTokens,
     outputTokens: source?.outputTokens,
-    cacheCreationInputTokens: source?.cacheCreationInputTokens,
+    outputThinkingTokens: source?.outputThinkingTokens,
     estimatedCost: source?.estimatedCost
   }
 }
@@ -218,7 +219,7 @@ function getUsageValues(source: AgentUsageSummaryOutput | AgentUsageModelSummary
 export function UsageBillingSettingsPage({
   onUiPreferencesChange,
   uiPreferences
-}: UsageBillingSettingsPageProps) {
+}: UsageBillingSettingsPageProps): ReactElement {
   const { language, t } = useFrontendConfig()
   const [range, setRange] = useState<UsageChartRange>('last7Days')
   const [summary, setSummary] = useState<AgentUsageSummaryOutput | null>(null)
@@ -237,17 +238,22 @@ export function UsageBillingSettingsPage({
       ),
     [summary?.models]
   )
+  const activeModelKey =
+    selectedModelKey === ALL_MODELS_KEY ||
+    sortedModels.some((model) => getModelKey(model) === selectedModelKey)
+      ? selectedModelKey
+      : ALL_MODELS_KEY
   const selectedModel = useMemo(
-    () => sortedModels.find((model) => getModelKey(model) === selectedModelKey),
-    [selectedModelKey, sortedModels]
+    () => sortedModels.find((model) => getModelKey(model) === activeModelKey),
+    [activeModelKey, sortedModels]
   )
   const chartData = useMemo(
     () =>
       chartBuckets.map((chartBucket) => {
         const source =
-          selectedModelKey === ALL_MODELS_KEY
+          activeModelKey === ALL_MODELS_KEY
             ? chartBucket.summary
-            : chartBucket.summary.models.find((model) => getModelKey(model) === selectedModelKey)
+            : chartBucket.summary.models.find((model) => getModelKey(model) === activeModelKey)
 
         return {
           dateLabel: chartBucket.dateLabel,
@@ -255,7 +261,7 @@ export function UsageBillingSettingsPage({
           values: getUsageValues(source)
         }
       }),
-    [chartBuckets, selectedModelKey]
+    [activeModelKey, chartBuckets]
   )
   const chartMaxValue = useMemo(() => {
     const maxValue = chartData.reduce((currentMax, day) => {
@@ -277,7 +283,7 @@ export function UsageBillingSettingsPage({
   useEffect(() => {
     let isCancelled = false
 
-    async function loadUsageData() {
+    async function loadUsageData(): Promise<void> {
       setIsLoading(true)
       setErrorMessage('')
       try {
@@ -304,19 +310,13 @@ export function UsageBillingSettingsPage({
     }
   }, [language, range, t])
 
-  useEffect(() => {
-    if (selectedModelKey === ALL_MODELS_KEY) return
-    if (sortedModels.some((model) => getModelKey(model) === selectedModelKey)) return
-    setSelectedModelKey(ALL_MODELS_KEY)
-  }, [selectedModelKey, sortedModels])
-
-  const closeModelMenuOnBlur = (event: FocusEvent<HTMLDivElement>) => {
+  const closeModelMenuOnBlur = (event: FocusEvent<HTMLDivElement>): void => {
     if (!event.currentTarget.contains(event.relatedTarget)) {
       setModelMenuOpen(false)
     }
   }
 
-  const clearAllUsageRecords = async () => {
+  const clearAllUsageRecords = async (): Promise<void> => {
     setIsClearing(true)
     setErrorMessage('')
     setStatusMessage('')
@@ -401,10 +401,10 @@ export function UsageBillingSettingsPage({
                 >
                   <button
                     className="usage-model-filter-option"
-                    data-selected={selectedModelKey === ALL_MODELS_KEY || undefined}
+                    data-selected={activeModelKey === ALL_MODELS_KEY || undefined}
                     type="button"
                     role="option"
-                    aria-selected={selectedModelKey === ALL_MODELS_KEY}
+                    aria-selected={activeModelKey === ALL_MODELS_KEY}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => {
                       setSelectedModelKey(ALL_MODELS_KEY)
@@ -412,12 +412,12 @@ export function UsageBillingSettingsPage({
                     }}
                   >
                     <span>{t('usageBilling.allModels')}</span>
-                    {selectedModelKey === ALL_MODELS_KEY && <Check aria-hidden="true" />}
+                    {activeModelKey === ALL_MODELS_KEY && <Check aria-hidden="true" />}
                   </button>
 
                   {sortedModels.map((model) => {
                     const modelKey = getModelKey(model)
-                    const isSelected = selectedModelKey === modelKey
+                    const isSelected = activeModelKey === modelKey
                     return (
                       <button
                         className="usage-model-filter-option"
@@ -490,9 +490,8 @@ export function UsageBillingSettingsPage({
                         day.fullDateLabel,
                         `${t('usageBilling.estimatedCost')} ${formatEstimatedCostInteger(day.values.estimatedCost, language)}`,
                         `${t('usageBilling.inputTokens')} ${formatTokenCount(day.values.inputTokens, language, t('usageBilling.tokens'))}`,
-                        `${t('usageBilling.cachedInputTokens')} ${formatTokenCount(day.values.cachedInputTokens, language, t('usageBilling.tokens'))}`,
                         `${t('usageBilling.outputTokens')} ${formatTokenCount(day.values.outputTokens, language, t('usageBilling.tokens'))}`,
-                        `${t('usageBilling.cacheCreationInputTokens')} ${formatTokenCount(day.values.cacheCreationInputTokens, language, t('usageBilling.tokens'))}`
+                        `${t('usageBilling.outputThinkingTokens')} ${formatTokenCount(day.values.outputThinkingTokens, language, t('usageBilling.tokens'))}`
                       ].join(', ')
 
                       return (
@@ -550,20 +549,6 @@ export function UsageBillingSettingsPage({
                             </span>
                             <span className="usage-chart-tooltip__row">
                               <span>
-                                <i className="usage-chart-bar--cached-input" aria-hidden="true" />
-                                {t('usageBilling.cachedInputTokens')}
-                              </span>
-                              <strong>
-                                {formatTokenCount(
-                                  day.values.cachedInputTokens,
-                                  language,
-                                  t('usageBilling.tokens')
-                                )}
-                              </strong>
-                            </span>
-
-                            <span className="usage-chart-tooltip__row">
-                              <span>
                                 <i className="usage-chart-bar--output" aria-hidden="true" />
                                 {t('usageBilling.outputTokens')}
                               </span>
@@ -577,12 +562,15 @@ export function UsageBillingSettingsPage({
                             </span>
                             <span className="usage-chart-tooltip__row">
                               <span>
-                                <i className="usage-chart-bar--cache-write" aria-hidden="true" />
-                                {t('usageBilling.cacheCreationInputTokens')}
+                                <i
+                                  className="usage-chart-bar--output-thinking"
+                                  aria-hidden="true"
+                                />
+                                {t('usageBilling.outputThinkingTokens')}
                               </span>
                               <strong>
                                 {formatTokenCount(
-                                  day.values.cacheCreationInputTokens,
+                                  day.values.outputThinkingTokens,
                                   language,
                                   t('usageBilling.tokens')
                                 )}
@@ -634,12 +622,8 @@ export function UsageBillingSettingsPage({
 
         <div className="usage-secondary-grid">
           <div className="usage-secondary-stat">
-            <span>{t('usageBilling.cachedInputTokens')}</span>
-            <strong>{formatCount(summary?.cachedInputTokens, language)}</strong>
-          </div>
-          <div className="usage-secondary-stat">
-            <span>{t('usageBilling.cacheCreationInputTokens')}</span>
-            <strong>{formatCount(summary?.cacheCreationInputTokens, language)}</strong>
+            <span>{t('usageBilling.outputThinkingTokens')}</span>
+            <strong>{formatCount(summary?.outputThinkingTokens, language)}</strong>
           </div>
         </div>
 

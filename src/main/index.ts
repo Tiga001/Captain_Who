@@ -13,14 +13,24 @@ const terminalBridge = new TerminalBridge()
 let browserManager: BrowserWebContentsViewManager | null = null
 let isQuittingAfterTerminalShutdown = false
 
+const macWindowChromeOptions =
+  process.platform === 'darwin'
+    ? {
+        titleBarStyle: 'hidden' as const,
+        trafficLightPosition: { x: 18, y: 18 }
+      }
+    : {}
+
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
+    title: 'MyCopilot',
     width: 1120,
     height: 760,
     minWidth: 920,
     minHeight: 640,
     show: false,
     autoHideMenuBar: true,
+    ...macWindowChromeOptions,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -59,6 +69,7 @@ function createWindow(): void {
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
+  app.setName('MyCopilot')
   electronApp.setAppUserModelId('com.mycopilot.next')
   coreServer.start()
 

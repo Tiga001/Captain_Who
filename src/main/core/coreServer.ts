@@ -20,6 +20,7 @@ import type {
   CorePingResponse,
   StorageAgentPromptPreferencesRecord,
   StorageAppDataSnapshot,
+  StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
   StorageChatMessageRecord,
@@ -67,6 +68,7 @@ const STORAGE_DELETE_COMPOSER_DRAFT_METHOD = 'storage.deleteComposerDraft'
 const STORAGE_LOAD_UI_PREFERENCES_METHOD = 'storage.loadUiPreferences'
 const STORAGE_SAVE_UI_PREFERENCES_METHOD = 'storage.saveUiPreferences'
 const STORAGE_SELECT_PROFILE_AVATAR_METHOD = 'storage.selectProfileAvatar'
+const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD = 'storage.loadAttachmentImage'
 
 export class CoreServer {
   private readonly rpc = new CoreJsonRpcClient()
@@ -249,5 +251,12 @@ export class CoreServer {
 
   selectProfileAvatar(): Promise<string | null> {
     return this.rpc.request<string | null>(STORAGE_SELECT_PROFILE_AVATAR_METHOD)
+  }
+
+  loadAttachmentImage(input: { attachmentId: string }): Promise<StorageAttachmentImageRecord | null> {
+    return this.rpc.request<StorageAttachmentImageRecord | null, typeof input>(
+      STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
+      input
+    )
   }
 }

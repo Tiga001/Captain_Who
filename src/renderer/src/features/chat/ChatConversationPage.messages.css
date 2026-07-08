@@ -22,6 +22,25 @@
   gap: 52px;
   overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--mc-color-border-default) transparent;
+  scrollbar-width: thin;
+}
+
+.chat-conversation-page__messages::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat-conversation-page__messages::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-conversation-page__messages::-webkit-scrollbar-thumb {
+  min-height: 40px;
+  background: var(--mc-color-border-default);
+  background-clip: content-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
 }
 
 .chat-conversation-page[data-approval-pending='true'] .chat-conversation-page__messages {
@@ -120,6 +139,17 @@
   background: var(--mc-color-surface-elevated);
   border: 1px solid var(--mc-color-border-subtle);
   box-shadow: var(--mc-shadow-none);
+}
+
+button.chat-message-attachment {
+  padding: 0;
+  cursor: zoom-in;
+  font: inherit;
+}
+
+button.chat-message-attachment:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
 }
 
 .chat-message-attachment[data-kind='file'] {
@@ -596,6 +626,12 @@
   max-width: 100%;
   height: auto;
   border-radius: var(--mc-radius-card);
+  cursor: zoom-in;
+}
+
+.chat-markdown img:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
 }
 
 .chat-markdown .katex-display {

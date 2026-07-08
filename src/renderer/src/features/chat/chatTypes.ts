@@ -51,6 +51,7 @@ export interface ChatReadActivity {
   extension?: string
   mimeType?: string
   thumbnailDataUrl?: string
+  fullDataUrl?: string
   error?: string
   updatedAt: number
 }

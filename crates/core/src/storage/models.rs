@@ -103,6 +103,17 @@ pub struct ChatMessageAttachmentRecord {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct AttachmentImageRecord {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub data: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatConversationRecord {
     pub id: String,
     pub project_id: Option<String>,
@@ -185,6 +196,7 @@ pub struct AgentUsageRecordInsert {
     pub created_at: i64,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub output_thinking_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     pub cache_creation_input_tokens: Option<u64>,

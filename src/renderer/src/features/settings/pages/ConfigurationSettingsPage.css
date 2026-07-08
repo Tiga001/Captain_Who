@@ -174,6 +174,7 @@
   border-radius: var(--mc-radius-pill);
   font-size: var(--mc-font-size-xs);
   font-weight: var(--mc-font-weight-heavy);
+  white-space: nowrap;
 }
 
 .model-capability-pill[data-supported="true"] {
@@ -293,12 +294,21 @@
 
 .model-manager-table__row {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) 84px 86px 86px minmax(126px, auto);
+  grid-template-columns:
+    minmax(240px, 1.35fr)
+    minmax(138px, 0.5fr)
+    minmax(98px, 0.35fr)
+    minmax(98px, 0.35fr)
+    minmax(156px, auto);
   align-items: center;
   min-height: 52px;
   padding: 0 16px;
   gap: 12px;
   border-bottom: 1px solid var(--mc-color-border-subtle);
+}
+
+.model-manager-table__row > span {
+  min-width: 0;
 }
 
 .model-manager-table__row:last-child {
@@ -337,11 +347,19 @@
   white-space: nowrap;
 }
 
+.model-manager-table__image {
+  justify-self: start;
+}
+
 .model-manager-table__price {
+  overflow: hidden;
   color: var(--settings-content-text-color);
   font-family: var(--mc-mono-font-family);
   font-size: var(--mc-font-size-xs);
   font-weight: var(--mc-font-weight-display);
+  line-height: var(--mc-line-height-control);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .model-manager-table__actions {
@@ -349,7 +367,7 @@
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .model-manager-table__actions .secondary-settings-button {
@@ -441,7 +459,12 @@
 
 @media (max-width: 1180px) {
   .model-manager-table__row {
-    grid-template-columns: minmax(200px, 1fr) 78px 82px 82px minmax(116px, auto);
+    grid-template-columns:
+      minmax(210px, 1fr)
+      minmax(132px, 0.5fr)
+      minmax(92px, 0.35fr)
+      minmax(92px, 0.35fr)
+      minmax(148px, auto);
   }
 }
 
@@ -451,7 +474,7 @@
   }
 
   .model-manager-table__row {
-    min-width: 720px;
+    min-width: 820px;
   }
 }
 

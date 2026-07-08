@@ -49,7 +49,7 @@ function normalizeImageDataUrl(value: unknown) {
   return dataUrl.startsWith('data:image/') ? dataUrl : undefined
 }
 
-function dataUrlFromImagePayload(payload: Record<string, unknown>) {
+function thumbnailDataUrlFromImagePayload(payload: Record<string, unknown>) {
   const directThumbnail = normalizeImageDataUrl(payload.thumbnailDataUrl)
   if (directThumbnail) return directThumbnail
 
@@ -57,6 +57,11 @@ function dataUrlFromImagePayload(payload: Record<string, unknown>) {
   const nestedThumbnail = normalizeImageDataUrl(image?.thumbnailDataUrl)
   if (nestedThumbnail) return nestedThumbnail
 
+  return undefined
+}
+
+function fullDataUrlFromImagePayload(payload: Record<string, unknown>) {
+  const image = isRecord(payload.image) ? payload.image : undefined
   const mimeType = stringValue(image?.mimeType) || stringValue(payload.mimeType)
   const dataBase64 = stringValue(image?.dataBase64)
   if (!mimeType.startsWith('image/') || !dataBase64 || dataBase64 === '[redacted]') {
@@ -75,8 +80,12 @@ function activityFromResult(
   const fileName = path ? fileNameFromPath(path) : previous?.fileName || '文件'
   const mimeType = stringValue(payload.mimeType) || previous?.mimeType
   const kind = previous?.kind ?? getReadActivityKindForTool(result.tool)
+  const fullDataUrl =
+    kind === 'image' ? (fullDataUrlFromImagePayload(payload) ?? previous?.fullDataUrl) : undefined
   const thumbnailDataUrl =
-    kind === 'image' ? (dataUrlFromImagePayload(payload) ?? previous?.thumbnailDataUrl) : undefined
+    kind === 'image'
+      ? (thumbnailDataUrlFromImagePayload(payload) ?? fullDataUrl ?? previous?.thumbnailDataUrl)
+      : undefined
 
   return {
     callId: result.callId,
@@ -88,6 +97,7 @@ function activityFromResult(
     extension: extensionFromFileName(fileName),
     mimeType: mimeType || undefined,
     thumbnailDataUrl,
+    fullDataUrl,
     error: result.ok ? undefined : result.error,
     updatedAt: Date.now()
   }
@@ -140,6 +150,7 @@ export function upsertReadActivityFromCall(
     extension: existing?.extension ?? activity.extension,
     mimeType: existing?.mimeType,
     thumbnailDataUrl: existing?.thumbnailDataUrl,
+    fullDataUrl: existing?.fullDataUrl,
     error: existing?.error,
     status: existing?.status ?? activity.status
   })

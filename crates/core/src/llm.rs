@@ -207,6 +207,7 @@ async fn send_llm_request(
     cancellation_token.check()?;
     validate_request(request)?;
     let payload = build_payload(request);
+    log_payload_summary(request, &payload);
     let headers = build_headers(request.api_style, request.api_token.trim())?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
@@ -236,6 +237,114 @@ async fn send_llm_request(
     }
 
     Ok(response)
+}
+
+fn log_payload_summary(request: &LlmChatRequest, payload: &Value) {
+    let summary = serde_json::json!({
+        "api_url": request.api_url.trim(),
+        "model": request.model,
+        "api_style": format!("{:?}", request.api_style),
+        "stream": request.stream,
+        "message_count": payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0),
+        "messages": payload
+            .get("messages")
+            .and_then(Value::as_array)
+            .map(|messages| messages.iter().map(message_payload_summary).collect::<Vec<_>>())
+            .unwrap_or_default(),
+        "tools_count": payload
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0),
+    });
+
+    match serde_json::to_string(&summary) {
+        Ok(summary) => eprintln!("[llm-payload-summary] {summary}"),
+        Err(error) => eprintln!("[llm-payload-summary] failed to serialize summary: {error}"),
+    }
+}
+
+fn message_payload_summary(message: &Value) -> Value {
+    let role = message
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let content = message.get("content").unwrap_or(&Value::Null);
+
+    serde_json::json!({
+        "role": role,
+        "content_type": value_type_label(content),
+        "content_part_types": content
+            .as_array()
+            .map(|parts| parts.iter().map(content_part_summary).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    })
+}
+
+fn content_part_summary(part: &Value) -> Value {
+    let part_type = part
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    match part_type {
+        "image_url" => {
+            let url = part
+                .get("image_url")
+                .and_then(|image_url| image_url.get("url"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            serde_json::json!({
+                "type": part_type,
+                "mime": data_url_mime(url),
+                "data_url_len": url.len(),
+            })
+        }
+        "image" => {
+            let source = part.get("source").unwrap_or(&Value::Null);
+            let mime = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let data_len = source
+                .get("data")
+                .and_then(Value::as_str)
+                .map(str::len)
+                .unwrap_or(0);
+            let data_url_len = if mime.is_empty() {
+                data_len
+            } else {
+                format!("data:{mime};base64,").len() + data_len
+            };
+            serde_json::json!({
+                "type": part_type,
+                "mime": mime,
+                "data_url_len": data_url_len,
+            })
+        }
+        _ => serde_json::json!({ "type": part_type }),
+    }
+}
+
+fn data_url_mime(url: &str) -> Option<&str> {
+    url.strip_prefix("data:")
+        .and_then(|rest| rest.split_once(";base64,"))
+        .map(|(mime, _)| mime)
+}
+
+fn value_type_label(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 async fn response_text(
@@ -426,6 +535,32 @@ mod tests {
         assert_eq!(payload["messages"][1]["tool_calls"][0]["id"], "call-1");
         assert_eq!(payload["messages"][2]["role"], "tool");
         assert_eq!(payload["messages"][2]["tool_call_id"], "call-1");
+    }
+
+    #[test]
+    fn builds_openai_image_messages_with_image_url_parts() {
+        let mut image_message = message(LlmMessageRole::User, "Inspect this image.");
+        image_message.images.push(LlmImage {
+            mime_type: "image/png".to_string(),
+            data_base64: "YWJj".to_string(),
+        });
+        let request = LlmChatRequest {
+            api_url: "https://example.test/v1/chat/completions".to_string(),
+            api_token: "token".to_string(),
+            model: "gpt".to_string(),
+            api_style: AgentApiStyle::OpenAiCompatible,
+            max_tokens: 1024,
+            temperature: 0.2,
+            stream: false,
+            messages: vec![image_message],
+            tools: vec![tool_definition()],
+        };
+
+        let payload = build_payload(&request);
+
+        assert_eq!(payload["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(payload["messages"][0]["content"][1]["type"], "image_url");
+        assert!(payload["messages"][0]["content"][1].get("image").is_none());
     }
 
     #[test]

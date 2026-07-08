@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import 'katex/dist/katex.min.css'
 import { openExternalUrl } from '../../../lib/externalLinks'
+import { useImagePreview } from './ImagePreview'
 
 interface ChatMarkdownProps {
   className?: string
@@ -340,6 +341,7 @@ function openMarkdownLink(href: string) {
 }
 
 export function ChatMarkdown({ className, content }: ChatMarkdownProps) {
+  const openImagePreview = useImagePreview()
   const markdownClassName = ['chat-markdown', className].filter(Boolean).join(' ')
   const normalizedContent = normalizeMarkdownMath(content)
 
@@ -366,6 +368,36 @@ export function ChatMarkdown({ className, content }: ChatMarkdownProps) {
               >
                 {children}
               </a>
+            )
+          },
+          img: ({ alt, src, ...props }) => {
+            const imageSrc = typeof src === 'string' ? src : ''
+
+            return (
+              <img
+                {...props}
+                alt={alt ?? ''}
+                onClick={() =>
+                  openImagePreview({
+                    alt: alt ?? '',
+                    fileName: alt ?? undefined,
+                    src: imageSrc
+                  })
+                }
+                role={imageSrc ? 'button' : undefined}
+                src={src}
+                tabIndex={imageSrc ? 0 : undefined}
+                onKeyDown={(event) => {
+                  if (!imageSrc) return
+                  if (event.key !== 'Enter' && event.key !== ' ') return
+                  event.preventDefault()
+                  openImagePreview({
+                    alt: alt ?? '',
+                    fileName: alt ?? undefined,
+                    src: imageSrc
+                  })
+                }}
+              />
             )
           }
         }}

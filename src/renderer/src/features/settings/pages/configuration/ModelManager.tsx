@@ -1,6 +1,7 @@
 // Renderer UI.
 import { Plus } from "lucide-react";
 import { useState } from "react";
+import type { ReactElement } from "react";
 import { ConfirmationDialog } from "../../../../components/dialog/ConfirmationDialog";
 import { useFrontendConfig } from "../../../../config/FrontendConfigProvider";
 import type { ModelConfig } from "./configurationTypes";
@@ -13,7 +14,13 @@ interface ModelManagerProps {
   onEdit: (model: ModelConfig) => void;
 }
 
-export function ModelManager({ models, onBack, onCreate, onDelete, onEdit }: ModelManagerProps) {
+export function ModelManager({
+  models,
+  onBack,
+  onCreate,
+  onDelete,
+  onEdit,
+}: ModelManagerProps): ReactElement {
   const { t } = useFrontendConfig();
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const pendingDeleteModel = models.find((model) => model.id === pendingDeleteId);
@@ -49,7 +56,7 @@ export function ModelManager({ models, onBack, onCreate, onDelete, onEdit }: Mod
               <strong>{model.displayName}</strong>
               {model.providerPath && <small>{model.providerPath}</small>}
             </span>
-            <span role="cell">
+            <span className="model-manager-table__image" role="cell">
               <span className="image-support-pill" data-supported={model.supportsImage || undefined}>
                 {model.supportsImage ? t("configuration.supported") : t("configuration.unsupported")}
               </span>

@@ -236,9 +236,8 @@
 
 .usage-chart-panel {
   --usage-chart-input-color: #3269e8;
-  --usage-chart-cached-input-color: #12bfb8;
   --usage-chart-output-color: #2457df;
-  --usage-chart-cache-write-color: #00b7a8;
+  --usage-chart-output-thinking-color: #8f3f71;
   --usage-chart-plot-height: 320px;
   --usage-chart-label-height: 34px;
   margin-top: 28px;
@@ -272,16 +271,12 @@
   background: var(--usage-chart-input-color);
 }
 
-.usage-chart-bar--cached-input {
-  background: var(--usage-chart-cached-input-color);
-}
-
 .usage-chart-bar--output {
   background: var(--usage-chart-output-color);
 }
 
-.usage-chart-bar--cache-write {
-  background: var(--usage-chart-cache-write-color);
+.usage-chart-bar--output-thinking {
+  background: var(--usage-chart-output-thinking-color);
 }
 
 .usage-chart-scroller {
@@ -457,12 +452,13 @@
   -webkit-backdrop-filter: var(--mc-effect-blur-popover);
 }
 
-.usage-chart-day:first-child .usage-chart-tooltip {
+.usage-chart-day:nth-child(-n + 2):not(:last-child) .usage-chart-tooltip {
   left: 0;
+  right: auto;
   transform: translate(0, -8px);
 }
 
-.usage-chart-day:last-child .usage-chart-tooltip {
+.usage-chart-day:nth-last-child(-n + 2):not(:first-child) .usage-chart-tooltip {
   right: 0;
   left: auto;
   transform: translate(0, -8px);
@@ -474,10 +470,10 @@
   transform: translate(-50%, 0);
 }
 
-.usage-chart-day:first-child:hover .usage-chart-tooltip,
-.usage-chart-day:first-child:focus-visible .usage-chart-tooltip,
-.usage-chart-day:last-child:hover .usage-chart-tooltip,
-.usage-chart-day:last-child:focus-visible .usage-chart-tooltip {
+.usage-chart-day:nth-child(-n + 2):not(:last-child):hover .usage-chart-tooltip,
+.usage-chart-day:nth-child(-n + 2):not(:last-child):focus-visible .usage-chart-tooltip,
+.usage-chart-day:nth-last-child(-n + 2):not(:first-child):hover .usage-chart-tooltip,
+.usage-chart-day:nth-last-child(-n + 2):not(:first-child):focus-visible .usage-chart-tooltip {
   transform: translate(0, 0);
 }
 

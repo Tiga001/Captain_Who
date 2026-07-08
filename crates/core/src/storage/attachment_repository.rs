@@ -162,6 +162,37 @@ pub fn list_attachment_storage_rel_paths(connection: &Connection) -> rusqlite::R
     paths
 }
 
+pub fn get_attachment(
+    connection: &Connection,
+    attachment_id: &str,
+) -> rusqlite::Result<Option<AttachmentRecord>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT
+            id,
+            conversation_id,
+            message_id,
+            project_id,
+            kind,
+            original_name,
+            mime_type,
+            size_bytes,
+            storage_rel_path,
+            created_at
+        FROM attachments
+        WHERE id = ?1
+        LIMIT 1
+        ",
+    )?;
+
+    let mut rows = statement.query(params![attachment_id])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+
+    attachment_from_row(row).map(Some)
+}
+
 fn attachment_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttachmentRecord> {
     Ok(AttachmentRecord {
         id: row.get(0)?,

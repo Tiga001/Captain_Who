@@ -35,6 +35,7 @@ import {
   getAttachmentTypeLabel
 } from '../attachmentDisplay'
 import type { ChatComposerDraft, ChatPermissionMode, ChatSubmitOptions } from '../chatTypes'
+import { useImagePreview } from './ImagePreview'
 import './ChatComposer.css'
 
 interface PermissionOption {
@@ -80,6 +81,7 @@ export function ChatComposer({
   const { t } = useFrontendConfig()
   const { enabledModels } = useModelSettings()
   const { projects, selectProjectDirectory } = useProjectSettings()
+  const openImagePreview = useImagePreview()
   const draftRef = useRef(draft)
   const composerRef = useRef<HTMLFormElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -347,11 +349,24 @@ export function ChatComposer({
             return (
               <div className="composer-attachment" data-kind={attachment.kind} key={attachment.id}>
                 {isImagePreview ? (
-                  <img
-                    className="composer-attachment__thumbnail"
-                    src={attachment.previewUrl}
-                    alt={attachment.name}
-                  />
+                  <button
+                    className="composer-attachment__image-button"
+                    onClick={() =>
+                      openImagePreview({
+                        alt: attachment.name,
+                        fileName: attachment.name,
+                        src: attachment.previewUrl ?? ''
+                      })
+                    }
+                    title={attachment.name}
+                    type="button"
+                  >
+                    <img
+                      className="composer-attachment__thumbnail"
+                      src={attachment.previewUrl}
+                      alt={attachment.name}
+                    />
+                  </button>
                 ) : (
                   <>
                     <div className="composer-attachment__icon" aria-hidden="true">

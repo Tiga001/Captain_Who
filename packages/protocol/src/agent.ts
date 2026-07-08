@@ -197,6 +197,7 @@ export interface AgentApprovalDecision {
 export interface AgentUsage {
   inputTokens?: number;
   outputTokens?: number;
+  outputThinkingTokens?: number;
   totalTokens?: number;
   cachedInputTokens?: number;
   cacheCreationInputTokens?: number;
@@ -219,6 +220,7 @@ export interface AgentUsageModelSummary {
   messageCount: number;
   inputTokens?: number;
   outputTokens?: number;
+  outputThinkingTokens?: number;
   totalTokens?: number;
   cachedInputTokens?: number;
   cacheCreationInputTokens?: number;
@@ -230,6 +232,7 @@ export interface AgentUsageSummaryOutput {
   messageCount: number;
   inputTokens?: number;
   outputTokens?: number;
+  outputThinkingTokens?: number;
   totalTokens?: number;
   cachedInputTokens?: number;
   cacheCreationInputTokens?: number;

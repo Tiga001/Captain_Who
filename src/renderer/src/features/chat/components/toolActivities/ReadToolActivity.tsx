@@ -5,6 +5,7 @@ import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../../config/translationFormat'
 import type { ChatReadActivity, ChatReadActivityKind } from '../../chatTypes'
+import { useImagePreview, useImagePreviewNotice } from '../ImagePreview'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import type { SettledToolStatus } from './toolActivityUtils'
 
@@ -124,6 +125,11 @@ function normalizeThumbnailDataUrl(activity: ChatReadActivity | undefined) {
   return thumbnailDataUrl?.startsWith('data:image/') ? thumbnailDataUrl : undefined
 }
 
+function normalizeFullDataUrl(activity: ChatReadActivity | undefined) {
+  const fullDataUrl = activity?.fullDataUrl?.trim()
+  return fullDataUrl?.startsWith('data:image/') ? fullDataUrl : undefined
+}
+
 function getReadCountLabel(t: Translate, kind: ChatReadActivityKind, count: number) {
   return formatTranslation(t, `agent.read.count.${kind}` as TranslationKey, { count })
 }
@@ -224,18 +230,34 @@ function ReadTextRow({ activity, call, result }: ReadToolActivityProps) {
 
 function ReadActivityCard({ activity, call, result }: ReadToolActivityProps) {
   const { t } = useFrontendConfig()
+  const openImagePreview = useImagePreview()
+  const showImagePreviewNotice = useImagePreviewNotice()
   const kind = getKind(call, activity)
   const thumbnailDataUrl = kind === 'image' ? normalizeThumbnailDataUrl(activity) : undefined
+  const fullDataUrl = kind === 'image' ? normalizeFullDataUrl(activity) : undefined
   const error = activity?.error ?? result?.error
+  const displayName = getDisplayName(activity, call, t)
 
   if (thumbnailDataUrl && !error) {
     return (
-      <div
+      <button
         className="read-activity__image"
+        onClick={() => {
+          if (!fullDataUrl) {
+            showImagePreviewNotice(t('imagePreview.originalMissing'))
+            return
+          }
+          openImagePreview({
+            alt: displayName,
+            fileName: displayName,
+            src: fullDataUrl
+          })
+        }}
         title={activity?.path || getPathFromCall(call) || getDisplayName(activity, call, t)}
+        type="button"
       >
-        <img src={thumbnailDataUrl} alt={getDisplayName(activity, call, t)} />
-      </div>
+        <img src={thumbnailDataUrl} alt={displayName} />
+      </button>
     )
   }
 

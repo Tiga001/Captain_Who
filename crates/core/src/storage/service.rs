@@ -5,9 +5,10 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::storage::models::{
     AgentActionAuditRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
-    AgentUsageRecordInsert, AppDataSnapshot, AttachmentRecord, ChatConversationMetaRecord,
-    ChatConversationRecord, ChatMessageAttachmentRecord, ChatMessageRecord, ChatMessageStateRecord,
-    ComposerDraftRecord, ModelSettingsRecord, ProjectRecord, UiPreferencesRecord,
+    AgentUsageRecordInsert, AppDataSnapshot, AttachmentImageRecord, AttachmentRecord,
+    ChatConversationMetaRecord, ChatConversationRecord, ChatMessageAttachmentRecord,
+    ChatMessageRecord, ChatMessageStateRecord, ComposerDraftRecord, ModelSettingsRecord,
+    ProjectRecord, UiPreferencesRecord,
 };
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
@@ -114,6 +115,48 @@ impl StorageService {
             chat_repository::list_conversations(&connection).map_err(storage_error)?;
         self.attach_message_attachments(&connection, &mut conversations)?;
         Ok(conversations)
+    }
+
+    pub fn load_attachment_image(
+        &self,
+        attachment_id: &str,
+    ) -> Result<Option<AttachmentImageRecord>, String> {
+        let attachment_id = attachment_id.trim();
+        if attachment_id.is_empty() {
+            return Ok(None);
+        }
+
+        let connection = self.state.connection()?;
+        let Some(attachment) = attachment_repository::get_attachment(&connection, attachment_id)
+            .map_err(storage_error)?
+        else {
+            return Ok(None);
+        };
+
+        let Some(mime_type) = image_preview_mime_type(&attachment) else {
+            return Ok(None);
+        };
+        let Some(storage_path) = safe_existing_attachment_storage_path(
+            &self.attachment_root,
+            &attachment.storage_rel_path,
+        ) else {
+            return Ok(None);
+        };
+
+        let bytes = match fs::read(storage_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("读取图片附件失败：{error}")),
+        };
+
+        Ok(Some(AttachmentImageRecord {
+            id: attachment.id,
+            name: attachment.original_name,
+            mime_type,
+            size_bytes: bytes.len() as u64,
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            created_at: attachment.created_at,
+        }))
     }
 
     pub fn save_conversation(

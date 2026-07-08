@@ -30,6 +30,7 @@ import type {
   CorePingResponse,
   StorageAgentPromptPreferencesRecord,
   StorageAppDataSnapshot,
+  StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
   StorageChatMessageRecord,
@@ -103,6 +104,7 @@ export interface StorageHostApi {
   loadUiPreferences(): Promise<StorageUiPreferencesRecord>
   saveUiPreferences(preferences: StorageUiPreferencesRecord): Promise<StorageUiPreferencesRecord>
   selectProfileAvatar(): Promise<string | null>
+  loadAttachmentImage(input: { attachmentId: string }): Promise<StorageAttachmentImageRecord | null>
 }
 
 export interface TerminalHostApi {
@@ -127,6 +129,10 @@ export interface AgentHostApi {
   onEvent(handler: (event: AgentEvent) => void): () => void
 }
 
+export interface ClipboardHostApi {
+  writeImage(input: { dataUrl: string }): Promise<void>
+}
+
 export interface HostApi {
   core: {
     ping(input?: CorePingRequest): Promise<CorePingResponse>
@@ -137,6 +143,7 @@ export interface HostApi {
   agent: AgentHostApi
   attachments: AttachmentsHostApi
   browser: BrowserHostApi
+  clipboard: ClipboardHostApi
   storage: StorageHostApi
   terminal: TerminalHostApi
 }

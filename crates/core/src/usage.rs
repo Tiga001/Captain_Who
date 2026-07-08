@@ -29,6 +29,11 @@ pub(crate) fn merge_stream_usage(target: &mut Option<AgentUsage>, next: Option<A
     let output_tokens = next
         .output_tokens
         .or_else(|| existing.as_ref().and_then(|usage| usage.output_tokens));
+    let output_thinking_tokens = next.output_thinking_tokens.or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|usage| usage.output_thinking_tokens)
+    });
     let total_tokens = next
         .total_tokens
         .or_else(|| existing.as_ref().and_then(|usage| usage.total_tokens))
@@ -55,6 +60,7 @@ pub(crate) fn merge_stream_usage(target: &mut Option<AgentUsage>, next: Option<A
     *target = Some(AgentUsage {
         input_tokens,
         output_tokens,
+        output_thinking_tokens,
         total_tokens,
         cached_input_tokens,
         cache_creation_input_tokens,
@@ -71,6 +77,8 @@ pub(crate) fn merge_total_usage(total: &mut Option<AgentUsage>, next: Option<Age
         Some(total) => {
             total.input_tokens = sum_optional(total.input_tokens, next.input_tokens);
             total.output_tokens = sum_optional(total.output_tokens, next.output_tokens);
+            total.output_thinking_tokens =
+                sum_optional(total.output_thinking_tokens, next.output_thinking_tokens);
             total.total_tokens = sum_optional(total.total_tokens, next.total_tokens);
             total.cached_input_tokens =
                 sum_optional(total.cached_input_tokens, next.cached_input_tokens);
@@ -95,6 +103,25 @@ fn usage_from_usage_value(usage: &Value) -> Option<AgentUsage> {
     let output_tokens = usage
         .get("completion_tokens")
         .or_else(|| usage.get("output_tokens"))
+        .and_then(Value::as_u64);
+    let output_thinking_tokens = usage
+        .get("completion_tokens_details")
+        .and_then(|details| {
+            details
+                .get("reasoning_tokens")
+                .or_else(|| details.get("thinking_tokens"))
+        })
+        .or_else(|| {
+            usage.get("output_tokens_details").and_then(|details| {
+                details
+                    .get("reasoning_tokens")
+                    .or_else(|| details.get("thinking_tokens"))
+            })
+        })
+        .or_else(|| usage.get("output_thinking_tokens"))
+        .or_else(|| usage.get("outputThinkingTokens"))
+        .or_else(|| usage.get("reasoning_tokens"))
+        .or_else(|| usage.get("thinking_tokens"))
         .and_then(Value::as_u64);
     let total_tokens = usage
         .get("total_tokens")
@@ -124,6 +151,7 @@ fn usage_from_usage_value(usage: &Value) -> Option<AgentUsage> {
 
     if input_tokens.is_none()
         && output_tokens.is_none()
+        && output_thinking_tokens.is_none()
         && total_tokens.is_none()
         && cached_input_tokens.is_none()
         && cache_creation_input_tokens.is_none()
@@ -134,6 +162,7 @@ fn usage_from_usage_value(usage: &Value) -> Option<AgentUsage> {
     Some(AgentUsage {
         input_tokens,
         output_tokens,
+        output_thinking_tokens,
         total_tokens,
         cached_input_tokens,
         cache_creation_input_tokens,
@@ -170,6 +199,9 @@ mod tests {
                 "total_tokens": 12,
                 "prompt_tokens_details": {
                     "cached_tokens": 2
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 3
                 }
             }
         });
@@ -184,6 +216,7 @@ mod tests {
 
         let openai_usage = extract_usage(&openai).unwrap();
         assert_eq!(openai_usage.total_tokens, Some(12));
+        assert_eq!(openai_usage.output_thinking_tokens, Some(3));
         assert_eq!(openai_usage.cached_input_tokens, Some(2));
         assert_eq!(openai_usage.billable_request_count, Some(1));
 
@@ -202,6 +235,7 @@ mod tests {
             Some(AgentUsage {
                 input_tokens: Some(10),
                 output_tokens: None,
+                output_thinking_tokens: None,
                 total_tokens: None,
                 cached_input_tokens: Some(3),
                 cache_creation_input_tokens: None,
@@ -213,6 +247,7 @@ mod tests {
             Some(AgentUsage {
                 input_tokens: None,
                 output_tokens: Some(5),
+                output_thinking_tokens: Some(2),
                 total_tokens: None,
                 cached_input_tokens: None,
                 cache_creation_input_tokens: Some(2),
@@ -223,6 +258,7 @@ mod tests {
         let total = total.unwrap();
         assert_eq!(total.input_tokens, Some(10));
         assert_eq!(total.output_tokens, Some(5));
+        assert_eq!(total.output_thinking_tokens, Some(2));
         assert_eq!(total.total_tokens, Some(15));
         assert_eq!(total.cached_input_tokens, Some(3));
         assert_eq!(total.cache_creation_input_tokens, Some(2));
@@ -237,6 +273,7 @@ mod tests {
             Some(AgentUsage {
                 input_tokens: Some(10),
                 output_tokens: Some(5),
+                output_thinking_tokens: Some(1),
                 total_tokens: Some(15),
                 cached_input_tokens: Some(2),
                 cache_creation_input_tokens: None,
@@ -248,6 +285,7 @@ mod tests {
             Some(AgentUsage {
                 input_tokens: Some(20),
                 output_tokens: Some(7),
+                output_thinking_tokens: Some(4),
                 total_tokens: Some(27),
                 cached_input_tokens: None,
                 cache_creation_input_tokens: Some(3),
@@ -258,6 +296,7 @@ mod tests {
         let total = total.unwrap();
         assert_eq!(total.input_tokens, Some(30));
         assert_eq!(total.output_tokens, Some(12));
+        assert_eq!(total.output_thinking_tokens, Some(5));
         assert_eq!(total.total_tokens, Some(42));
         assert_eq!(total.cached_input_tokens, Some(2));
         assert_eq!(total.cache_creation_input_tokens, Some(3));

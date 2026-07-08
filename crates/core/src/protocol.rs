@@ -304,6 +304,8 @@ pub struct AgentUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_thinking_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_input_tokens: Option<u64>,
@@ -346,6 +348,8 @@ pub struct AgentUsageModelSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_thinking_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cached_input_tokens: Option<u64>,
@@ -364,6 +368,8 @@ pub struct AgentUsageSummaryOutput {
     pub input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_thinking_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

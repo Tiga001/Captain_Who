@@ -37,6 +37,7 @@ pub const STORAGE_DELETE_COMPOSER_DRAFT_METHOD: &str = "storage.deleteComposerDr
 pub const STORAGE_LOAD_UI_PREFERENCES_METHOD: &str = "storage.loadUiPreferences";
 pub const STORAGE_SAVE_UI_PREFERENCES_METHOD: &str = "storage.saveUiPreferences";
 pub const STORAGE_SELECT_PROFILE_AVATAR_METHOD: &str = "storage.selectProfileAvatar";
+pub const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD: &str = "storage.loadAttachmentImage";
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {

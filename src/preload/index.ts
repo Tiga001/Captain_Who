@@ -78,6 +78,9 @@ const host: HostApi = {
     clearBrowsingData: (id) => ipcRenderer.invoke('host:browser.clearBrowsingData', id),
     onEvent: onBrowserEvent
   },
+  clipboard: {
+    writeImage: (input) => ipcRenderer.invoke('host:clipboard.writeImage', input)
+  },
   storage: {
     loadAppData: () => ipcRenderer.invoke('host:storage.loadAppData'),
     loadModelSettings: () => ipcRenderer.invoke('host:storage.loadModelSettings'),
@@ -108,7 +111,8 @@ const host: HostApi = {
     loadUiPreferences: () => ipcRenderer.invoke('host:storage.loadUiPreferences'),
     saveUiPreferences: (preferences) =>
       ipcRenderer.invoke('host:storage.saveUiPreferences', preferences),
-    selectProfileAvatar: () => ipcRenderer.invoke('host:storage.selectProfileAvatar')
+    selectProfileAvatar: () => ipcRenderer.invoke('host:storage.selectProfileAvatar'),
+    loadAttachmentImage: (input) => ipcRenderer.invoke('host:storage.loadAttachmentImage', input)
   },
   terminal: {
     createSession: (request) => ipcRenderer.invoke('host:terminal.createSession', request),

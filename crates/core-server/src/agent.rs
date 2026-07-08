@@ -949,6 +949,9 @@ impl AgentService {
                 created_at: now,
                 input_tokens,
                 output_tokens,
+                output_thinking_tokens: usage
+                    .as_ref()
+                    .and_then(|usage| usage.output_thinking_tokens),
                 total_tokens: usage.as_ref().and_then(|usage| usage.total_tokens),
                 cached_input_tokens: usage.as_ref().and_then(|usage| usage.cached_input_tokens),
                 cache_creation_input_tokens: usage

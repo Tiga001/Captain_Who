@@ -1,5 +1,5 @@
 // Electron main client.
-import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
 import type { IpcMainInvokeEvent, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
 import { basename, extname, isAbsolute, join } from 'path'
 import { readFile } from 'fs/promises'
@@ -83,6 +83,23 @@ async function selectProfileAvatar(event: IpcMainInvokeEvent): Promise<string | 
   const mimeType = IMAGE_MIME_BY_EXTENSION[extname(filePath).toLowerCase()] ?? 'image/png'
   const data = await readFile(filePath)
   return `data:${mimeType};base64,${data.toString('base64')}`
+}
+
+async function writeImageToClipboard(input: { dataUrl?: string }): Promise<void> {
+  const dataUrl = input.dataUrl?.trim()
+  if (!dataUrl?.startsWith('data:image/')) {
+    throw new Error('Image data URL is required')
+  }
+
+  const image = nativeImage.createFromDataURL(dataUrl)
+  if (image.isEmpty()) {
+    throw new Error('Image data is invalid')
+  }
+
+  clipboard.writeImage(image)
+  if (clipboard.readImage().isEmpty()) {
+    throw new Error('Image clipboard write failed')
+  }
 }
 
 async function getProjectPath(coreServer: CoreServer, projectId: string): Promise<string | null> {
@@ -182,6 +199,7 @@ export function registerHostIpc(
   ipcMain.handle('host:browser.clearBrowsingData', (_event, id) =>
     getBrowserManager().clearBrowsingData(id)
   )
+  ipcMain.handle('host:clipboard.writeImage', (_event, input) => writeImageToClipboard(input))
   ipcMain.handle('host:storage.loadAppData', () => coreServer.loadAppData())
   ipcMain.handle('host:storage.loadModelSettings', () => coreServer.loadModelSettings())
   ipcMain.handle('host:storage.saveModelSettings', (_event, settings) =>
@@ -233,6 +251,9 @@ export function registerHostIpc(
     coreServer.saveUiPreferences(preferences)
   )
   ipcMain.handle('host:storage.selectProfileAvatar', (event) => selectProfileAvatar(event))
+  ipcMain.handle('host:storage.loadAttachmentImage', (_event, input) =>
+    coreServer.loadAttachmentImage(input)
+  )
   ipcMain.handle('host:terminal.createSession', (_event, request) =>
     terminalBridge.createSession(request)
   )

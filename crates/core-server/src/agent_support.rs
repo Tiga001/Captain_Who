@@ -527,6 +527,7 @@ pub(super) fn merge_usage(total: &mut Option<AgentUsage>, next: Option<AgentUsag
     let total_usage = total.get_or_insert(AgentUsage {
         input_tokens: None,
         output_tokens: None,
+        output_thinking_tokens: None,
         total_tokens: None,
         cached_input_tokens: None,
         cache_creation_input_tokens: None,
@@ -535,6 +536,10 @@ pub(super) fn merge_usage(total: &mut Option<AgentUsage>, next: Option<AgentUsag
 
     total_usage.input_tokens = add_optional(total_usage.input_tokens, next.input_tokens);
     total_usage.output_tokens = add_optional(total_usage.output_tokens, next.output_tokens);
+    total_usage.output_thinking_tokens = add_optional(
+        total_usage.output_thinking_tokens,
+        next.output_thinking_tokens,
+    );
     total_usage.total_tokens = add_optional(total_usage.total_tokens, next.total_tokens);
     total_usage.cached_input_tokens =
         add_optional(total_usage.cached_input_tokens, next.cached_input_tokens);
@@ -547,6 +552,7 @@ pub(super) fn merge_usage(total: &mut Option<AgentUsage>, next: Option<AgentUsag
         next.billable_request_count.or_else(|| {
             (next.input_tokens.is_some()
                 || next.output_tokens.is_some()
+                || next.output_thinking_tokens.is_some()
                 || next.total_tokens.is_some())
             .then_some(1)
         }),

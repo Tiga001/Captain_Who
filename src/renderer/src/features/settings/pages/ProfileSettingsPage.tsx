@@ -21,11 +21,12 @@ interface ProfileSettingsPageProps {
 export function ProfileSettingsPage({ onUiPreferencesChange, uiPreferences }: ProfileSettingsPageProps) {
   const { language, t } = useFrontendConfig();
   const [avatarError, setAvatarError] = useState("");
-  const [isRemoveAvatarDialogOpen, setRemoveAvatarDialogOpen] = useState(false);
   const displayName = getProfileDisplayName(uiPreferences, language);
   const handle = getProfileHandle(uiPreferences);
   const initials = getProfileInitials(displayName);
   const explicitDisplayName = normalizeProfileDisplayName(uiPreferences.profileDisplayName);
+  const profileAvatarDataUrl = uiPreferences.profileAvatarDataUrl?.trim() ? uiPreferences.profileAvatarDataUrl : null;
+  const hasCustomAvatar = Boolean(profileAvatarDataUrl);
 
   const uploadAvatar = async () => {
     setAvatarError("");
@@ -38,14 +39,20 @@ export function ProfileSettingsPage({ onUiPreferencesChange, uiPreferences }: Pr
     }
   };
 
+  const removeAvatar = () => {
+    if (!hasCustomAvatar) return;
+    setAvatarError("");
+    onUiPreferencesChange({ profileAvatarDataUrl: null });
+  };
+
   return (
     <article className="settings-list-page profile-settings-page">
       <h1>{t("settings.page.profile")}</h1>
 
       <section className="profile-settings-hero" aria-label={t("profile.account")}>
         <div className="profile-settings-avatar" aria-label={t("profile.avatar")}>
-          {uiPreferences.profileAvatarDataUrl ? (
-            <img src={uiPreferences.profileAvatarDataUrl} alt="" />
+          {profileAvatarDataUrl ? (
+            <img src={profileAvatarDataUrl} alt="" />
           ) : (
             <span>{initials}</span>
           )}
@@ -70,11 +77,11 @@ export function ProfileSettingsPage({ onUiPreferencesChange, uiPreferences }: Pr
                 <UserCircle aria-hidden="true" />
                 <span>{t("profile.uploadAvatar")}</span>
               </button>
-              {uiPreferences.profileAvatarDataUrl && (
+              {hasCustomAvatar && (
                 <button
-                  className="profile-settings-button profile-settings-button--secondary"
+                  className="profile-settings-button profile-settings-button--danger"
                   type="button"
-                  onClick={() => setRemoveAvatarDialogOpen(true)}
+                  onClick={removeAvatar}
                 >
                   {t("profile.removeAvatar")}
                 </button>
@@ -113,42 +120,6 @@ export function ProfileSettingsPage({ onUiPreferencesChange, uiPreferences }: Pr
           </label>
         </div>
       </section>
-
-      {isRemoveAvatarDialogOpen && (
-        <div
-          className="profile-remove-avatar-dialog"
-          role="alertdialog"
-          aria-modal="true"
-          aria-labelledby="profile-remove-avatar-dialog-title"
-          onMouseDown={(event) => {
-            if (event.currentTarget === event.target) setRemoveAvatarDialogOpen(false);
-          }}
-        >
-          <div className="profile-remove-avatar-dialog__card">
-            <h2 id="profile-remove-avatar-dialog-title">{t("profile.removeAvatarTitle")}</h2>
-            <p>{t("profile.removeAvatarDescription")}</p>
-            <div className="profile-remove-avatar-dialog__actions">
-              <button
-                className="profile-remove-avatar-dialog__cancel"
-                type="button"
-                onClick={() => setRemoveAvatarDialogOpen(false)}
-              >
-                {t("project.cancel")}
-              </button>
-              <button
-                className="profile-remove-avatar-dialog__confirm"
-                type="button"
-                onClick={() => {
-                  onUiPreferencesChange({ profileAvatarDataUrl: null });
-                  setRemoveAvatarDialogOpen(false);
-                }}
-              >
-                {t("profile.confirmRemoveAvatar")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </article>
   );
 }

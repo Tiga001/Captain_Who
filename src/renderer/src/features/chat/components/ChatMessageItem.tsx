@@ -18,8 +18,10 @@ import {
   getAttachmentIcon,
   getAttachmentPreviewUrl
 } from '../attachmentDisplay'
+import { loadAttachmentImage } from '../../storage/storageClient'
 import { ChatMarkdown } from './ChatMarkdown'
 import { EditSummaryCard } from './EditSummaryCard'
+import { useImagePreview, useImagePreviewNotice } from './ImagePreview'
 import { AgentToolActivity } from './toolActivities/AgentToolActivity'
 import {
   ApplyPatchToolActivityGroup,
@@ -851,10 +853,48 @@ function MessageAttachments({
   attachments?: ChatMessage['attachments']
   messageId: string
 }) {
+  const { t } = useFrontendConfig()
+  const openImagePreview = useImagePreview()
+  const showImagePreviewNotice = useImagePreviewNotice()
   if (!attachments?.length) return null
 
   const imageAttachments = attachments.filter((attachment) => attachment.kind === 'image')
   const fileAttachments = attachments.filter((attachment) => attachment.kind !== 'image')
+
+  const openOriginalImageAttachment = async (
+    attachment: NonNullable<ChatMessage['attachments']>[number]
+  ) => {
+    if (
+      attachment.encoding === 'base64' &&
+      attachment.mimeType?.startsWith('image/') &&
+      attachment.data
+    ) {
+      openImagePreview({
+        alt: attachment.name,
+        fileName: attachment.name,
+        src: `data:${attachment.mimeType};base64,${attachment.data}`
+      })
+      return
+    }
+
+    try {
+      const image = await loadAttachmentImage(attachment.id)
+      if (!image?.mimeType.startsWith('image/') || !image.data) {
+        showImagePreviewNotice(t('imagePreview.originalMissing'))
+        return
+      }
+
+      openImagePreview({
+        alt: image.name || attachment.name,
+        fileName: image.name || attachment.name,
+        src: `data:${image.mimeType};base64,${image.data}`
+      })
+    } catch (error) {
+      console.error('Failed to load attachment image', error)
+      showImagePreviewNotice(t('imagePreview.originalMissing'))
+    }
+  }
+
   const renderAttachment = (attachment: NonNullable<ChatMessage['attachments']>[number]) => {
     const extension = getAttachmentExtension(attachment.name)
     const AttachmentIcon = getAttachmentIcon(attachment.kind, extension)
@@ -862,29 +902,40 @@ function MessageAttachments({
     const previewUrl = getAttachmentPreviewUrl(attachment)
     const isImagePreview = attachment.kind === 'image' && Boolean(previewUrl)
 
+    if (isImagePreview) {
+      return (
+        <button
+          className="chat-message-attachment"
+          data-chat-attachment-id={attachment.id}
+          data-chat-attachment-message-id={messageId}
+          data-kind="image"
+          key={attachment.id}
+          onClick={() => void openOriginalImageAttachment(attachment)}
+          title={attachment.name}
+          type="button"
+        >
+          <img src={previewUrl} alt={attachment.name} />
+        </button>
+      )
+    }
+
     return (
       <div
         className="chat-message-attachment"
         data-chat-attachment-id={attachment.id}
         data-chat-attachment-message-id={messageId}
-        data-kind={isImagePreview ? 'image' : 'file'}
+        data-kind="file"
         key={attachment.id}
         title={attachment.name}
       >
-        {isImagePreview ? (
-          <img src={previewUrl} alt={attachment.name} />
-        ) : (
-          <>
-            <span className="chat-message-attachment__icon" aria-hidden="true">
-              {badgeLabel ? (
-                <span className="chat-message-attachment__badge">{badgeLabel}</span>
-              ) : (
-                <AttachmentIcon />
-              )}
-            </span>
-            <span className="chat-message-attachment__name">{attachment.name}</span>
-          </>
-        )}
+        <span className="chat-message-attachment__icon" aria-hidden="true">
+          {badgeLabel ? (
+            <span className="chat-message-attachment__badge">{badgeLabel}</span>
+          ) : (
+            <AttachmentIcon />
+          )}
+        </span>
+        <span className="chat-message-attachment__name">{attachment.name}</span>
       </div>
     )
   }

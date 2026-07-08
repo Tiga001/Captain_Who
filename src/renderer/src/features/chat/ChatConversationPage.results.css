@@ -287,10 +287,17 @@
 .read-activity__image {
   width: 92px;
   height: 92px;
+  padding: 0;
   overflow: hidden;
   background: var(--mc-color-surface-elevated);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-xl);
+  cursor: zoom-in;
+}
+
+button.read-activity__image:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
 }
 
 .read-activity__image img {

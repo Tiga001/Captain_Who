@@ -2,6 +2,7 @@
 import type { AgentInputAttachment, AgentPermissions, AgentPromptPreferences } from "@mycopilot/protocol";
 import type {
   StorageAppDataSnapshot,
+  StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
   StorageChatMessageRecord,
@@ -183,6 +184,14 @@ export async function saveUiPreferences(preferences: UiPreferencesSnapshot): Pro
 
 export async function selectProfileAvatar(): Promise<string | null> {
   return hostClient.storage.selectProfileAvatar();
+}
+
+export async function loadAttachmentImage(
+  attachmentId: string,
+): Promise<StorageAttachmentImageRecord | null> {
+  const normalizedId = attachmentId.trim();
+  if (!normalizedId) return null;
+  return hostClient.storage.loadAttachmentImage({ attachmentId: normalizedId });
 }
 
 export function defaultAgentPromptPreferences(): AgentPromptPreferencesSnapshot {
