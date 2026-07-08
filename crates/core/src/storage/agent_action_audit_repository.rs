@@ -81,6 +81,35 @@ pub fn upsert_action_audit_record(
     Ok(())
 }
 
+pub fn delete_action_audit_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "DELETE FROM agent_action_audit WHERE conversation_id = ?1",
+        params![conversation_id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_action_audit_for_project(
+    connection: &Connection,
+    project_id: &str,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "
+        DELETE FROM agent_action_audit
+        WHERE conversation_id IN (
+            SELECT id
+            FROM conversations
+            WHERE project_id = ?1
+        )
+        ",
+        params![project_id],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

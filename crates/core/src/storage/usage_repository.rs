@@ -8,6 +8,40 @@ use rusqlite::{params, Connection};
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
+const DELETED_USAGE_ROLLUP_UPDATE_SQL: &str = "
+    request_count = agent_deleted_usage_daily_rollups.request_count + excluded.request_count,
+    message_count = agent_deleted_usage_daily_rollups.message_count + excluded.message_count,
+    input_tokens = CASE
+        WHEN agent_deleted_usage_daily_rollups.input_tokens IS NULL AND excluded.input_tokens IS NULL THEN NULL
+        ELSE COALESCE(agent_deleted_usage_daily_rollups.input_tokens, 0) + COALESCE(excluded.input_tokens, 0)
+    END,
+    output_tokens = CASE
+        WHEN agent_deleted_usage_daily_rollups.output_tokens IS NULL AND excluded.output_tokens IS NULL THEN NULL
+        ELSE COALESCE(agent_deleted_usage_daily_rollups.output_tokens, 0) + COALESCE(excluded.output_tokens, 0)
+    END,
+    output_thinking_tokens = CASE
+        WHEN agent_deleted_usage_daily_rollups.output_thinking_tokens IS NULL AND excluded.output_thinking_tokens IS NULL THEN NULL
+        ELSE COALESCE(agent_deleted_usage_daily_rollups.output_thinking_tokens, 0) + COALESCE(excluded.output_thinking_tokens, 0)
+    END,
+    total_tokens = CASE
+        WHEN agent_deleted_usage_daily_rollups.total_tokens IS NULL AND excluded.total_tokens IS NULL THEN NULL
+        ELSE COALESCE(agent_deleted_usage_daily_rollups.total_tokens, 0) + COALESCE(excluded.total_tokens, 0)
+    END,
+    cached_input_tokens = CASE
+        WHEN agent_deleted_usage_daily_rollups.cached_input_tokens IS NULL AND excluded.cached_input_tokens IS NULL THEN NULL
+        ELSE COALESCE(agent_deleted_usage_daily_rollups.cached_input_tokens, 0) + COALESCE(excluded.cached_input_tokens, 0)
+    END,
+    cache_creation_input_tokens = CASE
+        WHEN agent_deleted_usage_daily_rollups.cache_creation_input_tokens IS NULL AND excluded.cache_creation_input_tokens IS NULL THEN NULL
+        ELSE COALESCE(agent_deleted_usage_daily_rollups.cache_creation_input_tokens, 0) + COALESCE(excluded.cache_creation_input_tokens, 0)
+    END,
+    estimated_cost = CASE
+        WHEN agent_deleted_usage_daily_rollups.estimated_cost IS NULL AND excluded.estimated_cost IS NULL THEN NULL
+        ELSE COALESCE(agent_deleted_usage_daily_rollups.estimated_cost, 0.0) + COALESCE(excluded.estimated_cost, 0.0)
+    END,
+    updated_at = excluded.updated_at
+";
+
 pub fn upsert_usage_record(
     connection: &Connection,
     record: &AgentUsageRecordInsert,
@@ -91,6 +125,89 @@ pub fn upsert_usage_record(
     Ok(())
 }
 
+pub fn roll_up_deleted_usage_for_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    roll_up_deleted_usage(connection, "conversation_id = ?1", conversation_id, now_ms)
+}
+
+pub fn roll_up_deleted_usage_for_project(
+    connection: &Connection,
+    project_id: &str,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    roll_up_deleted_usage(
+        connection,
+        "
+        conversation_id IN (
+            SELECT id
+            FROM conversations
+            WHERE project_id = ?1
+        )
+        ",
+        project_id,
+        now_ms,
+    )
+}
+
+fn roll_up_deleted_usage(
+    connection: &Connection,
+    usage_filter_sql: &str,
+    usage_filter_value: &str,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    let statement = format!(
+        "
+        INSERT INTO agent_deleted_usage_daily_rollups (
+            usage_day,
+            model_id,
+            model_name,
+            provider_path_key,
+            request_count,
+            message_count,
+            input_tokens,
+            output_tokens,
+            output_thinking_tokens,
+            total_tokens,
+            cached_input_tokens,
+            cache_creation_input_tokens,
+            estimated_cost,
+            created_at,
+            updated_at
+        )
+        SELECT
+            CAST(created_at / ?2 AS INTEGER) * ?2,
+            model_id,
+            model_name,
+            COALESCE(provider_path, ''),
+            COALESCE(SUM(billable_request_count), 0),
+            COUNT(*),
+            SUM(input_tokens),
+            SUM(output_tokens),
+            SUM(output_thinking_tokens),
+            SUM(total_tokens),
+            SUM(cached_input_tokens),
+            SUM(cache_creation_input_tokens),
+            SUM(estimated_cost),
+            ?3,
+            ?3
+        FROM agent_usage_records
+        WHERE {usage_filter_sql}
+        GROUP BY
+            CAST(created_at / ?2 AS INTEGER) * ?2,
+            model_id,
+            model_name,
+            COALESCE(provider_path, '')
+        ON CONFLICT(usage_day, model_id, model_name, provider_path_key) DO UPDATE SET
+            {DELETED_USAGE_ROLLUP_UPDATE_SQL}
+        "
+    );
+    connection.execute(&statement, params![usage_filter_value, DAY_MS, now_ms])?;
+    Ok(())
+}
+
 pub fn usage_summary(
     connection: &Connection,
     input: &AgentUsageSummaryInput,
@@ -118,7 +235,7 @@ pub fn clear_usage_records(
     connection: &Connection,
     input: &AgentUsageClearInput,
 ) -> rusqlite::Result<AgentUsageClearOutput> {
-    let changed = connection.execute(
+    let changed_records = connection.execute(
         "
         DELETE FROM agent_usage_records
         WHERE (?1 IS NULL OR created_at >= ?1)
@@ -126,9 +243,18 @@ pub fn clear_usage_records(
         ",
         params![input.from, input.to],
     )?;
+    let (rollup_from, rollup_to) = rollup_window(input.from, input.to);
+    let changed_rollups = connection.execute(
+        "
+        DELETE FROM agent_deleted_usage_daily_rollups
+        WHERE (?1 IS NULL OR usage_day >= ?1)
+          AND (?2 IS NULL OR usage_day <= ?2)
+        ",
+        params![rollup_from, rollup_to],
+    )?;
 
     Ok(AgentUsageClearOutput {
-        deleted_records: changed as u64,
+        deleted_records: (changed_records + changed_rollups) as u64,
     })
 }
 
@@ -171,11 +297,12 @@ fn query_usage_totals(
     from: Option<i64>,
     to: Option<i64>,
 ) -> rusqlite::Result<UsageTotals> {
+    let (rollup_from, rollup_to) = rollup_window(from, to);
     connection.query_row(
         "
         SELECT
-            COALESCE(SUM(billable_request_count), 0),
-            COUNT(*),
+            COALESCE(SUM(request_count), 0),
+            COALESCE(SUM(message_count), 0),
             SUM(input_tokens),
             SUM(output_tokens),
             SUM(output_thinking_tokens),
@@ -183,11 +310,37 @@ fn query_usage_totals(
             SUM(cached_input_tokens),
             SUM(cache_creation_input_tokens),
             SUM(estimated_cost)
-        FROM agent_usage_records
-        WHERE (?1 IS NULL OR created_at >= ?1)
-          AND (?2 IS NULL OR created_at <= ?2)
+        FROM (
+            SELECT
+                billable_request_count AS request_count,
+                1 AS message_count,
+                input_tokens,
+                output_tokens,
+                output_thinking_tokens,
+                total_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+                estimated_cost
+            FROM agent_usage_records
+            WHERE (?1 IS NULL OR created_at >= ?1)
+              AND (?2 IS NULL OR created_at <= ?2)
+            UNION ALL
+            SELECT
+                request_count,
+                message_count,
+                input_tokens,
+                output_tokens,
+                output_thinking_tokens,
+                total_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+                estimated_cost
+            FROM agent_deleted_usage_daily_rollups
+            WHERE (?3 IS NULL OR usage_day >= ?3)
+              AND (?4 IS NULL OR usage_day <= ?4)
+        )
         ",
-        params![from, to],
+        params![from, to, rollup_from, rollup_to],
         |row| {
             Ok(UsageTotals {
                 request_count: i64_to_u64(row.get::<_, i64>(0)?),
@@ -209,14 +362,15 @@ fn query_usage_models(
     from: Option<i64>,
     to: Option<i64>,
 ) -> rusqlite::Result<Vec<AgentUsageModelSummary>> {
+    let (rollup_from, rollup_to) = rollup_window(from, to);
     let mut statement = connection.prepare(
         "
         SELECT
             model_id,
             model_name,
-            provider_path,
-            COALESCE(SUM(billable_request_count), 0),
-            COUNT(*),
+            NULLIF(provider_path_key, ''),
+            COALESCE(SUM(request_count), 0),
+            COALESCE(SUM(message_count), 0),
             SUM(input_tokens),
             SUM(output_tokens),
             SUM(output_thinking_tokens),
@@ -224,16 +378,48 @@ fn query_usage_models(
             SUM(cached_input_tokens),
             SUM(cache_creation_input_tokens),
             SUM(estimated_cost)
-        FROM agent_usage_records
-        WHERE (?1 IS NULL OR created_at >= ?1)
-          AND (?2 IS NULL OR created_at <= ?2)
-        GROUP BY model_id, model_name, provider_path
+        FROM (
+            SELECT
+                model_id,
+                model_name,
+                COALESCE(provider_path, '') AS provider_path_key,
+                billable_request_count AS request_count,
+                1 AS message_count,
+                input_tokens,
+                output_tokens,
+                output_thinking_tokens,
+                total_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+                estimated_cost
+            FROM agent_usage_records
+            WHERE (?1 IS NULL OR created_at >= ?1)
+              AND (?2 IS NULL OR created_at <= ?2)
+            UNION ALL
+            SELECT
+                model_id,
+                model_name,
+                provider_path_key,
+                request_count,
+                message_count,
+                input_tokens,
+                output_tokens,
+                output_thinking_tokens,
+                total_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+                estimated_cost
+            FROM agent_deleted_usage_daily_rollups
+            WHERE (?3 IS NULL OR usage_day >= ?3)
+              AND (?4 IS NULL OR usage_day <= ?4)
+        )
+        GROUP BY model_id, model_name, provider_path_key
         ORDER BY COALESCE(SUM(total_tokens), 0) DESC, model_name ASC
         ",
     )?;
 
     let models = statement
-        .query_map(params![from, to], |row| {
+        .query_map(params![from, to, rollup_from, rollup_to], |row| {
             Ok(AgentUsageModelSummary {
                 model_id: row.get(0)?,
                 model_name: row.get(1)?,
@@ -251,6 +437,14 @@ fn query_usage_models(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(models)
+}
+
+fn rollup_window(from: Option<i64>, to: Option<i64>) -> (Option<i64>, Option<i64>) {
+    (from.map(day_start_ms), to.map(day_start_ms))
+}
+
+fn day_start_ms(timestamp_ms: i64) -> i64 {
+    timestamp_ms.div_euclid(DAY_MS) * DAY_MS
 }
 
 fn summary_window(input: &AgentUsageSummaryInput, now_ms: i64) -> (Option<i64>, Option<i64>) {
@@ -400,6 +594,132 @@ mod tests {
         assert_eq!(summary.cache_creation_input_tokens, None);
         assert_eq!(summary.models.len(), 1);
         assert_eq!(summary.models[0].model_id, "model-a");
+    }
+
+    #[test]
+    fn rolls_up_deleted_conversation_usage_into_summary_and_clear() {
+        let connection = in_memory_connection();
+        insert_conversation(&connection, "conversation-1");
+        upsert_usage_record(
+            &connection,
+            &AgentUsageRecordInsert {
+                id: "usage-1".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                message_id: "message-1".to_string(),
+                run_id: "run-1".to_string(),
+                project_id: Some("project-1".to_string()),
+                model_id: "model-a".to_string(),
+                model_name: "Model A".to_string(),
+                provider_path: Some("provider/model-a".to_string()),
+                started_at: Some(DAY_MS + 900),
+                completed_at: Some(DAY_MS + 1_000),
+                status: Some("completed".to_string()),
+                error: None,
+                created_at: DAY_MS + 1_000,
+                input_tokens: Some(10),
+                output_tokens: Some(20),
+                output_thinking_tokens: Some(5),
+                total_tokens: Some(30),
+                cached_input_tokens: Some(3),
+                cache_creation_input_tokens: None,
+                billable_request_count: 2,
+                input_price: Some("0".to_string()),
+                output_price: Some("0".to_string()),
+                estimated_cost: Some(0.1),
+            },
+        )
+        .unwrap();
+        upsert_usage_record(
+            &connection,
+            &AgentUsageRecordInsert {
+                id: "usage-2".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                message_id: "message-2".to_string(),
+                run_id: "run-2".to_string(),
+                project_id: Some("project-1".to_string()),
+                model_id: "model-a".to_string(),
+                model_name: "Model A".to_string(),
+                provider_path: Some("provider/model-a".to_string()),
+                started_at: Some(DAY_MS + 1_900),
+                completed_at: Some(DAY_MS + 2_000),
+                status: Some("completed".to_string()),
+                error: None,
+                created_at: DAY_MS + 2_000,
+                input_tokens: Some(1),
+                output_tokens: Some(2),
+                output_thinking_tokens: None,
+                total_tokens: Some(3),
+                cached_input_tokens: None,
+                cache_creation_input_tokens: Some(4),
+                billable_request_count: 1,
+                input_price: Some("0".to_string()),
+                output_price: Some("0".to_string()),
+                estimated_cost: Some(0.2),
+            },
+        )
+        .unwrap();
+
+        roll_up_deleted_usage_for_conversation(&connection, "conversation-1", DAY_MS * 2).unwrap();
+        connection
+            .execute(
+                "DELETE FROM conversations WHERE id = ?1",
+                params!["conversation-1"],
+            )
+            .unwrap();
+
+        let remaining_records: i64 = connection
+            .query_row("SELECT COUNT(*) FROM agent_usage_records", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining_records, 0);
+
+        let summary = usage_summary(
+            &connection,
+            &AgentUsageSummaryInput {
+                range: AgentUsageSummaryRange::All,
+                from: None,
+                to: None,
+            },
+            DAY_MS * 3,
+        )
+        .unwrap();
+        assert_eq!(summary.request_count, 3);
+        assert_eq!(summary.message_count, 2);
+        assert_eq!(summary.input_tokens, Some(11));
+        assert_eq!(summary.output_tokens, Some(22));
+        assert_eq!(summary.output_thinking_tokens, Some(5));
+        assert_eq!(summary.total_tokens, Some(33));
+        assert_eq!(summary.cached_input_tokens, Some(3));
+        assert_eq!(summary.cache_creation_input_tokens, Some(4));
+        assert!((summary.estimated_cost.unwrap() - 0.3).abs() < f64::EPSILON);
+        assert_eq!(summary.models.len(), 1);
+        assert_eq!(
+            summary.models[0].provider_path.as_deref(),
+            Some("provider/model-a")
+        );
+
+        let deleted = clear_usage_records(
+            &connection,
+            &AgentUsageClearInput {
+                from: None,
+                to: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(deleted.deleted_records, 1);
+
+        let summary = usage_summary(
+            &connection,
+            &AgentUsageSummaryInput {
+                range: AgentUsageSummaryRange::All,
+                from: None,
+                to: None,
+            },
+            DAY_MS * 3,
+        )
+        .unwrap();
+        assert_eq!(summary.message_count, 0);
     }
 
     #[test]

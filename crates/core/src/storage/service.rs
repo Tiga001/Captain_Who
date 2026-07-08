@@ -12,8 +12,9 @@ use crate::storage::models::{
 };
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
-    chat_repository, composer_draft_repository, config_repository, pending_action_repository,
-    preferences_repository, project_repository, storage_error, usage_repository, StorageState,
+    chat_repository, composer_draft_repository, config_repository, now_ms,
+    pending_action_repository, preferences_repository, project_repository, storage_error,
+    usage_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
@@ -101,13 +102,26 @@ impl StorageService {
     }
 
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
-        let connection = self.state.connection()?;
+        let mut connection = self.state.connection()?;
         let attachments =
             attachment_repository::list_project_deletion_attachments(&connection, project_id)
                 .map_err(storage_error)?;
-        composer_draft_repository::delete_project_composer_drafts(&connection, project_id)
+        {
+            let transaction = connection.transaction().map_err(storage_error)?;
+            usage_repository::roll_up_deleted_usage_for_project(&transaction, project_id, now_ms())
+                .map_err(storage_error)?;
+            pending_action_repository::delete_pending_actions_for_project(&transaction, project_id)
+                .map_err(storage_error)?;
+            agent_action_audit_repository::delete_action_audit_for_project(
+                &transaction,
+                project_id,
+            )
             .map_err(storage_error)?;
-        project_repository::delete_project(&connection, project_id).map_err(storage_error)?;
+            composer_draft_repository::delete_project_composer_drafts(&transaction, project_id)
+                .map_err(storage_error)?;
+            project_repository::delete_project(&transaction, project_id).map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)?;
+        }
         self.cleanup_attachment_files(attachments)
     }
 
@@ -182,14 +196,34 @@ impl StorageService {
     }
 
     pub fn delete_conversation(&self, conversation_id: &str) -> Result<(), String> {
-        let connection = self.state.connection()?;
+        let mut connection = self.state.connection()?;
         let attachments =
             attachment_repository::list_conversation_attachments(&connection, conversation_id)
                 .map_err(storage_error)?;
-        chat_repository::delete_conversation(&connection, conversation_id)
+        {
+            let transaction = connection.transaction().map_err(storage_error)?;
+            usage_repository::roll_up_deleted_usage_for_conversation(
+                &transaction,
+                conversation_id,
+                now_ms(),
+            )
             .map_err(storage_error)?;
-        composer_draft_repository::delete_composer_draft(&connection, conversation_id)
+            pending_action_repository::delete_pending_actions_for_conversation(
+                &transaction,
+                conversation_id,
+            )
             .map_err(storage_error)?;
+            agent_action_audit_repository::delete_action_audit_for_conversation(
+                &transaction,
+                conversation_id,
+            )
+            .map_err(storage_error)?;
+            chat_repository::delete_conversation(&transaction, conversation_id)
+                .map_err(storage_error)?;
+            composer_draft_repository::delete_composer_draft(&transaction, conversation_id)
+                .map_err(storage_error)?;
+            transaction.commit().map_err(storage_error)?;
+        }
         self.cleanup_attachment_files(attachments)
     }
 
@@ -1085,6 +1119,75 @@ mod tests {
         assert_eq!(scopes, vec!["conversation-3".to_string()]);
     }
 
+    #[test]
+    fn deleting_conversation_removes_agent_rows_and_keeps_usage_rollup() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        service
+            .save_conversation(conversation(
+                "conversation-1",
+                Some("project-1"),
+                "message-1",
+            ))
+            .unwrap();
+        service
+            .upsert_agent_usage(agent_usage_record("conversation-1", "message-1"))
+            .unwrap();
+        service
+            .upsert_pending_agent_action(pending_action("action-1", "conversation-1"))
+            .unwrap();
+        service
+            .upsert_agent_action_audit(action_audit("action-1", "conversation-1"))
+            .unwrap();
+
+        service.delete_conversation("conversation-1").unwrap();
+
+        let summary = service
+            .get_usage_summary(
+                &crate::AgentUsageSummaryInput {
+                    range: crate::AgentUsageSummaryRange::All,
+                    from: None,
+                    to: None,
+                },
+                200_000,
+            )
+            .unwrap();
+        assert_eq!(summary.request_count, 1);
+        assert_eq!(summary.message_count, 1);
+        assert_eq!(summary.input_tokens, Some(12));
+        assert_eq!(summary.output_tokens, Some(8));
+        assert_eq!(summary.total_tokens, Some(20));
+
+        let connection = service.state.connection().unwrap();
+        let raw_usage_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM agent_usage_records", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let rollup_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM agent_deleted_usage_daily_rollups",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let pending_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM agent_pending_actions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let audit_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM agent_action_audit", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        assert_eq!(raw_usage_count, 0);
+        assert_eq!(rollup_count, 1);
+        assert_eq!(pending_count, 0);
+        assert_eq!(audit_count, 0);
+    }
+
     struct StorageFixture {
         root: PathBuf,
     }
@@ -1170,6 +1273,77 @@ mod tests {
             project_id: project_id.map(ToString::to_string),
             attachments_json: "[]".to_string(),
             updated_at: 1,
+        }
+    }
+
+    fn agent_usage_record(conversation_id: &str, message_id: &str) -> AgentUsageRecordInsert {
+        AgentUsageRecordInsert {
+            id: format!("usage-{message_id}"),
+            conversation_id: conversation_id.to_string(),
+            message_id: message_id.to_string(),
+            run_id: "run-1".to_string(),
+            project_id: Some("project-1".to_string()),
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            provider_path: Some("provider/model-1".to_string()),
+            started_at: Some(900),
+            completed_at: Some(1_000),
+            status: Some("completed".to_string()),
+            error: None,
+            created_at: 1_000,
+            input_tokens: Some(12),
+            output_tokens: Some(8),
+            output_thinking_tokens: None,
+            total_tokens: Some(20),
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            billable_request_count: 1,
+            input_price: Some("0".to_string()),
+            output_price: Some("0".to_string()),
+            estimated_cost: Some(0.0),
+        }
+    }
+
+    fn pending_action(action_id: &str, conversation_id: &str) -> AgentPendingActionRecord {
+        AgentPendingActionRecord {
+            action_id: action_id.to_string(),
+            run_id: "run-1".to_string(),
+            conversation_id: Some(conversation_id.to_string()),
+            assistant_message_id: Some("message-1".to_string()),
+            action_type: "command".to_string(),
+            tool_name: "run_command".to_string(),
+            tool_call_id: Some(action_id.to_string()),
+            status: "pending".to_string(),
+            action_json: "{}".to_string(),
+            agent_input_json: "{}".to_string(),
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    fn action_audit(action_id: &str, conversation_id: &str) -> AgentActionAuditRecord {
+        AgentActionAuditRecord {
+            action_id: action_id.to_string(),
+            run_id: "run-1".to_string(),
+            conversation_id: Some(conversation_id.to_string()),
+            assistant_message_id: Some("message-1".to_string()),
+            action_type: "command".to_string(),
+            tool_name: "run_command".to_string(),
+            decision: Some("approved".to_string()),
+            status: "completed".to_string(),
+            action_json: "{}".to_string(),
+            patch_result_json: None,
+            command_result_json: None,
+            tool_result_json: None,
+            error: None,
+            created_at: 1,
+            decided_at: Some(2),
+            completed_at: Some(3),
+            effective_permissions_json: None,
+            path_scope: None,
+            command_cwd_scope: None,
+            blocked_reason: None,
+            decision_source: Some("manual".to_string()),
         }
     }
 }

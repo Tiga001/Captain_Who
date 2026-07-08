@@ -138,6 +138,25 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS agent_deleted_usage_daily_rollups (
+            usage_day INTEGER NOT NULL,
+            model_id TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            provider_path_key TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            output_thinking_tokens INTEGER,
+            total_tokens INTEGER,
+            cached_input_tokens INTEGER,
+            cache_creation_input_tokens INTEGER,
+            estimated_cost REAL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (usage_day, model_id, model_name, provider_path_key)
+        );
+
         CREATE TABLE IF NOT EXISTS agent_action_audit (
             action_id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
@@ -297,6 +316,8 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_usage_records_created_at ON agent_usage_records(created_at);
         CREATE INDEX IF NOT EXISTS idx_agent_usage_records_model_id ON agent_usage_records(model_id);
         CREATE INDEX IF NOT EXISTS idx_agent_usage_records_project_id ON agent_usage_records(project_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_deleted_usage_daily_rollups_usage_day ON agent_deleted_usage_daily_rollups(usage_day);
+        CREATE INDEX IF NOT EXISTS idx_agent_deleted_usage_daily_rollups_model_id ON agent_deleted_usage_daily_rollups(model_id);
         CREATE INDEX IF NOT EXISTS idx_agent_action_audit_run_id ON agent_action_audit(run_id);
         CREATE INDEX IF NOT EXISTS idx_agent_action_audit_conversation_id ON agent_action_audit(conversation_id);
         CREATE INDEX IF NOT EXISTS idx_agent_action_audit_created_at ON agent_action_audit(created_at);
