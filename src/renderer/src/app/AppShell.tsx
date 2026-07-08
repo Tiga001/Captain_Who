@@ -1,5 +1,6 @@
 // Renderer UI.
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react'
+import type { AppWindowState } from '@mycopilot/host-api'
 import type { AgentEvent, AgentProposedAction } from '@mycopilot/protocol'
 import type { AgentInputAttachment } from '@mycopilot/protocol'
 import { ResizeHandle } from '../components/layout/ResizeHandle'
@@ -8,6 +9,7 @@ import { RightSidebar } from '../components/sidebar/RightSidebar'
 import { useModelSettings } from '../config/ModelSettingsProvider'
 import { useProjectSettings } from '../config/ProjectSettingsProvider'
 import { useFrontendConfig } from '../config/FrontendConfigProvider'
+import { hostClient } from '../host/hostClient'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
 import { NewConversationPage } from '../features/chat/NewConversationPage'
 import type { SettingsPageId } from '../features/settings/SettingsPage'
@@ -120,6 +122,11 @@ function getEditableLastTurn(conversation: ChatConversation) {
   }
 }
 
+const DEFAULT_APP_WINDOW_STATE: AppWindowState = {
+  isFullScreen: false,
+  isMaximized: false
+}
+
 export function AppShell() {
   const { t } = useFrontendConfig()
   const { enabledModels } = useModelSettings()
@@ -138,6 +145,7 @@ export function AppShell() {
     toggleRightSidebarMaximized
   } = useShellLayout()
   const [view, setView] = useState<'workspace' | 'settings'>('workspace')
+  const [appWindowState, setAppWindowState] = useState<AppWindowState>(DEFAULT_APP_WINDOW_STATE)
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPageId>('general')
   const [uiPreferences, setUiPreferences] = useState<UiPreferencesSnapshot>(() =>
     defaultUiPreferences()
@@ -197,6 +205,27 @@ export function AppShell() {
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId
   }, [activeConversationId])
+
+  useEffect(() => {
+    let cancelled = false
+    const unsubscribe = hostClient.app.onWindowStateChange(setAppWindowState)
+
+    void hostClient.app
+      .getWindowState()
+      .then((state) => {
+        if (!cancelled) {
+          setAppWindowState(state)
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to load app window state', error)
+      })
+
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -1142,6 +1171,7 @@ export function AppShell() {
     setSettingsInitialPage(initialPage)
     setView('settings')
   }, [])
+  const appWindowMaximized = appWindowState.isFullScreen || appWindowState.isMaximized
 
   if (view === 'settings') {
     return (
@@ -1169,6 +1199,7 @@ export function AppShell() {
       data-right-maximized={rightMaximized ? 'true' : undefined}
       data-right-open={rightOpen ? 'true' : 'false'}
       data-translucent-sidebar={uiPreferences.translucentSidebar ? 'true' : undefined}
+      data-window-maximized={appWindowMaximized ? 'true' : undefined}
       style={getAppShellPanelStyle(leftOpen, leftWidth, rightOpen, rightWidth, uiPreferences)}
     >
       <header className="window-toolbar" data-drag-region />

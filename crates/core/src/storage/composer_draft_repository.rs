@@ -72,3 +72,22 @@ pub fn delete_composer_draft(connection: &Connection, scope_id: &str) -> rusqlit
     )?;
     Ok(())
 }
+
+pub fn delete_project_composer_drafts(
+    connection: &Connection,
+    project_id: &str,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "
+        DELETE FROM composer_drafts
+        WHERE project_id = ?1
+           OR scope_id IN (
+                SELECT id
+                FROM conversations
+                WHERE project_id = ?1
+           )
+        ",
+        params![project_id],
+    )?;
+    Ok(())
+}

@@ -1,6 +1,7 @@
 // Renderer UI.
 import { Archive, ChevronDown, Folder, RotateCcw, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
+import { ConfirmationDialog } from "../../../components/dialog/ConfirmationDialog";
 import { useFrontendConfig } from "../../../config/FrontendConfigProvider";
 import type { AppProject } from "../../../config/projectConfig";
 import type { ChatConversation } from "../../chat/chatTypes";
@@ -8,13 +9,17 @@ import "./ArchivedConversationsSettingsPage.css";
 
 interface ArchivedConversationsSettingsPageProps {
   conversations: ChatConversation[];
-  onDeleteAllArchivedConversations: () => void;
+  onDeleteArchivedConversations: (conversationIds: string[]) => void;
   onDeleteConversation: (conversationId: string) => void;
   onUnarchiveConversation: (conversationId: string) => void;
   projects: AppProject[];
 }
 
 type ProjectFilter = "all" | "none" | string;
+type PendingDeleteConfirmation =
+  | { conversationId: string; type: "single" }
+  | { conversationIds: string[]; type: "all" }
+  | { conversationIds: string[]; scopeName: string; type: "filtered" };
 
 function formatArchivedDate(timestamp: number, language: string) {
   const date = new Date(timestamp);
@@ -44,15 +49,26 @@ function getProjectName(projectId: string | null, projects: AppProject[], noProj
   return projects.find((project) => project.id === projectId)?.name ?? noProjectLabel;
 }
 
+function getProjectFilterName(
+  projectFilter: ProjectFilter,
+  projects: AppProject[],
+  noProjectLabel: string,
+) {
+  if (projectFilter === "none") return noProjectLabel;
+  return projects.find((project) => project.id === projectFilter)?.name ?? noProjectLabel;
+}
+
 export function ArchivedConversationsSettingsPage({
   conversations,
-  onDeleteAllArchivedConversations,
+  onDeleteArchivedConversations,
   onDeleteConversation,
   onUnarchiveConversation,
   projects,
 }: ArchivedConversationsSettingsPageProps) {
   const { language, t } = useFrontendConfig();
   const [projectFilter, setProjectFilter] = useState<ProjectFilter>("all");
+  const [pendingDeleteConfirmation, setPendingDeleteConfirmation] =
+    useState<PendingDeleteConfirmation | null>(null);
   const archivedConversations = useMemo(
     () =>
       conversations
@@ -65,6 +81,24 @@ export function ArchivedConversationsSettingsPage({
     if (projectFilter === "none") return !conversation.projectId;
     return conversation.projectId === projectFilter;
   });
+  const pendingDeleteTitle =
+    pendingDeleteConfirmation?.type === "filtered"
+      ? t("archive.deleteFilteredConfirmTitle").replace(
+          "{scopeName}",
+          pendingDeleteConfirmation.scopeName,
+        )
+      : pendingDeleteConfirmation?.type === "all"
+        ? t("archive.deleteAllConfirmTitle")
+        : t("archive.deleteConfirmTitle");
+  const pendingDeleteDescription =
+    pendingDeleteConfirmation?.type === "filtered"
+      ? t("archive.deleteFilteredConfirmDescription").replace(
+          "{scopeName}",
+          pendingDeleteConfirmation.scopeName,
+        )
+      : pendingDeleteConfirmation?.type === "all"
+        ? t("archive.deleteAllConfirmDescription")
+        : t("archive.deleteConfirmDescription");
 
   return (
     <article className="archived-conversations-page">
@@ -73,8 +107,21 @@ export function ArchivedConversationsSettingsPage({
         <button
           className="archived-conversations-page__delete-all"
           type="button"
-          disabled={archivedConversations.length === 0}
-          onClick={onDeleteAllArchivedConversations}
+          disabled={filteredConversations.length === 0}
+          onClick={() => {
+            setPendingDeleteConfirmation(
+              projectFilter === "all"
+                ? {
+                    conversationIds: archivedConversations.map((conversation) => conversation.id),
+                    type: "all",
+                  }
+                : {
+                    conversationIds: filteredConversations.map((conversation) => conversation.id),
+                    scopeName: getProjectFilterName(projectFilter, projects, t("archive.noProject")),
+                    type: "filtered",
+                  },
+            );
+          }}
         >
           <Trash2 aria-hidden="true" />
           <span>{t("archive.deleteAll")}</span>
@@ -126,7 +173,12 @@ export function ArchivedConversationsSettingsPage({
                     type="button"
                     aria-label={t("archive.deleteConversation")}
                     title={t("archive.deleteConversation")}
-                    onClick={() => onDeleteConversation(conversation.id)}
+                    onClick={() =>
+                      setPendingDeleteConfirmation({
+                        conversationId: conversation.id,
+                        type: "single",
+                      })
+                    }
                   >
                     <Trash2 aria-hidden="true" />
                   </button>
@@ -144,6 +196,24 @@ export function ArchivedConversationsSettingsPage({
           )}
         </div>
       </section>
+
+      {pendingDeleteConfirmation && (
+        <ConfirmationDialog
+          title={pendingDeleteTitle}
+          description={pendingDeleteDescription}
+          cancelLabel={t("configuration.cancel")}
+          confirmLabel={t("configuration.delete")}
+          onCancel={() => setPendingDeleteConfirmation(null)}
+          onConfirm={() => {
+            if (pendingDeleteConfirmation.type === "all" || pendingDeleteConfirmation.type === "filtered") {
+              onDeleteArchivedConversations(pendingDeleteConfirmation.conversationIds);
+            } else {
+              onDeleteConversation(pendingDeleteConfirmation.conversationId);
+            }
+            setPendingDeleteConfirmation(null);
+          }}
+        />
+      )}
     </article>
   );
 }

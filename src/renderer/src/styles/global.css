@@ -248,7 +248,7 @@ button {
   right: 20px;
 }
 
-.app-shell[data-left-open="false"] .panel-toggle--left {
+.app-shell[data-left-open="false"]:not([data-window-maximized="true"]) .panel-toggle--left {
   left: var(--mac-window-control-safe-width);
 }
 
@@ -322,7 +322,7 @@ button {
   pointer-events: none;
 }
 
-.app-shell[data-left-open="false"] .main-panel__title {
+.app-shell[data-left-open="false"]:not([data-window-maximized="true"]) .main-panel__title {
   left: calc(var(--mac-window-control-safe-width) + 44px);
 }
 

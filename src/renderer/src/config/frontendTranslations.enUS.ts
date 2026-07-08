@@ -270,7 +270,15 @@ export const enUSTranslations = {
   'archive.noProject': 'No project',
   'archive.empty': 'No archived chats',
   'archive.deleteConversation': 'Delete chat',
+  'archive.deleteConfirmTitle': 'Delete archived chat?',
+  'archive.deleteConfirmDescription': 'This will permanently delete this archived chat.',
   'archive.unarchive': 'Unarchive',
+  'archive.deleteAllConfirmTitle': 'Delete all archived local chats?',
+  'archive.deleteAllConfirmDescription':
+    'This will permanently delete all local archived chat records.',
+  'archive.deleteFilteredConfirmTitle': 'Delete archived chats in {scopeName}?',
+  'archive.deleteFilteredConfirmDescription':
+    'This will permanently delete local archived chat records in {scopeName}.',
 
   'chat.newConversation': 'New chat',
   'chat.title': 'What should we build?',

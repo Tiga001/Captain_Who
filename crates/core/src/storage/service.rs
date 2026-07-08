@@ -105,6 +105,8 @@ impl StorageService {
         let attachments =
             attachment_repository::list_project_deletion_attachments(&connection, project_id)
                 .map_err(storage_error)?;
+        composer_draft_repository::delete_project_composer_drafts(&connection, project_id)
+            .map_err(storage_error)?;
         project_repository::delete_project(&connection, project_id).map_err(storage_error)?;
         self.cleanup_attachment_files(attachments)
     }
@@ -185,6 +187,8 @@ impl StorageService {
             attachment_repository::list_conversation_attachments(&connection, conversation_id)
                 .map_err(storage_error)?;
         chat_repository::delete_conversation(&connection, conversation_id)
+            .map_err(storage_error)?;
+        composer_draft_repository::delete_composer_draft(&connection, conversation_id)
             .map_err(storage_error)?;
         self.cleanup_attachment_files(attachments)
     }
@@ -871,7 +875,7 @@ fn orphan_scan_relative_path(attachment_root: &Path, path: &Path) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord, ComposerDraftRecord};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -996,6 +1000,91 @@ mod tests {
         assert!(library.project_attachments.is_empty());
     }
 
+    #[test]
+    fn deleting_conversation_and_project_removes_composer_drafts() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        service
+            .save_conversation(conversation(
+                "conversation-1",
+                Some("project-1"),
+                "message-1",
+            ))
+            .unwrap();
+        service
+            .save_conversation(conversation(
+                "conversation-2",
+                Some("project-1"),
+                "message-2",
+            ))
+            .unwrap();
+        service
+            .save_conversation(conversation(
+                "conversation-3",
+                Some("project-2"),
+                "message-3",
+            ))
+            .unwrap();
+
+        service
+            .save_composer_draft(composer_draft(
+                "conversation-1",
+                Some("project-1"),
+                "draft 1",
+            ))
+            .unwrap();
+        service
+            .save_composer_draft(composer_draft(
+                "conversation-2",
+                Some("project-1"),
+                "draft 2",
+            ))
+            .unwrap();
+        service
+            .save_composer_draft(composer_draft(
+                "new-conversation-project-1",
+                Some("project-1"),
+                "new draft",
+            ))
+            .unwrap();
+        service
+            .save_composer_draft(composer_draft(
+                "conversation-3",
+                Some("project-2"),
+                "draft 3",
+            ))
+            .unwrap();
+
+        service.delete_conversation("conversation-1").unwrap();
+
+        let mut scopes = service
+            .load_composer_drafts()
+            .unwrap()
+            .into_iter()
+            .map(|draft| draft.scope_id)
+            .collect::<Vec<_>>();
+        scopes.sort();
+        assert_eq!(
+            scopes,
+            vec![
+                "conversation-2".to_string(),
+                "conversation-3".to_string(),
+                "new-conversation-project-1".to_string()
+            ]
+        );
+
+        service.delete_project("project-1").unwrap();
+
+        let mut scopes = service
+            .load_composer_drafts()
+            .unwrap()
+            .into_iter()
+            .map(|draft| draft.scope_id)
+            .collect::<Vec<_>>();
+        scopes.sort();
+        assert_eq!(scopes, vec!["conversation-3".to_string()]);
+    }
+
     struct StorageFixture {
         root: PathBuf,
     }
@@ -1065,6 +1154,22 @@ mod tests {
             encoding: AgentInputAttachmentEncoding::Base64,
             data: base64::engine::general_purpose::STANDARD.encode(bytes),
             truncated: None,
+        }
+    }
+
+    fn composer_draft(
+        scope_id: &str,
+        project_id: Option<&str>,
+        message: &str,
+    ) -> ComposerDraftRecord {
+        ComposerDraftRecord {
+            scope_id: scope_id.to_string(),
+            message: message.to_string(),
+            permission_mode: "workspace".to_string(),
+            model_id: Some("model-1".to_string()),
+            project_id: project_id.map(ToString::to_string),
+            attachments_json: "[]".to_string(),
+            updated_at: 1,
         }
     }
 }

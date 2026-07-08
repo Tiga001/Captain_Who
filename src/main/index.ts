@@ -2,6 +2,7 @@
 import { app, shell, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import type { AppWindowState } from '@mycopilot/host-api'
 import icon from '../../resources/icon.png?asset'
 import { BrowserWebContentsViewManager } from './browser/BrowserWebContentsViewManager'
 import { CoreServer } from './core/coreServer'
@@ -25,6 +26,22 @@ const macWindowChromeOptions =
       }
     : {}
 
+const APP_WINDOW_STATE_CHANNEL = 'host:app.windowStateChange'
+
+function getAppWindowState(window: BrowserWindow): AppWindowState {
+  return {
+    isFullScreen: window.isFullScreen(),
+    isMaximized: window.isMaximized()
+  }
+}
+
+function sendAppWindowState(window: BrowserWindow): void {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) {
+    return
+  }
+  window.webContents.send(APP_WINDOW_STATE_CHANNEL, getAppWindowState(window))
+}
+
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
     title: 'MyCopilot',
@@ -45,6 +62,7 @@ function createWindow(): void {
   })
 
   browserManager = new BrowserWebContentsViewManager(mainWindow)
+  const handleWindowStateChange = (): void => sendAppWindowState(mainWindow)
 
   mainWindow.on('closed', () => {
     browserManager?.destroyAll()
@@ -53,7 +71,15 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => {
     mainWindow.show()
+    sendAppWindowState(mainWindow)
   })
+
+  mainWindow.webContents.on('did-finish-load', handleWindowStateChange)
+  mainWindow.on('maximize', handleWindowStateChange)
+  mainWindow.on('unmaximize', handleWindowStateChange)
+  mainWindow.on('enter-full-screen', handleWindowStateChange)
+  mainWindow.on('leave-full-screen', handleWindowStateChange)
+  mainWindow.on('restore', handleWindowStateChange)
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)

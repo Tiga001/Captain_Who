@@ -26,6 +26,12 @@
   gap: 8px;
 }
 
+.app-shell[data-left-open="false"]:not([data-window-maximized="true"])
+  .right-sidebar--maximized
+  .right-sidebar__toolbar {
+  padding-left: var(--mac-window-control-safe-width);
+}
+
 .right-sidebar__toolbar--home {
   border-bottom: 0;
 }

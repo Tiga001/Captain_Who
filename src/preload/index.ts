@@ -2,6 +2,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type { HostApi } from '@mycopilot/host-api'
+import type { AppWindowState } from '@mycopilot/host-api'
 import type {
   AgentEvent,
   BrowserViewEvent,
@@ -11,6 +12,7 @@ import type {
 
 const BROWSER_EVENT_CHANNEL = 'host:browser.event'
 const AGENT_EVENT_CHANNEL = 'host:agent.event'
+const APP_WINDOW_STATE_CHANNEL = 'host:app.windowStateChange'
 const TERMINAL_OUTPUT_CHANNEL = 'host:terminal.output'
 const TERMINAL_EXIT_CHANNEL = 'host:terminal.exit'
 
@@ -24,6 +26,12 @@ function onAgentEvent(handler: (event: AgentEvent) => void): () => void {
   const listener = (_event: IpcRendererEvent, payload: AgentEvent): void => handler(payload)
   ipcRenderer.on(AGENT_EVENT_CHANNEL, listener)
   return () => ipcRenderer.removeListener(AGENT_EVENT_CHANNEL, listener)
+}
+
+function onAppWindowStateChange(handler: (state: AppWindowState) => void): () => void {
+  const listener = (_event: IpcRendererEvent, payload: AppWindowState): void => handler(payload)
+  ipcRenderer.on(APP_WINDOW_STATE_CHANNEL, listener)
+  return () => ipcRenderer.removeListener(APP_WINDOW_STATE_CHANNEL, listener)
 }
 
 function onTerminalOutput(handler: (event: TerminalOutputEvent) => void): () => void {
@@ -44,7 +52,9 @@ const host: HostApi = {
     ping: (input) => ipcRenderer.invoke('host:core.ping', input)
   },
   app: {
+    getWindowState: () => ipcRenderer.invoke('host:app.getWindowState'),
     getVersion: () => ipcRenderer.invoke('host:app.getVersion'),
+    onWindowStateChange: onAppWindowStateChange,
     setNativeThemeSource: (themeSource) =>
       ipcRenderer.invoke('host:app.setNativeThemeSource', themeSource)
   },

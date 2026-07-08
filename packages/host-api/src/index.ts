@@ -150,12 +150,19 @@ export interface ClipboardHostApi {
 
 export type NativeThemeSource = 'system' | 'light' | 'dark'
 
+export interface AppWindowState {
+  isFullScreen: boolean
+  isMaximized: boolean
+}
+
 export interface HostApi {
   core: {
     ping(input?: CorePingRequest): Promise<CorePingResponse>
   }
   app: {
+    getWindowState(): Promise<AppWindowState>
     getVersion(): Promise<AppVersionResponse>
+    onWindowStateChange(handler: (state: AppWindowState) => void): () => void
     setNativeThemeSource(themeSource: NativeThemeSource): Promise<void>
   }
   agent: AgentHostApi

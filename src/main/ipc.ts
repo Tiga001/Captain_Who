@@ -9,6 +9,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import { fileURLToPath } from 'url'
 import type { StorageImageFileRecord } from '@mycopilot/protocol'
 import type { StorageProjectRecord } from '@mycopilot/protocol'
+import type { AppWindowState } from '@mycopilot/host-api'
 
 import { CoreServer } from './core/coreServer'
 import { BrowserWebContentsViewManager } from './browser/BrowserWebContentsViewManager'
@@ -34,6 +35,13 @@ type NativeThemeSource = 'system' | 'light' | 'dark'
 
 function isNativeThemeSource(value: unknown): value is NativeThemeSource {
   return value === 'system' || value === 'light' || value === 'dark'
+}
+
+function getAppWindowState(window: BrowserWindow | undefined): AppWindowState {
+  return {
+    isFullScreen: window?.isFullScreen() ?? false,
+    isMaximized: window?.isMaximized() ?? false
+  }
 }
 
 function getInvokeWindow(event: IpcMainInvokeEvent): BrowserWindow | undefined {
@@ -383,6 +391,7 @@ export function registerHostIpc(
   })
 
   ipcMain.handle('host:core.ping', (_event, input) => coreServer.ping(input))
+  ipcMain.handle('host:app.getWindowState', (event) => getAppWindowState(getInvokeWindow(event)))
   ipcMain.handle('host:app.getVersion', () => coreServer.getVersion())
   ipcMain.handle('host:app.setNativeThemeSource', (_event, themeSource) => {
     if (!isNativeThemeSource(themeSource)) {

@@ -256,7 +256,13 @@ export const zhCNTranslations = {
   'archive.noProject': '无项目',
   'archive.empty': '暂无归档对话',
   'archive.deleteConversation': '删除对话',
+  'archive.deleteConfirmTitle': '删除已归档聊天？',
+  'archive.deleteConfirmDescription': '这将永久删除已归档聊天',
   'archive.unarchive': '取消归档',
+  'archive.deleteAllConfirmTitle': '删除所有已归档本地聊天？',
+  'archive.deleteAllConfirmDescription': '这将永久删除所有本地已归档聊天记录',
+  'archive.deleteFilteredConfirmTitle': '删除“{scopeName}”下的已归档聊天？',
+  'archive.deleteFilteredConfirmDescription': '这将永久删除“{scopeName}”下的本地已归档聊天记录',
 
   'chat.newConversation': '新对话',
   'chat.title': '我们应该构建什么？',

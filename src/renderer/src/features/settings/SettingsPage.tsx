@@ -35,7 +35,7 @@ const SUPPORTS_NATIVE_FONT_SMOOTHING = isMacOS()
 interface SettingsPageProps {
   conversations: ChatConversation[]
   onBack: () => void
-  onDeleteAllArchivedConversations: () => void
+  onDeleteArchivedConversations: (conversationIds: string[]) => void
   onDeleteConversation: (conversationId: string) => void
   onUnarchiveConversation: (conversationId: string) => void
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
@@ -91,7 +91,7 @@ const SETTINGS_GROUPS: Array<{ titleKey: TranslationKey; items: SettingsNavItem[
 function SettingsContent({
   activePage,
   conversations,
-  onDeleteAllArchivedConversations,
+  onDeleteArchivedConversations,
   onDeleteConversation,
   onUnarchiveConversation,
   onUiPreferencesChange,
@@ -100,7 +100,7 @@ function SettingsContent({
 }: {
   activePage: SettingsPageId
   conversations: ChatConversation[]
-  onDeleteAllArchivedConversations: () => void
+  onDeleteArchivedConversations: (conversationIds: string[]) => void
   onDeleteConversation: (conversationId: string) => void
   onUnarchiveConversation: (conversationId: string) => void
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
@@ -151,7 +151,7 @@ function SettingsContent({
       <ArchivedConversationsSettingsPage
         conversations={conversations}
         projects={projects}
-        onDeleteAllArchivedConversations={onDeleteAllArchivedConversations}
+        onDeleteArchivedConversations={onDeleteArchivedConversations}
         onDeleteConversation={onDeleteConversation}
         onUnarchiveConversation={onUnarchiveConversation}
       />
@@ -240,7 +240,7 @@ function SettingsNavigation({ activePage, onBack, onSelectPage }: SettingsNaviga
 export function SettingsPage({
   conversations,
   onBack,
-  onDeleteAllArchivedConversations,
+  onDeleteArchivedConversations,
   onDeleteConversation,
   onUnarchiveConversation,
   onUiPreferencesChange,
@@ -282,7 +282,7 @@ export function SettingsPage({
             activePage={activePage}
             conversations={conversations}
             projects={projects}
-            onDeleteAllArchivedConversations={onDeleteAllArchivedConversations}
+            onDeleteArchivedConversations={onDeleteArchivedConversations}
             onDeleteConversation={onDeleteConversation}
             onUnarchiveConversation={onUnarchiveConversation}
             onUiPreferencesChange={onUiPreferencesChange}

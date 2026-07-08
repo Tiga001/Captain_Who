@@ -35,12 +35,22 @@ export function AppShellSettingsView({
       projects={projects}
       uiPreferences={uiPreferences}
       onBack={onBack}
-      onDeleteAllArchivedConversations={() =>
+      onDeleteArchivedConversations={(conversationIds) =>
         onConversationsChange((currentConversations) => {
-          currentConversations
-            .filter((conversation) => conversation.archivedAt)
-            .forEach((conversation) => void deleteStoredConversation(conversation.id))
-          return currentConversations.filter((conversation) => !conversation.archivedAt)
+          const conversationIdSet = new Set(conversationIds)
+          const deletedConversationIds = new Set<string>()
+          const nextConversations = currentConversations.filter((conversation) => {
+            if (!conversationIdSet.has(conversation.id)) {
+              return true
+            }
+            deletedConversationIds.add(conversation.id)
+            return false
+          })
+
+          deletedConversationIds.forEach(
+            (conversationId) => void deleteStoredConversation(conversationId)
+          )
+          return nextConversations
         })
       }
       onDeleteConversation={(conversationId) => {
