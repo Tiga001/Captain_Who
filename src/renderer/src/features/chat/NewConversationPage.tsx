@@ -40,6 +40,7 @@ export function NewConversationPage({
           draft={draft}
           onDraftChange={onDraftChange}
           permissionModeAvailability={permissionModeAvailability}
+          resetKey={`new:${defaultProjectId ?? 'root'}`}
           showProjectSelector
           onSubmitMessage={onSubmitMessage}
         />

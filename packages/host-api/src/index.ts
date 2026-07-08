@@ -16,6 +16,9 @@ import type {
   AgentUsageSummaryInput,
   AgentUsageSummaryOutput,
   AppVersionResponse,
+  AttachmentInputPayload,
+  AttachmentLoadFromPathsRequest,
+  AttachmentSelectInputRequest,
   BrowserBounds,
   BrowserCreateViewRequest,
   BrowserNavigateRequest,
@@ -40,6 +43,13 @@ import type {
   TerminalOutputEvent,
   TerminalSessionSnapshot
 } from '@mycopilot/protocol'
+
+export interface AttachmentsHostApi {
+  selectInputAttachments(request: AttachmentSelectInputRequest): Promise<AttachmentInputPayload[]>
+  loadInputAttachmentsFromPaths(
+    request: AttachmentLoadFromPathsRequest
+  ): Promise<AttachmentInputPayload[]>
+}
 
 export interface BrowserHostApi {
   createView(request: BrowserCreateViewRequest): Promise<BrowserNavigationState>
@@ -125,6 +135,7 @@ export interface HostApi {
     getVersion(): Promise<AppVersionResponse>
   }
   agent: AgentHostApi
+  attachments: AttachmentsHostApi
   browser: BrowserHostApi
   storage: StorageHostApi
   terminal: TerminalHostApi

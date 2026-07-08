@@ -62,6 +62,7 @@ interface ChatComposerProps {
     custom: boolean
     full: boolean
   }
+  resetKey?: string
   showProjectSelector?: boolean
 }
 
@@ -73,6 +74,7 @@ export function ChatComposer({
   onSubmitMessage,
   onStopGenerating,
   permissionModeAvailability = { custom: true, full: true },
+  resetKey,
   showProjectSelector = false
 }: ChatComposerProps) {
   const { t } = useFrontendConfig()
@@ -152,6 +154,12 @@ export function ChatComposer({
   useEffect(() => {
     draftRef.current = draft
   }, [draft])
+
+  useEffect(() => {
+    setAttachmentError(null)
+    setIsAttachmentMenuOpen(false)
+    setIsFileDragActive(false)
+  }, [resetKey])
 
   const updateDraft = (patch: Partial<ChatComposerDraft>) => {
     const currentDraft = draftRef.current
@@ -411,6 +419,7 @@ export function ChatComposer({
             aria-expanded={isAttachmentMenuOpen}
             aria-label={t('chat.addContext')}
             onClick={() => {
+              setAttachmentError(null)
               setIsAttachmentMenuOpen((open) => !open)
               setIsPermissionMenuOpen(false)
               setIsModelMenuOpen(false)

@@ -312,6 +312,19 @@ mod tests {
             read_result.result.as_ref().unwrap()["content"],
             "hello from attachment"
         );
+
+        let traversal_result = registry.execute(
+            &context,
+            &AgentToolCall {
+                id: "call-read-traversal".to_string(),
+                tool: "read_file".to_string(),
+                args: json!({ "path": "@attachments/a1/../notes.txt" }),
+                approval_status: crate::protocol::AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
+        assert!(!traversal_result.ok);
+        assert!(traversal_result.error.unwrap().contains("完整 readPath"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 // Protocol layer.
 export * from './agent'
+export * from './attachments'
 export * from './browser'
 export * from './core'
 export * from './jsonRpc'

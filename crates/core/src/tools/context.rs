@@ -207,17 +207,26 @@ impl ToolExecutionContext {
         &self,
         input_path: &str,
     ) -> AgentResult<&AgentAttachmentReference> {
+        let normalized_path = input_path.trim();
         let attachment_id = attachment_id_from_path(input_path)?;
         let library = self.attachment_library.as_ref().ok_or_else(|| {
             AgentError::new("当前对话没有可用的附件库，无法读取 @attachments 路径。")
         })?;
 
-        library
+        let reference = library
             .conversation_attachments
             .iter()
             .chain(library.project_attachments.iter())
             .find(|attachment| attachment.id == attachment_id)
-            .ok_or_else(|| AgentError::new(format!("未找到附件：{attachment_id}")))
+            .ok_or_else(|| AgentError::new(format!("未找到附件：{attachment_id}")))?;
+
+        if reference.read_path != normalized_path {
+            return Err(AgentError::new(
+                "附件路径必须使用 attachments_list 返回的完整 readPath。",
+            ));
+        }
+
+        Ok(reference)
     }
 }
 

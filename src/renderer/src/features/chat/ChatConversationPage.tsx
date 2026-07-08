@@ -132,6 +132,7 @@ export function ChatConversationPage({
             onStopGenerating={onStopGenerating}
             onSubmitMessage={onSubmitMessage}
             permissionModeAvailability={permissionModeAvailability}
+            resetKey={conversation.id}
           />
         )}
       </div>

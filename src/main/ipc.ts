@@ -1,6 +1,6 @@
 // Electron main client.
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import type { IpcMainInvokeEvent, OpenDialogOptions } from 'electron'
+import type { IpcMainInvokeEvent, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
 import { basename, extname, isAbsolute, join } from 'path'
 import { readFile } from 'fs/promises'
 import type { StorageProjectRecord } from '@mycopilot/protocol'
@@ -8,6 +8,7 @@ import type { StorageProjectRecord } from '@mycopilot/protocol'
 import { CoreServer } from './core/coreServer'
 import { BrowserWebContentsViewManager } from './browser/BrowserWebContentsViewManager'
 import { TerminalBridge } from './terminal/TerminalBridge'
+import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   '.gif': 'image/gif',
@@ -21,7 +22,10 @@ function getInvokeWindow(event: IpcMainInvokeEvent): BrowserWindow | undefined {
   return BrowserWindow.fromWebContents(event.sender) ?? undefined
 }
 
-function showOpenDialog(event: IpcMainInvokeEvent, options: OpenDialogOptions) {
+function showOpenDialog(
+  event: IpcMainInvokeEvent,
+  options: OpenDialogOptions
+): Promise<OpenDialogReturnValue> {
   const window = getInvokeWindow(event)
   return window ? dialog.showOpenDialog(window, options) : dialog.showOpenDialog(options)
 }
@@ -126,6 +130,8 @@ export function registerHostIpc(
   terminalBridge: TerminalBridge,
   getBrowserManager: () => BrowserWebContentsViewManager
 ): void {
+  const attachmentDialogBridge = new AttachmentDialogBridge()
+
   coreServer.onAgentEvent((event) => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) {
@@ -148,6 +154,12 @@ export function registerHostIpc(
   ipcMain.handle('host:agent.getUsageSummary', (_event, input) => coreServer.getUsageSummary(input))
   ipcMain.handle('host:agent.clearUsageRecords', (_event, input) =>
     coreServer.clearUsageRecords(input)
+  )
+  ipcMain.handle('host:attachments.selectInputAttachments', (event, request) =>
+    attachmentDialogBridge.selectInputAttachments(event, request)
+  )
+  ipcMain.handle('host:attachments.loadInputAttachmentsFromPaths', (_event, request) =>
+    attachmentDialogBridge.loadInputAttachmentsFromPaths(request)
   )
   ipcMain.handle('host:browser.createView', (_event, request) =>
     getBrowserManager().createView(request)

@@ -181,6 +181,17 @@ pub(super) fn prepare_conversation_turn(
     if !model.enabled {
         return Err(format!("模型未启用：{model_id}"));
     }
+    if !model.supports_image
+        && input
+            .attachments
+            .iter()
+            .any(|attachment| attachment.kind == AgentInputAttachmentKind::Image)
+    {
+        return Err(format!(
+            "当前模型「{}」不支持图片输入，请切换支持图片的模型后再发送。",
+            model.display_name
+        ));
+    }
 
     let prompt_preferences = match input.prompt_preferences.clone() {
         Some(preferences) => preferences,
@@ -268,6 +279,15 @@ pub(super) fn prepare_conversation_turn(
     upsert_message(&mut conversation.messages, user_message.clone());
     upsert_message(&mut conversation.messages, assistant_message.clone());
     storage.save_conversation(conversation)?;
+    storage.save_input_attachments(
+        &conversation_id,
+        &user_message_id,
+        resolved_project_id.as_deref(),
+        &input.attachments,
+        timestamp,
+    )?;
+    let attachment_library = storage
+        .build_attachment_library_context(&conversation_id, resolved_project_id.as_deref())?;
 
     let mut agent_messages = history_messages;
     agent_messages.push(AgentChatMessage {
@@ -292,7 +312,7 @@ pub(super) fn prepare_conversation_turn(
                 display_name: Some(project.name.clone()),
                 root_path: project.path.clone(),
             }),
-            attachment_library: None,
+            attachment_library: Some(attachment_library),
             permissions: input.permissions,
         }),
         search_config: Some(AgentSearchConfig {

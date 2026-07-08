@@ -1,5 +1,6 @@
 // Renderer UI.
 import type { AgentInputAttachment } from '@mycopilot/protocol'
+import { hostClient } from '../../host/hostClient'
 
 export type ComposerAttachmentKind = 'file' | 'image'
 
@@ -201,26 +202,26 @@ export interface ComposerAttachment {
   agentAttachment: AgentInputAttachment
 }
 
-export function createAttachmentSummary(attachments: ComposerAttachment[]) {
+export function createAttachmentSummary(attachments: ComposerAttachment[]): string {
   if (attachments.length === 0) return ''
   return `附件：${attachments.map((attachment) => attachment.name).join('、')}`
+}
+
+function getAttachmentsHost() {
+  const attachmentsHost = (
+    hostClient as Partial<Pick<typeof hostClient, 'attachments'>>
+  ).attachments
+  if (!attachmentsHost) {
+    throw new Error('附件上传能力未加载，请重启应用后再试。')
+  }
+  return attachmentsHost
 }
 
 export async function selectComposerAttachments(
   kind: ComposerAttachmentKind
 ): Promise<ComposerAttachment[]> {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.multiple = true
-  input.accept = kind === 'image' ? 'image/*' : READABLE_FILE_ACCEPT
-
-  const files = await new Promise<FileList | null>((resolve) => {
-    input.onchange = () => resolve(input.files)
-    input.oncancel = () => resolve(null)
-    input.click()
-  })
-
-  return files ? createComposerAttachmentsFromFiles(files) : []
+  const attachments = await getAttachmentsHost().selectInputAttachments({ kind })
+  return attachments.map(composerAttachmentFromAgentAttachment)
 }
 
 export async function createComposerAttachmentsFromFiles(
@@ -240,7 +241,8 @@ export async function createComposerAttachmentsFromPaths(
   paths: string[]
 ): Promise<ComposerAttachment[]> {
   if (paths.length === 0) return []
-  throw new Error('Path-based attachments are not available in the Electron host adapter yet.')
+  const attachments = await getAttachmentsHost().loadInputAttachmentsFromPaths({ paths })
+  return attachments.map(composerAttachmentFromAgentAttachment)
 }
 
 export function composerAttachmentFromAgentAttachment(
@@ -299,7 +301,7 @@ function inferAttachmentKind(file: File): ComposerAttachmentKind | null {
   return null
 }
 
-function inferMimeType(name: string, kind: ComposerAttachmentKind) {
+function inferMimeType(name: string, kind: ComposerAttachmentKind): string {
   const extension = fileExtension(name)
   if (kind === 'image') {
     if (extension === 'jpg') return 'image/jpeg'
@@ -339,17 +341,17 @@ function readFileAsBase64(file: File): Promise<string> {
   })
 }
 
-function fileExtension(name: string) {
+function fileExtension(name: string): string {
   const normalizedName = name.trim().toLowerCase()
   if (!normalizedName.includes('.')) return ''
   return normalizedName.split('.').pop() ?? ''
 }
 
-function createAttachmentId() {
+function createAttachmentId(): string {
   return `attachment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-function previewUrlForAttachment(attachment: AgentInputAttachment) {
+function previewUrlForAttachment(attachment: AgentInputAttachment): string | undefined {
   if (attachment.kind !== 'image') return undefined
   if (attachment.encoding !== 'base64') return undefined
   if (!attachment.mimeType?.startsWith('image/')) return undefined

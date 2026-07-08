@@ -224,7 +224,7 @@ impl OpenAiStreamAccumulator {
                         append_stream_fragment(&mut entry.name, name);
                     }
                     if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
-                        entry.arguments.push_str(arguments);
+                        append_argument_stream_fragment(&mut entry.arguments, arguments);
                     }
                 }
             }
@@ -457,5 +457,103 @@ fn append_stream_fragment(target: &mut String, fragment: &str) {
     }
     if target.is_empty() || !target.ends_with(fragment) {
         target.push_str(fragment);
+    }
+}
+
+fn append_argument_stream_fragment(target: &mut String, fragment: &str) {
+    if fragment.is_empty() {
+        return;
+    }
+
+    // Some OpenAI-compatible streaming APIs send cumulative function arguments snapshots instead
+    // of strict deltas. Appending those snapshots creates `{}{}`
+    // and later fails JSON parsing with "trailing characters".
+    if target.is_empty() {
+        target.push_str(fragment);
+    } else if fragment.starts_with(target.as_str()) {
+        target.clear();
+        target.push_str(fragment);
+    } else if !target.ends_with(fragment) {
+        target.push_str(fragment);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn openai_tool_call_frame(arguments: &str) -> String {
+        format!(
+            "data: {}\n\n",
+            json!({
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-1",
+                                    "function": {
+                                        "name": "run_command",
+                                        "arguments": arguments
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })
+        )
+    }
+
+    #[test]
+    fn openai_stream_accepts_incremental_tool_arguments() {
+        let mut accumulator = LlmStreamAccumulator::new(AgentApiStyle::OpenAiCompatible);
+        let mut deltas = Vec::new();
+
+        process_sse_frame(
+            &openai_tool_call_frame("{\"command\":\"conda env list\""),
+            &mut accumulator,
+            &mut |delta| deltas.push(delta),
+        )
+        .unwrap();
+        process_sse_frame(
+            &openai_tool_call_frame(",\"reason\":\"检查环境\"}"),
+            &mut accumulator,
+            &mut |delta| deltas.push(delta),
+        )
+        .unwrap();
+
+        let response = accumulator.finish().unwrap();
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "run_command");
+        assert_eq!(response.tool_calls[0].args["command"], "conda env list");
+        assert_eq!(response.tool_calls[0].args["reason"], "检查环境");
+    }
+
+    #[test]
+    fn openai_stream_accepts_cumulative_tool_arguments() {
+        let mut accumulator = LlmStreamAccumulator::new(AgentApiStyle::OpenAiCompatible);
+        let mut deltas = Vec::new();
+
+        process_sse_frame(
+            &openai_tool_call_frame("{\"command\":\"conda env list\""),
+            &mut accumulator,
+            &mut |delta| deltas.push(delta),
+        )
+        .unwrap();
+        process_sse_frame(
+            &openai_tool_call_frame("{\"command\":\"conda env list\",\"reason\":\"检查环境\"}"),
+            &mut accumulator,
+            &mut |delta| deltas.push(delta),
+        )
+        .unwrap();
+
+        let response = accumulator.finish().unwrap();
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "run_command");
+        assert_eq!(response.tool_calls[0].args["command"], "conda env list");
+        assert_eq!(response.tool_calls[0].args["reason"], "检查环境");
     }
 }

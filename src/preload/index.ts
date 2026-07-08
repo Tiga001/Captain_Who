@@ -2,7 +2,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type { HostApi } from '@mycopilot/host-api'
-import type { AgentEvent, BrowserViewEvent, TerminalExitEvent, TerminalOutputEvent } from '@mycopilot/protocol'
+import type {
+  AgentEvent,
+  BrowserViewEvent,
+  TerminalExitEvent,
+  TerminalOutputEvent
+} from '@mycopilot/protocol'
 
 const BROWSER_EVENT_CHANNEL = 'host:browser.event'
 const AGENT_EVENT_CHANNEL = 'host:agent.event'
@@ -43,8 +48,7 @@ const host: HostApi = {
   },
   agent: {
     startRun: (input) => ipcRenderer.invoke('host:agent.startRun', input),
-    startConversationTurn: (input) =>
-      ipcRenderer.invoke('host:agent.startConversationTurn', input),
+    startConversationTurn: (input) => ipcRenderer.invoke('host:agent.startConversationTurn', input),
     cancelRun: (input) => ipcRenderer.invoke('host:agent.cancelRun', input),
     listPendingActions: () => ipcRenderer.invoke('host:agent.listPendingActions'),
     approveAction: (input) => ipcRenderer.invoke('host:agent.approveAction', input),
@@ -53,6 +57,12 @@ const host: HostApi = {
     getUsageSummary: (input) => ipcRenderer.invoke('host:agent.getUsageSummary', input),
     clearUsageRecords: (input) => ipcRenderer.invoke('host:agent.clearUsageRecords', input),
     onEvent: onAgentEvent
+  },
+  attachments: {
+    selectInputAttachments: (request) =>
+      ipcRenderer.invoke('host:attachments.selectInputAttachments', request),
+    loadInputAttachmentsFromPaths: (request) =>
+      ipcRenderer.invoke('host:attachments.loadInputAttachmentsFromPaths', request)
   },
   browser: {
     createView: (request) => ipcRenderer.invoke('host:browser.createView', request),

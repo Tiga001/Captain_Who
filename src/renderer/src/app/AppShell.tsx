@@ -1,5 +1,5 @@
 // Renderer UI.
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react'
 import type { AgentEvent, AgentProposedAction } from '@mycopilot/protocol'
 import { ResizeHandle } from '../components/layout/ResizeHandle'
 import { LeftSidebar } from '../components/sidebar/LeftSidebar'
@@ -36,7 +36,8 @@ import {
   saveComposerDraft,
   saveConversation,
   saveConversationMeta,
-  saveUiPreferences
+  saveUiPreferences,
+  upsertChatMessages
 } from '../features/storage/storageClient'
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import { NEW_CONVERSATION_DRAFT_ID, THINKING_PLACEHOLDER } from './appConstants'
@@ -72,6 +73,11 @@ import {
 } from './AppShellSupport'
 import type { PendingMessageDelta, PendingMessageSave } from './AppShellSupport'
 
+type PendingMessageUpsert = {
+  messages: ChatMessage[]
+  positionOffset: number
+}
+
 export function AppShell() {
   const { t } = useFrontendConfig()
   const { projects, deleteProject, renameProject, showProjectInFolder, togglePinProject } =
@@ -100,6 +106,10 @@ export function AppShell() {
   const activeRunBindingsRef = useRef<Map<string, ActiveRunBinding>>(new Map())
   const bufferedAgentEventsRef = useRef<Map<string, AgentEvent[]>>(new Map())
   const pendingMessageDeltasRef = useRef<Map<string, PendingMessageDelta>>(new Map())
+  const conversationSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
+  const pendingConversationSavesRef = useRef<Map<string, ChatConversation>>(new Map())
+  const messageUpsertQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
+  const pendingMessageUpsertsRef = useRef<Map<string, PendingMessageUpsert[]>>(new Map())
   const messageSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
   const pendingMessageSavesRef = useRef<Map<string, PendingMessageSave>>(new Map())
   const pendingActionsHydratedRef = useRef(false)
@@ -121,13 +131,24 @@ export function AppShell() {
     (conversation) => !conversation.archivedAt && Boolean(conversation.unreadAt)
   )
 
+  // 修了一个伟大的 bug：agent tool events 会高频到达，不能让异步 React state
+  // commit 再回写 conversationsRef，否则旧快照会覆盖新 toolCalls/diffs/toolResults。
+  // 所有 conversation 更新都必须走这里，确保 UI state 和事件合并基准同步。
+  const setConversationsWithRef = useCallback((value: SetStateAction<ChatConversation[]>) => {
+    const nextConversations =
+      typeof value === 'function'
+        ? (value as (currentConversations: ChatConversation[]) => ChatConversation[])(
+            conversationsRef.current
+          )
+        : value
+
+    conversationsRef.current = nextConversations
+    setConversations(nextConversations)
+  }, [])
+
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId
   }, [activeConversationId])
-
-  useEffect(() => {
-    conversationsRef.current = conversations
-  }, [conversations])
 
   useEffect(() => {
     let cancelled = false
@@ -135,8 +156,7 @@ export function AppShell() {
       ([preferences, storedConversations, storedDrafts]) => {
         if (cancelled) return
         setUiPreferences(preferences)
-        conversationsRef.current = storedConversations
-        setConversations(storedConversations)
+        setConversationsWithRef(storedConversations)
         setDrafts({
           [NEW_CONVERSATION_DRAFT_ID]: createComposerDraft(),
           ...storedDrafts
@@ -149,7 +169,7 @@ export function AppShell() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [setConversationsWithRef])
 
   const updateUiPreferences = useCallback((patch: Partial<UiPreferencesSnapshot>) => {
     setUiPreferences((currentPreferences) => {
@@ -194,6 +214,95 @@ export function AppShell() {
     })
   }, [])
 
+  const waitForConversationSaves = useCallback(async (conversationId: string) => {
+    while (true) {
+      const pendingSave = conversationSaveQueuesRef.current.get(conversationId)
+      if (!pendingSave) return
+      await pendingSave
+    }
+  }, [])
+
+  const waitForMessageUpserts = useCallback(async (conversationId: string) => {
+    while (true) {
+      const pendingUpsert = messageUpsertQueuesRef.current.get(conversationId)
+      if (!pendingUpsert) return
+      await pendingUpsert
+    }
+  }, [])
+
+  const enqueueConversationSave = useCallback((conversation: ChatConversation) => {
+    const conversationId = conversation.id
+    pendingConversationSavesRef.current.set(conversationId, conversation)
+
+    if (conversationSaveQueuesRef.current.has(conversationId)) {
+      return
+    }
+
+    const drainSaves = async () => {
+      while (true) {
+        const payload = pendingConversationSavesRef.current.get(conversationId)
+        if (!payload) return
+
+        pendingConversationSavesRef.current.delete(conversationId)
+        try {
+          await saveConversation(payload)
+        } catch (error) {
+          console.error('Failed to save conversation to SQLite', error)
+        }
+      }
+    }
+
+    const nextSave = drainSaves().finally(() => {
+      conversationSaveQueuesRef.current.delete(conversationId)
+    })
+    conversationSaveQueuesRef.current.set(conversationId, nextSave)
+  }, [])
+
+  const enqueueChatMessagesUpsert = useCallback(
+    (conversationId: string, messages: ChatMessage[], positionOffset: number) => {
+      const pendingUpserts = pendingMessageUpsertsRef.current.get(conversationId) ?? []
+      pendingMessageUpsertsRef.current.set(conversationId, [
+        ...pendingUpserts,
+        {
+          messages,
+          positionOffset
+        }
+      ])
+
+      if (messageUpsertQueuesRef.current.has(conversationId)) {
+        return
+      }
+
+      const drainUpserts = async () => {
+        while (true) {
+          const pendingUpserts = pendingMessageUpsertsRef.current.get(conversationId) ?? []
+          const payload = pendingUpserts[0]
+          if (!payload) return
+
+          const remainingUpserts = pendingUpserts.slice(1)
+          if (remainingUpserts.length > 0) {
+            pendingMessageUpsertsRef.current.set(conversationId, remainingUpserts)
+          } else {
+            pendingMessageUpsertsRef.current.delete(conversationId)
+          }
+
+          try {
+            await waitForConversationSaves(conversationId)
+            await upsertChatMessages(conversationId, payload.messages, payload.positionOffset)
+          } catch (error) {
+            console.error('Failed to upsert chat messages to SQLite', error)
+          }
+        }
+      }
+
+      const nextUpsert = drainUpserts().finally(() => {
+        messageUpsertQueuesRef.current.delete(conversationId)
+      })
+      messageUpsertQueuesRef.current.set(conversationId, nextUpsert)
+    },
+    [waitForConversationSaves]
+  )
+
   const enqueueChatMessageStateSave = useCallback(
     (conversationId: string, message: ChatMessage) => {
       const key = `${conversationId}:${message.id}`
@@ -210,6 +319,8 @@ export function AppShell() {
 
           pendingMessageSavesRef.current.delete(key)
           try {
+            await waitForConversationSaves(payload.conversationId)
+            await waitForMessageUpserts(payload.conversationId)
             await saveChatMessageState(payload.conversationId, payload.message)
           } catch (error) {
             console.error('Failed to save chat message state to SQLite', error)
@@ -222,7 +333,7 @@ export function AppShell() {
       })
       messageSaveQueuesRef.current.set(key, nextSave)
     },
-    []
+    [waitForConversationSaves, waitForMessageUpserts]
   )
 
   const updateAssistantMessage = useCallback(
@@ -253,8 +364,7 @@ export function AppShell() {
         return nextConversation
       })
 
-      conversationsRef.current = nextConversations
-      setConversations(nextConversations)
+      setConversationsWithRef(nextConversations)
 
       if (messageToSave) {
         enqueueChatMessageStateSave(conversationId, messageToSave)
@@ -263,7 +373,7 @@ export function AppShell() {
         void saveConversationMeta(conversationMetaToSave)
       }
     },
-    [enqueueChatMessageStateSave]
+    [enqueueChatMessageStateSave, setConversationsWithRef]
   )
 
   const flushPendingMessageDelta = useCallback(
@@ -399,8 +509,7 @@ export function AppShell() {
           })
 
           if (conversationToSave) {
-            conversationsRef.current = nextConversations
-            setConversations(nextConversations)
+            setConversationsWithRef(nextConversations)
             void saveConversationMeta(conversationToSave)
           }
         }
@@ -414,7 +523,13 @@ export function AppShell() {
         cleanupRunBinding(agentEvent.runId)
       }
     },
-    [bufferMessageDelta, cleanupRunBinding, flushPendingMessageDelta, updateAssistantMessage]
+    [
+      bufferMessageDelta,
+      cleanupRunBinding,
+      flushPendingMessageDelta,
+      setConversationsWithRef,
+      updateAssistantMessage
+    ]
   )
 
   useEffect(() => {
@@ -513,8 +628,7 @@ export function AppShell() {
               }
             : conversation
         )
-        conversationsRef.current = nextConversations
-        setConversations(nextConversations)
+        setConversationsWithRef(nextConversations)
 
         if (resolvedConversationId !== conversationId) {
           setActiveConversationId((currentActiveConversationId) =>
@@ -604,9 +718,13 @@ export function AppShell() {
           )
         : [conversationToSave, ...conversationsRef.current]
 
-      conversationsRef.current = nextConversations
-      setConversations(nextConversations)
-      void saveConversation(conversationToSave)
+      setConversationsWithRef(nextConversations)
+      enqueueConversationSave(conversationToSave)
+      enqueueChatMessagesUpsert(
+        conversationId,
+        [userMessage, assistantMessage],
+        activeConversation?.messages.length ?? 0
+      )
       activeConversationIdRef.current = conversationId
       setActiveConversationId(conversationId)
       updateDraft(
@@ -629,7 +747,14 @@ export function AppShell() {
         activeConversation ? undefined : title
       )
     },
-    [activeConversation, requestAssistantResponse, updateDraft]
+    [
+      activeConversation,
+      enqueueChatMessagesUpsert,
+      enqueueConversationSave,
+      requestAssistantResponse,
+      setConversationsWithRef,
+      updateDraft
+    ]
   )
 
   const selectConversation = useCallback((conversationId: string) => {
@@ -647,13 +772,12 @@ export function AppShell() {
     })
 
     if (conversationToSave) {
-      conversationsRef.current = nextConversations
-      setConversations(nextConversations)
+      setConversationsWithRef(nextConversations)
       void saveConversationMeta(conversationToSave)
     }
 
     setActiveConversationId(conversationId)
-  }, [])
+  }, [setConversationsWithRef])
 
   const patchConversation = useCallback(
     (conversationId: string, patch: Partial<ChatConversation>) => {
@@ -666,18 +790,17 @@ export function AppShell() {
       })
 
       if (nextConversation) {
-        conversationsRef.current = nextConversations
-        setConversations(nextConversations)
+        setConversationsWithRef(nextConversations)
         void saveConversationMeta(nextConversation)
       }
     },
-    []
+    [setConversationsWithRef]
   )
 
   const archiveConversations = useCallback(
     (predicate: (conversation: ChatConversation) => boolean) => {
       const archivedAt = Date.now()
-      setConversations((currentConversations) =>
+      setConversationsWithRef((currentConversations) =>
         currentConversations.map((conversation) => {
           if (conversation.archivedAt || !predicate(conversation)) return conversation
 
@@ -691,7 +814,7 @@ export function AppShell() {
         })
       )
     },
-    []
+    [setConversationsWithRef]
   )
 
   const stopActiveGeneration = useCallback(() => {
@@ -831,7 +954,7 @@ export function AppShell() {
         initialPage={settingsInitialPage}
         onBack={() => setView('workspace')}
         onConversationPatch={patchConversation}
-        onConversationsChange={setConversations}
+        onConversationsChange={setConversationsWithRef}
         onUiPreferencesChange={updateUiPreferences}
         projects={projects}
         uiPreferences={uiPreferences}
@@ -939,7 +1062,7 @@ export function AppShell() {
                 const messageToSave: ChatMessage | null = currentMessage
                   ? { ...currentMessage, uiState }
                   : null
-                setConversations((currentConversations) =>
+                setConversationsWithRef((currentConversations) =>
                   currentConversations.map((conversation) =>
                     conversation.id === activeConversation.id
                       ? {
