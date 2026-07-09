@@ -1,5 +1,5 @@
 // Renderer UI.
-import { ChevronDown, Folder, FolderOpen, MoreHorizontal, SquarePen } from 'lucide-react'
+import { ChevronDown, Folder, FolderOpen, MoreHorizontal, Search, SquarePen } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
@@ -14,6 +14,7 @@ import { LeftSidebarAccountFooter } from './LeftSidebarAccountFooter'
 import { ConversationRow } from './LeftSidebarConversationRow'
 import { LeftSidebarDialogs } from './LeftSidebarDialogs'
 import { LeftSidebarProjectMenu } from './LeftSidebarProjectMenu'
+import { LeftSidebarSearchDialog } from './LeftSidebarSearchDialog'
 import { LeftSidebarSectionMenu } from './LeftSidebarSectionMenu'
 import type {
   BulkArchiveScope,
@@ -80,6 +81,7 @@ export function LeftSidebar({
   )
   const [pendingArchiveProject, setPendingArchiveProject] = useState<AppProject | null>(null)
   const [pendingRemoveProject, setPendingRemoveProject] = useState<AppProject | null>(null)
+  const [isSearchDialogOpen, setIsSearchDialogOpen] = useState(false)
   const [conversationListStages, setConversationListStages] = useState<
     Record<string, ConversationListStage>
   >({})
@@ -243,6 +245,12 @@ export function LeftSidebar({
     setOpenSectionMenu(null)
     setSectionMenuPosition(null)
     setOpenSectionSubmenu(null)
+  }
+
+  const openSearchDialog = () => {
+    closeProjectMenu()
+    closeSectionMenu()
+    setIsSearchDialogOpen(true)
   }
 
   const openSectionActions = (scope: SidebarSectionScope, anchorElement: HTMLElement) => {
@@ -885,6 +893,10 @@ export function LeftSidebar({
           <SquarePen aria-hidden="true" />
           <span>{t('sidebar.newConversation')}</span>
         </button>
+        <button className="left-sidebar__search-action" type="button" onClick={openSearchDialog}>
+          <Search aria-hidden="true" />
+          <span>{t('sidebar.search')}</span>
+        </button>
       </div>
 
       <div className="left-sidebar__scroll">
@@ -951,6 +963,24 @@ export function LeftSidebar({
         renamingProject={renamingProject}
         t={t}
       />
+
+      {isSearchDialogOpen && (
+        <LeftSidebarSearchDialog
+          conversations={visibleConversations}
+          labels={{
+            chats: t('sidebar.searchChats'),
+            empty: t('sidebar.searchEmpty'),
+            inputPlaceholder: t('sidebar.searchPlaceholder'),
+            noMatches: t('sidebar.searchNoMatches'),
+            noProject: t('archive.noProject'),
+            searchFailed: t('sidebar.searchFailed'),
+            searching: t('sidebar.searchingChats')
+          }}
+          onClose={() => setIsSearchDialogOpen(false)}
+          onSelectConversation={onSelectConversation}
+          projects={projects}
+        />
+      )}
     </aside>
   )
 }

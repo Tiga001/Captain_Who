@@ -28,6 +28,8 @@ import type {
   BrowserZoomState,
   CorePingRequest,
   CorePingResponse,
+  ChatSearchInput,
+  ChatSearchResult,
   StorageAgentPromptPreferencesRecord,
   StorageAppDataSnapshot,
   StorageAttachmentImageRecord,
@@ -117,6 +119,10 @@ export interface StorageHostApi {
   }): Promise<StorageImageFileRecord | null>
 }
 
+export interface SearchHostApi {
+  searchChats(input: ChatSearchInput): Promise<ChatSearchResult[]>
+}
+
 export interface TerminalHostApi {
   createSession(request: TerminalCreateSessionRequest): Promise<TerminalSessionSnapshot>
   writeInput(sessionId: string, data: string): Promise<void>
@@ -169,6 +175,7 @@ export interface HostApi {
   attachments: AttachmentsHostApi
   browser: BrowserHostApi
   clipboard: ClipboardHostApi
+  search: SearchHostApi
   storage: StorageHostApi
   terminal: TerminalHostApi
 }

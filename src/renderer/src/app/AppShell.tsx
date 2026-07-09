@@ -153,7 +153,13 @@ export function AppShell() {
   const [conversations, setConversations] = useState<ChatConversation[]>([])
   const conversationsRef = useRef<ChatConversation[]>([])
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null)
+  const [activeConversationInitialScrollTop, setActiveConversationInitialScrollTop] = useState<
+    number | null
+  >(null)
+  const [conversationScrollToBottomSignal, setConversationScrollToBottomSignal] = useState(0)
+  const [scrollTargetMessageId, setScrollTargetMessageId] = useState<string | null>(null)
   const activeConversationIdRef = useRef<string | null>(null)
+  const conversationScrollPositionsRef = useRef<Map<string, number>>(new Map())
   const activeRunBindingsRef = useRef<Map<string, ActiveRunBinding>>(new Map())
   const bufferedAgentEventsRef = useRef<Map<string, AgentEvent[]>>(new Map())
   const pendingMessageDeltasRef = useRef<Map<string, PendingMessageDelta>>(new Map())
@@ -179,7 +185,8 @@ export function AppShell() {
     drafts[activeDraftId] ??
     createComposerDraft({ projectId: activeConversation?.projectId ?? null })
   const activeDraftSelectedModel = useMemo(
-    () => enabledModels.find((model) => model.id === activeDraft.modelId) ?? enabledModels[0] ?? null,
+    () =>
+      enabledModels.find((model) => model.id === activeDraft.modelId) ?? enabledModels[0] ?? null,
     [activeDraft.modelId, enabledModels]
   )
   const permissionModeAvailability = getPermissionModeAvailability(uiPreferences)
@@ -805,6 +812,9 @@ export function AppShell() {
         activeConversation?.messages.length ?? 0
       )
       activeConversationIdRef.current = conversationId
+      setScrollTargetMessageId(null)
+      setActiveConversationInitialScrollTop(null)
+      setConversationScrollToBottomSignal((signal) => signal + 1)
       setActiveConversationId(conversationId)
       updateDraft(
         conversationId,
@@ -843,7 +853,9 @@ export function AppShell() {
         throw new Error('当前没有可编辑的对话。')
       }
 
-      const conversation = conversationsRef.current.find((candidate) => candidate.id === conversationId)
+      const conversation = conversationsRef.current.find(
+        (candidate) => candidate.id === conversationId
+      )
       if (!conversation) {
         throw new Error('当前对话不存在。')
       }
@@ -853,7 +865,8 @@ export function AppShell() {
         throw new Error('这条消息已经不能编辑，请刷新当前对话后再试。')
       }
 
-      const attachmentIds = editableTurn.userMessage.attachments?.map((attachment) => attachment.id) ?? []
+      const attachmentIds =
+        editableTurn.userMessage.attachments?.map((attachment) => attachment.id) ?? []
       const attachments = await loadInputAttachments(attachmentIds)
 
       await waitForConversationSaves(conversationId)
@@ -890,7 +903,10 @@ export function AppShell() {
       const permissionMode = activeDraft.permissionMode
       const userMessage = createUserMessage(messageContent, attachments)
       const assistantMessage = createAssistantMessage(THINKING_PLACEHOLDER, 'pending')
-      const messagesBeforeEditedTurn = latestConversation.messages.slice(0, latestEditableTurn.userIndex)
+      const messagesBeforeEditedTurn = latestConversation.messages.slice(
+        0,
+        latestEditableTurn.userIndex
+      )
       const nextConversation: ChatConversation = {
         ...latestConversation,
         messages: [...messagesBeforeEditedTurn, userMessage, assistantMessage],
@@ -907,6 +923,9 @@ export function AppShell() {
 
       cancelledPendingMessageIdsRef.current.add(latestEditableTurn.assistantMessage.id)
       const submissionSeq = (editSubmissionSeqRef.current += 1)
+      setScrollTargetMessageId(null)
+      setActiveConversationInitialScrollTop(null)
+      setConversationScrollToBottomSignal((signal) => signal + 1)
       setConversationsWithRef((currentConversations) =>
         currentConversations.map((candidate) =>
           candidate.id === conversationId ? nextConversation : candidate
@@ -982,27 +1001,48 @@ export function AppShell() {
     ]
   )
 
-  const selectConversation = useCallback((conversationId: string) => {
-    activeConversationIdRef.current = conversationId
+  const selectConversation = useCallback(
+    (conversationId: string, messageId?: string | null) => {
+      activeConversationIdRef.current = conversationId
+      const selectedConversation = conversationsRef.current.find(
+        (conversation) => conversation.id === conversationId
+      )
+      const shouldRestoreRememberedPosition = !messageId && !selectedConversation?.unreadAt
 
-    let conversationToSave: ChatConversation | null = null
-    const nextConversations = conversationsRef.current.map((conversation) => {
-      if (conversation.id !== conversationId || !conversation.unreadAt) return conversation
+      setScrollTargetMessageId(messageId ?? null)
+      setActiveConversationInitialScrollTop(
+        shouldRestoreRememberedPosition
+          ? (conversationScrollPositionsRef.current.get(conversationId) ?? null)
+          : null
+      )
 
-      conversationToSave = {
-        ...conversation,
-        unreadAt: null
+      let conversationToSave: ChatConversation | null = null
+      const nextConversations = conversationsRef.current.map((conversation) => {
+        if (conversation.id !== conversationId || !conversation.unreadAt) return conversation
+
+        conversationToSave = {
+          ...conversation,
+          unreadAt: null
+        }
+        return conversationToSave
+      })
+
+      if (conversationToSave) {
+        setConversationsWithRef(nextConversations)
+        void saveConversationMeta(conversationToSave)
       }
-      return conversationToSave
-    })
 
-    if (conversationToSave) {
-      setConversationsWithRef(nextConversations)
-      void saveConversationMeta(conversationToSave)
-    }
+      setActiveConversationId(conversationId)
+    },
+    [setConversationsWithRef]
+  )
 
-    setActiveConversationId(conversationId)
-  }, [setConversationsWithRef])
+  const rememberConversationScrollPosition = useCallback(
+    (conversationId: string, scrollTop: number) => {
+      conversationScrollPositionsRef.current.set(conversationId, scrollTop)
+    },
+    []
+  )
 
   const patchConversation = useCallback(
     (conversationId: string, patch: Partial<ChatConversation>) => {
@@ -1236,6 +1276,8 @@ export function AppShell() {
             onNewConversation={(projectId = null) => {
               activeConversationIdRef.current = null
               setActiveConversationId(null)
+              setScrollTargetMessageId(null)
+              setActiveConversationInitialScrollTop(null)
               updateDraft(NEW_CONVERSATION_DRAFT_ID, createComposerDraft({ projectId }))
             }}
             onOpenSettings={() => openSettings('general')}
@@ -1279,7 +1321,10 @@ export function AppShell() {
               conversation={activeConversation}
               editSelectedModelAvailable={Boolean(activeDraftSelectedModel)}
               editSelectedModelSupportsImage={Boolean(activeDraftSelectedModel?.supportsImage)}
+              initialScrollTop={activeConversationInitialScrollTop}
               permissionModeAvailability={permissionModeAvailability}
+              scrollToBottomSignal={conversationScrollToBottomSignal}
+              scrollTargetMessageId={scrollTargetMessageId}
               showTokenUsageDetails={uiPreferences.showTokenUsageDetails}
               onApproveAgentAction={handleApproveAgentAction}
               onCancelAgentAction={handleCancelAgentAction}
@@ -1309,6 +1354,7 @@ export function AppShell() {
                 }
               }}
               onRejectAgentAction={handleRejectAgentAction}
+              onScrollPositionChange={rememberConversationScrollPosition}
               onStopGenerating={stopActiveGeneration}
               onSubmitMessage={submitMessage}
             />

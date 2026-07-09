@@ -11,6 +11,13 @@ export const zhCNTranslations = {
   'app.resizeRightSidebar': '调整右侧栏宽度',
 
   'sidebar.newConversation': '新对话',
+  'sidebar.search': '搜索',
+  'sidebar.searchPlaceholder': '搜索聊天',
+  'sidebar.searchChats': '聊天',
+  'sidebar.searchEmpty': '暂无聊天',
+  'sidebar.searchingChats': '正在搜索聊天',
+  'sidebar.searchNoMatches': '无匹配项',
+  'sidebar.searchFailed': '搜索服务不可用',
   'sidebar.projects': '项目',
   'sidebar.conversations': '对话',
   'sidebar.expandConversations': '展开显示',

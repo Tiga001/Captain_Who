@@ -14,6 +14,7 @@ pub const AGENT_CANCEL_ACTION_METHOD: &str = "agent.cancelAction";
 pub const AGENT_GET_USAGE_SUMMARY_METHOD: &str = "agent.getUsageSummary";
 pub const AGENT_CLEAR_USAGE_RECORDS_METHOD: &str = "agent.clearUsageRecords";
 pub const AGENT_EVENT_NOTIFICATION_METHOD: &str = "agent.event";
+pub const SEARCH_SEARCH_CHATS_METHOD: &str = "search.searchChats";
 pub const STORAGE_LOAD_APP_DATA_METHOD: &str = "storage.loadAppData";
 pub const STORAGE_LOAD_MODEL_SETTINGS_METHOD: &str = "storage.loadModelSettings";
 pub const STORAGE_SAVE_MODEL_SETTINGS_METHOD: &str = "storage.saveModelSettings";

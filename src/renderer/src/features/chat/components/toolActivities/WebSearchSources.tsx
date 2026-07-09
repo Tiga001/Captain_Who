@@ -1,9 +1,18 @@
 // Renderer UI.
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
+import { createPortal } from 'react-dom'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { ChatWebSearchSource } from '../../chatTypes'
 import { compareWebSearchSourcesByRelevance } from '../../agentWebSearch'
 import { openExternalUrl } from '../../../../lib/externalLinks'
+
+const ASSISTANT_SOURCES_POPOVER_GAP = 10
+const ASSISTANT_SOURCES_VIEWPORT_MARGIN = 16
+const ASSISTANT_SOURCES_MAX_WIDTH = 620
+const ASSISTANT_SOURCES_HEADER_HEIGHT = 33
+const ASSISTANT_SOURCES_ROW_HEIGHT = 34
+const ASSISTANT_SOURCES_MAX_VISIBLE_ITEMS = 5
 
 function getDomainInitial(domain: string) {
   return (domain.replace(/^www\./, '').match(/[a-z0-9]/i)?.[0] ?? 'W').toUpperCase()
@@ -83,7 +92,52 @@ export function WebSearchSourcesList({
 export function AssistantSources({ sources }: { sources: ChatWebSearchSource[] }) {
   const { t } = useFrontendConfig()
   const [isOpen, setOpen] = useState(false)
+  const [popoverStyle, setPopoverStyle] = useState<CSSProperties | null>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
+  const visibleItemCount = Math.min(sources.length, ASSISTANT_SOURCES_MAX_VISIBLE_ITEMS)
+  const sourcesListMaxHeight = visibleItemCount * ASSISTANT_SOURCES_ROW_HEIGHT
+
+  const updatePopoverPosition = useCallback(() => {
+    const button = buttonRef.current
+    if (!button) return
+
+    const rect = button.getBoundingClientRect()
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+    const width = Math.min(
+      ASSISTANT_SOURCES_MAX_WIDTH,
+      Math.max(280, viewportWidth - ASSISTANT_SOURCES_VIEWPORT_MARGIN * 2)
+    )
+    const estimatedHeight =
+      ASSISTANT_SOURCES_HEADER_HEIGHT +
+      sourcesListMaxHeight +
+      ASSISTANT_SOURCES_VIEWPORT_MARGIN * 2
+    const measuredHeight = popoverRef.current?.offsetHeight ?? estimatedHeight
+    const spaceAbove = rect.top - ASSISTANT_SOURCES_VIEWPORT_MARGIN
+    const spaceBelow = viewportHeight - rect.bottom - ASSISTANT_SOURCES_VIEWPORT_MARGIN
+    const shouldPlaceBelow =
+      spaceBelow >= measuredHeight || (spaceBelow >= spaceAbove && spaceAbove < measuredHeight)
+    const rawTop = shouldPlaceBelow
+      ? rect.bottom + ASSISTANT_SOURCES_POPOVER_GAP
+      : rect.top - measuredHeight - ASSISTANT_SOURCES_POPOVER_GAP
+    const top = Math.min(
+      Math.max(rawTop, ASSISTANT_SOURCES_VIEWPORT_MARGIN),
+      Math.max(ASSISTANT_SOURCES_VIEWPORT_MARGIN, viewportHeight - measuredHeight - ASSISTANT_SOURCES_VIEWPORT_MARGIN)
+    )
+    const left = Math.min(
+      Math.max(rect.left, ASSISTANT_SOURCES_VIEWPORT_MARGIN),
+      Math.max(ASSISTANT_SOURCES_VIEWPORT_MARGIN, viewportWidth - width - ASSISTANT_SOURCES_VIEWPORT_MARGIN)
+    )
+
+    setPopoverStyle({
+      left,
+      top,
+      width,
+      '--assistant-sources-list-max-height': `${sourcesListMaxHeight}px`
+    } as CSSProperties)
+  }, [sourcesListMaxHeight])
 
   useEffect(() => {
     if (!isOpen) return undefined
@@ -91,6 +145,7 @@ export function AssistantSources({ sources }: { sources: ChatWebSearchSource[] }
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target
       if (!(target instanceof Node)) return
+      if (rootRef.current?.contains(target)) return
       if (popoverRef.current?.contains(target)) return
       setOpen(false)
     }
@@ -108,11 +163,29 @@ export function AssistantSources({ sources }: { sources: ChatWebSearchSource[] }
     }
   }, [isOpen])
 
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      setPopoverStyle(null)
+      return undefined
+    }
+
+    updatePopoverPosition()
+    const animationFrame = window.requestAnimationFrame(updatePopoverPosition)
+    window.addEventListener('resize', updatePopoverPosition)
+    document.addEventListener('scroll', updatePopoverPosition, true)
+    return () => {
+      window.cancelAnimationFrame(animationFrame)
+      window.removeEventListener('resize', updatePopoverPosition)
+      document.removeEventListener('scroll', updatePopoverPosition, true)
+    }
+  }, [isOpen, updatePopoverPosition])
+
   if (sources.length === 0) return null
 
   return (
-    <div className="assistant-sources" ref={popoverRef}>
+    <div className="assistant-sources" ref={rootRef}>
       <button
+        ref={buttonRef}
         aria-expanded={isOpen}
         className="assistant-sources__button"
         onClick={() => setOpen((current) => !current)}
@@ -125,16 +198,20 @@ export function AssistantSources({ sources }: { sources: ChatWebSearchSource[] }
         </span>
         <span>{t('agent.web.sources')}</span>
       </button>
-      {isOpen && (
-        <div
-          className="assistant-sources__popover"
-          role="dialog"
-          aria-label={t('agent.web.sourcesAria')}
-        >
-          <strong>{t('agent.web.sources')}</strong>
-          <WebSearchSourcesList sources={sources} />
-        </div>
-      )}
+      {isOpen &&
+        createPortal(
+          <div
+            className="assistant-sources__popover"
+            ref={popoverRef}
+            role="dialog"
+            aria-label={t('agent.web.sourcesAria')}
+            style={popoverStyle ?? undefined}
+          >
+            <strong>{t('agent.web.sources')}</strong>
+            <WebSearchSourcesList sources={sources} />
+          </div>,
+          document.body
+        )}
     </div>
   )
 }

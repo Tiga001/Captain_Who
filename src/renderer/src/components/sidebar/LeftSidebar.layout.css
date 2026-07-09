@@ -2,7 +2,8 @@
 .left-sidebar {
   --left-sidebar-footer-height: 64px;
   --left-sidebar-header-height: calc(
-    var(--titlebar-height) + var(--mc-layout-sidebar-action-height) + 24px
+    var(--titlebar-height) + var(--mc-layout-sidebar-action-height) +
+      var(--mc-layout-sidebar-action-height) + 26px
   );
   --left-sidebar-popover-z-index: 1100;
   position: relative;
@@ -24,8 +25,11 @@
   top: 0;
   right: 0;
   left: 0;
+  display: grid;
+  align-content: start;
   height: var(--left-sidebar-header-height);
-  padding: calc(var(--titlebar-height) + 12px) 18px 24px;
+  padding: calc(var(--titlebar-height) + 8px) 18px 14px;
+  gap: 4px;
 }
 
 .left-sidebar__scroll {
@@ -80,6 +84,7 @@
 }
 
 .left-sidebar__primary-action,
+.left-sidebar__search-action,
 .left-sidebar__settings,
 .left-sidebar__conversation-title-button,
 .left-sidebar__section-title-button {
@@ -101,6 +106,7 @@
 }
 
 .left-sidebar__primary-action:hover,
+.left-sidebar__search-action:hover,
 .left-sidebar__settings:hover,
 .left-sidebar__conversation-header:hover,
 .left-sidebar__conversation-header:focus-within,
@@ -237,6 +243,7 @@
 }
 
 .left-sidebar__primary-action:focus-visible,
+.left-sidebar__search-action:focus-visible,
 .left-sidebar__settings:focus-visible,
 .left-sidebar__account-button:focus-visible,
 .left-sidebar__account-menu-item:focus-visible,
@@ -255,6 +262,7 @@
 }
 
 .left-sidebar__primary-action svg,
+.left-sidebar__search-action svg,
 .left-sidebar__settings svg,
 .left-sidebar__account-menu-item svg,
 .left-sidebar__conversation-title-button svg,

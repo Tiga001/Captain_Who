@@ -1,5 +1,5 @@
 // Renderer UI.
-import { useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import type { AgentProposedAction } from '@mycopilot/protocol'
 import { ChatComposer } from './components/ChatComposer'
 import { AgentApprovalDialog } from './components/AgentApprovalDialog'
@@ -16,6 +16,8 @@ interface ChatConversationPageProps {
   composerDraft: ChatComposerDraft
   editSelectedModelAvailable: boolean
   editSelectedModelSupportsImage: boolean
+  initialScrollTop?: number | null
+  scrollToBottomSignal?: number
   onApproveAgentAction?: (
     messageId: string,
     action: AgentProposedAction,
@@ -24,6 +26,7 @@ interface ChatConversationPageProps {
   onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void
   onComposerDraftChange: (draft: ChatComposerDraft) => void
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
+  onScrollPositionChange?: (conversationId: string, scrollTop: number) => void
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onStopGenerating?: () => void
   onSubmitMessage: (message: string, options: ChatSubmitOptions) => void
@@ -36,6 +39,7 @@ interface ChatConversationPageProps {
     full: boolean
   }
   showTokenUsageDetails: boolean
+  scrollTargetMessageId?: string | null
 }
 
 function getActionApprovalStatus(action: AgentProposedAction) {
@@ -93,18 +97,23 @@ export function ChatConversationPage({
   conversation,
   editSelectedModelAvailable,
   editSelectedModelSupportsImage,
+  initialScrollTop = null,
+  scrollToBottomSignal = 0,
   onApproveAgentAction,
   onCancelAgentAction,
   onComposerDraftChange,
   onEditLastUserMessage,
+  onScrollPositionChange,
   onRejectAgentAction,
   onStopGenerating,
   onSubmitMessage,
   onMessageUiStateChange,
   permissionModeAvailability,
-  showTokenUsageDetails
+  showTokenUsageDetails,
+  scrollTargetMessageId
 }: ChatConversationPageProps) {
   const messagesRef = useRef<HTMLDivElement>(null)
+  const handledScrollTargetRef = useRef<string | null>(null)
   const isGenerating = conversation.messages.some(
     (message) => message.role === 'assistant' && message.status === 'pending'
   )
@@ -120,12 +129,73 @@ export function ChatConversationPage({
     ? null
     : getEditableLastUserMessageId(conversation)
 
-  useEffect(() => {
-    if (!hasPendingApproval) return
+  const rememberCurrentScrollPosition = useCallback(() => {
+    const messagesElement = messagesRef.current
+    if (!messagesElement) return
+    onScrollPositionChange?.(conversation.id, messagesElement.scrollTop)
+  }, [conversation.id, onScrollPositionChange])
+
+  useLayoutEffect(() => {
+    if (scrollTargetMessageId) return undefined
+    const messagesElement = messagesRef.current
+    if (!messagesElement) return undefined
+
+    const animationFrameId = window.requestAnimationFrame(() => {
+      if (initialScrollTop === null || initialScrollTop === undefined) {
+        messagesElement.scrollTop = messagesElement.scrollHeight
+        return
+      }
+
+      const maxScrollTop = Math.max(0, messagesElement.scrollHeight - messagesElement.clientHeight)
+      messagesElement.scrollTop = Math.min(initialScrollTop, maxScrollTop)
+    })
+
+    return () => window.cancelAnimationFrame(animationFrameId)
+  }, [conversation.id, initialScrollTop, scrollTargetMessageId])
+
+  useLayoutEffect(() => {
+    if (!hasPendingApproval || scrollTargetMessageId) return
     const messagesElement = messagesRef.current
     if (!messagesElement) return
     messagesElement.scrollTop = messagesElement.scrollHeight
-  }, [conversation.messages, hasPendingApproval])
+  }, [conversation.messages, hasPendingApproval, scrollTargetMessageId])
+
+  useLayoutEffect(() => {
+    if (!scrollToBottomSignal || scrollTargetMessageId) return
+    const messagesElement = messagesRef.current
+    if (!messagesElement) return
+    messagesElement.scrollTop = messagesElement.scrollHeight
+  }, [scrollTargetMessageId, scrollToBottomSignal])
+
+  useLayoutEffect(() => {
+    if (!scrollTargetMessageId) {
+      handledScrollTargetRef.current = null
+      return
+    }
+    const messagesElement = messagesRef.current
+    if (!messagesElement) return
+    const targetKey = `${conversation.id}:${scrollTargetMessageId}`
+    if (handledScrollTargetRef.current === targetKey) return
+
+    const animationFrameId = window.requestAnimationFrame(() => {
+      const target = Array.from(
+        messagesElement.querySelectorAll<HTMLElement>('[data-message-id]')
+      ).find((element) => element.dataset.messageId === scrollTargetMessageId)
+
+      if (!target) return
+      handledScrollTargetRef.current = targetKey
+      target?.scrollIntoView({
+        block: 'center',
+        behavior: 'smooth'
+      })
+    })
+
+    return () => window.cancelAnimationFrame(animationFrameId)
+  }, [conversation.id, conversation.messages, scrollTargetMessageId])
+
+  useEffect(() => {
+    return rememberCurrentScrollPosition
+  }, [rememberCurrentScrollPosition])
 
   return (
     <section
@@ -133,7 +203,11 @@ export function ChatConversationPage({
       aria-label={conversation.title}
       data-approval-pending={hasPendingApproval ? 'true' : undefined}
     >
-      <div className="chat-conversation-page__messages" ref={messagesRef}>
+      <div
+        className="chat-conversation-page__messages"
+        onScroll={rememberCurrentScrollPosition}
+        ref={messagesRef}
+      >
         {conversation.messages.map((message) => (
           <ChatMessageItem
             isLastAssistantMessage={message.id === lastAssistantMessageId}

@@ -18,6 +18,8 @@ import type {
   AppVersionResponse,
   CorePingRequest,
   CorePingResponse,
+  ChatSearchInput,
+  ChatSearchResult,
   StorageAgentPromptPreferencesRecord,
   StorageAppDataSnapshot,
   StorageAttachmentImageRecord,
@@ -48,6 +50,7 @@ const AGENT_CANCEL_ACTION_METHOD = 'agent.cancelAction'
 const AGENT_GET_USAGE_SUMMARY_METHOD = 'agent.getUsageSummary'
 const AGENT_CLEAR_USAGE_RECORDS_METHOD = 'agent.clearUsageRecords'
 const AGENT_EVENT_NOTIFICATION_METHOD = 'agent.event'
+const SEARCH_SEARCH_CHATS_METHOD = 'search.searchChats'
 const STORAGE_LOAD_APP_DATA_METHOD = 'storage.loadAppData'
 const STORAGE_LOAD_MODEL_SETTINGS_METHOD = 'storage.loadModelSettings'
 const STORAGE_SAVE_MODEL_SETTINGS_METHOD = 'storage.saveModelSettings'
@@ -95,7 +98,10 @@ export class CoreServer {
   }
 
   startRun(input: AgentStartRunRequest): Promise<AgentStartRunResponse> {
-    return this.rpc.request<AgentStartRunResponse, AgentStartRunRequest>(AGENT_START_RUN_METHOD, input)
+    return this.rpc.request<AgentStartRunResponse, AgentStartRunRequest>(
+      AGENT_START_RUN_METHOD,
+      input
+    )
   }
 
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput> {
@@ -106,7 +112,10 @@ export class CoreServer {
   }
 
   cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse> {
-    return this.rpc.request<AgentCancelRunResponse, AgentCancelRunRequest>(AGENT_CANCEL_RUN_METHOD, input)
+    return this.rpc.request<AgentCancelRunResponse, AgentCancelRunRequest>(
+      AGENT_CANCEL_RUN_METHOD,
+      input
+    )
   }
 
   listPendingActions(): Promise<PendingAgentActionSnapshot[]> {
@@ -114,11 +123,17 @@ export class CoreServer {
   }
 
   approveAction(input: AgentActionIdRequest): Promise<AgentActionExecutionOutput> {
-    return this.rpc.request<AgentActionExecutionOutput, AgentActionIdRequest>(AGENT_APPROVE_ACTION_METHOD, input)
+    return this.rpc.request<AgentActionExecutionOutput, AgentActionIdRequest>(
+      AGENT_APPROVE_ACTION_METHOD,
+      input
+    )
   }
 
   rejectAction(input: AgentRejectActionRequest): Promise<AgentActionExecutionOutput> {
-    return this.rpc.request<AgentActionExecutionOutput, AgentRejectActionRequest>(AGENT_REJECT_ACTION_METHOD, input)
+    return this.rpc.request<AgentActionExecutionOutput, AgentRejectActionRequest>(
+      AGENT_REJECT_ACTION_METHOD,
+      input
+    )
   }
 
   cancelAction(input: AgentActionIdRequest): Promise<boolean> {
@@ -126,15 +141,27 @@ export class CoreServer {
   }
 
   getUsageSummary(input: AgentUsageSummaryInput): Promise<AgentUsageSummaryOutput> {
-    return this.rpc.request<AgentUsageSummaryOutput, AgentUsageSummaryInput>(AGENT_GET_USAGE_SUMMARY_METHOD, input)
+    return this.rpc.request<AgentUsageSummaryOutput, AgentUsageSummaryInput>(
+      AGENT_GET_USAGE_SUMMARY_METHOD,
+      input
+    )
   }
 
   clearUsageRecords(input: AgentUsageClearInput): Promise<AgentUsageClearOutput> {
-    return this.rpc.request<AgentUsageClearOutput, AgentUsageClearInput>(AGENT_CLEAR_USAGE_RECORDS_METHOD, input)
+    return this.rpc.request<AgentUsageClearOutput, AgentUsageClearInput>(
+      AGENT_CLEAR_USAGE_RECORDS_METHOD,
+      input
+    )
   }
 
   onAgentEvent(handler: (event: AgentEvent) => void): () => void {
-    return this.rpc.onNotification(AGENT_EVENT_NOTIFICATION_METHOD, (params) => handler(params as AgentEvent))
+    return this.rpc.onNotification(AGENT_EVENT_NOTIFICATION_METHOD, (params) =>
+      handler(params as AgentEvent)
+    )
+  }
+
+  searchChats(input: ChatSearchInput): Promise<ChatSearchResult[]> {
+    return this.rpc.request<ChatSearchResult[], ChatSearchInput>(SEARCH_SEARCH_CHATS_METHOD, input)
   }
 
   loadAppData(): Promise<StorageAppDataSnapshot> {
@@ -146,20 +173,25 @@ export class CoreServer {
   }
 
   saveModelSettings(settings: StorageModelSettingsRecord): Promise<void> {
-    return this.rpc.request<void, StorageModelSettingsRecord>(STORAGE_SAVE_MODEL_SETTINGS_METHOD, settings)
+    return this.rpc.request<void, StorageModelSettingsRecord>(
+      STORAGE_SAVE_MODEL_SETTINGS_METHOD,
+      settings
+    )
   }
 
   loadAgentPromptPreferences(): Promise<StorageAgentPromptPreferencesRecord> {
-    return this.rpc.request<StorageAgentPromptPreferencesRecord>(STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD)
+    return this.rpc.request<StorageAgentPromptPreferencesRecord>(
+      STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD
+    )
   }
 
   saveAgentPromptPreferences(
     preferences: StorageAgentPromptPreferencesRecord
   ): Promise<StorageAgentPromptPreferencesRecord> {
-    return this.rpc.request<StorageAgentPromptPreferencesRecord, StorageAgentPromptPreferencesRecord>(
-      STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD,
-      preferences
-    )
+    return this.rpc.request<
+      StorageAgentPromptPreferencesRecord,
+      StorageAgentPromptPreferencesRecord
+    >(STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD, preferences)
   }
 
   loadProjects(): Promise<StorageProjectRecord[]> {
@@ -171,15 +203,22 @@ export class CoreServer {
   }
 
   saveProject(project: StorageProjectRecord): Promise<StorageProjectRecord> {
-    return this.rpc.request<StorageProjectRecord, StorageProjectRecord>(STORAGE_SAVE_PROJECT_METHOD, project)
+    return this.rpc.request<StorageProjectRecord, StorageProjectRecord>(
+      STORAGE_SAVE_PROJECT_METHOD,
+      project
+    )
   }
 
   deleteProject(projectId: string): Promise<void> {
-    return this.rpc.request<void, { projectId: string }>(STORAGE_DELETE_PROJECT_METHOD, { projectId })
+    return this.rpc.request<void, { projectId: string }>(STORAGE_DELETE_PROJECT_METHOD, {
+      projectId
+    })
   }
 
   showProjectInFolder(projectId: string): Promise<void> {
-    return this.rpc.request<void, { projectId: string }>(STORAGE_SHOW_PROJECT_IN_FOLDER_METHOD, { projectId })
+    return this.rpc.request<void, { projectId: string }>(STORAGE_SHOW_PROJECT_IN_FOLDER_METHOD, {
+      projectId
+    })
   }
 
   revealProjectFile(input: { projectId?: string | null; filePath: string }): Promise<void> {
@@ -193,7 +232,9 @@ export class CoreServer {
     return this.rpc.request<StorageChatConversationRecord[]>(STORAGE_LOAD_CONVERSATIONS_METHOD)
   }
 
-  saveConversation(conversation: StorageChatConversationRecord): Promise<StorageChatConversationRecord> {
+  saveConversation(
+    conversation: StorageChatConversationRecord
+  ): Promise<StorageChatConversationRecord> {
     return this.rpc.request<StorageChatConversationRecord, StorageChatConversationRecord>(
       STORAGE_SAVE_CONVERSATION_METHOD,
       conversation
@@ -210,11 +251,16 @@ export class CoreServer {
   }
 
   deleteConversation(conversationId: string): Promise<void> {
-    return this.rpc.request<void, { conversationId: string }>(STORAGE_DELETE_CONVERSATION_METHOD, { conversationId })
+    return this.rpc.request<void, { conversationId: string }>(STORAGE_DELETE_CONVERSATION_METHOD, {
+      conversationId
+    })
   }
 
   deleteChatMessages(input: StorageDeleteChatMessagesRequest): Promise<void> {
-    return this.rpc.request<void, StorageDeleteChatMessagesRequest>(STORAGE_DELETE_CHAT_MESSAGES_METHOD, input)
+    return this.rpc.request<void, StorageDeleteChatMessagesRequest>(
+      STORAGE_DELETE_CHAT_MESSAGES_METHOD,
+      input
+    )
   }
 
   upsertChatMessages(input: {
@@ -222,7 +268,10 @@ export class CoreServer {
     messages: StorageChatMessageRecord[]
     positionOffset: number
   }): Promise<StorageChatMessageRecord[]> {
-    return this.rpc.request<StorageChatMessageRecord[], typeof input>(STORAGE_UPSERT_CHAT_MESSAGES_METHOD, input)
+    return this.rpc.request<StorageChatMessageRecord[], typeof input>(
+      STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
+      input
+    )
   }
 
   saveChatMessageState(input: {
@@ -244,7 +293,9 @@ export class CoreServer {
   }
 
   deleteComposerDraft(scopeId: string): Promise<void> {
-    return this.rpc.request<void, { scopeId: string }>(STORAGE_DELETE_COMPOSER_DRAFT_METHOD, { scopeId })
+    return this.rpc.request<void, { scopeId: string }>(STORAGE_DELETE_COMPOSER_DRAFT_METHOD, {
+      scopeId
+    })
   }
 
   loadUiPreferences(): Promise<StorageUiPreferencesRecord> {
@@ -262,14 +313,18 @@ export class CoreServer {
     return this.rpc.request<string | null>(STORAGE_SELECT_PROFILE_AVATAR_METHOD)
   }
 
-  loadAttachmentImage(input: { attachmentId: string }): Promise<StorageAttachmentImageRecord | null> {
+  loadAttachmentImage(input: {
+    attachmentId: string
+  }): Promise<StorageAttachmentImageRecord | null> {
     return this.rpc.request<StorageAttachmentImageRecord | null, typeof input>(
       STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
       input
     )
   }
 
-  loadInputAttachments(input: StorageLoadInputAttachmentsRequest): Promise<StorageInputAttachment[]> {
+  loadInputAttachments(
+    input: StorageLoadInputAttachmentsRequest
+  ): Promise<StorageInputAttachment[]> {
     return this.rpc.request<StorageInputAttachment[], StorageLoadInputAttachmentsRequest>(
       STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD,
       input

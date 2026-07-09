@@ -7,12 +7,12 @@ use crate::storage::models::{
     AgentActionAuditRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
     AgentUsageRecordInsert, AppDataSnapshot, AttachmentImageRecord, AttachmentRecord,
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageAttachmentRecord,
-    ChatMessageRecord, ChatMessageStateRecord, ComposerDraftRecord, ModelSettingsRecord,
-    ProjectRecord, UiPreferencesRecord,
+    ChatMessageRecord, ChatMessageStateRecord, ChatSearchInput, ChatSearchResult,
+    ComposerDraftRecord, ModelSettingsRecord, ProjectRecord, UiPreferencesRecord,
 };
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
-    chat_repository, composer_draft_repository, config_repository, now_ms,
+    chat_repository, chat_search_repository, composer_draft_repository, config_repository, now_ms,
     pending_action_repository, preferences_repository, project_repository, storage_error,
     usage_repository, StorageState,
 };
@@ -131,6 +131,11 @@ impl StorageService {
             chat_repository::list_conversations(&connection).map_err(storage_error)?;
         self.attach_message_attachments(&connection, &mut conversations)?;
         Ok(conversations)
+    }
+
+    pub fn search_chats(&self, input: &ChatSearchInput) -> Result<Vec<ChatSearchResult>, String> {
+        let connection = self.state.connection()?;
+        chat_search_repository::search_chats(&connection, input).map_err(storage_error)
     }
 
     pub fn load_attachment_image(

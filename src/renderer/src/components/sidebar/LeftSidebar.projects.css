@@ -153,12 +153,14 @@
 }
 
 .left-sidebar__primary-action svg,
+.left-sidebar__search-action svg,
 .left-sidebar__settings svg {
   width: var(--mc-icon-size-lg);
   height: var(--mc-icon-size-lg);
 }
 
 .left-sidebar__primary-action svg,
+.left-sidebar__search-action svg,
 .left-sidebar__settings svg {
   width: var(--mc-icon-size-md);
   height: var(--mc-icon-size-md);

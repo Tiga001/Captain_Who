@@ -129,6 +129,32 @@ pub struct ChatConversationRecord {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct ChatSearchInput {
+    pub query: String,
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ChatSearchMatchKind {
+    Title,
+    Message,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSearchResult {
+    pub conversation_id: String,
+    pub project_id: Option<String>,
+    pub title: String,
+    pub message_id: Option<String>,
+    pub snippet: Option<String>,
+    pub match_kind: ChatSearchMatchKind,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposerDraftRecord {
     pub scope_id: String,
     pub message: String,

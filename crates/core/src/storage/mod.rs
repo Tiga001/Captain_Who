@@ -3,6 +3,7 @@ pub mod agent_action_audit_repository;
 pub mod agent_prompt_preferences_repository;
 pub mod attachment_repository;
 pub mod chat_repository;
+pub mod chat_search_repository;
 pub mod composer_draft_repository;
 pub mod config_repository;
 pub mod migrations;

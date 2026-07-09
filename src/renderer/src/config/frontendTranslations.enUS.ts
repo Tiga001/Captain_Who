@@ -11,6 +11,13 @@ export const enUSTranslations = {
   'app.resizeRightSidebar': 'Resize right sidebar',
 
   'sidebar.newConversation': 'New chat',
+  'sidebar.search': 'Search',
+  'sidebar.searchPlaceholder': 'Search chats',
+  'sidebar.searchChats': 'Chats',
+  'sidebar.searchEmpty': 'No chats',
+  'sidebar.searchingChats': 'Searching chats',
+  'sidebar.searchNoMatches': 'No matches',
+  'sidebar.searchFailed': 'Search service unavailable',
   'sidebar.projects': 'Projects',
   'sidebar.conversations': 'Chats',
   'sidebar.expandConversations': 'Show more',

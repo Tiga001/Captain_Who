@@ -93,6 +93,9 @@ const host: HostApi = {
   clipboard: {
     writeImage: (input) => ipcRenderer.invoke('host:clipboard.writeImage', input)
   },
+  search: {
+    searchChats: (input) => ipcRenderer.invoke('host:search.searchChats', input)
+  },
   storage: {
     loadAppData: () => ipcRenderer.invoke('host:storage.loadAppData'),
     loadModelSettings: () => ipcRenderer.invoke('host:storage.loadModelSettings'),

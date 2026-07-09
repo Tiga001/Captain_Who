@@ -1,6 +1,19 @@
 // Electron main client.
-import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, shell } from 'electron'
-import type { IpcMainInvokeEvent, NativeImage, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
+import {
+  BrowserWindow,
+  clipboard,
+  dialog,
+  ipcMain,
+  nativeImage,
+  nativeTheme,
+  shell
+} from 'electron'
+import type {
+  IpcMainInvokeEvent,
+  NativeImage,
+  OpenDialogOptions,
+  OpenDialogReturnValue
+} from 'electron'
 import { execFile } from 'child_process'
 import { homedir, tmpdir } from 'os'
 import { promisify } from 'util'
@@ -199,9 +212,12 @@ async function writeMacImageToClipboard(
   }
 }
 
-function writeElectronImageToClipboard(
-  image: NativeImage
-): { formats: string[]; width: number; height: number; method: string } {
+function writeElectronImageToClipboard(image: NativeImage): {
+  formats: string[]
+  width: number
+  height: number
+  method: string
+} {
   clipboard.clear()
   clipboard.writeImage(image)
 
@@ -412,6 +428,7 @@ export function registerHostIpc(
   ipcMain.handle('host:agent.clearUsageRecords', (_event, input) =>
     coreServer.clearUsageRecords(input)
   )
+  ipcMain.handle('host:search.searchChats', (_event, input) => coreServer.searchChats(input))
   ipcMain.handle('host:attachments.selectInputAttachments', (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)
   )
@@ -500,9 +517,7 @@ export function registerHostIpc(
   ipcMain.handle('host:storage.loadInputAttachments', (_event, input) =>
     coreServer.loadInputAttachments(input)
   )
-  ipcMain.handle('host:storage.loadImageFile', (_event, input) =>
-    loadImageFile(coreServer, input)
-  )
+  ipcMain.handle('host:storage.loadImageFile', (_event, input) => loadImageFile(coreServer, input))
   ipcMain.handle('host:terminal.createSession', (_event, request) =>
     terminalBridge.createSession(request)
   )

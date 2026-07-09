@@ -36,7 +36,7 @@ export interface LeftSidebarProps {
   onRemoveProject: (projectId: string) => void
   onRenameConversation: (conversationId: string, title: string) => void
   onRenameProject: (projectId: string, name: string) => void
-  onSelectConversation: (conversationId: string) => void
+  onSelectConversation: (conversationId: string, messageId?: string | null) => void
   onShowProjectInFolder: (projectId: string) => void
   onTogglePinConversation: (conversationId: string) => void
   onTogglePinProject: (projectId: string) => void

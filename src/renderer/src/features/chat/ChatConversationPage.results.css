@@ -666,16 +666,13 @@ button.attachment-list-activity__item:focus-visible {
 }
 
 .assistant-sources__popover {
-  position: absolute;
-  z-index: 12;
-  bottom: calc(100% + 10px);
-  left: 0;
+  position: fixed;
+  z-index: 220;
   display: grid;
-  width: min(620px, calc(100vw - 64px));
-  max-height: min(420px, 62vh);
+  max-height: calc(100vh - 32px);
   padding: 18px 20px;
   gap: 14px;
-  overflow: auto;
+  overflow: hidden;
   color: var(--mc-color-text-primary);
   background: var(--mc-color-surface-elevated);
   border: 1px solid var(--mc-color-border-subtle);
@@ -688,4 +685,14 @@ button.attachment-list-activity__item:focus-visible {
   font-size: var(--mc-font-size-base);
   font-weight: var(--mc-font-weight-strong);
   line-height: var(--mc-line-height-tight);
+}
+
+.assistant-sources__popover .web-search-sources-list {
+  max-height: var(--assistant-sources-list-max-height, 170px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-color: var(--mc-color-border-default) transparent;
+  scrollbar-width: thin;
 }
