@@ -1,5 +1,6 @@
 // Rust agent core.
 mod attachments;
+mod hooks;
 mod tool_flow;
 
 use crate::cancellation::AgentCancellationToken;
@@ -20,6 +21,7 @@ use attachments::{
     append_attachment_text_to_last_user_message, attach_images_to_last_user_message,
     build_attachment_context, AttachmentContext,
 };
+use hooks::AgentRuntimeHooks;
 use serde_json::{json, Value};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -141,6 +143,7 @@ impl AgentRuntime {
     ) -> AgentResult<AgentChatOutput> {
         let run_id = run_id.unwrap_or_else(generate_run_id);
         let context = input.context.clone();
+        let mut runtime_hooks = AgentRuntimeHooks::for_run(&run_id);
         let tool_registry = Arc::new(ToolRegistry::read_only_defaults_with_search(
             input.search_config.as_ref(),
         ));
@@ -159,6 +162,7 @@ impl AgentRuntime {
             .unwrap_or(false)
             && host_executor.is_some();
         let mut tool_definitions = tool_registry.definitions();
+        tool_definitions.extend(runtime_hooks.tool_definitions());
         apply_permission_policy_to_tool_definitions(&mut tool_definitions, context.as_ref());
         if command_auto_approve {
             if let Some(definition) = tool_definitions
@@ -226,7 +230,11 @@ impl AgentRuntime {
                 max_tokens: llm_request.max_tokens,
                 temperature: llm_request.temperature,
                 stream: llm_request.stream,
-                messages: messages.clone(),
+                messages: {
+                    let mut request_messages = messages.clone();
+                    runtime_hooks.before_llm_request(&mut request_messages)?;
+                    request_messages
+                },
                 tools: llm_request.tools.clone(),
             };
             let llm_response_result = if request.stream {
@@ -406,13 +414,16 @@ impl AgentRuntime {
                         run_id,
                         events: event_stream.into_events(),
                         tool_definitions,
+                        todo: runtime_hooks.todo_state(),
                         usage,
                         finish_reason,
                         proposed_actions: vec![action],
                     });
                 }
 
-                let result_result = if auto_execute_host_action {
+                let result_result = if let Some(result) = runtime_hooks.handle_tool_call(&call) {
+                    result
+                } else if auto_execute_host_action {
                     match tool_registry.proposed_action(&tool_context, &call) {
                         Ok(action) => {
                             let action = approve_proposed_action(action);
@@ -472,6 +483,7 @@ impl AgentRuntime {
                     run_id: run_id.clone(),
                     result: event_result.clone(),
                 });
+                runtime_hooks.after_tool_result(&event_result, &mut event_stream)?;
 
                 messages.push(LlmMessage::tool_result(
                     call.id.clone(),
@@ -503,6 +515,7 @@ impl AgentRuntime {
             ));
         }
         let content = final_content.unwrap_or_else(|| "没有生成可显示的回复。".to_string());
+        runtime_hooks.before_run_finish(&mut event_stream)?;
         if !llm_request.stream {
             event_stream.emit(AgentEvent::MessageDelta {
                 run_id: run_id.clone(),
@@ -526,6 +539,7 @@ impl AgentRuntime {
             run_id,
             events: event_stream.into_events(),
             tool_definitions,
+            todo: runtime_hooks.todo_state(),
             usage,
             finish_reason,
             proposed_actions: Vec::<AgentProposedAction>::new(),

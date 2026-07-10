@@ -550,6 +550,18 @@ export function applyAgentEventToChatMessage(
     }
   }
 
+  if (agentEvent.type === 'todo_updated') {
+    return {
+      ...message,
+      status: 'pending',
+      agentRun: {
+        ...currentRun,
+        status: 'running',
+        todo: agentEvent.todo
+      }
+    }
+  }
+
   if (agentEvent.type === 'approval_required') {
     const call = getActionToolCall(agentEvent.action)
     const timeline = call
@@ -693,6 +705,7 @@ export function applyAgentOutputToChatMessage(
         finalResponseAt && !currentRun.lastResponseAt ? finalResponseAt : currentRun.lastResponseAt,
       completedAt: outputCompletedAt,
       toolDefinitions: output.toolDefinitions,
+      todo: output.todo ?? currentRun.todo,
       usage: output.usage ?? currentRun.usage,
       finishReason: output.finishReason,
       approvals: getApprovalsForStatus(output.status, currentRun.approvals, output.proposedActions),

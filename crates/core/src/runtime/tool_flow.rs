@@ -200,21 +200,32 @@ pub(super) fn redact_tool_result_for_event(result: &AgentToolResult) -> AgentToo
 fn redact_base64_fields(value: &mut Value) {
     match value {
         Value::Object(object) => {
-            for (key, value) in object.iter_mut() {
-                if key == "dataBase64" {
-                    *value = json!("[redacted]");
+            for (key, item) in object.iter_mut() {
+                if key == "dataBase64" || is_base64_data_url(item) {
+                    *item = json!("[redacted]");
                 } else {
-                    redact_base64_fields(value);
+                    redact_base64_fields(item);
                 }
             }
         }
         Value::Array(items) => {
             for item in items {
-                redact_base64_fields(item);
+                if is_base64_data_url(item) {
+                    *item = json!("[redacted]");
+                } else {
+                    redact_base64_fields(item);
+                }
             }
         }
         _ => {}
     }
+}
+
+fn is_base64_data_url(value: &Value) -> bool {
+    value
+        .as_str()
+        .map(str::trim_start)
+        .is_some_and(|value| value.starts_with("data:") && value.contains(";base64,"))
 }
 
 pub(super) fn llm_image_message_from_tool_result(result: &AgentToolResult) -> Option<LlmMessage> {
@@ -356,6 +367,7 @@ pub(super) fn cancelled_output(
         run_id,
         events: event_stream.into_events(),
         tool_definitions,
+        todo: None,
         usage,
         finish_reason,
         proposed_actions: Vec::new(),

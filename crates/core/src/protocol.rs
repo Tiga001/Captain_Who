@@ -13,7 +13,6 @@ pub struct AgentChatInput {
     pub api_style: Option<AgentApiStyle>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
-    pub mode: Option<AgentRunMode>,
     pub stream: Option<bool>,
     pub context: Option<AgentRunContext>,
     pub search_config: Option<AgentSearchConfig>,
@@ -78,6 +77,8 @@ pub struct AgentChatOutput {
     pub events: Vec<AgentEvent>,
     pub tool_definitions: Vec<AgentToolDefinition>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub todo: Option<AgentTodoState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<AgentUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
@@ -93,14 +94,6 @@ pub enum AgentRunStatus {
     Completed,
     Failed,
     Cancelled,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentRunMode {
-    Chat,
-    Plan,
-    Edit,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -448,6 +441,46 @@ pub enum AgentToolSafety {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum AgentTodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Blocked,
+}
+
+impl AgentTodoStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InProgress => "in_progress",
+            Self::Completed => "completed",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTodoItem {
+    pub id: String,
+    pub title: String,
+    pub status: AgentTodoStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTodoState {
+    pub revision: u64,
+    pub items: Vec<AgentTodoItem>,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentCommandOutputStream {
     Stdout,
     Stderr,
@@ -594,6 +627,10 @@ pub enum AgentEvent {
     ToolResult {
         run_id: String,
         result: AgentToolResult,
+    },
+    TodoUpdated {
+        run_id: String,
+        todo: AgentTodoState,
     },
     ApprovalRequired {
         run_id: String,

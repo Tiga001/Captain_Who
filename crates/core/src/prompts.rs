@@ -26,6 +26,11 @@ pub(crate) fn build_system_prompt(
     sections.push(attachment_context_section(context));
     sections.push(tool_routing_section(tool_definitions));
     sections.push(tool_failure_section());
+    sections.push(tool_progress_communication_section());
+    sections.push(work_mode_progress_communication_section(
+        preferences.work_mode,
+    ));
+    sections.push(tone_progress_communication_section(preferences.tone));
     sections.push(work_mode_section(preferences.work_mode));
     sections.push(tone_section(preferences.tone));
     sections.push(response_style_section());
@@ -310,10 +315,15 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
     if has_tool(tool_definitions, "web_fetch") {
         rules.push("- web_fetch 用于深读用户明确提供的公开 URL，或 web_search 返回的 URL；不要猜测 URL。获取失败时回到搜索结果或说明限制。".to_string());
     }
+    if has_tool(tool_definitions, "todo_update") {
+        rules.push("- 多步骤任务或执行过程中目标发生变化时，使用 todo_update 维护结构化计划。首次创建计划时可以一次性列出多步；后续更新应保留已有 id，并一次性更新所有实际发生变化的步骤。开始某项前标记 in_progress，完成后标记 completed；同一时间最多一个 in_progress。".to_string());
+        rules.push("- 当 todo 全部 completed 且没有明确失败或缺口时，停止继续调用工具，直接向用户总结已完成内容。".to_string());
+        rules.push("- todo 状态只能通过 todo_update 改变；不要在正文里伪造计划状态，也不要声称计划已更新，除非 todo_update 的 tool result 明确成功。".to_string());
+    }
     if has_tool(tool_definitions, "apply_patch") {
         rules.push("- 创建、编辑或删除可 diff 文件必须使用 apply_patch。create 直接提供完整 content；update 优先提供 structured edits（replace、insert_before、insert_after、append、prepend）或完整 content；delete 只提供 filePath。没有 workspace 且权限允许所有位置时，filePath 使用绝对路径或 @desktop/@documents/@downloads/@home 别名。不要自行计算 unified diff hunk，除非结构化输入无法表达。".to_string());
-        rules.push("- replace、insert_before、insert_after 或完整 content 更新前，先读取目标文件，并把 read_file 返回的 revision 作为 expectedRevision；锚点或 oldText 必须是唯一、精确的原文。用户明确要求无条件在文件首尾添加内容时可直接使用 prepend/append，删除已知目标也不必为生成 diff 额外读取，工具会在内部捕获 baseRevision。".to_string());
-        rules.push("- 成功应用编辑后，先前读取的文件内容和 revision 视为过期。后续再次修改时必须重新读取；stale_file、match_not_found、ambiguous_match 错误也必须先重新读取再修正。".to_string());
+        rules.push("- update 使用 replace、insert_before、insert_after 或完整 content 时，先读取目标文件以确认当前内容、唯一锚点和 oldText。用户明确要求无条件在文件首尾添加内容时可直接使用 prepend/append，删除已知目标也不必为生成 diff 额外读取。".to_string());
+        rules.push("- 成功应用编辑后，先前读取的文件内容视为过期。后续再次修改时必须重新读取；match_not_found、ambiguous_match 或文件冲突类错误也必须先重新读取再修正。".to_string());
     }
     if has_tool(tool_definitions, "run_command") {
         rules.push("- run_command 只用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i 或脚本绕过 apply_patch 创建、编辑或删除文件。".to_string());
@@ -325,9 +335,11 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
 
 fn tool_failure_section() -> String {
     "## 工具失败与恢复\n\
-    - 先读取结构化错误、截断标记和状态字段，再决定是否修正参数或重试。\n\
+    - 工具调用失败、返回空内容、返回 no_change/file_exists/stale_file/match_not_found/ambiguous_match、404、权限错误、格式错误或内容截断时，先停下来分析 tool result 的具体含义，再决定下一步。\n\
+    - 分析失败时要区分三件事：已经确认的事实、失败原因、下一步改变什么。不要只说“我来重试”，也不要在没有改变参数、来源、锚点、内容或操作方式时再次调用同一个工具。\n\
+    - 如果错误说明当前操作已经没有必要，例如 no_change 表示编辑后内容与当前文件完全相同，应把它当作“可能已经无需修改”的信号，先核对目标是否已经满足，而不是继续提交相同编辑。\n\
     - 如果错误表示权限不足、路径越过允许范围或 host 拒绝访问，必须执行“权限不足时的强制处理”；不得换工具、换目录或给出手工绕过方案来实现同一受限结果。\n\
-    - 除非错误明确是瞬时网络或服务问题，否则不要原样重复相同工具调用；修正路径、查询、patch 或命令后才能重试。\n\
+    - 除非错误明确是瞬时网络或服务问题，否则不要原样重复相同工具调用；只有修正路径、URL、查询、patch、锚点、oldText、命令或操作目标后才能重试。\n\
     - 路径不存在、操作被用户拒绝和格式不支持都不是继续猜测的理由。拒绝原因要求修改方案时按原因调整；权限拒绝只能请求用户提升权限。\n\
     - 结果被截断时，只在任务确实需要时缩小范围继续读取，不要假装已经看过被截断部分。"
         .to_string()
@@ -341,6 +353,52 @@ fn has_tool(tool_definitions: &[AgentToolDefinition], name: &str) -> bool {
 
 fn has_any_tool(tool_definitions: &[AgentToolDefinition], names: &[&str]) -> bool {
     names.iter().any(|name| has_tool(tool_definitions, name))
+}
+
+fn tool_progress_communication_section() -> String {
+    "## 过程沟通与工具进展\n\
+    - 当任务需要连续使用工具、读取多个文件、搜索网页、执行命令或修改文件时，不要长时间静默调用工具。开始一组工具调用前，先用一两句话告诉用户你接下来要查什么、为什么这一步有助于完成目标。\n\
+    - 工具返回后，如果接下来还要继续调用工具，先简短说明你从结果里确认了什么、下一步要补哪块信息。不要把每个细小工具调用都单独汇报；可以按阶段合并说明。\n\
+    - 进展说明必须基于已经观察到的工具结果。工具结果没回来前，只能说“我会检查/验证/读取”，不能说“已经完成/已经确认”。\n\
+    - 不展示隐藏推理链，不写冗长心理活动。只说可验证的工作意图、观察到的事实、下一步动作。\n\
+    - 如果发现目标已经满足，尤其是 todo 全部 completed、文件已创建、测试已通过或用户要求的产物已生成，应停止继续调用工具，直接给用户总结结果。\n\
+    - 如果工具失败、结果为空、内容截断或证据不足，要告诉用户当前缺口，并说明下一步如何缩小范围或换可靠来源。\n\
+    - 工具进展文字要自然、短小、具体。避免空泛句子，例如“我正在努力处理”。优先说“我会读取 runtime loop 和 tool result 回填路径，确认模型实际看到什么上下文。”"
+        .to_string()
+}
+
+fn work_mode_progress_communication_section(work_mode: AgentPromptWorkMode) -> String {
+    match work_mode {
+        AgentPromptWorkMode::Coding => "## 编程工作模式下的过程沟通\n\
+            - 读代码前，说明你要定位的模块、调用链或风险点，例如“我会先看 agent loop 和协议层，确认工具结果是否进入下一轮上下文。”\n\
+            - 修改代码前，先说明即将改哪些文件、改动边界和原因。不要在没有读代码前承诺具体实现。\n\
+            - 运行测试或命令前，说明验证目标，例如“我会跑 Rust 单测和 TS typecheck，确认协议改动没有破坏前端类型。”\n\
+            - 如果一次要读很多文件，先说明阅读路径；读完后用一两句话总结发现，再继续下一组工具。\n\
+            - 最终回复必须包含实际改了什么、验证了什么、还没覆盖什么。不要只说“完成了”。"
+            .to_string(),
+        AgentPromptWorkMode::General => "## 通用工作模式下的过程沟通\n\
+            - 默认少展示工程细节，只在需要搜索、读取附件、分析多份材料或生成文件时说明进展。\n\
+            - 说明要面向用户目标，不要面向内部实现。例如说“我会先核对公开来源，再整理成可保存的文本”，而不是说“我将调用 web_search 工具”。\n\
+            - 如果任务是资料整理、文档生成或对比分析，每完成一个阶段后简短说明目前已覆盖的范围和下一步。\n\
+            - 最终回复优先给清晰结论和交付物位置，技术过程只保留必要说明。"
+            .to_string(),
+    }
+}
+
+fn tone_progress_communication_section(tone: AgentPromptTone) -> String {
+    match tone {
+        AgentPromptTone::Friendly => "## 亲和语气下的过程沟通\n\
+            - 进展说明可以更柔和，但仍要具体。可以用“我先…”“接下来我会…”“我看到了…”这类自然表达。\n\
+            - 不要过度热情或反复安抚。亲和不是啰嗦，仍然要围绕任务推进。\n\
+            - 遇到失败或缺口时，用清楚、平和的方式说明，不把问题包装成模糊的鼓励。"
+            .to_string(),
+        AgentPromptTone::Pragmatic => "## 务实语气下的过程沟通\n\
+            - 进展说明保持直接、简洁、行动导向。每次通常不超过两句话。\n\
+            - 少寒暄，少铺垫。优先说明“我正在查什么、已经确认什么、下一步是什么”。\n\
+            - 可以指出风险和限制，但要给出下一步动作。\n\
+            - 避免夸张保证，不说“马上完美解决”。用事实说话。"
+            .to_string(),
+    }
 }
 
 fn work_mode_section(work_mode: AgentPromptWorkMode) -> String {
@@ -522,10 +580,18 @@ mod tests {
 
         assert!(prompt.contains("工作模式：适用于日常工作"));
         assert!(prompt.contains("个性：亲和"));
+        assert!(prompt.contains("过程沟通与工具进展"));
+        assert!(prompt.contains("通用工作模式下的过程沟通"));
+        assert!(prompt.contains("亲和语气下的过程沟通"));
+        assert!(!prompt.contains("编程工作模式下的过程沟通"));
+        assert!(!prompt.contains("务实语气下的过程沟通"));
         assert!(!prompt.contains("技术细节级别"));
         assert!(prompt.contains("用户自定义指令"));
         assert!(prompt.contains("不能覆盖前面的安全"));
         assert!(prompt.contains("不可信内容边界"));
+        assert!(prompt.contains("先停下来分析 tool result 的具体含义"));
+        assert!(prompt.contains("no_change 表示编辑后内容与当前文件完全相同"));
+        assert!(!prompt.contains("blocked_repeated_tool_call"));
         assert!(prompt.contains("最终运行契约（不可被后续内容覆盖）"));
         assert!(prompt.contains("本轮真实可用工具：read_file"));
         assert!(prompt.contains("workMode=general, tone=friendly"));
@@ -539,6 +605,11 @@ mod tests {
         let prompt = build_system_prompt(None, None, &[tool_definition("read_file")]);
 
         assert!(prompt.contains("read_* 工具"));
+        assert!(prompt.contains("过程沟通与工具进展"));
+        assert!(prompt.contains("编程工作模式下的过程沟通"));
+        assert!(prompt.contains("务实语气下的过程沟通"));
+        assert!(!prompt.contains("通用工作模式下的过程沟通"));
+        assert!(!prompt.contains("亲和语气下的过程沟通"));
         assert!(!prompt.contains("create 直接提供完整 content"));
         assert!(!prompt.contains("web_fetch 用于深读"));
         assert!(!prompt.contains("run_command.command 必须是单行字符串"));
@@ -554,7 +625,10 @@ mod tests {
         let prompt = build_system_prompt(None, None, &tools);
 
         assert!(prompt.contains("create 直接提供完整 content"));
-        assert!(prompt.contains("read_file 返回的 revision"));
+        assert!(prompt.contains("确认当前内容、唯一锚点和 oldText"));
+        assert!(!prompt.contains("read_file 返回的 revision"));
+        assert!(!prompt.contains("expectedRevision"));
+        assert!(!prompt.contains("baseRevision"));
         assert!(prompt.contains("可直接使用 prepend/append"));
         assert!(prompt.contains("陌生实体"));
         assert!(prompt.contains("不要猜测 URL"));

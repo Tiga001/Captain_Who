@@ -256,9 +256,12 @@
 }
 
 .chat-conversation-page__composer {
+  display: grid;
+  justify-items: stretch;
   width: min(100%, 760px);
   padding: 14px 28px 28px;
   margin: 0 auto;
+  gap: 8px;
 }
 
 @media (max-width: 760px) {

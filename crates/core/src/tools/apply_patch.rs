@@ -76,7 +76,6 @@ fn patch_input_schema() -> Value {
                     "required": ["kind"]
                 }
             },
-            "expectedRevision": { "type": "string", "description": "Optional revision returned by read_file. If supplied, the edit fails when the file changed." },
             "patch": { "type": "string", "description": "Legacy advanced input: a complete unified diff. Do not use when content or edits can express the change." },
             "summary": { "type": "string", "description": "Short human-readable summary of the proposed change." }
         },
@@ -453,6 +452,14 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn input_schema_does_not_expose_expected_revision() {
+        let schema = patch_input_schema();
+        let properties = schema["properties"].as_object().unwrap();
+
+        assert!(!properties.contains_key("expectedRevision"));
+    }
 
     #[test]
     fn builds_diff_proposal_for_text_patch() {

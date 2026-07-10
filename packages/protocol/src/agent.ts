@@ -22,8 +22,6 @@ export type AgentRunStatus =
   | "cancelled"
   | "not_implemented";
 
-export type AgentRunMode = "chat" | "plan" | "edit";
-
 export type AgentApiStyle = "openai_compatible" | "anthropic_compatible";
 
 export type AgentSearchMode = "auto" | "disabled" | "tavily";
@@ -85,6 +83,7 @@ export type AgentToolName =
   | "web_search"
   | "web_fetch"
   | "git_diff"
+  | "todo_update"
   | "apply_patch"
   | "run_command"
   | (string & {});
@@ -94,6 +93,8 @@ export type AgentToolSafety = "read_only" | "requires_approval" | "destructive";
 export type AgentApprovalStatus = "not_required" | "required" | "approved" | "rejected";
 
 export type AgentApprovalDecisionStatus = "approved" | "rejected";
+
+export type AgentTodoStatus = "pending" | "in_progress" | "completed" | "blocked";
 
 export type AgentPatchOperation = "create" | "update" | "delete";
 
@@ -249,6 +250,21 @@ export interface AgentUsageClearOutput {
   deletedRecords: number;
 }
 
+export interface AgentTodoItem {
+  id: string;
+  title: string;
+  status: AgentTodoStatus;
+  note?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentTodoState {
+  revision: number;
+  items: AgentTodoItem[];
+  updatedAt: number;
+}
+
 export type AgentActionExecutionStatus = "applied" | "approved" | "failed" | "conflict" | "rejected";
 
 export interface AgentCommandExecutionResult {
@@ -282,6 +298,7 @@ export interface AgentChatOutput {
   runId: string;
   events: AgentEvent[];
   toolDefinitions: AgentToolDefinition[];
+  todo?: AgentTodoState;
   usage?: AgentUsage;
   finishReason?: string;
   proposedActions: AgentProposedAction[];
@@ -298,7 +315,6 @@ export interface AgentConversationTurnInput {
   assistantMessageId?: string;
   maxTokens?: number;
   temperature?: number;
-  mode?: AgentRunMode;
   promptPreferences?: AgentPromptPreferences;
   permissions?: AgentPermissions;
 }
@@ -457,6 +473,7 @@ export type AgentEvent =
   | { type: "message"; runId: string; content: string }
   | { type: "tool_call"; runId: string; call: AgentToolCall }
   | { type: "tool_result"; runId: string; result: AgentToolResult }
+  | { type: "todo_updated"; runId: string; todo: AgentTodoState }
   | { type: "approval_required"; runId: string; action: AgentProposedAction }
   | { type: "diff"; runId: string; diff: AgentDiffProposal }
   | {

@@ -1,10 +1,16 @@
 // Renderer UI.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
-import type { AgentProposedAction } from '@mycopilot/protocol'
+import type { AgentProposedAction, AgentTodoState } from '@mycopilot/protocol'
 import { ChatComposer } from './components/ChatComposer'
 import { AgentApprovalDialog } from './components/AgentApprovalDialog'
+import { AgentTodoProgress } from './components/AgentTodoProgress'
 import { ChatMessageItem } from './components/ChatMessageItem'
-import type { ChatComposerDraft, ChatConversation, ChatSubmitOptions } from './chatTypes'
+import type {
+  ChatAgentRunView,
+  ChatComposerDraft,
+  ChatConversation,
+  ChatSubmitOptions
+} from './chatTypes'
 import './ChatConversationPage.css'
 
 interface AgentApprovalOptions {
@@ -92,6 +98,29 @@ function getEditableLastUserMessageId(conversation: ChatConversation) {
   return userMessage.id
 }
 
+interface LatestAgentTodo {
+  completedAt?: number
+  runStatus?: ChatAgentRunView['status']
+  todo: AgentTodoState
+}
+
+function getLatestAgentTodo(conversation: ChatConversation): LatestAgentTodo | null {
+  for (let messageIndex = conversation.messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = conversation.messages[messageIndex]
+    if (message.role !== 'assistant') continue
+    const run = message.agentRun
+    if (!run?.todo?.items.length) continue
+
+    return {
+      completedAt: run.completedAt,
+      runStatus: run.status,
+      todo: run.todo
+    }
+  }
+
+  return null
+}
+
 export function ChatConversationPage({
   composerDraft,
   conversation,
@@ -124,6 +153,7 @@ export function ChatConversationPage({
     () => getPendingApprovalTarget(conversation),
     [conversation]
   )
+  const activeTodo = useMemo(() => getLatestAgentTodo(conversation), [conversation])
   const hasPendingApproval = Boolean(pendingApprovalTarget)
   const editableLastUserMessageId = hasPendingApproval
     ? null
@@ -229,6 +259,13 @@ export function ChatConversationPage({
       </div>
 
       <div className="chat-conversation-page__composer">
+        {activeTodo && (
+          <AgentTodoProgress
+            completedAt={activeTodo.completedAt}
+            runStatus={activeTodo.runStatus}
+            todo={activeTodo.todo}
+          />
+        )}
         {pendingApprovalTarget ? (
           <AgentApprovalDialog
             target={pendingApprovalTarget}

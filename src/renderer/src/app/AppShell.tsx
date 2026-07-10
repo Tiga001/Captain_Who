@@ -1118,7 +1118,8 @@ export function AppShell() {
           agentRun: settleAgentRunToolActivities(
             {
               ...currentRun,
-              completedAt: stoppedAt
+              completedAt: stoppedAt,
+              todo: undefined
             },
             'cancelled',
             stoppedAt

@@ -9,6 +9,7 @@ import { GitDiffToolActivity } from './GitDiffToolActivity'
 import { ReadToolActivity } from './ReadToolActivity'
 import { RunCommandToolActivity } from './RunCommandToolActivity'
 import { SearchToolActivity } from './SearchToolActivity'
+import { TodoUpdateToolActivity } from './TodoUpdateToolActivity'
 import { WebSearchToolActivity } from './WebSearchToolActivity'
 import { WorkspaceMapToolActivity } from './WorkspaceMapToolActivity'
 import type { SettledToolStatus } from './toolActivityUtils'
@@ -118,6 +119,17 @@ export function AgentToolActivity({
         call={call}
         diff={diff}
         projectId={projectId}
+        result={result}
+        settledStatus={settledStatus}
+      />
+    )
+  }
+
+  if (call.tool === 'todo_update') {
+    return (
+      <TodoUpdateToolActivity
+        cancelled={cancelled && !result}
+        call={call}
         result={result}
         settledStatus={settledStatus}
       />

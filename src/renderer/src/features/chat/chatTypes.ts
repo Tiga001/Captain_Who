@@ -5,6 +5,7 @@ import type {
   AgentProposedAction,
   AgentRunStatus,
   AgentStateSnapshot,
+  AgentTodoState,
   AgentToolCall,
   AgentToolDefinition,
   AgentToolResult,
@@ -69,6 +70,7 @@ export interface ChatAgentRunView {
   lastResponseAt?: number
   completedAt?: number
   toolDefinitions: AgentToolDefinition[]
+  todo?: AgentTodoState
   toolCalls: AgentToolCall[]
   toolResults: AgentToolResult[]
   webSearchActivities?: ChatWebSearchActivity[]

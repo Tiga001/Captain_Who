@@ -11,7 +11,7 @@ use response::{
     extract_api_error, extract_finish_reason, extract_response_text, extract_tool_calls,
     truncate_for_error,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::time::Duration;
 use stream::parse_sse_response;
 #[cfg(test)]
@@ -192,11 +192,8 @@ where
 
     let streamed = parse_sse_response(response, api_style, cancellation_token, on_delta).await?;
 
-    validate_llm_response(
-        &streamed.content,
-        &streamed.tool_calls,
-        "streaming response",
-    )?;
+    let diagnostic = streaming_response_diagnostic(&streamed);
+    validate_llm_response(&streamed.content, &streamed.tool_calls, &diagnostic)?;
     Ok(streamed)
 }
 
@@ -281,6 +278,28 @@ fn validate_llm_response(
     }
 
     Ok(())
+}
+
+fn streaming_response_diagnostic(response: &LlmChatResponse) -> String {
+    let usage = response.usage.as_ref().map(|usage| {
+        json!({
+            "inputTokens": usage.input_tokens,
+            "outputTokens": usage.output_tokens,
+            "outputThinkingTokens": usage.output_thinking_tokens,
+            "totalTokens": usage.total_tokens,
+            "cachedInputTokens": usage.cached_input_tokens,
+            "cacheCreationInputTokens": usage.cache_creation_input_tokens,
+        })
+    });
+
+    serde_json::to_string(&json!({
+        "type": "streaming_response",
+        "finishReason": response.finish_reason,
+        "contentLength": response.content.len(),
+        "toolCallCount": response.tool_calls.len(),
+        "usage": usage,
+    }))
+    .unwrap_or_else(|_| "streaming response".to_string())
 }
 
 pub(crate) fn detect_api_style(api_url: &str) -> AgentApiStyle {

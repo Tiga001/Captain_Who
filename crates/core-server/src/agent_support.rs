@@ -16,8 +16,8 @@ use mycopilot_core::{
     AgentCommandRequest, AgentDiffProposal, AgentEvent, AgentInputAttachment,
     AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentPatchResult,
     AgentPatchResultStatus, AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences,
-    AgentPromptTone, AgentPromptWorkMode, AgentProposedAction, AgentRunContext, AgentRunMode,
-    AgentRunStatus, AgentSearchConfig, AgentSearchMode, AgentToolCall, AgentToolResult, AgentUsage,
+    AgentPromptTone, AgentPromptWorkMode, AgentProposedAction, AgentRunContext, AgentRunStatus,
+    AgentSearchConfig, AgentSearchMode, AgentToolCall, AgentToolResult, AgentUsage,
     AgentWorkspaceContext,
 };
 use mycopilot_protocol_rs::AGENT_EVENT_NOTIFICATION_METHOD;
@@ -126,7 +126,6 @@ pub struct AgentConversationTurnInput {
     pub assistant_message_id: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
-    pub mode: Option<AgentRunMode>,
     pub prompt_preferences: Option<AgentPromptPreferences>,
     #[serde(default)]
     pub permissions: AgentPermissions,
@@ -302,7 +301,6 @@ pub(super) fn prepare_conversation_turn(
         api_style: None,
         max_tokens: input.max_tokens,
         temperature: input.temperature,
-        mode: input.mode,
         stream: Some(true),
         context: Some(AgentRunContext {
             conversation_id: Some(conversation_id.clone()),

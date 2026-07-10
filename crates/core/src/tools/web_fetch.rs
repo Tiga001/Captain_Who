@@ -384,6 +384,12 @@ fn format_tavily_extract_response_with_favicon_fetcher_and_cancellation(
         .and_then(Value::as_array)
         .map(|failed_results| failed_results.len() > MAX_FAILED_RESULTS)
         .unwrap_or(false);
+    if content_is_empty(content.as_deref()) && !failed_results.is_empty() {
+        return Err(AgentError::new(format_failed_extract_error(
+            &request.url,
+            &failed_results,
+        )));
+    }
     let response_time = response
         .get("response_time")
         .or_else(|| response.get("responseTime"))
@@ -420,6 +426,10 @@ fn extract_content(result: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+fn content_is_empty(content: Option<&str>) -> bool {
+    content.map(str::trim).unwrap_or_default().is_empty()
+}
+
 fn format_failed_results(response: &Value) -> Vec<Value> {
     response
         .get("failed_results")
@@ -441,6 +451,35 @@ fn format_failed_results(response: &Value) -> Vec<Value> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+fn format_failed_extract_error(requested_url: &str, failed_results: &[Value]) -> String {
+    let first = failed_results.first();
+    let failed_url = first
+        .and_then(|result| result.get("url"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty());
+    let error = first
+        .and_then(|result| result.get("error"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|error| !error.is_empty());
+
+    match (failed_url, error) {
+        (Some(failed_url), Some(error)) => format!(
+            "web_fetch 未能抽取可读正文：requestedUrl={requested_url}，failedUrl={failed_url}，error={error}"
+        ),
+        (Some(failed_url), None) => format!(
+            "web_fetch 未能抽取可读正文：requestedUrl={requested_url}，failedUrl={failed_url}"
+        ),
+        (None, Some(error)) => {
+            format!("web_fetch 未能抽取可读正文：requestedUrl={requested_url}，error={error}")
+        }
+        (None, None) => {
+            format!("web_fetch 未能抽取可读正文：requestedUrl={requested_url}")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -522,6 +561,40 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("chunksPerSource"));
+    }
+
+    #[test]
+    fn rejects_empty_content_with_failed_results() {
+        let request = TavilyExtractRequest::from_args(WebFetchArgs {
+            url: "https://example.com/missing".to_string(),
+            query: None,
+            chunks_per_source: None,
+            extract_depth: None,
+            format: None,
+            include_images: None,
+            include_favicon: None,
+            timeout_seconds: None,
+            max_chars: None,
+        })
+        .unwrap();
+        let response = json!({
+            "results": [],
+            "failed_results": [{
+                "url": "https://example.com/missing",
+                "error": "404 Not Found"
+            }]
+        });
+
+        let error = format_tavily_extract_response_with_favicon_fetcher(
+            request,
+            response,
+            &FaviconFetcher::disabled(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("未能抽取可读正文"));
+        assert!(error.to_string().contains("https://example.com/missing"));
+        assert!(error.to_string().contains("404 Not Found"));
     }
 
     #[test]
