@@ -85,10 +85,13 @@ export type AgentToolName =
   | "git_diff"
   | "todo_update"
   | "apply_patch"
+  | "write_file"
   | "run_command"
   | (string & {});
 
 export type AgentToolSafety = "read_only" | "requires_approval" | "destructive";
+
+export type AgentToolApprovalMode = "never" | "always" | "dynamic";
 
 export type AgentApprovalStatus = "not_required" | "required" | "approved" | "rejected";
 
@@ -99,6 +102,27 @@ export type AgentTodoStatus = "pending" | "in_progress" | "completed" | "blocked
 export type AgentPatchOperation = "create" | "update" | "delete";
 
 export type AgentPatchResultStatus = "applied" | "failed" | "conflict" | "rejected";
+
+export type AgentFileWriteMode = "create" | "rewrite" | "modify" | "append" | "upsert";
+
+export type AgentFileDraftStatus =
+  | "drafting"
+  | "ready"
+  | "waiting_approval"
+  | "applying"
+  | "applied"
+  | "rejected"
+  | "conflict"
+  | "failed"
+  | "aborted"
+  | "expired";
+
+export type AgentFileWriteResultStatus =
+  | "applied"
+  | "failed"
+  | "conflict"
+  | "rejected"
+  | "already_applied";
 
 export type AgentCommandOutputStream = "stdout" | "stderr";
 
@@ -287,6 +311,7 @@ export interface AgentActionExecutionOutput {
   toolName: string;
   status: AgentActionExecutionStatus;
   patchResult?: AgentPatchResult;
+  fileWriteResult?: AgentFileWriteResult;
   commandResult?: AgentCommandExecutionResult;
   toolResult?: AgentToolResult;
   agentOutput: AgentChatOutput;
@@ -410,6 +435,7 @@ export interface AgentToolDefinition {
   safety: AgentToolSafety;
   requiresWorkspace: boolean;
   requiresApproval: boolean;
+  approvalMode: AgentToolApprovalMode;
 }
 
 export interface AgentToolResult {
@@ -433,6 +459,84 @@ export interface AgentDiffProposal {
   baseRevision?: string;
   summary?: string;
   approvalStatus: AgentApprovalStatus;
+}
+
+export interface AgentFileDraftSnapshot {
+  draftId: string;
+  conversationId: string;
+  projectId?: string;
+  filePath: string;
+  mode: AgentFileWriteMode;
+  status: AgentFileDraftStatus;
+  baseRevision?: string;
+  additions: number;
+  deletions: number;
+  lineCount: number;
+  byteCount: number;
+  chunkCount: number;
+  nextChunkIndex: number;
+  statsFinal: boolean;
+  summary?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentFileWriteProposal {
+  id: string;
+  draftId: string;
+  mode: AgentFileWriteMode;
+  filePath: string;
+  baseRevision?: string;
+  summary?: string;
+  additions: number;
+  deletions: number;
+  lineCount: number;
+  byteCount: number;
+  approvalStatus: AgentApprovalStatus;
+}
+
+export interface AgentFileWriteResult {
+  status: AgentFileWriteResultStatus;
+  draftId: string;
+  mode: AgentFileWriteMode;
+  filePath: string;
+  additions: number;
+  deletions: number;
+  lineCount: number;
+  byteCount: number;
+  revision?: string;
+  error?: string;
+  message?: string;
+}
+
+export interface AgentFileDraftIdInput {
+  draftId: string;
+}
+
+export interface AgentFileDraftReadInput extends AgentFileDraftIdInput {
+  offset?: number;
+  maxChars?: number;
+}
+
+export interface AgentFileDraftContentPage {
+  draft: AgentFileDraftSnapshot;
+  content: string;
+  offset: number;
+  nextOffset?: number;
+  truncated: boolean;
+}
+
+export interface AgentFileWriteDiffInput extends AgentFileDraftIdInput {
+  offset?: number;
+  maxChars?: number;
+}
+
+export interface AgentFileWriteDiffPage {
+  draftId: string;
+  patch: string;
+  offset: number;
+  nextOffset?: number;
+  truncated: boolean;
 }
 
 export interface AgentPatchResult {
@@ -464,16 +568,36 @@ export interface AgentCommandRequest {
 export type AgentProposedAction =
   | { type: "tool_call"; call: AgentToolCall }
   | { type: "diff"; diff: AgentDiffProposal }
+  | { type: "file_write"; fileWrite: AgentFileWriteProposal }
   | { type: "command"; command: AgentCommandRequest };
 
 export type AgentEvent =
   | { type: "started"; runId: string; toolDefinitions: AgentToolDefinition[] }
   | { type: "state"; runId: string; state: AgentStateSnapshot }
-  | { type: "message_delta"; runId: string; delta: string }
+  | { type: "message_delta"; runId: string; streamId?: string; delta: string }
+  | { type: "message_stream_started"; runId: string; streamId: string; attempt: number }
+  | { type: "message_stream_reset"; runId: string; streamId: string; reason: string }
+  | { type: "message_stream_committed"; runId: string; streamId: string }
+  | {
+      type: "llm_retry";
+      runId: string;
+      streamId: string;
+      attempt: number;
+      maxAttempts: number;
+      reason: string;
+    }
+  | {
+      type: "tool_input_progress";
+      runId: string;
+      streamId: string;
+      tool: string;
+      receivedBytes: number;
+    }
   | { type: "message"; runId: string; content: string }
   | { type: "tool_call"; runId: string; call: AgentToolCall }
   | { type: "tool_result"; runId: string; result: AgentToolResult }
   | { type: "todo_updated"; runId: string; todo: AgentTodoState }
+  | { type: "file_draft_updated"; runId: string; draft: AgentFileDraftSnapshot }
   | { type: "approval_required"; runId: string; action: AgentProposedAction }
   | { type: "diff"; runId: string; diff: AgentDiffProposal }
   | {

@@ -171,6 +171,9 @@ pub(super) fn approve_proposed_action(mut action: AgentProposedAction) -> AgentP
         AgentProposedAction::Diff { diff } => {
             diff.approval_status = AgentApprovalStatus::Approved;
         }
+        AgentProposedAction::FileWrite { file_write } => {
+            file_write.approval_status = AgentApprovalStatus::Approved;
+        }
         AgentProposedAction::ToolCall { call } => {
             call.approval_status = AgentApprovalStatus::Approved;
         }
@@ -188,13 +191,49 @@ pub(super) fn failed_tool_call_result(call: &AgentToolCall, error: AgentError) -
     }
 }
 
-pub(super) fn redact_tool_result_for_event(result: &AgentToolResult) -> AgentToolResult {
+pub(super) fn redact_tool_result_for_llm(result: &AgentToolResult) -> AgentToolResult {
     let mut redacted = result.clone();
     if let Some(value) = redacted.result.as_mut() {
         redact_base64_fields(value);
     }
 
     redacted
+}
+
+pub(super) fn redact_tool_result_for_event(result: &AgentToolResult) -> AgentToolResult {
+    let mut redacted = redact_tool_result_for_llm(result);
+    if redacted.tool == "write_file" {
+        if let Some(object) = redacted.result.as_mut().and_then(Value::as_object_mut) {
+            object.remove("tail");
+        }
+    }
+    redacted
+}
+
+pub(super) fn redact_tool_call_for_event(call: &AgentToolCall) -> AgentToolCall {
+    let mut redacted = call.clone();
+    if redacted.tool != "write_file" {
+        return redacted;
+    }
+    let Some(args) = redacted.args.as_object_mut() else {
+        return redacted;
+    };
+    if let Some(content) = args.get("content").and_then(Value::as_str) {
+        let content_bytes = content.len() as u64;
+        args.insert("content".to_string(), json!("[stored in private draft]"));
+        args.insert("contentBytes".to_string(), json!(content_bytes));
+    }
+    redacted
+}
+
+pub(super) fn file_draft_from_tool_result(
+    result: &AgentToolResult,
+) -> Option<crate::protocol::AgentFileDraftSnapshot> {
+    if result.tool != "write_file" || !result.ok {
+        return None;
+    }
+    let draft = result.result.as_ref()?.get("draft")?.clone();
+    serde_json::from_value(draft).ok()
 }
 
 fn redact_base64_fields(value: &mut Value) {

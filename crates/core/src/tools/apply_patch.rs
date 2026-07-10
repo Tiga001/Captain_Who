@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 const MAX_SUMMARY_CHARS: usize = 2_000;
 const MAX_EDIT_CONTENT_BYTES: usize = 240_000;
+const MAX_INLINE_CONTENT_BYTES: usize = 32 * 1024;
 
 pub(super) struct ApplyPatchTool;
 
@@ -28,6 +29,7 @@ impl AgentTool for ApplyPatchTool {
             safety: AgentToolSafety::RequiresApproval,
             requires_workspace: false,
             requires_approval: true,
+            approval_mode: crate::protocol::AgentToolApprovalMode::Always,
         }
     }
 
@@ -58,7 +60,7 @@ fn patch_input_schema() -> Value {
                 "description": "Requested operation. create uses content; update uses edits or complete content; delete only needs filePath."
             },
             "filePath": { "type": "string", "description": "Workspace-relative path, absolute local path, or a system alias such as @desktop/file.txt when permissions allow it." },
-            "content": { "type": "string", "description": "Complete UTF-8 file content. Required for create; optional for update when replacing the whole file." },
+            "content": { "type": "string", "maxLength": 32768, "description": "Complete UTF-8 file content for small files only. Required for create; optional for update. Use write_file for content above 32 KiB or content that should be generated in chunks." },
             "edits": {
                 "type": "array",
                 "minItems": 1,
@@ -172,7 +174,7 @@ fn build_patch(
             let content = args.content.as_deref().ok_or_else(|| {
                 edit_error("missing_content", "create 操作必须提供完整 content。")
             })?;
-            validate_content_size(content)?;
+            validate_inline_content_size(content)?;
             let target = target_path_for_create(context, file_path)?;
             if target.exists() {
                 return Err(edit_error(
@@ -197,7 +199,7 @@ fn build_patch(
                     ))
                 }
                 (Some(content), None) => {
-                    validate_content_size(content)?;
+                    validate_inline_content_size(content)?;
                     content.to_string()
                 }
                 (None, Some(edits)) if !edits.is_empty() => {
@@ -299,6 +301,20 @@ fn validate_content_size(content: &str) -> AgentResult<()> {
         ));
     }
     Ok(())
+}
+
+fn validate_inline_content_size(content: &str) -> AgentResult<()> {
+    if content.len() > MAX_INLINE_CONTENT_BYTES {
+        return Err(edit_error(
+            "use_staged_write",
+            format!(
+                "完整 content 为 {} bytes，超过 apply_patch 的 {} bytes 内联限制；请使用 write_file 分块生成草稿。",
+                content.len(),
+                MAX_INLINE_CONTENT_BYTES
+            ),
+        ));
+    }
+    validate_content_size(content)
 }
 
 fn apply_structured_edits(current: &str, edits: &[StructuredTextEdit]) -> AgentResult<String> {

@@ -209,6 +209,33 @@ fn read_image_tool_result_is_redacted_but_creates_visual_message() {
 }
 
 #[test]
+fn file_write_tail_is_available_to_llm_but_not_persisted_in_events() {
+    let result = AgentToolResult {
+        call_id: "call-write".to_string(),
+        tool: "write_file".to_string(),
+        ok: true,
+        result: Some(json!({
+            "draft": { "draftId": "draft-1" },
+            "tail": "private generated content"
+        })),
+        error: None,
+    };
+
+    let llm_result = redact_tool_result_for_llm(&result);
+    let event_result = redact_tool_result_for_event(&result);
+
+    assert_eq!(
+        llm_result.result.as_ref().unwrap()["tail"],
+        "private generated content"
+    );
+    assert!(event_result.result.as_ref().unwrap().get("tail").is_none());
+    assert_eq!(
+        event_result.result.as_ref().unwrap()["draft"]["draftId"],
+        "draft-1"
+    );
+}
+
+#[test]
 fn rejects_unknown_message_roles() {
     let error = normalize_messages(vec![message("tool", "result")]).unwrap_err();
     assert!(error.to_string().contains("不支持的消息角色"));

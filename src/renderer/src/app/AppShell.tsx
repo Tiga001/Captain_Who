@@ -476,6 +476,7 @@ export function AppShell() {
           applyAgentEventToChatMessage(message, {
             type: 'message_delta',
             runId,
+            streamId: pendingDelta.streamId,
             delta: pendingDelta.delta
           }),
         { touchConversation: false }
@@ -513,6 +514,7 @@ export function AppShell() {
         conversationId,
         delta: agentEvent.delta,
         messageId,
+        streamId: agentEvent.streamId,
         timerId
       })
     },
@@ -563,6 +565,8 @@ export function AppShell() {
         bufferMessageDelta(conversationId, assistantMessageId, agentEvent)
         return
       }
+
+      if (agentEvent.type === 'tool_input_progress') return
 
       if (agentEvent.runId) {
         flushPendingMessageDelta(agentEvent.runId)

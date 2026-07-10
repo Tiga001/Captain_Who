@@ -20,6 +20,7 @@ export type PendingMessageDelta = {
   conversationId: string
   delta: string
   messageId: string
+  streamId?: string
   timerId: number
 }
 

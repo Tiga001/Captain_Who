@@ -1,6 +1,6 @@
 // Server-sent event parsing and stream accumulation for LLM responses.
 use super::response::{extract_api_error, parse_tool_arguments, truncate_for_error};
-use super::{LlmChatResponse, LlmToolCall};
+use super::{LlmChatResponse, LlmStreamEvent, LlmToolCall};
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentUsage};
 use crate::usage::{extract_anthropic_stream_usage, extract_usage, merge_stream_usage};
@@ -15,7 +15,7 @@ pub(super) async fn parse_sse_response<F>(
     mut on_delta: F,
 ) -> AgentResult<LlmChatResponse>
 where
-    F: FnMut(String) + Send,
+    F: FnMut(LlmStreamEvent) + Send,
 {
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::<u8>::new();
@@ -60,7 +60,7 @@ pub(super) fn process_sse_frame<F>(
     on_delta: &mut F,
 ) -> AgentResult<()>
 where
-    F: FnMut(String),
+    F: FnMut(LlmStreamEvent),
 {
     let frame = parse_sse_frame(frame);
     let data = frame.data.trim();
@@ -147,7 +147,7 @@ impl LlmStreamAccumulator {
         on_delta: &mut F,
     ) -> AgentResult<()>
     where
-        F: FnMut(String),
+        F: FnMut(LlmStreamEvent),
     {
         match self {
             Self::OpenAi(accumulator) => accumulator.process(value, on_delta),
@@ -181,7 +181,7 @@ struct OpenAiToolCallAccumulator {
 impl OpenAiStreamAccumulator {
     fn process<F>(&mut self, value: &Value, on_delta: &mut F) -> AgentResult<()>
     where
-        F: FnMut(String),
+        F: FnMut(LlmStreamEvent),
     {
         merge_stream_usage(&mut self.usage, extract_usage(value));
 
@@ -200,7 +200,7 @@ impl OpenAiStreamAccumulator {
             if let Some(content) = delta.get("content").and_then(Value::as_str) {
                 if !content.is_empty() {
                     self.content.push_str(content);
-                    on_delta(content.to_string());
+                    on_delta(LlmStreamEvent::Delta(content.to_string()));
                 }
             }
 
@@ -225,6 +225,10 @@ impl OpenAiStreamAccumulator {
                     }
                     if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
                         append_argument_stream_fragment(&mut entry.arguments, arguments);
+                        on_delta(LlmStreamEvent::ToolInputProgress {
+                            tool: entry.name.clone(),
+                            received_bytes: entry.arguments.len() as u64,
+                        });
                     }
                 }
             }
@@ -287,7 +291,7 @@ impl AnthropicStreamAccumulator {
         on_delta: &mut F,
     ) -> AgentResult<()>
     where
-        F: FnMut(String),
+        F: FnMut(LlmStreamEvent),
     {
         let event_kind = event
             .filter(|event| !event.trim().is_empty())
@@ -332,7 +336,7 @@ impl AnthropicStreamAccumulator {
 
     fn process_content_block_start<F>(&mut self, value: &Value, on_delta: &mut F) -> AgentResult<()>
     where
-        F: FnMut(String),
+        F: FnMut(LlmStreamEvent),
     {
         let index = value
             .get("index")
@@ -352,7 +356,7 @@ impl AnthropicStreamAccumulator {
                 if let Some(text) = content_block.get("text").and_then(Value::as_str) {
                     if !text.is_empty() {
                         self.content.push_str(text);
-                        on_delta(text.to_string());
+                        on_delta(LlmStreamEvent::Delta(text.to_string()));
                     }
                 }
             }
@@ -368,6 +372,10 @@ impl AnthropicStreamAccumulator {
                 if let Some(input) = content_block.get("input") {
                     if !input.is_null() && input != &json!({}) {
                         block.input_json = serde_json::to_string(input).unwrap_or_default();
+                        on_delta(LlmStreamEvent::ToolInputProgress {
+                            tool: block.name.clone().unwrap_or_default(),
+                            received_bytes: block.input_json.len() as u64,
+                        });
                     }
                 }
             }
@@ -379,7 +387,7 @@ impl AnthropicStreamAccumulator {
 
     fn process_content_block_delta<F>(&mut self, value: &Value, on_delta: &mut F) -> AgentResult<()>
     where
-        F: FnMut(String),
+        F: FnMut(LlmStreamEvent),
     {
         let index = value
             .get("index")
@@ -402,7 +410,7 @@ impl AnthropicStreamAccumulator {
                 if !text.is_empty() {
                     block.kind = "text".to_string();
                     self.content.push_str(text);
-                    on_delta(text.to_string());
+                    on_delta(LlmStreamEvent::Delta(text.to_string()));
                 }
             }
             "input_json_delta" => {
@@ -412,6 +420,10 @@ impl AnthropicStreamAccumulator {
                     .unwrap_or_default();
                 block.kind = "tool_use".to_string();
                 block.input_json.push_str(partial_json);
+                on_delta(LlmStreamEvent::ToolInputProgress {
+                    tool: block.name.clone().unwrap_or_default(),
+                    received_bytes: block.input_json.len() as u64,
+                });
             }
             _ => {}
         }

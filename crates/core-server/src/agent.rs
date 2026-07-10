@@ -2,7 +2,8 @@
 use crate::agent_support::*;
 pub use crate::agent_support::{
     AgentActionExecutionOutput, AgentConversationTurnInput, AgentConversationTurnOutput,
-    PendingActionStatus, PendingAgentActionSnapshot,
+    AgentFileDraftContentPage, AgentFileWriteDiffPage, PendingActionStatus,
+    PendingAgentActionSnapshot,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,6 +11,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use mycopilot_core::command::{run_approved_command, AgentCommandExecutionResult, CommandRunState};
+use mycopilot_core::file_write::{file_draft_snapshot, file_write_diff};
 use mycopilot_core::storage::models::{
     AgentActionAuditRecord, AgentPendingActionRecord, AgentUsageRecordInsert,
 };
@@ -108,6 +110,7 @@ impl AgentService {
                 emitter,
                 cancellation_token,
                 host_executor,
+                service.storage.clone(),
             )
             .await;
 
@@ -252,6 +255,28 @@ impl AgentService {
                 );
                 Ok(tool_result)
             }
+            AgentProposedAction::FileWrite { file_write } => {
+                let action = AgentProposedAction::FileWrite {
+                    file_write: file_write.clone(),
+                };
+                let execution =
+                    approved_file_write_execution(&self.storage, &agent_input, &file_write);
+                self.record_auto_action_audit(
+                    &run_id,
+                    conversation_id,
+                    assistant_message_id,
+                    &agent_input,
+                    action,
+                    &execution.status,
+                    None,
+                    None,
+                    Some(&execution.tool_result),
+                    execution.tool_result.error.as_deref(),
+                    created_at,
+                    now_ms(),
+                );
+                Ok(execution.tool_result)
+            }
             AgentProposedAction::ToolCall { call } => Ok(AgentToolResult {
                 call_id: call.id,
                 tool: call.tool,
@@ -276,6 +301,73 @@ impl AgentService {
             .collect::<Vec<_>>();
         snapshots.sort_by_key(|snapshot| snapshot.created_at);
         snapshots
+    }
+
+    pub fn get_file_draft(
+        &self,
+        draft_id: &str,
+    ) -> Result<mycopilot_core::AgentFileDraftSnapshot, String> {
+        let draft = self
+            .storage
+            .get_agent_file_draft(draft_id)?
+            .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
+        file_draft_snapshot(&draft)
+    }
+
+    pub fn read_file_draft(
+        &self,
+        draft_id: &str,
+        offset: Option<usize>,
+        max_chars: Option<usize>,
+    ) -> Result<AgentFileDraftContentPage, String> {
+        let draft = self
+            .storage
+            .get_agent_file_draft(draft_id)?
+            .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
+        let snapshot = file_draft_snapshot(&draft)?;
+        let (content, offset, next_offset, truncated) =
+            paginate_chars(&draft.content, offset, max_chars);
+        Ok(AgentFileDraftContentPage {
+            draft: snapshot,
+            content,
+            offset,
+            next_offset,
+            truncated,
+        })
+    }
+
+    pub fn get_file_write_diff(
+        &self,
+        draft_id: &str,
+        offset: Option<usize>,
+        max_chars: Option<usize>,
+    ) -> Result<AgentFileWriteDiffPage, String> {
+        let draft = self
+            .storage
+            .get_agent_file_draft(draft_id)?
+            .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
+        let diff = file_write_diff(&draft);
+        let (patch, offset, next_offset, truncated) = paginate_chars(&diff, offset, max_chars);
+        Ok(AgentFileWriteDiffPage {
+            draft_id: draft.id,
+            patch,
+            offset,
+            next_offset,
+            truncated,
+        })
+    }
+
+    pub fn discard_file_draft(&self, draft_id: &str) -> Result<bool, String> {
+        let Some(mut draft) = self.storage.get_agent_file_draft(draft_id)? else {
+            return Ok(false);
+        };
+        if draft.status == "applied" {
+            return Err("已应用的文件草稿不能丢弃。".to_string());
+        }
+        draft.status = "aborted".to_string();
+        draft.updated_at = now_ms();
+        self.storage.update_agent_file_draft(&draft)?;
+        Ok(true)
     }
 
     pub fn approve_action(
@@ -402,10 +494,39 @@ impl AgentService {
             return self.queue_command_execution(record, call, notifications);
         }
 
-        let execution =
-            action_execution_for_decision(&record, &call, decision_status, message.as_deref());
+        let execution = action_execution_for_decision(
+            &self.storage,
+            &record,
+            &call,
+            decision_status,
+            message.as_deref(),
+        );
         let final_pending_status = execution.final_pending_status;
         let tool_result = execution.tool_result.clone();
+        if matches!(
+            record.snapshot.action,
+            AgentProposedAction::FileWrite { .. }
+        ) {
+            let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+                run_id: record.snapshot.run_id.clone(),
+                result: tool_result.clone(),
+            }));
+            if let Some(file_write_result) = execution.file_write_result.as_ref() {
+                if let Ok(Some(draft)) = self
+                    .storage
+                    .get_agent_file_draft(&file_write_result.draft_id)
+                {
+                    if let Ok(snapshot) = file_draft_snapshot(&draft) {
+                        let _ = notifications.send(agent_event_notification(
+                            AgentEvent::FileDraftUpdated {
+                                run_id: record.snapshot.run_id.clone(),
+                                draft: snapshot,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
         self.record_action_audit(
             &record,
             Some(match decision_status {
@@ -452,6 +573,7 @@ impl AgentService {
             tool_name: record.snapshot.tool_name,
             status: execution.status,
             patch_result: execution.patch_result,
+            file_write_result: execution.file_write_result,
             command_result: None,
             tool_result: Some(execution.tool_result),
             agent_output: AgentChatOutput {
@@ -489,6 +611,7 @@ impl AgentService {
             tool_name: record.snapshot.tool_name,
             status: "approved".to_string(),
             patch_result: None,
+            file_write_result: None,
             command_result: None,
             tool_result: None,
             agent_output: AgentChatOutput {
@@ -627,6 +750,7 @@ impl AgentService {
             emitter,
             cancellation_token,
             host_executor,
+            self.storage.clone(),
         )
         .await;
 
@@ -1094,6 +1218,21 @@ fn load_persisted_pending_actions(
         .collect()
 }
 
+fn paginate_chars(
+    value: &str,
+    offset: Option<usize>,
+    max_chars: Option<usize>,
+) -> (String, usize, Option<usize>, bool) {
+    let offset = offset.unwrap_or(0);
+    let limit = max_chars.unwrap_or(50_000).clamp(1_000, 100_000);
+    let total = value.chars().count();
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    let content = value.chars().skip(start).take(end - start).collect();
+    let truncated = end < total;
+    (content, start, truncated.then_some(end), truncated)
+}
+
 fn pending_storage_record(
     record: &PendingActionRecord,
     updated_at: i64,
@@ -1147,6 +1286,7 @@ fn pending_status_from_label(value: &str) -> Option<PendingActionStatus> {
 fn path_scope_for_action(input: &AgentChatInput, action: &AgentProposedAction) -> Option<String> {
     let path = match action {
         AgentProposedAction::Diff { diff } => Some(diff.file_path.as_str()),
+        AgentProposedAction::FileWrite { file_write } => Some(file_write.file_path.as_str()),
         AgentProposedAction::ToolCall { call } if call.tool == "apply_patch" => call
             .args
             .get("filePath")

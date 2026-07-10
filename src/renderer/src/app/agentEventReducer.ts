@@ -4,6 +4,7 @@ import type {
   AgentApprovalStatus,
   AgentChatOutput,
   AgentEvent,
+  AgentFileDraftStatus,
   AgentProposedAction,
   AgentToolCall,
   AgentToolResult
@@ -44,6 +45,8 @@ function createAgentRun(
     toolResults: [],
     approvals: [],
     diffs: [],
+    fileDrafts: [],
+    messageStreamCheckpoints: {},
     webSearchActivities: [],
     readActivities: [],
     timeline: []
@@ -68,7 +71,9 @@ export function ensureAgentRun(
       ? (currentRun.completedAt ?? Date.now())
       : currentRun.completedAt,
     timeline: currentRun.timeline ?? [],
-    readActivities: currentRun.readActivities ?? []
+    readActivities: currentRun.readActivities ?? [],
+    fileDrafts: currentRun.fileDrafts ?? [],
+    messageStreamCheckpoints: currentRun.messageStreamCheckpoints ?? {}
   }
 }
 
@@ -187,6 +192,20 @@ function getActionToolCall(action: AgentProposedAction): AgentToolCall | null {
     }
   }
 
+  if (action.type === 'file_write') {
+    return {
+      id: action.fileWrite.id,
+      tool: 'write_file',
+      args: {
+        phase: 'finish',
+        draftId: action.fileWrite.draftId,
+        summary: action.fileWrite.summary
+      },
+      approvalStatus: action.fileWrite.approvalStatus,
+      reason: action.fileWrite.summary
+    }
+  }
+
   if (action.type !== 'command') return null
 
   return {
@@ -223,6 +242,16 @@ function withActionApprovalStatus(
       ...action,
       call: {
         ...action.call,
+        approvalStatus
+      }
+    }
+  }
+
+  if (action.type === 'file_write') {
+    return {
+      ...action,
+      fileWrite: {
+        ...action.fileWrite,
         approvalStatus
       }
     }
@@ -287,6 +316,84 @@ function updateDiffApprovalStatus(
   )
 }
 
+function updateFileDraftApprovalStatus(
+  fileDrafts: NonNullable<ChatAgentRunView['fileDrafts']>,
+  action: AgentProposedAction,
+  approvalStatus: AgentApprovalStatus
+) {
+  if (action.type !== 'file_write') return fileDrafts
+  const status: AgentFileDraftStatus =
+    approvalStatus === 'required'
+      ? 'waiting_approval'
+      : approvalStatus === 'rejected'
+        ? 'rejected'
+        : 'applying'
+  const updated = fileDrafts.map((draft) =>
+    draft.draftId === action.fileWrite.draftId
+      ? { ...draft, status, statsFinal: true, updatedAt: Date.now() }
+      : draft
+  )
+  if (updated.some((draft) => draft.draftId === action.fileWrite.draftId)) return updated
+  const now = Date.now()
+  return [
+    ...updated,
+    {
+      draftId: action.fileWrite.draftId,
+      conversationId: '',
+      filePath: action.fileWrite.filePath,
+      mode: action.fileWrite.mode,
+      status,
+      baseRevision: action.fileWrite.baseRevision,
+      additions: action.fileWrite.additions,
+      deletions: action.fileWrite.deletions,
+      lineCount: action.fileWrite.lineCount,
+      byteCount: action.fileWrite.byteCount,
+      chunkCount: 0,
+      nextChunkIndex: 0,
+      statsFinal: true,
+      summary: action.fileWrite.summary,
+      createdAt: now,
+      updatedAt: now
+    }
+  ]
+}
+
+function updateFileDraftFromToolResult(
+  fileDrafts: NonNullable<ChatAgentRunView['fileDrafts']>,
+  result: AgentToolResult
+) {
+  if (result.tool !== 'write_file' || !result.result || typeof result.result !== 'object') {
+    return fileDrafts
+  }
+  const value = result.result as Record<string, unknown>
+  const draftId = typeof value.draftId === 'string' ? value.draftId : ''
+  if (!draftId) return fileDrafts
+  return fileDrafts.map((draft) => {
+    if (draft.draftId !== draftId) return draft
+    const resultStatus = value.status
+    const status: AgentFileDraftStatus =
+      resultStatus === 'applied' || resultStatus === 'already_applied'
+        ? 'applied'
+        : resultStatus === 'conflict'
+          ? 'conflict'
+          : resultStatus === 'rejected'
+            ? 'rejected'
+            : resultStatus === 'failed'
+              ? 'failed'
+              : draft.status
+    return {
+      ...draft,
+      status,
+      additions: typeof value.additions === 'number' ? value.additions : draft.additions,
+      deletions: typeof value.deletions === 'number' ? value.deletions : draft.deletions,
+      lineCount: typeof value.lineCount === 'number' ? value.lineCount : draft.lineCount,
+      byteCount: typeof value.byteCount === 'number' ? value.byteCount : draft.byteCount,
+      statsFinal: true,
+      updatedAt: Date.now()
+    }
+  })
+}
+
 function createRejectedToolResult(
   action: AgentProposedAction,
   message?: string
@@ -331,8 +438,21 @@ function getApprovalsForStatus(
 
 function appendMessageDeltaToTimeline(
   run: ChatAgentRunView,
-  delta: string
+  delta: string,
+  streamId?: string
 ): ChatAgentTimelineItem[] {
+  if (streamId) {
+    const itemId = `message-stream-${streamId}`
+    const existing = run.timeline.find((item) => item.id === itemId)
+    if (existing?.type === 'message') {
+      return run.timeline.map((item) =>
+        item.id === itemId && item.type === 'message'
+          ? { ...item, content: `${item.content}${delta}` }
+          : item
+      )
+    }
+    return [...run.timeline, { id: itemId, type: 'message', content: delta, streamId }]
+  }
   const lastItem = run.timeline[run.timeline.length - 1]
 
   if (lastItem?.type === 'message') {
@@ -480,6 +600,58 @@ export function applyAgentEventToChatMessage(
     }
   }
 
+  if (agentEvent.type === 'message_stream_started') {
+    if (currentRun.messageStreamCheckpoints?.[agentEvent.streamId]) return message
+    const currentContent = message.content === THINKING_PLACEHOLDER ? '' : message.content
+    return {
+      ...message,
+      agentRun: {
+        ...currentRun,
+        messageStreamCheckpoints: {
+          ...currentRun.messageStreamCheckpoints,
+          [agentEvent.streamId]: {
+            baseContentLength: currentContent.length,
+            baseWasThinking: message.content === THINKING_PLACEHOLDER
+          }
+        }
+      }
+    }
+  }
+
+  if (agentEvent.type === 'message_stream_reset') {
+    const checkpoint = currentRun.messageStreamCheckpoints?.[agentEvent.streamId]
+    if (!checkpoint) return message
+    const currentContent = message.content === THINKING_PLACEHOLDER ? '' : message.content
+    const restoredContent = currentContent.slice(0, checkpoint.baseContentLength)
+    const nextCheckpoints = { ...currentRun.messageStreamCheckpoints }
+    delete nextCheckpoints[agentEvent.streamId]
+    return {
+      ...message,
+      content:
+        checkpoint.baseWasThinking && !restoredContent ? THINKING_PLACEHOLDER : restoredContent,
+      agentRun: {
+        ...currentRun,
+        messageStreamCheckpoints: nextCheckpoints,
+        timeline: currentRun.timeline.filter(
+          (item) => item.type !== 'message' || item.streamId !== agentEvent.streamId
+        )
+      }
+    }
+  }
+
+  if (agentEvent.type === 'message_stream_committed') {
+    const nextCheckpoints = { ...currentRun.messageStreamCheckpoints }
+    delete nextCheckpoints[agentEvent.streamId]
+    return {
+      ...message,
+      agentRun: { ...currentRun, messageStreamCheckpoints: nextCheckpoints }
+    }
+  }
+
+  if (agentEvent.type === 'llm_retry' || agentEvent.type === 'tool_input_progress') {
+    return message
+  }
+
   if (agentEvent.type === 'message_delta') {
     const receivedAt = Date.now()
 
@@ -491,7 +663,7 @@ export function applyAgentEventToChatMessage(
         ...currentRun,
         status: 'running',
         ...getRunResponseTimestamps(currentRun, receivedAt),
-        timeline: appendMessageDeltaToTimeline(currentRun, agentEvent.delta)
+        timeline: appendMessageDeltaToTimeline(currentRun, agentEvent.delta, agentEvent.streamId)
       }
     }
   }
@@ -545,7 +717,24 @@ export function applyAgentEventToChatMessage(
           (result) => result.callId
         ),
         webSearchActivities: upsertWebSearchActivityFromResult(currentRun, agentEvent.result),
-        readActivities: upsertReadActivityFromResult(currentRun, agentEvent.result)
+        readActivities: upsertReadActivityFromResult(currentRun, agentEvent.result),
+        fileDrafts: updateFileDraftFromToolResult(currentRun.fileDrafts ?? [], agentEvent.result)
+      }
+    }
+  }
+
+  if (agentEvent.type === 'file_draft_updated') {
+    return {
+      ...message,
+      status: 'pending',
+      agentRun: {
+        ...currentRun,
+        status: 'running',
+        fileDrafts: upsertById(
+          currentRun.fileDrafts ?? [],
+          agentEvent.draft,
+          (draft) => draft.draftId
+        )
       }
     }
   }
@@ -578,6 +767,11 @@ export function applyAgentEventToChatMessage(
           ? upsertById(currentRun.toolCalls, call, (candidate) => candidate.id)
           : currentRun.toolCalls,
         diffs: updateDiffApprovalStatus(currentRun.diffs, agentEvent.action, 'required'),
+        fileDrafts: updateFileDraftApprovalStatus(
+          currentRun.fileDrafts ?? [],
+          agentEvent.action,
+          'required'
+        ),
         approvals: upsertAgentAction(currentRun.approvals, agentEvent.action),
         timeline
       }
@@ -743,6 +937,7 @@ export function applyAgentActionDecisionToChatMessage(
       ? upsertById(currentRun.toolResults, rejectedToolResult, (result) => result.callId)
       : currentRun.toolResults,
     diffs: updateDiffApprovalStatus(currentRun.diffs, action, approvalStatus),
+    fileDrafts: updateFileDraftApprovalStatus(currentRun.fileDrafts ?? [], action, approvalStatus),
     timeline: removeTransientToolTimelineItems(currentRun.timeline)
   })
 
@@ -790,6 +985,7 @@ export function applyAgentActionExecutionToChatMessage(
       execution.toolResult,
       (result) => result.callId
     ),
+    fileDrafts: updateFileDraftFromToolResult(currentRun.fileDrafts ?? [], execution.toolResult),
     diffs: currentRun.diffs.map((diff) =>
       diff.id === execution.actionId
         ? {

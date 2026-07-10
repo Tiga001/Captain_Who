@@ -1,6 +1,7 @@
 // Renderer UI.
 import type {
   AgentDiffProposal,
+  AgentFileDraftSnapshot,
   AgentInputAttachment,
   AgentProposedAction,
   AgentRunStatus,
@@ -57,7 +58,7 @@ export interface ChatReadActivity {
 }
 
 export type ChatAgentTimelineItem =
-  | { id: string; type: 'message'; content: string }
+  | { id: string; type: 'message'; content: string; streamId?: string }
   | { id: string; type: 'tool_call'; callId: string }
   | { id: string; type: 'error'; message: string }
 
@@ -76,6 +77,8 @@ export interface ChatAgentRunView {
   readActivities?: ChatReadActivity[]
   approvals: AgentProposedAction[]
   diffs: AgentDiffProposal[]
+  fileDrafts?: AgentFileDraftSnapshot[]
+  messageStreamCheckpoints?: Record<string, { baseContentLength: number; baseWasThinking: boolean }>
   timeline: ChatAgentTimelineItem[]
   state?: AgentStateSnapshot
   error?: string

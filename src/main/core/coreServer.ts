@@ -7,6 +7,12 @@ import type {
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
   AgentEvent,
+  AgentFileDraftContentPage,
+  AgentFileDraftIdInput,
+  AgentFileDraftReadInput,
+  AgentFileDraftSnapshot,
+  AgentFileWriteDiffInput,
+  AgentFileWriteDiffPage,
   AgentRejectActionRequest,
   AgentStartRunRequest,
   AgentStartRunResponse,
@@ -49,6 +55,10 @@ const AGENT_REJECT_ACTION_METHOD = 'agent.rejectAction'
 const AGENT_CANCEL_ACTION_METHOD = 'agent.cancelAction'
 const AGENT_GET_USAGE_SUMMARY_METHOD = 'agent.getUsageSummary'
 const AGENT_CLEAR_USAGE_RECORDS_METHOD = 'agent.clearUsageRecords'
+const AGENT_GET_FILE_DRAFT_METHOD = 'agent.getFileDraft'
+const AGENT_READ_FILE_DRAFT_METHOD = 'agent.readFileDraft'
+const AGENT_GET_FILE_WRITE_DIFF_METHOD = 'agent.getFileWriteDiff'
+const AGENT_DISCARD_FILE_DRAFT_METHOD = 'agent.discardFileDraft'
 const AGENT_EVENT_NOTIFICATION_METHOD = 'agent.event'
 const SEARCH_SEARCH_CHATS_METHOD = 'search.searchChats'
 const STORAGE_LOAD_APP_DATA_METHOD = 'storage.loadAppData'
@@ -152,6 +162,31 @@ export class CoreServer {
       AGENT_CLEAR_USAGE_RECORDS_METHOD,
       input
     )
+  }
+
+  getFileDraft(input: AgentFileDraftIdInput): Promise<AgentFileDraftSnapshot> {
+    return this.rpc.request<AgentFileDraftSnapshot, AgentFileDraftIdInput>(
+      AGENT_GET_FILE_DRAFT_METHOD,
+      input
+    )
+  }
+
+  readFileDraft(input: AgentFileDraftReadInput): Promise<AgentFileDraftContentPage> {
+    return this.rpc.request<AgentFileDraftContentPage, AgentFileDraftReadInput>(
+      AGENT_READ_FILE_DRAFT_METHOD,
+      input
+    )
+  }
+
+  getFileWriteDiff(input: AgentFileWriteDiffInput): Promise<AgentFileWriteDiffPage> {
+    return this.rpc.request<AgentFileWriteDiffPage, AgentFileWriteDiffInput>(
+      AGENT_GET_FILE_WRITE_DIFF_METHOD,
+      input
+    )
+  }
+
+  discardFileDraft(input: AgentFileDraftIdInput): Promise<boolean> {
+    return this.rpc.request<boolean, AgentFileDraftIdInput>(AGENT_DISCARD_FILE_DRAFT_METHOD, input)
   }
 
   onAgentEvent(handler: (event: AgentEvent) => void): () => void {

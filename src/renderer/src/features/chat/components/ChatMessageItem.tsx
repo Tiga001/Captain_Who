@@ -23,6 +23,7 @@ import { ChatMarkdown } from './ChatMarkdown'
 import { EditSummaryCard } from './EditSummaryCard'
 import { useImagePreview, useImagePreviewNotice } from './ImagePreview'
 import { AgentToolActivity } from './toolActivities/AgentToolActivity'
+import { FileWriteToolActivity } from './toolActivities/FileWriteToolActivity'
 import {
   ApplyPatchToolActivityGroup,
   type ApplyPatchToolActivityGroupItem
@@ -88,6 +89,12 @@ type RenderableTimelineItem =
   | {
       id: string
       type: 'apply_patch_group'
+      callIds: string[]
+    }
+  | {
+      id: string
+      type: 'write_file_group'
+      draftId: string
       callIds: string[]
     }
 
@@ -301,6 +308,31 @@ function groupTimelineItems(
     const call = run.toolCalls.find((candidate) => candidate.id === item.callId)
     if (!call) return [...items, item]
 
+    if (call.tool === 'write_file') {
+      const draftId = getWriteFileDraftId(run, call) ?? call.id
+      const existingIndex = items.findIndex(
+        (candidate) => candidate.type === 'write_file_group' && candidate.draftId === draftId
+      )
+      if (existingIndex >= 0) {
+        const existing = items[existingIndex]
+        if (existing.type !== 'write_file_group') return [...items, item]
+        return [
+          ...items.slice(0, existingIndex),
+          ...items.slice(existingIndex + 1),
+          { ...existing, callIds: [...existing.callIds, item.callId] }
+        ]
+      }
+      return [
+        ...items,
+        {
+          id: `write-file-${draftId}`,
+          type: 'write_file_group',
+          draftId,
+          callIds: [item.callId]
+        }
+      ]
+    }
+
     const readKind = getReadKindForCall(run, call)
     if (readKind) {
       const previousItem = items[items.length - 1]
@@ -395,6 +427,18 @@ function groupTimelineItems(
 
     return [...items, item]
   }, [])
+}
+
+function getWriteFileDraftId(run: ChatAgentRunView, call: AgentToolCall) {
+  const args =
+    call.args && typeof call.args === 'object' ? (call.args as Record<string, unknown>) : {}
+  if (typeof args.draftId === 'string' && args.draftId) return args.draftId
+  const result = getToolResult(run, call.id)?.result
+  if (!result || typeof result !== 'object') return undefined
+  const draft = (result as Record<string, unknown>).draft
+  if (!draft || typeof draft !== 'object') return undefined
+  const draftId = (draft as Record<string, unknown>).draftId
+  return typeof draftId === 'string' && draftId ? draftId : undefined
 }
 
 function getReadGroupItems(run: ChatAgentRunView, callIds: string[]): ReadToolActivityGroupItem[] {
@@ -693,6 +737,15 @@ function AgentTimelineItemView({
     const items = getApplyPatchGroupItems(run, item.callIds)
     if (items.length === 0) return null
     return <ApplyPatchToolActivityGroup items={items} projectId={projectId} />
+  }
+
+  if (item.type === 'write_file_group') {
+    return (
+      <FileWriteToolActivity
+        draft={run.fileDrafts?.find((candidate) => candidate.draftId === item.draftId)}
+        draftId={item.draftId}
+      />
+    )
   }
 
   if (item.type === 'message') {

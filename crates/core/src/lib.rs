@@ -1,6 +1,7 @@
 // Rust agent core.
 mod cancellation;
 pub mod command;
+pub mod file_write;
 mod llm;
 pub mod patch;
 mod prompts;
@@ -17,12 +18,14 @@ pub use protocol::{
     AgentApiStyle, AgentApprovalDecision, AgentApprovalDecisionStatus, AgentApprovalStatus,
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentChatInput, AgentChatMessage,
     AgentChatOutput, AgentCommandOutputStream, AgentCommandPermission, AgentCommandRequest,
-    AgentCommandRiskLevel, AgentDiffProposal, AgentError, AgentEvent, AgentGitDiffSnapshot,
-    AgentInputAttachment, AgentInputAttachmentEncoding, AgentInputAttachmentKind,
-    AgentPatchOperation, AgentPatchPermission, AgentPatchResult, AgentPatchResultStatus,
-    AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone,
-    AgentPromptWorkMode, AgentProposedAction, AgentReadPermission, AgentResult, AgentRunContext,
-    AgentRunStatus, AgentSearchConfig, AgentSearchMode, AgentStateSnapshot, AgentToolCall,
+    AgentCommandRiskLevel, AgentDiffProposal, AgentError, AgentEvent, AgentFileDraftSnapshot,
+    AgentFileDraftStatus, AgentFileWriteMode, AgentFileWriteProposal, AgentFileWriteResult,
+    AgentFileWriteResultStatus, AgentGitDiffSnapshot, AgentInputAttachment,
+    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentPatchOperation,
+    AgentPatchPermission, AgentPatchResult, AgentPatchResultStatus, AgentPermissions,
+    AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
+    AgentProposedAction, AgentReadPermission, AgentResult, AgentRunContext, AgentRunStatus,
+    AgentSearchConfig, AgentSearchMode, AgentStateSnapshot, AgentToolApprovalMode, AgentToolCall,
     AgentToolContinuation, AgentToolDefinition, AgentToolResult, AgentToolSafety, AgentUsage,
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageModelSummary, AgentUsageSummaryInput,
     AgentUsageSummaryOutput, AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission,

@@ -5,8 +5,10 @@ use crate::protocol::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentError, AgentPermissions,
     AgentReadPermission, AgentResult, AgentRunContext,
 };
+use crate::storage::service::StorageService;
 use crate::system_paths::expand_system_path;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ToolExecutionContext {
@@ -14,6 +16,10 @@ pub struct ToolExecutionContext {
     attachment_library: Option<AgentAttachmentLibraryContext>,
     cancellation_token: AgentCancellationToken,
     permissions: AgentPermissions,
+    conversation_id: Option<String>,
+    project_id: Option<String>,
+    run_id: Option<String>,
+    storage: Option<Arc<StorageService>>,
 }
 
 impl ToolExecutionContext {
@@ -26,17 +32,33 @@ impl ToolExecutionContext {
         let permissions = context
             .map(|context| context.permissions)
             .unwrap_or_default();
+        let conversation_id = context.and_then(|context| context.conversation_id.clone());
+        let project_id = context.and_then(|context| context.project_id.clone());
 
         Self {
             workspace_root,
             attachment_library,
             cancellation_token: AgentCancellationToken::new(),
             permissions,
+            conversation_id,
+            project_id,
+            run_id: None,
+            storage: None,
         }
     }
 
     pub fn with_cancellation(mut self, cancellation_token: AgentCancellationToken) -> Self {
         self.cancellation_token = cancellation_token;
+        self
+    }
+
+    pub fn with_runtime_services(
+        mut self,
+        run_id: String,
+        storage: Option<Arc<StorageService>>,
+    ) -> Self {
+        self.run_id = Some(run_id);
+        self.storage = storage;
         self
     }
 
@@ -72,6 +94,28 @@ impl ToolExecutionContext {
 
     pub(super) fn permissions(&self) -> AgentPermissions {
         self.permissions
+    }
+
+    pub(super) fn conversation_id(&self) -> AgentResult<&str> {
+        self.conversation_id
+            .as_deref()
+            .ok_or_else(|| AgentError::new("当前运行缺少 conversationId，不能创建文件草稿。"))
+    }
+
+    pub(super) fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
+    }
+
+    pub(super) fn run_id(&self) -> AgentResult<&str> {
+        self.run_id
+            .as_deref()
+            .ok_or_else(|| AgentError::new("当前运行缺少 runId，不能创建文件草稿。"))
+    }
+
+    pub(super) fn storage(&self) -> AgentResult<&Arc<StorageService>> {
+        self.storage
+            .as_ref()
+            .ok_or_else(|| AgentError::new("当前 host 未提供文件草稿存储服务。"))
     }
 
     pub(super) fn resolve_existing_path(&self, input_path: &str) -> AgentResult<PathBuf> {

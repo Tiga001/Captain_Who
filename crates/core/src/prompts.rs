@@ -325,6 +325,11 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- update 使用 replace、insert_before、insert_after 或完整 content 时，先读取目标文件以确认当前内容、唯一锚点和 oldText。用户明确要求无条件在文件首尾添加内容时可直接使用 prepend/append，删除已知目标也不必为生成 diff 额外读取。".to_string());
         rules.push("- 成功应用编辑后，先前读取的文件内容视为过期。后续再次修改时必须重新读取；match_not_found、ambiguous_match 或文件冲突类错误也必须先重新读取再修正。".to_string());
     }
+    if has_tool(tool_definitions, "write_file") {
+        rules.push("- 创建长报告、Markdown 表格、完整生成文件或分多步修改同一文件时使用 write_file。先 phase=begin；生成内容按不超过 8192 bytes 的块依次 phase=append，并严格使用上次结果的 nextChunkIndex；局部调整草稿可用 phase=edit；完成后只调用一次 phase=finish。不要把完整长文件塞进 apply_patch.content。".to_string());
+        rules.push("- write_file 的 create 要求目标不存在；rewrite 完整重写已有文件；modify 从已有内容开始做结构化编辑；append 保留已有内容并追加；upsert 用于生成型产物，不存在则创建、存在则重写。begin/append/edit 只更新私有草稿，只有 finish 才提交文件修改审批。".to_string());
+        rules.push("- write_file append 成功后以前的块已经持久化，不要重复生成；调用失败时依据返回的 nextChunkIndex 和草稿状态处理。finish 成功应用后停止写入该草稿。".to_string());
+    }
     if has_tool(tool_definitions, "run_command") {
         rules.push("- run_command 只用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i 或脚本绕过 apply_patch 创建、编辑或删除文件。".to_string());
         rules.push("- run_command.command 必须是单行字符串。审批状态属于同一个 tool call 生命周期，不要生成第二个命令调用来表示批准后的执行。".to_string());
@@ -548,6 +553,7 @@ mod tests {
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
             requires_approval: false,
+            approval_mode: crate::protocol::AgentToolApprovalMode::Never,
         }
     }
 

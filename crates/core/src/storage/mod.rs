@@ -6,6 +6,7 @@ pub mod chat_repository;
 pub mod chat_search_repository;
 pub mod composer_draft_repository;
 pub mod config_repository;
+pub mod file_draft_repository;
 pub mod migrations;
 pub mod models;
 pub mod pending_action_repository;

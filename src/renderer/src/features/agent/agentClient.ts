@@ -1,6 +1,9 @@
 // Renderer UI.
 import type {
   AgentEvent,
+  AgentFileDraftContentPage,
+  AgentFileDraftSnapshot,
+  AgentFileWriteDiffPage,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
   AgentActionExecutionOutput,
@@ -59,4 +62,28 @@ export async function clearAgentUsageRecords(
 
 export function onAgentEvent(handler: (event: AgentEvent) => void): () => void {
   return hostClient.agent.onEvent(handler)
+}
+
+export function getAgentFileDraft(draftId: string): Promise<AgentFileDraftSnapshot> {
+  return hostClient.agent.getFileDraft({ draftId })
+}
+
+export function readAgentFileDraft(
+  draftId: string,
+  offset = 0,
+  maxChars = 50_000
+): Promise<AgentFileDraftContentPage> {
+  return hostClient.agent.readFileDraft({ draftId, offset, maxChars })
+}
+
+export function getAgentFileWriteDiff(
+  draftId: string,
+  offset = 0,
+  maxChars = 50_000
+): Promise<AgentFileWriteDiffPage> {
+  return hostClient.agent.getFileWriteDiff({ draftId, offset, maxChars })
+}
+
+export function discardAgentFileDraft(draftId: string): Promise<boolean> {
+  return hostClient.agent.discardFileDraft({ draftId })
 }

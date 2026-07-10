@@ -1,7 +1,7 @@
 // Rust agent core.
 mod apply_patch;
 mod apply_patch_diff;
-mod apply_patch_paths;
+pub(crate) mod apply_patch_paths;
 mod attachments;
 mod context;
 mod document_text;
@@ -20,6 +20,7 @@ mod search_files;
 mod web_fetch;
 mod web_search;
 mod workspace_map;
+mod write_file;
 
 use crate::protocol::{
     AgentError, AgentProposedAction, AgentResult, AgentSearchConfig, AgentSearchMode,
@@ -42,6 +43,7 @@ use std::collections::BTreeMap;
 use web_fetch::WebFetchTool;
 use web_search::WebSearchTool;
 use workspace_map::WorkspaceMapTool;
+use write_file::WriteFileTool;
 
 pub(super) use context::ToolExecutionContext;
 use document_text::{
@@ -80,6 +82,7 @@ impl ToolRegistry {
         }
         registry.register(GitDiffTool);
         registry.register(ApplyPatchTool);
+        registry.register(WriteFileTool);
         registry.register(RunCommandTool);
         registry
     }
@@ -88,8 +91,16 @@ impl ToolRegistry {
         self.tools.values().map(|tool| tool.definition()).collect()
     }
 
+    #[cfg(test)]
     pub fn definition_for(&self, tool_name: &str) -> Option<AgentToolDefinition> {
         self.tools.get(tool_name).map(|tool| tool.definition())
+    }
+
+    pub fn requires_approval_for_call(&self, tool_name: &str, args: &Value) -> bool {
+        self.tools
+            .get(tool_name)
+            .map(|tool| tool.requires_approval_for_call(args))
+            .unwrap_or(false)
     }
 
     pub fn proposed_action(
@@ -183,6 +194,10 @@ pub(super) trait AgentTool: Send + Sync {
     ) -> AgentResult<AgentProposedAction> {
         Ok(AgentProposedAction::ToolCall { call: call.clone() })
     }
+
+    fn requires_approval_for_call(&self, _args: &Value) -> bool {
+        self.definition().requires_approval
+    }
 }
 
 #[cfg(test)]
@@ -242,6 +257,19 @@ mod tests {
         assert_eq!(definition.name, "apply_patch");
         assert!(!definition.requires_workspace);
         assert!(definition.requires_approval);
+    }
+
+    #[test]
+    fn write_file_uses_dynamic_finish_approval() {
+        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let definition = registry.definition_for("write_file").unwrap();
+
+        assert_eq!(
+            definition.approval_mode,
+            crate::protocol::AgentToolApprovalMode::Dynamic
+        );
+        assert!(!registry.requires_approval_for_call("write_file", &json!({ "phase": "append" })));
+        assert!(registry.requires_approval_for_call("write_file", &json!({ "phase": "finish" })));
     }
 
     #[test]

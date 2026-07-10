@@ -273,3 +273,47 @@ pub struct AgentPendingActionRecord {
     pub created_at: i64,
     pub updated_at: i64,
 }
+
+#[derive(Debug, Clone)]
+pub struct AgentFileDraftRecord {
+    pub id: String,
+    pub conversation_id: String,
+    pub project_id: Option<String>,
+    pub run_id: String,
+    pub file_path: String,
+    pub mode: String,
+    pub status: String,
+    pub base_revision: Option<String>,
+    pub base_content: String,
+    pub content: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub line_count: u64,
+    pub byte_count: u64,
+    pub chunk_count: u64,
+    pub next_chunk_index: u64,
+    pub stats_final: bool,
+    pub summary: Option<String>,
+    pub final_action_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentFileDraftChunkRecord {
+    pub draft_id: String,
+    pub chunk_index: u64,
+    pub content_hash: String,
+    pub byte_count: u64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentFileDraftOperationRecord {
+    pub draft_id: String,
+    pub sequence: u64,
+    pub operation: String,
+    pub payload_hash: String,
+    pub created_at: i64,
+}

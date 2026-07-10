@@ -146,7 +146,7 @@ const TEXT_PATCH_BASENAMES: &[&str] = &[
 const UNSUPPORTED_DOCUMENT_EXTENSIONS: &[&str] =
     &["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx"];
 
-pub(super) fn sanitize_file_path(
+pub(crate) fn sanitize_file_path(
     path: &str,
     permission: AgentWritePermission,
 ) -> AgentResult<String> {
@@ -190,7 +190,7 @@ pub(super) fn sanitize_file_path(
     Ok(normalized)
 }
 
-pub(super) fn validate_text_patch_path(path: &str) -> AgentResult<()> {
+pub(crate) fn validate_text_patch_path(path: &str) -> AgentResult<()> {
     let file_name = Path::new(path)
         .file_name()
         .and_then(|file_name| file_name.to_str())

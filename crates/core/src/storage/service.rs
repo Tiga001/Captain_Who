@@ -4,7 +4,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::storage::models::{
-    AgentActionAuditRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
+    AgentActionAuditRecord, AgentFileDraftChunkRecord, AgentFileDraftOperationRecord,
+    AgentFileDraftRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
     AgentUsageRecordInsert, AppDataSnapshot, AttachmentImageRecord, AttachmentRecord,
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageAttachmentRecord,
     ChatMessageRecord, ChatMessageStateRecord, ChatSearchInput, ChatSearchResult,
@@ -12,9 +13,9 @@ use crate::storage::models::{
 };
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
-    chat_repository, chat_search_repository, composer_draft_repository, config_repository, now_ms,
-    pending_action_repository, preferences_repository, project_repository, storage_error,
-    usage_repository, StorageState,
+    chat_repository, chat_search_repository, composer_draft_repository, config_repository,
+    file_draft_repository, now_ms, pending_action_repository, preferences_repository,
+    project_repository, storage_error, usage_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
@@ -531,6 +532,50 @@ impl StorageService {
         )
         .map(|_| ())
         .map_err(storage_error)
+    }
+
+    pub fn create_agent_file_draft(&self, draft: AgentFileDraftRecord) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        file_draft_repository::insert_draft(&connection, &draft).map_err(storage_error)
+    }
+
+    pub fn get_agent_file_draft(
+        &self,
+        draft_id: &str,
+    ) -> Result<Option<AgentFileDraftRecord>, String> {
+        let connection = self.state.connection()?;
+        file_draft_repository::get_draft(&connection, draft_id).map_err(storage_error)
+    }
+
+    pub fn save_agent_file_draft_progress(
+        &self,
+        draft: &AgentFileDraftRecord,
+        chunk: Option<&AgentFileDraftChunkRecord>,
+        operation: Option<&AgentFileDraftOperationRecord>,
+    ) -> Result<(), String> {
+        let mut connection = self.state.connection()?;
+        file_draft_repository::save_draft_progress(&mut connection, draft, chunk, operation)
+            .map_err(storage_error)
+    }
+
+    pub fn update_agent_file_draft(&self, draft: &AgentFileDraftRecord) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        file_draft_repository::update_draft(&connection, draft).map_err(storage_error)
+    }
+
+    pub fn get_agent_file_draft_chunk_hash(
+        &self,
+        draft_id: &str,
+        chunk_index: u64,
+    ) -> Result<Option<String>, String> {
+        let connection = self.state.connection()?;
+        file_draft_repository::get_chunk_hash(&connection, draft_id, chunk_index)
+            .map_err(storage_error)
+    }
+
+    pub fn next_agent_file_draft_operation_sequence(&self, draft_id: &str) -> Result<u64, String> {
+        let connection = self.state.connection()?;
+        file_draft_repository::next_operation_sequence(&connection, draft_id).map_err(storage_error)
     }
 
     fn attach_message_attachments(

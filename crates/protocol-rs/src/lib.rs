@@ -13,6 +13,10 @@ pub const AGENT_REJECT_ACTION_METHOD: &str = "agent.rejectAction";
 pub const AGENT_CANCEL_ACTION_METHOD: &str = "agent.cancelAction";
 pub const AGENT_GET_USAGE_SUMMARY_METHOD: &str = "agent.getUsageSummary";
 pub const AGENT_CLEAR_USAGE_RECORDS_METHOD: &str = "agent.clearUsageRecords";
+pub const AGENT_GET_FILE_DRAFT_METHOD: &str = "agent.getFileDraft";
+pub const AGENT_READ_FILE_DRAFT_METHOD: &str = "agent.readFileDraft";
+pub const AGENT_GET_FILE_WRITE_DIFF_METHOD: &str = "agent.getFileWriteDiff";
+pub const AGENT_DISCARD_FILE_DRAFT_METHOD: &str = "agent.discardFileDraft";
 pub const AGENT_EVENT_NOTIFICATION_METHOD: &str = "agent.event";
 pub const SEARCH_SEARCH_CHATS_METHOD: &str = "search.searchChats";
 pub const STORAGE_LOAD_APP_DATA_METHOD: &str = "storage.loadAppData";
@@ -81,6 +85,20 @@ pub struct JsonRpcErrorObject {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentFileDraftIdRequest {
+    pub draft_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentFileDraftReadRequest {
+    pub draft_id: String,
+    pub offset: Option<usize>,
+    pub max_chars: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

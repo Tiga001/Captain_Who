@@ -6,7 +6,7 @@ mod tool_flow;
 use crate::cancellation::AgentCancellationToken;
 use crate::llm::{
     complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessage,
-    LlmMessageRole, LlmToolCall,
+    LlmMessageRole, LlmStreamEvent, LlmToolCall,
 };
 use crate::prompts::build_system_prompt;
 use crate::protocol::{
@@ -15,6 +15,7 @@ use crate::protocol::{
     AgentProposedAction, AgentResult, AgentRunContext, AgentRunStatus, AgentToolCall,
     AgentToolContinuation, AgentToolDefinition, AgentToolResult,
 };
+use crate::storage::service::StorageService;
 use crate::tools::{ToolExecutionContext, ToolRegistry};
 use crate::usage::merge_total_usage;
 use attachments::{
@@ -29,7 +30,8 @@ use tool_flow::{
     approve_proposed_action, build_approval_decision_observation, build_tool_observation_message,
     cancelled_output, done_event, execute_host_action_on_blocking_thread,
     execute_tool_on_blocking_thread, extract_reason_from_args, failed_tool_call_result,
-    generate_run_id, llm_image_message_from_tool_result, redact_tool_result_for_event,
+    file_draft_from_tool_result, generate_run_id, llm_image_message_from_tool_result,
+    redact_tool_call_for_event, redact_tool_result_for_event, redact_tool_result_for_llm,
     sanitize_max_tokens, sanitize_temperature, state_event, tool_calls_from_response,
 };
 
@@ -74,6 +76,7 @@ pub async fn send_chat_with_events_and_cancellation(
             Some(emitter),
             cancellation_token,
             None,
+            None,
         )
         .await
 }
@@ -84,6 +87,7 @@ pub async fn send_chat_with_host_executor(
     emitter: AgentEventEmitter,
     cancellation_token: AgentCancellationToken,
     host_executor: AgentHostActionExecutor,
+    storage: Arc<StorageService>,
 ) -> AgentResult<AgentChatOutput> {
     AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
@@ -92,6 +96,7 @@ pub async fn send_chat_with_host_executor(
             Some(emitter),
             cancellation_token,
             Some(host_executor),
+            Some(storage),
         )
         .await
 }
@@ -129,6 +134,7 @@ impl AgentRuntime {
             emitter,
             AgentCancellationToken::new(),
             None,
+            None,
         )
         .await
     }
@@ -140,6 +146,7 @@ impl AgentRuntime {
         emitter: Option<AgentEventEmitter>,
         cancellation_token: AgentCancellationToken,
         host_executor: Option<AgentHostActionExecutor>,
+        storage: Option<Arc<StorageService>>,
     ) -> AgentResult<AgentChatOutput> {
         let run_id = run_id.unwrap_or_else(generate_run_id);
         let context = input.context.clone();
@@ -174,13 +181,12 @@ impl AgentRuntime {
             }
         }
         if patch_auto_approve {
-            if let Some(definition) = tool_definitions
-                .iter_mut()
-                .find(|definition| definition.name == "apply_patch")
-            {
+            for definition in tool_definitions.iter_mut().filter(|definition| {
+                definition.name == "apply_patch" || definition.name == "write_file"
+            }) {
                 definition.requires_approval = false;
                 definition.description.push_str(
-                    " The current permission policy automatically approves validated patches.",
+                    " The current permission policy automatically approves the final validated file change.",
                 );
             }
         }
@@ -192,7 +198,8 @@ impl AgentRuntime {
         let llm_request = build_llm_request(input, &tool_definitions)?;
         let mut messages = llm_request.messages;
         let tool_context = ToolExecutionContext::from_run_context(context.as_ref())
-            .with_cancellation(cancellation_token.clone());
+            .with_cancellation(cancellation_token.clone())
+            .with_runtime_services(run_id.clone(), storage);
         event_stream.emit(state_event(
             &run_id,
             AgentRunStatus::Running,
@@ -239,16 +246,69 @@ impl AgentRuntime {
             };
             let llm_response_result = if request.stream {
                 let delta_run_id = run_id.clone();
+                let stream_id = format!("{}-stream-{}", run_id, iteration + 1);
                 let delta_cancellation_token = cancellation_token.clone();
-                complete_chat_streaming(request, cancellation_token.clone(), |delta| {
+                complete_chat_streaming(request, cancellation_token.clone(), |stream_event| {
                     if delta_cancellation_token.is_cancelled() {
                         return;
                     }
-                    if !delta.is_empty() {
-                        event_stream.emit(AgentEvent::MessageDelta {
-                            run_id: delta_run_id.clone(),
-                            delta,
-                        });
+                    match stream_event {
+                        LlmStreamEvent::AttemptStarted {
+                            attempt,
+                            max_attempts,
+                        } => {
+                            let _ = max_attempts;
+                            event_stream.emit(AgentEvent::MessageStreamStarted {
+                                run_id: delta_run_id.clone(),
+                                stream_id: stream_id.clone(),
+                                attempt,
+                            });
+                        }
+                        LlmStreamEvent::Delta(delta) if !delta.is_empty() => {
+                            event_stream.emit(AgentEvent::MessageDelta {
+                                run_id: delta_run_id.clone(),
+                                stream_id: Some(stream_id.clone()),
+                                delta,
+                            });
+                        }
+                        LlmStreamEvent::ToolInputProgress {
+                            tool,
+                            received_bytes,
+                        } => {
+                            event_stream.emit(AgentEvent::ToolInputProgress {
+                                run_id: delta_run_id.clone(),
+                                stream_id: stream_id.clone(),
+                                tool,
+                                received_bytes,
+                            });
+                        }
+                        LlmStreamEvent::AttemptReset { reason } => {
+                            event_stream.emit(AgentEvent::MessageStreamReset {
+                                run_id: delta_run_id.clone(),
+                                stream_id: stream_id.clone(),
+                                reason,
+                            });
+                        }
+                        LlmStreamEvent::Retrying {
+                            attempt,
+                            max_attempts,
+                            reason,
+                        } => {
+                            event_stream.emit(AgentEvent::LlmRetry {
+                                run_id: delta_run_id.clone(),
+                                stream_id: stream_id.clone(),
+                                attempt,
+                                max_attempts,
+                                reason,
+                            });
+                        }
+                        LlmStreamEvent::Committed => {
+                            event_stream.emit(AgentEvent::MessageStreamCommitted {
+                                run_id: delta_run_id.clone(),
+                                stream_id: stream_id.clone(),
+                            });
+                        }
+                        LlmStreamEvent::Delta(_) => {}
                     }
                 })
                 .await
@@ -321,12 +381,12 @@ impl AgentRuntime {
                 let tool_name = tool_request.name;
                 let tool_args = tool_request.args;
                 let reason = extract_reason_from_args(&tool_args);
-                let definition_requires_approval = tool_registry
-                    .definition_for(&tool_name)
-                    .map(|definition| definition.requires_approval)
-                    .unwrap_or(false);
+                let definition_requires_approval =
+                    tool_registry.requires_approval_for_call(&tool_name, &tool_args);
                 let auto_execute_command = tool_name == "run_command" && command_auto_approve;
-                let auto_execute_patch = tool_name == "apply_patch" && patch_auto_approve;
+                let auto_execute_patch = (tool_name == "apply_patch" || tool_name == "write_file")
+                    && patch_auto_approve
+                    && definition_requires_approval;
                 let auto_execute_host_action = auto_execute_command || auto_execute_patch;
                 let requires_approval = definition_requires_approval && !auto_execute_host_action;
                 let call = AgentToolCall {
@@ -344,7 +404,7 @@ impl AgentRuntime {
                 };
                 event_stream.emit(AgentEvent::ToolCall {
                     run_id: run_id.clone(),
-                    call: call.clone(),
+                    call: redact_tool_call_for_event(&call),
                 });
                 if cancellation_token.is_cancelled() {
                     return Ok(cancelled_output(
@@ -479,15 +539,22 @@ impl AgentRuntime {
                     ));
                 }
                 let event_result = redact_tool_result_for_event(&result);
+                let llm_result = redact_tool_result_for_llm(&result);
                 event_stream.emit(AgentEvent::ToolResult {
                     run_id: run_id.clone(),
                     result: event_result.clone(),
                 });
+                if let Some(draft) = file_draft_from_tool_result(&event_result) {
+                    event_stream.emit(AgentEvent::FileDraftUpdated {
+                        run_id: run_id.clone(),
+                        draft,
+                    });
+                }
                 runtime_hooks.after_tool_result(&event_result, &mut event_stream)?;
 
                 messages.push(LlmMessage::tool_result(
                     call.id.clone(),
-                    build_tool_observation_message(&event_result),
+                    build_tool_observation_message(&llm_result),
                     !result.ok,
                 ));
                 if let Some(image_message) = llm_image_message_from_tool_result(&result) {
@@ -519,6 +586,7 @@ impl AgentRuntime {
         if !llm_request.stream {
             event_stream.emit(AgentEvent::MessageDelta {
                 run_id: run_id.clone(),
+                stream_id: None,
                 delta: content.clone(),
             });
         }
@@ -613,7 +681,9 @@ fn apply_permission_policy_to_tool_definitions(
         .unwrap_or_default();
 
     if permissions.write == crate::protocol::AgentWritePermission::Denied {
-        definitions.retain(|definition| definition.name != "apply_patch");
+        definitions.retain(|definition| {
+            definition.name != "apply_patch" && definition.name != "write_file"
+        });
     }
 
     if permissions.read == crate::protocol::AgentReadPermission::All {
@@ -648,11 +718,14 @@ fn apply_permission_policy_to_tool_definitions(
     }
 
     if permissions.write == crate::protocol::AgentWritePermission::All {
-        for definition in definitions
-            .iter_mut()
-            .filter(|definition| definition.name == "apply_patch")
-        {
-            definition.description = "Create, update, or delete one text/code/config file through structured content or edits; Rust generates the unified diff. The target may be workspace-relative, absolute, or use @home/@desktop/@documents/@downloads. This works without a workspace when write access allows all locations. Do not use run_command to write files. Applying the generated diff still requires host approval.".to_string();
+        for definition in definitions.iter_mut().filter(|definition| {
+            definition.name == "apply_patch" || definition.name == "write_file"
+        }) {
+            if definition.name == "apply_patch" {
+                definition.description = "Create, update, or delete one text/code/config file through structured content or edits; Rust generates the unified diff. The target may be workspace-relative, absolute, or use @home/@desktop/@documents/@downloads. This works without a workspace when write access allows all locations. Do not use run_command to write files. Applying the generated diff still requires host approval.".to_string();
+            } else {
+                definition.description.push_str(" Targets may be workspace-relative, absolute, or use @home/@desktop/@documents/@downloads when write access allows all locations.");
+            }
             set_schema_property_description(
                 &mut definition.input_schema,
                 "filePath",

@@ -430,6 +430,14 @@ export function registerHostIpc(
   ipcMain.handle('host:agent.clearUsageRecords', (_event, input) =>
     coreServer.clearUsageRecords(input)
   )
+  ipcMain.handle('host:agent.getFileDraft', (_event, input) => coreServer.getFileDraft(input))
+  ipcMain.handle('host:agent.readFileDraft', (_event, input) => coreServer.readFileDraft(input))
+  ipcMain.handle('host:agent.getFileWriteDiff', (_event, input) =>
+    coreServer.getFileWriteDiff(input)
+  )
+  ipcMain.handle('host:agent.discardFileDraft', (_event, input) =>
+    coreServer.discardFileDraft(input)
+  )
   ipcMain.handle('host:search.searchChats', (_event, input) => coreServer.searchChats(input))
   ipcMain.handle('host:attachments.selectInputAttachments', (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)

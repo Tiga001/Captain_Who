@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mycopilot_core::command::AgentCommandExecutionResult;
+use mycopilot_core::file_write::{apply_file_write, failed_file_write_result};
 use mycopilot_core::patch::apply_unified_diff_in_workspace;
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationRecord, ChatMessageAttachmentRecord,
@@ -13,7 +14,8 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
     AgentApprovalDecisionStatus, AgentChatInput, AgentChatMessage, AgentChatOutput,
-    AgentCommandRequest, AgentDiffProposal, AgentEvent, AgentInputAttachment,
+    AgentCommandRequest, AgentDiffProposal, AgentEvent, AgentFileDraftSnapshot,
+    AgentFileWriteProposal, AgentFileWriteResult, AgentFileWriteResultStatus, AgentInputAttachment,
     AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentPatchResult,
     AgentPatchResultStatus, AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences,
     AgentPromptTone, AgentPromptWorkMode, AgentProposedAction, AgentRunContext, AgentRunStatus,
@@ -56,6 +58,7 @@ pub(super) struct ActionExecutionDecision {
     pub(super) status: String,
     pub(super) final_pending_status: PendingActionStatus,
     pub(super) patch_result: Option<AgentPatchResult>,
+    pub(super) file_write_result: Option<AgentFileWriteResult>,
     pub(super) tool_result: AgentToolResult,
 }
 
@@ -106,10 +109,34 @@ pub struct AgentActionExecutionOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patch_result: Option<AgentPatchResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_write_result: Option<AgentFileWriteResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub command_result: Option<AgentCommandExecutionResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_result: Option<AgentToolResult>,
     pub agent_output: AgentChatOutput,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentFileDraftContentPage {
+    pub draft: AgentFileDraftSnapshot,
+    pub content: String,
+    pub offset: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentFileWriteDiffPage {
+    pub draft_id: String,
+    pub patch: String,
+    pub offset: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -570,6 +597,7 @@ pub(super) fn action_id_for_action(action: &AgentProposedAction) -> String {
     match action {
         AgentProposedAction::ToolCall { call } => call.id.clone(),
         AgentProposedAction::Diff { diff } => diff.id.clone(),
+        AgentProposedAction::FileWrite { file_write } => file_write.id.clone(),
         AgentProposedAction::Command { command } => command.id.clone(),
     }
 }
@@ -578,6 +606,7 @@ pub(super) fn action_type_for_action(action: &AgentProposedAction) -> &'static s
     match action {
         AgentProposedAction::ToolCall { .. } => "tool_call",
         AgentProposedAction::Diff { .. } => "diff",
+        AgentProposedAction::FileWrite { .. } => "file_write",
         AgentProposedAction::Command { .. } => "command",
     }
 }
@@ -586,6 +615,7 @@ pub(super) fn tool_name_for_action(action: &AgentProposedAction) -> String {
     match action {
         AgentProposedAction::ToolCall { call } => call.tool.clone(),
         AgentProposedAction::Diff { .. } => "apply_patch".to_string(),
+        AgentProposedAction::FileWrite { .. } => "write_file".to_string(),
         AgentProposedAction::Command { .. } => "run_command".to_string(),
     }
 }
@@ -594,7 +624,22 @@ pub(super) fn tool_call_for_action(action: &AgentProposedAction) -> AgentToolCal
     match action {
         AgentProposedAction::ToolCall { call } => call.clone(),
         AgentProposedAction::Diff { diff } => diff_tool_call(diff),
+        AgentProposedAction::FileWrite { file_write } => file_write_tool_call(file_write),
         AgentProposedAction::Command { command } => command_tool_call(command),
+    }
+}
+
+pub(super) fn file_write_tool_call(file_write: &AgentFileWriteProposal) -> AgentToolCall {
+    AgentToolCall {
+        id: file_write.id.clone(),
+        tool: "write_file".to_string(),
+        args: json!({
+            "phase": "finish",
+            "draftId": file_write.draft_id,
+            "summary": file_write.summary
+        }),
+        approval_status: file_write.approval_status,
+        reason: file_write.summary.clone(),
     }
 }
 
@@ -661,22 +706,27 @@ pub(super) fn tool_result_for_decision(
 }
 
 pub(super) fn action_execution_for_decision(
+    storage: &StorageService,
     record: &PendingActionRecord,
     call: &AgentToolCall,
     decision_status: AgentApprovalDecisionStatus,
     message: Option<&str>,
 ) -> ActionExecutionDecision {
     if decision_status == AgentApprovalDecisionStatus::Rejected {
-        return rejected_action_execution(record, call, message);
+        return rejected_action_execution(storage, record, call, message);
     }
 
     match &record.snapshot.action {
         AgentProposedAction::Diff { diff } => approved_patch_execution(record, diff),
+        AgentProposedAction::FileWrite { file_write } => {
+            approved_file_write_execution(storage, &record.agent_input, file_write)
+        }
         AgentProposedAction::ToolCall { call } if call.tool == "apply_patch" => {
             ActionExecutionDecision {
                 status: "failed".to_string(),
                 final_pending_status: PendingActionStatus::Failed,
                 patch_result: None,
+                file_write_result: None,
                 tool_result: AgentToolResult {
                     call_id: call.id.clone(),
                     tool: call.tool.clone(),
@@ -693,12 +743,14 @@ pub(super) fn action_execution_for_decision(
             status: "failed".to_string(),
             final_pending_status: PendingActionStatus::Failed,
             patch_result: None,
+            file_write_result: None,
             tool_result: tool_result_for_decision(call, decision_status, message),
         },
     }
 }
 
 pub(super) fn rejected_action_execution(
+    storage: &StorageService,
     record: &PendingActionRecord,
     call: &AgentToolCall,
     message: Option<&str>,
@@ -719,7 +771,28 @@ pub(super) fn rejected_action_execution(
             status: "rejected".to_string(),
             final_pending_status: PendingActionStatus::Rejected,
             patch_result: Some(patch_result),
+            file_write_result: None,
             tool_result,
+        };
+    }
+
+    if let AgentProposedAction::FileWrite { file_write } = &record.snapshot.action {
+        if let Ok(Some(mut draft)) = storage.get_agent_file_draft(&file_write.draft_id) {
+            draft.status = "rejected".to_string();
+            draft.updated_at = now_ms();
+            let _ = storage.update_agent_file_draft(&draft);
+        }
+        let result = failed_file_write_result(
+            file_write,
+            AgentFileWriteResultStatus::Rejected,
+            message.unwrap_or("用户拒绝了文件写入。"),
+        );
+        return ActionExecutionDecision {
+            status: "rejected".to_string(),
+            final_pending_status: PendingActionStatus::Rejected,
+            patch_result: None,
+            file_write_result: Some(result.clone()),
+            tool_result: file_write_tool_result(&record.snapshot.action_id, true, &result),
         };
     }
 
@@ -727,6 +800,7 @@ pub(super) fn rejected_action_execution(
         status: "rejected".to_string(),
         final_pending_status: PendingActionStatus::Rejected,
         patch_result: None,
+        file_write_result: None,
         tool_result: tool_result_for_decision(call, AgentApprovalDecisionStatus::Rejected, message),
     }
 }
@@ -792,7 +866,99 @@ pub(super) fn approved_patch_execution_for_input(
             PendingActionStatus::Failed
         },
         patch_result: Some(patch_result),
+        file_write_result: None,
         tool_result,
+    }
+}
+
+pub(super) fn approved_file_write_execution(
+    storage: &StorageService,
+    agent_input: &AgentChatInput,
+    proposal: &AgentFileWriteProposal,
+) -> ActionExecutionDecision {
+    let Some(mut draft) = storage
+        .get_agent_file_draft(&proposal.draft_id)
+        .ok()
+        .flatten()
+    else {
+        let result = failed_file_write_result(
+            proposal,
+            AgentFileWriteResultStatus::Failed,
+            "未找到待应用的文件草稿。",
+        );
+        return file_write_decision(proposal, result);
+    };
+    draft.status = "applying".to_string();
+    draft.updated_at = now_ms();
+    let _ = storage.update_agent_file_draft(&draft);
+    let result = apply_file_write(
+        workspace_root_optional(agent_input).as_deref(),
+        proposal,
+        &draft,
+        permissions_from_input(agent_input),
+    )
+    .unwrap_or_else(|error| {
+        let status = if error.contains("发生变化") || error.contains("已出现") {
+            AgentFileWriteResultStatus::Conflict
+        } else {
+            AgentFileWriteResultStatus::Failed
+        };
+        failed_file_write_result(proposal, status, error)
+    });
+    draft.status = match result.status {
+        AgentFileWriteResultStatus::Applied | AgentFileWriteResultStatus::AlreadyApplied => {
+            "applied"
+        }
+        AgentFileWriteResultStatus::Conflict => "conflict",
+        AgentFileWriteResultStatus::Rejected => "rejected",
+        AgentFileWriteResultStatus::Failed => "failed",
+    }
+    .to_string();
+    draft.updated_at = now_ms();
+    let _ = storage.update_agent_file_draft(&draft);
+    file_write_decision(proposal, result)
+}
+
+fn file_write_decision(
+    proposal: &AgentFileWriteProposal,
+    result: AgentFileWriteResult,
+) -> ActionExecutionDecision {
+    let applied = matches!(
+        result.status,
+        AgentFileWriteResultStatus::Applied | AgentFileWriteResultStatus::AlreadyApplied
+    );
+    let conflict = result.status == AgentFileWriteResultStatus::Conflict;
+    ActionExecutionDecision {
+        status: if applied {
+            "applied"
+        } else if conflict {
+            "conflict"
+        } else {
+            "failed"
+        }
+        .to_string(),
+        final_pending_status: if applied {
+            PendingActionStatus::Completed
+        } else {
+            PendingActionStatus::Failed
+        },
+        patch_result: None,
+        file_write_result: Some(result.clone()),
+        tool_result: file_write_tool_result(&proposal.id, applied, &result),
+    }
+}
+
+pub(super) fn file_write_tool_result(
+    action_id: &str,
+    ok: bool,
+    result: &AgentFileWriteResult,
+) -> AgentToolResult {
+    AgentToolResult {
+        call_id: action_id.to_string(),
+        tool: "write_file".to_string(),
+        ok,
+        result: Some(json!(result)),
+        error: if ok { None } else { result.error.clone() },
     }
 }
 

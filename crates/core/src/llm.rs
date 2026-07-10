@@ -12,10 +12,6 @@ use response::{
     truncate_for_error,
 };
 use serde_json::{json, Value};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
 use std::time::Duration;
 use stream::parse_sse_response;
 #[cfg(test)]
@@ -123,6 +119,28 @@ pub(crate) struct LlmToolCall {
     pub args: Value,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum LlmStreamEvent {
+    AttemptStarted {
+        attempt: usize,
+        max_attempts: usize,
+    },
+    Delta(String),
+    ToolInputProgress {
+        tool: String,
+        received_bytes: u64,
+    },
+    AttemptReset {
+        reason: String,
+    },
+    Retrying {
+        attempt: usize,
+        max_attempts: usize,
+        reason: String,
+    },
+    Committed,
+}
+
 const LLM_MAX_ATTEMPTS: usize = 3;
 const LLM_RETRY_BASE_DELAY_MS: u64 = 350;
 const LLM_RETRY_MAX_DELAY_MS: u64 = 2_000;
@@ -189,40 +207,45 @@ async fn complete_chat_once(
 pub(crate) async fn complete_chat_streaming<F>(
     request: LlmChatRequest,
     cancellation_token: AgentCancellationToken,
-    mut on_delta: F,
+    mut on_event: F,
 ) -> AgentResult<LlmChatResponse>
 where
-    F: FnMut(String) + Send,
+    F: FnMut(LlmStreamEvent) + Send,
 {
     let mut request = request;
     request.stream = true;
 
     let mut last_error = None;
     for attempt in 1..=LLM_MAX_ATTEMPTS {
-        let emitted_visible_delta = Arc::new(AtomicBool::new(false));
-        let delta_marker = emitted_visible_delta.clone();
-        let result =
-            complete_chat_streaming_once(&request, cancellation_token.clone(), |delta: String| {
-                if !delta.is_empty() {
-                    delta_marker.store(true, Ordering::SeqCst);
-                }
-                on_delta(delta);
-            })
-            .await;
+        on_event(LlmStreamEvent::AttemptStarted {
+            attempt,
+            max_attempts: LLM_MAX_ATTEMPTS,
+        });
+        let result = complete_chat_streaming_once(&request, cancellation_token.clone(), |event| {
+            on_event(event)
+        })
+        .await;
 
         match result {
-            Ok(response) => return Ok(response),
+            Ok(response) => {
+                on_event(LlmStreamEvent::Committed);
+                return Ok(response);
+            }
             Err(error) if error.is_cancelled() => return Err(error),
             Err(error) => {
-                if emitted_visible_delta.load(Ordering::SeqCst) {
-                    return Err(AgentError::new(format!(
-                        "{error}（已收到部分模型输出，为避免重复显示，本次不自动重试。）"
-                    )));
-                }
+                let reason = error.to_string();
+                on_event(LlmStreamEvent::AttemptReset {
+                    reason: reason.clone(),
+                });
                 if attempt >= LLM_MAX_ATTEMPTS || !is_retryable_llm_error(&error) {
                     return Err(retry_exhausted_error(error, attempt));
                 }
                 last_error = Some(error);
+                on_event(LlmStreamEvent::Retrying {
+                    attempt: attempt + 1,
+                    max_attempts: LLM_MAX_ATTEMPTS,
+                    reason,
+                });
                 wait_before_retry(attempt, cancellation_token.clone()).await?;
             }
         }
@@ -240,7 +263,7 @@ async fn complete_chat_streaming_once<F>(
     mut on_delta: F,
 ) -> AgentResult<LlmChatResponse>
 where
-    F: FnMut(String) + Send,
+    F: FnMut(LlmStreamEvent) + Send,
 {
     let api_style = request.api_style;
     let response = send_llm_request(request, cancellation_token.clone()).await?;
@@ -260,7 +283,7 @@ where
         let content = extract_response_text(&value).unwrap_or_default();
         validate_llm_response(&content, &tool_calls, &body)?;
         if !content.is_empty() {
-            on_delta(content.clone());
+            on_delta(LlmStreamEvent::Delta(content.clone()));
         }
         return Ok(LlmChatResponse {
             content,
@@ -493,6 +516,16 @@ mod tests {
         LlmMessage::text(role, content)
     }
 
+    fn joined_text(events: &[LlmStreamEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LlmStreamEvent::Delta(delta) => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn tool_definition() -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_file".to_string(),
@@ -507,6 +540,7 @@ mod tests {
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: true,
             requires_approval: false,
+            approval_mode: crate::protocol::AgentToolApprovalMode::Never,
         }
     }
 
@@ -824,7 +858,12 @@ mod tests {
         .unwrap();
 
         let response = accumulator.finish().unwrap();
-        assert_eq!(deltas.join(""), "Hello");
+        assert_eq!(joined_text(&deltas), "Hello");
+        assert!(deltas.iter().any(|event| matches!(
+            event,
+            LlmStreamEvent::ToolInputProgress { tool, received_bytes }
+                if tool == "read_file" && *received_bytes > 0
+        )));
         assert_eq!(response.content, "Hello");
         assert_eq!(response.finish_reason, Some("tool_calls".to_string()));
         assert_eq!(response.tool_calls[0].id, "call-1");
@@ -912,7 +951,12 @@ mod tests {
         .unwrap();
 
         let response = accumulator.finish().unwrap();
-        assert_eq!(deltas.join(""), "Hi there");
+        assert_eq!(joined_text(&deltas), "Hi there");
+        assert!(deltas.iter().any(|event| matches!(
+            event,
+            LlmStreamEvent::ToolInputProgress { tool, received_bytes }
+                if tool == "search_files" && *received_bytes > 0
+        )));
         assert_eq!(response.content, "Hi there");
         assert_eq!(response.finish_reason, Some("tool_use".to_string()));
         assert_eq!(response.usage.unwrap().output_tokens, Some(8));

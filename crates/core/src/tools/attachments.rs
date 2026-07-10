@@ -22,6 +22,7 @@ impl AgentTool for AttachmentsListTool {
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
             requires_approval: false,
+            approval_mode: crate::protocol::AgentToolApprovalMode::Never,
         }
     }
 
@@ -44,6 +45,7 @@ impl AgentTool for AttachmentsListProjectTool {
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
             requires_approval: false,
+            approval_mode: crate::protocol::AgentToolApprovalMode::Never,
         }
     }
 

@@ -50,6 +50,7 @@ interface ChatConversationPageProps {
 
 function getActionApprovalStatus(action: AgentProposedAction) {
   if (action.type === 'diff') return action.diff.approvalStatus
+  if (action.type === 'file_write') return action.fileWrite.approvalStatus
   if (action.type === 'command') return action.command.approvalStatus
   return action.call.approvalStatus
 }

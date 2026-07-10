@@ -32,6 +32,7 @@ impl AgentTool for RunCommandTool {
             safety: AgentToolSafety::RequiresApproval,
             requires_workspace: false,
             requires_approval: true,
+            approval_mode: crate::protocol::AgentToolApprovalMode::Always,
         }
     }
 

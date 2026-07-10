@@ -21,6 +21,7 @@ impl AgentTool for GitDiffTool {
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: true,
             requires_approval: false,
+            approval_mode: crate::protocol::AgentToolApprovalMode::Never,
         }
     }
 

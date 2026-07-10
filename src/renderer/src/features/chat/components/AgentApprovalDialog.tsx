@@ -24,6 +24,7 @@ interface AgentApprovalDialogProps {
 function getApprovalFallbackTitle(action: AgentProposedAction, t: Translate) {
   if (action.type === 'command') return t('agent.approval.dialog.commandTitle')
   if (action.type === 'diff') return t('agent.approval.dialog.diffTitle')
+  if (action.type === 'file_write') return t('agent.approval.dialog.fileWriteTitle')
   return formatTranslation(t, 'agent.approval.dialog.toolTitle', {
     tool: getToolDisplayName(action.call.tool, t)
   })
@@ -31,6 +32,8 @@ function getApprovalFallbackTitle(action: AgentProposedAction, t: Translate) {
 
 function getApprovalRequest(action: AgentProposedAction, t: Translate) {
   if (action.type === 'diff') return action.diff.summary ?? action.diff.patch
+  if (action.type === 'file_write')
+    return action.fileWrite.summary ?? getApprovalFallbackTitle(action, t)
   if (action.type === 'command') return action.command.reason ?? getApprovalFallbackTitle(action, t)
   return action.call.reason ?? formatToolDetails(action.call.args)
 }
@@ -38,12 +41,14 @@ function getApprovalRequest(action: AgentProposedAction, t: Translate) {
 function getApprovalCode(action: AgentProposedAction) {
   if (action.type === 'command') return action.command.command
   if (action.type === 'diff') return action.diff.filePath
+  if (action.type === 'file_write') return action.fileWrite.filePath
   return action.call.tool
 }
 
 function getApprovalPolicyHint(action: AgentProposedAction, t: Translate) {
   if (action.type === 'command') return t('agent.approval.dialog.commandPolicyHint')
   if (action.type === 'diff') return t('agent.approval.dialog.diffPolicyHint')
+  if (action.type === 'file_write') return t('agent.approval.dialog.diffPolicyHint')
   return t('agent.approval.dialog.toolPolicyHint')
 }
 
@@ -53,7 +58,7 @@ function getRememberCommandPrefix(action: AgentProposedAction) {
 }
 
 function canRememberForRun(action: AgentProposedAction) {
-  return action.type === 'command' || action.type === 'diff'
+  return action.type === 'command' || action.type === 'diff' || action.type === 'file_write'
 }
 
 export function AgentApprovalDialog({ target, onApprove, onReject }: AgentApprovalDialogProps) {
@@ -115,7 +120,7 @@ export function AgentApprovalDialog({ target, onApprove, onReject }: AgentApprov
         >
           <span className="agent-approval-dialog__index">2</span>
           <span className="agent-approval-dialog__choice-text">
-            {action.type === 'diff'
+            {action.type === 'diff' || action.type === 'file_write'
               ? t('agent.approval.dialog.approvePatchRemember')
               : t('agent.approval.dialog.approveRemember')}
             {rememberPrefix ? (

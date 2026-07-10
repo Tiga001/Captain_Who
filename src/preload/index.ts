@@ -68,6 +68,10 @@ const host: HostApi = {
     cancelAction: (input) => ipcRenderer.invoke('host:agent.cancelAction', input),
     getUsageSummary: (input) => ipcRenderer.invoke('host:agent.getUsageSummary', input),
     clearUsageRecords: (input) => ipcRenderer.invoke('host:agent.clearUsageRecords', input),
+    getFileDraft: (input) => ipcRenderer.invoke('host:agent.getFileDraft', input),
+    readFileDraft: (input) => ipcRenderer.invoke('host:agent.readFileDraft', input),
+    getFileWriteDiff: (input) => ipcRenderer.invoke('host:agent.getFileWriteDiff', input),
+    discardFileDraft: (input) => ipcRenderer.invoke('host:agent.discardFileDraft', input),
     onEvent: onAgentEvent
   },
   attachments: {

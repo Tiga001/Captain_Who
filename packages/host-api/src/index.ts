@@ -7,6 +7,12 @@ import type {
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
   AgentEvent,
+  AgentFileDraftContentPage,
+  AgentFileDraftIdInput,
+  AgentFileDraftReadInput,
+  AgentFileDraftSnapshot,
+  AgentFileWriteDiffInput,
+  AgentFileWriteDiffPage,
   PendingAgentActionSnapshot,
   AgentRejectActionRequest,
   AgentStartRunRequest,
@@ -148,6 +154,10 @@ export interface AgentHostApi {
   cancelAction(input: AgentActionIdRequest): Promise<boolean>
   getUsageSummary(input: AgentUsageSummaryInput): Promise<AgentUsageSummaryOutput>
   clearUsageRecords(input: AgentUsageClearInput): Promise<AgentUsageClearOutput>
+  getFileDraft(input: AgentFileDraftIdInput): Promise<AgentFileDraftSnapshot>
+  readFileDraft(input: AgentFileDraftReadInput): Promise<AgentFileDraftContentPage>
+  getFileWriteDiff(input: AgentFileWriteDiffInput): Promise<AgentFileWriteDiffPage>
+  discardFileDraft(input: AgentFileDraftIdInput): Promise<boolean>
   onEvent(handler: (event: AgentEvent) => void): () => void
 }
 

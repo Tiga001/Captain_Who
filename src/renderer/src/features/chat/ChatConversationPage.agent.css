@@ -769,3 +769,111 @@ button.apply-patch-activity__path:focus-visible {
   font-size: var(--mc-font-size-chat-metadata);
   line-height: var(--mc-line-height-relaxed);
 }
+
+.agent-activity--file-write {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.file-write-activity__summary {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  color: var(--mc-color-text-muted);
+  line-height: var(--mc-line-height-relaxed);
+}
+
+.file-write-activity__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+  color: var(--mc-color-icon-muted);
+}
+
+.file-write-activity__icon svg,
+.file-write-activity__toggle svg {
+  width: 100%;
+  height: 100%;
+  stroke-width: var(--mc-icon-stroke-medium);
+}
+
+.file-write-activity__spinner {
+  animation: mc-agent-todo-spin 1s linear infinite;
+}
+
+.file-write-activity__label {
+  flex: 0 0 auto;
+}
+
+.file-write-activity__path {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--mc-color-text-accent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-write-activity__stats {
+  display: inline-grid;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(4ch, auto) minmax(4ch, auto);
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.file-write-activity__additions {
+  color: #16a34a;
+}
+
+.file-write-activity__deletions,
+.file-write-activity__error {
+  color: var(--mc-color-text-danger);
+}
+
+.file-write-activity__toggle {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 2px;
+  place-items: center;
+  color: var(--mc-color-icon-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-sm);
+  cursor: pointer;
+}
+
+.file-write-activity__toggle:hover,
+.file-write-activity__toggle:focus-visible {
+  color: var(--mc-color-icon-default);
+  background: var(--mc-color-surface-muted);
+}
+
+.file-write-activity__preview {
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-md);
+  background: var(--mc-color-surface-muted);
+}
+
+.file-write-activity__preview > span {
+  display: block;
+  padding: 10px 12px;
+  font-size: var(--mc-font-size-chat-metadata);
+}
+
+.file-write-activity__preview pre {
+  min-width: max-content;
+  padding: 10px 12px;
+  margin: 0;
+  font-family: var(--mc-font-family-mono);
+  font-size: var(--mc-font-size-chat-metadata);
+  line-height: var(--mc-line-height-relaxed);
+  white-space: pre;
+}

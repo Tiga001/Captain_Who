@@ -441,6 +441,49 @@ pub enum AgentToolSafety {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum AgentToolApprovalMode {
+    Never,
+    Always,
+    Dynamic,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFileWriteMode {
+    Create,
+    Rewrite,
+    Modify,
+    Append,
+    Upsert,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFileDraftStatus {
+    Drafting,
+    Ready,
+    WaitingApproval,
+    Applying,
+    Applied,
+    Rejected,
+    Conflict,
+    Failed,
+    Aborted,
+    Expired,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFileWriteResultStatus {
+    Applied,
+    Failed,
+    Conflict,
+    Rejected,
+    AlreadyApplied,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentTodoStatus {
     Pending,
     InProgress,
@@ -516,6 +559,7 @@ pub struct AgentToolDefinition {
     pub safety: AgentToolSafety,
     pub requires_workspace: bool,
     pub requires_approval: bool,
+    pub approval_mode: AgentToolApprovalMode,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -542,6 +586,68 @@ pub struct AgentDiffProposal {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     pub approval_status: AgentApprovalStatus,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentFileDraftSnapshot {
+    pub draft_id: String,
+    pub conversation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    pub file_path: String,
+    pub mode: AgentFileWriteMode,
+    pub status: AgentFileDraftStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<String>,
+    pub additions: u64,
+    pub deletions: u64,
+    pub line_count: u64,
+    pub byte_count: u64,
+    pub chunk_count: u64,
+    pub next_chunk_index: u64,
+    pub stats_final: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentFileWriteProposal {
+    pub id: String,
+    pub draft_id: String,
+    pub mode: AgentFileWriteMode,
+    pub file_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub additions: u64,
+    pub deletions: u64,
+    pub line_count: u64,
+    pub byte_count: u64,
+    pub approval_status: AgentApprovalStatus,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentFileWriteResult {
+    pub status: AgentFileWriteResultStatus,
+    pub draft_id: String,
+    pub mode: AgentFileWriteMode,
+    pub file_path: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub line_count: u64,
+    pub byte_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -594,6 +700,7 @@ pub struct AgentCommandRequest {
 pub enum AgentProposedAction {
     ToolCall { call: AgentToolCall },
     Diff { diff: AgentDiffProposal },
+    FileWrite { file_write: AgentFileWriteProposal },
     Command { command: AgentCommandRequest },
 }
 
@@ -614,7 +721,36 @@ pub enum AgentEvent {
     },
     MessageDelta {
         run_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stream_id: Option<String>,
         delta: String,
+    },
+    MessageStreamStarted {
+        run_id: String,
+        stream_id: String,
+        attempt: usize,
+    },
+    MessageStreamReset {
+        run_id: String,
+        stream_id: String,
+        reason: String,
+    },
+    MessageStreamCommitted {
+        run_id: String,
+        stream_id: String,
+    },
+    LlmRetry {
+        run_id: String,
+        stream_id: String,
+        attempt: usize,
+        max_attempts: usize,
+        reason: String,
+    },
+    ToolInputProgress {
+        run_id: String,
+        stream_id: String,
+        tool: String,
+        received_bytes: u64,
     },
     Message {
         run_id: String,
@@ -631,6 +767,10 @@ pub enum AgentEvent {
     TodoUpdated {
         run_id: String,
         todo: AgentTodoState,
+    },
+    FileDraftUpdated {
+        run_id: String,
+        draft: AgentFileDraftSnapshot,
     },
     ApprovalRequired {
         run_id: String,

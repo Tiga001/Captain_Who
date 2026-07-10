@@ -1,6 +1,6 @@
 // Renderer UI.
 import { ChevronDown, ChevronUp, FileDiff, Undo2 } from 'lucide-react'
-import { useState } from 'react'
+import { useState, type JSX } from 'react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../config/translationFormat'
 import type { ChatAgentRunView } from '../chatTypes'
@@ -21,7 +21,7 @@ interface EditSummaryEntry {
 
 const COLLAPSED_FILE_COUNT = 3
 
-function splitFilePath(filePath: string) {
+function splitFilePath(filePath: string): { directory: string; fileName: string } {
   const normalized = filePath.replace(/\\/g, '/')
   const separatorIndex = normalized.lastIndexOf('/')
   if (separatorIndex < 0) {
@@ -34,8 +34,19 @@ function splitFilePath(filePath: string) {
   }
 }
 
-function getAppliedEditEntries(run: ChatAgentRunView) {
+function getAppliedEditEntries(run: ChatAgentRunView): EditSummaryEntry[] {
   const entries = new Map<string, EditSummaryEntry>()
+
+  const addEntry = (entry: EditSummaryEntry): void => {
+    const existing = entries.get(entry.filePath)
+    if (existing) {
+      existing.additions += entry.additions
+      existing.deletions += entry.deletions
+      return
+    }
+
+    entries.set(entry.filePath, entry)
+  }
 
   run.toolCalls.forEach((call) => {
     if (call.tool !== 'apply_patch') return
@@ -49,18 +60,22 @@ function getAppliedEditEntries(run: ChatAgentRunView) {
 
     if (view.status !== 'applied' || !view.filePath) return
 
-    const existing = entries.get(view.filePath)
-    if (existing) {
-      existing.additions += view.additions
-      existing.deletions += view.deletions
-      return
-    }
-
-    entries.set(view.filePath, {
+    addEntry({
       additions: view.additions,
       deletions: view.deletions,
       filePath: view.filePath,
       id: call.id
+    })
+  })
+
+  run.fileDrafts?.forEach((draft) => {
+    if (draft.status !== 'applied' || !draft.filePath) return
+
+    addEntry({
+      additions: draft.additions,
+      deletions: draft.deletions,
+      filePath: draft.filePath,
+      id: draft.draftId
     })
   })
 
@@ -73,7 +88,7 @@ function EditSummaryPath({
 }: {
   entry: EditSummaryEntry
   projectId?: string | null
-}) {
+}): JSX.Element {
   const { t } = useFrontendConfig()
   const { directory, fileName } = splitFilePath(entry.filePath)
   const canReveal = Boolean(projectId || isAbsoluteLocalPath(entry.filePath))
@@ -113,7 +128,7 @@ function EditSummaryPath({
   )
 }
 
-export function EditSummaryCard({ projectId, run }: EditSummaryCardProps) {
+export function EditSummaryCard({ projectId, run }: EditSummaryCardProps): JSX.Element | null {
   const { t } = useFrontendConfig()
   const [expanded, setExpanded] = useState(false)
   const entries = getAppliedEditEntries(run)

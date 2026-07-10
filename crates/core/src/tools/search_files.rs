@@ -27,6 +27,7 @@ impl AgentTool for SearchFilesTool {
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
             requires_approval: false,
+            approval_mode: crate::protocol::AgentToolApprovalMode::Never,
         }
     }
 

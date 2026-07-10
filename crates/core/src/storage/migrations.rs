@@ -191,6 +191,52 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             updated_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS agent_file_drafts (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            project_id TEXT,
+            run_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            base_revision TEXT,
+            base_content TEXT NOT NULL,
+            content TEXT NOT NULL,
+            additions INTEGER NOT NULL DEFAULT 0,
+            deletions INTEGER NOT NULL DEFAULT 0,
+            line_count INTEGER NOT NULL DEFAULT 0,
+            byte_count INTEGER NOT NULL DEFAULT 0,
+            chunk_count INTEGER NOT NULL DEFAULT 0,
+            next_chunk_index INTEGER NOT NULL DEFAULT 0,
+            stats_final INTEGER NOT NULL DEFAULT 0,
+            summary TEXT,
+            final_action_id TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_file_draft_chunks (
+            draft_id TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            byte_count INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (draft_id, chunk_index),
+            FOREIGN KEY (draft_id) REFERENCES agent_file_drafts(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_file_draft_operations (
+            draft_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            operation TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (draft_id, sequence),
+            FOREIGN KEY (draft_id) REFERENCES agent_file_drafts(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS maintenance_tasks (
             id TEXT PRIMARY KEY,
             completed_at INTEGER NOT NULL
@@ -325,6 +371,9 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_pending_actions_status ON agent_pending_actions(status);
         CREATE INDEX IF NOT EXISTS idx_agent_pending_actions_run_id ON agent_pending_actions(run_id);
         CREATE INDEX IF NOT EXISTS idx_agent_pending_actions_conversation_id ON agent_pending_actions(conversation_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_conversation_status ON agent_file_drafts(conversation_id, status);
+        CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_project_id ON agent_file_drafts(project_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_expires_at ON agent_file_drafts(expires_at);
         CREATE INDEX IF NOT EXISTS idx_composer_drafts_updated_at ON composer_drafts(updated_at);
         ",
     )?;

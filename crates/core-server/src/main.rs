@@ -16,25 +16,27 @@ use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{AgentUsageClearInput, AgentUsageSummaryInput};
 use mycopilot_protocol_rs::{
     error, success, AgentActionIdRequest, AgentCancelRunRequest, AgentCancelRunResponse,
-    AgentRejectActionRequest, AgentStartRunRequest, AgentStartRunResponse, AppVersionResponse,
-    CorePingRequest, CorePingResponse, JsonRpcId, JsonRpcRequest, AGENT_APPROVE_ACTION_METHOD,
+    AgentFileDraftIdRequest, AgentFileDraftReadRequest, AgentRejectActionRequest,
+    AgentStartRunRequest, AgentStartRunResponse, AppVersionResponse, CorePingRequest,
+    CorePingResponse, JsonRpcId, JsonRpcRequest, AGENT_APPROVE_ACTION_METHOD,
     AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD, AGENT_CLEAR_USAGE_RECORDS_METHOD,
-    AGENT_GET_USAGE_SUMMARY_METHOD, AGENT_LIST_PENDING_ACTIONS_METHOD, AGENT_REJECT_ACTION_METHOD,
-    AGENT_START_CONVERSATION_TURN_METHOD, AGENT_START_RUN_METHOD, APP_GET_VERSION_METHOD,
-    CORE_PING_METHOD, SEARCH_SEARCH_CHATS_METHOD, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
-    STORAGE_DELETE_COMPOSER_DRAFT_METHOD, STORAGE_DELETE_CONVERSATION_METHOD,
-    STORAGE_DELETE_PROJECT_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
-    STORAGE_LOAD_APP_DATA_METHOD, STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
-    STORAGE_LOAD_COMPOSER_DRAFTS_METHOD, STORAGE_LOAD_CONVERSATIONS_METHOD,
-    STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD, STORAGE_LOAD_MODEL_SETTINGS_METHOD,
-    STORAGE_LOAD_PROJECTS_METHOD, STORAGE_LOAD_UI_PREFERENCES_METHOD,
-    STORAGE_REVEAL_PROJECT_FILE_METHOD, STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD,
-    STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD, STORAGE_SAVE_COMPOSER_DRAFT_METHOD,
-    STORAGE_SAVE_CONVERSATION_META_METHOD, STORAGE_SAVE_CONVERSATION_METHOD,
-    STORAGE_SAVE_MODEL_SETTINGS_METHOD, STORAGE_SAVE_PROJECT_METHOD,
-    STORAGE_SAVE_UI_PREFERENCES_METHOD, STORAGE_SELECT_PROFILE_AVATAR_METHOD,
-    STORAGE_SELECT_PROJECT_DIRECTORY_METHOD, STORAGE_SHOW_PROJECT_IN_FOLDER_METHOD,
-    STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
+    AGENT_DISCARD_FILE_DRAFT_METHOD, AGENT_GET_FILE_DRAFT_METHOD, AGENT_GET_FILE_WRITE_DIFF_METHOD,
+    AGENT_GET_USAGE_SUMMARY_METHOD, AGENT_LIST_PENDING_ACTIONS_METHOD,
+    AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
+    AGENT_START_RUN_METHOD, APP_GET_VERSION_METHOD, CORE_PING_METHOD, SEARCH_SEARCH_CHATS_METHOD,
+    STORAGE_DELETE_CHAT_MESSAGES_METHOD, STORAGE_DELETE_COMPOSER_DRAFT_METHOD,
+    STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
+    STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_LOAD_APP_DATA_METHOD,
+    STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD, STORAGE_LOAD_COMPOSER_DRAFTS_METHOD,
+    STORAGE_LOAD_CONVERSATIONS_METHOD, STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD,
+    STORAGE_LOAD_MODEL_SETTINGS_METHOD, STORAGE_LOAD_PROJECTS_METHOD,
+    STORAGE_LOAD_UI_PREFERENCES_METHOD, STORAGE_REVEAL_PROJECT_FILE_METHOD,
+    STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD,
+    STORAGE_SAVE_COMPOSER_DRAFT_METHOD, STORAGE_SAVE_CONVERSATION_META_METHOD,
+    STORAGE_SAVE_CONVERSATION_METHOD, STORAGE_SAVE_MODEL_SETTINGS_METHOD,
+    STORAGE_SAVE_PROJECT_METHOD, STORAGE_SAVE_UI_PREFERENCES_METHOD,
+    STORAGE_SELECT_PROFILE_AVATAR_METHOD, STORAGE_SELECT_PROJECT_DIRECTORY_METHOD,
+    STORAGE_SHOW_PROJECT_IN_FOLDER_METHOD, STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -143,6 +145,47 @@ fn handle_request(
         }
         AGENT_CLEAR_USAGE_RECORDS_METHOD => {
             handle_agent_clear_usage_records(agent_service, request.id, request.params)
+        }
+        AGENT_GET_FILE_DRAFT_METHOD => {
+            let input = match parse_params::<AgentFileDraftIdRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.get_file_draft(&input.draft_id) {
+                Ok(output) => response_success(request.id, output),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        AGENT_READ_FILE_DRAFT_METHOD => {
+            let input = match parse_params::<AgentFileDraftReadRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.read_file_draft(&input.draft_id, input.offset, input.max_chars) {
+                Ok(output) => response_success(request.id, output),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        AGENT_GET_FILE_WRITE_DIFF_METHOD => {
+            let input = match parse_params::<AgentFileDraftReadRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.get_file_write_diff(&input.draft_id, input.offset, input.max_chars)
+            {
+                Ok(output) => response_success(request.id, output),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        AGENT_DISCARD_FILE_DRAFT_METHOD => {
+            let input = match parse_params::<AgentFileDraftIdRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match agent_service.discard_file_draft(&input.draft_id) {
+                Ok(output) => response_success(request.id, output),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
         }
         SEARCH_SEARCH_CHATS_METHOD => {
             let input = match parse_params::<ChatSearchInput>(request.params) {
