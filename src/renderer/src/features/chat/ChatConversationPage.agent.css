@@ -776,13 +776,29 @@ button.apply-patch-activity__path:focus-visible {
   gap: 6px;
 }
 
-.file-write-activity__summary {
+.file-write-activity__details {
+  gap: 6px;
+}
+
+.file-write-activity__item {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.file-write-activity__summary,
+.file-write-activity__item-line {
   display: flex;
   align-items: center;
   min-width: 0;
+  max-width: 100%;
   gap: 6px;
   color: var(--mc-color-text-muted);
   line-height: var(--mc-line-height-relaxed);
+}
+
+.file-write-activity__item-line {
+  align-items: baseline;
 }
 
 .file-write-activity__icon {
@@ -804,16 +820,17 @@ button.apply-patch-activity__path:focus-visible {
   animation: mc-agent-todo-spin 1s linear infinite;
 }
 
-.file-write-activity__label {
-  flex: 0 0 auto;
-}
-
 .file-write-activity__path {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--mc-color-text-accent);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-write-activity__item-line .file-write-activity__path {
+  color: var(--mc-color-text-accent);
 }
 
 .file-write-activity__stats {
@@ -826,12 +843,25 @@ button.apply-patch-activity__path:focus-visible {
 }
 
 .file-write-activity__additions {
-  color: #16a34a;
+  color: #16a34a !important;
 }
 
 .file-write-activity__deletions,
 .file-write-activity__error {
-  color: var(--mc-color-text-danger);
+  color: var(--mc-color-text-danger) !important;
+}
+
+.file-write-activity__error-note,
+.file-write-activity__rejection-reason {
+  margin: 0;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-chat-metadata);
+  line-height: var(--mc-line-height-relaxed);
+  overflow-wrap: anywhere;
+}
+
+.file-write-activity__error-note {
+  color: var(--mc-color-text-danger) !important;
 }
 
 .file-write-activity__toggle {

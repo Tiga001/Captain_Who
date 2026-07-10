@@ -81,6 +81,27 @@ pub fn upsert_action_audit_record(
     Ok(())
 }
 
+pub fn list_tool_result_json_for_run(
+    connection: &Connection,
+    run_id: &str,
+    tool_name: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT tool_result_json
+        FROM agent_action_audit
+        WHERE run_id = ?1
+          AND tool_name = ?2
+          AND tool_result_json IS NOT NULL
+        ORDER BY COALESCE(completed_at, decided_at, created_at) ASC, action_id ASC
+        ",
+    )?;
+    let results = statement
+        .query_map(params![run_id, tool_name], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(results)
+}
+
 pub fn delete_action_audit_for_conversation(
     connection: &Connection,
     conversation_id: &str,
@@ -158,5 +179,55 @@ mod tests {
             .unwrap();
         assert_eq!(status, "completed");
         assert_eq!(decision_source.as_deref(), Some("manual"));
+    }
+
+    #[test]
+    fn lists_only_matching_persisted_tool_results_in_completion_order() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let base = AgentActionAuditRecord {
+            action_id: "action-2".to_string(),
+            run_id: "run-1".to_string(),
+            conversation_id: Some("conversation-1".to_string()),
+            assistant_message_id: Some("message-1".to_string()),
+            action_type: "file_write".to_string(),
+            tool_name: "write_file".to_string(),
+            decision: Some("approved".to_string()),
+            status: "completed".to_string(),
+            action_json: "{}".to_string(),
+            patch_result_json: None,
+            command_result_json: None,
+            tool_result_json: Some(r#"{"callId":"action-2"}"#.to_string()),
+            error: None,
+            created_at: 2,
+            decided_at: Some(3),
+            completed_at: Some(4),
+            effective_permissions_json: None,
+            path_scope: None,
+            command_cwd_scope: None,
+            blocked_reason: None,
+            decision_source: Some("manual".to_string()),
+        };
+        upsert_action_audit_record(&connection, &base).unwrap();
+        let mut first = base.clone();
+        first.action_id = "action-1".to_string();
+        first.tool_result_json = Some(r#"{"callId":"action-1"}"#.to_string());
+        first.created_at = 1;
+        first.decided_at = Some(1);
+        first.completed_at = Some(1);
+        upsert_action_audit_record(&connection, &first).unwrap();
+        let mut other_tool = base.clone();
+        other_tool.action_id = "action-3".to_string();
+        other_tool.tool_name = "apply_patch".to_string();
+        other_tool.tool_result_json = Some(r#"{"callId":"action-3"}"#.to_string());
+        upsert_action_audit_record(&connection, &other_tool).unwrap();
+
+        assert_eq!(
+            list_tool_result_json_for_run(&connection, "run-1", "write_file").unwrap(),
+            vec![
+                r#"{"callId":"action-1"}"#.to_string(),
+                r#"{"callId":"action-2"}"#.to_string()
+            ]
+        );
     }
 }

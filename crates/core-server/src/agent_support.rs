@@ -888,6 +888,17 @@ pub(super) fn approved_file_write_execution(
         );
         return file_write_decision(proposal, result);
     };
+    if draft.status != "waiting_approval" {
+        let result = failed_file_write_result(
+            proposal,
+            AgentFileWriteResultStatus::Failed,
+            format!(
+                "文件草稿当前状态为 {}，不再等待此审批，不能重复执行。",
+                draft.status
+            ),
+        );
+        return file_write_decision(proposal, result);
+    }
     draft.status = "applying".to_string();
     draft.updated_at = now_ms();
     let _ = storage.update_agent_file_draft(&draft);

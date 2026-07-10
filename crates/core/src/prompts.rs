@@ -326,9 +326,10 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- 成功应用编辑后，先前读取的文件内容视为过期。后续再次修改时必须重新读取；match_not_found、ambiguous_match 或文件冲突类错误也必须先重新读取再修正。".to_string());
     }
     if has_tool(tool_definitions, "write_file") {
-        rules.push("- 创建长报告、Markdown 表格、完整生成文件或分多步修改同一文件时使用 write_file。先 phase=begin；生成内容按不超过 8192 bytes 的块依次 phase=append，并严格使用上次结果的 nextChunkIndex；局部调整草稿可用 phase=edit；完成后只调用一次 phase=finish。不要把完整长文件塞进 apply_patch.content。".to_string());
-        rules.push("- write_file 的 create 要求目标不存在；rewrite 完整重写已有文件；modify 从已有内容开始做结构化编辑；append 保留已有内容并追加；upsert 用于生成型产物，不存在则创建、存在则重写。begin/append/edit 只更新私有草稿，只有 finish 才提交文件修改审批。".to_string());
-        rules.push("- write_file append 成功后以前的块已经持久化，不要重复生成；调用失败时依据返回的 nextChunkIndex 和草稿状态处理。finish 成功应用后停止写入该草稿。".to_string());
+        rules.push("- 创建长报告、Markdown 表格、完整生成文件或分多步修改同一文件时使用 write_file。先 phase=begin；生成内容按不超过 8192 bytes 的块依次 phase=append，并严格使用上次结果的 nextChunkIndex；局部调整草稿可用 phase=edit；完成后调用 phase=finish。不要把完整长文件塞进 apply_patch.content。".to_string());
+        rules.push("- write_file 的 create 要求目标不存在；rewrite 完整重写已有文件；modify 从已有内容开始做结构化编辑；append 保留已有内容并追加；upsert 用于生成型产物，不存在则创建、存在则重写。begin/append/edit 只更新私有草稿；finish 会先完成自动或人工审批，再把真实 applied/rejected/conflict/failed 结果返回给你。".to_string());
+        rules.push("- 任何 begin/append/edit 成功后，当前文件事务为 dirty。在本轮所有 dirty 草稿都调用 finish 或 abort 并获得结果以前，只能继续调用工具，禁止输出任何面向用户的文字，包括进度说明。多个文件都必须分别结算。审批结果返回后，再基于真实结果进行说明。".to_string());
+        rules.push("- write_file append 成功后以前的块已经持久化，不要重复生成；调用失败时依据返回的 nextChunkIndex 和草稿状态处理。finish 的任何 applied/rejected/conflict/failed 结果都会终结当前草稿；后续再次修改同一文件必须重新 phase=begin。".to_string());
     }
     if has_tool(tool_definitions, "run_command") {
         rules.push("- run_command 只用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i 或脚本绕过 apply_patch 创建、编辑或删除文件。".to_string());
@@ -368,6 +369,7 @@ fn tool_progress_communication_section() -> String {
     - 不展示隐藏推理链，不写冗长心理活动。只说可验证的工作意图、观察到的事实、下一步动作。\n\
     - 如果发现目标已经满足，尤其是 todo 全部 completed、文件已创建、测试已通过或用户要求的产物已生成，应停止继续调用工具，直接给用户总结结果。\n\
     - 如果工具失败、结果为空、内容截断或证据不足，要告诉用户当前缺口，并说明下一步如何缩小范围或换可靠来源。\n\
+    - write_file 文件事务处于 dirty 或等待审批状态时是唯一例外：此时不得输出进展文字，只能继续工具调用并完成 finish/abort；审批结果返回后再说明进展。\n\
     - 工具进展文字要自然、短小、具体。避免空泛句子，例如“我正在努力处理”。优先说“我会读取 runtime loop 和 tool result 回填路径，确认模型实际看到什么上下文。”"
         .to_string()
 }

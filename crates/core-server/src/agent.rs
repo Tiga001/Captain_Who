@@ -361,8 +361,10 @@ impl AgentService {
         let Some(mut draft) = self.storage.get_agent_file_draft(draft_id)? else {
             return Ok(false);
         };
-        if draft.status == "applied" {
-            return Err("已应用的文件草稿不能丢弃。".to_string());
+        if !matches!(draft.status.as_str(), "drafting" | "ready") {
+            return Err(
+                "文件草稿已经进入审批或完成结算，不能再丢弃；后续写入请创建新草稿。".to_string(),
+            );
         }
         draft.status = "aborted".to_string();
         draft.updated_at = now_ms();

@@ -30,7 +30,7 @@ impl AgentTool for WriteFileTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "write_file".to_string(),
-            description: "Create and update UTF-8 text files through a persistent draft. Use phase=begin once, then phase=append for generated chunks or phase=edit for structured draft edits, and phase=finish once to propose the final workspace write. begin/append/edit/status/abort only change app-private draft state; finish requires file-change approval. Each append content must be at most 8192 UTF-8 bytes.".to_string(),
+            description: "Create and update UTF-8 text files through a persistent transaction draft. Use phase=begin once, then phase=append for generated chunks or phase=edit for structured draft edits, and phase=finish once to request approval and apply the real workspace write. After begin/append/edit, user-visible text is forbidden until every dirty draft has a finish or abort result. A finish result is returned only after automatic or manual approval completes. Each append content must be at most 8192 UTF-8 bytes.".to_string(),
             input_schema: input_schema(),
             safety: AgentToolSafety::RequiresApproval,
             requires_workspace: false,
@@ -366,9 +366,7 @@ fn abort_draft(context: &ToolExecutionContext, args: WriteFileArgs) -> AgentResu
     let draft_id = required_string(args.draft_id, "abort 需要 draftId")?;
     let storage = context.storage()?;
     let mut draft = load_owned_draft(context, &draft_id)?;
-    if draft.status == "applied" {
-        return Err(AgentError::new("已应用的 write_file 草稿不能中止。"));
-    }
+    ensure_mutable(&draft)?;
     draft.status = "aborted".to_string();
     draft.updated_at = now_ms();
     storage
@@ -386,7 +384,6 @@ fn finish_draft(
     let storage = context.storage()?;
     let mut draft = load_owned_draft(context, &draft_id)?;
     ensure_mutable(&draft)?;
-    validate_base_state(context, &draft)?;
     draft.status = "waiting_approval".to_string();
     draft.stats_final = true;
     draft.final_action_id = Some(call.id.clone());
@@ -413,30 +410,6 @@ fn finish_draft(
     })
 }
 
-fn validate_base_state(
-    context: &ToolExecutionContext,
-    draft: &AgentFileDraftRecord,
-) -> AgentResult<()> {
-    let target = resolve_target(context, &draft.file_path)?;
-    match draft.base_revision.as_deref() {
-        Some(expected) => {
-            let current = read_target_text(&target)?;
-            if content_revision(current.as_bytes()) != expected {
-                return Err(AgentError::new(
-                    "目标文件在草稿创建后发生变化，不能提交当前草稿。",
-                ));
-            }
-        }
-        None if target.exists() => {
-            return Err(AgentError::new(
-                "目标文件在草稿创建后已出现，不能覆盖该文件。",
-            ));
-        }
-        None => {}
-    }
-    Ok(())
-}
-
 fn load_owned_draft(
     context: &ToolExecutionContext,
     draft_id: &str,
@@ -454,11 +427,14 @@ fn load_owned_draft(
 
 fn ensure_mutable(draft: &AgentFileDraftRecord) -> AgentResult<()> {
     match draft.status.as_str() {
-        "drafting" | "ready" | "rejected" | "failed" | "conflict" => Ok(()),
+        "drafting" | "ready" => Ok(()),
         "waiting_approval" => Err(AgentError::new("草稿正在等待审批，不能继续修改。")),
-        "applied" => Err(AgentError::new("草稿已经应用。")),
         "applying" => Err(AgentError::new("草稿正在应用。")),
-        "aborted" | "expired" => Err(AgentError::new("草稿已经失效。")),
+        "applied" | "rejected" | "conflict" | "failed" | "aborted" | "expired" => {
+            Err(AgentError::new(
+                "write_file 草稿已经结算，不能继续修改或重复提交；后续写入请重新 phase=begin。",
+            ))
+        }
         _ => Err(AgentError::new("草稿状态不可修改。")),
     }
 }
@@ -558,7 +534,14 @@ fn draft_result(draft: &AgentFileDraftRecord) -> Value {
         "draft": snapshot,
         "tail": tail_chars(&draft.content, RESULT_TAIL_CHARS),
         "chunkLimitBytes": MAX_CHUNK_BYTES,
-        "maxDraftBytes": MAX_DRAFT_BYTES
+        "maxDraftBytes": MAX_DRAFT_BYTES,
+        "transactionState": if matches!(draft.status.as_str(), "drafting" | "ready") { "dirty" } else { "settled" },
+        "requiresFinishBeforeResponse": matches!(draft.status.as_str(), "drafting" | "ready"),
+        "nextAction": if matches!(draft.status.as_str(), "drafting" | "ready") {
+            "Continue write_file tool calls, then call phase=finish or phase=abort before emitting user-visible text."
+        } else {
+            "Do not modify this settled draft again. Call phase=begin for any later file transaction."
+        }
     })
 }
 
@@ -829,5 +812,122 @@ mod tests {
                 .status,
             "waiting_approval"
         );
+    }
+
+    #[test]
+    fn finish_enters_approval_even_when_target_changed_after_begin() {
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("report.md"), "before\n").unwrap();
+        let storage = Arc::new(StorageService::open(&fixture.path().join("app.db")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-1".to_string(),
+                project_id: None,
+                model_id: None,
+                title: "Test".to_string(),
+                messages: Vec::new(),
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+            conversation_id: Some("conversation-1".to_string()),
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("workspace".to_string()),
+                root_path: Some(workspace.to_string_lossy().to_string()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                command: AgentCommandPermission::RequireApproval,
+                patch: AgentPatchPermission::RequireApproval,
+            },
+        }))
+        .with_runtime_services("run-1".to_string(), Some(storage.clone()));
+        let tool = WriteFileTool;
+        let begin = tool
+            .execute(
+                &context,
+                json!({
+                    "phase": "begin",
+                    "filePath": "report.md",
+                    "mode": "rewrite"
+                }),
+            )
+            .unwrap();
+        let draft_id = begin["draft"]["draftId"].as_str().unwrap().to_string();
+        tool.execute(
+            &context,
+            json!({
+                "phase": "append",
+                "draftId": draft_id,
+                "index": 0,
+                "content": "after\n"
+            }),
+        )
+        .unwrap();
+        fs::write(workspace.join("report.md"), "changed outside\n").unwrap();
+
+        let action = tool
+            .proposed_action(
+                &context,
+                &AgentToolCall {
+                    id: "call-finish".to_string(),
+                    tool: "write_file".to_string(),
+                    args: json!({ "phase": "finish", "draftId": draft_id }),
+                    approval_status: AgentApprovalStatus::Required,
+                    reason: None,
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(action, AgentProposedAction::FileWrite { .. }));
+        assert_eq!(
+            storage
+                .get_agent_file_draft(&draft_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "waiting_approval"
+        );
+    }
+
+    #[test]
+    fn settled_draft_requires_a_new_begin() {
+        let draft = AgentFileDraftRecord {
+            id: "draft-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            project_id: None,
+            run_id: "run-1".to_string(),
+            file_path: "report.md".to_string(),
+            mode: "create".to_string(),
+            status: "rejected".to_string(),
+            base_revision: None,
+            base_content: String::new(),
+            content: "draft".to_string(),
+            additions: 1,
+            deletions: 0,
+            line_count: 1,
+            byte_count: 5,
+            chunk_count: 1,
+            next_chunk_index: 1,
+            stats_final: true,
+            summary: None,
+            final_action_id: Some("call-finish".to_string()),
+            created_at: 1,
+            updated_at: 2,
+            expires_at: i64::MAX,
+        };
+
+        let error = ensure_mutable(&draft).unwrap_err().to_string();
+        assert!(error.contains("phase=begin"));
     }
 }

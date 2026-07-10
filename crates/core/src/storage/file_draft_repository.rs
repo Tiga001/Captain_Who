@@ -64,6 +64,44 @@ pub fn get_draft(
         .optional()
 }
 
+pub fn list_drafts_for_run(
+    connection: &Connection,
+    run_id: &str,
+) -> rusqlite::Result<Vec<AgentFileDraftRecord>> {
+    let mut statement = connection.prepare(
+        r#"
+        SELECT id, conversation_id, project_id, run_id, file_path, mode, status,
+               base_revision, base_content, content, additions, deletions, line_count,
+               byte_count, chunk_count, next_chunk_index, stats_final, summary,
+               final_action_id, created_at, updated_at, expires_at
+        FROM agent_file_drafts
+        WHERE run_id = ?1
+        ORDER BY created_at ASC, id ASC
+        "#,
+    )?;
+    let drafts = statement
+        .query_map([run_id], map_draft)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(drafts)
+}
+
+pub fn settle_unresolved_drafts_for_run(
+    connection: &Connection,
+    run_id: &str,
+    status: &str,
+    updated_at: i64,
+) -> rusqlite::Result<usize> {
+    connection.execute(
+        r#"
+        UPDATE agent_file_drafts
+        SET status = ?2, stats_final = 1, updated_at = ?3
+        WHERE run_id = ?1
+          AND status IN ('drafting', 'ready', 'waiting_approval', 'applying')
+        "#,
+        params![run_id, status, updated_at],
+    )
+}
+
 pub fn save_draft_progress(
     connection: &mut Connection,
     draft: &AgentFileDraftRecord,
@@ -277,6 +315,54 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("hash-1")
+        );
+    }
+
+    #[test]
+    fn lists_and_settles_only_unresolved_drafts_for_a_run() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                params!["conversation-1", "Test", 1_i64, 1_i64],
+            )
+            .unwrap();
+        let mut unresolved = record();
+        insert_draft(&connection, &unresolved).unwrap();
+        let mut applied = record();
+        applied.id = "draft-2".to_string();
+        applied.status = "applied".to_string();
+        applied.created_at = 2;
+        insert_draft(&connection, &applied).unwrap();
+        let mut other_run = record();
+        other_run.id = "draft-3".to_string();
+        other_run.run_id = "run-2".to_string();
+        other_run.created_at = 3;
+        insert_draft(&connection, &other_run).unwrap();
+
+        let listed = list_drafts_for_run(&connection, "run-1").unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|draft| draft.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["draft-1", "draft-2"]
+        );
+        assert_eq!(
+            settle_unresolved_drafts_for_run(&connection, "run-1", "failed", 9).unwrap(),
+            1
+        );
+        unresolved = get_draft(&connection, "draft-1").unwrap().unwrap();
+        assert_eq!(unresolved.status, "failed");
+        assert!(unresolved.stats_final);
+        assert_eq!(
+            get_draft(&connection, "draft-2").unwrap().unwrap().status,
+            "applied"
+        );
+        assert_eq!(
+            get_draft(&connection, "draft-3").unwrap().unwrap().status,
+            "drafting"
         );
     }
 }

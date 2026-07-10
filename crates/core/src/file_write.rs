@@ -149,8 +149,11 @@ fn validate_proposal(
     {
         return Err("文件写入提案的统计信息与草稿不匹配。".to_string());
     }
-    if draft.status == "applied" {
-        return Err("文件草稿已经应用。".to_string());
+    if !matches!(draft.status.as_str(), "waiting_approval" | "applying") {
+        return Err(format!(
+            "文件草稿当前状态为 {}，不能应用此提案。",
+            draft.status
+        ));
     }
     if draft.content.len() > 4 * 1024 * 1024 {
         return Err("文件草稿超过 4 MiB 限制。".to_string());

@@ -1,5 +1,6 @@
 // Rust agent core.
 mod attachments;
+mod file_transactions;
 mod hooks;
 mod tool_flow;
 
@@ -21,6 +22,9 @@ use crate::usage::merge_total_usage;
 use attachments::{
     append_attachment_text_to_last_user_message, attach_images_to_last_user_message,
     build_attachment_context, AttachmentContext,
+};
+use file_transactions::{
+    FileTransactionRunGuard, FileTransactionState, MAX_RESPONSE_FENCE_CORRECTIONS,
 };
 use hooks::AgentRuntimeHooks;
 use serde_json::{json, Value};
@@ -195,6 +199,12 @@ impl AgentRuntime {
             run_id: run_id.clone(),
             tool_definitions: tool_definitions.clone(),
         });
+        let transaction_storage = storage.clone();
+        let mut file_transaction_guard = FileTransactionRunGuard::new(
+            transaction_storage.clone(),
+            run_id.clone(),
+            cancellation_token.clone(),
+        );
         let llm_request = build_llm_request(input, &tool_definitions)?;
         let mut messages = llm_request.messages;
         let tool_context = ToolExecutionContext::from_run_context(context.as_ref())
@@ -209,6 +219,7 @@ impl AgentRuntime {
         let mut usage = None;
         let mut finish_reason = None;
         let mut final_content = None;
+        let mut response_fence_corrections = 0_usize;
         if cancellation_token.is_cancelled() {
             return Ok(cancelled_output(
                 run_id,
@@ -229,6 +240,9 @@ impl AgentRuntime {
                     finish_reason,
                 ));
             }
+            let file_transactions =
+                FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
+            let user_text_blocked = file_transactions.blocks_user_text();
             let request = LlmChatRequest {
                 api_url: llm_request.api_url.clone(),
                 api_token: llm_request.api_token.clone(),
@@ -240,6 +254,9 @@ impl AgentRuntime {
                 messages: {
                     let mut request_messages = messages.clone();
                     runtime_hooks.before_llm_request(&mut request_messages)?;
+                    if let Some(context) = file_transactions.request_context() {
+                        request_messages.push(LlmMessage::text(LlmMessageRole::System, context));
+                    }
                     request_messages
                 },
                 tools: llm_request.tools.clone(),
@@ -256,7 +273,7 @@ impl AgentRuntime {
                         LlmStreamEvent::AttemptStarted {
                             attempt,
                             max_attempts,
-                        } => {
+                        } if !user_text_blocked => {
                             let _ = max_attempts;
                             event_stream.emit(AgentEvent::MessageStreamStarted {
                                 run_id: delta_run_id.clone(),
@@ -264,7 +281,7 @@ impl AgentRuntime {
                                 attempt,
                             });
                         }
-                        LlmStreamEvent::Delta(delta) if !delta.is_empty() => {
+                        LlmStreamEvent::Delta(delta) if !user_text_blocked && !delta.is_empty() => {
                             event_stream.emit(AgentEvent::MessageDelta {
                                 run_id: delta_run_id.clone(),
                                 stream_id: Some(stream_id.clone()),
@@ -282,7 +299,7 @@ impl AgentRuntime {
                                 received_bytes,
                             });
                         }
-                        LlmStreamEvent::AttemptReset { reason } => {
+                        LlmStreamEvent::AttemptReset { reason } if !user_text_blocked => {
                             event_stream.emit(AgentEvent::MessageStreamReset {
                                 run_id: delta_run_id.clone(),
                                 stream_id: stream_id.clone(),
@@ -302,13 +319,16 @@ impl AgentRuntime {
                                 reason,
                             });
                         }
-                        LlmStreamEvent::Committed => {
+                        LlmStreamEvent::Committed if !user_text_blocked => {
                             event_stream.emit(AgentEvent::MessageStreamCommitted {
                                 run_id: delta_run_id.clone(),
                                 stream_id: stream_id.clone(),
                             });
                         }
-                        LlmStreamEvent::Delta(_) => {}
+                        LlmStreamEvent::AttemptStarted { .. }
+                        | LlmStreamEvent::AttemptReset { .. }
+                        | LlmStreamEvent::Committed
+                        | LlmStreamEvent::Delta(_) => {}
                     }
                 })
                 .await
@@ -347,10 +367,24 @@ impl AgentRuntime {
                 &run_id,
                 iteration,
             );
+            if user_text_blocked && tool_requests.is_empty() {
+                response_fence_corrections = response_fence_corrections.saturating_add(1);
+                if response_fence_corrections > MAX_RESPONSE_FENCE_CORRECTIONS {
+                    return Err(AgentError::new(
+                        "模型连续输出文字但未结算文件事务，已停止以避免循环。请重试任务。",
+                    ));
+                }
+                messages.push(LlmMessage::text(
+                    LlmMessageRole::System,
+                    file_transactions.protocol_correction(),
+                ));
+                continue;
+            }
             if tool_requests.is_empty() {
                 final_content = Some(llm_response.content);
                 break;
             }
+            response_fence_corrections = 0;
 
             if iteration >= self.max_tool_iterations {
                 let message = "工具调用次数超过限制，已停止继续执行。".to_string();
@@ -363,8 +397,13 @@ impl AgentRuntime {
                 break;
             }
 
+            let suppressed_narration = user_text_blocked && !llm_response.content.trim().is_empty();
             messages.push(LlmMessage::assistant(
-                llm_response.content.clone(),
+                if user_text_blocked {
+                    String::new()
+                } else {
+                    llm_response.content.clone()
+                },
                 tool_requests.clone(),
             ));
 
@@ -467,6 +506,7 @@ impl AgentRuntime {
                         finish_reason.clone(),
                         vec![action.clone()],
                     ));
+                    file_transaction_guard.preserve_for_approval();
 
                     return Ok(AgentChatOutput {
                         content: String::new(),
@@ -570,6 +610,12 @@ impl AgentRuntime {
                     ));
                 }
             }
+            if suppressed_narration {
+                messages.push(LlmMessage::text(
+                    LlmMessageRole::System,
+                    "The text emitted alongside the preceding tool calls was not shown to the user because file transactions were unsettled. Do not assume the user saw it. Continue the transaction protocol and generate new text only after every draft has a finish or abort outcome.",
+                ));
+            }
         }
 
         if cancellation_token.is_cancelled() {
@@ -581,6 +627,14 @@ impl AgentRuntime {
                 finish_reason,
             ));
         }
+        let final_file_transactions =
+            FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
+        if final_file_transactions.blocks_user_text() {
+            return Err(AgentError::new(
+                "文件事务尚未结算，不能结束当前运行或输出最终回复。",
+            ));
+        }
+        file_transaction_guard.complete();
         let content = final_content.unwrap_or_else(|| "没有生成可显示的回复。".to_string());
         runtime_hooks.before_run_finish(&mut event_stream)?;
         if !llm_request.stream {
