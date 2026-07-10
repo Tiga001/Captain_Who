@@ -28,6 +28,7 @@ import { CoreServer } from './core/coreServer'
 import { BrowserWebContentsViewManager } from './browser/BrowserWebContentsViewManager'
 import { TerminalBridge } from './terminal/TerminalBridge'
 import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
+import { FaviconResourceCache } from './resources/FaviconResourceCache'
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   '.avif': 'image/avif',
@@ -394,6 +395,7 @@ function expandSystemPathAlias(rawFilePath: string): string | null {
 export function registerHostIpc(
   coreServer: CoreServer,
   terminalBridge: TerminalBridge,
+  faviconResourceCache: FaviconResourceCache,
   getBrowserManager: () => BrowserWebContentsViewManager
 ): void {
   const attachmentDialogBridge = new AttachmentDialogBridge()
@@ -457,6 +459,9 @@ export function registerHostIpc(
     getBrowserManager().clearBrowsingData(id)
   )
   ipcMain.handle('host:clipboard.writeImage', (_event, input) => writeImageToClipboard(input))
+  ipcMain.handle('host:resources.resolveFavicon', (_event, input) =>
+    faviconResourceCache.resolveFavicon(input)
+  )
   ipcMain.handle('host:storage.loadAppData', () => coreServer.loadAppData())
   ipcMain.handle('host:storage.loadModelSettings', () => coreServer.loadModelSettings())
   ipcMain.handle('host:storage.saveModelSettings', (_event, settings) =>

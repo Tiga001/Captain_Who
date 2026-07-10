@@ -201,7 +201,7 @@ fn redact_base64_fields(value: &mut Value) {
     match value {
         Value::Object(object) => {
             for (key, item) in object.iter_mut() {
-                if key == "dataBase64" || is_base64_data_url(item) {
+                if key == "dataBase64" {
                     *item = json!("[redacted]");
                 } else {
                     redact_base64_fields(item);
@@ -210,22 +210,11 @@ fn redact_base64_fields(value: &mut Value) {
         }
         Value::Array(items) => {
             for item in items {
-                if is_base64_data_url(item) {
-                    *item = json!("[redacted]");
-                } else {
-                    redact_base64_fields(item);
-                }
+                redact_base64_fields(item);
             }
         }
         _ => {}
     }
-}
-
-fn is_base64_data_url(value: &Value) -> bool {
-    value
-        .as_str()
-        .map(str::trim_start)
-        .is_some_and(|value| value.starts_with("data:") && value.contains(";base64,"))
 }
 
 pub(super) fn llm_image_message_from_tool_result(result: &AgentToolResult) -> Option<LlmMessage> {

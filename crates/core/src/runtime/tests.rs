@@ -187,15 +187,6 @@ fn read_image_tool_result_is_redacted_but_creates_visual_message() {
             "format": "png",
             "mimeType": "image/png",
             "sizeBytes": 3,
-            "faviconDataUrl": "data:image/x-icon;base64,AAAB",
-            "sourceUrl": "https://example.com/icon.ico",
-            "nested": {
-                "previewDataUrl": "data:image/png;base64,BBBB",
-                "items": [
-                    "data:image/jpeg;base64,CCCC",
-                    "plain text"
-                ]
-            },
             "image": {
                 "mimeType": "image/png",
                 "dataBase64": "YWJj"
@@ -204,26 +195,10 @@ fn read_image_tool_result_is_redacted_but_creates_visual_message() {
         error: None,
     };
 
-    let redacted = redact_tool_result_for_event(&result);
+    let event_result = redact_tool_result_for_event(&result);
     assert_eq!(
-        redacted.result.as_ref().unwrap()["image"]["dataBase64"],
+        event_result.result.as_ref().unwrap()["image"]["dataBase64"],
         "[redacted]"
-    );
-    assert_eq!(
-        redacted.result.as_ref().unwrap()["faviconDataUrl"],
-        "[redacted]"
-    );
-    assert_eq!(
-        redacted.result.as_ref().unwrap()["nested"]["previewDataUrl"],
-        "[redacted]"
-    );
-    assert_eq!(
-        redacted.result.as_ref().unwrap()["nested"]["items"][0],
-        "[redacted]"
-    );
-    assert_eq!(
-        redacted.result.as_ref().unwrap()["sourceUrl"],
-        "https://example.com/icon.ico"
     );
 
     let image_message = llm_image_message_from_tool_result(&result).unwrap();

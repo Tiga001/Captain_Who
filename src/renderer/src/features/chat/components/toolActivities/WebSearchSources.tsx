@@ -6,6 +6,7 @@ import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { ChatWebSearchSource } from '../../chatTypes'
 import { compareWebSearchSourcesByRelevance } from '../../agentWebSearch'
 import { openExternalUrl } from '../../../../lib/externalLinks'
+import { hostClient } from '../../../../host/hostClient'
 
 const ASSISTANT_SOURCES_POPOVER_GAP = 10
 const ASSISTANT_SOURCES_VIEWPORT_MARGIN = 16
@@ -13,6 +14,28 @@ const ASSISTANT_SOURCES_MAX_WIDTH = 620
 const ASSISTANT_SOURCES_HEADER_HEIGHT = 33
 const ASSISTANT_SOURCES_ROW_HEIGHT = 34
 const ASSISTANT_SOURCES_MAX_VISIBLE_ITEMS = 5
+const faviconCache = new Map<string, Promise<string | null>>()
+
+function faviconCacheKey(source: ChatWebSearchSource) {
+  return `${source.url}\n${source.faviconUrl ?? ''}`
+}
+
+function resolveSourceFavicon(source: ChatWebSearchSource): Promise<string | null> {
+  const key = faviconCacheKey(source)
+  const cached = faviconCache.get(key)
+  if (cached) return cached
+
+  const request = hostClient.resources
+    .resolveFavicon({
+      pageUrl: source.url,
+      faviconUrl: source.faviconUrl ?? null
+    })
+    .then((response) => response.url)
+    .catch(() => null)
+
+  faviconCache.set(key, request)
+  return request
+}
 
 function getDomainInitial(domain: string) {
   return (domain.replace(/^www\./, '').match(/[a-z0-9]/i)?.[0] ?? 'W').toUpperCase()
@@ -26,11 +49,28 @@ function openSourceUrl(url: string) {
 
 export function SourceBadge({ source }: { source: ChatWebSearchSource }) {
   const [imageFailed, setImageFailed] = useState(false)
+  const [faviconUrl, setFaviconUrl] = useState<string | null>(null)
 
-  if (source.faviconDataUrl && !imageFailed) {
+  useEffect(() => {
+    let cancelled = false
+    setImageFailed(false)
+    setFaviconUrl(null)
+
+    void resolveSourceFavicon(source).then((url) => {
+      if (!cancelled) {
+        setFaviconUrl(url)
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [source.url, source.faviconUrl])
+
+  if (faviconUrl && !imageFailed) {
     return (
       <span className="web-source-badge web-source-badge--image" aria-hidden="true">
-        <img alt="" src={source.faviconDataUrl} onError={() => setImageFailed(true)} />
+        <img alt="" src={faviconUrl} onError={() => setImageFailed(true)} />
       </span>
     )
   }
@@ -111,9 +151,7 @@ export function AssistantSources({ sources }: { sources: ChatWebSearchSource[] }
       Math.max(280, viewportWidth - ASSISTANT_SOURCES_VIEWPORT_MARGIN * 2)
     )
     const estimatedHeight =
-      ASSISTANT_SOURCES_HEADER_HEIGHT +
-      sourcesListMaxHeight +
-      ASSISTANT_SOURCES_VIEWPORT_MARGIN * 2
+      ASSISTANT_SOURCES_HEADER_HEIGHT + sourcesListMaxHeight + ASSISTANT_SOURCES_VIEWPORT_MARGIN * 2
     const measuredHeight = popoverRef.current?.offsetHeight ?? estimatedHeight
     const spaceAbove = rect.top - ASSISTANT_SOURCES_VIEWPORT_MARGIN
     const spaceBelow = viewportHeight - rect.bottom - ASSISTANT_SOURCES_VIEWPORT_MARGIN
@@ -124,11 +162,17 @@ export function AssistantSources({ sources }: { sources: ChatWebSearchSource[] }
       : rect.top - measuredHeight - ASSISTANT_SOURCES_POPOVER_GAP
     const top = Math.min(
       Math.max(rawTop, ASSISTANT_SOURCES_VIEWPORT_MARGIN),
-      Math.max(ASSISTANT_SOURCES_VIEWPORT_MARGIN, viewportHeight - measuredHeight - ASSISTANT_SOURCES_VIEWPORT_MARGIN)
+      Math.max(
+        ASSISTANT_SOURCES_VIEWPORT_MARGIN,
+        viewportHeight - measuredHeight - ASSISTANT_SOURCES_VIEWPORT_MARGIN
+      )
     )
     const left = Math.min(
       Math.max(rect.left, ASSISTANT_SOURCES_VIEWPORT_MARGIN),
-      Math.max(ASSISTANT_SOURCES_VIEWPORT_MARGIN, viewportWidth - width - ASSISTANT_SOURCES_VIEWPORT_MARGIN)
+      Math.max(
+        ASSISTANT_SOURCES_VIEWPORT_MARGIN,
+        viewportWidth - width - ASSISTANT_SOURCES_VIEWPORT_MARGIN
+      )
     )
 
     setPopoverStyle({

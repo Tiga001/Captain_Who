@@ -1,8 +1,5 @@
 // Rust agent core.
-use super::{
-    block_on_tool_future, truncate_chars, web_favicon::FaviconFetcher, AgentTool,
-    ToolExecutionContext,
-};
+use super::{block_on_tool_future, truncate_chars, AgentTool, ToolExecutionContext};
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
@@ -313,36 +310,6 @@ fn format_tavily_extract_response(
     response: Value,
     cancellation_token: &AgentCancellationToken,
 ) -> AgentResult<Value> {
-    let favicon_fetcher = FaviconFetcher::new();
-    format_tavily_extract_response_with_favicon_fetcher_and_cancellation(
-        request,
-        response,
-        &favicon_fetcher,
-        cancellation_token,
-    )
-}
-
-#[cfg(test)]
-fn format_tavily_extract_response_with_favicon_fetcher(
-    request: TavilyExtractRequest,
-    response: Value,
-    favicon_fetcher: &FaviconFetcher,
-) -> AgentResult<Value> {
-    let cancellation_token = AgentCancellationToken::new();
-    format_tavily_extract_response_with_favicon_fetcher_and_cancellation(
-        request,
-        response,
-        favicon_fetcher,
-        &cancellation_token,
-    )
-}
-
-fn format_tavily_extract_response_with_favicon_fetcher_and_cancellation(
-    request: TavilyExtractRequest,
-    response: Value,
-    favicon_fetcher: &FaviconFetcher,
-    cancellation_token: &AgentCancellationToken,
-) -> AgentResult<Value> {
     cancellation_token.check()?;
     let result = response
         .get("results")
@@ -352,9 +319,6 @@ fn format_tavily_extract_response_with_favicon_fetcher_and_cancellation(
         .and_then(|result| result.get("url"))
         .and_then(Value::as_str)
         .unwrap_or(&request.url);
-    cancellation_token.check()?;
-    let favicon = result.and_then(|result| favicon_fetcher.fetch(result, url));
-    cancellation_token.check()?;
     let raw_results_len = response
         .get("results")
         .and_then(Value::as_array)
@@ -407,8 +371,6 @@ fn format_tavily_extract_response_with_favicon_fetcher_and_cancellation(
         "favicon": result
             .and_then(|result| result.get("favicon"))
             .and_then(Value::as_str),
-        "faviconDataUrl": favicon.as_ref().map(|asset| asset.data_url.as_str()),
-        "faviconMimeType": favicon.as_ref().map(|asset| asset.mime_type.as_str()),
         "failedResults": failed_results,
         "responseTime": response_time,
         "truncated": content_truncated
@@ -585,12 +547,9 @@ mod tests {
             }]
         });
 
-        let error = format_tavily_extract_response_with_favicon_fetcher(
-            request,
-            response,
-            &FaviconFetcher::disabled(),
-        )
-        .unwrap_err();
+        let error =
+            format_tavily_extract_response(request, response, &AgentCancellationToken::new())
+                .unwrap_err();
 
         assert!(error.to_string().contains("未能抽取可读正文"));
         assert!(error.to_string().contains("https://example.com/missing"));
@@ -622,19 +581,16 @@ mod tests {
             "response_time": 1.23
         });
 
-        let formatted = format_tavily_extract_response_with_favicon_fetcher(
-            request,
-            response,
-            &FaviconFetcher::disabled(),
-        )
-        .unwrap();
+        let formatted =
+            format_tavily_extract_response(request, response, &AgentCancellationToken::new())
+                .unwrap();
 
         assert_eq!(formatted["provider"], "tavily");
         assert_eq!(formatted["content"], "hello\n...[truncated]");
         assert_eq!(formatted["rawContent"], "hello\n...[truncated]");
         assert_eq!(formatted["favicon"], "https://example.com/favicon.ico");
-        assert_eq!(formatted["faviconDataUrl"], Value::Null);
-        assert_eq!(formatted["faviconMimeType"], Value::Null);
+        assert!(formatted.get("faviconDataUrl").is_none());
+        assert!(formatted.get("faviconMimeType").is_none());
         assert_eq!(formatted["truncated"], true);
     }
 }

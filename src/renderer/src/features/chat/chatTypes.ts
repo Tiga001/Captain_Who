@@ -18,8 +18,7 @@ export interface ChatWebSearchSource {
   url: string
   displayUrl: string
   domain: string
-  faviconDataUrl?: string
-  faviconMimeType?: string
+  faviconUrl?: string
   snippet?: string
   score?: number
   publishedDate?: string

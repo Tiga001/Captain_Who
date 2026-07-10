@@ -14,8 +14,7 @@ interface WebSearchResultPayload {
 interface WebSearchResultItem {
   title?: unknown
   url?: unknown
-  faviconDataUrl?: unknown
-  faviconMimeType?: unknown
+  favicon?: unknown
   content?: unknown
   score?: unknown
   publishedDate?: unknown
@@ -27,8 +26,7 @@ interface WebFetchResultPayload {
   provider?: unknown
   content?: unknown
   rawContent?: unknown
-  faviconDataUrl?: unknown
-  faviconMimeType?: unknown
+  favicon?: unknown
   responseTime?: unknown
   truncated?: unknown
 }
@@ -94,14 +92,9 @@ function sourceId(callId: string, url: string, index: number) {
   return `${callId}:source:${index}:${url}`
 }
 
-function normalizeFaviconDataUrl(value: unknown) {
-  const faviconDataUrl = stringValue(value)
-  return faviconDataUrl.startsWith('data:image/') ? faviconDataUrl : undefined
-}
-
-function normalizeFaviconMimeType(value: unknown) {
-  const faviconMimeType = stringValue(value)
-  return faviconMimeType.startsWith('image/') ? faviconMimeType : undefined
+function normalizeFaviconUrl(value: unknown) {
+  const url = validHttpUrl(value)
+  return url?.toString()
 }
 
 function truncateWebFetchSummary(content: string) {
@@ -145,8 +138,7 @@ function normalizeWebSearchSources(callId: string, results: unknown): ChatWebSea
       url: normalizedUrl,
       displayUrl: displayUrlFromUrl(url),
       domain: url.hostname.replace(/^www\./, ''),
-      faviconDataUrl: normalizeFaviconDataUrl(result.faviconDataUrl),
-      faviconMimeType: normalizeFaviconMimeType(result.faviconMimeType),
+      faviconUrl: normalizeFaviconUrl(result.favicon),
       snippet: snippet || undefined,
       score: numberValue(result.score),
       publishedDate: publishedDate || undefined
@@ -173,8 +165,7 @@ function normalizeWebFetchSources(
       url: normalizedUrl,
       displayUrl: displayUrlFromUrl(url),
       domain: url.hostname.replace(/^www\./, ''),
-      faviconDataUrl: normalizeFaviconDataUrl(payload.faviconDataUrl),
-      faviconMimeType: normalizeFaviconMimeType(payload.faviconMimeType),
+      faviconUrl: normalizeFaviconUrl(payload.favicon),
       snippet: content ? truncateWebFetchSummary(content) : undefined
     }
   ]

@@ -7,10 +7,14 @@ import icon from '../../resources/icon.png?asset'
 import { BrowserWebContentsViewManager } from './browser/BrowserWebContentsViewManager'
 import { CoreServer } from './core/coreServer'
 import { registerHostIpc } from './ipc'
+import { FaviconResourceCache, registerResourceSchemes } from './resources/FaviconResourceCache'
 import { TerminalBridge } from './terminal/TerminalBridge'
+
+registerResourceSchemes()
 
 const coreServer = new CoreServer()
 const terminalBridge = new TerminalBridge()
+const faviconResourceCache = new FaviconResourceCache()
 let browserManager: BrowserWebContentsViewManager | null = null
 let isQuittingAfterTerminalShutdown = false
 
@@ -102,12 +106,13 @@ app.whenReady().then(() => {
   app.setName('MyCopilot')
   electronApp.setAppUserModelId('com.mycopilot.next')
   coreServer.start()
+  faviconResourceCache.registerProtocol()
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  registerHostIpc(coreServer, terminalBridge, () => {
+  registerHostIpc(coreServer, terminalBridge, faviconResourceCache, () => {
     if (!browserManager) {
       throw new Error('Browser view manager is not available')
     }

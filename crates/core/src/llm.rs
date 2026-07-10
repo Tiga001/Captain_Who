@@ -12,6 +12,10 @@ use response::{
     truncate_for_error,
 };
 use serde_json::{json, Value};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 use stream::parse_sse_response;
 #[cfg(test)]
@@ -119,14 +123,44 @@ pub(crate) struct LlmToolCall {
     pub args: Value,
 }
 
+const LLM_MAX_ATTEMPTS: usize = 3;
+const LLM_RETRY_BASE_DELAY_MS: u64 = 350;
+const LLM_RETRY_MAX_DELAY_MS: u64 = 2_000;
+
 pub(crate) async fn complete_chat(
     request: LlmChatRequest,
     cancellation_token: AgentCancellationToken,
 ) -> AgentResult<LlmChatResponse> {
     let mut request = request;
     request.stream = false;
+
+    let mut last_error = None;
+    for attempt in 1..=LLM_MAX_ATTEMPTS {
+        match complete_chat_once(&request, cancellation_token.clone()).await {
+            Ok(response) => return Ok(response),
+            Err(error) if error.is_cancelled() => return Err(error),
+            Err(error) => {
+                if attempt >= LLM_MAX_ATTEMPTS || !is_retryable_llm_error(&error) {
+                    return Err(retry_exhausted_error(error, attempt));
+                }
+                last_error = Some(error);
+                wait_before_retry(attempt, cancellation_token.clone()).await?;
+            }
+        }
+    }
+
+    Err(retry_exhausted_error(
+        last_error.unwrap_or_else(|| AgentError::new("模型请求失败。")),
+        LLM_MAX_ATTEMPTS,
+    ))
+}
+
+async fn complete_chat_once(
+    request: &LlmChatRequest,
+    cancellation_token: AgentCancellationToken,
+) -> AgentResult<LlmChatResponse> {
     let api_style = request.api_style;
-    let response = send_llm_request(&request, cancellation_token.clone()).await?;
+    let response = send_llm_request(request, cancellation_token.clone()).await?;
     let body = response_text(response, cancellation_token.clone(), "读取模型响应失败").await?;
 
     let value: Value = serde_json::from_str(&body).map_err(|error| {
@@ -162,8 +196,54 @@ where
 {
     let mut request = request;
     request.stream = true;
+
+    let mut last_error = None;
+    for attempt in 1..=LLM_MAX_ATTEMPTS {
+        let emitted_visible_delta = Arc::new(AtomicBool::new(false));
+        let delta_marker = emitted_visible_delta.clone();
+        let result =
+            complete_chat_streaming_once(&request, cancellation_token.clone(), |delta: String| {
+                if !delta.is_empty() {
+                    delta_marker.store(true, Ordering::SeqCst);
+                }
+                on_delta(delta);
+            })
+            .await;
+
+        match result {
+            Ok(response) => return Ok(response),
+            Err(error) if error.is_cancelled() => return Err(error),
+            Err(error) => {
+                if emitted_visible_delta.load(Ordering::SeqCst) {
+                    return Err(AgentError::new(format!(
+                        "{error}（已收到部分模型输出，为避免重复显示，本次不自动重试。）"
+                    )));
+                }
+                if attempt >= LLM_MAX_ATTEMPTS || !is_retryable_llm_error(&error) {
+                    return Err(retry_exhausted_error(error, attempt));
+                }
+                last_error = Some(error);
+                wait_before_retry(attempt, cancellation_token.clone()).await?;
+            }
+        }
+    }
+
+    Err(retry_exhausted_error(
+        last_error.unwrap_or_else(|| AgentError::new("模型请求失败。")),
+        LLM_MAX_ATTEMPTS,
+    ))
+}
+
+async fn complete_chat_streaming_once<F>(
+    request: &LlmChatRequest,
+    cancellation_token: AgentCancellationToken,
+    mut on_delta: F,
+) -> AgentResult<LlmChatResponse>
+where
+    F: FnMut(String) + Send,
+{
     let api_style = request.api_style;
-    let response = send_llm_request(&request, cancellation_token.clone()).await?;
+    let response = send_llm_request(request, cancellation_token.clone()).await?;
     if !is_sse_response(&response) {
         let body = response_text(response, cancellation_token.clone(), "读取模型响应失败").await?;
         let value: Value = serde_json::from_str(&body).map_err(|error| {
@@ -280,6 +360,93 @@ fn validate_llm_response(
     Ok(())
 }
 
+fn retry_exhausted_error(error: AgentError, attempts: usize) -> AgentError {
+    if attempts <= 1 {
+        return error;
+    }
+
+    AgentError::new(format!("模型请求失败，已重试 {} 次：{error}", attempts - 1))
+}
+
+async fn wait_before_retry(
+    attempt: usize,
+    cancellation_token: AgentCancellationToken,
+) -> AgentResult<()> {
+    let delay = retry_delay(attempt);
+    tokio::select! {
+        _ = cancellation_token.cancelled() => Err(AgentError::cancelled()),
+        _ = tokio::time::sleep(delay) => Ok(()),
+    }
+}
+
+fn retry_delay(attempt: usize) -> Duration {
+    let multiplier = 1_u64 << attempt.saturating_sub(1).min(8);
+    Duration::from_millis((LLM_RETRY_BASE_DELAY_MS * multiplier).min(LLM_RETRY_MAX_DELAY_MS))
+}
+
+fn is_retryable_llm_error(error: &AgentError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    if message.trim().is_empty() {
+        return false;
+    }
+
+    if message.contains("请先在设置")
+        || message.contains("请选择一个可用模型")
+        || message.contains("没有可发送的对话内容")
+        || message.contains("不支持的消息角色")
+        || message.contains("api token")
+        || message.contains("401")
+        || message.contains("403")
+        || message.contains("404")
+        || message.contains("400")
+    {
+        return false;
+    }
+
+    if retryable_http_status_in_message(&message) {
+        return true;
+    }
+
+    [
+        "请求模型接口失败",
+        "读取模型响应失败",
+        "读取模型错误响应失败",
+        "读取模型流失败",
+        "模型响应不是有效 json",
+        "模型流事件不是有效 json",
+        "模型流不是有效 utf-8",
+        "模型流尾部不是有效 utf-8",
+        "error decoding response body",
+        "connection",
+        "connect",
+        "timeout",
+        "timed out",
+        "deadline",
+        "temporarily",
+        "temporary",
+        "overloaded",
+        "unavailable",
+        "try again",
+        "rate limit",
+        "rate_limit",
+        "too many requests",
+        "connection reset",
+        "connection closed",
+        "broken pipe",
+        "unexpected eof",
+        "incomplete message",
+        "body write aborted",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+fn retryable_http_status_in_message(message: &str) -> bool {
+    [408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524]
+        .iter()
+        .any(|status| message.contains(&status.to_string()))
+}
+
 fn streaming_response_diagnostic(response: &LlmChatResponse) -> String {
     let usage = response.usage.as_ref().map(|usage| {
         json!({
@@ -341,6 +508,47 @@ mod tests {
             requires_workspace: true,
             requires_approval: false,
         }
+    }
+
+    #[test]
+    fn retry_delay_uses_capped_exponential_backoff() {
+        assert_eq!(retry_delay(1), Duration::from_millis(350));
+        assert_eq!(retry_delay(2), Duration::from_millis(700));
+        assert_eq!(retry_delay(10), Duration::from_millis(2_000));
+    }
+
+    #[test]
+    fn classifies_transient_llm_errors_as_retryable() {
+        assert!(is_retryable_llm_error(&AgentError::new(
+            "读取模型流失败：error decoding response body"
+        )));
+        assert!(is_retryable_llm_error(&AgentError::new(
+            "模型接口返回 429：rate limit"
+        )));
+        assert!(is_retryable_llm_error(&AgentError::new(
+            "模型接口返回 503：upstream overloaded"
+        )));
+    }
+
+    #[test]
+    fn classifies_configuration_and_client_errors_as_non_retryable() {
+        assert!(!is_retryable_llm_error(&AgentError::new(
+            "请先在设置 > 配置里填写 API Token。"
+        )));
+        assert!(!is_retryable_llm_error(&AgentError::new(
+            "模型接口返回 401：unauthorized"
+        )));
+        assert!(!is_retryable_llm_error(&AgentError::new(
+            "模型接口返回 400：bad request"
+        )));
+    }
+
+    #[test]
+    fn retry_exhausted_error_mentions_retry_count() {
+        let error = retry_exhausted_error(AgentError::new("读取模型响应失败：timeout"), 3);
+
+        assert!(error.to_string().contains("已重试 2 次"));
+        assert!(error.to_string().contains("timeout"));
     }
 
     #[test]

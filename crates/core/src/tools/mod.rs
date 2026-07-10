@@ -17,7 +17,6 @@ mod read_word;
 mod run_command;
 mod search_code;
 mod search_files;
-mod web_favicon;
 mod web_fetch;
 mod web_search;
 mod workspace_map;

@@ -93,6 +93,9 @@ const host: HostApi = {
   clipboard: {
     writeImage: (input) => ipcRenderer.invoke('host:clipboard.writeImage', input)
   },
+  resources: {
+    resolveFavicon: (input) => ipcRenderer.invoke('host:resources.resolveFavicon', input)
+  },
   search: {
     searchChats: (input) => ipcRenderer.invoke('host:search.searchChats', input)
   },

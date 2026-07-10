@@ -1,8 +1,5 @@
 // Rust agent core.
-use super::{
-    block_on_tool_future, truncate_chars, web_favicon::FaviconFetcher, AgentTool,
-    ToolExecutionContext,
-};
+use super::{block_on_tool_future, truncate_chars, AgentTool, ToolExecutionContext};
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
@@ -232,7 +229,6 @@ fn format_tavily_response(
     cancellation_token: &AgentCancellationToken,
 ) -> AgentResult<Value> {
     cancellation_token.check()?;
-    let favicon_fetcher = FaviconFetcher::new();
     let (answer, answer_truncated) = response
         .get("answer")
         .and_then(Value::as_str)
@@ -255,7 +251,7 @@ fn format_tavily_response(
                 .map(|result| {
                     cancellation_token.check()?;
                     let (result, result_truncated) =
-                        format_tavily_result(result, request.include_raw_content, &favicon_fetcher);
+                        format_tavily_result(result, request.include_raw_content);
                     truncated |= result_truncated;
                     Ok(result)
                 })
@@ -280,11 +276,7 @@ fn format_tavily_response(
     }))
 }
 
-fn format_tavily_result(
-    result: &Value,
-    include_raw_content: bool,
-    favicon_fetcher: &FaviconFetcher,
-) -> (Value, bool) {
+fn format_tavily_result(result: &Value, include_raw_content: bool) -> (Value, bool) {
     let (content, content_truncated) = result
         .get("content")
         .and_then(Value::as_str)
@@ -302,11 +294,6 @@ fn format_tavily_result(
     } else {
         (None, false)
     };
-    let favicon = result
-        .get("url")
-        .and_then(Value::as_str)
-        .and_then(|url| favicon_fetcher.fetch(result, url));
-
     (
         json!({
             "title": result.get("title").and_then(Value::as_str),
@@ -318,8 +305,7 @@ fn format_tavily_result(
                 .get("published_date")
                 .or_else(|| result.get("publishedDate"))
                 .and_then(Value::as_str),
-            "faviconDataUrl": favicon.as_ref().map(|asset| asset.data_url.as_str()),
-            "faviconMimeType": favicon.as_ref().map(|asset| asset.mime_type.as_str())
+            "favicon": result.get("favicon").and_then(Value::as_str)
         }),
         content_truncated || raw_content_truncated,
     )
@@ -378,5 +364,39 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("searchDepth"));
+    }
+
+    #[test]
+    fn formats_results_without_favicon_data_urls() {
+        let request = TavilySearchRequest::from_args(WebSearchArgs {
+            query: "rust".to_string(),
+            max_results: Some(1),
+            search_depth: None,
+            topic: None,
+            time_range: None,
+            include_answer: None,
+            include_raw_content: None,
+            include_domains: None,
+            exclude_domains: None,
+        })
+        .unwrap();
+        let response = json!({
+            "results": [{
+                "title": "Rust",
+                "url": "https://www.rust-lang.org/",
+                "content": "Rust language",
+                "score": 0.9,
+                "favicon": "https://www.rust-lang.org/favicon.ico"
+            }],
+            "response_time": 0.42
+        });
+
+        let formatted =
+            format_tavily_response(request, response, &AgentCancellationToken::new()).unwrap();
+        let result = &formatted["results"][0];
+
+        assert_eq!(result["favicon"], "https://www.rust-lang.org/favicon.ico");
+        assert!(result.get("faviconDataUrl").is_none());
+        assert!(result.get("faviconMimeType").is_none());
     }
 }

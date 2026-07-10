@@ -28,6 +28,8 @@ import type {
   BrowserZoomState,
   CorePingRequest,
   CorePingResponse,
+  ResourceFaviconRequest,
+  ResourceFaviconResponse,
   ChatSearchInput,
   ChatSearchResult,
   StorageAgentPromptPreferencesRecord,
@@ -123,6 +125,10 @@ export interface SearchHostApi {
   searchChats(input: ChatSearchInput): Promise<ChatSearchResult[]>
 }
 
+export interface ResourcesHostApi {
+  resolveFavicon(input: ResourceFaviconRequest): Promise<ResourceFaviconResponse>
+}
+
 export interface TerminalHostApi {
   createSession(request: TerminalCreateSessionRequest): Promise<TerminalSessionSnapshot>
   writeInput(sessionId: string, data: string): Promise<void>
@@ -175,6 +181,7 @@ export interface HostApi {
   attachments: AttachmentsHostApi
   browser: BrowserHostApi
   clipboard: ClipboardHostApi
+  resources: ResourcesHostApi
   search: SearchHostApi
   storage: StorageHostApi
   terminal: TerminalHostApi
