@@ -1,6 +1,6 @@
 mod attachments;
+mod extensions;
 mod file_transactions;
-mod hooks;
 mod tool_flow;
 mod tool_input_stream;
 
@@ -25,10 +25,10 @@ use crate::storage::service::StorageService;
 use crate::tools::{ToolExecutionContext, ToolRegistry};
 use crate::usage::merge_total_usage;
 use attachments::{build_attachment_context, AttachmentContext};
+use extensions::{ModelRequestContext, RuntimeEffect, RuntimeExtensionEvent, RuntimeExtensions};
 use file_transactions::{
     FileTransactionRunGuard, FileTransactionState, MAX_RESPONSE_FENCE_CORRECTIONS,
 };
-use hooks::AgentRuntimeHooks;
 use serde_json::{json, Value};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -189,10 +189,11 @@ impl AgentRuntime {
     ) -> AgentResult<AgentChatOutput> {
         let run_id = run_id.unwrap_or_else(generate_run_id);
         let context = input.context.clone();
-        let mut runtime_hooks = AgentRuntimeHooks::for_run(&run_id);
-        let tool_registry = Arc::new(ToolRegistry::defaults_with_search(
-            input.search_config.as_ref(),
-        ));
+        let mut runtime_extensions =
+            RuntimeExtensions::for_run(&run_id, &input.extension_snapshots)?;
+        let mut tool_registry = ToolRegistry::defaults_with_search(input.search_config.as_ref());
+        runtime_extensions.register_tools(&mut tool_registry)?;
+        let tool_registry = Arc::new(tool_registry);
         let command_permission = context
             .as_ref()
             .map(|context| context.permissions.command)
@@ -208,7 +209,6 @@ impl AgentRuntime {
             .unwrap_or(false)
             && host_executor.is_some();
         let mut tool_definitions = tool_registry.definitions();
-        tool_definitions.extend(runtime_hooks.tool_definitions());
         apply_permission_policy_to_tool_definitions(&mut tool_definitions, context.as_ref());
         if command_auto_approve {
             if let Some(definition) = tool_definitions
@@ -262,6 +262,7 @@ impl AgentRuntime {
                 run_id,
                 event_stream,
                 tool_definitions,
+                runtime_extensions.todo_state(),
                 usage,
                 finish_reason,
             ));
@@ -273,6 +274,7 @@ impl AgentRuntime {
                     run_id,
                     event_stream,
                     tool_definitions,
+                    runtime_extensions.todo_state(),
                     usage,
                     finish_reason,
                 ));
@@ -281,7 +283,10 @@ impl AgentRuntime {
                 FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
             let user_text_blocked = file_transactions.blocks_user_text();
             let mut request_context = active_context.clone();
-            runtime_hooks.before_llm_request(&mut request_context)?;
+            runtime_extensions.contribute_request_context(
+                &ModelRequestContext::agent_work(),
+                &mut request_context,
+            )?;
             if let Some(context) = file_transactions.request_context() {
                 request_context.push(ContextItem::text(
                     LlmMessageRole::System,
@@ -421,6 +426,7 @@ impl AgentRuntime {
                         run_id,
                         event_stream,
                         tool_definitions,
+                        runtime_extensions.todo_state(),
                         usage,
                         finish_reason,
                     ));
@@ -435,6 +441,7 @@ impl AgentRuntime {
                     run_id,
                     event_stream,
                     tool_definitions,
+                    runtime_extensions.todo_state(),
                     usage,
                     finish_reason,
                 ));
@@ -508,6 +515,7 @@ impl AgentRuntime {
                         run_id,
                         event_stream,
                         tool_definitions,
+                        runtime_extensions.todo_state(),
                         usage,
                         finish_reason,
                     ));
@@ -545,6 +553,7 @@ impl AgentRuntime {
                         run_id,
                         event_stream,
                         tool_definitions,
+                        runtime_extensions.todo_state(),
                         usage,
                         finish_reason,
                     ));
@@ -578,6 +587,7 @@ impl AgentRuntime {
                             run_id,
                             event_stream,
                             tool_definitions,
+                            runtime_extensions.todo_state(),
                             usage,
                             finish_reason,
                         ));
@@ -591,6 +601,7 @@ impl AgentRuntime {
                     event_stream.emit(AgentEvent::ApprovalRequired {
                         run_id: run_id.clone(),
                         action: action.clone(),
+                        extension_snapshots: runtime_extensions.snapshots()?,
                     });
                     event_stream.emit(state_event(
                         &run_id,
@@ -615,16 +626,14 @@ impl AgentRuntime {
                         run_id,
                         events: event_stream.into_events(),
                         tool_definitions,
-                        todo: runtime_hooks.todo_state(),
+                        todo: runtime_extensions.todo_state(),
                         usage,
                         finish_reason,
                         proposed_actions: vec![action],
                     });
                 }
 
-                let result_result = if let Some(result) = runtime_hooks.handle_tool_call(&call) {
-                    result
-                } else if auto_execute_host_action {
+                let result_result = if auto_execute_host_action {
                     match tool_registry.proposed_action(&tool_context, &call) {
                         Ok(action) => {
                             let action = approve_proposed_action(action);
@@ -662,6 +671,7 @@ impl AgentRuntime {
                             run_id,
                             event_stream,
                             tool_definitions,
+                            runtime_extensions.todo_state(),
                             usage,
                             finish_reason,
                         ));
@@ -675,6 +685,7 @@ impl AgentRuntime {
                         run_id,
                         event_stream,
                         tool_definitions,
+                        runtime_extensions.todo_state(),
                         usage,
                         finish_reason,
                     ));
@@ -691,7 +702,13 @@ impl AgentRuntime {
                         draft,
                     });
                 }
-                runtime_hooks.after_tool_result(&event_result, &mut event_stream)?;
+                for effect in runtime_extensions
+                    .on_event(RuntimeExtensionEvent::ToolCompleted { result: &result })?
+                {
+                    match effect {
+                        RuntimeEffect::EmitEvent(event) => event_stream.emit(event),
+                    }
+                }
 
                 active_context.push(ContextItem::tool_result(
                     call.id.clone(),
@@ -720,6 +737,7 @@ impl AgentRuntime {
                         run_id,
                         event_stream,
                         tool_definitions,
+                        runtime_extensions.todo_state(),
                         usage,
                         finish_reason,
                     ));
@@ -741,6 +759,7 @@ impl AgentRuntime {
                 run_id,
                 event_stream,
                 tool_definitions,
+                runtime_extensions.todo_state(),
                 usage,
                 finish_reason,
             ));
@@ -754,7 +773,6 @@ impl AgentRuntime {
         }
         file_transaction_guard.complete();
         let content = final_content.unwrap_or_else(|| "没有生成可显示的回复。".to_string());
-        runtime_hooks.before_run_finish(&mut event_stream)?;
         if !llm_request.stream {
             event_stream.emit(AgentEvent::MessageDelta {
                 run_id: run_id.clone(),
@@ -779,7 +797,7 @@ impl AgentRuntime {
             run_id,
             events: event_stream.into_events(),
             tool_definitions,
-            todo: runtime_hooks.todo_state(),
+            todo: runtime_extensions.todo_state(),
             usage,
             finish_reason,
             proposed_actions: Vec::<AgentProposedAction>::new(),

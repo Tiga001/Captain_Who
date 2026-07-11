@@ -45,7 +45,7 @@ pub(crate) enum ContextSource {
     ToolContinuation,
     ModelResponse,
     ToolResult,
-    RuntimeHook,
+    RuntimeExtension,
     FileTransaction,
     RuntimeGuard,
 }
@@ -61,7 +61,7 @@ impl ContextSource {
             Self::ToolContinuation => "tool_continuation",
             Self::ModelResponse => "model_response",
             Self::ToolResult => "tool_result",
-            Self::RuntimeHook => "runtime_hook",
+            Self::RuntimeExtension => "runtime_extension",
             Self::FileTransaction => "file_transaction",
             Self::RuntimeGuard => "runtime_guard",
         }

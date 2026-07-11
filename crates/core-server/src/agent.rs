@@ -19,9 +19,10 @@ use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
     next_run_id, send_chat_with_host_executor, AgentApprovalDecision, AgentApprovalDecisionStatus,
     AgentApprovalStatus, AgentCancellationToken, AgentChatInput, AgentChatOutput, AgentError,
-    AgentEvent, AgentEventEmitter, AgentHostActionExecutor, AgentPatchResult, AgentProposedAction,
-    AgentResult, AgentRunStatus, AgentToolCall, AgentToolContinuation, AgentToolResult, AgentUsage,
-    AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    AgentEvent, AgentEventEmitter, AgentExtensionSnapshot, AgentHostActionExecutor,
+    AgentPatchResult, AgentProposedAction, AgentResult, AgentRunStatus, AgentToolCall,
+    AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
+    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -96,13 +97,22 @@ impl AgentService {
             let emitter_assistant_message_id = worker_assistant_message_id.clone();
             let emitter_agent_input = pending_agent_input.clone();
             let emitter: AgentEventEmitter = Arc::new(move |event| {
-                if let AgentEvent::ApprovalRequired { run_id, action } = &event {
+                if let AgentEvent::ApprovalRequired {
+                    run_id,
+                    action,
+                    extension_snapshots,
+                } = &event
+                {
+                    let agent_input = agent_input_with_extension_snapshots(
+                        &emitter_agent_input,
+                        extension_snapshots,
+                    );
                     emitter_service.store_pending_action(
                         run_id,
                         &emitter_conversation_id,
                         &emitter_assistant_message_id,
                         action.clone(),
-                        emitter_agent_input.clone(),
+                        agent_input,
                     );
                 }
                 let _ = emitter_notifications.send(agent_event_notification(event));
@@ -944,13 +954,20 @@ impl AgentService {
         let emitter_assistant_message_id = record.snapshot.assistant_message_id.clone();
         let emitter_agent_input = record.agent_input.clone();
         let emitter: AgentEventEmitter = Arc::new(move |event| {
-            if let AgentEvent::ApprovalRequired { run_id, action } = &event {
+            if let AgentEvent::ApprovalRequired {
+                run_id,
+                action,
+                extension_snapshots,
+            } = &event
+            {
+                let agent_input =
+                    agent_input_with_extension_snapshots(&emitter_agent_input, extension_snapshots);
                 emitter_service.store_pending_action(
                     run_id,
                     emitter_conversation_id.as_deref().unwrap_or_default(),
                     emitter_assistant_message_id.as_deref().unwrap_or_default(),
                     action.clone(),
-                    emitter_agent_input.clone(),
+                    agent_input,
                 );
             }
             let _ = emitter_notifications.send(agent_event_notification(event));
@@ -1569,6 +1586,15 @@ fn restore_agent_input_secrets(
     agent_input
 }
 
+fn agent_input_with_extension_snapshots(
+    agent_input: &AgentChatInput,
+    extension_snapshots: &[AgentExtensionSnapshot],
+) -> AgentChatInput {
+    let mut checkpoint = agent_input.clone();
+    checkpoint.extension_snapshots = extension_snapshots.to_vec();
+    checkpoint
+}
+
 fn pending_status_from_label(value: &str) -> Option<PendingActionStatus> {
     match value {
         "pending" => Some(PendingActionStatus::Pending),
@@ -1644,6 +1670,7 @@ mod tests {
     use super::*;
     use mycopilot_core::storage::models::ChatConversationRecord;
     use mycopilot_core::AgentUsageSummaryRange;
+    use serde_json::json;
     use tempfile::tempdir;
 
     #[test]
@@ -1745,5 +1772,53 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .is_empty());
+    }
+
+    #[test]
+    fn pending_approval_persists_extension_checkpoint() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let service = AgentService::new(storage.clone());
+        let base_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        let snapshots = vec![AgentExtensionSnapshot {
+            extension_id: "todo".to_string(),
+            version: 1,
+            state: json!({ "state": { "revision": 2, "items": [], "updatedAt": 10 }, "nextItemId": 3 }),
+        }];
+        let checkpoint = agent_input_with_extension_snapshots(&base_input, &snapshots);
+        let action = AgentProposedAction::ToolCall {
+            call: AgentToolCall {
+                id: "call-checkpoint".to_string(),
+                tool: "approval_test".to_string(),
+                args: json!({}),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            },
+        };
+
+        service.store_pending_action(
+            "run-checkpoint",
+            "conversation-checkpoint",
+            "assistant-checkpoint",
+            action,
+            checkpoint,
+        );
+        assert!(base_input.extension_snapshots.is_empty());
+
+        let reloaded = AgentService::new(storage);
+        let pending = reloaded
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let record = pending.get("call-checkpoint").unwrap();
+        assert_eq!(record.agent_input.extension_snapshots, snapshots);
+        assert!(record.agent_input.api_token.is_empty());
     }
 }

@@ -8,7 +8,7 @@ use crate::llm::{LlmImage, LlmMessage, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
     AgentApprovalDecision, AgentApprovalDecisionStatus, AgentApprovalStatus, AgentChatOutput,
     AgentError, AgentEvent, AgentProposedAction, AgentResult, AgentRunStatus, AgentStateSnapshot,
-    AgentToolCall, AgentToolDefinition, AgentToolResult, AgentUsage,
+    AgentTodoState, AgentToolCall, AgentToolDefinition, AgentToolResult, AgentUsage,
 };
 use crate::tools::{ToolExecutionContext, ToolRegistry};
 use serde::Deserialize;
@@ -375,6 +375,7 @@ pub(super) fn cancelled_output(
     run_id: String,
     mut event_stream: AgentEventStream,
     tool_definitions: Vec<AgentToolDefinition>,
+    todo: Option<AgentTodoState>,
     usage: Option<AgentUsage>,
     finish_reason: Option<String>,
 ) -> AgentChatOutput {
@@ -395,7 +396,7 @@ pub(super) fn cancelled_output(
         run_id,
         events: event_stream.into_events(),
         tool_definitions,
-        todo: None,
+        todo,
         usage,
         finish_reason,
         proposed_actions: Vec::new(),

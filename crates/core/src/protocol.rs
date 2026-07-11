@@ -22,7 +22,17 @@ pub struct AgentChatInput {
     pub tool_continuation: Option<AgentToolContinuation>,
     #[serde(default)]
     pub attachments: Vec<AgentInputAttachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_snapshots: Vec<AgentExtensionSnapshot>,
     pub messages: Vec<AgentChatMessage>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentExtensionSnapshot {
+    pub extension_id: String,
+    pub version: u32,
+    pub state: Value,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -808,6 +818,8 @@ pub enum AgentEvent {
     ApprovalRequired {
         run_id: String,
         action: AgentProposedAction,
+        #[serde(skip)]
+        extension_snapshots: Vec<AgentExtensionSnapshot>,
     },
     Diff {
         run_id: String,

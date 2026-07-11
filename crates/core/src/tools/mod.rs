@@ -59,12 +59,14 @@ use limits::*;
 
 pub struct ToolRegistry {
     tools: BTreeMap<String, Box<dyn AgentTool>>,
+    owners: BTreeMap<String, String>,
 }
 
 impl ToolRegistry {
     pub fn defaults_with_search(search_config: Option<&AgentSearchConfig>) -> Self {
         let mut registry = Self {
             tools: BTreeMap::new(),
+            owners: BTreeMap::new(),
         };
         registry.register(AttachmentsListTool);
         registry.register(AttachmentsListProjectTool);
@@ -182,9 +184,43 @@ impl ToolRegistry {
         }
     }
 
+    pub(crate) fn register_extension_tool(
+        &mut self,
+        extension_id: &str,
+        tool: Box<dyn AgentTool>,
+    ) -> AgentResult<()> {
+        self.register_boxed(format!("extension:{extension_id}"), tool)
+    }
+
     fn register<T: AgentTool + 'static>(&mut self, tool: T) {
-        self.tools
-            .insert(tool.definition().name, Box::new(tool) as Box<dyn AgentTool>);
+        self.register_boxed("core".to_string(), Box::new(tool))
+            .expect("core tool names must be unique and non-empty");
+    }
+
+    fn register_boxed(&mut self, owner: String, tool: Box<dyn AgentTool>) -> AgentResult<()> {
+        let definition = tool.definition();
+        let name = definition.name.trim();
+        if name.is_empty() {
+            return Err(AgentError::new(format!(
+                "工具注册失败：{owner} 提供了空工具名。"
+            )));
+        }
+        if name != definition.name {
+            return Err(AgentError::new(format!(
+                "工具注册失败：`{}` 的名称首尾不能包含空白字符。",
+                definition.name
+            )));
+        }
+        if let Some(existing_owner) = self.owners.get(name) {
+            return Err(AgentError::new(format!(
+                "工具注册冲突：`{name}` 已由 {existing_owner} 注册，{owner} 不能重复注册。"
+            )));
+        }
+
+        let name = name.to_string();
+        self.tools.insert(name.clone(), tool);
+        self.owners.insert(name, owner);
+        Ok(())
     }
 }
 
@@ -203,7 +239,7 @@ fn tavily_api_key(search_config: Option<&AgentSearchConfig>) -> Option<String> {
     Some(api_key.to_string())
 }
 
-pub(super) trait AgentTool: Send + Sync {
+pub(crate) trait AgentTool: Send + Sync {
     fn definition(&self) -> AgentToolDefinition;
     fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value>;
     fn proposed_action(

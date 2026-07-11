@@ -503,6 +503,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         approval_decision: None,
         tool_continuation: None,
         attachments: Vec::new(),
+        extension_snapshots: Vec::new(),
         messages: vec![message("user", "create a preview")],
     };
     let output = AgentRuntime::default()
