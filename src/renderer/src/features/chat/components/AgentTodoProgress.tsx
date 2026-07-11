@@ -2,20 +2,26 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   type CSSProperties,
-  type FocusEvent,
   type ReactElement,
   useState
 } from 'react'
 import { createPortal } from 'react-dom'
-import { AlertTriangle, CheckCircle2, Circle, LoaderCircle } from 'lucide-react'
+import { AlertTriangle, BadgeCheck, Circle } from 'lucide-react'
 import type { AgentTodoItem, AgentTodoState } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
-import { formatTranslation } from '../../../config/translationFormat'
 import type { ChatAgentRunView } from '../chatTypes'
+import {
+  formatTodoCompactProgressLabel,
+  getTodoCounts,
+  getTodoDisplayStatus,
+  getTodoProgressPercent,
+  getValidTodoItems
+} from './todoProgress'
 
 interface AgentTodoProgressProps {
   completedAt?: number
@@ -32,27 +38,9 @@ const TODO_POPOVER_MIN_WIDTH = 220
 const TODO_POPOVER_HORIZONTAL_PADDING = 52
 const TODO_POPOVER_AVERAGE_CHAR_WIDTH = 14
 
-function getCurrentStepIndex(items: AgentTodoItem[]): number {
-  const activeIndex = items.findIndex(
-    (item) => item.status === 'in_progress' || item.status === 'blocked'
-  )
-  if (activeIndex !== -1) return activeIndex + 1
-
-  const firstPendingIndex = items.findIndex((item) => item.status === 'pending')
-  if (firstPendingIndex !== -1) return firstPendingIndex + 1
-
-  return items.length
-}
-
-function getProgressPercent(items: AgentTodoItem[]): number {
-  if (items.length === 0) return 0
-  const completedCount = items.filter((item) => item.status === 'completed').length
-  return Math.round((completedCount / items.length) * 100)
-}
-
 function TodoStatusIcon({ status }: { status: AgentTodoItem['status'] }): ReactElement {
-  if (status === 'completed') return <CheckCircle2 aria-hidden="true" />
-  if (status === 'in_progress') return <LoaderCircle aria-hidden="true" />
+  if (status === 'completed') return <BadgeCheck aria-hidden="true" />
+  if (status === 'in_progress') return <span className="mc-processing-spinner" />
   if (status === 'blocked') return <AlertTriangle aria-hidden="true" />
   return <Circle aria-hidden="true" />
 }
@@ -65,21 +53,18 @@ export function AgentTodoProgress({
   const { t } = useFrontendConfig()
   const [hiddenDeadlineKey, setHiddenDeadlineKey] = useState<string | null>(null)
   const [isPopoverOpen, setPopoverOpen] = useState(false)
-  const rootRef = useRef<HTMLDivElement>(null)
+  const popoverId = useId()
+  const rootRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
-  const closeTimerRef = useRef<number | null>(null)
-  const items = useMemo(
-    () => todo.items.filter((item) => item.title.trim().length > 0),
-    [todo.items]
-  )
+  const items = useMemo(() => getValidTodoItems(todo.items), [todo.items])
+  const counts = useMemo(() => getTodoCounts(items), [items])
   const longestTitleLength = useMemo(
     () => items.reduce((max, item) => Math.max(max, item.title.length), 0),
     [items]
   )
   const hasItems = items.length > 0
-  const currentStep = getCurrentStepIndex(items)
-  const activeStatus = items[currentStep - 1]?.status ?? 'pending'
-  const allCompleted = hasItems && items.every((item) => item.status === 'completed')
+  const displayStatus = getTodoDisplayStatus(counts)
+  const allCompleted = hasItems && counts.completed === counts.total
   const hideAt =
     runStatus === 'cancelled' || runStatus === 'failed'
       ? (completedAt ?? todo.updatedAt) + INTERRUPTED_TODO_HIDE_DELAY_MS
@@ -89,28 +74,9 @@ export function AgentTodoProgress({
   const hideDeadlineKey = hideAt === null ? null : `${todo.revision}:${runStatus}:${hideAt}`
   const isHidden = hideDeadlineKey !== null && hiddenDeadlineKey === hideDeadlineKey
   const progressStyle = {
-    '--agent-todo-progress': `${getProgressPercent(items)}%`
+    '--agent-todo-progress': `${getTodoProgressPercent(counts)}%`
   } as CSSProperties & Record<'--agent-todo-progress', string>
-  const progressLabel = formatTranslation(t, 'agent.todo.progress', {
-    current: currentStep,
-    total: items.length
-  })
-  const closePopoverLater = useCallback(() => {
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current)
-    }
-    closeTimerRef.current = window.setTimeout(() => {
-      setPopoverOpen(false)
-      closeTimerRef.current = null
-    }, 80)
-  }, [])
-  const openPopover = useCallback(() => {
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current)
-      closeTimerRef.current = null
-    }
-    setPopoverOpen(true)
-  }, [])
+  const progressLabel = formatTodoCompactProgressLabel(t, counts)
   const updatePopoverPosition = useCallback(() => {
     const root = rootRef.current
     const popover = popoverRef.current
@@ -118,7 +84,6 @@ export function AgentTodoProgress({
 
     const rect = root.getBoundingClientRect()
     const viewportWidth = window.innerWidth
-    const viewportHeight = window.innerHeight
     const preferredWidth = Math.ceil(
       longestTitleLength * TODO_POPOVER_AVERAGE_CHAR_WIDTH + TODO_POPOVER_HORIZONTAL_PADDING
     )
@@ -129,31 +94,20 @@ export function AgentTodoProgress({
         Math.min(preferredWidth, viewportWidth - TODO_POPOVER_MARGIN * 2)
       )
     )
-    const measuredHeight = popover.offsetHeight
+    const availableHeight = Math.max(0, rect.top - TODO_POPOVER_GAP - TODO_POPOVER_MARGIN)
     const rawLeft = rect.left + rect.width / 2 - width / 2
     const left = Math.min(
       Math.max(rawLeft, TODO_POPOVER_MARGIN),
       Math.max(TODO_POPOVER_MARGIN, viewportWidth - width - TODO_POPOVER_MARGIN)
     )
-    const rawTop = rect.top - measuredHeight - TODO_POPOVER_GAP
-    const top = Math.min(
-      Math.max(rawTop, TODO_POPOVER_MARGIN),
-      Math.max(TODO_POPOVER_MARGIN, viewportHeight - measuredHeight - TODO_POPOVER_MARGIN)
-    )
 
     popover.style.left = `${left}px`
-    popover.style.top = `${top}px`
     popover.style.width = `${width}px`
+    popover.style.maxHeight = `${availableHeight}px`
+    const top = Math.max(TODO_POPOVER_MARGIN, rect.top - popover.offsetHeight - TODO_POPOVER_GAP)
+    popover.style.top = `${top}px`
     popover.style.visibility = 'visible'
   }, [longestTitleLength])
-  const handleBlur = useCallback(
-    (event: FocusEvent<HTMLDivElement>) => {
-      const nextTarget = event.relatedTarget
-      if (nextTarget instanceof Node && popoverRef.current?.contains(nextTarget)) return
-      closePopoverLater()
-    },
-    [closePopoverLater]
-  )
 
   useEffect(() => {
     if (hideAt === null || hideDeadlineKey === null) return undefined
@@ -170,12 +124,33 @@ export function AgentTodoProgress({
   }, [hideAt, hideDeadlineKey])
 
   useEffect(() => {
-    return () => {
-      if (closeTimerRef.current !== null) {
-        window.clearTimeout(closeTimerRef.current)
-      }
+    if (!isPopoverOpen) return undefined
+
+    const isWithinDisclosure = (target: EventTarget | null): boolean =>
+      target instanceof Node &&
+      (Boolean(rootRef.current?.contains(target)) || Boolean(popoverRef.current?.contains(target)))
+    const handlePointerDown = (event: PointerEvent): void => {
+      if (!isWithinDisclosure(event.target)) setPopoverOpen(false)
     }
-  }, [])
+    const handleFocusIn = (event: FocusEvent): void => {
+      if (!isWithinDisclosure(event.target)) setPopoverOpen(false)
+    }
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setPopoverOpen(false)
+      rootRef.current?.focus()
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    document.addEventListener('focusin', handleFocusIn)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true)
+      document.removeEventListener('focusin', handleFocusIn)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isPopoverOpen])
 
   useLayoutEffect(() => {
     if (!isPopoverOpen) return undefined
@@ -198,26 +173,30 @@ export function AgentTodoProgress({
   if (isHidden) return null
 
   return (
-    <div
-      className="agent-todo-progress"
-      aria-label={progressLabel}
-      ref={rootRef}
-      style={progressStyle}
-      tabIndex={0}
-      data-status={activeStatus}
-      onBlur={handleBlur}
-      onFocus={openPopover}
-      onPointerEnter={openPopover}
-      onPointerLeave={closePopoverLater}
-    >
+    <>
+      <button
+        aria-controls={isPopoverOpen ? popoverId : undefined}
+        aria-expanded={isPopoverOpen}
+        aria-label={progressLabel}
+        className="agent-todo-progress"
+        data-status={displayStatus}
+        onClick={() => setPopoverOpen((current) => !current)}
+        ref={rootRef}
+        style={progressStyle}
+        type="button"
+      >
+        <span className="agent-todo-progress__ring" aria-hidden="true" />
+        <span className="agent-todo-progress__label">{progressLabel}</span>
+      </button>
+
       {isPopoverOpen &&
         createPortal(
           <div
+            aria-label={t('agent.todo.title')}
             className="agent-todo-progress__popover"
-            onPointerEnter={openPopover}
-            onPointerLeave={closePopoverLater}
+            id={popoverId}
             ref={popoverRef}
-            role="status"
+            role="region"
             style={{ visibility: 'hidden' }}
           >
             <ul className="agent-todo-progress__list" aria-label={t('agent.todo.title')}>
@@ -238,9 +217,6 @@ export function AgentTodoProgress({
           </div>,
           document.body
         )}
-
-      <span className="agent-todo-progress__ring" aria-hidden="true" />
-      <span className="agent-todo-progress__label">{progressLabel}</span>
-    </div>
+    </>
   )
 }

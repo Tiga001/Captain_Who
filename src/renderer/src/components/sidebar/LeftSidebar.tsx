@@ -709,7 +709,7 @@ export function LeftSidebar({
           {shouldShowProjectStatus && (
             <span className="left-sidebar__project-status">
               {hasPendingProjectConversation ? (
-                <span className="left-sidebar__conversation-spinner" aria-label="正在处理" />
+                <span className="mc-processing-spinner" aria-label="正在处理" />
               ) : (
                 <span
                   className="left-sidebar__conversation-unread-dot"

@@ -53,6 +53,10 @@ import {
   type SearchToolActivityGroupItem
 } from './toolActivities/SearchToolActivity'
 import type { SettledToolStatus } from './toolActivities/toolActivityUtils'
+import {
+  WebSearchToolActivityGroup,
+  type WebSearchToolActivityGroupItem
+} from './toolActivities/WebSearchToolActivity'
 import { AssistantSources } from './toolActivities/WebSearchSources'
 
 const ACTIVE_STREAMING_GRACE_MS = 1200
@@ -89,6 +93,12 @@ type RenderableTimelineItem =
       id: string
       type: 'search_group'
       kind: SearchKind
+      callIds: string[]
+    }
+  | {
+      id: string
+      type: 'web_activity_group'
+      kind: 'search' | 'fetch'
       callIds: string[]
     }
   | {
@@ -340,6 +350,30 @@ function groupTimelineItems(
     const call = run.toolCalls.find((candidate) => candidate.id === item.callId)
     if (!call) return [...items, item]
 
+    if (call.tool === 'web_search' || call.tool === 'web_fetch') {
+      const kind = call.tool === 'web_fetch' ? 'fetch' : 'search'
+      const previousItem = items[items.length - 1]
+      if (previousItem?.type === 'web_activity_group' && previousItem.kind === kind) {
+        return [
+          ...items.slice(0, -1),
+          {
+            ...previousItem,
+            callIds: [...previousItem.callIds, item.callId]
+          }
+        ]
+      }
+
+      return [
+        ...items,
+        {
+          id: `web-${kind}-group-${item.callId}`,
+          type: 'web_activity_group',
+          kind,
+          callIds: [item.callId]
+        }
+      ]
+    }
+
     if (call.tool === 'write_file') {
       let existingIndex = -1
       for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -563,6 +597,27 @@ function getSearchGroupItems(
         cancelled: settledStatus === 'cancelled',
         result,
         settledStatus
+      }
+    ]
+  }, [])
+}
+
+function getWebActivityGroupItems(
+  run: ChatAgentRunView,
+  callIds: string[]
+): WebSearchToolActivityGroupItem[] {
+  return callIds.reduce<WebSearchToolActivityGroupItem[]>((items, callId) => {
+    const call = run.toolCalls.find((candidate) => candidate.id === callId)
+    if (!call) return items
+    const result = getToolResult(run, call.id)
+
+    return [
+      ...items,
+      {
+        activity: run.webSearchActivities?.find((activity) => activity.callId === call.id),
+        call,
+        result,
+        settledStatus: getSettledToolStatus(run, result)
       }
     ]
   }, [])
@@ -812,6 +867,12 @@ function AgentTimelineItemView({
     const items = getSearchGroupItems(run, item.callIds)
     if (items.length === 0) return null
     return <SearchToolActivityGroup items={items} kind={item.kind} />
+  }
+
+  if (item.type === 'web_activity_group') {
+    const items = getWebActivityGroupItems(run, item.callIds)
+    if (items.length === 0) return null
+    return <WebSearchToolActivityGroup items={items} />
   }
 
   if (item.type === 'run_command_group') {

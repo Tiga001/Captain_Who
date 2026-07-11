@@ -133,6 +133,7 @@
 }
 
 .agent-todo-progress {
+  appearance: none;
   position: relative;
   justify-self: center;
   display: inline-flex;
@@ -142,31 +143,38 @@
   min-height: 42px;
   padding: 0 18px;
   gap: 10px;
-  color: var(--mc-color-text-secondary);
+  color: var(--mc-color-text-muted);
   background: color-mix(in srgb, var(--mc-color-surface-muted) 86%, transparent);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: 22px;
   box-shadow: var(--mc-shadow-popover);
-  cursor: default;
+  cursor: pointer;
+  font-family: inherit;
   font-size: var(--mc-font-size-chat-activity);
   font-weight: var(--mc-font-weight-strong);
+  line-height: inherit;
   outline: none;
+  text-align: left;
+  transition: color 120ms ease;
   z-index: 4;
 }
 
-.agent-todo-progress[data-status='in_progress'] {
+.agent-todo-progress:hover,
+.agent-todo-progress:focus-visible,
+.agent-todo-progress[aria-expanded='true'] {
   color: var(--mc-color-text-primary);
 }
 
-.agent-todo-progress[data-status='blocked'] {
-  color: var(--mc-color-text-danger);
+.agent-todo-progress:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
 }
 
 .agent-todo-progress__ring {
   position: relative;
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
   background: conic-gradient(
     var(--mc-color-text-accent) var(--agent-todo-progress, 0%),
     color-mix(in srgb, currentColor 24%, transparent) 0
@@ -177,7 +185,7 @@
 
 .agent-todo-progress__ring::after {
   position: absolute;
-  inset: 4px;
+  inset: 2px;
   content: '';
   background: var(--mc-color-surface-muted);
   border-radius: inherit;
@@ -200,6 +208,7 @@
 .agent-todo-progress__popover {
   position: fixed;
   z-index: 1600;
+  box-sizing: border-box;
   width: fit-content;
   max-width: calc(100vw - 32px);
   padding: 8px;
@@ -208,6 +217,8 @@
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: 18px;
   box-shadow: var(--mc-shadow-popover);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   pointer-events: auto;
 }
 
@@ -264,8 +275,9 @@
   stroke-width: var(--mc-icon-stroke-medium);
 }
 
-.agent-todo-progress__item[data-status='in_progress'] .agent-todo-progress__item-icon svg {
-  animation: mc-agent-todo-spin 1s linear infinite;
+.agent-todo-progress__item-icon .mc-processing-spinner {
+  width: 100%;
+  height: 100%;
 }
 
 .agent-todo-progress__item-copy {
@@ -292,12 +304,6 @@
 @keyframes mc-agent-todo-spin {
   to {
     transform: rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .agent-todo-progress__item[data-status='in_progress'] .agent-todo-progress__item-icon svg {
-    animation: none;
   }
 }
 
@@ -607,29 +613,27 @@
   color: currentColor;
 }
 
-.todo-update-activity__item-index {
-  display: inline-flex;
-  justify-content: flex-end;
-  width: var(--mc-icon-size-sm);
-  margin-top: 0.02em;
-  color: var(--mc-color-text-subtle);
-  font-variant-numeric: tabular-nums;
-}
-
 .todo-update-activity__item-icon svg {
   width: 100%;
   height: 100%;
   stroke-width: var(--mc-icon-stroke-medium);
 }
 
-.todo-update-activity__item[data-status='in_progress'] .todo-update-activity__item-icon svg {
-  animation: mc-agent-todo-spin 1s linear infinite;
+.todo-update-activity__item-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
 }
 
-.todo-update-activity__item-title {
-  min-width: 0;
+.todo-update-activity__item-title,
+.todo-update-activity__item-note {
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.todo-update-activity__item-note {
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-xs);
 }
 
 .run-command-shell__status {

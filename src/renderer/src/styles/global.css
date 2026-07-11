@@ -37,6 +37,23 @@ button {
   font: inherit;
 }
 
+.mc-processing-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  vertical-align: -1px;
+  border: 2px solid var(--mc-color-sidebar-text-secondary);
+  border-top-color: var(--mc-color-text-muted);
+  border-radius: 999px;
+  animation: mc-processing-spinner 2400ms linear infinite;
+}
+
+@keyframes mc-processing-spinner {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .app-shell[data-native-font-smoothing="true"],
 .app-shell[data-native-font-smoothing="true"] *,
 .settings-page[data-native-font-smoothing="true"],

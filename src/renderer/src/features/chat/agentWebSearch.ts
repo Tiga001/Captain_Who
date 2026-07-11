@@ -1,6 +1,7 @@
 // Renderer UI.
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { ChatAgentRunView, ChatWebSearchActivity, ChatWebSearchSource } from './chatTypes'
+import { buildWebFetchPresentation, type WebFetchPresentation } from './webFetchPresentation'
 
 interface WebSearchResultPayload {
   query?: unknown
@@ -21,6 +22,7 @@ interface WebSearchResultItem {
 }
 
 interface WebFetchResultPayload {
+  title?: unknown
   url?: unknown
   requestedUrl?: unknown
   provider?: unknown
@@ -32,17 +34,16 @@ interface WebFetchResultPayload {
 }
 
 const WEB_ACTIVITY_TOOLS = new Set(['web_search', 'web_fetch'])
-const WEB_FETCH_SUMMARY_MAX_CHARS = 1_200
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
-function stringValue(value: unknown) {
+function stringValue(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
-function numberValue(value: unknown) {
+function numberValue(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value
   if (typeof value === 'string' && value.trim()) {
     const parsed = Number(value)
@@ -51,13 +52,13 @@ function numberValue(value: unknown) {
   return undefined
 }
 
-function responseTimeValue(value: unknown) {
+function responseTimeValue(value: unknown): number | string | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value
   if (typeof value === 'string' && value.trim()) return value.trim()
   return null
 }
 
-export function isWebActivityTool(tool: string) {
+export function isWebActivityTool(tool: string): boolean {
   return WEB_ACTIVITY_TOOLS.has(tool)
 }
 
@@ -65,13 +66,13 @@ function kindFromTool(tool: string): ChatWebSearchActivity['kind'] {
   return tool === 'web_fetch' ? 'fetch' : 'search'
 }
 
-function queryFromCall(call: AgentToolCall) {
+function queryFromCall(call: AgentToolCall): string {
   if (!isRecord(call.args)) return ''
   if (call.tool === 'web_fetch') return stringValue(call.args.url)
   return stringValue(call.args.query)
 }
 
-function validHttpUrl(value: unknown) {
+function validHttpUrl(value: unknown): URL | null {
   const rawUrl = stringValue(value)
   if (!rawUrl) return null
 
@@ -84,28 +85,23 @@ function validHttpUrl(value: unknown) {
   }
 }
 
-function displayUrlFromUrl(url: URL) {
+function displayUrlFromUrl(url: URL): string {
   return `${url.hostname}${url.pathname === '/' ? '' : url.pathname}`.replace(/\/$/, '')
 }
 
-function sourceId(callId: string, url: string, index: number) {
+function sourceId(callId: string, url: string, index: number): string {
   return `${callId}:source:${index}:${url}`
 }
 
-function normalizeFaviconUrl(value: unknown) {
+function normalizeFaviconUrl(value: unknown): string | undefined {
   const url = validHttpUrl(value)
   return url?.toString()
-}
-
-function truncateWebFetchSummary(content: string) {
-  if (content.length <= WEB_FETCH_SUMMARY_MAX_CHARS) return content
-  return `${content.slice(0, WEB_FETCH_SUMMARY_MAX_CHARS).trimEnd()}\n...[truncated]`
 }
 
 export function compareWebSearchSourcesByRelevance(
   left: ChatWebSearchSource,
   right: ChatWebSearchSource
-) {
+): number {
   if (left.score === undefined && right.score === undefined) return 0
   if (left.score === undefined) return 1
   if (right.score === undefined) return -1
@@ -150,23 +146,22 @@ function normalizeWebSearchSources(callId: string, results: unknown): ChatWebSea
 
 function normalizeWebFetchSources(
   callId: string,
-  payload: WebFetchResultPayload
+  payload: WebFetchResultPayload,
+  presentation: WebFetchPresentation
 ): ChatWebSearchSource[] {
   const url = validHttpUrl(payload.url) ?? validHttpUrl(payload.requestedUrl)
   if (!url) return []
 
   const normalizedUrl = url.toString()
-  const content = stringValue(payload.content) || stringValue(payload.rawContent)
-
   return [
     {
       id: sourceId(callId, normalizedUrl, 0),
-      title: url.hostname,
+      title: presentation.title,
       url: normalizedUrl,
       displayUrl: displayUrlFromUrl(url),
       domain: url.hostname.replace(/^www\./, ''),
       faviconUrl: normalizeFaviconUrl(payload.favicon),
-      snippet: content ? truncateWebFetchSummary(content) : undefined
+      snippet: presentation.summary
     }
   ]
 }
@@ -196,6 +191,7 @@ function activityFromResult(
       status: 'failed',
       sources: previous?.sources ?? [],
       answer: previous?.answer,
+      summaryQuality: previous?.summaryQuality,
       error: result.error,
       responseTime: previous?.responseTime ?? null,
       truncated: previous?.truncated,
@@ -203,11 +199,16 @@ function activityFromResult(
     }
   }
 
-  const answer = isFetch
-    ? truncateWebFetchSummary(
-        stringValue(fetchPayload.content) || stringValue(fetchPayload.rawContent)
+  const fetchContent = stringValue(fetchPayload.content) || stringValue(fetchPayload.rawContent)
+  const fetchUrl = validHttpUrl(fetchPayload.url) ?? validHttpUrl(fetchPayload.requestedUrl)
+  const fetchPresentation = isFetch
+    ? buildWebFetchPresentation(
+        fetchContent,
+        fetchUrl?.hostname.replace(/^www\./, '') || previous?.sources[0]?.title || 'web',
+        stringValue(fetchPayload.title)
       )
-    : stringValue(searchPayload.answer)
+    : undefined
+  const answer = isFetch ? fetchPresentation?.summary : stringValue(searchPayload.answer)
 
   return {
     callId: result.callId,
@@ -216,9 +217,10 @@ function activityFromResult(
     provider,
     status: 'completed',
     sources: isFetch
-      ? normalizeWebFetchSources(result.callId, fetchPayload)
+      ? normalizeWebFetchSources(result.callId, fetchPayload, fetchPresentation!)
       : normalizeWebSearchSources(result.callId, searchPayload.results),
     answer: answer || undefined,
+    summaryQuality: fetchPresentation?.summaryQuality,
     error: undefined,
     responseTime: responseTimeValue(payload.responseTime),
     truncated: typeof payload.truncated === 'boolean' ? payload.truncated : undefined,
@@ -267,6 +269,7 @@ export function upsertWebSearchActivityFromCall(
     ...activity,
     sources: existing?.sources ?? activity.sources,
     answer: existing?.answer,
+    summaryQuality: existing?.summaryQuality,
     error: existing?.error,
     responseTime: existing?.responseTime ?? activity.responseTime,
     truncated: existing?.truncated,

@@ -310,10 +310,10 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- 需要当前聊天的历史附件时先用 attachments_list；需要同项目其他聊天的附件时用 attachments_list_project。取得 readPath 后再调用对应 read_* 工具。".to_string());
     }
     if has_tool(tool_definitions, "web_search") {
-        rules.push("- 对当前状态、近期变化、陌生实体或需要来源核实的信息使用 web_search；本地项目问题不能用网页搜索替代 workspace 检查。".to_string());
+        rules.push("- 对当前状态、近期变化、陌生实体或需要来源核实的信息使用 web_search；用它定位和比较来源，查询应围绕明确的信息缺口，并优先官方或一手来源。已有结果足以回答时停止搜索；追加搜索应补充具体缺口，不要重复高度重叠的查询。本地项目问题不能用网页搜索替代 workspace 检查。".to_string());
     }
     if has_tool(tool_definitions, "web_fetch") {
-        rules.push("- web_fetch 用于深读用户明确提供的公开 URL，或 web_search 返回的 URL；不要猜测 URL。获取失败时回到搜索结果或说明限制。".to_string());
+        rules.push("- web_fetch 用于深读用户明确提供的公开 URL，或从 web_search 结果中筛选出的少量关键页面；仅在搜索摘要不足以支撑结论时读取正文，不要猜测 URL。获取失败时回到搜索结果或说明限制。".to_string());
     }
     if has_tool(tool_definitions, "todo_update") {
         rules.push("- 多步骤任务或执行过程中目标发生变化时，使用 todo_update 维护结构化计划。首次创建计划时可以一次性列出多步；后续更新应保留已有 id，并一次性更新所有实际发生变化的步骤。开始某项前标记 in_progress，完成后标记 completed；并行推进时可以有多项 in_progress，但不要把尚未真正开始的事项提前标记为进行中。".to_string());
@@ -639,6 +639,8 @@ mod tests {
         assert!(!prompt.contains("baseRevision"));
         assert!(prompt.contains("可直接使用 prepend/append"));
         assert!(prompt.contains("陌生实体"));
+        assert!(prompt.contains("定位和比较来源"));
+        assert!(prompt.contains("少量关键页面"));
         assert!(prompt.contains("不要猜测 URL"));
     }
 

@@ -34,6 +34,7 @@ export interface ChatWebSearchActivity {
   status: 'running' | 'completed' | 'failed' | 'cancelled'
   sources: ChatWebSearchSource[]
   answer?: string
+  summaryQuality?: 'good' | 'low'
   error?: string
   responseTime?: number | string | null
   truncated?: boolean

@@ -185,17 +185,6 @@
   line-height: 1;
 }
 
-.left-sidebar__conversation-spinner {
-  display: inline-block;
-  width: 12px;
-  height: 12px;
-  vertical-align: -1px;
-  border: 2px solid var(--mc-color-sidebar-text-secondary);
-  border-top-color: var(--mc-color-text-muted);
-  border-radius: 999px;
-  animation: left-sidebar-conversation-spinner 2400ms linear infinite;
-}
-
 .left-sidebar__conversation-unread-dot {
   display: inline-block;
   width: 9px;
@@ -334,10 +323,4 @@
 .left-sidebar__conversation-pin-icon {
   transform: rotate(45deg);
   transform-origin: center;
-}
-
-@keyframes left-sidebar-conversation-spinner {
-  to {
-    transform: rotate(360deg);
-  }
 }

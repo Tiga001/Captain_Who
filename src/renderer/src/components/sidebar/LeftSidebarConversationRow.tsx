@@ -118,10 +118,10 @@ export function ConversationRow({
             <span className="left-sidebar__conversation-approval-badge">
               {waitingApprovalLabel}
             </span>
-            <span className="left-sidebar__conversation-spinner" aria-label={processingLabel} />
+            <span className="mc-processing-spinner" aria-label={processingLabel} />
           </>
         ) : isPending ? (
-          <span className="left-sidebar__conversation-spinner" aria-label={processingLabel} />
+          <span className="mc-processing-spinner" aria-label={processingLabel} />
         ) : isUnread ? (
           <span className="left-sidebar__conversation-unread-dot" aria-label={unreadLabel} />
         ) : (

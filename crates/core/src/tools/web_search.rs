@@ -10,10 +10,9 @@ use std::time::Duration;
 
 const TAVILY_SEARCH_ENDPOINT: &str = "https://api.tavily.com/search";
 const DEFAULT_MAX_RESULTS: usize = 5;
-const MAX_RESULTS: usize = 10;
-const DEFAULT_RESULT_CONTENT_CHARS: usize = 1_500;
-const MAX_RESULT_CONTENT_CHARS: usize = 4_000;
-const DEFAULT_ANSWER_CHARS: usize = 4_000;
+const MAX_RESULTS: usize = 8;
+const DEFAULT_RESULT_CONTENT_CHARS: usize = 600;
+const DEFAULT_ANSWER_CHARS: usize = 1_200;
 
 pub(super) struct WebSearchTool {
     api_key: String,
@@ -39,7 +38,6 @@ impl AgentTool for WebSearchTool {
                     "topic": { "type": "string", "enum": ["general", "news", "finance"] },
                     "timeRange": { "type": "string", "description": "Optional Tavily time range such as day, week, month, or year." },
                     "includeAnswer": { "type": "boolean" },
-                    "includeRawContent": { "type": "boolean" },
                     "includeDomains": { "type": "array", "items": { "type": "string" } },
                     "excludeDomains": { "type": "array", "items": { "type": "string" } }
                 },
@@ -76,7 +74,6 @@ struct WebSearchArgs {
     topic: Option<String>,
     time_range: Option<String>,
     include_answer: Option<bool>,
-    include_raw_content: Option<bool>,
     include_domains: Option<Vec<String>>,
     exclude_domains: Option<Vec<String>>,
 }
@@ -89,7 +86,6 @@ struct TavilySearchRequest {
     topic: Option<String>,
     time_range: Option<String>,
     include_answer: bool,
-    include_raw_content: bool,
     include_domains: Vec<String>,
     exclude_domains: Vec<String>,
 }
@@ -127,7 +123,6 @@ impl TavilySearchRequest {
             topic,
             time_range: args.time_range.filter(|value| !value.trim().is_empty()),
             include_answer: args.include_answer.unwrap_or(true),
-            include_raw_content: args.include_raw_content.unwrap_or(false),
             include_domains: clean_domains(args.include_domains.unwrap_or_default()),
             exclude_domains: clean_domains(args.exclude_domains.unwrap_or_default()),
         })
@@ -139,7 +134,7 @@ impl TavilySearchRequest {
             "max_results": self.max_results,
             "search_depth": self.search_depth,
             "include_answer": self.include_answer,
-            "include_raw_content": self.include_raw_content,
+            "include_raw_content": false,
         });
 
         if let Some(topic) = &self.topic {
@@ -251,8 +246,7 @@ fn format_tavily_response(
                 .take(request.max_results)
                 .map(|result| {
                     cancellation_token.check()?;
-                    let (result, result_truncated) =
-                        format_tavily_result(result, request.include_raw_content);
+                    let (result, result_truncated) = format_tavily_result(result);
                     truncated |= result_truncated;
                     Ok(result)
                 })
@@ -277,30 +271,18 @@ fn format_tavily_response(
     }))
 }
 
-fn format_tavily_result(result: &Value, include_raw_content: bool) -> (Value, bool) {
+fn format_tavily_result(result: &Value) -> (Value, bool) {
     let (content, content_truncated) = result
         .get("content")
         .and_then(Value::as_str)
         .map(|content| truncate_chars(content, DEFAULT_RESULT_CONTENT_CHARS))
         .map(|(content, truncated)| (Some(content), truncated))
         .unwrap_or((None, false));
-    let (raw_content, raw_content_truncated) = if include_raw_content {
-        result
-            .get("raw_content")
-            .or_else(|| result.get("rawContent"))
-            .and_then(Value::as_str)
-            .map(|content| truncate_chars(content, MAX_RESULT_CONTENT_CHARS))
-            .map(|(content, truncated)| (Some(content), truncated))
-            .unwrap_or((None, false))
-    } else {
-        (None, false)
-    };
     (
         json!({
             "title": result.get("title").and_then(Value::as_str),
             "url": result.get("url").and_then(Value::as_str),
             "content": content,
-            "rawContent": raw_content,
             "score": result.get("score").cloned(),
             "publishedDate": result
                 .get("published_date")
@@ -308,7 +290,7 @@ fn format_tavily_result(result: &Value, include_raw_content: bool) -> (Value, bo
                 .and_then(Value::as_str),
             "favicon": result.get("favicon").and_then(Value::as_str)
         }),
-        content_truncated || raw_content_truncated,
+        content_truncated,
     )
 }
 
@@ -334,7 +316,6 @@ mod tests {
             topic: Some("general".to_string()),
             time_range: Some("week".to_string()),
             include_answer: None,
-            include_raw_content: Some(true),
             include_domains: Some(vec![" docs.rs ".to_string(), "".to_string()]),
             exclude_domains: None,
         })
@@ -345,7 +326,7 @@ mod tests {
         assert_eq!(payload["query"], "rust async");
         assert_eq!(payload["search_depth"], "advanced");
         assert_eq!(payload["include_answer"], true);
-        assert_eq!(payload["include_raw_content"], true);
+        assert_eq!(payload["include_raw_content"], false);
         assert_eq!(payload["include_domains"][0], "docs.rs");
     }
 
@@ -358,7 +339,6 @@ mod tests {
             topic: None,
             time_range: None,
             include_answer: None,
-            include_raw_content: None,
             include_domains: None,
             exclude_domains: None,
         })
@@ -376,7 +356,6 @@ mod tests {
             topic: None,
             time_range: None,
             include_answer: None,
-            include_raw_content: None,
             include_domains: None,
             exclude_domains: None,
         })
@@ -397,7 +376,52 @@ mod tests {
         let result = &formatted["results"][0];
 
         assert_eq!(result["favicon"], "https://www.rust-lang.org/favicon.ico");
+        assert!(result.get("rawContent").is_none());
         assert!(result.get("faviconDataUrl").is_none());
         assert!(result.get("faviconMimeType").is_none());
+    }
+
+    #[test]
+    fn bounds_answer_and_result_content_for_model_context() {
+        let request = TavilySearchRequest::from_args(WebSearchArgs {
+            query: "rust".to_string(),
+            max_results: Some(MAX_RESULTS),
+            search_depth: None,
+            topic: None,
+            time_range: None,
+            include_answer: None,
+            include_domains: None,
+            exclude_domains: None,
+        })
+        .unwrap();
+        let response = json!({
+            "answer": "a".repeat(DEFAULT_ANSWER_CHARS + 100),
+            "results": (0..MAX_RESULTS)
+                .map(|index| json!({
+                    "title": format!("Result {index}"),
+                    "url": format!("https://example.com/{index}"),
+                    "content": "b".repeat(DEFAULT_RESULT_CONTENT_CHARS + 100)
+                }))
+                .collect::<Vec<_>>()
+        });
+
+        let formatted =
+            format_tavily_response(request, response, &AgentCancellationToken::new()).unwrap();
+        let truncation_suffix_chars = "\n...[truncated]".chars().count();
+
+        assert_eq!(formatted["results"].as_array().unwrap().len(), MAX_RESULTS);
+        assert_eq!(
+            formatted["answer"].as_str().unwrap().chars().count(),
+            DEFAULT_ANSWER_CHARS + truncation_suffix_chars
+        );
+        assert!(formatted["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|result| {
+                result["content"].as_str().unwrap().chars().count()
+                    == DEFAULT_RESULT_CONTENT_CHARS + truncation_suffix_chars
+            }));
+        assert_eq!(formatted["truncated"], true);
     }
 }

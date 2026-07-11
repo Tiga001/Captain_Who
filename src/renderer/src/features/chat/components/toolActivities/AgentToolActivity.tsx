@@ -132,7 +132,6 @@ export function AgentToolActivity({
     return (
       <TodoUpdateToolActivity
         cancelled={cancelled && !result}
-        call={call}
         previousResult={previousTodoResult}
         result={result}
         settledStatus={settledStatus}
