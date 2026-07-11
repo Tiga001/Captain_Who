@@ -542,7 +542,10 @@ pub(crate) fn detect_api_style(api_url: &str) -> AgentApiStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::AgentToolSafety;
+    use crate::context::{
+        ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextToolContinuation,
+    };
+    use crate::protocol::{AgentChatMessage, AgentToolSafety};
     use serde_json::json;
 
     fn message(role: LlmMessageRole, content: &str) -> LlmMessage {
@@ -574,6 +577,13 @@ mod tests {
             requires_workspace: true,
             requires_approval: false,
             approval_mode: crate::protocol::AgentToolApprovalMode::Never,
+        }
+    }
+
+    fn chat_message(role: &str, content: &str) -> AgentChatMessage {
+        AgentChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
         }
     }
 
@@ -733,6 +743,66 @@ mod tests {
         assert_eq!(payload["messages"][1]["tool_calls"][0]["id"], "call-1");
         assert_eq!(payload["messages"][2]["role"], "tool");
         assert_eq!(payload["messages"][2]["tool_call_id"], "call-1");
+    }
+
+    #[test]
+    fn assembled_context_preserves_order_across_provider_payloads() {
+        let context = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "System rules".to_string(),
+            messages: vec![
+                chat_message("user", "Earlier question"),
+                chat_message("assistant", "Earlier answer"),
+                chat_message("user", "Continue the edit"),
+            ],
+            attachments: ContextAttachments::default(),
+            approval_observation: None,
+            tool_continuation: Some(ContextToolContinuation {
+                call: LlmToolCall {
+                    id: "call-context-1".to_string(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "src/lib.rs" }),
+                },
+                observation: "file contents".to_string(),
+                is_error: false,
+            }),
+        })
+        .unwrap();
+
+        let request = |api_style| LlmChatRequest {
+            api_url: "https://example.test".to_string(),
+            api_token: "token".to_string(),
+            model: "model".to_string(),
+            api_style,
+            max_tokens: 1024,
+            temperature: 0.2,
+            stream: false,
+            messages: context.to_messages(),
+            tools: vec![tool_definition()],
+        };
+
+        let openai = build_payload(&request(AgentApiStyle::OpenAiCompatible));
+        assert_eq!(openai["messages"][0]["role"], "system");
+        assert_eq!(openai["messages"][3]["content"], "Continue the edit");
+        assert_eq!(
+            openai["messages"][4]["tool_calls"][0]["id"],
+            "call-context-1"
+        );
+        assert_eq!(openai["messages"][5]["role"], "tool");
+
+        let anthropic = build_payload(&request(AgentApiStyle::AnthropicCompatible));
+        assert_eq!(anthropic["system"], "System rules");
+        assert_eq!(
+            anthropic["messages"][2]["content"][0]["text"],
+            "Continue the edit"
+        );
+        assert_eq!(
+            anthropic["messages"][3]["content"][0]["id"],
+            "call-context-1"
+        );
+        assert_eq!(
+            anthropic["messages"][4]["content"][0]["tool_use_id"],
+            "call-context-1"
+        );
     }
 
     #[test]

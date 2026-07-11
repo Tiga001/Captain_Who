@@ -1,10 +1,9 @@
 // Input attachment staging and extraction helpers for agent runtime.
 use super::RUN_COUNTER;
-use crate::llm::{LlmImage, LlmMessage, LlmMessageRole};
+use crate::llm::LlmImage;
 use crate::protocol::{
-    AgentApprovalStatus, AgentChatMessage, AgentError, AgentInputAttachment,
-    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentResult, AgentRunContext,
-    AgentToolCall, AgentWorkspaceContext,
+    AgentApprovalStatus, AgentError, AgentInputAttachment, AgentInputAttachmentEncoding,
+    AgentInputAttachmentKind, AgentResult, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
 };
 use crate::tools::{ToolExecutionContext, ToolRegistry};
 use base64::Engine;
@@ -149,40 +148,6 @@ fn build_attachment_context_in_workspace(
     };
 
     Ok(AttachmentContext { text, images })
-}
-
-pub(super) fn append_attachment_text_to_last_user_message(
-    messages: &mut [AgentChatMessage],
-    attachment_text: &str,
-) {
-    if attachment_text.trim().is_empty() {
-        return;
-    }
-
-    if let Some(message) = messages
-        .iter_mut()
-        .rev()
-        .find(|message| message.role == "user")
-    {
-        message.content = format!("{}\n\n{}", message.content, attachment_text);
-    }
-}
-
-pub(super) fn attach_images_to_last_user_message(
-    messages: &mut [LlmMessage],
-    images: Vec<LlmImage>,
-) {
-    if images.is_empty() {
-        return;
-    }
-
-    if let Some(message) = messages
-        .iter_mut()
-        .rev()
-        .find(|message| message.role == LlmMessageRole::User)
-    {
-        message.images.extend(images);
-    }
 }
 
 fn read_tool_for_attachment(

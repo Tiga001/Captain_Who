@@ -5,9 +5,14 @@ mod tool_flow;
 mod tool_input_stream;
 
 use crate::cancellation::AgentCancellationToken;
+use crate::context::{
+    ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextFrame, ContextGroup,
+    ContextItem, ContextMetadata, ContextRetention, ContextScope, ContextSource,
+    ContextToolContinuation,
+};
 use crate::llm::{
-    complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessage,
-    LlmMessageRole, LlmStreamEvent, LlmToolCall,
+    complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessageRole,
+    LlmStreamEvent, LlmToolCall,
 };
 use crate::prompts::build_system_prompt;
 use crate::protocol::{
@@ -19,10 +24,7 @@ use crate::protocol::{
 use crate::storage::service::StorageService;
 use crate::tools::{ToolExecutionContext, ToolRegistry};
 use crate::usage::merge_total_usage;
-use attachments::{
-    append_attachment_text_to_last_user_message, attach_images_to_last_user_message,
-    build_attachment_context, AttachmentContext,
-};
+use attachments::{build_attachment_context, AttachmentContext};
 use file_transactions::{
     FileTransactionRunGuard, FileTransactionState, MAX_RESPONSE_FENCE_CORRECTIONS,
 };
@@ -44,6 +46,38 @@ const DEFAULT_MAX_TOKENS: u32 = 30_000;
 const MAX_MAX_TOKENS: u32 = 128_000;
 const DEFAULT_TEMPERATURE: f32 = 0.6;
 const MAX_TOOL_ITERATIONS: usize = 10_000;
+
+struct LlmRequestTemplate {
+    api_url: String,
+    api_token: String,
+    model: String,
+    api_style: crate::protocol::AgentApiStyle,
+    max_tokens: u32,
+    temperature: f32,
+    stream: bool,
+    tools: Vec<AgentToolDefinition>,
+}
+
+impl LlmRequestTemplate {
+    fn request(&self, context: ContextFrame) -> LlmChatRequest {
+        LlmChatRequest {
+            api_url: self.api_url.clone(),
+            api_token: self.api_token.clone(),
+            model: self.model.clone(),
+            api_style: self.api_style,
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            stream: self.stream,
+            messages: context.into_messages(),
+            tools: self.tools.clone(),
+        }
+    }
+}
+
+struct PreparedLlmRequest {
+    template: LlmRequestTemplate,
+    context: ContextFrame,
+}
 
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -206,8 +240,10 @@ impl AgentRuntime {
             run_id.clone(),
             cancellation_token.clone(),
         );
-        let llm_request = build_llm_request(input, &tool_definitions)?;
-        let mut messages = llm_request.messages;
+        let PreparedLlmRequest {
+            template: llm_request,
+            context: mut active_context,
+        } = build_llm_request(input, &tool_definitions)?;
         let tool_context = ToolExecutionContext::from_run_context(context.as_ref())
             .with_cancellation(cancellation_token.clone())
             .with_runtime_services(run_id.clone(), storage);
@@ -244,24 +280,24 @@ impl AgentRuntime {
             let file_transactions =
                 FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
             let user_text_blocked = file_transactions.blocks_user_text();
-            let request = LlmChatRequest {
-                api_url: llm_request.api_url.clone(),
-                api_token: llm_request.api_token.clone(),
-                model: llm_request.model.clone(),
-                api_style: llm_request.api_style,
-                max_tokens: llm_request.max_tokens,
-                temperature: llm_request.temperature,
-                stream: llm_request.stream,
-                messages: {
-                    let mut request_messages = messages.clone();
-                    runtime_hooks.before_llm_request(&mut request_messages)?;
-                    if let Some(context) = file_transactions.request_context() {
-                        request_messages.push(LlmMessage::text(LlmMessageRole::System, context));
-                    }
-                    request_messages
-                },
-                tools: llm_request.tools.clone(),
-            };
+            let mut request_context = active_context.clone();
+            runtime_hooks.before_llm_request(&mut request_context)?;
+            if let Some(context) = file_transactions.request_context() {
+                request_context.push(ContextItem::text(
+                    LlmMessageRole::System,
+                    context,
+                    ContextSource::FileTransaction,
+                    ContextScope::Run,
+                    ContextRetention::RequestOnly,
+                ));
+            }
+            emit_context_manifest_if_enabled(
+                &run_id,
+                iteration + 1,
+                &request_context,
+                &llm_request.tools,
+            );
+            let request = llm_request.request(request_context);
             let llm_response_result = if request.stream {
                 let delta_run_id = run_id.clone();
                 let stream_id = format!("{}-stream-{}", run_id, iteration + 1);
@@ -420,9 +456,12 @@ impl AgentRuntime {
                         "模型连续输出文字但未结算文件事务，已停止以避免循环。请重试任务。",
                     ));
                 }
-                messages.push(LlmMessage::text(
+                active_context.push(ContextItem::text(
                     LlmMessageRole::System,
                     file_transactions.protocol_correction(),
+                    ContextSource::RuntimeGuard,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
                 ));
                 continue;
             }
@@ -444,13 +483,23 @@ impl AgentRuntime {
             }
 
             let suppressed_narration = user_text_blocked && !llm_response.content.trim().is_empty();
-            messages.push(LlmMessage::assistant(
+            let tool_exchange_group = ContextGroup::tool_exchange(format!(
+                "run:{run_id}:tool-exchange:{}",
+                iteration + 1
+            ));
+            active_context.push(ContextItem::assistant(
                 if user_text_blocked {
                     String::new()
                 } else {
                     llm_response.content.clone()
                 },
                 tool_requests.clone(),
+                ContextMetadata::new(
+                    ContextSource::ModelResponse,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                )
+                .with_group(tool_exchange_group.clone()),
             ));
 
             for tool_request in tool_requests {
@@ -510,10 +559,16 @@ impl AgentRuntime {
                                 run_id: run_id.clone(),
                                 result: result.clone(),
                             });
-                            messages.push(LlmMessage::tool_result(
+                            active_context.push(ContextItem::tool_result(
                                 call.id.clone(),
                                 build_tool_observation_message(&result),
                                 true,
+                                ContextMetadata::new(
+                                    ContextSource::ToolResult,
+                                    ContextScope::Run,
+                                    ContextRetention::Retained,
+                                )
+                                .with_group(tool_exchange_group.clone()),
                             ));
                             continue;
                         }
@@ -638,13 +693,27 @@ impl AgentRuntime {
                 }
                 runtime_hooks.after_tool_result(&event_result, &mut event_stream)?;
 
-                messages.push(LlmMessage::tool_result(
+                active_context.push(ContextItem::tool_result(
                     call.id.clone(),
                     build_tool_observation_message(&llm_result),
                     !result.ok,
+                    ContextMetadata::new(
+                        ContextSource::ToolResult,
+                        ContextScope::Run,
+                        ContextRetention::Retained,
+                    )
+                    .with_group(tool_exchange_group.clone()),
                 ));
                 if let Some(image_message) = llm_image_message_from_tool_result(&result) {
-                    messages.push(image_message);
+                    active_context.push(ContextItem::new(
+                        image_message,
+                        ContextMetadata::new(
+                            ContextSource::ToolResult,
+                            ContextScope::Run,
+                            ContextRetention::Retained,
+                        )
+                        .with_group(tool_exchange_group.clone()),
+                    ));
                 }
                 if cancellation_token.is_cancelled() {
                     return Ok(cancelled_output(
@@ -657,9 +726,12 @@ impl AgentRuntime {
                 }
             }
             if suppressed_narration {
-                messages.push(LlmMessage::text(
+                active_context.push(ContextItem::text(
                     LlmMessageRole::System,
                     "The text emitted alongside the preceding tool calls was not shown to the user because file transactions were unsettled. Do not assume the user saw it. Continue the transaction protocol and generate new text only after every draft has a finish or abort outcome.",
+                    ContextSource::RuntimeGuard,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
                 ));
             }
         }
@@ -761,16 +833,51 @@ fn emit_tool_input_preview(
     }
 }
 
+fn emit_context_manifest_if_enabled(
+    run_id: &str,
+    request_index: usize,
+    context: &ContextFrame,
+    tools: &[AgentToolDefinition],
+) {
+    let enabled = std::env::var("MYCOPILOT_CONTEXT_MANIFEST")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes"));
+    if !enabled {
+        return;
+    }
+
+    let tool_definition_characters = tools
+        .iter()
+        .filter_map(|tool| serde_json::to_string(tool).ok())
+        .map(|tool| tool.chars().count())
+        .sum::<usize>();
+    let manifest = json!({
+        "items": context.manifest().entries,
+        "toolDefinitions": {
+            "count": tools.len(),
+            "serializedCharacterCount": tool_definition_characters,
+        }
+    });
+    match serde_json::to_string(&manifest) {
+        Ok(manifest) => {
+            eprintln!("[context-manifest] run={run_id} request={request_index} {manifest}")
+        }
+        Err(error) => eprintln!(
+            "[context-manifest] run={run_id} request={request_index} serialization_error={error}"
+        ),
+    }
+}
+
 fn build_llm_request(
     input: AgentChatInput,
     tool_definitions: &[AgentToolDefinition],
-) -> AgentResult<LlmChatRequest> {
+) -> AgentResult<PreparedLlmRequest> {
     let api_style = input
         .api_style
         .unwrap_or_else(|| detect_api_style(input.api_url.trim()));
     let attachment_context = build_attachment_context(&input.attachments)?;
     let tool_continuation = input.tool_continuation.clone();
-    let messages = build_runtime_messages(
+    let context = assemble_initial_context(
         input.messages,
         attachment_context,
         input.context.as_ref(),
@@ -780,16 +887,18 @@ fn build_llm_request(
         tool_definitions,
     )?;
 
-    Ok(LlmChatRequest {
-        api_url: input.api_url.trim().to_string(),
-        api_token: input.api_token.trim().to_string(),
-        model: input.model.trim().to_string(),
-        api_style,
-        max_tokens: sanitize_max_tokens(input.max_tokens),
-        temperature: sanitize_temperature(input.temperature),
-        stream: input.stream.unwrap_or(false),
-        messages,
-        tools: tool_definitions.to_vec(),
+    Ok(PreparedLlmRequest {
+        template: LlmRequestTemplate {
+            api_url: input.api_url.trim().to_string(),
+            api_token: input.api_token.trim().to_string(),
+            model: input.model.trim().to_string(),
+            api_style,
+            max_tokens: sanitize_max_tokens(input.max_tokens),
+            temperature: sanitize_temperature(input.temperature),
+            stream: input.stream.unwrap_or(false),
+            tools: tool_definitions.to_vec(),
+        },
+        context,
     })
 }
 
@@ -877,7 +986,7 @@ fn set_schema_property_description(schema: &mut Value, property: &str, descripti
     }
 }
 
-fn build_runtime_messages(
+fn assemble_initial_context(
     messages: Vec<AgentChatMessage>,
     attachment_context: AttachmentContext,
     context: Option<&AgentRunContext>,
@@ -885,97 +994,26 @@ fn build_runtime_messages(
     approval_decision: Option<&AgentApprovalDecision>,
     tool_continuation: Option<&AgentToolContinuation>,
     tool_definitions: &[AgentToolDefinition],
-) -> AgentResult<Vec<LlmMessage>> {
-    let mut normalized = normalize_messages(messages)?;
-    append_attachment_text_to_last_user_message(&mut normalized, &attachment_context.text);
-
-    if normalized.is_empty() {
-        return Err(AgentError::new("没有可发送的对话内容。"));
-    }
-
-    if !normalized.iter().any(|message| message.role != "system") {
-        return Err(AgentError::new("对话里缺少用户或助手消息。"));
-    }
-
-    if tool_continuation.is_none() {
-        if let Some(approval_decision) = approval_decision {
-            normalized.push(AgentChatMessage {
-                role: "user".to_string(),
-                content: build_approval_decision_observation(approval_decision),
-            });
-        }
-    }
-
-    let mut runtime_messages = normalized
-        .into_iter()
-        .map(agent_message_to_llm_message)
-        .collect::<AgentResult<Vec<_>>>()?;
-    attach_images_to_last_user_message(&mut runtime_messages, attachment_context.images);
-
-    if let Some(continuation) = tool_continuation {
-        runtime_messages.push(LlmMessage::assistant(
-            "",
-            vec![LlmToolCall {
-                id: continuation.call.id.clone(),
-                name: continuation.call.tool.clone(),
-                args: continuation.call.args.clone(),
-            }],
-        ));
-        runtime_messages.push(LlmMessage::tool_result(
-            continuation.call.id.clone(),
-            build_tool_observation_message(&continuation.result),
-            !continuation.result.ok,
-        ));
-    }
-
-    runtime_messages.insert(
-        0,
-        LlmMessage::text(
-            LlmMessageRole::System,
-            build_system_prompt(context, prompt_preferences, tool_definitions),
-        ),
-    );
-
-    Ok(runtime_messages)
-}
-
-fn agent_message_to_llm_message(message: AgentChatMessage) -> AgentResult<LlmMessage> {
-    let role = match message.role.as_str() {
-        "system" => LlmMessageRole::System,
-        "user" => LlmMessageRole::User,
-        "assistant" => LlmMessageRole::Assistant,
-        _ => {
-            return Err(AgentError::new(format!(
-                "不支持的消息角色：{}",
-                message.role
-            )))
-        }
-    };
-
-    Ok(LlmMessage::text(role, message.content))
-}
-
-fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentChatMessage>> {
-    let mut normalized = Vec::new();
-
-    for message in messages {
-        let role = message.role.trim();
-        let content = message.content.trim();
-
-        if content.is_empty() {
-            continue;
-        }
-
-        match role {
-            "system" | "user" | "assistant" => normalized.push(AgentChatMessage {
-                role: role.to_string(),
-                content: content.to_string(),
-            }),
-            _ => return Err(AgentError::new(format!("不支持的消息角色：{role}"))),
-        }
-    }
-
-    Ok(normalized)
+) -> AgentResult<ContextFrame> {
+    let continuation = tool_continuation.map(|continuation| ContextToolContinuation {
+        call: LlmToolCall {
+            id: continuation.call.id.clone(),
+            name: continuation.call.tool.clone(),
+            args: continuation.call.args.clone(),
+        },
+        observation: build_tool_observation_message(&continuation.result),
+        is_error: !continuation.result.ok,
+    });
+    ContextAssembler::assemble(ContextAssemblyInput {
+        system_prompt: build_system_prompt(context, prompt_preferences, tool_definitions),
+        messages,
+        attachments: ContextAttachments {
+            text: attachment_context.text,
+            images: attachment_context.images,
+        },
+        approval_observation: approval_decision.map(build_approval_decision_observation),
+        tool_continuation: continuation,
+    })
 }
 
 #[cfg(test)]

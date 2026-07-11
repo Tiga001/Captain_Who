@@ -1,6 +1,7 @@
 // Internal runtime hooks for stateful agent extensions.
 use super::AgentEventStream;
-use crate::llm::{LlmMessage, LlmMessageRole};
+use crate::context::{ContextFrame, ContextItem, ContextRetention, ContextScope, ContextSource};
+use crate::llm::LlmMessageRole;
 use crate::protocol::{
     AgentError, AgentEvent, AgentResult, AgentTodoItem, AgentTodoState, AgentTodoStatus,
     AgentToolCall, AgentToolDefinition, AgentToolResult, AgentToolSafety,
@@ -20,7 +21,7 @@ pub(super) trait AgentRuntimeHook: Send {
         Vec::new()
     }
 
-    fn before_llm_request(&mut self, _messages: &mut Vec<LlmMessage>) -> AgentResult<()> {
+    fn before_llm_request(&mut self, _context: &mut ContextFrame) -> AgentResult<()> {
         Ok(())
     }
 
@@ -63,9 +64,9 @@ impl AgentRuntimeHooks {
             .collect()
     }
 
-    pub(super) fn before_llm_request(&mut self, messages: &mut Vec<LlmMessage>) -> AgentResult<()> {
+    pub(super) fn before_llm_request(&mut self, context: &mut ContextFrame) -> AgentResult<()> {
         for hook in &mut self.hooks {
-            hook.before_llm_request(messages)?;
+            hook.before_llm_request(context)?;
         }
         Ok(())
     }
@@ -270,7 +271,7 @@ impl TodoHook {
         }
     }
 
-    fn todo_snapshot_message(&self) -> Option<LlmMessage> {
+    fn todo_snapshot_item(&self) -> Option<ContextItem> {
         if self.state.items.is_empty() {
             return None;
         }
@@ -308,7 +309,13 @@ impl TodoHook {
             self.state.revision, completed, total, items, completion_instruction
         );
 
-        Some(LlmMessage::text(LlmMessageRole::User, content))
+        Some(ContextItem::text(
+            LlmMessageRole::User,
+            content,
+            ContextSource::RuntimeHook,
+            ContextScope::Run,
+            ContextRetention::RequestOnly,
+        ))
     }
 }
 
@@ -317,11 +324,11 @@ impl AgentRuntimeHook for TodoHook {
         vec![self.definition()]
     }
 
-    fn before_llm_request(&mut self, messages: &mut Vec<LlmMessage>) -> AgentResult<()> {
-        let Some(message) = self.todo_snapshot_message() else {
+    fn before_llm_request(&mut self, context: &mut ContextFrame) -> AgentResult<()> {
+        let Some(item) = self.todo_snapshot_item() else {
             return Ok(());
         };
-        messages.push(message);
+        context.push(item);
         Ok(())
     }
 
@@ -520,13 +527,26 @@ mod tests {
             })))
             .unwrap()
             .unwrap();
-        let mut messages = vec![LlmMessage::text(LlmMessageRole::System, "system")];
+        let base_context = ContextFrame::new(vec![ContextItem::text(
+            LlmMessageRole::System,
+            "system",
+            ContextSource::BackendSystemPrompt,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        )]);
+        let mut context = base_context.clone();
 
-        hook.before_llm_request(&mut messages).unwrap();
+        hook.before_llm_request(&mut context).unwrap();
+        let messages = context.to_messages();
 
+        assert_eq!(base_context.to_messages().len(), 1);
         assert_eq!(messages.len(), 2);
         assert!(messages[1].content.contains("Runtime todo state"));
         assert!(messages[1].content.contains("Read files"));
+        let manifest = context.manifest();
+        assert_eq!(manifest.entries[1].sources, vec!["runtime_hook"]);
+        assert_eq!(manifest.entries[1].scope, "run");
+        assert_eq!(manifest.entries[1].retention, "request_only");
     }
 
     #[test]
@@ -540,13 +560,14 @@ mod tests {
             })))
             .unwrap()
             .unwrap();
-        let mut messages = vec![LlmMessage::text(LlmMessageRole::System, "system")];
+        let mut context = ContextFrame::default();
 
-        hook.before_llm_request(&mut messages).unwrap();
+        hook.before_llm_request(&mut context).unwrap();
+        let messages = context.to_messages();
 
-        assert!(messages[1].content.contains("progress: 1/1 completed"));
-        assert!(messages[1].content.contains("All todo items are completed"));
-        assert!(messages[1]
+        assert!(messages[0].content.contains("progress: 1/1 completed"));
+        assert!(messages[0].content.contains("All todo items are completed"));
+        assert!(messages[0]
             .content
             .contains("Respond to the user with a concise final summary"));
     }

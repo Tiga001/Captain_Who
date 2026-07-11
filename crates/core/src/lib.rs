@@ -1,5 +1,6 @@
 mod cancellation;
 pub mod command;
+mod context;
 pub mod file_write;
 mod llm;
 pub mod patch;

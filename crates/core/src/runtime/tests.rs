@@ -21,20 +21,6 @@ fn empty_attachment_context() -> AttachmentContext {
 }
 
 #[test]
-fn normalizes_supported_messages_and_skips_empty_content() {
-    let messages = normalize_messages(vec![
-        message(" user ", " hello "),
-        message("assistant", " "),
-        message("system", "rules"),
-    ])
-    .unwrap();
-
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages[0].role, "user");
-    assert_eq!(messages[0].content, "hello");
-}
-
-#[test]
 fn runtime_messages_add_backend_system_prompt() {
     let context = AgentRunContext {
         conversation_id: Some("conversation-1".to_string()),
@@ -47,7 +33,7 @@ fn runtime_messages_add_backend_system_prompt() {
         attachment_library: None,
         permissions: Default::default(),
     };
-    let messages = build_runtime_messages(
+    let context = assemble_initial_context(
         vec![message("user", "Read src/main.rs")],
         empty_attachment_context(),
         Some(&context),
@@ -57,6 +43,7 @@ fn runtime_messages_add_backend_system_prompt() {
         &ToolRegistry::defaults_with_search(None).definitions(),
     )
     .unwrap();
+    let messages = context.to_messages();
 
     assert_eq!(messages[0].role.as_str(), "system");
     assert!(messages[0].content.contains("MyCopilot"));
@@ -71,7 +58,7 @@ fn runtime_messages_include_approval_decision_observation() {
         status: AgentApprovalDecisionStatus::Rejected,
         message: Some("不要运行安装命令，先说明替代方案。".to_string()),
     };
-    let messages = build_runtime_messages(
+    let context = assemble_initial_context(
         vec![message("user", "Run pnpm install")],
         empty_attachment_context(),
         None,
@@ -81,6 +68,7 @@ fn runtime_messages_include_approval_decision_observation() {
         &ToolRegistry::defaults_with_search(None).definitions(),
     )
     .unwrap();
+    let messages = context.to_messages();
 
     assert!(messages
         .iter()
@@ -90,7 +78,7 @@ fn runtime_messages_include_approval_decision_observation() {
 
 #[test]
 fn runtime_messages_include_text_attachment_content() {
-    let messages = build_runtime_messages(
+    let context = assemble_initial_context(
         vec![message("user", "Summarize this attachment")],
         AttachmentContext {
             text: "用户输入框附件内容如下。\n\n### notes.txt\nhello from attachment".to_string(),
@@ -103,6 +91,7 @@ fn runtime_messages_include_text_attachment_content() {
         &ToolRegistry::defaults_with_search(None).definitions(),
     )
     .unwrap();
+    let messages = context.to_messages();
 
     assert!(messages
         .iter()
@@ -132,7 +121,7 @@ fn runtime_messages_resume_with_native_tool_call_and_result() {
             error: Some("stale_file".to_string()),
         },
     };
-    let messages = build_runtime_messages(
+    let context = assemble_initial_context(
         vec![message("user", "Edit src/main.rs")],
         empty_attachment_context(),
         None,
@@ -142,6 +131,7 @@ fn runtime_messages_resume_with_native_tool_call_and_result() {
         &ToolRegistry::defaults_with_search(None).definitions(),
     )
     .unwrap();
+    let messages = context.to_messages();
 
     let assistant = messages
         .iter()
@@ -233,12 +223,6 @@ fn file_write_tail_is_available_to_llm_but_not_persisted_in_events() {
         event_result.result.as_ref().unwrap()["draft"]["draftId"],
         "draft-1"
     );
-}
-
-#[test]
-fn rejects_unknown_message_roles() {
-    let error = normalize_messages(vec![message("tool", "result")]).unwrap_err();
-    assert!(error.to_string().contains("不支持的消息角色"));
 }
 
 #[test]
