@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_event_keeps_extension_snapshots_internal() {
+    fn approval_event_keeps_run_checkpoint_internal() {
         let event = AgentEvent::ApprovalRequired {
             run_id: "run-1".to_string(),
             action: AgentProposedAction::ToolCall {
@@ -363,16 +363,25 @@ mod tests {
                     reason: None,
                 },
             },
-            extension_snapshots: vec![AgentExtensionSnapshot {
-                extension_id: "private".to_string(),
+            checkpoint: crate::protocol::AgentRunCheckpoint {
                 version: 1,
-                state: json!({ "secret": "internal state" }),
-            }],
+                run_id: "run-1".to_string(),
+                context_items: Vec::new(),
+                next_model_request_index: 1,
+                queued_tool_calls: Vec::new(),
+                suppressed_narration: false,
+                extension_snapshots: vec![AgentExtensionSnapshot {
+                    extension_id: "private".to_string(),
+                    version: 1,
+                    state: json!({ "secret": "internal state" }),
+                }],
+                pending_tool_call_id: "call-1".to_string(),
+            },
         };
 
         let serialized = serde_json::to_string(&event).unwrap();
 
-        assert!(!serialized.contains("extensionSnapshots"));
+        assert!(!serialized.contains("checkpoint"));
         assert!(!serialized.contains("internal state"));
     }
 }

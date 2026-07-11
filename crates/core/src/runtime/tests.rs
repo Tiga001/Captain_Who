@@ -1,8 +1,8 @@
 // Tests for runtime message construction and tool-flow helpers.
 use super::*;
 use crate::protocol::{
-    AgentApprovalDecisionStatus, AgentInputAttachment, AgentInputAttachmentEncoding,
-    AgentInputAttachmentKind, AgentRunContext, AgentWorkspaceContext,
+    AgentInputAttachment, AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentRunContext,
+    AgentWorkspaceContext,
 };
 use crate::runtime::tool_flow::parse_tool_call_request;
 
@@ -38,8 +38,6 @@ fn runtime_messages_add_backend_system_prompt() {
         empty_attachment_context(),
         Some(&context),
         None,
-        None,
-        None,
         &ToolRegistry::defaults_with_search(None).definitions(),
     )
     .unwrap();
@@ -52,31 +50,6 @@ fn runtime_messages_add_backend_system_prompt() {
 }
 
 #[test]
-fn runtime_messages_include_approval_decision_observation() {
-    let decision = AgentApprovalDecision {
-        action_id: "tool-1".to_string(),
-        status: AgentApprovalDecisionStatus::Rejected,
-        message: Some("不要运行安装命令，先说明替代方案。".to_string()),
-    };
-    let context = assemble_initial_context(
-        vec![message("user", "Run pnpm install")],
-        empty_attachment_context(),
-        None,
-        None,
-        Some(&decision),
-        None,
-        &ToolRegistry::defaults_with_search(None).definitions(),
-    )
-    .unwrap();
-    let messages = context.to_messages();
-
-    assert!(messages
-        .iter()
-        .any(|message| message.content.contains("approval_decision")
-            && message.content.contains("不要运行安装命令")));
-}
-
-#[test]
 fn runtime_messages_include_text_attachment_content() {
     let context = assemble_initial_context(
         vec![message("user", "Summarize this attachment")],
@@ -84,8 +57,6 @@ fn runtime_messages_include_text_attachment_content() {
             text: "用户输入框附件内容如下。\n\n### notes.txt\nhello from attachment".to_string(),
             images: Vec::new(),
         },
-        None,
-        None,
         None,
         None,
         &ToolRegistry::defaults_with_search(None).definitions(),
@@ -97,55 +68,6 @@ fn runtime_messages_include_text_attachment_content() {
         .iter()
         .any(|message| message.role == LlmMessageRole::User
             && message.content.contains("hello from attachment")));
-}
-
-#[test]
-fn runtime_messages_resume_with_native_tool_call_and_result() {
-    let continuation = AgentToolContinuation {
-        call: AgentToolCall {
-            id: "patch-1".to_string(),
-            tool: "apply_patch".to_string(),
-            args: json!({
-                "operation": "update",
-                "filePath": "src/main.rs",
-                "edits": [{ "kind": "append", "text": "\nfn test() {}\n" }]
-            }),
-            approval_status: AgentApprovalStatus::Approved,
-            reason: None,
-        },
-        result: AgentToolResult {
-            call_id: "patch-1".to_string(),
-            tool: "apply_patch".to_string(),
-            ok: false,
-            result: None,
-            error: Some("stale_file".to_string()),
-        },
-    };
-    let context = assemble_initial_context(
-        vec![message("user", "Edit src/main.rs")],
-        empty_attachment_context(),
-        None,
-        None,
-        None,
-        Some(&continuation),
-        &ToolRegistry::defaults_with_search(None).definitions(),
-    )
-    .unwrap();
-    let messages = context.to_messages();
-
-    let assistant = messages
-        .iter()
-        .find(|message| !message.tool_calls.is_empty())
-        .unwrap();
-    assert_eq!(assistant.role, LlmMessageRole::Assistant);
-    assert_eq!(assistant.tool_calls[0].id, "patch-1");
-    let result = messages
-        .iter()
-        .find(|message| message.role == LlmMessageRole::Tool)
-        .unwrap();
-    assert_eq!(result.tool_call_id.as_deref(), Some("patch-1"));
-    assert!(result.is_error);
-    assert!(result.content.contains("stale_file"));
 }
 
 #[test]
@@ -503,7 +425,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         approval_decision: None,
         tool_continuation: None,
         attachments: Vec::new(),
-        extension_snapshots: Vec::new(),
+        resume_checkpoint: None,
         messages: vec![message("user", "create a preview")],
     };
     let output = AgentRuntime::default()
@@ -552,4 +474,258 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
             .status,
         "aborted"
     );
+}
+
+#[tokio::test]
+async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
+    use crate::protocol::{
+        AgentApprovalDecision, AgentApprovalDecisionStatus, AgentCommandPermission,
+        AgentPatchPermission, AgentPermissions, AgentReadPermission, AgentToolContinuation,
+        AgentWritePermission,
+    };
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_json_request(stream: &mut TcpStream) -> Value {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut body_start = None;
+        let mut expected_len = None;
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request completed");
+            request.extend_from_slice(&buffer[..read]);
+            if body_start.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    let start = header_end + 4;
+                    body_start = Some(start);
+                    expected_len = Some(start + content_length);
+                }
+            }
+            if expected_len.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        serde_json::from_slice(&request[body_start.unwrap()..expected_len.unwrap()]).unwrap()
+    }
+
+    async fn write_response(stream: &mut TcpStream, body: Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    }
+
+    fn native_tool_call(id: &str, name: &str, args: Value) -> Value {
+        json!({
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": serde_json::to_string(&args).unwrap()
+            }
+        })
+    }
+
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("source.txt"), "evidence-before-approval").unwrap();
+    std::fs::write(workspace.join("queued.txt"), "evidence-from-queued-tool").unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let final_request = Arc::new(std::sync::Mutex::new(None::<Value>));
+    let server_final_request = final_request.clone();
+    let server = tokio::spawn(async move {
+        for request_index in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_json_request(&mut stream).await;
+            let response = match request_index {
+                0 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "I will read the source first.",
+                            "tool_calls": [
+                                native_tool_call(
+                                    "todo-before",
+                                    "todo_update",
+                                    json!({
+                                        "items": [{
+                                            "title": "Collect evidence and write report",
+                                            "status": "in_progress"
+                                        }]
+                                    })
+                                ),
+                                native_tool_call(
+                                    "read-before",
+                                    "read_file",
+                                    json!({ "path": "source.txt" })
+                                )
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }),
+                1 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "I have the evidence and will prepare the report.",
+                            "tool_calls": [
+                                native_tool_call(
+                                    "patch-approval",
+                                    "apply_patch",
+                                    json!({
+                                        "operation": "create",
+                                        "filePath": "report.txt",
+                                        "content": "draft report"
+                                    })
+                                ),
+                                native_tool_call(
+                                    "read-queued",
+                                    "read_file",
+                                    json!({ "path": "queued.txt" })
+                                )
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }),
+                _ => {
+                    *server_final_request.lock().unwrap() = Some(request);
+                    json!({
+                        "choices": [{
+                            "message": { "role": "assistant", "content": "resumed with evidence" },
+                            "finish_reason": "stop"
+                        }]
+                    })
+                }
+            };
+            write_response(&mut stream, response).await;
+        }
+    });
+
+    let base_input = AgentChatInput {
+        api_url: format!("http://{address}/v1/chat/completions"),
+        api_token: "test-token".to_string(),
+        model: "test-model".to_string(),
+        api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
+        max_tokens: Some(1_000),
+        temperature: None,
+        stream: Some(false),
+        context: Some(AgentRunContext {
+            conversation_id: Some("conversation-checkpoint".to_string()),
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("workspace".to_string()),
+                root_path: Some(workspace.to_string_lossy().to_string()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                command: AgentCommandPermission::RequireApproval,
+                patch: AgentPatchPermission::RequireApproval,
+            },
+        }),
+        search_config: None,
+        prompt_preferences: None,
+        approval_decision: None,
+        tool_continuation: None,
+        attachments: Vec::new(),
+        resume_checkpoint: None,
+        messages: vec![message("user", "collect evidence and write report.txt")],
+    };
+    let waiting = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            base_input.clone(),
+            Some("run-checkpoint".to_string()),
+            None,
+            AgentCancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(waiting.status, AgentRunStatus::WaitingForApproval);
+    let checkpoint = waiting
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ApprovalRequired { checkpoint, .. } => Some(checkpoint.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(checkpoint.pending_tool_call_id, "patch-approval");
+    assert_eq!(checkpoint.queued_tool_calls.len(), 1);
+    assert_eq!(checkpoint.extension_snapshots[0].extension_id, "todo");
+
+    let mut resume_input = base_input;
+    resume_input.messages.clear();
+    resume_input.resume_checkpoint = Some(checkpoint);
+    resume_input.approval_decision = Some(AgentApprovalDecision {
+        action_id: "patch-approval".to_string(),
+        status: AgentApprovalDecisionStatus::Rejected,
+        message: Some("Keep the evidence but revise the report first.".to_string()),
+    });
+    resume_input.tool_continuation = Some(AgentToolContinuation {
+        call: AgentToolCall {
+            id: "patch-approval".to_string(),
+            tool: "apply_patch".to_string(),
+            args: json!({ "operation": "create", "filePath": "report.txt" }),
+            approval_status: AgentApprovalStatus::Rejected,
+            reason: None,
+        },
+        result: AgentToolResult {
+            call_id: "patch-approval".to_string(),
+            tool: "apply_patch".to_string(),
+            ok: false,
+            result: None,
+            error: Some(
+                "user rejected: Keep the evidence but revise the report first.".to_string(),
+            ),
+        },
+    });
+
+    let completed = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            resume_input,
+            Some("run-checkpoint".to_string()),
+            None,
+            AgentCancellationToken::new(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(completed.status, AgentRunStatus::Completed);
+    assert_eq!(completed.content, "resumed with evidence");
+    assert_eq!(completed.todo.as_ref().unwrap().revision, 1);
+    let request = final_request.lock().unwrap().take().unwrap();
+    let messages = serde_json::to_string(&request["messages"]).unwrap();
+    assert!(messages.contains("evidence-before-approval"));
+    assert!(messages.contains("evidence-from-queued-tool"));
+    assert!(messages.contains("user rejected"));
+    assert!(messages.contains("read-before"));
+    assert!(messages.contains("patch-approval"));
+    assert!(messages.contains("read-queued"));
 }

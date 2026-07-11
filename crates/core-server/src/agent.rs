@@ -19,10 +19,10 @@ use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
     next_run_id, send_chat_with_host_executor, AgentApprovalDecision, AgentApprovalDecisionStatus,
     AgentApprovalStatus, AgentCancellationToken, AgentChatInput, AgentChatOutput, AgentError,
-    AgentEvent, AgentEventEmitter, AgentExtensionSnapshot, AgentHostActionExecutor,
-    AgentPatchResult, AgentProposedAction, AgentResult, AgentRunStatus, AgentToolCall,
-    AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    AgentEvent, AgentEventEmitter, AgentHostActionExecutor, AgentPatchResult, AgentProposedAction,
+    AgentResult, AgentRunCheckpoint, AgentRunStatus, AgentToolCall, AgentToolContinuation,
+    AgentToolResult, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
+    AgentUsageSummaryInput, AgentUsageSummaryOutput,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -100,13 +100,11 @@ impl AgentService {
                 if let AgentEvent::ApprovalRequired {
                     run_id,
                     action,
-                    extension_snapshots,
+                    checkpoint,
                 } = &event
                 {
-                    let agent_input = agent_input_with_extension_snapshots(
-                        &emitter_agent_input,
-                        extension_snapshots,
-                    );
+                    let agent_input =
+                        agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
                     emitter_service.store_pending_action(
                         run_id,
                         &emitter_conversation_id,
@@ -957,11 +955,10 @@ impl AgentService {
             if let AgentEvent::ApprovalRequired {
                 run_id,
                 action,
-                extension_snapshots,
+                checkpoint,
             } = &event
             {
-                let agent_input =
-                    agent_input_with_extension_snapshots(&emitter_agent_input, extension_snapshots);
+                let agent_input = agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
                 emitter_service.store_pending_action(
                     run_id,
                     emitter_conversation_id.as_deref().unwrap_or_default(),
@@ -1586,13 +1583,17 @@ fn restore_agent_input_secrets(
     agent_input
 }
 
-fn agent_input_with_extension_snapshots(
+fn agent_input_with_run_checkpoint(
     agent_input: &AgentChatInput,
-    extension_snapshots: &[AgentExtensionSnapshot],
+    checkpoint: &AgentRunCheckpoint,
 ) -> AgentChatInput {
-    let mut checkpoint = agent_input.clone();
-    checkpoint.extension_snapshots = extension_snapshots.to_vec();
-    checkpoint
+    let mut resume_input = agent_input.clone();
+    resume_input.messages.clear();
+    resume_input.attachments.clear();
+    resume_input.approval_decision = None;
+    resume_input.tool_continuation = None;
+    resume_input.resume_checkpoint = Some(checkpoint.clone());
+    resume_input
 }
 
 fn pending_status_from_label(value: &str) -> Option<PendingActionStatus> {
@@ -1775,7 +1776,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_approval_persists_extension_checkpoint() {
+    fn pending_approval_persists_full_run_checkpoint() {
         let fixture = tempdir().unwrap();
         let storage =
             Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
@@ -1787,17 +1788,54 @@ mod tests {
             "messages": []
         }))
         .unwrap();
-        let snapshots = vec![AgentExtensionSnapshot {
-            extension_id: "todo".to_string(),
+        let run_checkpoint = AgentRunCheckpoint {
             version: 1,
-            state: json!({ "state": { "revision": 2, "items": [], "updatedAt": 10 }, "nextItemId": 3 }),
-        }];
-        let checkpoint = agent_input_with_extension_snapshots(&base_input, &snapshots);
+            run_id: "run-checkpoint".to_string(),
+            context_items: vec![
+                mycopilot_core::AgentContextCheckpointItem {
+                    role: "system".to_string(),
+                    content: "rules".to_string(),
+                    images: Vec::new(),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    is_error: false,
+                    sources: vec!["backend_system_prompt".to_string()],
+                    scope: "run".to_string(),
+                    retention: "retained".to_string(),
+                    group: None,
+                },
+                mycopilot_core::AgentContextCheckpointItem {
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    images: Vec::new(),
+                    tool_call_id: None,
+                    tool_calls: vec![mycopilot_core::AgentContextCheckpointToolCall {
+                        id: "call-checkpoint".to_string(),
+                        name: "apply_patch".to_string(),
+                        args: json!({ "operation": "create", "filePath": "report.txt" }),
+                    }],
+                    is_error: false,
+                    sources: vec!["model_response".to_string()],
+                    scope: "run".to_string(),
+                    retention: "retained".to_string(),
+                    group: Some(mycopilot_core::AgentContextCheckpointGroup {
+                        id: "exchange-checkpoint".to_string(),
+                        kind: "tool_exchange".to_string(),
+                    }),
+                },
+            ],
+            next_model_request_index: 1,
+            queued_tool_calls: Vec::new(),
+            suppressed_narration: false,
+            extension_snapshots: Vec::new(),
+            pending_tool_call_id: "call-checkpoint".to_string(),
+        };
+        let checkpoint = agent_input_with_run_checkpoint(&base_input, &run_checkpoint);
         let action = AgentProposedAction::ToolCall {
             call: AgentToolCall {
                 id: "call-checkpoint".to_string(),
-                tool: "approval_test".to_string(),
-                args: json!({}),
+                tool: "apply_patch".to_string(),
+                args: json!({ "operation": "create", "filePath": "report.txt" }),
                 approval_status: AgentApprovalStatus::Required,
                 reason: None,
             },
@@ -1810,7 +1848,7 @@ mod tests {
             action,
             checkpoint,
         );
-        assert!(base_input.extension_snapshots.is_empty());
+        assert!(base_input.resume_checkpoint.is_none());
 
         let reloaded = AgentService::new(storage);
         let pending = reloaded
@@ -1818,7 +1856,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let record = pending.get("call-checkpoint").unwrap();
-        assert_eq!(record.agent_input.extension_snapshots, snapshots);
+        assert_eq!(
+            record.agent_input.resume_checkpoint.as_ref(),
+            Some(&run_checkpoint)
+        );
+        assert!(record.agent_input.messages.is_empty());
+        assert!(record.agent_input.attachments.is_empty());
         assert!(record.agent_input.api_token.is_empty());
     }
 }

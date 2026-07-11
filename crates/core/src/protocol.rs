@@ -22,8 +22,8 @@ pub struct AgentChatInput {
     pub tool_continuation: Option<AgentToolContinuation>,
     #[serde(default)]
     pub attachments: Vec<AgentInputAttachment>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extension_snapshots: Vec<AgentExtensionSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resume_checkpoint: Option<AgentRunCheckpoint>,
     pub messages: Vec<AgentChatMessage>,
 }
 
@@ -33,6 +33,66 @@ pub struct AgentExtensionSnapshot {
     pub extension_id: String,
     pub version: u32,
     pub state: Value,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunCheckpoint {
+    pub version: u32,
+    pub run_id: String,
+    pub context_items: Vec<AgentContextCheckpointItem>,
+    pub next_model_request_index: usize,
+    pub queued_tool_calls: Vec<AgentQueuedToolCallCheckpoint>,
+    pub suppressed_narration: bool,
+    pub extension_snapshots: Vec<AgentExtensionSnapshot>,
+    pub pending_tool_call_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextCheckpointItem {
+    pub role: String,
+    pub content: String,
+    pub images: Vec<AgentContextCheckpointImage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    pub tool_calls: Vec<AgentContextCheckpointToolCall>,
+    pub is_error: bool,
+    pub sources: Vec<String>,
+    pub scope: String,
+    pub retention: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<AgentContextCheckpointGroup>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextCheckpointImage {
+    pub mime_type: String,
+    pub data_base64: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextCheckpointToolCall {
+    pub id: String,
+    pub name: String,
+    pub args: Value,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextCheckpointGroup {
+    pub id: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQueuedToolCallCheckpoint {
+    pub call: AgentContextCheckpointToolCall,
+    pub assistant_content: String,
+    pub group_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -734,7 +794,7 @@ pub enum AgentProposedAction {
     Command { command: AgentCommandRequest },
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -819,7 +879,7 @@ pub enum AgentEvent {
         run_id: String,
         action: AgentProposedAction,
         #[serde(skip)]
-        extension_snapshots: Vec<AgentExtensionSnapshot>,
+        checkpoint: AgentRunCheckpoint,
     },
     Diff {
         run_id: String,

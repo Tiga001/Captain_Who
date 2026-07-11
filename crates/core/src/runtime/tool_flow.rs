@@ -6,9 +6,9 @@ use super::{
 use crate::cancellation::AgentCancellationToken;
 use crate::llm::{LlmImage, LlmMessage, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
-    AgentApprovalDecision, AgentApprovalDecisionStatus, AgentApprovalStatus, AgentChatOutput,
-    AgentError, AgentEvent, AgentProposedAction, AgentResult, AgentRunStatus, AgentStateSnapshot,
-    AgentTodoState, AgentToolCall, AgentToolDefinition, AgentToolResult, AgentUsage,
+    AgentApprovalStatus, AgentChatOutput, AgentError, AgentEvent, AgentProposedAction, AgentResult,
+    AgentRunStatus, AgentStateSnapshot, AgentTodoState, AgentToolCall, AgentToolDefinition,
+    AgentToolResult, AgentUsage,
 };
 use crate::tools::{ToolExecutionContext, ToolRegistry};
 use serde::Deserialize;
@@ -292,24 +292,6 @@ pub(super) fn llm_image_message_from_tool_result(result: &AgentToolResult) -> Op
     });
 
     Some(message)
-}
-
-pub(super) fn build_approval_decision_observation(decision: &AgentApprovalDecision) -> String {
-    let status = match decision.status {
-        AgentApprovalDecisionStatus::Approved => "approved",
-        AgentApprovalDecisionStatus::Rejected => "rejected",
-    };
-    let payload = json!({
-        "type": "approval_decision",
-        "actionId": decision.action_id,
-        "status": status,
-        "message": decision.message
-    });
-    let payload = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string());
-
-    format!(
-        "Approval decision observation. If rejected, respect the user's reason or requested alternative before continuing.\n```json\n{payload}\n```"
-    )
 }
 
 pub(super) fn extract_reason_from_args(args: &Value) -> Option<String> {

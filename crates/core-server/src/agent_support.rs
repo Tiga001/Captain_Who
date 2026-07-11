@@ -359,7 +359,7 @@ pub(super) fn prepare_conversation_turn(
         approval_decision: None,
         tool_continuation: None,
         attachments: input.attachments,
-        extension_snapshots: Vec::new(),
+        resume_checkpoint: None,
         messages: agent_messages,
     };
 

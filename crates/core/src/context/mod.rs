@@ -7,9 +7,7 @@
 mod assembler;
 mod frame;
 
-pub(crate) use assembler::{
-    ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextToolContinuation,
-};
+pub(crate) use assembler::{ContextAssembler, ContextAssemblyInput, ContextAttachments};
 pub(crate) use frame::{
     ContextFrame, ContextGroup, ContextItem, ContextMetadata, ContextRetention, ContextScope,
     ContextSource,

@@ -543,7 +543,8 @@ pub(crate) fn detect_api_style(api_url: &str) -> AgentApiStyle {
 mod tests {
     use super::*;
     use crate::context::{
-        ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextToolContinuation,
+        ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextGroup, ContextItem,
+        ContextMetadata, ContextRetention, ContextScope, ContextSource,
     };
     use crate::protocol::{AgentChatMessage, AgentToolSafety};
     use serde_json::json;
@@ -747,7 +748,7 @@ mod tests {
 
     #[test]
     fn assembled_context_preserves_order_across_provider_payloads() {
-        let context = ContextAssembler::assemble(ContextAssemblyInput {
+        let mut context = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "System rules".to_string(),
             messages: vec![
                 chat_message("user", "Earlier question"),
@@ -755,18 +756,34 @@ mod tests {
                 chat_message("user", "Continue the edit"),
             ],
             attachments: ContextAttachments::default(),
-            approval_observation: None,
-            tool_continuation: Some(ContextToolContinuation {
-                call: LlmToolCall {
-                    id: "call-context-1".to_string(),
-                    name: "read_file".to_string(),
-                    args: json!({ "path": "src/lib.rs" }),
-                },
-                observation: "file contents".to_string(),
-                is_error: false,
-            }),
         })
         .unwrap();
+        let group = ContextGroup::tool_exchange("tool-context-1");
+        context.push(ContextItem::assistant(
+            "",
+            vec![LlmToolCall {
+                id: "call-context-1".to_string(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "src/lib.rs" }),
+            }],
+            ContextMetadata::new(
+                ContextSource::ModelResponse,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group.clone()),
+        ));
+        context.push(ContextItem::tool_result(
+            "call-context-1",
+            "file contents",
+            false,
+            ContextMetadata::new(
+                ContextSource::ToolResult,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(group),
+        ));
 
         let request = |api_style| LlmChatRequest {
             api_url: "https://example.test".to_string(),
