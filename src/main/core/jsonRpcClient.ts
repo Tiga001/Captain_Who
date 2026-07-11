@@ -1,4 +1,3 @@
-// Electron main client.
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { app } from 'electron'
@@ -186,8 +185,9 @@ export class CoreJsonRpcClient {
       }
     }
 
+    const executableName = process.platform === 'win32' ? 'core-server.exe' : 'core-server'
     return {
-      executable: join(process.resourcesPath, 'core-server'),
+      executable: join(process.resourcesPath, executableName),
       args: [],
       cwd: process.resourcesPath
     }

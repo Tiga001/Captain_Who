@@ -1,10 +1,9 @@
-// Electron main client.
 import { app, protocol } from 'electron'
 import { createHash } from 'crypto'
 import { lookup } from 'dns/promises'
 import { isIP } from 'net'
 import { extname, join } from 'path'
-import { mkdir, readFile, rm, stat, writeFile } from 'fs/promises'
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'fs/promises'
 import type { ResourceFaviconRequest, ResourceFaviconResponse } from '@mycopilot/protocol'
 
 const RESOURCE_SCHEME = 'mycopilot-resource'
@@ -14,6 +13,8 @@ const FAVICON_FETCH_TIMEOUT_MS = 2_500
 const FAVICON_MAX_BYTES = 64 * 1024
 const FAVICON_HTML_MAX_BYTES = 512 * 1024
 const FAVICON_MAX_REDIRECTS = 3
+const FAVICON_CACHE_MAX_FILES = 256
+const FAVICON_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 const FAVICON_USER_AGENT = 'MyCopilot/1.0 favicon resolver'
 
 const FAVICON_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'svg'] as const
@@ -66,6 +67,12 @@ export class FaviconResourceCache {
 
   registerProtocol(): void {
     protocol.handle(RESOURCE_SCHEME, async (request) => this.handleProtocolRequest(request.url))
+    void this.pruneCache().catch(() => undefined)
+  }
+
+  async clear(): Promise<void> {
+    this.pending.clear()
+    await rm(this.cacheDirectoryPath(), { force: true, recursive: true })
   }
 
   async resolveFavicon(input: ResourceFaviconRequest): Promise<ResourceFaviconResponse> {
@@ -151,9 +158,13 @@ export class FaviconResourceCache {
   }
 
   private async cacheDirectory(): Promise<string> {
-    const directory = join(app.getPath('userData'), 'resource-cache', FAVICON_CACHE_DIRECTORY)
+    const directory = this.cacheDirectoryPath()
     await mkdir(directory, { recursive: true })
     return directory
+  }
+
+  private cacheDirectoryPath(): string {
+    return join(app.getPath('userData'), 'resource-cache', FAVICON_CACHE_DIRECTORY)
   }
 
   private async findCachedFile(cacheKey: string): Promise<CachedFaviconFile | null> {
@@ -162,6 +173,10 @@ export class FaviconResourceCache {
       const filePath = join(directory, `${cacheKey}.${extension}`)
       const stats = await stat(filePath).catch(() => null)
       if (stats?.isFile()) {
+        if (stats.mtimeMs < Date.now() - FAVICON_CACHE_MAX_AGE_MS) {
+          await rm(filePath, { force: true })
+          continue
+        }
         return {
           filePath,
           mimeType: MIME_BY_EXTENSION[`.${extension}`] ?? 'application/octet-stream'
@@ -181,6 +196,31 @@ export class FaviconResourceCache {
 
     const extension = EXTENSION_BY_MIME[favicon.mimeType] ?? 'ico'
     await writeFile(join(directory, `${cacheKey}.${extension}`), favicon.bytes)
+    await this.pruneCache()
+  }
+
+  private async pruneCache(): Promise<void> {
+    const directory = await this.cacheDirectory()
+    const entries = await readdir(directory, { withFileTypes: true })
+    const files = (
+      await Promise.all(
+        entries
+          .filter((entry) => entry.isFile())
+          .map(async (entry) => {
+            const filePath = join(directory, entry.name)
+            const stats = await stat(filePath).catch(() => null)
+            return stats ? { filePath, mtimeMs: stats.mtimeMs } : null
+          })
+      )
+    )
+      .filter((file): file is { filePath: string; mtimeMs: number } => Boolean(file))
+      .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    const cutoff = Date.now() - FAVICON_CACHE_MAX_AGE_MS
+    await Promise.all(
+      files
+        .filter((file, index) => index >= FAVICON_CACHE_MAX_FILES || file.mtimeMs < cutoff)
+        .map((file) => rm(file.filePath, { force: true }))
+    )
   }
 }
 

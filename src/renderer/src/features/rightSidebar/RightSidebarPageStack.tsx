@@ -1,7 +1,3 @@
-// Renderer UI.
-// Implements the right-sidebar generic keep-alive page stack.
-// Switching pages only changes visibility; mounted module components stay alive until their page closes.
-
 import type { ReactNode } from 'react'
 import type { RightSidebarPage } from './rightSidebarTypes'
 

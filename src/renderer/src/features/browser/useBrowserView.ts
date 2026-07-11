@@ -1,4 +1,3 @@
-// Renderer browser UI.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import {
@@ -41,7 +40,6 @@ interface UseBrowserViewResult {
   navigateToUrl: (url: string) => Promise<void>
   reload: () => Promise<void>
   setZoom: (zoomFactor: number) => Promise<BrowserZoomState>
-  syncBounds: () => void
 }
 
 const MIN_BROWSER_VIEW_HEIGHT = 80
@@ -256,8 +254,7 @@ export function useBrowserView({
       navigationState,
       navigateToUrl,
       reload,
-      setZoom,
-      syncBounds
+      setZoom
     }),
     [
       clearBrowsingData,
@@ -267,8 +264,7 @@ export function useBrowserView({
       navigationState,
       navigateToUrl,
       reload,
-      setZoom,
-      syncBounds
+      setZoom
     ]
   )
 }

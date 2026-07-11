@@ -1,4 +1,3 @@
-// Renderer UI.
 import type { AgentPermissions } from '@mycopilot/protocol'
 import type { ChatPermissionMode } from './chatTypes'
 

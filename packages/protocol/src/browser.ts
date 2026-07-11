@@ -1,4 +1,3 @@
-// Protocol layer.
 export type BrowserViewId = string
 
 export interface BrowserBounds {

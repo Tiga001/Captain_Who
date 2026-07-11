@@ -1,47 +1,47 @@
-// Renderer UI.
-import { useFrontendConfig } from "../../../config/FrontendConfigProvider";
-import { isMacOS } from "../../../lib/platform";
-import type { ThemePreference } from "../../../config/frontendTheme";
-import type { TranslationKey } from "../../../config/frontendTranslations";
-import type { UiPreferencesSnapshot } from "../../storage/storageClient";
+import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { isMacOS } from '../../../lib/platform'
+import type { ThemePreference } from '../../../config/frontendTheme'
+import type { TranslationKey } from '../../../config/frontendTranslations'
+import type { UiPreferencesSnapshot } from '../../storage/storageClient'
 import {
   MAX_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
   MIN_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
-  normalizeTranslucentSidebarTransparency,
-} from "../../storage/storageClient";
-import "./AppearanceSettingsPage.css";
+  normalizeTranslucentSidebarTransparency
+} from '../../storage/storageClient'
+import './AppearanceSettingsPage.css'
 
 const THEME_OPTIONS: Array<{
-  id: ThemePreference;
-  labelKey: TranslationKey;
-  preview: "system" | "light" | "dark";
+  id: ThemePreference
+  labelKey: TranslationKey
+  preview: 'system' | 'light' | 'dark'
 }> = [
-  { id: "system", labelKey: "appearance.theme.system", preview: "system" },
-  { id: "light", labelKey: "appearance.theme.light", preview: "light" },
-  { id: "dark", labelKey: "appearance.theme.dark", preview: "dark" },
-];
+  { id: 'system', labelKey: 'appearance.theme.system', preview: 'system' },
+  { id: 'light', labelKey: 'appearance.theme.light', preview: 'light' },
+  { id: 'dark', labelKey: 'appearance.theme.dark', preview: 'dark' }
+]
 
-const SUPPORTS_NATIVE_FONT_SMOOTHING = isMacOS();
+const SUPPORTS_NATIVE_FONT_SMOOTHING = isMacOS()
 
 interface AppearanceSettingsPageProps {
-  onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void;
-  uiPreferences: UiPreferencesSnapshot;
+  onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
+  uiPreferences: UiPreferencesSnapshot
 }
 
 export function AppearanceSettingsPage({
   onUiPreferencesChange,
-  uiPreferences,
+  uiPreferences
 }: AppearanceSettingsPageProps) {
-  const { setThemePreference, t, themePreference } = useFrontendConfig();
+  const { setThemePreference, t, themePreference } = useFrontendConfig()
   const sidebarTransparency = normalizeTranslucentSidebarTransparency(
-    uiPreferences.translucentSidebarTransparency,
-  );
+    uiPreferences.translucentSidebarTransparency
+  )
 
   return (
     <article className="settings-list-page appearance-settings-page">
-      <h1>{t("settings.page.appearance")}</h1>
+      <h1>{t('settings.page.appearance')}</h1>
+      <p className="settings-list-page__description">{t('appearance.description')}</p>
 
-      <div className="appearance-theme-grid" role="group" aria-label={t("appearance.theme")}>
+      <div className="appearance-theme-grid" role="group" aria-label={t('appearance.theme')}>
         {THEME_OPTIONS.map((option) => (
           <button
             className="appearance-theme-option"
@@ -82,10 +82,10 @@ export function AppearanceSettingsPage({
             <div className="settings-list-row">
               <div className="settings-list-row__text">
                 <h2 className="settings-list-row__title" id="native-font-smoothing-heading">
-                  {t("appearance.nativeFontSmoothing")}
+                  {t('appearance.nativeFontSmoothing')}
                 </h2>
                 <p className="settings-list-row__description">
-                  {t("appearance.nativeFontSmoothingDescription")}
+                  {t('appearance.nativeFontSmoothingDescription')}
                 </p>
               </div>
 
@@ -94,7 +94,7 @@ export function AppearanceSettingsPage({
                 type="button"
                 role="switch"
                 aria-checked={uiPreferences.nativeFontSmoothing}
-                data-state={uiPreferences.nativeFontSmoothing ? "on" : "off"}
+                data-state={uiPreferences.nativeFontSmoothing ? 'on' : 'off'}
                 onClick={() =>
                   onUiPreferencesChange({ nativeFontSmoothing: !uiPreferences.nativeFontSmoothing })
                 }
@@ -107,10 +107,10 @@ export function AppearanceSettingsPage({
           <div className="settings-list-row">
             <div className="settings-list-row__text">
               <h2 className="settings-list-row__title" id="translucent-sidebar-heading">
-                {t("appearance.translucentSidebar")}
+                {t('appearance.translucentSidebar')}
               </h2>
               <p className="settings-list-row__description">
-                {t("appearance.translucentSidebarDescription")}
+                {t('appearance.translucentSidebarDescription')}
               </p>
             </div>
 
@@ -119,7 +119,7 @@ export function AppearanceSettingsPage({
               type="button"
               role="switch"
               aria-checked={uiPreferences.translucentSidebar}
-              data-state={uiPreferences.translucentSidebar ? "on" : "off"}
+              data-state={uiPreferences.translucentSidebar ? 'on' : 'off'}
               onClick={() =>
                 onUiPreferencesChange({ translucentSidebar: !uiPreferences.translucentSidebar })
               }
@@ -130,7 +130,7 @@ export function AppearanceSettingsPage({
 
           <div
             className="appearance-translucency-drawer"
-            data-open={uiPreferences.translucentSidebar ? "true" : "false"}
+            data-open={uiPreferences.translucentSidebar ? 'true' : 'false'}
             aria-hidden={!uiPreferences.translucentSidebar}
           >
             <div className="settings-list-row appearance-translucency-row">
@@ -139,7 +139,7 @@ export function AppearanceSettingsPage({
                   className="settings-list-row__title"
                   id="translucent-sidebar-transparency-heading"
                 >
-                  {t("appearance.translucentSidebarTransparency")}
+                  {t('appearance.translucentSidebarTransparency')}
                 </h2>
               </div>
 
@@ -155,8 +155,8 @@ export function AppearanceSettingsPage({
                   onChange={(event) =>
                     onUiPreferencesChange({
                       translucentSidebarTransparency: normalizeTranslucentSidebarTransparency(
-                        Number(event.currentTarget.value),
-                      ),
+                        Number(event.currentTarget.value)
+                      )
                     })
                   }
                 />
@@ -166,5 +166,5 @@ export function AppearanceSettingsPage({
         </div>
       </section>
     </article>
-  );
+  )
 }

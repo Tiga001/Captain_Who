@@ -1,4 +1,3 @@
-// Renderer browser UI.
 import { hostClient } from '../../host/hostClient'
 import type {
   BrowserBounds,

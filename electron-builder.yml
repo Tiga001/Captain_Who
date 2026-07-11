@@ -1,18 +1,27 @@
-appId: com.electron.app
-productName: mycopilot-next
+appId: com.mycopilot.next
+productName: MyCopilot
 directories:
   buildResources: build
 files:
-  - '!**/.vscode/*'
-  - '!src/*'
-  - '!electron.vite.config.{js,ts,mjs,cjs}'
-  - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
-  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
-  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - out/**/*
+  - resources/**/*
+  - '!node_modules/node-addon-api/**/*'
+  - '!node_modules/node-pty/deps/**/*'
+  - '!node_modules/node-pty/scripts/**/*'
+  - '!node_modules/node-pty/src/**/*'
+  - '!node_modules/node-pty/third_party/**/*'
+  - '!node_modules/node-pty/typings/**/*'
+  - '!node_modules/node-pty/prebuilds/**/*'
+  - '!node_modules/node-pty/lib/**/*.map'
+  - '!node_modules/node-pty/lib/**/*.test.js'
+  - '!node_modules/@electron-toolkit/utils/dist/*.d.*'
 asarUnpack:
   - resources/**
 win:
-  executableName: mycopilot-next
+  executableName: mycopilot
+  extraResources:
+    - from: target/release/core-server.exe
+      to: core-server.exe
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
@@ -20,24 +29,25 @@ nsis:
   createDesktopShortcut: always
 mac:
   entitlementsInherit: build/entitlements.mac.plist
+  extraResources:
+    - from: target/release/core-server
+      to: core-server
   extendInfo:
-    - NSCameraUsageDescription: Application requests access to the device's camera.
-    - NSMicrophoneUsageDescription: Application requests access to the device's microphone.
-    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
-    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+    - NSDocumentsFolderUsageDescription: MyCopilot accesses files you select in Documents.
+    - NSDownloadsFolderUsageDescription: MyCopilot accesses files you select in Downloads.
   notarize: false
 dmg:
   artifactName: ${name}-${version}.${ext}
 linux:
+  extraResources:
+    - from: target/release/core-server
+      to: core-server
   target:
     - AppImage
     - snap
     - deb
-  maintainer: electronjs.org
+  maintainer: MyCopilot Contributors
   category: Utility
 appImage:
   artifactName: ${name}-${version}.${ext}
 npmRebuild: false
-publish:
-  provider: generic
-  url: https://example.com/auto-updates

@@ -1,14 +1,13 @@
-// Renderer UI.
-import { useState } from "react";
-import { useModelSettings } from "../../../config/ModelSettingsProvider";
-import { ModelForm } from "./configuration/ModelForm";
-import { ModelManager } from "./configuration/ModelManager";
-import { ModelProviderSettings } from "./configuration/ModelProviderSettings";
-import { WebSearchSettings } from "./configuration/WebSearchSettings";
-import type { ModelConfig, ModelFormValues } from "./configuration/configurationTypes";
-import "./ConfigurationSettingsPage.css";
+import { useState } from 'react'
+import { useModelSettings } from '../../../config/ModelSettingsProvider'
+import { ModelForm } from './configuration/ModelForm'
+import { ModelManager } from './configuration/ModelManager'
+import { ModelProviderSettings } from './configuration/ModelProviderSettings'
+import { WebSearchSettings } from './configuration/WebSearchSettings'
+import type { ModelConfig, ModelFormValues } from './configuration/configurationTypes'
+import './ConfigurationSettingsPage.css'
 
-type ConfigurationView = "settings" | "manager" | "createModel" | "editModel";
+type ConfigurationView = 'settings' | 'manager' | 'createModel' | 'editModel'
 
 export function ConfigurationSettingsPage() {
   const {
@@ -23,58 +22,59 @@ export function ConfigurationSettingsPage() {
     setTavilyApiKey,
     tavilyApiKey,
     toggleModel,
-    upsertModel,
-  } = useModelSettings();
-  const [view, setView] = useState<ConfigurationView>("settings");
-  const [editingModel, setEditingModel] = useState<ModelConfig | undefined>();
+    upsertModel
+  } = useModelSettings()
+  const [view, setView] = useState<ConfigurationView>('settings')
+  const [editingModel, setEditingModel] = useState<ModelConfig | undefined>()
 
   const openCreateModel = () => {
-    setEditingModel(undefined);
-    setView("createModel");
-  };
+    setEditingModel(undefined)
+    setView('createModel')
+  }
 
   const openEditModel = (model: ModelConfig) => {
-    setEditingModel(model);
-    setView("editModel");
-  };
+    setEditingModel(model)
+    setView('editModel')
+  }
 
   const saveModel = (values: ModelFormValues) => {
     const savedModel: ModelConfig = {
       id: values.id,
       displayName: values.displayName || values.id,
-      providerPath: editingModel && editingModel.id === values.id ? editingModel.providerPath : undefined,
+      providerPath:
+        editingModel && editingModel.id === values.id ? editingModel.providerPath : undefined,
       shortName: editingModel && editingModel.id === values.id ? editingModel.shortName : undefined,
       supportsImage: values.supportsImage,
       inputPrice: values.inputPrice,
       outputPrice: values.outputPrice,
-      enabled: editingModel?.enabled ?? true,
-    };
+      enabled: editingModel?.enabled ?? true
+    }
 
-    upsertModel(savedModel, editingModel?.id);
-    setEditingModel(undefined);
-    setView("manager");
-  };
+    upsertModel(savedModel, editingModel?.id)
+    setEditingModel(undefined)
+    setView('manager')
+  }
 
-  if (view === "manager") {
+  if (view === 'manager') {
     return (
       <ModelManager
         models={models}
-        onBack={() => setView("settings")}
+        onBack={() => setView('settings')}
         onCreate={openCreateModel}
         onDelete={deleteModel}
         onEdit={openEditModel}
       />
-    );
+    )
   }
 
-  if (view === "createModel" || view === "editModel") {
+  if (view === 'createModel' || view === 'editModel') {
     return (
       <ModelForm
-        model={view === "editModel" ? editingModel : undefined}
-        onCancel={() => setView("manager")}
+        model={view === 'editModel' ? editingModel : undefined}
+        onCancel={() => setView('manager')}
         onSave={saveModel}
       />
-    );
+    )
   }
 
   return (
@@ -85,7 +85,7 @@ export function ConfigurationSettingsPage() {
         models={models}
         onApiTokenChange={setApiToken}
         onApiUrlChange={setApiUrl}
-        onManageModels={() => setView("manager")}
+        onManageModels={() => setView('manager')}
         onToggleModel={toggleModel}
       />
 
@@ -96,5 +96,5 @@ export function ConfigurationSettingsPage() {
         onTavilyApiKeyChange={setTavilyApiKey}
       />
     </div>
-  );
+  )
 }

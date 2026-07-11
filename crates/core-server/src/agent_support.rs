@@ -32,6 +32,17 @@ pub(super) struct PendingActionRecord {
     pub(super) agent_input: AgentChatInput,
 }
 
+pub(super) fn agent_input_belongs_to_project(
+    agent_input: &AgentChatInput,
+    project_id: &str,
+) -> bool {
+    agent_input
+        .context
+        .as_ref()
+        .and_then(|context| context.project_id.as_deref())
+        == Some(project_id)
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct AgentRunUsageContext {
     pub(super) conversation_id: String,
@@ -502,7 +513,7 @@ pub(super) fn normalized_optional(value: Option<&str>) -> Option<String> {
 
 pub(super) fn non_empty(value: String) -> Option<String> {
     let value = value.trim().to_string();
-    if value.is_empty() || value == "tvly-my-copilot-search-key" {
+    if value.is_empty() {
         None
     } else {
         Some(value)
@@ -686,11 +697,10 @@ pub(super) fn tool_result_for_decision(
             tool: call.tool.clone(),
             ok: false,
             result: Some(json!({
-                "status": "not_implemented",
-                "phase": "pending_actions_continuation",
-                "message": "Host approval path is wired, but execution is not implemented in this phase. No file, command, git, or shell changes were made."
+                "status": "unsupported",
+                "message": "Generic approved tool calls cannot be executed. Only structured diff, file-write, and command actions are supported."
             })),
-            error: Some("已批准，但本阶段尚未实现真实执行；没有执行文件修改或命令。".to_string()),
+            error: Some("不支持执行通用审批工具调用；未修改文件或运行命令。".to_string()),
         },
         AgentApprovalDecisionStatus::Rejected => AgentToolResult {
             call_id: call.id.clone(),

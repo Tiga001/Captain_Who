@@ -1,4 +1,3 @@
-// Renderer UI for agent todo_update tool activity rows in chat history.
 import {
   BadgeCheck,
   Circle,

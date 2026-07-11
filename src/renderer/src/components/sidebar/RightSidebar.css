@@ -1,6 +1,3 @@
-/* Renderer UI. */
-/* Hosts right-sidebar tools, tabs, and embedded command-line terminal surfaces. */
-
 .right-sidebar {
   display: grid;
   grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
@@ -288,24 +285,6 @@
   height: 20px;
   color: var(--mc-color-icon-default);
   stroke-width: var(--mc-icon-stroke-regular);
-}
-
-.right-sidebar__module-menu-item:disabled {
-  cursor: default;
-  opacity: 0.42;
-}
-
-.right-sidebar__module-menu-item:disabled:hover {
-  background: transparent;
-}
-
-.right-sidebar__tool-card:disabled {
-  cursor: default;
-  opacity: 0.42;
-}
-
-.right-sidebar__tool-card:disabled:hover {
-  background: var(--mc-color-surface-muted);
 }
 
 .right-sidebar__content {

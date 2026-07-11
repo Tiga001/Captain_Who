@@ -1,4 +1,3 @@
-// Protocol layer.
 import type { AgentInputAttachment } from './agent'
 
 export type AttachmentSelectionKind = 'file' | 'image'

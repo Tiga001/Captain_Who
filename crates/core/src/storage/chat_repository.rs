@@ -1,8 +1,18 @@
-// Rust core storage.
 use crate::storage::models::{
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ChatMessageStateRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension};
+
+pub fn conversation_exists(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?1)",
+        params![conversation_id],
+        |row| row.get(0),
+    )
+}
 
 pub fn list_conversations(
     connection: &Connection,
@@ -40,43 +50,6 @@ pub fn list_conversations(
     }
 
     Ok(conversations)
-}
-
-pub fn get_conversation(
-    connection: &Connection,
-    conversation_id: &str,
-) -> rusqlite::Result<Option<ChatConversationRecord>> {
-    let conversation = connection
-        .query_row(
-            "
-            SELECT id, project_id, model_id, title, created_at, updated_at, pinned_at, archived_at, unread_at
-            FROM conversations
-            WHERE id = ?1
-            ",
-            params![conversation_id],
-            |row| {
-                Ok(ChatConversationRecord {
-                    id: row.get(0)?,
-                    project_id: row.get(1)?,
-                    model_id: row.get(2)?,
-                    title: row.get(3)?,
-                    messages: Vec::new(),
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
-                    pinned_at: row.get(6)?,
-                    archived_at: row.get(7)?,
-                    unread_at: row.get(8)?,
-                })
-            },
-        )
-        .optional()?;
-
-    let Some(mut conversation) = conversation else {
-        return Ok(None);
-    };
-
-    conversation.messages = list_messages(connection, conversation_id)?;
-    Ok(Some(conversation))
 }
 
 pub fn save_conversation(
@@ -383,34 +356,6 @@ pub fn update_message_run_terminal_state(
     connection.execute(
         "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
         params![completed_at, conversation_id],
-    )?;
-    Ok(())
-}
-
-pub fn update_message_status_content_and_agent_run(
-    connection: &Connection,
-    conversation_id: &str,
-    message_id: &str,
-    content: &str,
-    status: Option<&str>,
-    agent_run_json: Option<&str>,
-    updated_at: i64,
-) -> rusqlite::Result<()> {
-    connection.execute(
-        "
-        UPDATE messages
-        SET content = ?1, status = ?2, agent_run_json = ?3
-        WHERE conversation_id = ?4 AND id = ?5
-        ",
-        params![content, status, agent_run_json, conversation_id, message_id],
-    )?;
-    connection.execute(
-        "
-        UPDATE conversations
-        SET updated_at = ?1
-        WHERE id = ?2
-        ",
-        params![updated_at, conversation_id],
     )?;
     Ok(())
 }

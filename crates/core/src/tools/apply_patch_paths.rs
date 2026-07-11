@@ -196,10 +196,7 @@ pub(crate) fn validate_text_patch_path(path: &str) -> AgentResult<()> {
         .and_then(|file_name| file_name.to_str())
         .unwrap_or_default();
 
-    if TEXT_PATCH_BASENAMES
-        .iter()
-        .any(|basename| file_name == *basename)
-    {
+    if TEXT_PATCH_BASENAMES.contains(&file_name) {
         return Ok(());
     }
 
@@ -219,18 +216,12 @@ pub(crate) fn validate_text_patch_path(path: &str) -> AgentResult<()> {
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default();
-    if UNSUPPORTED_DOCUMENT_EXTENSIONS
-        .iter()
-        .any(|unsupported| extension == *unsupported)
-    {
+    if UNSUPPORTED_DOCUMENT_EXTENSIONS.contains(&extension) {
         return Err(AgentError::new(format!(
             "apply_patch 不支持直接修改 .{extension} 文档。PDF/Office 文件需要专用编辑工具。"
         )));
     }
-    if TEXT_PATCH_EXTENSIONS
-        .iter()
-        .any(|allowed| extension == *allowed)
-    {
+    if TEXT_PATCH_EXTENSIONS.contains(&extension) {
         return Ok(());
     }
 

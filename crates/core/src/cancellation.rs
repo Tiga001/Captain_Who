@@ -1,4 +1,3 @@
-// Rust agent core.
 use crate::protocol::{AgentError, AgentResult};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -20,10 +19,6 @@ impl AgentCancellationToken {
         Self {
             flag: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    pub fn from_flag(flag: Arc<AtomicBool>) -> Self {
-        Self { flag }
     }
 
     pub fn cancel(&self) {

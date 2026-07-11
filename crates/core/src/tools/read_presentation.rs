@@ -1,8 +1,6 @@
-// Rust agent core.
 use super::{
-    extract_with_textutil, read_zip_xml_text_parts, resolve_document_path,
-    sanitize_document_max_chars, truncate_chars, AgentTool, NamedText, ToolExecutionContext,
-    MAX_DOCUMENT_TEXT_CHARS,
+    read_zip_xml_text_parts, resolve_document_path, sanitize_document_max_chars, truncate_chars,
+    AgentTool, NamedText, ToolExecutionContext, MAX_DOCUMENT_TEXT_CHARS,
 };
 use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
 use serde::Deserialize;
@@ -15,12 +13,12 @@ impl AgentTool for ReadPresentationTool {
         AgentToolDefinition {
             name: "read_presentation".to_string(),
             description:
-                "Extract text from presentation files (.pptx, .ppt) in the selected workspace or an @attachments path."
+                "Extract text from .pptx presentation files in the selected workspace or an @attachments path. Legacy .ppt files are not supported."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative .pptx/.ppt path or @attachments/... readPath." },
+                    "path": { "type": "string", "description": "Workspace-relative .pptx path or @attachments/... readPath." },
                     "filePath": { "type": "string", "description": "Alias for path." },
                     "maxChars": { "type": "integer", "minimum": 1, "maximum": MAX_DOCUMENT_TEXT_CHARS }
                 },
@@ -39,7 +37,7 @@ impl AgentTool for ReadPresentationTool {
             .map_err(|error| AgentError::new(format!("read_presentation 参数无效：{error}")))?;
         let path = args.path()?;
         let max_chars = sanitize_document_max_chars(args.max_chars);
-        let resolved = resolve_document_path(context, path, &["pptx", "ppt"])?;
+        let resolved = resolve_document_path(context, path, &["pptx"])?;
         let cancellation_token = context.cancellation_token();
         let (text, slides, extractor) = match resolved.extension.as_str() {
             "pptx" => {
@@ -57,11 +55,6 @@ impl AgentTool for ReadPresentationTool {
                     .join("\n\n");
                 (text, slides.len(), "ooxml")
             }
-            "ppt" => (
-                extract_with_textutil(&resolved.file_path, &cancellation_token)?,
-                1,
-                "textutil",
-            ),
             _ => unreachable!("extension validated before dispatch"),
         };
         cancellation_token.check()?;
@@ -129,7 +122,7 @@ mod tests {
         let fixture = TestWorkspace::new();
         fixture.write_pptx("deck.pptx", "Slide text");
         let context = fixture.context();
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
         let call = AgentToolCall {
             id: "call-1".to_string(),
             tool: "read_presentation".to_string(),

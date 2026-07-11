@@ -1,4 +1,3 @@
-// Renderer UI.
 import { ChevronDown, Pencil } from 'lucide-react'
 import { useState } from 'react'
 import type {
@@ -64,11 +63,11 @@ const ROW_LABELS: Record<AgentPatchOperation, Record<ApplyPatchStatus, Translati
   }
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
-export function getString(value: unknown) {
+function getString(value: unknown) {
   return typeof value === 'string' ? value.trim() : ''
 }
 
@@ -88,7 +87,7 @@ export function isAbsoluteLocalPath(filePath: string) {
   return filePath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(filePath) || filePath.startsWith('\\\\')
 }
 
-export function getPatchResult(result: AgentToolResult | undefined): AgentPatchResult | undefined {
+function getPatchResult(result: AgentToolResult | undefined): AgentPatchResult | undefined {
   if (!isRecord(result?.result)) return undefined
   const status = result.result.status
   const operation = getOperation(result.result.operation)
@@ -129,7 +128,7 @@ function getStatus(item: ApplyPatchToolActivityGroupItem): ApplyPatchStatus {
   return 'running'
 }
 
-export function countPatchLines(patch: string) {
+function countPatchLines(patch: string) {
   return patch.split(/\r?\n/).reduce(
     (counts, line) => {
       if (line.startsWith('+++ ') || line.startsWith('--- ')) return counts

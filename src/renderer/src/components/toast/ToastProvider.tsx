@@ -1,12 +1,10 @@
-// Renderer UI.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ToastContext, type ToastOptions, type ToastTone } from './ToastContext'
+import { ToastContext, type ToastOptions } from './ToastContext'
 import './ToastProvider.css'
 
 interface ToastState {
   id: number
   message: string
-  tone: ToastTone
   durationMs: number
 }
 
@@ -23,7 +21,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToast({
       id: nextToastIdRef.current,
       message: normalizedMessage,
-      tone: options.tone ?? 'accent',
       durationMs: options.durationMs ?? DEFAULT_TOAST_DURATION_MS
     })
     nextToastIdRef.current += 1
@@ -42,7 +39,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       <div className="toast-viewport" aria-live="polite" aria-atomic="true">
         {toast && (
-          <div className="toast-message" data-tone={toast.tone} key={toast.id} role="status">
+          <div className="toast-message" key={toast.id} role="status">
             {toast.message}
           </div>
         )}

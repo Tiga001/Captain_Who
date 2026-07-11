@@ -1,4 +1,3 @@
-// Renderer UI.
 import type { AgentInputAttachment } from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
 
@@ -28,9 +27,7 @@ const READABLE_FILE_EXTENSIONS = new Set([
   'docx',
   'doc',
   'pptx',
-  'ppt',
   'xlsx',
-  'xls',
   'csv',
   'tsv',
   'txt',
@@ -150,48 +147,6 @@ const READABLE_FILE_EXTENSIONS = new Set([
   'astro'
 ])
 
-export const READABLE_FILE_ACCEPT = [
-  'text/*',
-  'application/json',
-  'application/javascript',
-  'application/xml',
-  'application/x-httpd-php',
-  'application/x-sh',
-  'application/x-sql',
-  'application/x-toml',
-  'application/x-yaml',
-  'text/csv',
-  'text/html',
-  'text/javascript',
-  'text/markdown',
-  'text/plain',
-  'text/x-c',
-  'text/x-c++',
-  'text/x-csharp',
-  'text/x-go',
-  'text/x-java-source',
-  'text/x-kotlin',
-  'text/x-php',
-  'text/x-python',
-  'text/x-ruby',
-  'text/x-rust',
-  'text/x-scss',
-  'text/x-shellscript',
-  'text/x-sql',
-  'text/x-swift',
-  'text/xml',
-  'text/yaml',
-  'text/tab-separated-values',
-  'application/pdf',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.ms-powerpoint',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'application/vnd.ms-excel',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  ...[...READABLE_FILE_EXTENSIONS].map((extension) => `.${extension}`)
-].join(',')
-
 export interface ComposerAttachment {
   id: string
   kind: ComposerAttachmentKind
@@ -202,15 +157,30 @@ export interface ComposerAttachment {
   agentAttachment: AgentInputAttachment
 }
 
-export function createAttachmentSummary(attachments: ComposerAttachment[]): string {
+export function createAttachmentSummary(attachments: Array<{ name: string }>): string {
   if (attachments.length === 0) return ''
-  return `附件：${attachments.map((attachment) => attachment.name).join('、')}`
+  return `Attachments: ${attachments.map((attachment) => attachment.name).join(', ')}`
+}
+
+export function stripAttachmentSummary(
+  content: string,
+  attachments: Array<{ name: string }>
+): string {
+  if (attachments.length === 0) return content
+
+  const names = attachments.map((attachment) => attachment.name)
+  const summaries = [createAttachmentSummary(attachments), `附件：${names.join('、')}`]
+  for (const summary of summaries) {
+    if (content === summary) return ''
+    const suffix = `\n\n${summary}`
+    if (content.endsWith(suffix)) return content.slice(0, -suffix.length)
+  }
+  return content
 }
 
 function getAttachmentsHost() {
-  const attachmentsHost = (
-    hostClient as Partial<Pick<typeof hostClient, 'attachments'>>
-  ).attachments
+  const attachmentsHost = (hostClient as Partial<Pick<typeof hostClient, 'attachments'>>)
+    .attachments
   if (!attachmentsHost) {
     throw new Error('附件上传能力未加载，请重启应用后再试。')
   }
@@ -235,14 +205,6 @@ export async function createComposerAttachmentsFromFiles(
   }
 
   return attachments
-}
-
-export async function createComposerAttachmentsFromPaths(
-  paths: string[]
-): Promise<ComposerAttachment[]> {
-  if (paths.length === 0) return []
-  const attachments = await getAttachmentsHost().loadInputAttachmentsFromPaths({ paths })
-  return attachments.map(composerAttachmentFromAgentAttachment)
 }
 
 export function composerAttachmentFromAgentAttachment(
@@ -314,10 +276,8 @@ function inferMimeType(name: string, kind: ComposerAttachmentKind): string {
   if (extension === 'doc') return 'application/msword'
   if (extension === 'docx')
     return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-  if (extension === 'ppt') return 'application/vnd.ms-powerpoint'
   if (extension === 'pptx')
     return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-  if (extension === 'xls') return 'application/vnd.ms-excel'
   if (extension === 'xlsx')
     return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   if (extension === 'csv') return 'text/csv'

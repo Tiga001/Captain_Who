@@ -1,4 +1,3 @@
-// Renderer UI.
 import { useEffect, useState, type CSSProperties } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
@@ -37,6 +36,7 @@ interface SettingsPageProps {
   onBack: () => void
   onDeleteArchivedConversations: (conversationIds: string[]) => void
   onDeleteConversation: (conversationId: string) => void
+  onRemoveProject: (projectId: string) => Promise<boolean>
   onUnarchiveConversation: (conversationId: string) => void
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
   projects: AppProject[]
@@ -93,6 +93,7 @@ function SettingsContent({
   conversations,
   onDeleteArchivedConversations,
   onDeleteConversation,
+  onRemoveProject,
   onUnarchiveConversation,
   onUiPreferencesChange,
   projects,
@@ -102,6 +103,7 @@ function SettingsContent({
   conversations: ChatConversation[]
   onDeleteArchivedConversations: (conversationIds: string[]) => void
   onDeleteConversation: (conversationId: string) => void
+  onRemoveProject: (projectId: string) => Promise<boolean>
   onUnarchiveConversation: (conversationId: string) => void
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
   projects: AppProject[]
@@ -143,7 +145,7 @@ function SettingsContent({
   }
 
   if (activePage === 'environment') {
-    return <EnvironmentSettingsPage />
+    return <EnvironmentSettingsPage onRemoveProject={onRemoveProject} />
   }
 
   if (activePage === 'archivedConversations') {
@@ -242,6 +244,7 @@ export function SettingsPage({
   onBack,
   onDeleteArchivedConversations,
   onDeleteConversation,
+  onRemoveProject,
   onUnarchiveConversation,
   onUiPreferencesChange,
   projects,
@@ -284,6 +287,7 @@ export function SettingsPage({
             projects={projects}
             onDeleteArchivedConversations={onDeleteArchivedConversations}
             onDeleteConversation={onDeleteConversation}
+            onRemoveProject={onRemoveProject}
             onUnarchiveConversation={onUnarchiveConversation}
             onUiPreferencesChange={onUiPreferencesChange}
             uiPreferences={uiPreferences}

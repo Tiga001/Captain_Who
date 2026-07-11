@@ -1,4 +1,3 @@
-// Rust core storage.
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -6,10 +5,10 @@ use std::path::{Component, Path, PathBuf};
 use crate::storage::models::{
     AgentActionAuditRecord, AgentFileDraftChunkRecord, AgentFileDraftOperationRecord,
     AgentFileDraftRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
-    AgentUsageRecordInsert, AppDataSnapshot, AttachmentImageRecord, AttachmentRecord,
-    ChatConversationMetaRecord, ChatConversationRecord, ChatMessageAttachmentRecord,
-    ChatMessageRecord, ChatMessageStateRecord, ChatSearchInput, ChatSearchResult,
-    ComposerDraftRecord, ModelSettingsRecord, ProjectRecord, UiPreferencesRecord,
+    AgentUsageRecordInsert, AttachmentImageRecord, AttachmentRecord, ChatConversationMetaRecord,
+    ChatConversationRecord, ChatMessageAttachmentRecord, ChatMessageRecord, ChatMessageStateRecord,
+    ChatSearchInput, ChatSearchResult, ComposerDraftRecord, ModelSettingsRecord, ProjectRecord,
+    UiPreferencesRecord,
 };
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
@@ -36,34 +35,26 @@ impl StorageService {
             .map(|parent| parent.join("attachments"))
             .unwrap_or_else(|| PathBuf::from("attachments"));
 
-        Ok(Self {
+        let service = Self {
             state: StorageState::open(database_path)?,
             attachment_root,
-        })
-    }
+        };
 
-    pub fn load_app_data(&self) -> Result<AppDataSnapshot, String> {
-        let connection = self.state.connection()?;
-        if let Err(error) = self.cleanup_orphan_attachment_files(&connection) {
-            eprintln!("failed to cleanup orphan attachment files: {error}");
+        match service.state.connection() {
+            Ok(mut connection) => {
+                if let Err(error) =
+                    file_draft_repository::expire_and_prune_drafts(&mut connection, now_ms())
+                {
+                    eprintln!("failed to prune expired file drafts: {error}");
+                }
+                if let Err(error) = service.cleanup_orphan_attachment_files(&connection) {
+                    eprintln!("failed to cleanup orphan attachment files: {error}");
+                }
+            }
+            Err(error) => eprintln!("failed to open storage for startup maintenance: {error}"),
         }
-        let mut conversations =
-            chat_repository::list_conversations(&connection).map_err(storage_error)?;
-        self.attach_message_attachments(&connection, &mut conversations)?;
 
-        Ok(AppDataSnapshot {
-            model_settings: config_repository::load_model_settings(&connection)
-                .map_err(storage_error)?,
-            projects: project_repository::list_projects(&connection).map_err(storage_error)?,
-            conversations,
-            composer_drafts: composer_draft_repository::list_composer_drafts(&connection)
-                .map_err(storage_error)?,
-            ui_preferences: preferences_repository::load_ui_preferences(&connection)
-                .map_err(storage_error)?,
-            agent_prompt_preferences:
-                agent_prompt_preferences_repository::load_agent_prompt_preferences(&connection)
-                    .map_err(storage_error)?,
-        })
+        Ok(service)
     }
 
     pub fn load_model_settings(&self) -> Result<Option<ModelSettingsRecord>, String> {
@@ -123,7 +114,10 @@ impl StorageService {
             project_repository::delete_project(&transaction, project_id).map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
         }
-        self.cleanup_attachment_files(attachments)
+        if let Err(error) = self.cleanup_attachment_files(attachments) {
+            eprintln!("failed to remove deleted project attachment files: {error}");
+        }
+        Ok(())
     }
 
     pub fn load_conversations(&self) -> Result<Vec<ChatConversationRecord>, String> {
@@ -186,6 +180,7 @@ impl StorageService {
         conversation: ChatConversationRecord,
     ) -> Result<ChatConversationRecord, String> {
         let mut connection = self.state.connection()?;
+        ensure_project_reference_exists(&connection, conversation.project_id.as_deref())?;
         chat_repository::save_conversation(&mut connection, conversation.clone())
             .map_err(storage_error)?;
         Ok(conversation)
@@ -196,6 +191,7 @@ impl StorageService {
         conversation: ChatConversationMetaRecord,
     ) -> Result<ChatConversationMetaRecord, String> {
         let connection = self.state.connection()?;
+        ensure_project_reference_exists(&connection, conversation.project_id.as_deref())?;
         chat_repository::save_conversation_meta(&connection, &conversation)
             .map_err(storage_error)?;
         Ok(conversation)
@@ -230,7 +226,10 @@ impl StorageService {
                 .map_err(storage_error)?;
             transaction.commit().map_err(storage_error)?;
         }
-        self.cleanup_attachment_files(attachments)
+        if let Err(error) = self.cleanup_attachment_files(attachments) {
+            eprintln!("failed to remove deleted conversation attachment files: {error}");
+        }
+        Ok(())
     }
 
     pub fn delete_chat_messages(
@@ -257,7 +256,10 @@ impl StorageService {
         .map_err(storage_error)?;
         chat_repository::delete_messages(&mut connection, conversation_id, message_ids)
             .map_err(storage_error)?;
-        self.cleanup_attachment_files(attachments)
+        if let Err(error) = self.cleanup_attachment_files(attachments) {
+            eprintln!("failed to remove deleted message attachment files: {error}");
+        }
+        Ok(())
     }
 
     pub fn save_input_attachments(
@@ -275,6 +277,8 @@ impl StorageService {
         fs::create_dir_all(&self.attachment_root)
             .map_err(|error| format!("创建附件库目录失败：{error}"))?;
         let connection = self.state.connection()?;
+        ensure_conversation_exists(&connection, conversation_id)?;
+        ensure_project_reference_exists(&connection, project_id)?;
 
         for attachment in attachments {
             let bytes = input_attachment_bytes(attachment)?;
@@ -386,6 +390,7 @@ impl StorageService {
         position_offset: i64,
     ) -> Result<Vec<ChatMessageRecord>, String> {
         let mut connection = self.state.connection()?;
+        ensure_conversation_exists(&connection, conversation_id)?;
         chat_repository::upsert_messages(
             &mut connection,
             conversation_id,
@@ -456,15 +461,10 @@ impl StorageService {
         draft: ComposerDraftRecord,
     ) -> Result<ComposerDraftRecord, String> {
         let connection = self.state.connection()?;
+        ensure_project_reference_exists(&connection, draft.project_id.as_deref())?;
         composer_draft_repository::save_composer_draft(&connection, draft.clone())
             .map_err(storage_error)?;
         Ok(draft)
-    }
-
-    pub fn delete_composer_draft(&self, scope_id: &str) -> Result<(), String> {
-        let connection = self.state.connection()?;
-        composer_draft_repository::delete_composer_draft(&connection, scope_id)
-            .map_err(storage_error)
     }
 
     pub fn load_ui_preferences(&self) -> Result<UiPreferencesRecord, String> {
@@ -1006,6 +1006,31 @@ fn slash_path(path: &Path) -> String {
         .join("/")
 }
 
+fn ensure_project_reference_exists(
+    connection: &rusqlite::Connection,
+    project_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(project_id) = project_id else {
+        return Ok(());
+    };
+    if project_repository::project_exists(connection, project_id).map_err(storage_error)? {
+        Ok(())
+    } else {
+        Err(format!("项目已不存在，拒绝保存关联数据：{project_id}"))
+    }
+}
+
+fn ensure_conversation_exists(
+    connection: &rusqlite::Connection,
+    conversation_id: &str,
+) -> Result<(), String> {
+    if chat_repository::conversation_exists(connection, conversation_id).map_err(storage_error)? {
+        Ok(())
+    } else {
+        Err(format!("对话已不存在，拒绝保存关联数据：{conversation_id}"))
+    }
+}
+
 fn orphan_scan_relative_path(attachment_root: &Path, path: &Path) -> Option<String> {
     let relative_path = path.strip_prefix(attachment_root).ok()?;
     let parts = relative_path
@@ -1021,7 +1046,10 @@ fn orphan_scan_relative_path(attachment_root: &Path, path: &Path) -> Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord, ComposerDraftRecord};
+    use crate::storage::models::{
+        ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ComposerDraftRecord,
+        ProjectRecord,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1073,6 +1101,44 @@ mod tests {
         assert!(PathBuf::from(library.root_path.unwrap())
             .join(&library.conversation_attachments[0].storage_rel_path)
             .is_file());
+    }
+
+    #[test]
+    fn opening_storage_removes_orphan_attachments_and_preserves_referenced_files() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        service
+            .save_conversation(conversation("conversation-1", None, "message-1"))
+            .unwrap();
+        service
+            .save_input_attachments(
+                "conversation-1",
+                "message-1",
+                None,
+                &[input_attachment(
+                    "referenced",
+                    AgentInputAttachmentKind::File,
+                    "referenced.txt",
+                    Some("text/plain"),
+                    b"referenced",
+                )],
+                10,
+            )
+            .unwrap();
+        let library = service
+            .build_attachment_library_context("conversation-1", None)
+            .unwrap();
+        let referenced_path = PathBuf::from(library.root_path.unwrap())
+            .join(&library.conversation_attachments[0].storage_rel_path);
+        drop(service);
+
+        let orphan_path = fixture.root.join("attachments/orphan/nested.txt");
+        fs::create_dir_all(orphan_path.parent().unwrap()).unwrap();
+        fs::write(&orphan_path, b"orphan").unwrap();
+
+        let _reopened = fixture.service();
+        assert!(referenced_path.is_file());
+        assert!(!orphan_path.exists());
     }
 
     #[test]
@@ -1232,6 +1298,51 @@ mod tests {
     }
 
     #[test]
+    fn stale_saves_cannot_recreate_deleted_project_data() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let stale_conversation =
+            conversation("conversation-stale", Some("project-1"), "message-stale");
+        service
+            .save_conversation(stale_conversation.clone())
+            .unwrap();
+        service.delete_project("project-1").unwrap();
+
+        assert!(service
+            .save_conversation(stale_conversation.clone())
+            .is_err());
+        assert!(service
+            .save_conversation_meta(ChatConversationMetaRecord {
+                id: stale_conversation.id.clone(),
+                project_id: stale_conversation.project_id.clone(),
+                model_id: stale_conversation.model_id.clone(),
+                title: stale_conversation.title.clone(),
+                created_at: stale_conversation.created_at,
+                updated_at: stale_conversation.updated_at,
+                pinned_at: stale_conversation.pinned_at,
+                archived_at: stale_conversation.archived_at,
+                unread_at: stale_conversation.unread_at,
+            })
+            .is_err());
+        assert!(service
+            .upsert_chat_messages(
+                &stale_conversation.id,
+                stale_conversation.messages.clone(),
+                0,
+            )
+            .is_err());
+        assert!(service
+            .save_composer_draft(composer_draft(
+                &stale_conversation.id,
+                Some("project-1"),
+                "stale draft",
+            ))
+            .is_err());
+        assert!(service.load_conversations().unwrap().is_empty());
+        assert!(service.load_composer_drafts().unwrap().is_empty());
+    }
+
+    #[test]
     fn deleting_conversation_removes_agent_rows_and_keeps_usage_rollup() {
         let fixture = StorageFixture::new();
         let service = fixture.service();
@@ -1315,7 +1426,19 @@ mod tests {
         }
 
         fn service(&self) -> StorageService {
-            StorageService::open(&self.root.join("storage.sqlite")).unwrap()
+            let service = StorageService::open(&self.root.join("storage.sqlite")).unwrap();
+            for project_id in ["project-1", "project-2"] {
+                service
+                    .save_project(ProjectRecord {
+                        id: project_id.to_string(),
+                        name: project_id.to_string(),
+                        path: Some(self.root.join(project_id).to_string_lossy().to_string()),
+                        created_at: 1,
+                        pinned_at: None,
+                    })
+                    .unwrap();
+            }
+            service
         }
     }
 

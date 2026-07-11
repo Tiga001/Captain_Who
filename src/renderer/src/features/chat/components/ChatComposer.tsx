@@ -1,5 +1,4 @@
-// Renderer UI.
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
   ArrowUp,
@@ -163,24 +162,27 @@ export function ChatComposer({
     setIsFileDragActive(false)
   }, [resetKey])
 
-  const updateDraft = (patch: Partial<ChatComposerDraft>) => {
-    const currentDraft = draftRef.current
-    const nextDraft = {
-      ...currentDraft,
-      ...patch,
-      updatedAt: Date.now()
-    }
-    draftRef.current = nextDraft
-    onDraftChange({
-      ...nextDraft
-    })
-  }
+  const updateDraft = useCallback(
+    (patch: Partial<ChatComposerDraft>) => {
+      const currentDraft = draftRef.current
+      const nextDraft = {
+        ...currentDraft,
+        ...patch,
+        updatedAt: Date.now()
+      }
+      draftRef.current = nextDraft
+      onDraftChange({
+        ...nextDraft
+      })
+    },
+    [onDraftChange]
+  )
 
   useEffect(() => {
     if (draft.permissionMode !== permissionMode) {
       updateDraft({ permissionMode })
     }
-  }, [draft.permissionMode, permissionMode])
+  }, [draft.permissionMode, permissionMode, updateDraft])
 
   const appendAttachments = (nextAttachments: ComposerAttachment[]) => {
     if (nextAttachments.length === 0) return
@@ -194,19 +196,19 @@ export function ChatComposer({
     if (showProjectSelector && defaultProjectId !== null && defaultProjectId !== draft.projectId) {
       updateDraft({ projectId: defaultProjectId })
     }
-  }, [defaultProjectId, showProjectSelector])
+  }, [defaultProjectId, draft.projectId, showProjectSelector, updateDraft])
 
   useEffect(() => {
     if (draft.projectId && !projects.some((project) => project.id === draft.projectId)) {
       updateDraft({ projectId: null })
     }
-  }, [draft.projectId, projects])
+  }, [draft.projectId, projects, updateDraft])
 
   useEffect(() => {
     if (!selectedModel && enabledModels.length > 0) {
       updateDraft({ modelId: enabledModels[0].id })
     }
-  }, [enabledModels, selectedModel])
+  }, [enabledModels, selectedModel, updateDraft])
 
   useEffect(() => {
     const textarea = textareaRef.current

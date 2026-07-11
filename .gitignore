@@ -4,4 +4,9 @@ out
 target
 .DS_Store
 .eslintcache
+coverage
+*.tsbuildinfo
 *.log*
+.env
+.env.*
+!.env.example

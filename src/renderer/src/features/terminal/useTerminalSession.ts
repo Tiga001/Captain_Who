@@ -1,4 +1,3 @@
-// Renderer terminal UI.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
@@ -11,11 +10,7 @@ import {
   resizeTerminalSession,
   writeTerminalInput
 } from './terminalClient'
-import type {
-  TerminalExitEvent,
-  TerminalSessionSnapshot,
-  TerminalSessionStatus
-} from './terminalTypes'
+import type { TerminalExitEvent, TerminalSessionStatus } from './terminalTypes'
 
 interface UseTerminalSessionOptions {
   containerRef: RefObject<HTMLDivElement | null>
@@ -26,8 +21,6 @@ interface UseTerminalSessionOptions {
 
 interface UseTerminalSessionResult {
   errorMessage: string | null
-  fitTerminal: () => void
-  session: TerminalSessionSnapshot | null
   status: TerminalSessionStatus
 }
 
@@ -109,7 +102,6 @@ export function useTerminalSession({
   const sessionIdRef = useRef<string | null>(null)
   const initialCwdRef = useRef(initialCwd)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
-  const [session, setSession] = useState<TerminalSessionSnapshot | null>(null)
   const [status, setStatus] = useState<TerminalSessionStatus>('starting')
 
   useEffect(() => {
@@ -228,7 +220,6 @@ export function useTerminalSession({
         }
 
         sessionIdRef.current = nextSession.sessionId
-        setSession(nextSession)
         setStatus('running')
         terminal.focus()
         queueFit()
@@ -299,8 +290,6 @@ export function useTerminalSession({
 
   return {
     errorMessage,
-    fitTerminal,
-    session,
     status
   }
 }

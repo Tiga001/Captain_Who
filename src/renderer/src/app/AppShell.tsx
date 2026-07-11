@@ -1,4 +1,3 @@
-// Renderer UI.
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react'
 import type { AppWindowState } from '@mycopilot/host-api'
 import type { AgentEvent, AgentProposedAction } from '@mycopilot/protocol'
@@ -6,6 +5,7 @@ import type { AgentInputAttachment } from '@mycopilot/protocol'
 import { ResizeHandle } from '../components/layout/ResizeHandle'
 import { LeftSidebar } from '../components/sidebar/LeftSidebar'
 import { RightSidebar } from '../components/sidebar/RightSidebar'
+import { useToast } from '../components/toast/ToastContext'
 import { useModelSettings } from '../config/ModelSettingsProvider'
 import { useProjectSettings } from '../config/ProjectSettingsProvider'
 import { useFrontendConfig } from '../config/FrontendConfigProvider'
@@ -31,6 +31,7 @@ import {
   startConversationTurn
 } from '../features/agent/agentClient'
 import { resolveChatPermissions } from '../features/chat/chatPermissions'
+import { createAttachmentSummary } from '../features/chat/chatAttachments'
 import {
   defaultUiPreferences,
   deleteChatMessages,
@@ -47,7 +48,7 @@ import {
 import type { UiPreferencesSnapshot } from '../features/storage/storageClient'
 import { NEW_CONVERSATION_DRAFT_ID, THINKING_PLACEHOLDER } from './appConstants'
 import type { ActiveRunBinding } from './appTypes'
-import { getAgentActionId } from './agentActionUtils'
+import { getAgentActionApprovalStatus, getAgentActionId } from './agentActionUtils'
 import {
   applyAgentActionDecisionToChatMessage,
   applyAgentActionExecutionToChatMessage,
@@ -83,14 +84,9 @@ type PendingMessageUpsert = {
   positionOffset: number
 }
 
-function getAttachmentSummaryFromInput(attachments: AgentInputAttachment[]): string {
-  if (attachments.length === 0) return ''
-  return `附件：${attachments.map((attachment) => attachment.name).join('、')}`
-}
-
 function buildMessageContentWithAttachments(content: string, attachments: AgentInputAttachment[]) {
   const trimmedContent = content.trim()
-  const attachmentSummary = getAttachmentSummaryFromInput(attachments)
+  const attachmentSummary = createAttachmentSummary(attachments)
   return [trimmedContent, attachmentSummary].filter(Boolean).join('\n\n')
 }
 
@@ -129,6 +125,7 @@ const DEFAULT_APP_WINDOW_STATE: AppWindowState = {
 
 export function AppShell() {
   const { t } = useFrontendConfig()
+  const { showToast } = useToast()
   const { enabledModels } = useModelSettings()
   const { projects, deleteProject, renameProject, showProjectInFolder, togglePinProject } =
     useProjectSettings()
@@ -194,9 +191,8 @@ export function AppShell() {
     (conversation) => !conversation.archivedAt && Boolean(conversation.unreadAt)
   )
 
-  // 修了一个伟大的 bug：agent tool events 会高频到达，不能让异步 React state
-  // commit 再回写 conversationsRef，否则旧快照会覆盖新 toolCalls/diffs/toolResults。
-  // 所有 conversation 更新都必须走这里，确保 UI state 和事件合并基准同步。
+  // Agent tool events arrive faster than React state commits. Keep the ref and state in one
+  // update path so an older render snapshot cannot overwrite newer tool-call results.
   const setConversationsWithRef = useCallback((value: SetStateAction<ChatConversation[]>) => {
     const nextConversations =
       typeof value === 'function'
@@ -311,6 +307,16 @@ export function AppShell() {
       const pendingUpsert = messageUpsertQueuesRef.current.get(conversationId)
       if (!pendingUpsert) return
       await pendingUpsert
+    }
+  }, [])
+
+  const waitForMessageStateSaves = useCallback(async (conversationId: string) => {
+    while (true) {
+      const pendingSaves = [...messageSaveQueuesRef.current.entries()]
+        .filter(([key]) => key.startsWith(`${conversationId}:`))
+        .map(([, pendingSave]) => pendingSave)
+      if (pendingSaves.length === 0) return
+      await Promise.allSettled(pendingSaves)
     }
   }, [])
 
@@ -653,11 +659,12 @@ export function AppShell() {
   }, [handleBoundAgentEvent])
 
   useEffect(() => {
+    const pendingMessageDeltas = pendingMessageDeltasRef.current
     return () => {
-      for (const pendingDelta of pendingMessageDeltasRef.current.values()) {
+      for (const pendingDelta of pendingMessageDeltas.values()) {
         window.clearTimeout(pendingDelta.timerId)
       }
-      pendingMessageDeltasRef.current.clear()
+      pendingMessageDeltas.clear()
     }
   }, [])
 
@@ -780,6 +787,7 @@ export function AppShell() {
     [
       cancelBackendAgentRun,
       handleBoundAgentEvent,
+      setConversationsWithRef,
       uiPreferences.customPermissions,
       updateAssistantMessage
     ]
@@ -791,7 +799,7 @@ export function AppShell() {
       const conversationId = activeConversation?.id ?? createId('conversation')
       const userMessage = createUserMessage(message, options.attachments ?? [])
       const assistantMessage = createAssistantMessage(THINKING_PLACEHOLDER, 'pending')
-      const title = createConversationTitle(message)
+      const title = createConversationTitle(message, t('chat.newConversation'))
       const conversationToSave: ChatConversation = activeConversation
         ? {
             ...activeConversation,
@@ -859,6 +867,7 @@ export function AppShell() {
       enqueueConversationMetaSave,
       requestAssistantResponse,
       setConversationsWithRef,
+      t,
       updateDraft
     ]
   )
@@ -867,19 +876,19 @@ export function AppShell() {
     async (messageId: string, content: string) => {
       const conversationId = activeConversationIdRef.current
       if (!conversationId) {
-        throw new Error('当前没有可编辑的对话。')
+        throw new Error(t('chat.editNoConversation'))
       }
 
       const conversation = conversationsRef.current.find(
         (candidate) => candidate.id === conversationId
       )
       if (!conversation) {
-        throw new Error('当前对话不存在。')
+        throw new Error(t('chat.editConversationMissing'))
       }
 
       const editableTurn = getEditableLastTurn(conversation)
       if (!editableTurn || editableTurn.userMessage.id !== messageId) {
-        throw new Error('这条消息已经不能编辑，请刷新当前对话后再试。')
+        throw new Error(t('chat.editMessageUnavailable'))
       }
 
       const attachmentIds =
@@ -893,17 +902,17 @@ export function AppShell() {
         (candidate) => candidate.id === conversationId
       )
       if (!latestConversation) {
-        throw new Error('当前对话不存在。')
+        throw new Error(t('chat.editConversationMissing'))
       }
 
       const latestEditableTurn = getEditableLastTurn(latestConversation)
       if (!latestEditableTurn || latestEditableTurn.userMessage.id !== messageId) {
-        throw new Error('对话已发生变化，请重新编辑最后一条消息。')
+        throw new Error(t('chat.editConversationChanged'))
       }
 
       const messageContent = buildMessageContentWithAttachments(content, attachments)
       if (!messageContent.trim()) {
-        throw new Error('消息内容不能为空。')
+        throw new Error(t('chat.emptyMessage'))
       }
       if (!activeDraftSelectedModel) {
         throw new Error(t('chat.noEnabledModels'))
@@ -1004,7 +1013,6 @@ export function AppShell() {
       })()
     },
     [
-      activeDraft.modelId,
       activeDraft.permissionMode,
       activeDraftSelectedModel,
       cleanupRunBinding,
@@ -1097,6 +1105,162 @@ export function AppShell() {
       )
     },
     [setConversationsWithRef]
+  )
+
+  const removeProject = useCallback(
+    async (projectId: string): Promise<boolean> => {
+      const projectConversations = conversationsRef.current.filter(
+        (conversation) => conversation.projectId === projectId
+      )
+      const conversationIds = new Set(projectConversations.map((conversation) => conversation.id))
+      const runIds = new Set<string>()
+      const actionIds = new Set<string>()
+
+      editSubmissionSeqRef.current += 1
+      for (const conversation of projectConversations) {
+        for (const message of conversation.messages) {
+          if (message.role !== 'assistant' || message.status !== 'pending') continue
+
+          cancelledPendingMessageIdsRef.current.add(message.id)
+          if (message.agentRun?.runId) runIds.add(message.agentRun.runId)
+          for (const action of message.agentRun?.approvals ?? []) {
+            if (getAgentActionApprovalStatus(action) === 'required') {
+              actionIds.add(getAgentActionId(action))
+            }
+          }
+        }
+      }
+      for (const [runId, binding] of activeRunBindingsRef.current) {
+        if (conversationIds.has(binding.conversationId)) runIds.add(runId)
+      }
+
+      runIds.forEach((runId) => {
+        cancelledRunIdsRef.current.add(runId)
+        cleanupRunBinding(runId)
+      })
+      await Promise.allSettled([
+        ...[...runIds].map((runId) => cancelAgentRun(runId)),
+        ...[...actionIds].map((actionId) => cancelAgentAction(actionId)),
+        ...[...conversationIds].map(async (conversationId) => {
+          await waitForConversationSaves(conversationId)
+          await waitForMessageUpserts(conversationId)
+          await waitForMessageStateSaves(conversationId)
+        })
+      ])
+
+      try {
+        await deleteProject(projectId)
+      } catch (error) {
+        console.error('Failed to remove project', error)
+        const cancelledAt = Date.now()
+        const reconciledConversations = conversationsRef.current.map((conversation) => {
+          if (conversation.projectId !== projectId) return conversation
+
+          return {
+            ...conversation,
+            messages: conversation.messages.map((message) => {
+              if (message.role !== 'assistant' || message.status !== 'pending') return message
+
+              const currentRun = ensureAgentRun(
+                message.agentRun,
+                message.agentRun?.runId ?? null,
+                'cancelled'
+              )
+              const cancelledMessage: ChatMessage = {
+                ...message,
+                content:
+                  message.content && message.content !== THINKING_PLACEHOLDER
+                    ? message.content
+                    : '',
+                status: 'sent',
+                agentRun: settleAgentRunToolActivities(
+                  {
+                    ...currentRun,
+                    completedAt: cancelledAt,
+                    todo: undefined
+                  },
+                  'cancelled',
+                  cancelledAt
+                )
+              }
+              enqueueChatMessageStateSave(conversation.id, cancelledMessage)
+              return cancelledMessage
+            })
+          }
+        })
+        setConversationsWithRef(reconciledConversations)
+        showToast(t('project.removeFailed'))
+        return false
+      }
+
+      const removedConversationIds = new Set(
+        conversationsRef.current
+          .filter((conversation) => conversation.projectId === projectId)
+          .map((conversation) => conversation.id)
+      )
+      for (const conversationId of removedConversationIds) {
+        conversationScrollPositionsRef.current.delete(conversationId)
+        pendingConversationSavesRef.current.delete(conversationId)
+        pendingMessageUpsertsRef.current.delete(conversationId)
+      }
+      for (const [key, pendingSave] of pendingMessageSavesRef.current) {
+        if (removedConversationIds.has(pendingSave.conversationId)) {
+          pendingMessageSavesRef.current.delete(key)
+        }
+      }
+
+      setConversationsWithRef((currentConversations) =>
+        currentConversations.filter((conversation) => !removedConversationIds.has(conversation.id))
+      )
+      setDrafts((currentDrafts) =>
+        Object.fromEntries(
+          Object.entries(currentDrafts)
+            .filter(([scopeId]) => !removedConversationIds.has(scopeId))
+            .map(([scopeId, draft]) => [
+              scopeId,
+              draft.projectId === projectId ? createComposerDraft() : draft
+            ])
+        )
+      )
+      setUiPreferences((currentPreferences) => {
+        const sidebarProjectOrder = currentPreferences.sidebarProjectOrder.filter(
+          (orderedProjectId) => orderedProjectId !== projectId
+        )
+        if (sidebarProjectOrder.length === currentPreferences.sidebarProjectOrder.length) {
+          return currentPreferences
+        }
+
+        const nextPreferences = {
+          ...currentPreferences,
+          sidebarProjectOrder,
+          updatedAt: Date.now()
+        }
+        void saveUiPreferences(nextPreferences)
+        return nextPreferences
+      })
+
+      if (
+        activeConversationIdRef.current &&
+        removedConversationIds.has(activeConversationIdRef.current)
+      ) {
+        activeConversationIdRef.current = null
+        setActiveConversationId(null)
+        setScrollTargetMessageId(null)
+        setActiveConversationInitialScrollTop(null)
+      }
+      return true
+    },
+    [
+      cleanupRunBinding,
+      deleteProject,
+      enqueueChatMessageStateSave,
+      setConversationsWithRef,
+      showToast,
+      t,
+      waitForConversationSaves,
+      waitForMessageStateSaves,
+      waitForMessageUpserts
+    ]
   )
 
   const stopActiveGeneration = useCallback(() => {
@@ -1239,6 +1403,7 @@ export function AppShell() {
         onBack={() => setView('workspace')}
         onConversationPatch={patchConversation}
         onConversationsChange={setConversationsWithRef}
+        onRemoveProject={removeProject}
         onUiPreferencesChange={updateUiPreferences}
         projects={projects}
         uiPreferences={uiPreferences}
@@ -1299,7 +1464,7 @@ export function AppShell() {
               updateDraft(NEW_CONVERSATION_DRAFT_ID, createComposerDraft({ projectId }))
             }}
             onOpenSettings={() => openSettings('general')}
-            onRemoveProject={deleteProject}
+            onRemoveProject={removeProject}
             onRenameConversation={(conversationId, title) =>
               patchConversation(conversationId, { title })
             }

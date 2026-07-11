@@ -1,4 +1,3 @@
-// Rust core storage usage persistence.
 use crate::storage::models::AgentUsageRecordInsert;
 use crate::{
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageModelSummary, AgentUsageSummaryInput,
@@ -440,11 +439,22 @@ fn query_usage_models(
 }
 
 fn rollup_window(from: Option<i64>, to: Option<i64>) -> (Option<i64>, Option<i64>) {
-    (from.map(day_start_ms), to.map(day_start_ms))
+    // A rollup row is anchored at a UTC day boundary. Select anchors contained by the
+    // requested interval so adjacent local-day windows cannot claim the same row twice.
+    (from.map(day_start_at_or_after_ms), to.map(day_start_ms))
 }
 
 fn day_start_ms(timestamp_ms: i64) -> i64 {
     timestamp_ms.div_euclid(DAY_MS) * DAY_MS
+}
+
+fn day_start_at_or_after_ms(timestamp_ms: i64) -> i64 {
+    let start = day_start_ms(timestamp_ms);
+    if start == timestamp_ms {
+        start
+    } else {
+        start.saturating_add(DAY_MS)
+    }
 }
 
 fn summary_window(input: &AgentUsageSummaryInput, now_ms: i64) -> (Option<i64>, Option<i64>) {
@@ -720,6 +730,71 @@ mod tests {
         )
         .unwrap();
         assert_eq!(summary.message_count, 0);
+    }
+
+    #[test]
+    fn adjacent_local_day_ranges_do_not_double_count_deleted_rollups() {
+        let connection = in_memory_connection();
+        for (usage_day, input_tokens, estimated_cost) in
+            [(DAY_MS * 2, 100_i64, 1.0_f64), (DAY_MS * 3, 200, 2.0)]
+        {
+            connection
+                .execute(
+                    "
+                    INSERT INTO agent_deleted_usage_daily_rollups (
+                        usage_day,
+                        model_id,
+                        model_name,
+                        provider_path_key,
+                        request_count,
+                        message_count,
+                        input_tokens,
+                        output_tokens,
+                        output_thinking_tokens,
+                        total_tokens,
+                        cached_input_tokens,
+                        cache_creation_input_tokens,
+                        estimated_cost,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?1, 'model-a', 'Model A', '', 1, 1, ?2, 0, 0, ?2, NULL, NULL, ?3, 0, 0)
+                    ",
+                    params![usage_day, input_tokens, estimated_cost],
+                )
+                .unwrap();
+        }
+
+        // UTC+8 local midnight is 16:00 UTC on the preceding calendar day.
+        let utc_plus_eight_offset_ms = 8 * 60 * 60 * 1_000;
+        let first_from = DAY_MS * 2 - utc_plus_eight_offset_ms;
+        let first_to = first_from + DAY_MS - 1;
+        let second_from = first_from + DAY_MS;
+        let second_to = second_from + DAY_MS - 1;
+
+        let summarize = |from, to| {
+            usage_summary(
+                &connection,
+                &AgentUsageSummaryInput {
+                    range: AgentUsageSummaryRange::Custom,
+                    from: Some(from),
+                    to: Some(to),
+                },
+                second_to,
+            )
+            .unwrap()
+        };
+
+        let first = summarize(first_from, first_to);
+        let second = summarize(second_from, second_to);
+        let combined = summarize(first_from, second_to);
+
+        assert_eq!(first.input_tokens, Some(100));
+        assert_eq!(second.input_tokens, Some(200));
+        assert_eq!(combined.input_tokens, Some(300));
+        assert_eq!(first.estimated_cost, Some(1.0));
+        assert_eq!(second.estimated_cost, Some(2.0));
+        assert_eq!(combined.estimated_cost, Some(3.0));
     }
 
     #[test]

@@ -1,4 +1,3 @@
-// Renderer agent todo progress UI.
 import {
   useCallback,
   useEffect,

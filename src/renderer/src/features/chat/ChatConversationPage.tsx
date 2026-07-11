@@ -1,4 +1,3 @@
-// Renderer UI.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import type { AgentProposedAction, AgentTodoState } from '@mycopilot/protocol'
 import { ChatComposer } from './components/ChatComposer'
@@ -11,6 +10,7 @@ import type {
   ChatConversation,
   ChatSubmitOptions
 } from './chatTypes'
+import { getAgentActionApprovalStatus } from '../../app/agentActionUtils'
 import './ChatConversationPage.css'
 
 interface AgentApprovalOptions {
@@ -48,13 +48,6 @@ interface ChatConversationPageProps {
   scrollTargetMessageId?: string | null
 }
 
-function getActionApprovalStatus(action: AgentProposedAction) {
-  if (action.type === 'diff') return action.diff.approvalStatus
-  if (action.type === 'file_write') return action.fileWrite.approvalStatus
-  if (action.type === 'command') return action.command.approvalStatus
-  return action.call.approvalStatus
-}
-
 function getPendingApprovalTarget(conversation: ChatConversation) {
   for (let messageIndex = conversation.messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const message = conversation.messages[messageIndex]
@@ -63,7 +56,7 @@ function getPendingApprovalTarget(conversation: ChatConversation) {
 
     const action = [...run.approvals]
       .reverse()
-      .find((candidate) => getActionApprovalStatus(candidate) === 'required')
+      .find((candidate) => getAgentActionApprovalStatus(candidate) === 'required')
     if (action) {
       return {
         action,

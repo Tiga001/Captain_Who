@@ -1,4 +1,3 @@
-// Renderer UI.
 import type {
   AgentDiffProposal,
   AgentFileDraftSnapshot,

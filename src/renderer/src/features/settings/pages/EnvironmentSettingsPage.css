@@ -1,4 +1,3 @@
-/* Renderer UI. */
 .environment-settings-page {
   color: var(--settings-content-text-color);
 }
@@ -55,10 +54,6 @@
 .environment-project-card__delete:focus-visible {
   outline: 2px solid var(--mc-color-focus-ring);
   outline-offset: 2px;
-}
-
-.environment-projects__folder-input {
-  display: none;
 }
 
 .environment-projects__list {

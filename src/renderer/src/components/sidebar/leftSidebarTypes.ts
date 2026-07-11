@@ -1,4 +1,3 @@
-// Shared sidebar types for the left navigation component family.
 import type { AppProject } from '../../config/projectConfig'
 import type { ChatConversation } from '../../features/chat/chatTypes'
 import type { UiPreferencesSnapshot } from '../../features/storage/storageClient'
@@ -33,7 +32,7 @@ export interface LeftSidebarProps {
   onMarkConversationUnread: (conversationId: string) => void
   onNewConversation: (projectId?: string | null) => void
   onOpenSettings: () => void
-  onRemoveProject: (projectId: string) => void
+  onRemoveProject: (projectId: string) => Promise<boolean>
   onRenameConversation: (conversationId: string, title: string) => void
   onRenameProject: (projectId: string, name: string) => void
   onSelectConversation: (conversationId: string, messageId?: string | null) => void

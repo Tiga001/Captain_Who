@@ -1,47 +1,4 @@
-/* Agent approval cards, approval dialog, composer placement, and responsive rules. */
-.agent-approval-card {
-  display: inline-grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  width: min(100%, 720px);
-  min-height: 30px;
-  align-items: start;
-  gap: 10px;
-  color: var(--mc-color-text-muted);
-  font-size: var(--mc-font-size-chat-activity);
-  font-weight: var(--mc-font-weight-strong);
-}
-
-.agent-approval-card > svg {
-  width: var(--mc-icon-size-base);
-  height: var(--mc-icon-size-base);
-  margin-top: 0.18em;
-  color: currentColor;
-  stroke-width: var(--mc-icon-stroke-medium);
-}
-
-.agent-approval-card strong {
-  display: block;
-  overflow: hidden;
-  color: var(--mc-color-text-muted);
-  font-size: inherit;
-  font-weight: inherit;
-  line-height: var(--mc-line-height-tight);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-approval-card p {
-  display: -webkit-box;
-  margin: 4px 0 0;
-  overflow: hidden;
-  color: var(--mc-color-text-muted);
-  font-size: var(--mc-font-size-chat-activity-detail);
-  font-weight: var(--mc-font-weight-medium);
-  line-height: var(--mc-line-height-relaxed);
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
+/* Agent approval dialog, composer placement, and responsive rules. */
 .agent-approval-dialog {
   display: grid;
   width: 100%;

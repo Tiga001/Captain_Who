@@ -1,4 +1,3 @@
-// Rust core storage.
 use crate::storage::models::{ModelConfigRecord, ModelSettingsRecord};
 use crate::storage::now_ms;
 use rusqlite::{params, Connection, OptionalExtension};

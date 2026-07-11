@@ -1,4 +1,3 @@
-// Rust agent core.
 use super::{
     extract_with_textutil, join_named_text, read_zip_xml_text_parts, resolve_document_path,
     sanitize_document_max_chars, truncate_chars, AgentTool, ToolExecutionContext,
@@ -15,12 +14,12 @@ impl AgentTool for ReadWordTool {
         AgentToolDefinition {
             name: "read_word".to_string(),
             description:
-                "Extract text from Word documents (.docx, .doc) in the selected workspace or an @attachments path."
+                "Extract text from Word documents in the selected workspace or an @attachments path. .docx works cross-platform; legacy .doc requires macOS textutil."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative .docx/.doc path or @attachments/... readPath." },
+                    "path": { "type": "string", "description": "Workspace-relative .docx path, legacy .doc path on macOS, or @attachments/... readPath." },
                     "filePath": { "type": "string", "description": "Alias for path." },
                     "maxChars": { "type": "integer", "minimum": 1, "maximum": MAX_DOCUMENT_TEXT_CHARS }
                 },
@@ -116,7 +115,7 @@ mod tests {
         let fixture = TestWorkspace::new();
         fixture.write_docx("sample.docx", "Hello from docx");
         let context = fixture.context();
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
         let call = AgentToolCall {
             id: "call-1".to_string(),
             tool: "read_word".to_string(),

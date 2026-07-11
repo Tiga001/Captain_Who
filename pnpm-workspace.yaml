@@ -1,7 +1,5 @@
-# Protocol layer.
 packages:
   - packages/*
-  - apps/*
 
 allowBuilds:
   electron: true

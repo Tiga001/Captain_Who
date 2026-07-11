@@ -1,4 +1,3 @@
-// Protocol layer.
 export type JsonRpcId = string | number
 
 export interface JsonRpcRequest<TParams = unknown> {
@@ -33,5 +32,4 @@ export interface JsonRpcErrorResponse {
 }
 
 export type JsonRpcResponse<TResult = unknown> =
-  | JsonRpcSuccessResponse<TResult>
-  | JsonRpcErrorResponse
+  JsonRpcSuccessResponse<TResult> | JsonRpcErrorResponse

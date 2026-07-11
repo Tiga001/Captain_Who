@@ -1,4 +1,3 @@
-// Rust core storage.
 use crate::storage::models::ComposerDraftRecord;
 use rusqlite::{params, Connection};
 

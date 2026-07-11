@@ -1,4 +1,3 @@
-// Renderer UI.
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ChevronDown, Check, Copy, Database, Pencil } from 'lucide-react'
 import type {
@@ -18,6 +17,7 @@ import type {
 } from '../chatTypes'
 import { getReadActivityKindForTool, isReadActivityTool } from '../agentReadActivities'
 import { getUniqueWebSearchSources } from '../agentWebSearch'
+import { stripAttachmentSummary } from '../chatAttachments'
 import {
   getAttachmentBadgeLabel,
   getAttachmentExtension,
@@ -136,7 +136,7 @@ function formatMessageTime(timestamp: number | undefined, language: string, t: T
     return `${new Intl.DateTimeFormat(language, { weekday: 'long' }).format(date)} ${time}`
   }
 
-  return `${date.getMonth() + 1}月${date.getDate()}日 ${time}`
+  return `${new Intl.DateTimeFormat(language, { month: 'short', day: 'numeric' }).format(date)} ${time}`
 }
 
 function formatUsageTokenCount(value: unknown, language: string) {
@@ -281,22 +281,9 @@ function getAssistantFinalContent(message: ChatMessage) {
   return isThinkingPlaceholder(content) ? '' : content
 }
 
-function getAttachmentSummary(attachments: NonNullable<ChatMessage['attachments']>) {
-  return `附件：${attachments.map((attachment) => attachment.name).join('、')}`
-}
-
 function getUserVisibleContent(message: ChatMessage) {
   if (message.role !== 'user' || !message.attachments?.length) return message.content
-
-  const summary = getAttachmentSummary(message.attachments)
-  if (message.content === summary) return ''
-
-  const suffix = `\n\n${summary}`
-  if (message.content.endsWith(suffix)) {
-    return message.content.slice(0, -suffix.length)
-  }
-
-  return message.content
+  return stripAttachmentSummary(message.content, message.attachments)
 }
 
 function isBottomTimelineItemSpecificPendingStatus(
@@ -945,16 +932,18 @@ function AgentRunView({
 }) {
   const { t } = useFrontendConfig()
   const run = message.agentRun
-  const timeline = run?.timeline ?? []
+  const timeline = useMemo(() => run?.timeline ?? [], [run?.timeline])
+  const runId = run?.runId
+  const runIsSettled = !run || isRunSettled(run)
   const hasTimeline = timeline.length > 0
   const hasTimelineError = timeline.some((item) => item.type === 'error')
   const canToggleTimeline = Boolean(
     run && isRunSettled(run) && hasCollapsibleTimelineContent(run, timeline)
   )
-  const [now, setNow] = useState(Date.now())
+  const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
-    if (!run || isRunSettled(run)) return undefined
+    if (runIsSettled) return undefined
 
     const timerId = window.setInterval(() => {
       setNow(Date.now())
@@ -963,7 +952,7 @@ function AgentRunView({
     return () => {
       window.clearInterval(timerId)
     }
-  }, [run?.runId, run?.status])
+  }, [runId, runIsSettled])
 
   const headerState = useMemo(() => {
     const hasFirstResponse = Boolean(run?.firstResponseAt)
@@ -993,7 +982,7 @@ function AgentRunView({
         duration: formatElapsedDuration(endedAt - startedAt)
       })
     }
-  }, [message.createdAt, now, run, t])
+  }, [message.createdAt, now, run, t, timeline])
   const displayTimeline = useMemo(
     () => (run ? groupTimelineItems(run, timeline) : []),
     [run, timeline]
@@ -1251,7 +1240,7 @@ function MessageAttachments({
   }
 
   return (
-    <div className="chat-message__attachments" aria-label="附件">
+    <div className="chat-message__attachments" aria-label={t('chat.attachments')}>
       {imageAttachments.length > 0 && (
         <div className="chat-message__attachment-row" data-kind="image">
           {imageAttachments.map(renderAttachment)}

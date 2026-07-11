@@ -1,4 +1,3 @@
-// Renderer browser UI.
 const EXPLICIT_PROTOCOL_PATTERN = /^[a-zA-Z][a-zA-Z\d+.-]*:/
 const LOCAL_HTTP_PATTERN = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::|\/|$)/i
 const SAFE_BROWSER_PROTOCOLS = new Set(['http:', 'https:'])

@@ -1,4 +1,4 @@
-# Rust core server.
+# Rust workspace.
 [workspace]
 members = [
   "crates/protocol-rs",

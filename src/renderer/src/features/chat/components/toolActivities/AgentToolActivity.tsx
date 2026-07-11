@@ -1,4 +1,3 @@
-// Renderer UI.
 import type { AgentDiffProposal, AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { ReactElement } from 'react'
 import type { ChatReadActivity, ChatWebSearchActivity } from '../../chatTypes'

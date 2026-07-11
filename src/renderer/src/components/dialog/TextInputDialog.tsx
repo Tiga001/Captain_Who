@@ -1,20 +1,19 @@
-// Renderer UI.
-import { X } from "lucide-react";
-import { useEffect, useId } from "react";
-import { createPortal } from "react-dom";
-import "./ConfirmationDialog.css";
+import { X } from 'lucide-react'
+import { useEffect, useId } from 'react'
+import { createPortal } from 'react-dom'
+import './ConfirmationDialog.css'
 
 interface TextInputDialogProps {
-  cancelLabel: string;
-  confirmDisabled?: boolean;
-  confirmLabel: string;
-  description: string;
-  inputAriaLabel?: string;
-  onCancel: () => void;
-  onConfirm: () => void;
-  onValueChange: (value: string) => void;
-  title: string;
-  value: string;
+  cancelLabel: string
+  confirmDisabled?: boolean
+  confirmLabel: string
+  description: string
+  inputAriaLabel?: string
+  onCancel: () => void
+  onConfirm: () => void
+  onValueChange: (value: string) => void
+  title: string
+  value: string
 }
 
 export function TextInputDialog({
@@ -27,26 +26,26 @@ export function TextInputDialog({
   onConfirm,
   onValueChange,
   title,
-  value,
+  value
 }: TextInputDialogProps) {
-  const titleId = useId();
-  const descriptionId = useId();
+  const titleId = useId()
+  const descriptionId = useId()
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onCancel();
-    };
+      if (event.key === 'Escape') onCancel()
+    }
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onCancel]);
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onCancel])
 
   return createPortal(
     <div
       className="app-confirm-dialog__backdrop"
       role="presentation"
       onMouseDown={(event) => {
-        if (event.currentTarget === event.target) onCancel();
+        if (event.currentTarget === event.target) onCancel()
       }}
     >
       <form
@@ -56,8 +55,8 @@ export function TextInputDialog({
         aria-labelledby={titleId}
         aria-describedby={descriptionId}
         onSubmit={(event) => {
-          event.preventDefault();
-          if (!confirmDisabled) onConfirm();
+          event.preventDefault()
+          if (!confirmDisabled) onConfirm()
         }}
       >
         <button
@@ -95,6 +94,6 @@ export function TextInputDialog({
         </div>
       </form>
     </div>,
-    document.body,
-  );
+    document.body
+  )
 }

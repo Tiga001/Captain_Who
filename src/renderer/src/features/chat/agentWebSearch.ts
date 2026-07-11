@@ -1,4 +1,3 @@
-// Renderer UI.
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { ChatAgentRunView, ChatWebSearchActivity, ChatWebSearchSource } from './chatTypes'
 import { buildWebFetchPresentation, type WebFetchPresentation } from './webFetchPresentation'
@@ -58,7 +57,7 @@ function responseTimeValue(value: unknown): number | string | null {
   return null
 }
 
-export function isWebActivityTool(tool: string): boolean {
+function isWebActivityTool(tool: string): boolean {
   return WEB_ACTIVITY_TOOLS.has(tool)
 }
 
@@ -242,7 +241,7 @@ function upsertActivity(
   )
 }
 
-export function webSearchActivityFromCall(call: AgentToolCall): ChatWebSearchActivity | null {
+function webSearchActivityFromCall(call: AgentToolCall): ChatWebSearchActivity | null {
   if (!isWebActivityTool(call.tool)) return null
 
   return {
@@ -324,13 +323,6 @@ export function settlePendingWebSearchActivities(
       updatedAt: settledAt
     })
   }, normalizeWebSearchActivities(run))
-}
-
-export function cancelPendingWebSearchActivities(
-  run: ChatAgentRunView,
-  cancelledAt: number
-): ChatWebSearchActivity[] | undefined {
-  return settlePendingWebSearchActivities(run, 'cancelled', cancelledAt)
 }
 
 export function getUniqueWebSearchSources(

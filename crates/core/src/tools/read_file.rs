@@ -1,4 +1,3 @@
-// Rust agent core.
 use super::{
     AgentTool, ToolExecutionContext, DEFAULT_READ_MAX_LINES, MAX_READ_FILE_BYTES, MAX_READ_LINES,
 };
@@ -120,7 +119,7 @@ mod tests {
         let fixture = TestWorkspace::new();
         fixture.write_file("notes.txt", "one\ntwo\nthree\n");
         let context = fixture.context();
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
         let call = AgentToolCall {
             id: "call-1".to_string(),
             tool: "read_file".to_string(),

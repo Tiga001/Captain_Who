@@ -1,6 +1,3 @@
-// Renderer UI.
-// Hosts the right-sidebar module integration shell and keep-alive tab surface.
-
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
@@ -157,16 +154,11 @@ export function RightSidebar({
   const openModule = useCallback(
     (moduleId: RightSidebarModuleId) => {
       const module = getRightSidebarModule(moduleId)
-      if (!module?.isEnabled) return
+      if (!module) return
 
       const pageId = createPageId(moduleId)
       setPages((currentPages) => {
-        const fallbackTitle =
-          moduleId === 'terminal'
-            ? t('terminal.title')
-            : moduleId === 'browser'
-              ? t('browser.newTab')
-              : t(module.titleKey)
+        const fallbackTitle = moduleId === 'terminal' ? t('terminal.title') : t('browser.newTab')
         const page: RightSidebarPage = {
           iconUrl: moduleId === 'browser' ? null : undefined,
           id: pageId,

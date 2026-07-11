@@ -1,4 +1,3 @@
-// Rust core storage.
 use crate::protocol::AgentPermissions;
 use serde::{Deserialize, Serialize};
 
@@ -193,17 +192,6 @@ pub struct AgentPromptPreferencesRecord {
     pub detail_level: String,
     pub custom_instructions: String,
     pub updated_at: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppDataSnapshot {
-    pub model_settings: Option<ModelSettingsRecord>,
-    pub projects: Vec<ProjectRecord>,
-    pub conversations: Vec<ChatConversationRecord>,
-    pub composer_drafts: Vec<ComposerDraftRecord>,
-    pub ui_preferences: UiPreferencesRecord,
-    pub agent_prompt_preferences: AgentPromptPreferencesRecord,
 }
 
 #[derive(Debug, Clone)]

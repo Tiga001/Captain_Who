@@ -1,4 +1,3 @@
-// Rust agent core.
 mod attachments;
 mod file_transactions;
 mod hooks;
@@ -157,7 +156,7 @@ impl AgentRuntime {
         let run_id = run_id.unwrap_or_else(generate_run_id);
         let context = input.context.clone();
         let mut runtime_hooks = AgentRuntimeHooks::for_run(&run_id);
-        let tool_registry = Arc::new(ToolRegistry::read_only_defaults_with_search(
+        let tool_registry = Arc::new(ToolRegistry::defaults_with_search(
             input.search_config.as_ref(),
         ));
         let command_permission = context

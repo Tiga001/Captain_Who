@@ -1,4 +1,3 @@
-// Rust agent core.
 use super::apply_patch_diff::{build_unified_diff, sanitize_patch, validate_patch_operation};
 use super::apply_patch_paths::sanitize_file_path;
 #[cfg(test)]

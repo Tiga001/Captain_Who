@@ -1,4 +1,3 @@
-// Electron main attachment dialog bridge.
 import { randomUUID } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
@@ -35,9 +34,7 @@ const READABLE_FILE_EXTENSIONS = new Set([
   'docx',
   'doc',
   'pptx',
-  'ppt',
   'xlsx',
-  'xls',
   'csv',
   'tsv',
   'txt',
@@ -172,7 +169,6 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   jsonl: 'application/json',
   pdf: 'application/pdf',
   png: 'image/png',
-  ppt: 'application/vnd.ms-powerpoint',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   svg: 'image/svg+xml',
   tif: 'image/tiff',
@@ -180,7 +176,6 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   tsv: 'text/tab-separated-values',
   txt: 'text/plain',
   webp: 'image/webp',
-  xls: 'application/vnd.ms-excel',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   xml: 'application/xml',
   yaml: 'text/yaml',

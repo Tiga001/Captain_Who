@@ -1,4 +1,3 @@
-/* Renderer UI left sidebar style entrypoint. */
 @import './LeftSidebar.layout.css';
 @import './LeftSidebar.sections.css';
 @import './LeftSidebar.projects.css';

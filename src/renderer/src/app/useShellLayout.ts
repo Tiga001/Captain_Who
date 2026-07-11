@@ -1,4 +1,3 @@
-// Renderer UI.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   CENTER_MIN_WIDTH,
@@ -160,7 +159,6 @@ export function useShellLayout() {
   }, [applyConstrainedLayout, leftOpen, rightOpen])
 
   return {
-    applyConstrainedLayout,
     leftOpen,
     leftWidth,
     resizeSide,

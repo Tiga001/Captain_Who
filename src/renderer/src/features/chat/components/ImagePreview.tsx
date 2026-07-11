@@ -1,4 +1,3 @@
-// Renderer chat image preview overlay.
 import {
   createContext,
   useCallback,
@@ -24,7 +23,6 @@ interface ImagePreviewInput {
 }
 
 interface ImagePreviewContextValue {
-  copyImageToClipboard: (src: string) => Promise<boolean>
   openImagePreview: (input: ImagePreviewInput) => void
 }
 
@@ -38,6 +36,7 @@ interface ContextMenuState {
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 4
 const ZOOM_STEP = 0.25
+const MAX_CLIPBOARD_IMAGE_BYTES = 16 * 1024 * 1024
 
 const ImagePreviewContext = createContext<ImagePreviewContextValue | null>(null)
 
@@ -67,7 +66,10 @@ function fileNameFromSource(src: string) {
 }
 
 function sanitizeDownloadFileName(fileName: string) {
-  return fileName.trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ')
+  return fileName
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, ' ')
 }
 
 function getDownloadFileName(preview: ImagePreviewInput, mimeType?: string) {
@@ -79,11 +81,23 @@ function getDownloadFileName(preview: ImagePreviewInput, mimeType?: string) {
 }
 
 async function fetchImageBlob(src: string) {
+  const url = new URL(src, window.location.href)
+  if (!['data:', 'http:', 'https:', 'mycopilot-resource:'].includes(url.protocol)) {
+    throw new Error(`Unsupported image protocol: ${url.protocol}`)
+  }
   const response = await fetch(src)
   if (!response.ok) {
     throw new Error(`Image request failed with status ${response.status}`)
   }
-  return response.blob()
+  const contentLength = Number(response.headers.get('content-length') ?? '')
+  if (Number.isFinite(contentLength) && contentLength > MAX_CLIPBOARD_IMAGE_BYTES) {
+    throw new Error('Image is too large')
+  }
+  const blob = await response.blob()
+  if (blob.size === 0 || blob.size > MAX_CLIPBOARD_IMAGE_BYTES) {
+    throw new Error('Image is empty or too large')
+  }
+  return blob
 }
 
 function blobToDataUrl(blob: Blob) {
@@ -101,31 +115,7 @@ function blobToDataUrl(blob: Blob) {
   })
 }
 
-function getHostReadableImageSource(src: string) {
-  const trimmedSource = src.trim()
-  if (trimmedSource.startsWith('data:image/')) {
-    return { dataUrl: trimmedSource }
-  }
-
-  try {
-    const url = new URL(trimmedSource, window.location.href)
-    if (url.protocol === 'file:' || url.protocol === 'http:' || url.protocol === 'https:') {
-      return { imageUrl: url.toString() }
-    }
-  } catch {
-    return null
-  }
-
-  return null
-}
-
 async function copyImageWithHostClipboard(src: string) {
-  const hostReadableSource = getHostReadableImageSource(src)
-  if (hostReadableSource) {
-    await hostClient.clipboard.writeImage(hostReadableSource)
-    return
-  }
-
   const blob = await fetchImageBlob(src)
   const dataUrl = await blobToDataUrl(blob)
   await hostClient.clipboard.writeImage({ dataUrl })
@@ -154,10 +144,13 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
     setContextMenu(null)
   }, [])
 
-  const showImagePreviewNotice = useCallback((message: string) => {
-    setCopyState('idle')
-    showToast(message, { tone: 'accent' })
-  }, [showToast])
+  const showImagePreviewNotice = useCallback(
+    (message: string) => {
+      setCopyState('idle')
+      showToast(message)
+    },
+    [showToast]
+  )
 
   const zoomOut = useCallback(() => {
     setZoom((currentZoom) => clampZoom(currentZoom - ZOOM_STEP))
@@ -199,34 +192,34 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
     }
   }, [preview])
 
-  const copyImageToClipboard = useCallback(async (src: string) => {
-    if (!src || copyState === 'copying') return false
-    setCopyState('copying')
-    setContextMenu(null)
-    showToast(t('imagePreview.copying'), { durationMs: 1000, tone: 'accent' })
+  const copyImageToClipboard = useCallback(
+    async (src: string) => {
+      if (!src || copyState === 'copying') return false
+      setCopyState('copying')
+      setContextMenu(null)
+      showToast(t('imagePreview.copying'), { durationMs: 1000 })
 
-    try {
-      await copyImageWithHostClipboard(src)
-      setCopyState('copied')
-      showToast(t('imagePreview.copied'), { tone: 'accent' })
-      return true
-    } catch (error) {
-      console.error('Failed to copy image', error)
-      setCopyState('failed')
-      showToast(t('imagePreview.copyFailed'), { tone: 'accent' })
-      return false
-    }
-  }, [copyState, showToast, t])
+      try {
+        await copyImageWithHostClipboard(src)
+        setCopyState('copied')
+        showToast(t('imagePreview.copied'))
+        return true
+      } catch (error) {
+        console.error('Failed to copy image', error)
+        setCopyState('failed')
+        showToast(t('imagePreview.copyFailed'))
+        return false
+      }
+    },
+    [copyState, showToast, t]
+  )
 
   const copyImage = useCallback(async () => {
     if (!preview) return
     await copyImageToClipboard(preview.src)
   }, [copyImageToClipboard, preview])
 
-  const value = useMemo(
-    () => ({ copyImageToClipboard, openImagePreview }),
-    [copyImageToClipboard, openImagePreview]
-  )
+  const value = useMemo(() => ({ openImagePreview }), [openImagePreview])
 
   useEffect(() => {
     if (!preview) return
@@ -299,9 +292,7 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
   const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
     event.preventDefault()
     setContextMenu(null)
-    setZoom((currentZoom) =>
-      clampZoom(currentZoom + (event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP))
-    )
+    setZoom((currentZoom) => clampZoom(currentZoom + (event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP)))
   }
 
   return (
@@ -392,7 +383,6 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
               </button>
             </div>
           )}
-
         </div>
       )}
     </ImagePreviewContext.Provider>
@@ -404,14 +394,12 @@ export function useImagePreview() {
   return context?.openImagePreview ?? (() => {})
 }
 
-export function useImageClipboard() {
-  const context = useContext(ImagePreviewContext)
-  return context?.copyImageToClipboard ?? (async () => false)
-}
-
 export function useImagePreviewNotice() {
   const { showToast } = useToast()
-  return useCallback((message: string) => {
-    showToast(message, { tone: 'accent' })
-  }, [showToast])
+  return useCallback(
+    (message: string) => {
+      showToast(message)
+    },
+    [showToast]
+  )
 }

@@ -1,4 +1,3 @@
-// Renderer UI.
 import { useEffect, useMemo, useState } from 'react'
 import type { FocusEvent, ReactElement } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
@@ -73,14 +72,6 @@ function formatEstimatedCost(value: number | undefined, language: string): strin
   return new Intl.NumberFormat(language, {
     maximumFractionDigits: 6,
     minimumFractionDigits: value > 0 && value < 0.01 ? 6 : 2
-  }).format(value)
-}
-
-function formatEstimatedCostInteger(value: number | undefined, language: string): string {
-  if (typeof value !== 'number') return '—'
-  return new Intl.NumberFormat(language, {
-    maximumFractionDigits: 0,
-    minimumFractionDigits: 0
   }).format(value)
 }
 
@@ -247,6 +238,7 @@ export function UsageBillingSettingsPage({
     () => sortedModels.find((model) => getModelKey(model) === activeModelKey),
     [activeModelKey, sortedModels]
   )
+  const visibleSummary = activeModelKey === ALL_MODELS_KEY ? summary : (selectedModel ?? null)
   const chartData = useMemo(
     () =>
       chartBuckets.map((chartBucket) => {
@@ -340,6 +332,7 @@ export function UsageBillingSettingsPage({
   return (
     <article className="settings-list-page usage-billing-settings-page">
       <h1>{t('settings.page.usageBilling')}</h1>
+      <p className="usage-cost-note">{t('configuration.priceNote')}</p>
 
       <section
         className="settings-list-section usage-summary-section"
@@ -488,7 +481,7 @@ export function UsageBillingSettingsPage({
                         dayMaxRatio > 0 ? `${Math.min(dayMaxRatio * 100 + 2, 92)}%` : '8px'
                       const ariaLabel = [
                         day.fullDateLabel,
-                        `${t('usageBilling.estimatedCost')} ${formatEstimatedCostInteger(day.values.estimatedCost, language)}`,
+                        `${t('usageBilling.estimatedCost')} ${formatEstimatedCost(day.values.estimatedCost, language)}`,
                         `${t('usageBilling.inputTokens')} ${formatTokenCount(day.values.inputTokens, language, t('usageBilling.tokens'))}`,
                         `${t('usageBilling.outputTokens')} ${formatTokenCount(day.values.outputTokens, language, t('usageBilling.tokens'))}`,
                         `${t('usageBilling.outputThinkingTokens')} ${formatTokenCount(day.values.outputThinkingTokens, language, t('usageBilling.tokens'))}`
@@ -519,7 +512,7 @@ export function UsageBillingSettingsPage({
                               )
                             })}
                             <span className="usage-chart-cost" style={{ bottom: costBottom }}>
-                              {formatEstimatedCostInteger(day.values.estimatedCost, language)}
+                              {formatEstimatedCost(day.values.estimatedCost, language)}
                             </span>
                           </div>
 
@@ -530,7 +523,7 @@ export function UsageBillingSettingsPage({
                             <span className="usage-chart-tooltip__row">
                               <span>{t('usageBilling.estimatedCost')}</span>
                               <strong>
-                                {formatEstimatedCostInteger(day.values.estimatedCost, language)}
+                                {formatEstimatedCost(day.values.estimatedCost, language)}
                               </strong>
                             </span>
 
@@ -596,34 +589,34 @@ export function UsageBillingSettingsPage({
         <div className="usage-summary-grid" aria-busy={isLoading}>
           <div className="usage-summary-card">
             <span>{t('usageBilling.requestCount')}</span>
-            <strong>{formatCount(summary?.requestCount, language)}</strong>
+            <strong>{formatCount(visibleSummary?.requestCount, language)}</strong>
           </div>
           <div className="usage-summary-card">
             <span>{t('usageBilling.messageCount')}</span>
-            <strong>{formatCount(summary?.messageCount, language)}</strong>
+            <strong>{formatCount(visibleSummary?.messageCount, language)}</strong>
           </div>
           <div className="usage-summary-card">
             <span>{t('usageBilling.inputTokens')}</span>
-            <strong>{formatCount(summary?.inputTokens, language)}</strong>
+            <strong>{formatCount(visibleSummary?.inputTokens, language)}</strong>
           </div>
           <div className="usage-summary-card">
             <span>{t('usageBilling.outputTokens')}</span>
-            <strong>{formatCount(summary?.outputTokens, language)}</strong>
+            <strong>{formatCount(visibleSummary?.outputTokens, language)}</strong>
           </div>
           <div className="usage-summary-card">
             <span>{t('usageBilling.totalTokens')}</span>
-            <strong>{formatCount(summary?.totalTokens, language)}</strong>
+            <strong>{formatCount(visibleSummary?.totalTokens, language)}</strong>
           </div>
           <div className="usage-summary-card">
             <span>{t('usageBilling.estimatedCost')}</span>
-            <strong>{formatEstimatedCost(summary?.estimatedCost, language)}</strong>
+            <strong>{formatEstimatedCost(visibleSummary?.estimatedCost, language)}</strong>
           </div>
         </div>
 
         <div className="usage-secondary-grid">
           <div className="usage-secondary-stat">
             <span>{t('usageBilling.outputThinkingTokens')}</span>
-            <strong>{formatCount(summary?.outputThinkingTokens, language)}</strong>
+            <strong>{formatCount(visibleSummary?.outputThinkingTokens, language)}</strong>
           </div>
         </div>
 

@@ -1,4 +1,3 @@
-// Rust agent core.
 use super::{clean_relative_path, AgentTool, ToolExecutionContext};
 use crate::protocol::{
     AgentApprovalStatus, AgentCommandRequest, AgentCommandRiskLevel, AgentError,

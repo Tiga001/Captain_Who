@@ -1,4 +1,3 @@
-/* Renderer UI. */
 .personalization-settings-page {
   width: min(100%, 1100px);
 }
@@ -50,7 +49,7 @@
   font: inherit;
 }
 
-.personalization-work-mode-card[data-selected="true"] {
+.personalization-work-mode-card[data-selected='true'] {
   background: var(--mc-color-surface-selected-subtle);
   border-color: transparent;
 }
@@ -106,17 +105,17 @@
   border-radius: var(--mc-radius-pill);
 }
 
-.personalization-radio[data-selected="true"] {
+.personalization-radio[data-selected='true'] {
   border-color: var(--mc-color-text-accent);
 }
 
-.personalization-radio[data-selected="true"]::after {
+.personalization-radio[data-selected='true']::after {
   width: 8px;
   height: 8px;
   background: var(--mc-color-text-inverse);
   border: 5px solid var(--mc-color-text-accent);
   border-radius: var(--mc-radius-pill);
-  content: "";
+  content: '';
 }
 
 .personalization-tone-section {

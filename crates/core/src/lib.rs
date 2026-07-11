@@ -1,4 +1,3 @@
-// Rust agent core.
 mod cancellation;
 pub mod command;
 pub mod file_write;
@@ -35,4 +34,4 @@ pub use runtime::{
     next_run_id, send_chat, send_chat_with_events, send_chat_with_events_and_cancellation,
     send_chat_with_host_executor, AgentEventEmitter, AgentHostActionExecutor, AgentRuntime,
 };
-pub use system_paths::{expand_system_path, system_path_aliases};
+pub use system_paths::expand_system_path;

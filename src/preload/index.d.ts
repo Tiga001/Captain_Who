@@ -1,4 +1,3 @@
-// Electron preload host API.
 import type { MyCopilotGlobal } from '@mycopilot/host-api'
 
 declare global {

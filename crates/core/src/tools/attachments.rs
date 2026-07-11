@@ -1,4 +1,3 @@
-// Rust agent core.
 use super::{AgentTool, ToolExecutionContext};
 use crate::protocol::{
     AgentAttachmentReference, AgentError, AgentInputAttachmentKind, AgentResult,

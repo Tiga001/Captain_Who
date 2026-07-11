@@ -1,7 +1,7 @@
 // Document path validation and text extraction helpers for Office-like files.
 use super::{
     ToolExecutionContext, DEFAULT_DOCUMENT_MAX_CHARS, MAX_DOCUMENT_FILE_BYTES,
-    MAX_DOCUMENT_TEXT_CHARS,
+    MAX_DOCUMENT_TEXT_CHARS, MAX_DOCUMENT_XML_ENTRY_BYTES, MAX_DOCUMENT_XML_TOTAL_BYTES,
 };
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentError, AgentResult};
@@ -95,6 +95,7 @@ pub(super) fn read_zip_xml_text_parts(
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|error| AgentError::new(format!("读取 OOXML 压缩包失败：{error}")))?;
     let mut parts = Vec::new();
+    let mut total_xml_bytes = 0;
 
     for index in 0..archive.len() {
         cancellation_token.check()?;
@@ -105,6 +106,7 @@ pub(super) fn read_zip_xml_text_parts(
         if !include_entry(&name) {
             continue;
         }
+        reserve_zip_xml_entry(&name, entry.size(), &mut total_xml_bytes)?;
 
         let mut xml = String::new();
         entry
@@ -120,6 +122,27 @@ pub(super) fn read_zip_xml_text_parts(
     cancellation_token.check()?;
     parts.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(parts)
+}
+
+pub(super) fn reserve_zip_xml_entry(
+    name: &str,
+    size: u64,
+    total_bytes: &mut u64,
+) -> AgentResult<()> {
+    if size > MAX_DOCUMENT_XML_ENTRY_BYTES {
+        return Err(AgentError::new(format!(
+            "文档 XML 条目过大：{name}（{size} bytes）。"
+        )));
+    }
+    let next_total = total_bytes.saturating_add(size);
+    if next_total > MAX_DOCUMENT_XML_TOTAL_BYTES {
+        return Err(AgentError::new(format!(
+            "文档解压后的 XML 总量超过 {} bytes 限制。",
+            MAX_DOCUMENT_XML_TOTAL_BYTES
+        )));
+    }
+    *total_bytes = next_total;
+    Ok(())
 }
 
 pub(super) fn xml_text_content(xml: &str) -> AgentResult<String> {

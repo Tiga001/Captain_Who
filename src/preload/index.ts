@@ -1,4 +1,3 @@
-// Electron preload host API.
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type { HostApi } from '@mycopilot/host-api'
@@ -53,13 +52,12 @@ const host: HostApi = {
   },
   app: {
     getWindowState: () => ipcRenderer.invoke('host:app.getWindowState'),
-    getVersion: () => ipcRenderer.invoke('host:app.getVersion'),
+    openExternal: (url) => ipcRenderer.invoke('host:app.openExternal', url),
     onWindowStateChange: onAppWindowStateChange,
     setNativeThemeSource: (themeSource) =>
       ipcRenderer.invoke('host:app.setNativeThemeSource', themeSource)
   },
   agent: {
-    startRun: (input) => ipcRenderer.invoke('host:agent.startRun', input),
     startConversationTurn: (input) => ipcRenderer.invoke('host:agent.startConversationTurn', input),
     cancelRun: (input) => ipcRenderer.invoke('host:agent.cancelRun', input),
     listPendingActions: () => ipcRenderer.invoke('host:agent.listPendingActions'),
@@ -68,17 +66,13 @@ const host: HostApi = {
     cancelAction: (input) => ipcRenderer.invoke('host:agent.cancelAction', input),
     getUsageSummary: (input) => ipcRenderer.invoke('host:agent.getUsageSummary', input),
     clearUsageRecords: (input) => ipcRenderer.invoke('host:agent.clearUsageRecords', input),
-    getFileDraft: (input) => ipcRenderer.invoke('host:agent.getFileDraft', input),
     readFileDraft: (input) => ipcRenderer.invoke('host:agent.readFileDraft', input),
     getFileWriteDiff: (input) => ipcRenderer.invoke('host:agent.getFileWriteDiff', input),
-    discardFileDraft: (input) => ipcRenderer.invoke('host:agent.discardFileDraft', input),
     onEvent: onAgentEvent
   },
   attachments: {
     selectInputAttachments: (request) =>
-      ipcRenderer.invoke('host:attachments.selectInputAttachments', request),
-    loadInputAttachmentsFromPaths: (request) =>
-      ipcRenderer.invoke('host:attachments.loadInputAttachmentsFromPaths', request)
+      ipcRenderer.invoke('host:attachments.selectInputAttachments', request)
   },
   browser: {
     createView: (request) => ipcRenderer.invoke('host:browser.createView', request),
@@ -104,7 +98,6 @@ const host: HostApi = {
     searchChats: (input) => ipcRenderer.invoke('host:search.searchChats', input)
   },
   storage: {
-    loadAppData: () => ipcRenderer.invoke('host:storage.loadAppData'),
     loadModelSettings: () => ipcRenderer.invoke('host:storage.loadModelSettings'),
     saveModelSettings: (settings) => ipcRenderer.invoke('host:storage.saveModelSettings', settings),
     loadAgentPromptPreferences: () => ipcRenderer.invoke('host:storage.loadAgentPromptPreferences'),
@@ -118,8 +111,6 @@ const host: HostApi = {
       ipcRenderer.invoke('host:storage.showProjectInFolder', projectId),
     revealProjectFile: (input) => ipcRenderer.invoke('host:storage.revealProjectFile', input),
     loadConversations: () => ipcRenderer.invoke('host:storage.loadConversations'),
-    saveConversation: (conversation) =>
-      ipcRenderer.invoke('host:storage.saveConversation', conversation),
     saveConversationMeta: (conversation) =>
       ipcRenderer.invoke('host:storage.saveConversationMeta', conversation),
     deleteConversation: (conversationId) =>
@@ -129,8 +120,6 @@ const host: HostApi = {
     saveChatMessageState: (input) => ipcRenderer.invoke('host:storage.saveChatMessageState', input),
     loadComposerDrafts: () => ipcRenderer.invoke('host:storage.loadComposerDrafts'),
     saveComposerDraft: (draft) => ipcRenderer.invoke('host:storage.saveComposerDraft', draft),
-    deleteComposerDraft: (scopeId) =>
-      ipcRenderer.invoke('host:storage.deleteComposerDraft', scopeId),
     loadUiPreferences: () => ipcRenderer.invoke('host:storage.loadUiPreferences'),
     saveUiPreferences: (preferences) =>
       ipcRenderer.invoke('host:storage.saveUiPreferences', preferences),

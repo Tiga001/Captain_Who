@@ -1,4 +1,3 @@
-/* Renderer chat conversation style entrypoint. */
 @import './ChatConversationPage.messages.css';
 @import './ChatConversationPage.agent.css';
 @import './ChatConversationPage.results.css';

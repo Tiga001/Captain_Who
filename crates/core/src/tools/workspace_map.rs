@@ -1,4 +1,3 @@
-// Rust agent core.
 use super::{relative_display, walk_workspace_with_cancellation, AgentTool, ToolExecutionContext};
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
@@ -645,7 +644,7 @@ mod tests {
         fixture.write_file("src/App.test.tsx", "test('ok', () => {})");
         fixture.write_file("node_modules/ignored/index.js", "ignored");
         let context = fixture.context();
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
 
         let result = registry.execute(
             &context,
@@ -680,7 +679,7 @@ mod tests {
         fixture.write_file("agent/rust/src/lib.rs", "pub fn lib() {}");
         fixture.write_file("apps/desktop/src/main.tsx", "main()");
         let context = fixture.context();
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
 
         let result = registry.execute(
             &context,

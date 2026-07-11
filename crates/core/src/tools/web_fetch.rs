@@ -1,4 +1,3 @@
-// Rust agent core.
 use super::{block_on_tool_future, truncate_chars, AgentTool, ToolExecutionContext};
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};

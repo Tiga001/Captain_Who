@@ -1,4 +1,3 @@
-// Rust agent core.
 use super::{
     sanitize_limit, walk_workspace_with_cancellation, AgentTool, ToolExecutionContext, WalkEntry,
     WalkResult, MAX_SEARCH_FILE_BYTES, MAX_SEARCH_LIMIT,
@@ -150,7 +149,7 @@ mod tests {
         let fixture = TestWorkspace::new();
         fixture.write_file("src/lib.rs", "pub fn target_symbol() {}\n");
         let context = fixture.context();
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
         let call = AgentToolCall {
             id: "call-1".to_string(),
             tool: "search_code".to_string(),

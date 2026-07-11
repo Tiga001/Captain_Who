@@ -1,4 +1,3 @@
-// Renderer UI.
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { ChatAgentRunView, ChatReadActivity, ChatReadActivityKind } from './chatTypes'
 
@@ -35,7 +34,7 @@ function pathFromArgs(args: unknown) {
 function fileNameFromPath(path: string) {
   const normalized = path.replace(/\\/g, '/').replace(/\/$/, '')
   const fileName = normalized.split('/').filter(Boolean).pop()
-  return fileName || normalized || '文件'
+  return fileName || normalized || 'file'
 }
 
 function extensionFromFileName(fileName: string) {
@@ -77,7 +76,7 @@ function activityFromResult(
 ): ChatReadActivity {
   const payload = isRecord(result.result) ? result.result : {}
   const path = stringValue(payload.path) || previous?.path || ''
-  const fileName = path ? fileNameFromPath(path) : previous?.fileName || '文件'
+  const fileName = path ? fileNameFromPath(path) : previous?.fileName || 'file'
   const mimeType = stringValue(payload.mimeType) || previous?.mimeType
   const kind = previous?.kind ?? getReadActivityKindForTool(result.tool)
   const fullDataUrl =
@@ -117,7 +116,7 @@ function upsertActivity(
   )
 }
 
-export function readActivityFromCall(call: AgentToolCall): ChatReadActivity | null {
+function readActivityFromCall(call: AgentToolCall): ChatReadActivity | null {
   if (!isReadActivityTool(call.tool)) return null
 
   const path = pathFromArgs(call.args)
@@ -203,11 +202,4 @@ export function settlePendingReadActivities(
       updatedAt: settledAt
     })
   }, normalizeReadActivities(run))
-}
-
-export function cancelPendingReadActivities(
-  run: ChatAgentRunView,
-  cancelledAt: number
-): ChatReadActivity[] | undefined {
-  return settlePendingReadActivities(run, 'cancelled', cancelledAt)
 }

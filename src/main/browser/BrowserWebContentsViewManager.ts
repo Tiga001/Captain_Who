@@ -1,6 +1,5 @@
-// Electron main Browser WebContentsView manager.
 import { randomUUID } from 'node:crypto'
-import { BrowserWindow, WebContentsView, type Rectangle } from 'electron'
+import { BrowserWindow, session, WebContentsView, type Rectangle, type WebContents } from 'electron'
 
 import type {
   BrowserBounds,
@@ -15,6 +14,7 @@ import type {
 interface BrowserViewRecord {
   state: BrowserNavigationState
   view: WebContentsView
+  webContents: WebContents
   zoomFactor: number
 }
 
@@ -27,9 +27,18 @@ const SAFE_HTTP_PROTOCOLS = new Set(['http:', 'https:'])
 export class BrowserWebContentsViewManager {
   private readonly views = new Map<BrowserViewId, BrowserViewRecord>()
 
-  constructor(private readonly ownerWindow: BrowserWindow) {}
+  constructor(private readonly ownerWindow: BrowserWindow) {
+    const browserSession = session.fromPartition(BROWSER_SESSION_PARTITION)
+    browserSession.setPermissionCheckHandler(() => false)
+    browserSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
+      callback(false)
+    })
+  }
 
   async createView(request: BrowserCreateViewRequest = {}): Promise<BrowserNavigationState> {
+    if (this.ownerWindow.isDestroyed() || this.ownerWindow.webContents.isDestroyed()) {
+      throw new Error('Browser owner window is no longer available')
+    }
     const id = normalizeBrowserViewId(request.id)
     const existingRecord = this.views.get(id)
     if (existingRecord) {
@@ -57,6 +66,7 @@ export class BrowserWebContentsViewManager {
     const record: BrowserViewRecord = {
       state: createInitialNavigationState(id),
       view,
+      webContents: view.webContents,
       zoomFactor: 1
     }
     this.views.set(id, record)
@@ -70,19 +80,16 @@ export class BrowserWebContentsViewManager {
   }
 
   async destroyView(id: BrowserViewId): Promise<void> {
-    const record = this.views.get(id)
-    if (!record) return
-
-    record.view.setVisible(false)
-    this.ownerWindow.contentView.removeChildView(record.view)
-    record.view.webContents.close()
-    this.views.delete(id)
-    this.emit({ id, type: 'browser.destroyed' })
+    this.disposeView(id, true)
   }
 
   destroyAll(): void {
     for (const id of [...this.views.keys()]) {
-      void this.destroyView(id)
+      try {
+        this.disposeView(id, false)
+      } catch (error) {
+        console.warn(`Failed to dispose browser view ${id}`, error)
+      }
     }
   }
 
@@ -128,8 +135,12 @@ export class BrowserWebContentsViewManager {
     this.emit({ state: record.state, type: 'browser.navigation' })
 
     try {
-      await record.view.webContents.loadURL(url)
+      await record.webContents.loadURL(url)
     } catch (error) {
+      if (!this.isRecordActive(record)) {
+        this.closeDisposedWebContents(record)
+        return record.state
+      }
       const message = error instanceof Error ? error.message : String(error)
       this.updateRecordState(record, {
         errorText: message,
@@ -144,27 +155,31 @@ export class BrowserWebContentsViewManager {
       })
     }
 
+    if (!this.isRecordActive(record)) {
+      this.closeDisposedWebContents(record)
+      return record.state
+    }
     return this.refreshNavigationState(record)
   }
 
   async reload(id: BrowserViewId): Promise<BrowserNavigationState> {
     const record = this.requireRecord(id)
-    record.view.webContents.reload()
+    record.webContents.reload()
     return this.refreshNavigationState(record)
   }
 
   async goBack(id: BrowserViewId): Promise<BrowserNavigationState> {
     const record = this.requireRecord(id)
-    if (record.view.webContents.navigationHistory.canGoBack()) {
-      record.view.webContents.navigationHistory.goBack()
+    if (record.webContents.navigationHistory.canGoBack()) {
+      record.webContents.navigationHistory.goBack()
     }
     return this.refreshNavigationState(record)
   }
 
   async goForward(id: BrowserViewId): Promise<BrowserNavigationState> {
     const record = this.requireRecord(id)
-    if (record.view.webContents.navigationHistory.canGoForward()) {
-      record.view.webContents.navigationHistory.goForward()
+    if (record.webContents.navigationHistory.canGoForward()) {
+      record.webContents.navigationHistory.goForward()
     }
     return this.refreshNavigationState(record)
   }
@@ -173,7 +188,7 @@ export class BrowserWebContentsViewManager {
     const record = this.requireRecord(id)
     const normalizedZoomFactor = clampZoomFactor(zoomFactor)
     record.zoomFactor = normalizedZoomFactor
-    record.view.webContents.setZoomFactor(normalizedZoomFactor)
+    record.webContents.setZoomFactor(normalizedZoomFactor)
 
     const state = {
       id,
@@ -187,14 +202,13 @@ export class BrowserWebContentsViewManager {
   async clearBrowsingData(id: BrowserViewId): Promise<void> {
     const record = this.requireRecord(id)
     await Promise.all([
-      record.view.webContents.session.clearCache(),
-      record.view.webContents.session.clearStorageData()
+      record.webContents.session.clearCache(),
+      record.webContents.session.clearStorageData()
     ])
   }
 
   private configureView(record: BrowserViewRecord): void {
-    const { view } = record
-    const { webContents } = view
+    const { webContents } = record
 
     webContents.setWindowOpenHandler((details) => {
       if (isAllowedHttpUrl(details.url)) {
@@ -214,6 +228,7 @@ export class BrowserWebContentsViewManager {
     })
 
     webContents.on('page-title-updated', (_event, title) => {
+      if (!this.isRecordActive(record)) return
       const currentUrl = webContents.getURL() || record.state.metadata.url
       const nextTitle = title.trim() || getFallbackPageTitle(currentUrl)
       this.updateRecordState(record, {
@@ -227,6 +242,7 @@ export class BrowserWebContentsViewManager {
     })
 
     webContents.on('page-favicon-updated', (_event, favicons) => {
+      if (!this.isRecordActive(record)) return
       this.updateRecordState(record, {
         metadata: {
           ...record.state.metadata,
@@ -237,6 +253,7 @@ export class BrowserWebContentsViewManager {
     })
 
     webContents.on('did-navigate', (_event, url) => {
+      if (!this.isRecordActive(record)) return
       this.updateRecordState(record, {
         errorText: null,
         metadata: {
@@ -249,7 +266,7 @@ export class BrowserWebContentsViewManager {
     })
 
     webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
-      if (!isMainFrame) return
+      if (!isMainFrame || !this.isRecordActive(record)) return
 
       this.updateRecordState(record, {
         metadata: {
@@ -261,6 +278,7 @@ export class BrowserWebContentsViewManager {
     })
 
     webContents.on('did-start-loading', () => {
+      if (!this.isRecordActive(record)) return
       this.updateRecordState(record, {
         isLoading: true
       })
@@ -268,6 +286,7 @@ export class BrowserWebContentsViewManager {
     })
 
     webContents.on('did-stop-loading', () => {
+      if (!this.isRecordActive(record)) return
       this.updateRecordState(record, {
         isLoading: false
       })
@@ -277,7 +296,7 @@ export class BrowserWebContentsViewManager {
     webContents.on(
       'did-fail-load',
       (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
-        if (!isMainFrame || errorCode === -3) return
+        if (!isMainFrame || errorCode === -3 || !this.isRecordActive(record)) return
 
         this.updateRecordState(record, {
           errorText: errorDescription,
@@ -322,7 +341,8 @@ export class BrowserWebContentsViewManager {
   }
 
   private refreshNavigationState(record: BrowserViewRecord): BrowserNavigationState {
-    const { webContents } = record.view
+    if (!this.isRecordActive(record)) return record.state
+    const { webContents } = record
     this.updateRecordState(record, {
       canGoBack: webContents.navigationHistory.canGoBack(),
       canGoForward: webContents.navigationHistory.canGoForward(),
@@ -352,8 +372,39 @@ export class BrowserWebContentsViewManager {
     return record
   }
 
+  private isRecordActive(record: BrowserViewRecord): boolean {
+    return this.views.get(record.state.id) === record && !record.webContents.isDestroyed()
+  }
+
+  private disposeView(id: BrowserViewId, emitDestroyed: boolean): void {
+    const record = this.views.get(id)
+    if (!record) return
+    this.views.delete(id)
+
+    if (!record.webContents.isDestroyed()) {
+      if (!this.ownerWindow.isDestroyed()) {
+        record.view.setVisible(false)
+        this.ownerWindow.contentView.removeChildView(record.view)
+      }
+      if (record.webContents.isLoading()) {
+        record.webContents.once('did-stop-loading', () => this.closeDisposedWebContents(record))
+      }
+      this.closeDisposedWebContents(record)
+    }
+
+    if (emitDestroyed) {
+      this.emit({ id, type: 'browser.destroyed' })
+    }
+  }
+
+  private closeDisposedWebContents(record: BrowserViewRecord): void {
+    if (!this.isRecordActive(record) && !record.webContents.isDestroyed()) {
+      record.webContents.close({ waitForBeforeUnload: false })
+    }
+  }
+
   private emit(event: BrowserViewEvent): void {
-    if (!this.ownerWindow.isDestroyed()) {
+    if (!this.ownerWindow.isDestroyed() && !this.ownerWindow.webContents.isDestroyed()) {
       this.ownerWindow.webContents.send(BROWSER_EVENT_CHANNEL, event)
     }
   }

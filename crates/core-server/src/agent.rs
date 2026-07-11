@@ -1,11 +1,10 @@
-// Rust core-server agent actions and conversation bridge.
 use crate::agent_support::*;
 pub use crate::agent_support::{
     AgentActionExecutionOutput, AgentConversationTurnInput, AgentConversationTurnOutput,
     AgentFileDraftContentPage, AgentFileWriteDiffPage, PendingActionStatus,
     PendingAgentActionSnapshot,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -19,9 +18,9 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
     next_run_id, send_chat_with_host_executor, AgentApprovalDecision, AgentApprovalDecisionStatus,
-    AgentApprovalStatus, AgentCancellationToken, AgentChatInput, AgentChatOutput, AgentEvent,
-    AgentEventEmitter, AgentHostActionExecutor, AgentPatchResult, AgentProposedAction, AgentResult,
-    AgentRunStatus, AgentToolCall, AgentToolContinuation, AgentToolResult, AgentUsage,
+    AgentApprovalStatus, AgentCancellationToken, AgentChatInput, AgentChatOutput, AgentError,
+    AgentEvent, AgentEventEmitter, AgentHostActionExecutor, AgentPatchResult, AgentProposedAction,
+    AgentResult, AgentRunStatus, AgentToolCall, AgentToolContinuation, AgentToolResult, AgentUsage,
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
 };
 use serde_json::Value;
@@ -40,6 +39,7 @@ pub struct AgentService {
     pending_actions: Arc<Mutex<HashMap<String, PendingActionRecord>>>,
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
     command_runs: CommandRunState,
+    deleting_projects: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AgentService {
@@ -51,6 +51,7 @@ impl AgentService {
             pending_actions: Arc::new(Mutex::new(pending_actions)),
             usage_contexts: Arc::new(Mutex::new(HashMap::new())),
             command_runs: CommandRunState::default(),
+            deleting_projects: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -59,6 +60,9 @@ impl AgentService {
         input: AgentConversationTurnInput,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, String> {
+        if self.is_project_deleting(input.project_id.as_deref()) {
+            return Err("项目正在移除，无法开始新的 agent 运行。".to_string());
+        }
         let run_id = next_run_id();
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
@@ -72,6 +76,11 @@ impl AgentService {
         };
 
         self.register_usage_context(&run_id, prepared.usage_context.clone());
+        if self.is_agent_input_project_deleting(&prepared.agent_input) {
+            self.discard_usage_context(&run_id);
+            self.unregister_cancellation(&run_id);
+            return Err("项目正在移除，无法开始新的 agent 运行。".to_string());
+        }
 
         let output = prepared.output.clone();
         let service = self.clone();
@@ -115,6 +124,19 @@ impl AgentService {
             )
             .await;
 
+            let deleting_projects = service
+                .deleting_projects
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if agent_input_project_id(&pending_agent_input)
+                .is_some_and(|project_id| deleting_projects.contains(project_id))
+            {
+                drop(deleting_projects);
+                service.discard_usage_context(&worker_run_id);
+                service.unregister_cancellation(&worker_run_id);
+                return;
+            }
+
             match result {
                 Ok(agent_output) => {
                     let _ = service.persist_final_assistant_output(
@@ -149,6 +171,7 @@ impl AgentService {
                 }
             }
 
+            drop(deleting_projects);
             service.unregister_cancellation(&worker_run_id);
         });
 
@@ -168,6 +191,57 @@ impl AgentService {
         };
         let cancelled_commands = self.command_runs.cancel_run(run_id);
         cancelled_run || cancelled_commands > 0
+    }
+
+    pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
+        {
+            let mut deleting_projects = self
+                .deleting_projects
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            deleting_projects.insert(project_id.to_string());
+        }
+
+        let run_ids = {
+            let usage_contexts = self
+                .usage_contexts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            usage_contexts
+                .iter()
+                .filter(|(_, state)| state.context.project_id.as_deref() == Some(project_id))
+                .map(|(run_id, _)| run_id.clone())
+                .collect::<Vec<_>>()
+        };
+        for run_id in run_ids {
+            self.cancel_run(&run_id);
+        }
+
+        let result = self.storage.delete_project(project_id);
+        if result.is_ok() {
+            {
+                let mut pending_actions = self
+                    .pending_actions
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                pending_actions.retain(|_, record| {
+                    !agent_input_belongs_to_project(&record.agent_input, project_id)
+                });
+            }
+            let mut usage_contexts = self
+                .usage_contexts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            usage_contexts
+                .retain(|_, state| state.context.project_id.as_deref() != Some(project_id));
+        } else {
+            let mut deleting_projects = self
+                .deleting_projects
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            deleting_projects.remove(project_id);
+        }
+        result
     }
 
     pub async fn shutdown_active_runs(&self, timeout: Duration) -> (usize, bool) {
@@ -273,9 +347,23 @@ impl AgentService {
         action: AgentProposedAction,
         cancellation_token: AgentCancellationToken,
     ) -> AgentResult<AgentToolResult> {
+        cancellation_token.check()?;
+        if self.is_agent_input_project_deleting(&agent_input) {
+            return Err(AgentError::cancelled());
+        }
         let created_at = now_ms();
         match action {
             AgentProposedAction::Diff { diff } => {
+                let deleting_projects = self
+                    .deleting_projects
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if agent_input_project_id(&agent_input)
+                    .is_some_and(|project_id| deleting_projects.contains(project_id))
+                {
+                    return Err(AgentError::cancelled());
+                }
+                cancellation_token.check()?;
                 let action_id = diff.id.clone();
                 let execution = approved_patch_execution_for_input(&agent_input, &action_id, &diff);
                 self.record_auto_action_audit(
@@ -292,6 +380,7 @@ impl AgentService {
                     created_at,
                     now_ms(),
                 );
+                drop(deleting_projects);
                 Ok(execution.tool_result)
             }
             AgentProposedAction::Command { command } => {
@@ -302,10 +391,20 @@ impl AgentService {
                     workspace_root.as_deref(),
                     &command,
                     permissions,
-                    cancellation_token,
+                    cancellation_token.clone(),
                     None,
                 )
                 .unwrap_or_else(|error| failed_command_result(&command_for_error, error));
+                let deleting_projects = self
+                    .deleting_projects
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if cancellation_token.is_cancelled()
+                    || agent_input_project_id(&agent_input)
+                        .is_some_and(|project_id| deleting_projects.contains(project_id))
+                {
+                    return Err(AgentError::cancelled());
+                }
                 let command_succeeded = command_result.error.is_none()
                     && !command_result.timed_out
                     && !command_result.cancelled
@@ -330,9 +429,20 @@ impl AgentService {
                     created_at,
                     now_ms(),
                 );
+                drop(deleting_projects);
                 Ok(tool_result)
             }
             AgentProposedAction::FileWrite { file_write } => {
+                let deleting_projects = self
+                    .deleting_projects
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if agent_input_project_id(&agent_input)
+                    .is_some_and(|project_id| deleting_projects.contains(project_id))
+                {
+                    return Err(AgentError::cancelled());
+                }
+                cancellation_token.check()?;
                 let action = AgentProposedAction::FileWrite {
                     file_write: file_write.clone(),
                 };
@@ -352,6 +462,7 @@ impl AgentService {
                     created_at,
                     now_ms(),
                 );
+                drop(deleting_projects);
                 Ok(execution.tool_result)
             }
             AgentProposedAction::ToolCall { call } => Ok(AgentToolResult {
@@ -378,17 +489,6 @@ impl AgentService {
             .collect::<Vec<_>>();
         snapshots.sort_by_key(|snapshot| snapshot.created_at);
         snapshots
-    }
-
-    pub fn get_file_draft(
-        &self,
-        draft_id: &str,
-    ) -> Result<mycopilot_core::AgentFileDraftSnapshot, String> {
-        let draft = self
-            .storage
-            .get_agent_file_draft(draft_id)?
-            .ok_or_else(|| format!("未找到文件草稿：{draft_id}"))?;
-        file_draft_snapshot(&draft)
     }
 
     pub fn read_file_draft(
@@ -434,21 +534,6 @@ impl AgentService {
         })
     }
 
-    pub fn discard_file_draft(&self, draft_id: &str) -> Result<bool, String> {
-        let Some(mut draft) = self.storage.get_agent_file_draft(draft_id)? else {
-            return Ok(false);
-        };
-        if !matches!(draft.status.as_str(), "drafting" | "ready") {
-            return Err(
-                "文件草稿已经进入审批或完成结算，不能再丢弃；后续写入请创建新草稿。".to_string(),
-            );
-        }
-        draft.status = "aborted".to_string();
-        draft.updated_at = now_ms();
-        self.storage.update_agent_file_draft(&draft)?;
-        Ok(true)
-    }
-
     pub fn approve_action(
         &self,
         action_id: &str,
@@ -479,6 +564,10 @@ impl AgentService {
     }
 
     pub fn cancel_action(&self, action_id: &str) -> Result<bool, String> {
+        let deleting_projects = self
+            .deleting_projects
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut pending_actions = self
             .pending_actions
             .lock()
@@ -486,6 +575,11 @@ impl AgentService {
         let Some(record) = pending_actions.get_mut(action_id) else {
             return Ok(false);
         };
+        if agent_input_project_id(&record.agent_input)
+            .is_some_and(|project_id| deleting_projects.contains(project_id))
+        {
+            return Ok(false);
+        }
         if record.snapshot.status == PendingActionStatus::Approved
             && matches!(record.snapshot.action, AgentProposedAction::Command { .. })
         {
@@ -534,6 +628,10 @@ impl AgentService {
         message: Option<String>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
+        let deleting_projects = self
+            .deleting_projects
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let record = {
             let mut pending_actions = self
                 .pending_actions
@@ -544,6 +642,11 @@ impl AgentService {
             };
             if record.snapshot.status != PendingActionStatus::Pending {
                 return Err(format!("待审批操作已经处理：{action_id}"));
+            }
+            if agent_input_project_id(&record.agent_input)
+                .is_some_and(|project_id| deleting_projects.contains(project_id))
+            {
+                return Err("项目正在移除，无法处理待审批操作。".to_string());
             }
             record.snapshot.status = pending_status;
             self.persist_pending_status(action_id, pending_status);
@@ -570,6 +673,7 @@ impl AgentService {
                 Some(decided_at),
                 None,
             );
+            drop(deleting_projects);
             return self.queue_command_execution(record, call, notifications);
         }
 
@@ -620,6 +724,7 @@ impl AgentService {
             Some(decided_at),
             Some(now_ms()),
         );
+        drop(deleting_projects);
 
         let mut agent_input = record.agent_input.clone();
         agent_input.approval_decision = Some(AgentApprovalDecision {
@@ -715,6 +820,10 @@ impl AgentService {
     ) {
         let run_id = record.snapshot.run_id.clone();
         let action_id = record.snapshot.action_id.clone();
+        if self.is_agent_input_project_deleting(&record.agent_input) {
+            self.discard_usage_context(&run_id);
+            return;
+        }
         let AgentProposedAction::Command { command } = record.snapshot.action.clone() else {
             self.update_pending_status(&action_id, PendingActionStatus::Failed);
             return;
@@ -722,6 +831,12 @@ impl AgentService {
 
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
+        if self.is_agent_input_project_deleting(&record.agent_input) {
+            cancellation_token.cancel();
+            self.unregister_cancellation(&run_id);
+            self.discard_usage_context(&run_id);
+            return;
+        }
 
         let guard = self.command_runs.register(&action_id, &run_id);
         let cancel_flag = guard.cancel_flag();
@@ -744,45 +859,59 @@ impl AgentService {
         .unwrap_or_else(|error| failed_command_result(&command_for_error, error));
         self.unregister_cancellation(&run_id);
 
-        let command_succeeded = command_result.error.is_none()
-            && !command_result.timed_out
-            && !command_result.cancelled
-            && command_result.exit_code == Some(0);
-        let final_pending_status = if command_result.cancelled {
-            PendingActionStatus::Cancelled
-        } else if command_succeeded {
-            PendingActionStatus::Completed
-        } else {
-            PendingActionStatus::Failed
+        let (agent_input, final_pending_status) = {
+            let deleting_projects = self
+                .deleting_projects
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if agent_input_project_id(&record.agent_input)
+                .is_some_and(|project_id| deleting_projects.contains(project_id))
+            {
+                self.discard_usage_context(&run_id);
+                return;
+            }
+
+            let command_succeeded = command_result.error.is_none()
+                && !command_result.timed_out
+                && !command_result.cancelled
+                && command_result.exit_code == Some(0);
+            let final_pending_status = if command_result.cancelled {
+                PendingActionStatus::Cancelled
+            } else if command_succeeded {
+                PendingActionStatus::Completed
+            } else {
+                PendingActionStatus::Failed
+            };
+            let tool_result = command_tool_result(&action_id, command_succeeded, &command_result);
+            self.record_action_audit(
+                &record,
+                Some("approved"),
+                pending_status_label(final_pending_status),
+                None,
+                Some(&command_result),
+                Some(&tool_result),
+                tool_result.error.as_deref(),
+                None,
+                Some(now_ms()),
+            );
+
+            let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+                run_id: run_id.clone(),
+                result: tool_result.clone(),
+            }));
+
+            let mut agent_input = record.agent_input.clone();
+            agent_input.approval_decision = Some(AgentApprovalDecision {
+                action_id: action_id.clone(),
+                status: AgentApprovalDecisionStatus::Approved,
+                message: None,
+            });
+            agent_input.tool_continuation = Some(AgentToolContinuation {
+                call,
+                result: tool_result,
+            });
+            (agent_input, final_pending_status)
         };
-        let tool_result = command_tool_result(&action_id, command_succeeded, &command_result);
-        self.record_action_audit(
-            &record,
-            Some("approved"),
-            pending_status_label(final_pending_status),
-            None,
-            Some(&command_result),
-            Some(&tool_result),
-            tool_result.error.as_deref(),
-            None,
-            Some(now_ms()),
-        );
-
-        let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
-            run_id: run_id.clone(),
-            result: tool_result.clone(),
-        }));
-
-        let mut agent_input = record.agent_input.clone();
-        agent_input.approval_decision = Some(AgentApprovalDecision {
-            action_id: action_id.clone(),
-            status: AgentApprovalDecisionStatus::Approved,
-            message: None,
-        });
-        agent_input.tool_continuation = Some(AgentToolContinuation {
-            call,
-            result: tool_result,
-        });
 
         self.run_action_continuation(record, agent_input, notifications, final_pending_status)
             .await;
@@ -796,8 +925,18 @@ impl AgentService {
         final_pending_status: PendingActionStatus,
     ) {
         let run_id = record.snapshot.run_id.clone();
+        if self.is_agent_input_project_deleting(&record.agent_input) {
+            self.discard_usage_context(&run_id);
+            return;
+        }
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
+        if self.is_agent_input_project_deleting(&record.agent_input) {
+            cancellation_token.cancel();
+            self.unregister_cancellation(&run_id);
+            self.discard_usage_context(&run_id);
+            return;
+        }
 
         let emitter_notifications = notifications.clone();
         let emitter_service = self.clone();
@@ -832,6 +971,19 @@ impl AgentService {
             self.storage.clone(),
         )
         .await;
+
+        let deleting_projects = self
+            .deleting_projects
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if agent_input_project_id(&record.agent_input)
+            .is_some_and(|project_id| deleting_projects.contains(project_id))
+        {
+            drop(deleting_projects);
+            self.discard_usage_context(&run_id);
+            self.unregister_cancellation(&run_id);
+            return;
+        }
 
         match result {
             Ok(agent_output) => {
@@ -879,6 +1031,7 @@ impl AgentService {
             }
         }
 
+        drop(deleting_projects);
         self.unregister_cancellation(&run_id);
     }
 
@@ -890,6 +1043,15 @@ impl AgentService {
         action: AgentProposedAction,
         agent_input: AgentChatInput,
     ) {
+        let deleting_projects = self
+            .deleting_projects
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if agent_input_project_id(&agent_input)
+            .is_some_and(|project_id| deleting_projects.contains(project_id))
+        {
+            return;
+        }
         let action_id = action_id_for_action(&action);
         let pending_record = PendingActionRecord {
             snapshot: PendingAgentActionSnapshot {
@@ -928,6 +1090,7 @@ impl AgentService {
             None,
             None,
         );
+        drop(deleting_projects);
     }
 
     fn update_pending_status(&self, action_id: &str, status: PendingActionStatus) {
@@ -1070,6 +1233,20 @@ impl AgentService {
         cancellations.remove(run_id);
     }
 
+    fn is_agent_input_project_deleting(&self, agent_input: &AgentChatInput) -> bool {
+        self.is_project_deleting(agent_input_project_id(agent_input))
+    }
+
+    fn is_project_deleting(&self, project_id: Option<&str>) -> bool {
+        let Some(project_id) = project_id else {
+            return false;
+        };
+        self.deleting_projects
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(project_id)
+    }
+
     fn register_usage_context(&self, run_id: &str, context: AgentRunUsageContext) {
         let mut contexts = self
             .usage_contexts
@@ -1084,6 +1261,14 @@ impl AgentService {
                 error: None,
             },
         );
+    }
+
+    fn discard_usage_context(&self, run_id: &str) {
+        let mut contexts = self
+            .usage_contexts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        contexts.remove(run_id);
     }
 
     fn find_usage_run_id(
@@ -1447,6 +1632,13 @@ fn scope_for_path(input: &AgentChatInput, path: &str) -> String {
     }
 }
 
+fn agent_input_project_id(input: &AgentChatInput) -> Option<&str> {
+    input
+        .context
+        .as_ref()
+        .and_then(|context| context.project_id.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1518,5 +1710,40 @@ mod tests {
         assert_eq!(summary.input_tokens, Some(20));
         assert_eq!(summary.output_tokens, Some(8));
         assert_eq!(summary.total_tokens, Some(28));
+    }
+
+    #[test]
+    fn deleting_project_cancels_runs_and_discards_usage_contexts() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let service = AgentService::new(storage);
+        let cancellation = AgentCancellationToken::new();
+        service.register_cancellation("run-1", cancellation.clone());
+        service.register_usage_context(
+            "run-1",
+            AgentRunUsageContext {
+                conversation_id: "conversation-1".to_string(),
+                assistant_message_id: "assistant-1".to_string(),
+                run_id: "run-1".to_string(),
+                project_id: Some("project-1".to_string()),
+                model_id: "model-1".to_string(),
+                model_name: "Model 1".to_string(),
+                provider_path: None,
+                input_price: None,
+                output_price: None,
+                started_at: 1,
+            },
+        );
+
+        service.delete_project("project-1").unwrap();
+
+        assert!(cancellation.is_cancelled());
+        assert!(service.is_project_deleting(Some("project-1")));
+        assert!(service
+            .usage_contexts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty());
     }
 }

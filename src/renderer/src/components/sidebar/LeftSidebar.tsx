@@ -1,4 +1,3 @@
-// Renderer UI.
 import { ChevronDown, Folder, FolderOpen, MoreHorizontal, Search, SquarePen } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
@@ -87,7 +86,7 @@ export function LeftSidebar({
   >({})
   const [draggingProjectId, setDraggingProjectId] = useState<string | null>(null)
   const [projectDragPreviewOrder, setProjectDragPreviewOrderState] = useState<string[] | null>(null)
-  const [now, setNow] = useState(Date.now())
+  const [now, setNow] = useState(() => Date.now())
   const projectMenuRef = useRef<HTMLDivElement>(null)
   const sectionMenuRef = useRef<HTMLDivElement>(null)
   const projectRowRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -709,7 +708,10 @@ export function LeftSidebar({
           {shouldShowProjectStatus && (
             <span className="left-sidebar__project-status">
               {hasPendingProjectConversation ? (
-                <span className="mc-processing-spinner" aria-label="正在处理" />
+                <span
+                  className="mc-processing-spinner"
+                  aria-label={t('sidebar.processingConversation')}
+                />
               ) : (
                 <span
                   className="left-sidebar__conversation-unread-dot"

@@ -1,4 +1,3 @@
-# Protocol layer.
 [package]
 name = "mycopilot-protocol-rs"
 version.workspace = true

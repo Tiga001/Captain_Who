@@ -1,4 +1,3 @@
-// Host API.
 import type {
   AgentActionExecutionOutput,
   AgentActionIdRequest,
@@ -8,22 +7,16 @@ import type {
   AgentConversationTurnOutput,
   AgentEvent,
   AgentFileDraftContentPage,
-  AgentFileDraftIdInput,
   AgentFileDraftReadInput,
-  AgentFileDraftSnapshot,
   AgentFileWriteDiffInput,
   AgentFileWriteDiffPage,
   PendingAgentActionSnapshot,
   AgentRejectActionRequest,
-  AgentStartRunRequest,
-  AgentStartRunResponse,
   AgentUsageClearInput,
   AgentUsageClearOutput,
   AgentUsageSummaryInput,
   AgentUsageSummaryOutput,
-  AppVersionResponse,
   AttachmentInputPayload,
-  AttachmentLoadFromPathsRequest,
   AttachmentSelectInputRequest,
   BrowserBounds,
   BrowserCreateViewRequest,
@@ -39,7 +32,6 @@ import type {
   ChatSearchInput,
   ChatSearchResult,
   StorageAgentPromptPreferencesRecord,
-  StorageAppDataSnapshot,
   StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
@@ -61,9 +53,6 @@ import type {
 
 export interface AttachmentsHostApi {
   selectInputAttachments(request: AttachmentSelectInputRequest): Promise<AttachmentInputPayload[]>
-  loadInputAttachmentsFromPaths(
-    request: AttachmentLoadFromPathsRequest
-  ): Promise<AttachmentInputPayload[]>
 }
 
 export interface BrowserHostApi {
@@ -82,7 +71,6 @@ export interface BrowserHostApi {
 }
 
 export interface StorageHostApi {
-  loadAppData(): Promise<StorageAppDataSnapshot>
   loadModelSettings(): Promise<StorageModelSettingsRecord | null>
   saveModelSettings(settings: StorageModelSettingsRecord): Promise<void>
   loadAgentPromptPreferences(): Promise<StorageAgentPromptPreferencesRecord>
@@ -96,9 +84,6 @@ export interface StorageHostApi {
   showProjectInFolder(projectId: string): Promise<void>
   revealProjectFile(input: { projectId?: string | null; filePath: string }): Promise<void>
   loadConversations(): Promise<StorageChatConversationRecord[]>
-  saveConversation(
-    conversation: StorageChatConversationRecord
-  ): Promise<StorageChatConversationRecord>
   saveConversationMeta(
     conversation: StorageChatConversationMetaRecord
   ): Promise<StorageChatConversationMetaRecord>
@@ -115,7 +100,6 @@ export interface StorageHostApi {
   }): Promise<void>
   loadComposerDrafts(): Promise<StorageComposerDraftRecord[]>
   saveComposerDraft(draft: StorageComposerDraftRecord): Promise<StorageComposerDraftRecord>
-  deleteComposerDraft(scopeId: string): Promise<void>
   loadUiPreferences(): Promise<StorageUiPreferencesRecord>
   saveUiPreferences(preferences: StorageUiPreferencesRecord): Promise<StorageUiPreferencesRecord>
   selectProfileAvatar(): Promise<string | null>
@@ -145,7 +129,6 @@ export interface TerminalHostApi {
 }
 
 export interface AgentHostApi {
-  startRun(input: AgentStartRunRequest): Promise<AgentStartRunResponse>
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput>
   cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse>
   listPendingActions(): Promise<PendingAgentActionSnapshot[]>
@@ -154,15 +137,13 @@ export interface AgentHostApi {
   cancelAction(input: AgentActionIdRequest): Promise<boolean>
   getUsageSummary(input: AgentUsageSummaryInput): Promise<AgentUsageSummaryOutput>
   clearUsageRecords(input: AgentUsageClearInput): Promise<AgentUsageClearOutput>
-  getFileDraft(input: AgentFileDraftIdInput): Promise<AgentFileDraftSnapshot>
   readFileDraft(input: AgentFileDraftReadInput): Promise<AgentFileDraftContentPage>
   getFileWriteDiff(input: AgentFileWriteDiffInput): Promise<AgentFileWriteDiffPage>
-  discardFileDraft(input: AgentFileDraftIdInput): Promise<boolean>
   onEvent(handler: (event: AgentEvent) => void): () => void
 }
 
 export interface ClipboardHostApi {
-  writeImage(input: { dataUrl?: string; imageUrl?: string }): Promise<{
+  writeImage(input: { dataUrl: string }): Promise<{
     formats: string[]
     width: number
     height: number
@@ -183,7 +164,7 @@ export interface HostApi {
   }
   app: {
     getWindowState(): Promise<AppWindowState>
-    getVersion(): Promise<AppVersionResponse>
+    openExternal(url: string): Promise<void>
     onWindowStateChange(handler: (state: AppWindowState) => void): () => void
     setNativeThemeSource(themeSource: NativeThemeSource): Promise<void>
   }

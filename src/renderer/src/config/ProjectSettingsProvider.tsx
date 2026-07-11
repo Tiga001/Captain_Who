@@ -1,4 +1,3 @@
-// Renderer UI.
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
@@ -8,13 +7,10 @@ import {
   selectProjectDirectory as selectStoredProjectDirectory,
   showStoredProjectInFolder
 } from '../features/storage/storageClient'
-import { createProjectId, projectConfig } from './projectConfig'
 import type { AppProject } from './projectConfig'
 
 interface ProjectSettingsContextValue {
-  addProject: (name: string, path?: string) => AppProject
-  deleteProject: (projectId: string) => void
-  hasLoadedProjects: boolean
+  deleteProject: (projectId: string) => Promise<void>
   projects: AppProject[]
   renameProject: (projectId: string, name: string) => void
   selectProjectDirectory: () => Promise<AppProject | null>
@@ -25,8 +21,7 @@ interface ProjectSettingsContextValue {
 const ProjectSettingsContext = createContext<ProjectSettingsContextValue | null>(null)
 
 export function ProjectSettingsProvider({ children }: { children: ReactNode }) {
-  const [projects, setProjects] = useState<AppProject[]>(projectConfig.initialProjects)
-  const [hasLoadedProjects, setHasLoadedProjects] = useState(false)
+  const [projects, setProjects] = useState<AppProject[]>([])
 
   useEffect(() => {
     let isCancelled = false
@@ -40,11 +35,6 @@ export function ProjectSettingsProvider({ children }: { children: ReactNode }) {
       .catch((error) => {
         console.error('Failed to load projects from SQLite', error)
       })
-      .finally(() => {
-        if (!isCancelled) {
-          setHasLoadedProjects(true)
-        }
-      })
 
     return () => {
       isCancelled = true
@@ -53,49 +43,12 @@ export function ProjectSettingsProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<ProjectSettingsContextValue>(
     () => ({
-      addProject: (name, path) => {
-        const normalizedName = name.trim()
-        const existingProject = projects.find((project) => project.name === normalizedName)
-        if (existingProject) {
-          if (path && existingProject.path !== path) {
-            const updatedProject = { ...existingProject, path }
-            setProjects((currentProjects) =>
-              currentProjects.map((project) =>
-                project.id === existingProject.id ? updatedProject : project
-              )
-            )
-            void saveStoredProject(updatedProject).catch((error) => {
-              console.error('Failed to save project to SQLite', error)
-            })
-            return updatedProject
-          }
-
-          return existingProject
-        }
-
-        const project: AppProject = {
-          id: createProjectId(normalizedName),
-          name: normalizedName,
-          path,
-          createdAt: Date.now(),
-          pinnedAt: null
-        }
-
-        setProjects((currentProjects) => [...currentProjects, project])
-        void saveStoredProject(project).catch((error) => {
-          console.error('Failed to save project to SQLite', error)
-        })
-        return project
-      },
-      deleteProject: (projectId) => {
+      deleteProject: async (projectId) => {
+        await deleteStoredProject(projectId)
         setProjects((currentProjects) =>
           currentProjects.filter((project) => project.id !== projectId)
         )
-        void deleteStoredProject(projectId).catch((error) => {
-          console.error('Failed to delete project from SQLite', error)
-        })
       },
-      hasLoadedProjects,
       projects,
       renameProject: (projectId, name) => {
         const normalizedName = name.trim()
@@ -172,7 +125,7 @@ export function ProjectSettingsProvider({ children }: { children: ReactNode }) {
         )
       }
     }),
-    [hasLoadedProjects, projects]
+    [projects]
   )
 
   return <ProjectSettingsContext.Provider value={value}>{children}</ProjectSettingsContext.Provider>

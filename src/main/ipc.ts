@@ -1,9 +1,8 @@
-// Electron main client.
 import {
   BrowserWindow,
   clipboard,
   dialog,
-  ipcMain,
+  ipcMain as electronIpcMain,
   nativeImage,
   nativeTheme,
   shell
@@ -19,7 +18,6 @@ import { homedir, tmpdir } from 'os'
 import { promisify } from 'util'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
 import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
-import { fileURLToPath } from 'url'
 import type { StorageImageFileRecord } from '@mycopilot/protocol'
 import type { StorageProjectRecord } from '@mycopilot/protocol'
 import type { AppWindowState } from '@mycopilot/host-api'
@@ -44,11 +42,24 @@ const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
 }
 
 const execFileAsync = promisify(execFile)
+const CLIPBOARD_IMAGE_MAX_BYTES = 16 * 1024 * 1024
+const CLIPBOARD_IMAGE_MAX_DATA_URL_CHARS = Math.ceil((CLIPBOARD_IMAGE_MAX_BYTES * 4) / 3) + 1024
 
 type NativeThemeSource = 'system' | 'light' | 'dark'
 
 function isNativeThemeSource(value: unknown): value is NativeThemeSource {
   return value === 'system' || value === 'light' || value === 'dark'
+}
+
+export function openExternalUrl(value: unknown): Promise<void> {
+  if (typeof value !== 'string') {
+    throw new Error('External URL must be a string')
+  }
+  const url = new URL(value)
+  if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) {
+    throw new Error(`Unsupported external URL protocol: ${url.protocol}`)
+  }
+  return shell.openExternal(url.toString())
 }
 
 function getAppWindowState(window: BrowserWindow | undefined): AppWindowState {
@@ -126,10 +137,9 @@ async function selectProfileAvatar(event: IpcMainInvokeEvent): Promise<string | 
 }
 
 async function writeImageToClipboard(input: {
-  dataUrl?: string
-  imageUrl?: string
+  dataUrl: string
 }): Promise<{ formats: string[]; width: number; height: number; method: string }> {
-  const imageBuffer = await imageBufferFromClipboardInput(input)
+  const imageBuffer = imageBufferFromClipboardInput(input)
   const image = nativeImage.createFromBuffer(imageBuffer)
   if (image.isEmpty()) {
     throw new Error('Image data is invalid')
@@ -146,43 +156,15 @@ async function writeImageToClipboard(input: {
   return writeElectronImageToClipboard(image)
 }
 
-async function imageBufferFromClipboardInput(input: {
-  dataUrl?: string
-  imageUrl?: string
-}): Promise<Buffer> {
-  const dataUrl = input.dataUrl?.trim()
-  if (dataUrl) {
-    if (!dataUrl.startsWith('data:image/')) {
-      throw new Error('Image data URL is required')
-    }
-    return bufferFromDataUrl(dataUrl)
+function imageBufferFromClipboardInput(input: { dataUrl: string }): Buffer {
+  if (!input || typeof input.dataUrl !== 'string') {
+    throw new Error('Image data URL is required')
   }
-
-  const imageUrl = input.imageUrl?.trim()
-  if (!imageUrl) {
-    throw new Error('Image source is required')
+  const dataUrl = input.dataUrl.trim()
+  if (!dataUrl.startsWith('data:image/') || dataUrl.length > CLIPBOARD_IMAGE_MAX_DATA_URL_CHARS) {
+    throw new Error('Image data URL is invalid or too large')
   }
-
-  let url: URL
-  try {
-    url = new URL(imageUrl)
-  } catch {
-    throw new Error('Image URL is invalid')
-  }
-
-  if (url.protocol === 'file:') {
-    return readFile(fileURLToPath(url))
-  }
-
-  if (url.protocol === 'http:' || url.protocol === 'https:') {
-    const response = await fetch(url.toString())
-    if (!response.ok) {
-      throw new Error(`Image request failed with status ${response.status}`)
-    }
-    return Buffer.from(await response.arrayBuffer())
-  }
-
-  throw new Error(`Unsupported image URL protocol: ${url.protocol}`)
+  return bufferFromDataUrl(dataUrl)
 }
 
 async function writeMacImageToClipboard(
@@ -237,16 +219,15 @@ function writeElectronImageToClipboard(image: NativeImage): {
 }
 
 function bufferFromDataUrl(dataUrl: string): Buffer {
-  const match = /^data:(image\/[-+.\w]+)((?:;[-\w=.+]+)*),(.*)$/s.exec(dataUrl)
+  const match = /^data:image\/[-+.\w]+(?:;[-\w=.+]+)*;base64,([a-z0-9+/]*={0,2})$/is.exec(dataUrl)
   if (!match) {
-    throw new Error('Image data URL is invalid')
+    throw new Error('Base64 image data URL is required')
   }
-  const metadata = match[2].toLowerCase()
-  const payload = match[3]
-  if (metadata.split(';').includes('base64')) {
-    return Buffer.from(payload, 'base64')
+  const buffer = Buffer.from(match[1], 'base64')
+  if (buffer.length === 0 || buffer.length > CLIPBOARD_IMAGE_MAX_BYTES) {
+    throw new Error('Image data is empty or too large')
   }
-  return Buffer.from(decodeURIComponent(payload), 'utf8')
+  return buffer
 }
 
 function escapeAppleScriptString(value: string): string {
@@ -396,13 +377,25 @@ export function registerHostIpc(
   coreServer: CoreServer,
   terminalBridge: TerminalBridge,
   faviconResourceCache: FaviconResourceCache,
-  getBrowserManager: () => BrowserWebContentsViewManager
+  getBrowserManager: () => BrowserWebContentsViewManager,
+  isTrustedRenderer: (event: IpcMainInvokeEvent) => boolean
 ): void {
   const attachmentDialogBridge = new AttachmentDialogBridge()
+  type InvokeHandler = Parameters<typeof electronIpcMain.handle>[1]
+  const ipcMain = {
+    handle(channel: string, handler: InvokeHandler): void {
+      electronIpcMain.handle(channel, (event, ...args) => {
+        if (!isTrustedRenderer(event)) {
+          throw new Error(`Blocked untrusted IPC sender for ${channel}`)
+        }
+        return handler(event, ...args)
+      })
+    }
+  }
 
   coreServer.onAgentEvent((event) => {
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
         window.webContents.send('host:agent.event', event)
       }
     }
@@ -410,14 +403,13 @@ export function registerHostIpc(
 
   ipcMain.handle('host:core.ping', (_event, input) => coreServer.ping(input))
   ipcMain.handle('host:app.getWindowState', (event) => getAppWindowState(getInvokeWindow(event)))
-  ipcMain.handle('host:app.getVersion', () => coreServer.getVersion())
+  ipcMain.handle('host:app.openExternal', (_event, url) => openExternalUrl(url))
   ipcMain.handle('host:app.setNativeThemeSource', (_event, themeSource) => {
     if (!isNativeThemeSource(themeSource)) {
       throw new Error('Invalid native theme source')
     }
     nativeTheme.themeSource = themeSource
   })
-  ipcMain.handle('host:agent.startRun', (_event, input) => coreServer.startRun(input))
   ipcMain.handle('host:agent.startConversationTurn', (_event, input) =>
     coreServer.startConversationTurn(input)
   )
@@ -430,20 +422,13 @@ export function registerHostIpc(
   ipcMain.handle('host:agent.clearUsageRecords', (_event, input) =>
     coreServer.clearUsageRecords(input)
   )
-  ipcMain.handle('host:agent.getFileDraft', (_event, input) => coreServer.getFileDraft(input))
   ipcMain.handle('host:agent.readFileDraft', (_event, input) => coreServer.readFileDraft(input))
   ipcMain.handle('host:agent.getFileWriteDiff', (_event, input) =>
     coreServer.getFileWriteDiff(input)
   )
-  ipcMain.handle('host:agent.discardFileDraft', (_event, input) =>
-    coreServer.discardFileDraft(input)
-  )
   ipcMain.handle('host:search.searchChats', (_event, input) => coreServer.searchChats(input))
   ipcMain.handle('host:attachments.selectInputAttachments', (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)
-  )
-  ipcMain.handle('host:attachments.loadInputAttachmentsFromPaths', (_event, request) =>
-    attachmentDialogBridge.loadInputAttachmentsFromPaths(request)
   )
   ipcMain.handle('host:browser.createView', (_event, request) =>
     getBrowserManager().createView(request)
@@ -463,14 +448,13 @@ export function registerHostIpc(
   ipcMain.handle('host:browser.setZoom', (_event, id, zoomFactor) =>
     getBrowserManager().setZoom(id, zoomFactor)
   )
-  ipcMain.handle('host:browser.clearBrowsingData', (_event, id) =>
-    getBrowserManager().clearBrowsingData(id)
-  )
+  ipcMain.handle('host:browser.clearBrowsingData', async (_event, id) => {
+    await Promise.all([getBrowserManager().clearBrowsingData(id), faviconResourceCache.clear()])
+  })
   ipcMain.handle('host:clipboard.writeImage', (_event, input) => writeImageToClipboard(input))
   ipcMain.handle('host:resources.resolveFavicon', (_event, input) =>
     faviconResourceCache.resolveFavicon(input)
   )
-  ipcMain.handle('host:storage.loadAppData', () => coreServer.loadAppData())
   ipcMain.handle('host:storage.loadModelSettings', () => coreServer.loadModelSettings())
   ipcMain.handle('host:storage.saveModelSettings', (_event, settings) =>
     coreServer.saveModelSettings(settings)
@@ -494,9 +478,6 @@ export function registerHostIpc(
     revealProjectFile(coreServer, input)
   )
   ipcMain.handle('host:storage.loadConversations', () => coreServer.loadConversations())
-  ipcMain.handle('host:storage.saveConversation', (_event, conversation) =>
-    coreServer.saveConversation(conversation)
-  )
   ipcMain.handle('host:storage.saveConversationMeta', (_event, conversation) =>
     coreServer.saveConversationMeta(conversation)
   )
@@ -515,9 +496,6 @@ export function registerHostIpc(
   ipcMain.handle('host:storage.loadComposerDrafts', () => coreServer.loadComposerDrafts())
   ipcMain.handle('host:storage.saveComposerDraft', (_event, draft) =>
     coreServer.saveComposerDraft(draft)
-  )
-  ipcMain.handle('host:storage.deleteComposerDraft', (_event, scopeId) =>
-    coreServer.deleteComposerDraft(scopeId)
   )
   ipcMain.handle('host:storage.loadUiPreferences', () => coreServer.loadUiPreferences())
   ipcMain.handle('host:storage.saveUiPreferences', (_event, preferences) =>

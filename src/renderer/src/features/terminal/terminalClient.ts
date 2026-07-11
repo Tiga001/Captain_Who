@@ -1,4 +1,3 @@
-// Renderer terminal UI.
 import { hostClient } from '../../host/hostClient'
 import type {
   TerminalCreateSessionRequest,

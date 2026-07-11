@@ -1,4 +1,3 @@
-/* Renderer UI. */
 .app-confirm-dialog__backdrop {
   position: fixed;
   z-index: 10000;
@@ -79,9 +78,14 @@
   cursor: pointer;
 }
 
-.app-confirm-dialog__close:hover {
+.app-confirm-dialog__close:hover:not(:disabled) {
   color: var(--mc-color-icon-default);
   background: var(--mc-color-state-hover);
+}
+
+.app-confirm-dialog__close:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .app-confirm-dialog__close svg {
@@ -119,7 +123,7 @@
   background: transparent;
 }
 
-.app-confirm-dialog__button--cancel:hover {
+.app-confirm-dialog__button--cancel:hover:not(:disabled) {
   color: var(--mc-color-sidebar-text-secondary);
   background: var(--mc-color-state-hover);
 }
@@ -129,7 +133,7 @@
   background: var(--mc-color-button-danger-soft-bg);
 }
 
-.app-confirm-dialog__button--danger:hover {
+.app-confirm-dialog__button--danger:hover:not(:disabled) {
   background: var(--mc-color-button-danger-soft-bg-hover);
 }
 

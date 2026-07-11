@@ -1,4 +1,3 @@
-// Renderer UI.
 import { ChevronDown, ChevronUp, FileDiff, Undo2 } from 'lucide-react'
 import { useState, type JSX } from 'react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'

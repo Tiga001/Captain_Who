@@ -1,4 +1,3 @@
-// Renderer UI.
 import { ChevronDown, Search } from 'lucide-react'
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { TranslationKey } from '../../../../config/frontendTranslations'

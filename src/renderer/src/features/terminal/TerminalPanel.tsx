@@ -1,4 +1,3 @@
-// Renderer terminal UI.
 import { useRef } from 'react'
 import '@xterm/xterm/css/xterm.css'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'

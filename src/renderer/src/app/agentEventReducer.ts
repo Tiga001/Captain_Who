@@ -1,4 +1,3 @@
-// Renderer UI.
 import type {
   AgentActionExecutionOutput,
   AgentApprovalStatus,
@@ -178,7 +177,7 @@ function removeAgentAction(actions: AgentProposedAction[], actionId: string) {
   return actions.filter((action) => getAgentActionId(action) !== actionId)
 }
 
-export function appendTimelineItem(
+function appendTimelineItem(
   run: ChatAgentRunView,
   item: ChatAgentTimelineItem
 ): ChatAgentTimelineItem[] {
@@ -951,10 +950,7 @@ export function applyAgentEventToChatMessage(
   }
 }
 
-export function applyAgentOutputToChatMessage(
-  message: ChatMessage,
-  output: AgentChatOutput
-): ChatMessage {
+function applyAgentOutputToChatMessage(message: ChatMessage, output: AgentChatOutput): ChatMessage {
   const messageWithEvents = output.events.reduce(applyAgentEventToChatMessage, message)
   const currentRun = ensureAgentRun(messageWithEvents.agentRun, output.runId, output.status)
   const outputFinalContent =

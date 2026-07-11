@@ -1,6 +1,5 @@
-// Rust agent core.
 use super::{
-    extract_with_textutil, normalize_text_output, resolve_document_path,
+    normalize_text_output, reserve_zip_xml_entry, resolve_document_path,
     sanitize_document_max_chars, truncate_chars, AgentTool, NamedText, ToolExecutionContext,
     MAX_DOCUMENT_TEXT_CHARS,
 };
@@ -18,11 +17,11 @@ impl AgentTool for ReadSpreadsheetTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_spreadsheet".to_string(),
-            description: "Extract text from spreadsheet files (.xlsx, .xls, .csv, .tsv) in the selected workspace or an @attachments path.".to_string(),
+            description: "Extract text from .xlsx, .csv, or .tsv spreadsheet files in the selected workspace or an @attachments path. Legacy .xls files are not supported.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative spreadsheet path or @attachments/... readPath." },
+                    "path": { "type": "string", "description": "Workspace-relative .xlsx/.csv/.tsv path or @attachments/... readPath." },
                     "filePath": { "type": "string", "description": "Alias for path." },
                     "maxChars": { "type": "integer", "minimum": 1, "maximum": MAX_DOCUMENT_TEXT_CHARS }
                 },
@@ -41,7 +40,7 @@ impl AgentTool for ReadSpreadsheetTool {
             .map_err(|error| AgentError::new(format!("read_spreadsheet 参数无效：{error}")))?;
         let path = args.path()?;
         let max_chars = sanitize_document_max_chars(args.max_chars);
-        let resolved = resolve_document_path(context, path, &["xlsx", "xls", "csv", "tsv"])?;
+        let resolved = resolve_document_path(context, path, &["xlsx", "csv", "tsv"])?;
         let cancellation_token = context.cancellation_token();
         let (text, sheet_count, extractor) = match resolved.extension.as_str() {
             "xlsx" => {
@@ -53,11 +52,6 @@ impl AgentTool for ReadSpreadsheetTool {
                     .join("\n\n");
                 (text, sheets.len(), "ooxml")
             }
-            "xls" => (
-                extract_with_textutil(&resolved.file_path, &cancellation_token)?,
-                1,
-                "textutil",
-            ),
             "csv" | "tsv" => {
                 cancellation_token.check()?;
                 let text = fs::read_to_string(&resolved.file_path)
@@ -110,7 +104,9 @@ fn read_xlsx_sheets(
         .map_err(|error| AgentError::new(format!("打开 XLSX 文件失败：{error}")))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|error| AgentError::new(format!("读取 XLSX 压缩包失败：{error}")))?;
-    let shared_strings = read_shared_strings(&mut archive, cancellation_token)?;
+    let mut total_xml_bytes = 0;
+    let shared_strings =
+        read_shared_strings(&mut archive, cancellation_token, &mut total_xml_bytes)?;
     let mut sheets = Vec::new();
 
     for index in 0..archive.len() {
@@ -122,6 +118,7 @@ fn read_xlsx_sheets(
         if !name.starts_with("xl/worksheets/sheet") || !name.ends_with(".xml") {
             continue;
         }
+        reserve_zip_xml_entry(&name, entry.size(), &mut total_xml_bytes)?;
 
         let mut xml = String::new();
         entry
@@ -150,11 +147,13 @@ fn read_xlsx_sheets(
 fn read_shared_strings(
     archive: &mut zip::ZipArchive<File>,
     cancellation_token: &crate::cancellation::AgentCancellationToken,
+    total_xml_bytes: &mut u64,
 ) -> AgentResult<Vec<String>> {
     cancellation_token.check()?;
     let Ok(mut entry) = archive.by_name("xl/sharedStrings.xml") else {
         return Ok(Vec::new());
     };
+    reserve_zip_xml_entry(entry.name(), entry.size(), total_xml_bytes)?;
 
     let mut xml = String::new();
     entry
@@ -265,7 +264,7 @@ mod tests {
         let fixture = TestWorkspace::new();
         fixture.write_xlsx("sheet.xlsx");
         let context = fixture.context();
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
         let call = AgentToolCall {
             id: "call-1".to_string(),
             tool: "read_spreadsheet".to_string(),

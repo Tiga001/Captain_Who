@@ -8,51 +8,12 @@ importers:
 
   .:
     dependencies:
-      '@electron-toolkit/preload':
-        specifier: ^3.0.2
-        version: 3.0.2(electron@39.8.10)
       '@electron-toolkit/utils':
         specifier: ^4.0.0
         version: 4.0.0(electron@39.8.10)
-      '@mycopilot/host-api':
-        specifier: workspace:*
-        version: link:packages/host-api
-      '@mycopilot/protocol':
-        specifier: workspace:*
-        version: link:packages/protocol
-      '@xterm/addon-fit':
-        specifier: ^0.11.0
-        version: 0.11.0
-      '@xterm/xterm':
-        specifier: ^6.0.0
-        version: 6.0.0
-      katex:
-        specifier: ^0.17.0
-        version: 0.17.0
-      lucide-react:
-        specifier: ^1.23.0
-        version: 1.23.0(react@19.2.7)
-      mdast-util-from-markdown:
-        specifier: ^2.0.3
-        version: 2.0.3
       node-pty:
         specifier: ^1.1.0
         version: 1.1.0
-      react-markdown:
-        specifier: ^10.1.0
-        version: 10.1.0(@types/react@19.2.17)(react@19.2.7)
-      rehype-katex:
-        specifier: ^7.0.1
-        version: 7.0.1
-      remark-breaks:
-        specifier: ^4.0.0
-        version: 4.0.0
-      remark-gfm:
-        specifier: ^4.0.1
-        version: 4.0.1
-      remark-math:
-        specifier: ^6.0.0
-        version: 6.0.0
     devDependencies:
       '@electron-toolkit/eslint-config-prettier':
         specifier: ^3.0.0
@@ -63,6 +24,12 @@ importers:
       '@electron-toolkit/tsconfig':
         specifier: ^2.0.0
         version: 2.0.0(@types/node@22.20.0)
+      '@mycopilot/host-api':
+        specifier: workspace:*
+        version: link:packages/host-api
+      '@mycopilot/protocol':
+        specifier: workspace:*
+        version: link:packages/protocol
       '@types/node':
         specifier: ^22.19.1
         version: 22.20.0
@@ -75,6 +42,12 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^5.1.1
         version: 5.2.0(vite@7.3.6(@types/node@22.20.0)(jiti@2.7.0))
+      '@xterm/addon-fit':
+        specifier: ^0.11.0
+        version: 0.11.0
+      '@xterm/xterm':
+        specifier: ^6.0.0
+        version: 6.0.0
       electron:
         specifier: ^39.2.6
         version: 39.8.10
@@ -96,6 +69,15 @@ importers:
       eslint-plugin-react-refresh:
         specifier: ^0.4.24
         version: 0.4.26(eslint@9.39.4(jiti@2.7.0))
+      katex:
+        specifier: ^0.17.0
+        version: 0.17.0
+      lucide-react:
+        specifier: ^1.23.0
+        version: 1.23.0(react@19.2.7)
+      mdast-util-from-markdown:
+        specifier: ^2.0.3
+        version: 2.0.3
       prettier:
         specifier: ^3.7.4
         version: 3.9.4
@@ -105,6 +87,21 @@ importers:
       react-dom:
         specifier: ^19.2.1
         version: 19.2.7(react@19.2.7)
+      react-markdown:
+        specifier: ^10.1.0
+        version: 10.1.0(@types/react@19.2.17)(react@19.2.7)
+      rehype-katex:
+        specifier: ^7.0.1
+        version: 7.0.1
+      remark-breaks:
+        specifier: ^4.0.0
+        version: 4.0.0
+      remark-gfm:
+        specifier: ^4.0.1
+        version: 4.0.1
+      remark-math:
+        specifier: ^6.0.0
+        version: 6.0.0
       typescript:
         specifier: ^5.9.3
         version: 5.9.3
@@ -225,11 +222,6 @@ packages:
     peerDependenciesMeta:
       typescript:
         optional: true
-
-  '@electron-toolkit/preload@3.0.2':
-    resolution: {integrity: sha512-TWWPToXd8qPRfSXwzf5KVhpXMfONaUuRAZJHsKthKgZR/+LqX1dZVSSClQ8OTAEduvLGdecljCsoT2jSshfoUg==}
-    peerDependencies:
-      electron: '>=13.0.0'
 
   '@electron-toolkit/tsconfig@2.0.0':
     resolution: {integrity: sha512-AdPsP770WhW7b260h13SHMdmjEEHJL6xFtgi3jwgdsSQbJOkJLeNnnpZW9qxTPCvmRI6vmdzWz5K3gibFS6SNg==}
@@ -3219,10 +3211,6 @@ snapshots:
       typescript: 5.9.3
     transitivePeerDependencies:
       - supports-color
-
-  '@electron-toolkit/preload@3.0.2(electron@39.8.10)':
-    dependencies:
-      electron: 39.8.10
 
   '@electron-toolkit/tsconfig@2.0.0(@types/node@22.20.0)':
     dependencies:

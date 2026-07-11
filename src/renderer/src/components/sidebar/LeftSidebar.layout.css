@@ -85,7 +85,6 @@
 
 .left-sidebar__primary-action,
 .left-sidebar__search-action,
-.left-sidebar__settings,
 .left-sidebar__conversation-title-button,
 .left-sidebar__section-title-button {
   display: flex;
@@ -107,7 +106,6 @@
 
 .left-sidebar__primary-action:hover,
 .left-sidebar__search-action:hover,
-.left-sidebar__settings:hover,
 .left-sidebar__conversation-header:hover,
 .left-sidebar__conversation-header:focus-within,
 .left-sidebar__section-header:hover,
@@ -244,7 +242,6 @@
 
 .left-sidebar__primary-action:focus-visible,
 .left-sidebar__search-action:focus-visible,
-.left-sidebar__settings:focus-visible,
 .left-sidebar__account-button:focus-visible,
 .left-sidebar__account-menu-item:focus-visible,
 .left-sidebar__conversation-title-button:focus-visible,
@@ -263,7 +260,6 @@
 
 .left-sidebar__primary-action svg,
 .left-sidebar__search-action svg,
-.left-sidebar__settings svg,
 .left-sidebar__account-menu-item svg,
 .left-sidebar__conversation-title-button svg,
 .left-sidebar__section-title-button svg,

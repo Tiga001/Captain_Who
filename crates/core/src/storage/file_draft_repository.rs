@@ -3,6 +3,8 @@ use crate::storage::models::{
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
+const EXPIRED_DRAFT_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
 pub fn insert_draft(connection: &Connection, draft: &AgentFileDraftRecord) -> rusqlite::Result<()> {
     connection.execute(
         r#"
@@ -100,6 +102,35 @@ pub fn settle_unresolved_drafts_for_run(
         "#,
         params![run_id, status, updated_at],
     )
+}
+
+pub fn expire_and_prune_drafts(
+    connection: &mut Connection,
+    now: i64,
+) -> rusqlite::Result<(usize, usize)> {
+    let transaction = connection.transaction()?;
+    let deleted = transaction.execute(
+        r#"
+        DELETE FROM agent_file_drafts
+        WHERE expires_at <= ?1
+          AND status IN ('applied', 'rejected', 'conflict', 'failed', 'aborted', 'expired')
+        "#,
+        [now],
+    )?;
+    let expired = transaction.execute(
+        r#"
+        UPDATE agent_file_drafts
+        SET status = 'expired',
+            stats_final = 1,
+            updated_at = ?1,
+            expires_at = ?2
+        WHERE expires_at <= ?1
+          AND status IN ('drafting', 'ready', 'waiting_approval', 'applying')
+        "#,
+        params![now, now.saturating_add(EXPIRED_DRAFT_RETENTION_MS)],
+    )?;
+    transaction.commit()?;
+    Ok((expired, deleted))
 }
 
 pub fn save_draft_progress(
@@ -364,5 +395,34 @@ mod tests {
             get_draft(&connection, "draft-3").unwrap().unwrap().status,
             "drafting"
         );
+    }
+
+    #[test]
+    fn expires_unresolved_drafts_and_prunes_expired_terminal_drafts() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                params!["conversation-1", "Test", 1_i64, 1_i64],
+            )
+            .unwrap();
+
+        let mut unresolved = record();
+        unresolved.expires_at = 10;
+        insert_draft(&connection, &unresolved).unwrap();
+        let mut terminal = record();
+        terminal.id = "draft-terminal".to_string();
+        terminal.status = "applied".to_string();
+        terminal.expires_at = 10;
+        insert_draft(&connection, &terminal).unwrap();
+
+        let (expired, deleted) = expire_and_prune_drafts(&mut connection, 20).unwrap();
+
+        assert_eq!((expired, deleted), (1, 1));
+        let unresolved = get_draft(&connection, "draft-1").unwrap().unwrap();
+        assert_eq!(unresolved.status, "expired");
+        assert!(unresolved.expires_at > 20);
+        assert!(get_draft(&connection, "draft-terminal").unwrap().is_none());
     }
 }

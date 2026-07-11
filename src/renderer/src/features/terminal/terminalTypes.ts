@@ -1,4 +1,3 @@
-// Renderer terminal UI.
 import type {
   TerminalCreateSessionRequest,
   TerminalExitEvent,

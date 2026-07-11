@@ -1,4 +1,3 @@
-// Rust agent core.
 use crate::protocol::AgentUsage;
 use serde_json::Value;
 

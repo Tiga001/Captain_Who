@@ -1,4 +1,3 @@
-// Electron main terminal bridge.
 import { BrowserWindow, utilityProcess } from 'electron'
 import type { UtilityProcess } from 'electron'
 import { join } from 'node:path'
@@ -116,6 +115,7 @@ export class TerminalBridge {
     const timeout = new Promise<void>((resolve) => {
       setTimeout(() => {
         if (this.child === child) {
+          this.child = null
           child.kill()
         }
         resolve()
@@ -135,17 +135,17 @@ export class TerminalBridge {
     await Promise.race([shutdown, timeout])
 
     if (this.child === child) {
+      this.child = null
       child.kill()
     }
   }
 
   killNow(): void {
     const child = this.child
-    if (child) {
-      if (this.child === child) {
-        child.kill()
-      }
-    }
+    if (!child) return
+
+    this.child = null
+    child.kill()
   }
 
   private createRequestId(): number {
@@ -238,7 +238,7 @@ export class TerminalBridge {
 
   private broadcast(channel: string, payload: TerminalOutputEvent | TerminalExitEvent): void {
     for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
         window.webContents.send(channel, payload)
       }
     }

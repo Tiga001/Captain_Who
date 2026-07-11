@@ -1,4 +1,3 @@
-// Rust agent core.
 use super::{truncate_chars, AgentTool, ToolExecutionContext, MAX_GIT_DIFF_BYTES};
 use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
 use serde::Deserialize;

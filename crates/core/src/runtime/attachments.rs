@@ -44,7 +44,7 @@ fn build_attachment_context_in_workspace(
     attachments: &[AgentInputAttachment],
     temp_root: &Path,
 ) -> AgentResult<AttachmentContext> {
-    let registry = ToolRegistry::read_only_defaults_with_search(None);
+    let registry = ToolRegistry::defaults_with_search(None);
     let tool_context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
         conversation_id: None,
         project_id: None,
@@ -193,8 +193,8 @@ fn read_tool_for_attachment(
     match extension.as_str() {
         "pdf" => Some("read_pdf"),
         "doc" | "docx" => Some("read_word"),
-        "ppt" | "pptx" => Some("read_presentation"),
-        "xls" | "xlsx" | "csv" | "tsv" => Some("read_spreadsheet"),
+        "pptx" => Some("read_presentation"),
+        "xlsx" | "csv" | "tsv" => Some("read_spreadsheet"),
         _ if is_text_attachment(attachment, safe_name) => Some("read_file"),
         _ => None,
     }

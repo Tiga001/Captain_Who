@@ -1,4 +1,3 @@
-// Renderer UI.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
@@ -16,19 +15,19 @@ const ASSISTANT_SOURCES_ROW_HEIGHT = 34
 const ASSISTANT_SOURCES_MAX_VISIBLE_ITEMS = 5
 const faviconCache = new Map<string, Promise<string | null>>()
 
-function faviconCacheKey(source: ChatWebSearchSource) {
-  return `${source.url}\n${source.faviconUrl ?? ''}`
+function faviconCacheKey(pageUrl: string, faviconUrl?: string | null) {
+  return `${pageUrl}\n${faviconUrl ?? ''}`
 }
 
-function resolveSourceFavicon(source: ChatWebSearchSource): Promise<string | null> {
-  const key = faviconCacheKey(source)
+function resolveSourceFavicon(pageUrl: string, faviconUrl?: string | null): Promise<string | null> {
+  const key = faviconCacheKey(pageUrl, faviconUrl)
   const cached = faviconCache.get(key)
   if (cached) return cached
 
   const request = hostClient.resources
     .resolveFavicon({
-      pageUrl: source.url,
-      faviconUrl: source.faviconUrl ?? null
+      pageUrl,
+      faviconUrl: faviconUrl ?? null
     })
     .then((response) => response.url)
     .catch(() => null)
@@ -47,7 +46,7 @@ function openSourceUrl(url: string) {
   })
 }
 
-export function SourceBadge({ source }: { source: ChatWebSearchSource }) {
+function SourceBadge({ source }: { source: ChatWebSearchSource }) {
   const [imageFailed, setImageFailed] = useState(false)
   const [faviconUrl, setFaviconUrl] = useState<string | null>(null)
 
@@ -56,7 +55,7 @@ export function SourceBadge({ source }: { source: ChatWebSearchSource }) {
     setImageFailed(false)
     setFaviconUrl(null)
 
-    void resolveSourceFavicon(source).then((url) => {
+    void resolveSourceFavicon(source.url, source.faviconUrl).then((url) => {
       if (!cancelled) {
         setFaviconUrl(url)
       }

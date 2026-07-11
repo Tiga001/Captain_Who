@@ -1,4 +1,3 @@
-// Renderer UI.
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { useProjectSettings } from '../../config/ProjectSettingsProvider'
 import { ChatComposer } from './components/ChatComposer'

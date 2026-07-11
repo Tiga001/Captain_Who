@@ -1,6 +1,6 @@
+node_modules
 out
 dist
+target
 pnpm-lock.yaml
-LICENSE.md
-tsconfig.json
-tsconfig.*.json
+Cargo.lock

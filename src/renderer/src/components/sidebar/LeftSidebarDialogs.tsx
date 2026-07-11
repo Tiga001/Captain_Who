@@ -1,4 +1,3 @@
-// Dialog cluster for sidebar rename, archive, and remove confirmations.
 import type { TranslationKey } from '../../config/frontendTranslations'
 import type { AppProject } from '../../config/projectConfig'
 import type { ChatConversation } from '../../features/chat/chatTypes'
@@ -23,7 +22,7 @@ interface LeftSidebarDialogsProps {
   onConfirmProjectRename: () => void
   onConversationRenameValueChange: (value: string) => void
   onProjectRenameValueChange: (value: string) => void
-  onRemoveProject: (projectId: string) => void
+  onRemoveProject: (projectId: string) => Promise<boolean>
   pendingArchiveProject: AppProject | null
   pendingBulkArchiveScope: BulkArchiveScope | null
   pendingRemoveProject: AppProject | null
@@ -135,9 +134,10 @@ export function LeftSidebarDialogs({
           cancelLabel={t('project.cancel')}
           confirmLabel={t('project.confirmRemove')}
           onCancel={onCancelRemoveProject}
-          onConfirm={() => {
-            onRemoveProject(pendingRemoveProject.id)
-            onCancelRemoveProject()
+          onConfirm={async () => {
+            if (await onRemoveProject(pendingRemoveProject.id)) {
+              onCancelRemoveProject()
+            }
           }}
         />
       )}

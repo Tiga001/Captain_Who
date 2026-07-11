@@ -1,4 +1,3 @@
-// Protocol layer.
 export * from './agent'
 export * from './attachments'
 export * from './browser'

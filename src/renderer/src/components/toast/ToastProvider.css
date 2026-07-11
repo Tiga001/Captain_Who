@@ -1,4 +1,3 @@
-/* Shared app toast surface. */
 .toast-viewport {
   position: fixed;
   z-index: 5000;

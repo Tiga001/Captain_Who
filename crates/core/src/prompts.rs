@@ -1,4 +1,3 @@
-// Rust agent core.
 use crate::protocol::{
     AgentCommandPermission, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
     AgentReadPermission, AgentRunContext, AgentToolDefinition, AgentWritePermission,
@@ -12,29 +11,27 @@ pub(crate) fn build_system_prompt(
     tool_definitions: &[AgentToolDefinition],
 ) -> String {
     let preferences = NormalizedPromptPreferences::from(preferences);
-    let mut sections = Vec::new();
-
-    sections.push(core_identity_section());
-    sections.push(safety_policy_section());
-    sections.push(untrusted_content_section());
-    sections.push(confidentiality_policy_section());
-    sections.push(evidence_policy_section());
-    sections.push(permission_policy_section(context));
-    sections.push(insufficient_permission_section());
-    sections.push(approval_policy_section(context));
-    sections.push(workspace_context_section(context));
-    sections.push(attachment_context_section(context));
-    sections.push(tool_routing_section(tool_definitions));
-    sections.push(tool_failure_section());
-    sections.push(tool_progress_communication_section());
-    sections.push(work_mode_progress_communication_section(
-        preferences.work_mode,
-    ));
-    sections.push(tone_progress_communication_section(preferences.tone));
-    sections.push(work_mode_section(preferences.work_mode));
-    sections.push(tone_section(preferences.tone));
-    sections.push(response_style_section());
-    sections.push(tool_definitions_section(tool_definitions));
+    let mut sections = vec![
+        core_identity_section(),
+        safety_policy_section(),
+        untrusted_content_section(),
+        confidentiality_policy_section(),
+        evidence_policy_section(),
+        permission_policy_section(context),
+        insufficient_permission_section(),
+        approval_policy_section(context),
+        workspace_context_section(context),
+        attachment_context_section(context),
+        tool_routing_section(tool_definitions),
+        tool_failure_section(),
+        tool_progress_communication_section(),
+        work_mode_progress_communication_section(preferences.work_mode),
+        tone_progress_communication_section(preferences.tone),
+        work_mode_section(preferences.work_mode),
+        tone_section(preferences.tone),
+        response_style_section(),
+        tool_definitions_section(tool_definitions),
+    ];
     if let Some(custom_instructions) = custom_instructions_section(&preferences) {
         sections.push(custom_instructions);
     }

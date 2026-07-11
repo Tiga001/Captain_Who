@@ -1,4 +1,3 @@
-// Renderer UI.
 import type { LucideIcon } from 'lucide-react'
 import {
   Braces,

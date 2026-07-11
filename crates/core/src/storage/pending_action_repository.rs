@@ -1,4 +1,3 @@
-// Rust core storage for persisted agent pending approvals.
 use crate::storage::models::AgentPendingActionRecord;
 use rusqlite::{params, Connection};
 

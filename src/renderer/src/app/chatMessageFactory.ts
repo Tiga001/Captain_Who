@@ -1,4 +1,3 @@
-// Renderer UI.
 import type { AgentConversationMessage, AgentInputAttachment } from '@mycopilot/protocol'
 import { modelConfig } from '../config/modelConfig'
 import type { ChatComposerDraft, ChatMessage } from '../features/chat/chatTypes'
@@ -7,8 +6,8 @@ export function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 }
 
-export function createConversationTitle(message: string) {
-  const firstLine = message.split(/\r?\n/)[0]?.replace(/\s+/g, ' ').trim() || '新对话'
+export function createConversationTitle(message: string, fallbackTitle: string) {
+  const firstLine = message.split(/\r?\n/)[0]?.replace(/\s+/g, ' ').trim() || fallbackTitle
   return firstLine.length > 24 ? `${firstLine.slice(0, 24)}...` : firstLine
 }
 

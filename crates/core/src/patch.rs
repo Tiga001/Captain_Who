@@ -1,4 +1,3 @@
-// Rust core patch execution.
 use crate::{content_revision, AgentPatchOperation, AgentPermissions, AgentWritePermission};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -23,10 +22,10 @@ pub fn apply_unified_diff_in_workspace(
     expected_base_revision: Option<&str>,
     permissions: AgentPermissions,
 ) -> Result<PatchApplyResult, String> {
-    if patch.as_bytes().len() > MAX_PATCH_BYTES {
+    if patch.len() > MAX_PATCH_BYTES {
         return Err(format!(
             "patch 过大：{} bytes，超过 {} bytes 限制。",
-            patch.as_bytes().len(),
+            patch.len(),
             MAX_PATCH_BYTES
         ));
     }

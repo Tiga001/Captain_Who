@@ -1,5 +1,3 @@
-export const SEARCH_SEARCH_CHATS_METHOD = 'search.searchChats'
-
 export type ChatSearchMatchKind = 'title' | 'message'
 
 export interface ChatSearchInput {

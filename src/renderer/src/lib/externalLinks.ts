@@ -1,6 +1,5 @@
-// Renderer UI.
-import { openExternalUrlThroughHost } from "../host/hostClient";
+import { hostClient } from '../host/hostClient'
 
-export async function openExternalUrl(url: string) {
-  await openExternalUrlThroughHost(url);
+export function openExternalUrl(url: string): Promise<void> {
+  return hostClient.app.openExternal(url)
 }

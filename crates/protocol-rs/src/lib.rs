@@ -1,11 +1,8 @@
-// Protocol layer.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const CORE_PING_METHOD: &str = "core.ping";
 pub const CORE_SHUTDOWN_METHOD: &str = "core.shutdown";
-pub const APP_GET_VERSION_METHOD: &str = "app.getVersion";
-pub const AGENT_START_RUN_METHOD: &str = "agent.startRun";
 pub const AGENT_CANCEL_RUN_METHOD: &str = "agent.cancelRun";
 pub const AGENT_START_CONVERSATION_TURN_METHOD: &str = "agent.startConversationTurn";
 pub const AGENT_LIST_PENDING_ACTIONS_METHOD: &str = "agent.listPendingActions";
@@ -14,13 +11,10 @@ pub const AGENT_REJECT_ACTION_METHOD: &str = "agent.rejectAction";
 pub const AGENT_CANCEL_ACTION_METHOD: &str = "agent.cancelAction";
 pub const AGENT_GET_USAGE_SUMMARY_METHOD: &str = "agent.getUsageSummary";
 pub const AGENT_CLEAR_USAGE_RECORDS_METHOD: &str = "agent.clearUsageRecords";
-pub const AGENT_GET_FILE_DRAFT_METHOD: &str = "agent.getFileDraft";
 pub const AGENT_READ_FILE_DRAFT_METHOD: &str = "agent.readFileDraft";
 pub const AGENT_GET_FILE_WRITE_DIFF_METHOD: &str = "agent.getFileWriteDiff";
-pub const AGENT_DISCARD_FILE_DRAFT_METHOD: &str = "agent.discardFileDraft";
 pub const AGENT_EVENT_NOTIFICATION_METHOD: &str = "agent.event";
 pub const SEARCH_SEARCH_CHATS_METHOD: &str = "search.searchChats";
-pub const STORAGE_LOAD_APP_DATA_METHOD: &str = "storage.loadAppData";
 pub const STORAGE_LOAD_MODEL_SETTINGS_METHOD: &str = "storage.loadModelSettings";
 pub const STORAGE_SAVE_MODEL_SETTINGS_METHOD: &str = "storage.saveModelSettings";
 pub const STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD: &str = "storage.loadAgentPromptPreferences";
@@ -28,11 +22,7 @@ pub const STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD: &str = "storage.saveAgen
 pub const STORAGE_LOAD_PROJECTS_METHOD: &str = "storage.loadProjects";
 pub const STORAGE_SAVE_PROJECT_METHOD: &str = "storage.saveProject";
 pub const STORAGE_DELETE_PROJECT_METHOD: &str = "storage.deleteProject";
-pub const STORAGE_SHOW_PROJECT_IN_FOLDER_METHOD: &str = "storage.showProjectInFolder";
-pub const STORAGE_REVEAL_PROJECT_FILE_METHOD: &str = "storage.revealProjectFile";
-pub const STORAGE_SELECT_PROJECT_DIRECTORY_METHOD: &str = "storage.selectProjectDirectory";
 pub const STORAGE_LOAD_CONVERSATIONS_METHOD: &str = "storage.loadConversations";
-pub const STORAGE_SAVE_CONVERSATION_METHOD: &str = "storage.saveConversation";
 pub const STORAGE_SAVE_CONVERSATION_META_METHOD: &str = "storage.saveConversationMeta";
 pub const STORAGE_DELETE_CONVERSATION_METHOD: &str = "storage.deleteConversation";
 pub const STORAGE_DELETE_CHAT_MESSAGES_METHOD: &str = "storage.deleteChatMessages";
@@ -40,10 +30,8 @@ pub const STORAGE_UPSERT_CHAT_MESSAGES_METHOD: &str = "storage.upsertChatMessage
 pub const STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD: &str = "storage.saveChatMessageState";
 pub const STORAGE_LOAD_COMPOSER_DRAFTS_METHOD: &str = "storage.loadComposerDrafts";
 pub const STORAGE_SAVE_COMPOSER_DRAFT_METHOD: &str = "storage.saveComposerDraft";
-pub const STORAGE_DELETE_COMPOSER_DRAFT_METHOD: &str = "storage.deleteComposerDraft";
 pub const STORAGE_LOAD_UI_PREFERENCES_METHOD: &str = "storage.loadUiPreferences";
 pub const STORAGE_SAVE_UI_PREFERENCES_METHOD: &str = "storage.saveUiPreferences";
-pub const STORAGE_SELECT_PROFILE_AVATAR_METHOD: &str = "storage.selectProfileAvatar";
 pub const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD: &str = "storage.loadAttachmentImage";
 pub const STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD: &str = "storage.loadInputAttachments";
 
@@ -90,12 +78,6 @@ pub struct JsonRpcErrorObject {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AgentFileDraftIdRequest {
-    pub draft_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AgentFileDraftReadRequest {
     pub draft_id: String,
     pub offset: Option<usize>,
@@ -121,27 +103,6 @@ pub struct CorePingResponse {
 pub struct CoreShutdownResponse {
     pub cancelled_runs: usize,
     pub timed_out: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AppVersionResponse {
-    pub name: &'static str,
-    pub version: &'static str,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentStartRunRequest {
-    pub conversation_id: Option<String>,
-    pub prompt: Option<String>,
-    pub workspace_path: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentStartRunResponse {
-    pub run_id: String,
-    pub status: &'static str,
 }
 
 #[derive(Debug, Deserialize)]

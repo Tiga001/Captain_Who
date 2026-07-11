@@ -1,4 +1,3 @@
-// Rust agent core.
 use super::{AgentTool, ToolExecutionContext};
 use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
 use base64::Engine;

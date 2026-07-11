@@ -297,14 +297,6 @@ fn reject_symlink_target(target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn file_write_operation(mode: AgentFileWriteMode, target_existed: bool) -> &'static str {
-    match (mode, target_existed) {
-        (AgentFileWriteMode::Create, _) => "create",
-        (AgentFileWriteMode::Upsert, false) => "create",
-        _ => "update",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,4 +1,3 @@
-// Rust core storage.
 pub mod agent_action_audit_repository;
 pub mod agent_prompt_preferences_repository;
 pub mod attachment_repository;

@@ -1,5 +1,9 @@
-// Rust core storage.
 use rusqlite::Connection;
+
+const REMOVE_INITIAL_DEMO_PROFILE_TASK: &str = "remove_initial_demo_profile";
+const CLEAR_PLACEHOLDER_TAVILY_KEY_TASK: &str = "clear_placeholder_tavily_key";
+const CLEAR_INITIAL_API_URL_TASK: &str = "clear_initial_api_url";
+const INITIAL_API_URL: &str = "https://zju.smartml.cn/userapi/v1/model/v1/chat/completions";
 
 fn add_column_if_missing(
     connection: &Connection,
@@ -18,6 +22,65 @@ fn add_column_if_missing(
                 Err(error)
             }
         })
+}
+
+fn run_one_time_maintenance(connection: &Connection) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    let already_completed = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM maintenance_tasks WHERE id = ?1)",
+        [REMOVE_INITIAL_DEMO_PROFILE_TASK],
+        |row| row.get::<_, bool>(0),
+    )?;
+
+    if !already_completed {
+        transaction.execute(
+            "UPDATE ui_preferences
+             SET profile_display_name = '', profile_handle = 'USER'
+             WHERE lower(trim(profile_display_name)) = 'hx z'
+               AND lower(ltrim(trim(profile_handle), '@')) = 'hxz9393'",
+            [],
+        )?;
+        transaction.execute(
+            "INSERT INTO maintenance_tasks (id, completed_at) VALUES (?1, CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+            [REMOVE_INITIAL_DEMO_PROFILE_TASK],
+        )?;
+    }
+
+    let placeholder_key_cleared = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM maintenance_tasks WHERE id = ?1)",
+        [CLEAR_PLACEHOLDER_TAVILY_KEY_TASK],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !placeholder_key_cleared {
+        transaction.execute(
+            "UPDATE model_provider_settings SET tavily_api_key = '' WHERE trim(tavily_api_key) = 'tvly-my-copilot-search-key'",
+            [],
+        )?;
+        transaction.execute(
+            "INSERT INTO maintenance_tasks (id, completed_at) VALUES (?1, CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+            [CLEAR_PLACEHOLDER_TAVILY_KEY_TASK],
+        )?;
+    }
+
+    let initial_api_url_cleared = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM maintenance_tasks WHERE id = ?1)",
+        [CLEAR_INITIAL_API_URL_TASK],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !initial_api_url_cleared {
+        transaction.execute(
+            "UPDATE model_provider_settings
+             SET api_url = ''
+             WHERE trim(api_url) = ?1 AND trim(api_token) = ''",
+            [INITIAL_API_URL],
+        )?;
+        transaction.execute(
+            "INSERT INTO maintenance_tasks (id, completed_at) VALUES (?1, CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+            [CLEAR_INITIAL_API_URL_TASK],
+        )?;
+    }
+
+    transaction.commit()
 }
 
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
@@ -332,6 +395,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "custom_permission_enabled",
         "INTEGER NOT NULL DEFAULT 1",
     )?;
+    run_one_time_maintenance(connection)?;
 
     connection.execute_batch(
         "
@@ -407,4 +471,161 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "agent_action_audit", "decision_source", "TEXT")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removes_initial_demo_profile_only_once() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute(
+                "DELETE FROM maintenance_tasks WHERE id = ?1",
+                [REMOVE_INITIAL_DEMO_PROFILE_TASK],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ui_preferences (
+                    id,
+                    sidebar_conversation_sort,
+                    sidebar_project_sort,
+                    sidebar_section_order,
+                    profile_display_name,
+                    profile_handle,
+                    updated_at
+                ) VALUES ('default', 'updated', 'created', 'projects_first', ' hx z ', '@hxz9393', 0)",
+                [],
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+        let migrated = connection
+            .query_row(
+                "SELECT profile_display_name, profile_handle FROM ui_preferences WHERE id = 'default'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(migrated, (String::new(), "USER".to_string()));
+
+        connection
+            .execute(
+                "UPDATE ui_preferences SET profile_display_name = 'hx z', profile_handle = 'hxz9393' WHERE id = 'default'",
+                [],
+            )
+            .unwrap();
+        run_migrations(&connection).unwrap();
+        let preserved = connection
+            .query_row(
+                "SELECT profile_display_name, profile_handle FROM ui_preferences WHERE id = 'default'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, ("hx z".to_string(), "hxz9393".to_string()));
+    }
+
+    #[test]
+    fn preserves_profiles_that_only_partially_match_the_initial_demo() {
+        for (display_name, handle) in [("hx z", "real-user"), ("Real User", "hxz9393")] {
+            let connection = Connection::open_in_memory().unwrap();
+            run_migrations(&connection).unwrap();
+            connection
+                .execute(
+                    "DELETE FROM maintenance_tasks WHERE id = ?1",
+                    [REMOVE_INITIAL_DEMO_PROFILE_TASK],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO ui_preferences (
+                        id,
+                        sidebar_conversation_sort,
+                        sidebar_project_sort,
+                        sidebar_section_order,
+                        profile_display_name,
+                        profile_handle,
+                        updated_at
+                    ) VALUES ('default', 'updated', 'created', 'projects_first', ?1, ?2, 0)",
+                    [display_name, handle],
+                )
+                .unwrap();
+
+            run_migrations(&connection).unwrap();
+            let preserved = connection
+                .query_row(
+                    "SELECT profile_display_name, profile_handle FROM ui_preferences WHERE id = 'default'",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .unwrap();
+            assert_eq!(preserved, (display_name.to_string(), handle.to_string()));
+        }
+    }
+
+    #[test]
+    fn clears_placeholder_tavily_key() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute(
+                "DELETE FROM maintenance_tasks WHERE id = ?1",
+                [CLEAR_PLACEHOLDER_TAVILY_KEY_TASK],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO model_provider_settings (
+                    id, api_url, api_token, search_mode, tavily_api_key, updated_at
+                ) VALUES ('default', '', '', 'auto', ' tvly-my-copilot-search-key ', 0)",
+                [],
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+        let key = connection
+            .query_row(
+                "SELECT tavily_api_key FROM model_provider_settings WHERE id = 'default'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert!(key.is_empty());
+    }
+
+    #[test]
+    fn clears_initial_api_url_only_when_no_token_was_configured() {
+        for (api_token, expected_url) in [("", ""), ("configured-token", INITIAL_API_URL)] {
+            let connection = Connection::open_in_memory().unwrap();
+            run_migrations(&connection).unwrap();
+            connection
+                .execute(
+                    "DELETE FROM maintenance_tasks WHERE id = ?1",
+                    [CLEAR_INITIAL_API_URL_TASK],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO model_provider_settings (
+                        id, api_url, api_token, search_mode, tavily_api_key, updated_at
+                    ) VALUES ('default', ?1, ?2, 'auto', '', 0)",
+                    [INITIAL_API_URL, api_token],
+                )
+                .unwrap();
+
+            run_migrations(&connection).unwrap();
+            let api_url = connection
+                .query_row(
+                    "SELECT api_url FROM model_provider_settings WHERE id = 'default'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap();
+            assert_eq!(api_url, expected_url);
+        }
+    }
 }

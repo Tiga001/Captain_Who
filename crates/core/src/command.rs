@@ -1,4 +1,3 @@
-// Rust core command execution for approved, non-interactive agent run_command actions.
 use crate::system_paths::expand_system_path;
 use crate::{
     AgentCancellationToken, AgentCommandRequest, AgentCommandRiskLevel, AgentPermissions,

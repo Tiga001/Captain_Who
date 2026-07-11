@@ -1,4 +1,3 @@
-// Renderer UI.
 import { useEffect, useId, useState } from 'react'
 import { CornerDownLeft, PencilLine } from 'lucide-react'
 import type { AgentProposedAction } from '@mycopilot/protocol'
@@ -6,7 +5,7 @@ import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../config/translationFormat'
 import { formatToolDetails, getToolDisplayName } from './toolActivities/toolActivityUtils'
 
-export interface AgentApprovalDialogTarget {
+interface AgentApprovalDialogTarget {
   action: AgentProposedAction
   messageId: string
 }

@@ -1,4 +1,3 @@
-// Electron utility terminal service.
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import * as pty from 'node-pty'

@@ -1,4 +1,3 @@
-// Renderer browser UI.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,

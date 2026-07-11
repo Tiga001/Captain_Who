@@ -1,7 +1,14 @@
-// Rust core storage.
 use crate::storage::models::ProjectRecord;
 use crate::storage::now_ms;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
+
+pub fn project_exists(connection: &Connection, project_id: &str) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+        params![project_id],
+        |row| row.get(0),
+    )
+}
 
 pub fn list_projects(connection: &Connection) -> rusqlite::Result<Vec<ProjectRecord>> {
     let mut statement = connection.prepare(
@@ -25,56 +32,6 @@ pub fn list_projects(connection: &Connection) -> rusqlite::Result<Vec<ProjectRec
         .collect();
 
     projects
-}
-
-pub fn get_project(
-    connection: &Connection,
-    project_id: &str,
-) -> rusqlite::Result<Option<ProjectRecord>> {
-    connection
-        .query_row(
-            "
-            SELECT id, name, path, created_at, pinned_at
-            FROM projects
-            WHERE id = ?1
-            ",
-            params![project_id],
-            |row| {
-                Ok(ProjectRecord {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    path: row.get(2)?,
-                    created_at: row.get(3)?,
-                    pinned_at: row.get(4)?,
-                })
-            },
-        )
-        .optional()
-}
-
-pub fn get_project_by_path(
-    connection: &Connection,
-    path: &str,
-) -> rusqlite::Result<Option<ProjectRecord>> {
-    connection
-        .query_row(
-            "
-            SELECT id, name, path, created_at, pinned_at
-            FROM projects
-            WHERE path = ?1
-            ",
-            params![path],
-            |row| {
-                Ok(ProjectRecord {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    path: row.get(2)?,
-                    created_at: row.get(3)?,
-                    pinned_at: row.get(4)?,
-                })
-            },
-        )
-        .optional()
 }
 
 pub fn save_project(connection: &Connection, project: ProjectRecord) -> rusqlite::Result<()> {

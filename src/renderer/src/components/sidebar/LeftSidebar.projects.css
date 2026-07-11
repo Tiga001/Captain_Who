@@ -153,15 +153,13 @@
 }
 
 .left-sidebar__primary-action svg,
-.left-sidebar__search-action svg,
-.left-sidebar__settings svg {
+.left-sidebar__search-action svg {
   width: var(--mc-icon-size-lg);
   height: var(--mc-icon-size-lg);
 }
 
 .left-sidebar__primary-action svg,
-.left-sidebar__search-action svg,
-.left-sidebar__settings svg {
+.left-sidebar__search-action svg {
   width: var(--mc-icon-size-md);
   height: var(--mc-icon-size-md);
   color: currentColor;

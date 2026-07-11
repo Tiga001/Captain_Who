@@ -1,4 +1,3 @@
-/* Renderer UI. */
 .configuration-page,
 .model-manager-page,
 .model-form-page {
@@ -177,12 +176,12 @@
   white-space: nowrap;
 }
 
-.model-capability-pill[data-supported="true"] {
+.model-capability-pill[data-supported='true'] {
   color: var(--mc-color-text-accent);
   background: var(--mc-color-surface-info-subtle);
 }
 
-.image-support-pill[data-supported="true"] {
+.image-support-pill[data-supported='true'] {
   color: var(--mc-color-icon-success);
   background: var(--mc-color-surface-success-subtle);
 }

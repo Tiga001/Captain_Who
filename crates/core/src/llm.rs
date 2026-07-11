@@ -1,4 +1,3 @@
-// Rust agent core.
 mod payload;
 mod response;
 mod stream;

@@ -1,4 +1,3 @@
-// Rust core storage agent action audit log.
 use crate::storage::models::AgentActionAuditRecord;
 use rusqlite::{params, Connection};
 

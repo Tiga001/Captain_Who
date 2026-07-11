@@ -1,4 +1,3 @@
-// Rust core server.
 mod agent;
 mod agent_support;
 
@@ -8,51 +7,42 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent::{AgentConversationTurnInput, AgentService};
 use mycopilot_core::storage::models::{
-    AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatConversationRecord,
-    ChatMessageRecord, ChatMessageStateRecord, ChatSearchInput, ComposerDraftRecord,
-    ModelSettingsRecord, ProjectRecord, UiPreferencesRecord,
+    AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatMessageRecord,
+    ChatMessageStateRecord, ChatSearchInput, ComposerDraftRecord, ModelSettingsRecord,
+    ProjectRecord, UiPreferencesRecord,
 };
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{AgentUsageClearInput, AgentUsageSummaryInput};
 use mycopilot_protocol_rs::{
     error, success, AgentActionIdRequest, AgentCancelRunRequest, AgentCancelRunResponse,
-    AgentFileDraftIdRequest, AgentFileDraftReadRequest, AgentRejectActionRequest,
-    AgentStartRunRequest, AgentStartRunResponse, AppVersionResponse, CorePingRequest,
-    CorePingResponse, CoreShutdownResponse, JsonRpcId, JsonRpcRequest, AGENT_APPROVE_ACTION_METHOD,
+    AgentFileDraftReadRequest, AgentRejectActionRequest, CorePingRequest, CorePingResponse,
+    CoreShutdownResponse, JsonRpcId, JsonRpcRequest, AGENT_APPROVE_ACTION_METHOD,
     AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD, AGENT_CLEAR_USAGE_RECORDS_METHOD,
-    AGENT_DISCARD_FILE_DRAFT_METHOD, AGENT_GET_FILE_DRAFT_METHOD, AGENT_GET_FILE_WRITE_DIFF_METHOD,
-    AGENT_GET_USAGE_SUMMARY_METHOD, AGENT_LIST_PENDING_ACTIONS_METHOD,
-    AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
-    AGENT_START_RUN_METHOD, APP_GET_VERSION_METHOD, CORE_PING_METHOD, CORE_SHUTDOWN_METHOD,
+    AGENT_GET_FILE_WRITE_DIFF_METHOD, AGENT_GET_USAGE_SUMMARY_METHOD,
+    AGENT_LIST_PENDING_ACTIONS_METHOD, AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD,
+    AGENT_START_CONVERSATION_TURN_METHOD, CORE_PING_METHOD, CORE_SHUTDOWN_METHOD,
     SEARCH_SEARCH_CHATS_METHOD, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
-    STORAGE_DELETE_COMPOSER_DRAFT_METHOD, STORAGE_DELETE_CONVERSATION_METHOD,
-    STORAGE_DELETE_PROJECT_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
-    STORAGE_LOAD_APP_DATA_METHOD, STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
+    STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
+    STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
     STORAGE_LOAD_COMPOSER_DRAFTS_METHOD, STORAGE_LOAD_CONVERSATIONS_METHOD,
     STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD, STORAGE_LOAD_MODEL_SETTINGS_METHOD,
     STORAGE_LOAD_PROJECTS_METHOD, STORAGE_LOAD_UI_PREFERENCES_METHOD,
-    STORAGE_REVEAL_PROJECT_FILE_METHOD, STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD,
-    STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD, STORAGE_SAVE_COMPOSER_DRAFT_METHOD,
-    STORAGE_SAVE_CONVERSATION_META_METHOD, STORAGE_SAVE_CONVERSATION_METHOD,
+    STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD,
+    STORAGE_SAVE_COMPOSER_DRAFT_METHOD, STORAGE_SAVE_CONVERSATION_META_METHOD,
     STORAGE_SAVE_MODEL_SETTINGS_METHOD, STORAGE_SAVE_PROJECT_METHOD,
-    STORAGE_SAVE_UI_PREFERENCES_METHOD, STORAGE_SELECT_PROFILE_AVATAR_METHOD,
-    STORAGE_SELECT_PROJECT_DIRECTORY_METHOD, STORAGE_SHOW_PROJECT_IN_FOLDER_METHOD,
-    STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
+    STORAGE_SAVE_UI_PREFERENCES_METHOD, STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let storage = Arc::new(StorageService::open(&database_path()).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("failed to initialize storage: {error}"),
-        )
-    })?);
+    let storage = Arc::new(
+        StorageService::open(&database_path())
+            .map_err(|error| io::Error::other(format!("failed to initialize storage: {error}")))?,
+    );
     let agent_service = AgentService::new(storage.clone());
     let stdin = BufReader::new(io::stdin());
     let mut lines = stdin.lines();
@@ -137,14 +127,6 @@ fn handle_request(
 
     match request.method.as_str() {
         CORE_PING_METHOD => handle_core_ping(request.id, request.params),
-        APP_GET_VERSION_METHOD => response_success(
-            request.id,
-            AppVersionResponse {
-                name: env!("CARGO_PKG_NAME"),
-                version: env!("CARGO_PKG_VERSION"),
-            },
-        ),
-        AGENT_START_RUN_METHOD => handle_agent_start_run(request.id, request.params),
         AGENT_START_CONVERSATION_TURN_METHOD => handle_agent_start_conversation_turn(
             agent_service,
             notification_tx,
@@ -172,16 +154,6 @@ fn handle_request(
         AGENT_CLEAR_USAGE_RECORDS_METHOD => {
             handle_agent_clear_usage_records(agent_service, request.id, request.params)
         }
-        AGENT_GET_FILE_DRAFT_METHOD => {
-            let input = match parse_params::<AgentFileDraftIdRequest>(request.params) {
-                Ok(input) => input,
-                Err(message) => return response_error(Some(request.id), -32602, message),
-            };
-            match agent_service.get_file_draft(&input.draft_id) {
-                Ok(output) => response_success(request.id, output),
-                Err(message) => response_error(Some(request.id), -32000, message),
-            }
-        }
         AGENT_READ_FILE_DRAFT_METHOD => {
             let input = match parse_params::<AgentFileDraftReadRequest>(request.params) {
                 Ok(input) => input,
@@ -203,16 +175,6 @@ fn handle_request(
                 Err(message) => response_error(Some(request.id), -32000, message),
             }
         }
-        AGENT_DISCARD_FILE_DRAFT_METHOD => {
-            let input = match parse_params::<AgentFileDraftIdRequest>(request.params) {
-                Ok(input) => input,
-                Err(message) => return response_error(Some(request.id), -32602, message),
-            };
-            match agent_service.discard_file_draft(&input.draft_id) {
-                Ok(output) => response_success(request.id, output),
-                Err(message) => response_error(Some(request.id), -32000, message),
-            }
-        }
         SEARCH_SEARCH_CHATS_METHOD => {
             let input = match parse_params::<ChatSearchInput>(request.params) {
                 Ok(input) => input,
@@ -220,7 +182,6 @@ fn handle_request(
             };
             storage_response(request.id, storage.search_chats(&input))
         }
-        STORAGE_LOAD_APP_DATA_METHOD => storage_response(request.id, storage.load_app_data()),
         STORAGE_LOAD_MODEL_SETTINGS_METHOD => {
             storage_response(request.id, storage.load_model_settings())
         }
@@ -248,7 +209,6 @@ fn handle_request(
             )
         }
         STORAGE_LOAD_PROJECTS_METHOD => storage_response(request.id, storage.load_projects()),
-        STORAGE_SELECT_PROJECT_DIRECTORY_METHOD => response_success(request.id, Value::Null),
         STORAGE_SAVE_PROJECT_METHOD => {
             let project = match parse_params::<ProjectRecord>(request.params) {
                 Ok(project) => project,
@@ -263,13 +223,11 @@ fn handle_request(
             };
             storage_response(
                 request.id,
-                storage
+                agent_service
                     .delete_project(&input.project_id)
                     .map(|_| json!(null)),
             )
         }
-        STORAGE_SHOW_PROJECT_IN_FOLDER_METHOD => response_success(request.id, Value::Null),
-        STORAGE_REVEAL_PROJECT_FILE_METHOD => response_success(request.id, Value::Null),
         STORAGE_LOAD_CONVERSATIONS_METHOD => {
             storage_response(request.id, storage.load_conversations())
         }
@@ -292,13 +250,6 @@ fn handle_request(
                 request.id,
                 storage.load_input_attachments(&input.attachment_ids),
             )
-        }
-        STORAGE_SAVE_CONVERSATION_METHOD => {
-            let conversation = match parse_params::<ChatConversationRecord>(request.params) {
-                Ok(conversation) => conversation,
-                Err(message) => return response_error(Some(request.id), -32602, message),
-            };
-            storage_response(request.id, storage.save_conversation(conversation))
         }
         STORAGE_SAVE_CONVERSATION_META_METHOD => {
             let conversation = match parse_params::<ChatConversationMetaRecord>(request.params) {
@@ -367,18 +318,6 @@ fn handle_request(
             };
             storage_response(request.id, storage.save_composer_draft(input.draft))
         }
-        STORAGE_DELETE_COMPOSER_DRAFT_METHOD => {
-            let input = match parse_params::<ScopeIdRequest>(request.params) {
-                Ok(input) => input,
-                Err(message) => return response_error(Some(request.id), -32602, message),
-            };
-            storage_response(
-                request.id,
-                storage
-                    .delete_composer_draft(&input.scope_id)
-                    .map(|_| json!(null)),
-            )
-        }
         STORAGE_LOAD_UI_PREFERENCES_METHOD => {
             storage_response(request.id, storage.load_ui_preferences())
         }
@@ -389,7 +328,6 @@ fn handle_request(
             };
             storage_response(request.id, storage.save_ui_preferences(preferences))
         }
-        STORAGE_SELECT_PROFILE_AVATAR_METHOD => response_success(request.id, Value::Null),
         _ => response_error(Some(request.id), -32601, "Method not found"),
     }
 }
@@ -403,20 +341,6 @@ fn handle_core_ping(id: JsonRpcId, params: Option<Value>) -> Value {
             message: "pong",
             echo: input.message,
             server_time_ms: now_ms(),
-        },
-    )
-}
-
-fn handle_agent_start_run(id: JsonRpcId, params: Option<Value>) -> Value {
-    if let Err(message) = parse_params::<AgentStartRunRequest>(params) {
-        return response_error(Some(id), -32602, message);
-    }
-
-    response_success(
-        id,
-        AgentStartRunResponse {
-            run_id: Uuid::new_v4().to_string(),
-            status: "not_implemented",
         },
     )
 }
@@ -579,12 +503,6 @@ struct ProjectIdRequest {
 #[serde(rename_all = "camelCase")]
 struct ConversationIdRequest {
     conversation_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ScopeIdRequest {
-    scope_id: String,
 }
 
 #[derive(Debug, Deserialize)]

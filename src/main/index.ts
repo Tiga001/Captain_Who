@@ -1,12 +1,12 @@
-// Electron main client.
-import { app, shell, BrowserWindow } from 'electron'
+import { app, BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import { join } from 'path'
+import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import type { AppWindowState } from '@mycopilot/host-api'
 import icon from '../../resources/icon.png?asset'
 import { BrowserWebContentsViewManager } from './browser/BrowserWebContentsViewManager'
 import { CoreServer } from './core/coreServer'
-import { registerHostIpc } from './ipc'
+import { openExternalUrl, registerHostIpc } from './ipc'
 import { FaviconResourceCache, registerResourceSchemes } from './resources/FaviconResourceCache'
 import { TerminalBridge } from './terminal/TerminalBridge'
 
@@ -17,6 +17,7 @@ const terminalBridge = new TerminalBridge()
 const faviconResourceCache = new FaviconResourceCache()
 let browserManager: BrowserWebContentsViewManager | null = null
 let isQuittingAfterServiceShutdown = false
+const trustedRendererEntries = new Map<number, string>()
 
 const macWindowChromeOptions =
   process.platform === 'darwin'
@@ -46,7 +47,33 @@ function sendAppWindowState(window: BrowserWindow): void {
   window.webContents.send(APP_WINDOW_STATE_CHANNEL, getAppWindowState(window))
 }
 
+function isAllowedRendererUrl(candidateValue: string, entryValue: string): boolean {
+  try {
+    const candidate = new URL(candidateValue)
+    const entry = new URL(entryValue)
+    if (entry.protocol === 'file:') {
+      return candidate.protocol === 'file:' && candidate.pathname === entry.pathname
+    }
+    return candidate.origin === entry.origin
+  } catch {
+    return false
+  }
+}
+
+function isTrustedRendererEvent(event: IpcMainInvokeEvent): boolean {
+  const entryUrl = trustedRendererEntries.get(event.sender.id)
+  return Boolean(
+    entryUrl &&
+    event.senderFrame === event.sender.mainFrame &&
+    isAllowedRendererUrl(event.senderFrame.url, entryUrl)
+  )
+}
+
 function createWindow(): void {
+  const rendererEntryUrl =
+    is.dev && process.env['ELECTRON_RENDERER_URL']
+      ? new URL(process.env['ELECTRON_RENDERER_URL']).toString()
+      : pathToFileURL(join(__dirname, '../renderer/index.html')).toString()
   const mainWindow = new BrowserWindow({
     title: 'MyCopilot',
     width: 1120,
@@ -61,16 +88,30 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true,
+      webSecurity: true
     }
   })
 
-  browserManager = new BrowserWebContentsViewManager(mainWindow)
+  const rendererWebContents = mainWindow.webContents
+  const rendererWebContentsId = rendererWebContents.id
+  const windowBrowserManager = new BrowserWebContentsViewManager(mainWindow)
+  trustedRendererEntries.set(rendererWebContentsId, rendererEntryUrl)
+  browserManager = windowBrowserManager
   const handleWindowStateChange = (): void => sendAppWindowState(mainWindow)
 
-  mainWindow.on('closed', () => {
-    browserManager?.destroyAll()
-    browserManager = null
+  rendererWebContents.once('destroyed', () => {
+    trustedRendererEntries.delete(rendererWebContentsId)
+  })
+  mainWindow.once('close', () => {
+    windowBrowserManager.destroyAll()
+  })
+  mainWindow.once('closed', () => {
+    windowBrowserManager.destroyAll()
+    trustedRendererEntries.delete(rendererWebContentsId)
+    if (browserManager === windowBrowserManager) {
+      browserManager = null
+    }
   })
 
   mainWindow.on('ready-to-show', () => {
@@ -78,30 +119,36 @@ function createWindow(): void {
     sendAppWindowState(mainWindow)
   })
 
-  mainWindow.webContents.on('did-finish-load', handleWindowStateChange)
+  rendererWebContents.on('did-finish-load', handleWindowStateChange)
   mainWindow.on('maximize', handleWindowStateChange)
   mainWindow.on('unmaximize', handleWindowStateChange)
   mainWindow.on('enter-full-screen', handleWindowStateChange)
   mainWindow.on('leave-full-screen', handleWindowStateChange)
   mainWindow.on('restore', handleWindowStateChange)
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+  rendererWebContents.setWindowOpenHandler((details) => {
+    void openExternalUrl(details.url).catch((error: unknown) => {
+      console.error('Failed to open external URL', error)
+    })
     return { action: 'deny' }
   })
 
-  // HMR for renderer base on electron-vite cli.
-  // Load the remote URL for development or the local html file for production.
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
-  }
+  rendererWebContents.on('will-navigate', (event, url) => {
+    if (isAllowedRendererUrl(url, rendererEntryUrl)) return
+
+    event.preventDefault()
+    void openExternalUrl(url).catch((error: unknown) => {
+      console.error('Blocked main-window navigation', error)
+    })
+  })
+
+  void mainWindow.loadURL(rendererEntryUrl).catch((error: unknown) => {
+    if (!mainWindow.isDestroyed()) {
+      console.error('Failed to load renderer entry', error)
+    }
+  })
 }
 
-// This method will be called when Electron has finished
-// initialization and is ready to create browser windows.
-// Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
   app.setName('MyCopilot')
   electronApp.setAppUserModelId('com.mycopilot.next')
@@ -112,26 +159,27 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  registerHostIpc(coreServer, terminalBridge, faviconResourceCache, () => {
-    if (!browserManager) {
-      throw new Error('Browser view manager is not available')
-    }
+  registerHostIpc(
+    coreServer,
+    terminalBridge,
+    faviconResourceCache,
+    () => {
+      if (!browserManager) {
+        throw new Error('Browser view manager is not available')
+      }
 
-    return browserManager
-  })
+      return browserManager
+    },
+    isTrustedRendererEvent
+  )
 
   createWindow()
 
   app.on('activate', function () {
-    // On macOS it's common to re-create a window in the app when the
-    // dock icon is clicked and there are no other windows open.
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
 
-// Quit when all windows are closed, except on macOS. There, it's common
-// for applications and their menu bar to stay active until the user quits
-// explicitly with Cmd + Q.
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()

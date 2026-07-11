@@ -1,7 +1,3 @@
-// Renderer UI.
-// Implements the right-sidebar module integration shell for embedded terminal panels.
-// Home shows the module launcher cards used when no right-sidebar tabs are open.
-
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import type { RightSidebarModuleDefinition, RightSidebarModuleId } from './rightSidebarTypes'
 
@@ -23,7 +19,6 @@ export function RightSidebarHome({ modules, onOpenModule }: RightSidebarHomeProp
             className="right-sidebar__tool-card"
             type="button"
             key={module.id}
-            disabled={!module.isEnabled}
             onClick={() => onOpenModule(module.id)}
           >
             <span className="right-sidebar__tool-heading">

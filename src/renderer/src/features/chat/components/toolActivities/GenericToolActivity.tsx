@@ -1,4 +1,3 @@
-// Renderer UI.
 import { CheckCircle2, SquareTerminal, XCircle } from 'lucide-react'
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'

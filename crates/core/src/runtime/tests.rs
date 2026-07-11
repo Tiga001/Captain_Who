@@ -54,7 +54,7 @@ fn runtime_messages_add_backend_system_prompt() {
         None,
         None,
         None,
-        &ToolRegistry::read_only_defaults_with_search(None).definitions(),
+        &ToolRegistry::defaults_with_search(None).definitions(),
     )
     .unwrap();
 
@@ -78,7 +78,7 @@ fn runtime_messages_include_approval_decision_observation() {
         None,
         Some(&decision),
         None,
-        &ToolRegistry::read_only_defaults_with_search(None).definitions(),
+        &ToolRegistry::defaults_with_search(None).definitions(),
     )
     .unwrap();
 
@@ -100,7 +100,7 @@ fn runtime_messages_include_text_attachment_content() {
         None,
         None,
         None,
-        &ToolRegistry::read_only_defaults_with_search(None).definitions(),
+        &ToolRegistry::defaults_with_search(None).definitions(),
     )
     .unwrap();
 
@@ -139,7 +139,7 @@ fn runtime_messages_resume_with_native_tool_call_and_result() {
         None,
         None,
         Some(&continuation),
-        &ToolRegistry::read_only_defaults_with_search(None).definitions(),
+        &ToolRegistry::defaults_with_search(None).definitions(),
     )
     .unwrap();
 

@@ -1,4 +1,3 @@
-// Renderer UI.
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { formatTranslation, type Translate } from '../../../../config/translationFormat'

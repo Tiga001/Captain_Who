@@ -1,4 +1,3 @@
-// Rust agent core.
 mod apply_patch;
 mod apply_patch_diff;
 pub(crate) mod apply_patch_paths;
@@ -50,7 +49,7 @@ use write_file::WriteFileTool;
 pub(super) use context::ToolExecutionContext;
 use document_text::{
     extract_with_textutil, join_named_text, normalize_text_output, read_zip_xml_text_parts,
-    resolve_document_path, sanitize_document_max_chars, NamedText,
+    reserve_zip_xml_entry, resolve_document_path, sanitize_document_max_chars, NamedText,
 };
 use filesystem::{
     block_on_tool_future, clean_relative_path, relative_display, sanitize_limit, truncate_chars,
@@ -63,7 +62,7 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    pub fn read_only_defaults_with_search(search_config: Option<&AgentSearchConfig>) -> Self {
+    pub fn defaults_with_search(search_config: Option<&AgentSearchConfig>) -> Self {
         let mut registry = Self {
             tools: BTreeMap::new(),
         };
@@ -274,7 +273,7 @@ mod tests {
 
     #[test]
     fn registers_tavily_tools_when_configured() {
-        let registry = ToolRegistry::read_only_defaults_with_search(Some(&AgentSearchConfig {
+        let registry = ToolRegistry::defaults_with_search(Some(&AgentSearchConfig {
             mode: AgentSearchMode::Tavily,
             tavily_api_key: Some("tvly-test".to_string()),
         }));
@@ -290,7 +289,7 @@ mod tests {
 
     #[test]
     fn registers_run_command_as_approval_tool() {
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
         let definition = registry.definition_for("run_command").unwrap();
 
         assert_eq!(definition.name, "run_command");
@@ -300,7 +299,7 @@ mod tests {
 
     #[test]
     fn registers_apply_patch_as_approval_tool() {
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
         let definition = registry.definition_for("apply_patch").unwrap();
 
         assert_eq!(definition.name, "apply_patch");
@@ -310,7 +309,7 @@ mod tests {
 
     #[test]
     fn write_file_uses_dynamic_finish_approval() {
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
         let definition = registry.definition_for("write_file").unwrap();
 
         assert_eq!(
@@ -355,7 +354,7 @@ mod tests {
             }),
             permissions: Default::default(),
         }));
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
 
         let list_result = registry.execute(
             &context,
@@ -437,7 +436,7 @@ mod tests {
             }),
             permissions: Default::default(),
         }));
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
         let result = registry.execute(
             &context,
             &AgentToolCall {
@@ -464,7 +463,7 @@ mod tests {
             TEST_WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::write(&outside, "outside content").unwrap();
-        let registry = ToolRegistry::read_only_defaults_with_search(None);
+        let registry = ToolRegistry::defaults_with_search(None);
         let call = AgentToolCall {
             id: "call-outside".to_string(),
             tool: "read_file".to_string(),

@@ -1,4 +1,3 @@
-// Rust agent core.
 use super::{
     resolve_document_path, sanitize_document_max_chars, truncate_chars, AgentTool,
     ToolExecutionContext, MAX_DOCUMENT_TEXT_CHARS,

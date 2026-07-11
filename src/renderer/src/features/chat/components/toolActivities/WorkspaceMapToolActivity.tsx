@@ -1,4 +1,3 @@
-// Renderer UI.
 import { FolderOpen } from 'lucide-react'
 import type { AgentToolResult } from '@mycopilot/protocol'
 import type { TranslationKey } from '../../../../config/frontendTranslations'

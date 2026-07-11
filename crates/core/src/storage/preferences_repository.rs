@@ -1,4 +1,3 @@
-// Rust core storage.
 use crate::protocol::{
     AgentCommandPermission, AgentPatchPermission, AgentPermissions, AgentReadPermission,
     AgentWritePermission,
@@ -303,9 +302,6 @@ fn normalize_avatar_data_url(value: Option<String>) -> Option<String> {
 
 fn normalize_text(value: &str, fallback: &str) -> String {
     let value = value.trim();
-    if value.eq_ignore_ascii_case("hx z") {
-        return fallback.to_string();
-    }
     if value.is_empty() {
         fallback.to_string()
     } else {
@@ -315,7 +311,7 @@ fn normalize_text(value: &str, fallback: &str) -> String {
 
 fn normalize_profile_handle(value: &str) -> String {
     let value = value.trim().trim_start_matches('@');
-    if value.is_empty() || value.eq_ignore_ascii_case("hxz9393") {
+    if value.is_empty() {
         DEFAULT_PROFILE_HANDLE.to_string()
     } else {
         value.to_string()

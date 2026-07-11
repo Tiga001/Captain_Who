@@ -1,4 +1,3 @@
-// Settings view adapter for AppShell conversation and preference callbacks.
 import type { Dispatch, SetStateAction } from 'react'
 import type { AppProject } from '../config/projectConfig'
 import { SettingsPage } from '../features/settings/SettingsPage'
@@ -13,6 +12,7 @@ interface AppShellSettingsViewProps {
   onBack: () => void
   onConversationPatch: (conversationId: string, patch: Partial<ChatConversation>) => void
   onConversationsChange: Dispatch<SetStateAction<ChatConversation[]>>
+  onRemoveProject: (projectId: string) => Promise<boolean>
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
   projects: AppProject[]
   uiPreferences: UiPreferencesSnapshot
@@ -24,6 +24,7 @@ export function AppShellSettingsView({
   onBack,
   onConversationPatch,
   onConversationsChange,
+  onRemoveProject,
   onUiPreferencesChange,
   projects,
   uiPreferences
@@ -59,6 +60,7 @@ export function AppShellSettingsView({
         )
         void deleteStoredConversation(conversationId)
       }}
+      onRemoveProject={onRemoveProject}
       onUnarchiveConversation={(conversationId) =>
         onConversationPatch(conversationId, { archivedAt: null })
       }

@@ -1,6 +1,13 @@
-/* Renderer UI. */
 .usage-billing-settings-page {
   width: min(100%, 1100px);
+}
+
+.usage-cost-note {
+  max-width: 760px;
+  margin: -8px 0 22px;
+  color: var(--settings-content-muted-color);
+  font-size: var(--mc-font-size-sm);
+  line-height: var(--mc-line-height-relaxed);
 }
 
 .usage-summary-header {
@@ -50,7 +57,7 @@
   font-weight: var(--mc-font-weight-strong);
 }
 
-.usage-range-control button[data-active="true"] {
+.usage-range-control button[data-active='true'] {
   color: var(--settings-content-text-color);
   background: var(--mc-color-surface-elevated);
   box-shadow: var(--mc-shadow-hairline);
@@ -216,7 +223,7 @@
 }
 
 .usage-model-filter-option:hover,
-.usage-model-filter-option[data-selected="true"] {
+.usage-model-filter-option[data-selected='true'] {
   background: var(--mc-color-state-hover);
 }
 
@@ -374,7 +381,7 @@
   background: color-mix(in srgb, var(--mc-color-surface-selected-subtle) 72%, transparent);
   border-radius: var(--mc-radius-row);
   opacity: 0;
-  content: "";
+  content: '';
   transition: opacity 120ms ease;
 }
 

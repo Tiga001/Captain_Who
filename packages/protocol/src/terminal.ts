@@ -1,4 +1,3 @@
-// Protocol layer.
 export interface TerminalCreateSessionRequest {
   cols?: number
   cwd?: string

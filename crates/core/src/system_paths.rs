@@ -1,4 +1,3 @@
-// Rust agent core.
 use std::env;
 use std::path::{Component, Path, PathBuf};
 
@@ -33,10 +32,6 @@ pub fn expand_system_path(input: &str) -> Result<Option<PathBuf>, String> {
     };
 
     Ok(Some(base.join(clean_alias_remainder(remainder)?)))
-}
-
-pub fn system_path_aliases() -> &'static [&'static str] {
-    &["~", "@home", "@desktop", "@documents", "@downloads"]
 }
 
 fn home_dir() -> Result<PathBuf, String> {

@@ -1,11 +1,7 @@
-// Renderer UI.
 import { createContext, useContext } from 'react'
-
-export type ToastTone = 'accent'
 
 export interface ToastOptions {
   durationMs?: number
-  tone?: ToastTone
 }
 
 export interface ToastContextValue {

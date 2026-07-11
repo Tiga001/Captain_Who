@@ -153,5 +153,5 @@ pub(super) fn block_on_tool_future<T>(
     runtime.block_on(future)
 }
 fn should_exclude_name(name: &str) -> bool {
-    EXCLUDED_NAMES.iter().any(|excluded| name == *excluded)
+    EXCLUDED_NAMES.contains(&name)
 }

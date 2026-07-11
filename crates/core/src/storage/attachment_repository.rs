@@ -1,4 +1,3 @@
-// Rust core storage.
 use crate::storage::models::AttachmentRecord;
 use rusqlite::{params, Connection};
 

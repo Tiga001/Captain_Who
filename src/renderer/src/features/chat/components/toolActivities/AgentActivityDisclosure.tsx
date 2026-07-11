@@ -1,4 +1,3 @@
-// Renderer UI.
 import { ChevronDown, type LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 
