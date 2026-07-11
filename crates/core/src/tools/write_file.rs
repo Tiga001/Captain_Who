@@ -1,5 +1,6 @@
 use super::apply_patch_paths::sanitize_file_path;
-use super::{AgentTool, ToolExecutionContext};
+use super::write_file_stream::WriteFileInputStreamObserver;
+use super::{AgentTool, ToolExecutionContext, ToolInputStreamObserver};
 use crate::content_revision;
 use crate::protocol::{
     AgentApprovalStatus, AgentError, AgentFileDraftSnapshot, AgentFileDraftStatus,
@@ -17,7 +18,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-const MAX_CHUNK_BYTES: usize = 8 * 1024;
 const MAX_DRAFT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_EDITS: usize = 128;
 const MAX_SUMMARY_CHARS: usize = 2_000;
@@ -30,7 +30,7 @@ impl AgentTool for WriteFileTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "write_file".to_string(),
-            description: "Create and update UTF-8 text files through a persistent transaction draft. Use phase=begin once, then phase=append for generated chunks or phase=edit for structured draft edits, and phase=finish once to request approval and apply the real workspace write. After begin/append/edit, user-visible text is forbidden until every dirty draft has a finish or abort result. A finish result is returned only after automatic or manual approval completes. Each append content must be at most 8192 UTF-8 bytes.".to_string(),
+            description: "Create and update UTF-8 text files through a persistent transaction draft. Use phase=begin once, then phase=append for generated content or phase=edit for structured draft edits, and phase=finish once to request approval and apply the real workspace write. After begin/append/edit, user-visible text is forbidden until every dirty draft has a finish or abort result. A finish result is returned only after automatic or manual approval completes.".to_string(),
             input_schema: input_schema(),
             safety: AgentToolSafety::RequiresApproval,
             requires_workspace: false,
@@ -72,6 +72,13 @@ impl AgentTool for WriteFileTool {
     fn requires_approval_for_call(&self, args: &Value) -> bool {
         args.get("phase").and_then(Value::as_str) == Some("finish")
     }
+
+    fn input_stream_observer(
+        &self,
+        context: ToolExecutionContext,
+    ) -> Option<Box<dyn ToolInputStreamObserver>> {
+        Some(Box::new(WriteFileInputStreamObserver::new(context)))
+    }
 }
 
 fn input_schema() -> Value {
@@ -91,7 +98,7 @@ fn input_schema() -> Value {
                 "description": "create requires a missing target; rewrite starts an empty replacement for an existing file; modify starts from existing content; append starts from existing content; upsert creates or rewrites."
             },
             "index": { "type": "integer", "minimum": 0, "description": "Zero-based append index. Use nextChunkIndex from the previous result." },
-            "content": { "type": "string", "maxLength": 8192, "description": "One UTF-8 draft chunk for phase=append; maximum 8192 bytes." },
+            "content": { "type": "string", "description": "UTF-8 content to append to the private draft during phase=append." },
             "edits": {
                 "type": "array",
                 "minItems": 1,
@@ -244,13 +251,6 @@ fn append_draft(context: &ToolExecutionContext, args: WriteFileArgs) -> AgentRes
         .ok_or_else(|| AgentError::new("write_file append 需要 content。"))?;
     if content.is_empty() {
         return Err(AgentError::new("write_file append.content 不能为空。"));
-    }
-    if content.len() > MAX_CHUNK_BYTES {
-        return Err(AgentError::new(format!(
-            "write_file 单块内容为 {} bytes，超过 {} bytes 限制。",
-            content.len(),
-            MAX_CHUNK_BYTES
-        )));
     }
     reject_nul(&content)?;
 
@@ -533,7 +533,6 @@ fn draft_result(draft: &AgentFileDraftRecord) -> Value {
     json!({
         "draft": snapshot,
         "tail": tail_chars(&draft.content, RESULT_TAIL_CHARS),
-        "chunkLimitBytes": MAX_CHUNK_BYTES,
         "maxDraftBytes": MAX_DRAFT_BYTES,
         "transactionState": if matches!(draft.status.as_str(), "drafting" | "ready") { "dirty" } else { "settled" },
         "requiresFinishBeforeResponse": matches!(draft.status.as_str(), "drafting" | "ready"),
@@ -773,6 +772,7 @@ mod tests {
             )
             .unwrap();
         let draft_id = begin["draft"]["draftId"].as_str().unwrap().to_string();
+        let content = format!("# Report\n{}\n", "x".repeat(16 * 1024));
         let appended = tool
             .execute(
                 &context,
@@ -780,12 +780,13 @@ mod tests {
                     "phase": "append",
                     "draftId": draft_id,
                     "index": 0,
-                    "content": "# Report\n"
+                    "content": content
                 }),
             )
             .unwrap();
         assert_eq!(appended["draft"]["nextChunkIndex"], 1);
-        assert_eq!(appended["draft"]["additions"], 1);
+        assert_eq!(appended["draft"]["byteCount"], content.len() as u64);
+        assert_eq!(appended["draft"]["additions"], 2);
 
         let action = tool
             .proposed_action(
@@ -803,7 +804,7 @@ mod tests {
             panic!("expected file write proposal");
         };
         assert_eq!(file_write.file_path, "report.md");
-        assert_eq!(file_write.additions, 1);
+        assert_eq!(file_write.additions, 2);
         assert_eq!(
             storage
                 .get_agent_file_draft(&file_write.draft_id)

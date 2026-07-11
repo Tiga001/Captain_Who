@@ -1,5 +1,6 @@
 // Renderer UI.
 import type { AgentDiffProposal, AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
+import type { ReactElement } from 'react'
 import type { ChatReadActivity, ChatWebSearchActivity } from '../../chatTypes'
 import { isReadActivityTool } from '../../agentReadActivities'
 import { AttachmentListToolActivity } from './AttachmentListToolActivity'
@@ -21,6 +22,7 @@ interface AgentToolActivityProps {
   call: AgentToolCall
   diff?: AgentDiffProposal
   projectId?: string | null
+  previousTodoResult?: AgentToolResult
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
 }
@@ -32,9 +34,10 @@ export function AgentToolActivity({
   call,
   diff,
   projectId,
+  previousTodoResult,
   result,
   settledStatus
-}: AgentToolActivityProps) {
+}: AgentToolActivityProps): ReactElement {
   if (call.tool === 'attachments_list' || call.tool === 'attachments_list_project') {
     return (
       <AttachmentListToolActivity
@@ -130,6 +133,7 @@ export function AgentToolActivity({
       <TodoUpdateToolActivity
         cancelled={cancelled && !result}
         call={call}
+        previousResult={previousTodoResult}
         result={result}
         settledStatus={settledStatus}
       />

@@ -360,6 +360,9 @@ fn format_tavily_extract_response(
         .or_else(|| response.get("responseTime"))
         .cloned();
 
+    // Tavily calls the extracted body `raw_content`, but after normalization and truncation this
+    // is our canonical model-facing content. Do not duplicate it under a `rawContent` alias: every
+    // later tool iteration would otherwise resend the same page body twice.
     Ok(json!({
         "url": url,
         "requestedUrl": request.url,
@@ -367,7 +370,6 @@ fn format_tavily_extract_response(
         "format": request.format,
         "extractDepth": request.extract_depth,
         "content": content,
-        "rawContent": content,
         "images": images,
         "favicon": result
             .and_then(|result| result.get("favicon"))
@@ -588,7 +590,7 @@ mod tests {
 
         assert_eq!(formatted["provider"], "tavily");
         assert_eq!(formatted["content"], "hello\n...[truncated]");
-        assert_eq!(formatted["rawContent"], "hello\n...[truncated]");
+        assert!(formatted.get("rawContent").is_none());
         assert_eq!(formatted["favicon"], "https://example.com/favicon.ico");
         assert!(formatted.get("faviconDataUrl").is_none());
         assert!(formatted.get("faviconMimeType").is_none());

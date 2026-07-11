@@ -2,6 +2,7 @@
 import type {
   AgentDiffProposal,
   AgentFileDraftSnapshot,
+  AgentFileWritePreview,
   AgentInputAttachment,
   AgentProposedAction,
   AgentRunStatus,
@@ -42,6 +43,14 @@ export interface ChatWebSearchActivity {
 export type ChatReadActivityKind =
   'file' | 'image' | 'pdf' | 'word' | 'presentation' | 'spreadsheet'
 
+export type ChatFileWritePreview = Omit<
+  AgentFileWritePreview,
+  'contentDelta' | 'contentOffsetBytes'
+> & {
+  content: string
+  receivedAt: number
+}
+
 export interface ChatReadActivity {
   callId: string
   tool: AgentToolCall['tool']
@@ -78,6 +87,7 @@ export interface ChatAgentRunView {
   approvals: AgentProposedAction[]
   diffs: AgentDiffProposal[]
   fileDrafts?: AgentFileDraftSnapshot[]
+  fileWritePreviews?: ChatFileWritePreview[]
   messageStreamCheckpoints?: Record<string, { baseContentLength: number; baseWasThinking: boolean }>
   timeline: ChatAgentTimelineItem[]
   state?: AgentStateSnapshot

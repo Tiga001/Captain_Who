@@ -138,7 +138,7 @@ impl TodoHook {
                 "properties": {
                     "items": {
                         "type": "array",
-                        "description": "Full replacement todo list in intended order.",
+                        "description": "Full replacement todo list in intended order. Multiple items may be in_progress when they are being advanced in parallel.",
                         "maxItems": MAX_TODO_ITEMS,
                         "items": {
                             "type": "object",
@@ -216,7 +216,6 @@ impl TodoHook {
             .collect::<BTreeMap<_, _>>();
         let now = now_ms();
         let mut used_ids = BTreeSet::new();
-        let mut in_progress_count = 0usize;
         let mut next_items = Vec::with_capacity(args.items.len());
 
         for item in args.items {
@@ -230,15 +229,6 @@ impl TodoHook {
                     "todo_update contains duplicate item id: {id}"
                 )));
             }
-            if item.status == AgentTodoStatus::InProgress {
-                in_progress_count += 1;
-                if in_progress_count > 1 {
-                    return Err(AgentError::new(
-                        "todo_update allows at most one in_progress item.",
-                    ));
-                }
-            }
-
             let created_at = previous
                 .get(&id)
                 .map(|existing| existing.created_at)
@@ -467,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn todo_hook_rejects_multiple_in_progress_items() {
+    fn todo_hook_allows_multiple_in_progress_items() {
         let mut hook = TodoHook::new("run-1".to_string());
         let result = hook
             .handle_tool_call(&todo_call(json!({
@@ -479,12 +469,13 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(!result.ok);
-        assert!(result
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("at most one in_progress"));
+        assert!(result.ok, "{:?}", result.error);
+        let state = hook.todo_state().unwrap();
+        assert_eq!(state.items.len(), 2);
+        assert!(state
+            .items
+            .iter()
+            .all(|item| item.status == AgentTodoStatus::InProgress));
     }
 
     #[test]

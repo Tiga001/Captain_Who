@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const CORE_PING_METHOD: &str = "core.ping";
+pub const CORE_SHUTDOWN_METHOD: &str = "core.shutdown";
 pub const APP_GET_VERSION_METHOD: &str = "app.getVersion";
 pub const AGENT_START_RUN_METHOD: &str = "agent.startRun";
 pub const AGENT_CANCEL_RUN_METHOD: &str = "agent.cancelRun";
@@ -113,6 +114,13 @@ pub struct CorePingResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub echo: Option<String>,
     pub server_time_ms: u128,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreShutdownResponse {
+    pub cancelled_runs: usize,
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Serialize)]

@@ -316,7 +316,7 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- web_fetch 用于深读用户明确提供的公开 URL，或 web_search 返回的 URL；不要猜测 URL。获取失败时回到搜索结果或说明限制。".to_string());
     }
     if has_tool(tool_definitions, "todo_update") {
-        rules.push("- 多步骤任务或执行过程中目标发生变化时，使用 todo_update 维护结构化计划。首次创建计划时可以一次性列出多步；后续更新应保留已有 id，并一次性更新所有实际发生变化的步骤。开始某项前标记 in_progress，完成后标记 completed；同一时间最多一个 in_progress。".to_string());
+        rules.push("- 多步骤任务或执行过程中目标发生变化时，使用 todo_update 维护结构化计划。首次创建计划时可以一次性列出多步；后续更新应保留已有 id，并一次性更新所有实际发生变化的步骤。开始某项前标记 in_progress，完成后标记 completed；并行推进时可以有多项 in_progress，但不要把尚未真正开始的事项提前标记为进行中。".to_string());
         rules.push("- 当 todo 全部 completed 且没有明确失败或缺口时，停止继续调用工具，直接向用户总结已完成内容。".to_string());
         rules.push("- todo 状态只能通过 todo_update 改变；不要在正文里伪造计划状态，也不要声称计划已更新，除非 todo_update 的 tool result 明确成功。".to_string());
     }
@@ -326,7 +326,7 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- 成功应用编辑后，先前读取的文件内容视为过期。后续再次修改时必须重新读取；match_not_found、ambiguous_match 或文件冲突类错误也必须先重新读取再修正。".to_string());
     }
     if has_tool(tool_definitions, "write_file") {
-        rules.push("- 创建长报告、Markdown 表格、完整生成文件或分多步修改同一文件时使用 write_file。先 phase=begin；生成内容按不超过 8192 bytes 的块依次 phase=append，并严格使用上次结果的 nextChunkIndex；局部调整草稿可用 phase=edit；完成后调用 phase=finish。不要把完整长文件塞进 apply_patch.content。".to_string());
+        rules.push("- 创建长报告、Markdown 表格、完整生成文件或分多步修改同一文件时使用 write_file。先 phase=begin；使用 phase=append 写入生成内容，可一次提交或自然分段，并严格使用上次结果的 nextChunkIndex；局部调整草稿可用 phase=edit；完成后调用 phase=finish。不要把完整长文件塞进 apply_patch.content。".to_string());
         rules.push("- write_file 的 create 要求目标不存在；rewrite 完整重写已有文件；modify 从已有内容开始做结构化编辑；append 保留已有内容并追加；upsert 用于生成型产物，不存在则创建、存在则重写。begin/append/edit 只更新私有草稿；finish 会先完成自动或人工审批，再把真实 applied/rejected/conflict/failed 结果返回给你。".to_string());
         rules.push("- 任何 begin/append/edit 成功后，当前文件事务为 dirty。在本轮所有 dirty 草稿都调用 finish 或 abort 并获得结果以前，只能继续调用工具，禁止输出任何面向用户的文字，包括进度说明。多个文件都必须分别结算。审批结果返回后，再基于真实结果进行说明。".to_string());
         rules.push("- write_file append 成功后以前的块已经持久化，不要重复生成；调用失败时依据返回的 nextChunkIndex 和草稿状态处理。finish 的任何 applied/rejected/conflict/failed 结果都会终结当前草稿；后续再次修改同一文件必须重新 phase=begin。".to_string());

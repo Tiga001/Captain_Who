@@ -426,6 +426,26 @@ impl StorageService {
         .map_err(storage_error)
     }
 
+    pub fn update_chat_message_run_terminal_state(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        message_status: Option<&str>,
+        run_status: &str,
+        completed_at: i64,
+    ) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        chat_repository::update_message_run_terminal_state(
+            &connection,
+            conversation_id,
+            message_id,
+            message_status,
+            run_status,
+            completed_at,
+        )
+        .map_err(storage_error)
+    }
+
     pub fn load_composer_drafts(&self) -> Result<Vec<ComposerDraftRecord>, String> {
         let connection = self.state.connection()?;
         composer_draft_repository::list_composer_drafts(&connection).map_err(storage_error)

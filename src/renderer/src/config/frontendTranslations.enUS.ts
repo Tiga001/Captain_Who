@@ -456,11 +456,11 @@ export const enUSTranslations = {
   'agent.fileWrite.update.row.stopped': 'Edit stopped',
   'agent.approval.dialog.toolTitle': 'Allow me to use {tool}?',
   'agent.approval.dialog.commandPolicyHint':
-    'Current permissions require confirmation before running commands. Dangerous commands are still blocked after approval.',
+    "If you approve, I'll run this command. The app will stop it if it looks dangerous.",
   'agent.approval.dialog.diffPolicyHint':
-    'Current permissions require confirmation before file edits. Approval still checks path scope, symlinks, file type, and revision.',
+    "If you approve, I'll edit this file. If it changed in the meantime or cannot be edited safely, I'll stop and let you know.",
   'agent.approval.dialog.toolPolicyHint':
-    'This tool needs manual confirmation and will still run under the current permission policy.',
+    "If you approve, I'll use this tool. The app will stop the action if it is not allowed.",
   'agent.approval.dialog.approve': 'Yes',
   'agent.approval.dialog.approveRemember':
     'Yes, and do not ask again this turn for commands starting with this',

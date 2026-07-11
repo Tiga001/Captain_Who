@@ -5,7 +5,7 @@ mod stream;
 
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentToolDefinition, AgentUsage};
-use crate::usage::extract_usage;
+use crate::usage::{extract_usage, merge_total_usage, usage_for_request};
 use payload::{build_headers, build_payload, is_sse_response};
 use response::{
     extract_api_error, extract_finish_reason, extract_response_text, extract_tool_calls,
@@ -127,7 +127,10 @@ pub(crate) enum LlmStreamEvent {
     },
     Delta(String),
     ToolInputProgress {
+        tool_call_index: usize,
+        tool_call_id: Option<String>,
         tool: String,
+        input_delta: String,
         received_bytes: u64,
     },
     AttemptReset {
@@ -153,16 +156,26 @@ pub(crate) async fn complete_chat(
     request.stream = false;
 
     let mut last_error = None;
+    let mut total_usage = None;
     for attempt in 1..=LLM_MAX_ATTEMPTS {
         match complete_chat_once(&request, cancellation_token.clone()).await {
-            Ok(response) => return Ok(response),
-            Err(error) if error.is_cancelled() => return Err(error),
+            Ok(mut response) => {
+                merge_total_usage(&mut total_usage, response.usage.take());
+                response.usage = total_usage;
+                return Ok(response);
+            }
+            Err(error) if error.is_cancelled() => {
+                return Err(merge_error_usage(error, &mut total_usage));
+            }
             Err(error) => {
+                let error = merge_error_usage(error, &mut total_usage);
                 if attempt >= LLM_MAX_ATTEMPTS || !is_retryable_llm_error(&error) {
                     return Err(retry_exhausted_error(error, attempt));
                 }
                 last_error = Some(error);
-                wait_before_retry(attempt, cancellation_token.clone()).await?;
+                wait_before_retry(attempt, cancellation_token.clone())
+                    .await
+                    .map_err(|error| error.with_usage(total_usage.clone()))?;
             }
         }
     }
@@ -178,30 +191,14 @@ async fn complete_chat_once(
     cancellation_token: AgentCancellationToken,
 ) -> AgentResult<LlmChatResponse> {
     let api_style = request.api_style;
-    let response = send_llm_request(request, cancellation_token.clone()).await?;
-    let body = response_text(response, cancellation_token.clone(), "读取模型响应失败").await?;
-
-    let value: Value = serde_json::from_str(&body).map_err(|error| {
-        AgentError::new(format!(
-            "模型响应不是有效 JSON：{error}；原始响应：{}",
-            truncate_for_error(&body)
-        ))
-    })?;
-    if let Some(error) = extract_api_error(&value) {
-        return Err(AgentError::new(format!("模型接口返回错误：{error}")));
-    }
-
-    let tool_calls = extract_tool_calls(&value, api_style)?;
-    let content = extract_response_text(&value).unwrap_or_default();
-
-    validate_llm_response(&content, &tool_calls, &body)?;
-
-    Ok(LlmChatResponse {
-        content,
-        tool_calls,
-        usage: extract_usage(&value),
-        finish_reason: extract_finish_reason(&value),
-    })
+    validate_request(request)?;
+    let response = send_llm_request(request, cancellation_token.clone())
+        .await
+        .map_err(with_request_usage)?;
+    let body = response_text(response, cancellation_token.clone(), "读取模型响应失败")
+        .await
+        .map_err(with_request_usage)?;
+    parse_non_stream_response(&body, api_style)
 }
 
 pub(crate) async fn complete_chat_streaming<F>(
@@ -216,6 +213,7 @@ where
     request.stream = true;
 
     let mut last_error = None;
+    let mut total_usage = None;
     for attempt in 1..=LLM_MAX_ATTEMPTS {
         on_event(LlmStreamEvent::AttemptStarted {
             attempt,
@@ -227,12 +225,17 @@ where
         .await;
 
         match result {
-            Ok(response) => {
+            Ok(mut response) => {
+                merge_total_usage(&mut total_usage, response.usage.take());
+                response.usage = total_usage;
                 on_event(LlmStreamEvent::Committed);
                 return Ok(response);
             }
-            Err(error) if error.is_cancelled() => return Err(error),
+            Err(error) if error.is_cancelled() => {
+                return Err(merge_error_usage(error, &mut total_usage));
+            }
             Err(error) => {
+                let error = merge_error_usage(error, &mut total_usage);
                 let reason = error.to_string();
                 on_event(LlmStreamEvent::AttemptReset {
                     reason: reason.clone(),
@@ -246,7 +249,9 @@ where
                     max_attempts: LLM_MAX_ATTEMPTS,
                     reason,
                 });
-                wait_before_retry(attempt, cancellation_token.clone()).await?;
+                wait_before_retry(attempt, cancellation_token.clone())
+                    .await
+                    .map_err(|error| error.with_usage(total_usage.clone()))?;
             }
         }
     }
@@ -266,38 +271,66 @@ where
     F: FnMut(LlmStreamEvent) + Send,
 {
     let api_style = request.api_style;
-    let response = send_llm_request(request, cancellation_token.clone()).await?;
+    validate_request(request)?;
+    let response = send_llm_request(request, cancellation_token.clone())
+        .await
+        .map_err(with_request_usage)?;
     if !is_sse_response(&response) {
-        let body = response_text(response, cancellation_token.clone(), "读取模型响应失败").await?;
-        let value: Value = serde_json::from_str(&body).map_err(|error| {
-            AgentError::new(format!(
-                "模型响应不是有效 JSON：{error}；原始响应：{}",
-                truncate_for_error(&body)
-            ))
-        })?;
-        if let Some(error) = extract_api_error(&value) {
-            return Err(AgentError::new(format!("模型接口返回错误：{error}")));
+        let body = response_text(response, cancellation_token.clone(), "读取模型响应失败")
+            .await
+            .map_err(with_request_usage)?;
+        let parsed = parse_non_stream_response(&body, api_style)?;
+        if !parsed.content.is_empty() {
+            on_delta(LlmStreamEvent::Delta(parsed.content.clone()));
         }
-
-        let tool_calls = extract_tool_calls(&value, api_style)?;
-        let content = extract_response_text(&value).unwrap_or_default();
-        validate_llm_response(&content, &tool_calls, &body)?;
-        if !content.is_empty() {
-            on_delta(LlmStreamEvent::Delta(content.clone()));
-        }
-        return Ok(LlmChatResponse {
-            content,
-            tool_calls,
-            usage: extract_usage(&value),
-            finish_reason: extract_finish_reason(&value),
-        });
+        return Ok(parsed);
     }
 
-    let streamed = parse_sse_response(response, api_style, cancellation_token, on_delta).await?;
+    let mut streamed = parse_sse_response(response, api_style, cancellation_token, on_delta)
+        .await
+        .map_err(with_request_usage)?;
+    streamed.usage = Some(usage_for_request(streamed.usage));
 
     let diagnostic = streaming_response_diagnostic(&streamed);
-    validate_llm_response(&streamed.content, &streamed.tool_calls, &diagnostic)?;
+    validate_llm_response(&streamed.content, &streamed.tool_calls, &diagnostic)
+        .map_err(|error| error.with_usage(streamed.usage.clone()))?;
     Ok(streamed)
+}
+
+fn parse_non_stream_response(body: &str, api_style: AgentApiStyle) -> AgentResult<LlmChatResponse> {
+    let value: Value = serde_json::from_str(body).map_err(|error| {
+        with_request_usage(AgentError::new(format!(
+            "模型响应不是有效 JSON：{error}；原始响应：{}",
+            truncate_for_error(body)
+        )))
+    })?;
+    let usage = usage_for_request(extract_usage(&value));
+    if let Some(error) = extract_api_error(&value) {
+        return Err(AgentError::new(format!("模型接口返回错误：{error}")).with_usage(Some(usage)));
+    }
+
+    let tool_calls = extract_tool_calls(&value, api_style)
+        .map_err(|error| error.with_usage(Some(usage.clone())))?;
+    let content = extract_response_text(&value).unwrap_or_default();
+    validate_llm_response(&content, &tool_calls, body)
+        .map_err(|error| error.with_usage(Some(usage.clone())))?;
+
+    Ok(LlmChatResponse {
+        content,
+        tool_calls,
+        usage: Some(usage),
+        finish_reason: extract_finish_reason(&value),
+    })
+}
+
+fn with_request_usage(error: AgentError) -> AgentError {
+    let usage = usage_for_request(error.usage().cloned());
+    error.with_usage(Some(usage))
+}
+
+fn merge_error_usage(error: AgentError, total: &mut Option<AgentUsage>) -> AgentError {
+    merge_total_usage(total, error.usage().cloned());
+    error.with_usage(total.clone())
 }
 
 async fn send_llm_request(
@@ -388,7 +421,8 @@ fn retry_exhausted_error(error: AgentError, attempts: usize) -> AgentError {
         return error;
     }
 
-    AgentError::new(format!("模型请求失败，已重试 {} 次：{error}", attempts - 1))
+    let usage = error.usage().cloned();
+    AgentError::new(format!("模型请求失败，已重试 {} 次：{error}", attempts - 1)).with_usage(usage)
 }
 
 async fn wait_before_retry(
@@ -579,10 +613,23 @@ mod tests {
 
     #[test]
     fn retry_exhausted_error_mentions_retry_count() {
-        let error = retry_exhausted_error(AgentError::new("读取模型响应失败：timeout"), 3);
+        let error = retry_exhausted_error(
+            AgentError::new("读取模型响应失败：timeout").with_usage(Some(AgentUsage {
+                input_tokens: Some(7),
+                output_tokens: None,
+                output_thinking_tokens: None,
+                total_tokens: None,
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                billable_request_count: Some(3),
+            })),
+            3,
+        );
 
         assert!(error.to_string().contains("已重试 2 次"));
         assert!(error.to_string().contains("timeout"));
+        assert_eq!(error.usage().unwrap().input_tokens, Some(7));
+        assert_eq!(error.usage().unwrap().billable_request_count, Some(3));
     }
 
     #[test]
@@ -861,7 +908,11 @@ mod tests {
         assert_eq!(joined_text(&deltas), "Hello");
         assert!(deltas.iter().any(|event| matches!(
             event,
-            LlmStreamEvent::ToolInputProgress { tool, received_bytes }
+            LlmStreamEvent::ToolInputProgress {
+                tool,
+                received_bytes,
+                ..
+            }
                 if tool == "read_file" && *received_bytes > 0
         )));
         assert_eq!(response.content, "Hello");
@@ -954,7 +1005,11 @@ mod tests {
         assert_eq!(joined_text(&deltas), "Hi there");
         assert!(deltas.iter().any(|event| matches!(
             event,
-            LlmStreamEvent::ToolInputProgress { tool, received_bytes }
+            LlmStreamEvent::ToolInputProgress {
+                tool,
+                received_bytes,
+                ..
+            }
                 if tool == "search_files" && *received_bytes > 0
         )));
         assert_eq!(response.content, "Hi there");

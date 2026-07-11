@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type JSX } from 'react'
 import { ChevronDown, ChevronRight, FilePenLine, LoaderCircle } from 'lucide-react'
 import type { AgentFileDraftSnapshot, AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import { getAgentFileWriteDiff, readAgentFileDraft } from '../../../agent/agentClient'
+import type { ChatFileWritePreview } from '../../chatTypes'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { formatTranslation, type Translate } from '../../../../config/translationFormat'
@@ -12,6 +13,7 @@ export interface FileWriteToolActivityGroupItem {
   call: AgentToolCall
   draft?: AgentFileDraftSnapshot
   draftId: string
+  preview?: ChatFileWritePreview
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
 }
@@ -59,22 +61,24 @@ const ROW_LABELS: Record<FileWriteOperation, Record<FileWriteStatus, Translation
 
 function AnimatedInteger({ value }: { value: number }): JSX.Element {
   const [displayed, setDisplayed] = useState(value)
-  const previousRef = useRef(value)
+  const displayedRef = useRef(value)
 
   useEffect(() => {
-    const from = previousRef.current
-    previousRef.current = value
+    const from = displayedRef.current
     if (from === value || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      displayedRef.current = value
       setDisplayed(value)
       return
     }
     const startedAt = performance.now()
-    const duration = 260
+    const duration = 160
     let frameId = 0
     const update = (now: number): void => {
       const progress = Math.min(1, (now - startedAt) / duration)
       const eased = 1 - Math.pow(1 - progress, 3)
-      setDisplayed(Math.round(from + (value - from) * eased))
+      const nextValue = Math.round(from + (value - from) * eased)
+      displayedRef.current = nextValue
+      setDisplayed(nextValue)
       if (progress < 1) frameId = window.requestAnimationFrame(update)
     }
     frameId = window.requestAnimationFrame(update)
@@ -148,14 +152,15 @@ function getItemView(item: FileWriteToolActivityGroupItem): FileWriteItemView {
   const args = getCallArgs(item.call)
   const result = getResultValue(item.result)
   const status = getStatus(item)
+  const preview = status === 'running' ? item.preview : undefined
   const error = getString(result.error) || item.result?.error || ''
   const message = getString(result.message)
 
   return {
-    additions: item.draft?.additions ?? 0,
-    deletions: item.draft?.deletions ?? 0,
+    additions: preview?.additions ?? item.draft?.additions ?? 0,
+    deletions: preview?.deletions ?? item.draft?.deletions ?? 0,
     error: status === 'failed' || status === 'conflict' ? error || message : '',
-    filePath: item.draft?.filePath ?? getString(args.filePath),
+    filePath: preview?.filePath ?? item.draft?.filePath ?? getString(args.filePath),
     operation: getOperation(item),
     rejectionReason: status === 'rejected' ? message || error : '',
     status
@@ -240,22 +245,33 @@ function FileWriteEntry({
 }): JSX.Element {
   const { t } = useFrontendConfig()
   const [expanded, setExpanded] = useState(false)
-  const [preview, setPreview] = useState('')
+  const [persistedPreview, setPersistedPreview] = useState('')
   const [previewError, setPreviewError] = useState('')
   const [loading, setLoading] = useState(false)
   const view = getItemView(item)
   const canPreview = Boolean(item.draft)
+  const hasLivePreview = view.status === 'running' && Boolean(item.preview)
+  const displayedPreview = hasLivePreview
+    ? `${persistedPreview}${item.preview?.content ?? ''}`
+    : persistedPreview
+  const previewSource =
+    !hasLivePreview && (item.draft?.statsFinal || item.draft?.status === 'waiting_approval')
+      ? 'diff'
+      : 'content'
 
   useEffect(() => {
     if (!expanded || !item.draft) return
     let cancelled = false
-    const shouldShowDiff = item.draft.statsFinal || item.draft.status === 'waiting_approval'
-    const request = shouldShowDiff
-      ? getAgentFileWriteDiff(item.draftId).then((page) => page.patch)
-      : readAgentFileDraft(item.draftId).then((page) => page.content)
+    const request =
+      previewSource === 'diff'
+        ? getAgentFileWriteDiff(item.draftId).then((page) => page.patch)
+        : readAgentFileDraft(item.draftId).then((page) => page.content)
     void request
       .then((content) => {
-        if (!cancelled) setPreview(content)
+        if (!cancelled) {
+          setPersistedPreview(content)
+          setPreviewError('')
+        }
       })
       .catch((error) => {
         if (!cancelled) setPreviewError(error instanceof Error ? error.message : String(error))
@@ -266,7 +282,7 @@ function FileWriteEntry({
     return () => {
       cancelled = true
     }
-  }, [expanded, item.draft, item.draftId])
+  }, [expanded, item.draft, item.draftId, previewSource])
 
   const toggleExpanded = (): void => {
     if (!expanded) {
@@ -334,7 +350,7 @@ function FileWriteEntry({
         <div className="file-write-activity__preview">
           {loading ? <span>{t('agent.fileWrite.loadingPreview')}</span> : null}
           {previewError ? <span className="file-write-activity__error">{previewError}</span> : null}
-          {!loading && !previewError ? <pre>{preview}</pre> : null}
+          {!loading && !previewError ? <pre>{displayedPreview}</pre> : null}
         </div>
       ) : null}
     </div>

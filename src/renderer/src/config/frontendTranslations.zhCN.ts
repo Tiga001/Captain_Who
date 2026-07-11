@@ -439,11 +439,11 @@ export const zhCNTranslations = {
   'agent.fileWrite.update.row.stopped': '已停止编辑',
   'agent.approval.dialog.toolTitle': '是否允许我使用 {tool}？',
   'agent.approval.dialog.commandPolicyHint':
-    '当前权限要求命令执行前确认；即使批准，危险命令仍会被后端安全策略阻止。',
+    '批准后我会运行这条命令。如果它可能带来危险，系统会自动拦住。',
   'agent.approval.dialog.diffPolicyHint':
-    '当前权限要求文件修改前确认；批准后仍会校验路径范围、符号链接、文件类型和文件版本。',
+    '批准后我会修改这个文件。如果文件已经变了，或不能安全修改，我会停下来告诉你。',
   'agent.approval.dialog.toolPolicyHint':
-    '这个工具需要人工确认；批准后仍会按当前权限和后端安全策略执行。',
+    '批准后我会使用这个工具。如果操作超出当前权限，系统会自动拦住。',
   'agent.approval.dialog.approve': '是',
   'agent.approval.dialog.approveRemember': '是，且本轮后续以此开头的命令不再询问',
   'agent.approval.dialog.approvePatchRemember': '是，且本轮编辑文件无需审批',

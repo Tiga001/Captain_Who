@@ -384,7 +384,7 @@ function mapMessageToStorage(message: ChatMessage): StorageChatMessageRecord {
     createdAt: message.createdAt,
     status: message.status ?? null,
     attachments: [],
-    agentRunJson: stringifyJson(message.agentRun),
+    agentRunJson: stringifyAgentRun(message.agentRun),
     uiStateJson: stringifyJson(message.uiState),
   };
 }
@@ -394,7 +394,7 @@ function mapMessageStateToStorage(message: ChatMessage): StorageChatMessageState
     id: message.id,
     content: message.content,
     status: message.status ?? null,
-    agentRunJson: stringifyJson(message.agentRun),
+    agentRunJson: stringifyAgentRun(message.agentRun),
     uiStateJson: stringifyJson(message.uiState),
   };
 }
@@ -522,6 +522,13 @@ function parseJson<T>(value: string | null | undefined): T | undefined {
 
 function stringifyJson(value: unknown): string | null {
   return value === undefined ? null : JSON.stringify(value);
+}
+
+function stringifyAgentRun(run: ChatAgentRunView | undefined): string | null {
+  if (!run) return null;
+  const persistedRun = { ...run };
+  delete persistedRun.fileWritePreviews;
+  return JSON.stringify(persistedRun);
 }
 
 function normalizeMessageStatus(status: StorageChatMessageRecord["status"]): ChatMessage["status"] {

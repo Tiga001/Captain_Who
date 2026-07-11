@@ -198,39 +198,24 @@
 }
 
 .agent-todo-progress__popover {
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  width: max-content;
-  min-width: min(320px, calc(100vw - 48px));
-  max-width: min(520px, calc(100vw - 48px));
-  padding: 10px;
+  position: fixed;
+  z-index: 1600;
+  width: fit-content;
+  max-width: calc(100vw - 32px);
+  padding: 8px;
   color: var(--mc-color-text-secondary);
   background: var(--mc-color-surface-elevated);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: 18px;
   box-shadow: var(--mc-shadow-popover);
-  opacity: 0;
-  pointer-events: none;
-  transform: translateX(-50%) translateY(4px);
-  transition:
-    opacity 120ms ease,
-    transform 120ms ease;
-}
-
-.agent-todo-progress:hover .agent-todo-progress__popover,
-.agent-todo-progress:focus-visible .agent-todo-progress__popover,
-.agent-todo-progress:focus-within .agent-todo-progress__popover {
-  opacity: 1;
   pointer-events: auto;
-  transform: translateX(-50%) translateY(0);
 }
 
 .agent-todo-progress__list {
   display: grid;
   margin: 0;
   padding: 0;
-  gap: 6px;
+  gap: 4px;
   list-style: none;
 }
 
@@ -239,11 +224,12 @@
   grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
   min-width: 0;
-  padding: 5px 6px;
-  gap: 10px;
+  padding: 4px 6px;
+  gap: 8px;
   border-radius: 10px;
   color: var(--mc-color-text-muted);
-  font-size: var(--mc-font-size-chat-activity-detail);
+  font-size: var(--mc-font-size-chat-assistant);
+  font-weight: var(--mc-font-weight-medium);
   line-height: var(--mc-line-height-body);
 }
 
@@ -295,7 +281,7 @@
 }
 
 .agent-todo-progress__item-title {
-  font-weight: var(--mc-font-weight-strong);
+  font-weight: inherit;
 }
 
 .agent-todo-progress__item-note {
@@ -821,7 +807,7 @@ button.apply-patch-activity__path:focus-visible {
 }
 
 .file-write-activity__path {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--mc-color-text-accent);
@@ -834,12 +820,11 @@ button.apply-patch-activity__path:focus-visible {
 }
 
 .file-write-activity__stats {
-  display: inline-grid;
+  display: inline-flex;
   flex: 0 0 auto;
-  grid-template-columns: minmax(4ch, auto) minmax(4ch, auto);
-  gap: 4px;
+  align-items: baseline;
+  gap: 6px;
   font-variant-numeric: tabular-nums;
-  text-align: right;
 }
 
 .file-write-activity__additions {

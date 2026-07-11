@@ -325,6 +325,68 @@ pub fn update_message_status_and_content(
     Ok(())
 }
 
+pub fn update_message_run_terminal_state(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    message_status: Option<&str>,
+    run_status: &str,
+    completed_at: i64,
+) -> rusqlite::Result<()> {
+    let existing_agent_run_json = connection
+        .query_row(
+            "SELECT agent_run_json FROM messages WHERE conversation_id = ?1 AND id = ?2",
+            params![conversation_id, message_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let next_agent_run_json = existing_agent_run_json.map(|raw| {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return raw;
+        };
+        let Some(run) = value.as_object_mut() else {
+            return raw;
+        };
+
+        run.insert("status".to_string(), run_status.into());
+        run.insert("completedAt".to_string(), completed_at.into());
+        run.insert(
+            "messageStreamCheckpoints".to_string(),
+            serde_json::json!({}),
+        );
+        if let Some(state) = run
+            .get_mut("state")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            state.insert("status".to_string(), run_status.into());
+            state.insert("activeRunId".to_string(), serde_json::Value::Null);
+            state.insert("updatedAt".to_string(), completed_at.into());
+        }
+
+        serde_json::to_string(&value).unwrap_or(raw)
+    });
+
+    connection.execute(
+        "
+        UPDATE messages
+        SET status = ?1, agent_run_json = ?2
+        WHERE conversation_id = ?3 AND id = ?4
+        ",
+        params![
+            message_status,
+            next_agent_run_json,
+            conversation_id,
+            message_id
+        ],
+    )?;
+    connection.execute(
+        "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
+        params![completed_at, conversation_id],
+    )?;
+    Ok(())
+}
+
 pub fn update_message_status_content_and_agent_run(
     connection: &Connection,
     conversation_id: &str,

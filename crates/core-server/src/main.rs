@@ -4,7 +4,7 @@ mod agent_support;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent::{AgentConversationTurnInput, AgentService};
 use mycopilot_core::storage::models::{
@@ -18,25 +18,26 @@ use mycopilot_protocol_rs::{
     error, success, AgentActionIdRequest, AgentCancelRunRequest, AgentCancelRunResponse,
     AgentFileDraftIdRequest, AgentFileDraftReadRequest, AgentRejectActionRequest,
     AgentStartRunRequest, AgentStartRunResponse, AppVersionResponse, CorePingRequest,
-    CorePingResponse, JsonRpcId, JsonRpcRequest, AGENT_APPROVE_ACTION_METHOD,
+    CorePingResponse, CoreShutdownResponse, JsonRpcId, JsonRpcRequest, AGENT_APPROVE_ACTION_METHOD,
     AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD, AGENT_CLEAR_USAGE_RECORDS_METHOD,
     AGENT_DISCARD_FILE_DRAFT_METHOD, AGENT_GET_FILE_DRAFT_METHOD, AGENT_GET_FILE_WRITE_DIFF_METHOD,
     AGENT_GET_USAGE_SUMMARY_METHOD, AGENT_LIST_PENDING_ACTIONS_METHOD,
     AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
-    AGENT_START_RUN_METHOD, APP_GET_VERSION_METHOD, CORE_PING_METHOD, SEARCH_SEARCH_CHATS_METHOD,
-    STORAGE_DELETE_CHAT_MESSAGES_METHOD, STORAGE_DELETE_COMPOSER_DRAFT_METHOD,
-    STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
-    STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_LOAD_APP_DATA_METHOD,
-    STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD, STORAGE_LOAD_COMPOSER_DRAFTS_METHOD,
-    STORAGE_LOAD_CONVERSATIONS_METHOD, STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD,
-    STORAGE_LOAD_MODEL_SETTINGS_METHOD, STORAGE_LOAD_PROJECTS_METHOD,
-    STORAGE_LOAD_UI_PREFERENCES_METHOD, STORAGE_REVEAL_PROJECT_FILE_METHOD,
-    STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD,
-    STORAGE_SAVE_COMPOSER_DRAFT_METHOD, STORAGE_SAVE_CONVERSATION_META_METHOD,
-    STORAGE_SAVE_CONVERSATION_METHOD, STORAGE_SAVE_MODEL_SETTINGS_METHOD,
-    STORAGE_SAVE_PROJECT_METHOD, STORAGE_SAVE_UI_PREFERENCES_METHOD,
-    STORAGE_SELECT_PROFILE_AVATAR_METHOD, STORAGE_SELECT_PROJECT_DIRECTORY_METHOD,
-    STORAGE_SHOW_PROJECT_IN_FOLDER_METHOD, STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
+    AGENT_START_RUN_METHOD, APP_GET_VERSION_METHOD, CORE_PING_METHOD, CORE_SHUTDOWN_METHOD,
+    SEARCH_SEARCH_CHATS_METHOD, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
+    STORAGE_DELETE_COMPOSER_DRAFT_METHOD, STORAGE_DELETE_CONVERSATION_METHOD,
+    STORAGE_DELETE_PROJECT_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
+    STORAGE_LOAD_APP_DATA_METHOD, STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
+    STORAGE_LOAD_COMPOSER_DRAFTS_METHOD, STORAGE_LOAD_CONVERSATIONS_METHOD,
+    STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD, STORAGE_LOAD_MODEL_SETTINGS_METHOD,
+    STORAGE_LOAD_PROJECTS_METHOD, STORAGE_LOAD_UI_PREFERENCES_METHOD,
+    STORAGE_REVEAL_PROJECT_FILE_METHOD, STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD,
+    STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD, STORAGE_SAVE_COMPOSER_DRAFT_METHOD,
+    STORAGE_SAVE_CONVERSATION_META_METHOD, STORAGE_SAVE_CONVERSATION_METHOD,
+    STORAGE_SAVE_MODEL_SETTINGS_METHOD, STORAGE_SAVE_PROJECT_METHOD,
+    STORAGE_SAVE_UI_PREFERENCES_METHOD, STORAGE_SELECT_PROFILE_AVATAR_METHOD,
+    STORAGE_SELECT_PROJECT_DIRECTORY_METHOD, STORAGE_SHOW_PROJECT_IN_FOLDER_METHOD,
+    STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -68,16 +69,41 @@ async fn main() -> io::Result<()> {
                     continue;
                 }
 
-                let response = match serde_json::from_str::<JsonRpcRequest>(&line) {
-                    Ok(request) => handle_request(
-                        &storage,
-                        &agent_service,
-                        notification_tx.clone(),
-                        request,
-                    ),
-                    Err(err) => serde_json::to_value(error(None, -32700, format!("Parse error: {err}")))
-                        .expect("JSON-RPC parse error response must serialize"),
+                let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
+                    Ok(request) => request,
+                    Err(err) => {
+                        let response = serde_json::to_value(error(
+                            None,
+                            -32700,
+                            format!("Parse error: {err}"),
+                        ))
+                        .expect("JSON-RPC parse error response must serialize");
+                        write_json_line(&mut stdout, response).await?;
+                        continue;
+                    }
                 };
+
+                if request.jsonrpc == "2.0" && request.method == CORE_SHUTDOWN_METHOD {
+                    let (cancelled_runs, timed_out) = agent_service
+                        .shutdown_active_runs(Duration::from_secs(2))
+                        .await;
+                    let response = response_success(
+                        request.id,
+                        CoreShutdownResponse {
+                            cancelled_runs,
+                            timed_out,
+                        },
+                    );
+                    write_json_line(&mut stdout, response).await?;
+                    break;
+                }
+
+                let response = handle_request(
+                    &storage,
+                    &agent_service,
+                    notification_tx.clone(),
+                    request,
+                );
 
                 write_json_line(&mut stdout, response).await?;
             }

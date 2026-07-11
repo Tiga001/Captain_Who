@@ -48,8 +48,14 @@ export class CoreJsonRpcClient {
     this.child.on('error', (error) => this.rejectAll(error))
     this.child.on('exit', (code, signal) => {
       this.child = null
-      this.rejectAll(new Error(`core-server exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`))
+      this.rejectAll(
+        new Error(`core-server exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`)
+      )
     })
+  }
+
+  isRunning(): boolean {
+    return this.child !== null
   }
 
   stop(): void {
@@ -154,7 +160,9 @@ export class CoreJsonRpcClient {
     return 'error' in response
   }
 
-  private isNotification(message: JsonRpcResponse | JsonRpcNotification): message is JsonRpcNotification {
+  private isNotification(
+    message: JsonRpcResponse | JsonRpcNotification
+  ): message is JsonRpcNotification {
     return 'method' in message && !('id' in message)
   }
 

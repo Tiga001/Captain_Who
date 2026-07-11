@@ -29,7 +29,10 @@ where
                 let Some(chunk) = chunk else {
                     break;
                 };
-                chunk.map_err(|error| AgentError::new(format!("读取模型流失败：{error}")))?
+                chunk.map_err(|error| {
+                    AgentError::new(format!("读取模型流失败：{error}"))
+                        .with_usage(accumulator.usage().cloned())
+                })?
             }
         };
         buffer.extend_from_slice(&chunk);
@@ -38,17 +41,23 @@ where
             cancellation_token.check()?;
             let frame_bytes = buffer[..frame_end].to_vec();
             buffer.drain(..frame_end + separator_len);
-            let frame = String::from_utf8(frame_bytes)
-                .map_err(|error| AgentError::new(format!("模型流不是有效 UTF-8：{error}")))?;
-            process_sse_frame(&frame, &mut accumulator, &mut on_delta)?;
+            let frame = String::from_utf8(frame_bytes).map_err(|error| {
+                AgentError::new(format!("模型流不是有效 UTF-8：{error}"))
+                    .with_usage(accumulator.usage().cloned())
+            })?;
+            process_sse_frame(&frame, &mut accumulator, &mut on_delta)
+                .map_err(|error| error.with_usage(accumulator.usage().cloned()))?;
         }
     }
 
     cancellation_token.check()?;
     if !buffer.iter().all(u8::is_ascii_whitespace) {
-        let frame = String::from_utf8(buffer)
-            .map_err(|error| AgentError::new(format!("模型流尾部不是有效 UTF-8：{error}")))?;
-        process_sse_frame(&frame, &mut accumulator, &mut on_delta)?;
+        let frame = String::from_utf8(buffer).map_err(|error| {
+            AgentError::new(format!("模型流尾部不是有效 UTF-8：{error}"))
+                .with_usage(accumulator.usage().cloned())
+        })?;
+        process_sse_frame(&frame, &mut accumulator, &mut on_delta)
+            .map_err(|error| error.with_usage(accumulator.usage().cloned()))?;
     }
 
     accumulator.finish()
@@ -161,12 +170,21 @@ impl LlmStreamAccumulator {
             Self::Anthropic(accumulator) => accumulator.finish(),
         }
     }
+
+    fn usage(&self) -> Option<&AgentUsage> {
+        match self {
+            Self::OpenAi(accumulator) => accumulator.usage.as_ref(),
+            Self::Anthropic(accumulator) => accumulator.usage.as_ref(),
+        }
+    }
 }
 
 #[derive(Default)]
 pub(super) struct OpenAiStreamAccumulator {
     content: String,
-    tool_calls: BTreeMap<usize, OpenAiToolCallAccumulator>,
+    tool_calls: Vec<OpenAiToolCallAccumulator>,
+    tool_call_slots_by_id: BTreeMap<String, usize>,
+    active_tool_call_slots_by_index: BTreeMap<usize, usize>,
     usage: Option<AgentUsage>,
     finish_reason: Option<String>,
 }
@@ -175,10 +193,152 @@ pub(super) struct OpenAiStreamAccumulator {
 struct OpenAiToolCallAccumulator {
     id: Option<String>,
     name: String,
-    arguments: String,
+    arguments: OpenAiToolArgumentsAccumulator,
+}
+
+#[derive(Default)]
+struct OpenAiToolArgumentsAccumulator {
+    incremental: String,
+    cumulative: Option<String>,
+    preview: String,
+    preview_mode: OpenAiArgumentStreamMode,
+}
+
+#[derive(Default)]
+enum OpenAiArgumentStreamMode {
+    #[default]
+    Unknown,
+    Incremental,
+    Cumulative,
+}
+
+impl OpenAiToolArgumentsAccumulator {
+    fn push(&mut self, fragment: &str) -> String {
+        if fragment.is_empty() {
+            return String::new();
+        }
+
+        self.incremental.push_str(fragment);
+        match &mut self.cumulative {
+            None if self.incremental == fragment => {
+                self.cumulative = Some(fragment.to_string());
+            }
+            Some(current) if fragment.starts_with(current.as_str()) => {
+                current.clear();
+                current.push_str(fragment);
+            }
+            Some(current) if current.starts_with(fragment) => {}
+            Some(_) | None => {
+                self.cumulative = None;
+            }
+        }
+
+        if self.preview.is_empty() {
+            self.preview.push_str(fragment);
+            return fragment.to_string();
+        }
+
+        match self.preview_mode {
+            OpenAiArgumentStreamMode::Unknown
+                if fragment.len() > self.preview.len()
+                    && fragment.starts_with(self.preview.as_str()) =>
+            {
+                let delta = fragment[self.preview.len()..].to_string();
+                self.preview.clear();
+                self.preview.push_str(fragment);
+                self.preview_mode = OpenAiArgumentStreamMode::Cumulative;
+                delta
+            }
+            OpenAiArgumentStreamMode::Unknown | OpenAiArgumentStreamMode::Incremental => {
+                self.preview_mode = OpenAiArgumentStreamMode::Incremental;
+                self.preview.push_str(fragment);
+                fragment.to_string()
+            }
+            OpenAiArgumentStreamMode::Cumulative if fragment.starts_with(self.preview.as_str()) => {
+                let delta = fragment[self.preview.len()..].to_string();
+                self.preview.clear();
+                self.preview.push_str(fragment);
+                delta
+            }
+            OpenAiArgumentStreamMode::Cumulative if self.preview.starts_with(fragment) => {
+                String::new()
+            }
+            OpenAiArgumentStreamMode::Cumulative => {
+                self.preview_mode = OpenAiArgumentStreamMode::Incremental;
+                self.preview.push_str(fragment);
+                fragment.to_string()
+            }
+        }
+    }
+
+    fn parse(&self) -> serde_json::Result<Value> {
+        match parse_tool_arguments(&self.incremental) {
+            Ok(value) => Ok(value),
+            Err(incremental_error) => {
+                if let Some(cumulative) = self
+                    .cumulative
+                    .as_deref()
+                    .filter(|cumulative| *cumulative != self.incremental)
+                {
+                    if let Ok(value) = parse_tool_arguments(cumulative) {
+                        return Ok(value);
+                    }
+                }
+                Err(incremental_error)
+            }
+        }
+    }
+
+    fn received_bytes(&self) -> u64 {
+        self.preview.len() as u64
+    }
 }
 
 impl OpenAiStreamAccumulator {
+    fn create_tool_call_slot(&mut self, provider_index: usize, id: Option<&str>) -> usize {
+        let slot = self.tool_calls.len();
+        let id = id.map(ToString::to_string);
+        self.tool_calls.push(OpenAiToolCallAccumulator {
+            id: id.clone(),
+            ..OpenAiToolCallAccumulator::default()
+        });
+        if let Some(id) = id {
+            self.tool_call_slots_by_id.insert(id, slot);
+        }
+        self.active_tool_call_slots_by_index
+            .insert(provider_index, slot);
+        slot
+    }
+
+    fn resolve_tool_call_slot(&mut self, provider_index: usize, id: Option<&str>) -> usize {
+        if let Some(id) = id {
+            if let Some(slot) = self.tool_call_slots_by_id.get(id).copied() {
+                self.active_tool_call_slots_by_index
+                    .insert(provider_index, slot);
+                return slot;
+            }
+
+            if let Some(slot) = self
+                .active_tool_call_slots_by_index
+                .get(&provider_index)
+                .copied()
+            {
+                if self.tool_calls[slot].id.is_none() {
+                    self.tool_calls[slot].id = Some(id.to_string());
+                    self.tool_call_slots_by_id.insert(id.to_string(), slot);
+                    return slot;
+                }
+            }
+
+            return self.create_tool_call_slot(provider_index, Some(id));
+        }
+
+        self.active_tool_call_slots_by_index
+            .get(&provider_index)
+            .copied()
+            .unwrap_or_else(|| self.create_tool_call_slot(provider_index, None))
+    }
+
     fn process<F>(&mut self, value: &Value, on_delta: &mut F) -> AgentResult<()>
     where
         F: FnMut(LlmStreamEvent),
@@ -208,27 +368,33 @@ impl OpenAiStreamAccumulator {
                 continue;
             };
             for (fallback_index, call) in tool_calls.iter().enumerate() {
-                let index = call
+                let explicit_index = call
                     .get("index")
                     .and_then(Value::as_u64)
-                    .map(|index| index as usize)
-                    .unwrap_or(fallback_index);
-                let entry = self.tool_calls.entry(index).or_default();
-                if let Some(id) = call.get("id").and_then(Value::as_str) {
-                    if !id.trim().is_empty() {
-                        entry.id = Some(id.to_string());
-                    }
-                }
+                    .map(|index| index as usize);
+                let provider_index = explicit_index.unwrap_or(fallback_index);
+                let id = call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty());
+                let slot = self.resolve_tool_call_slot(provider_index, id);
+                let entry = &mut self.tool_calls[slot];
                 if let Some(function) = call.get("function") {
                     if let Some(name) = function.get("name").and_then(Value::as_str) {
                         append_stream_fragment(&mut entry.name, name);
                     }
                     if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
-                        append_argument_stream_fragment(&mut entry.arguments, arguments);
-                        on_delta(LlmStreamEvent::ToolInputProgress {
-                            tool: entry.name.clone(),
-                            received_bytes: entry.arguments.len() as u64,
-                        });
+                        let input_delta = entry.arguments.push(arguments);
+                        if !input_delta.is_empty() {
+                            on_delta(LlmStreamEvent::ToolInputProgress {
+                                tool_call_index: slot,
+                                tool_call_id: entry.id.clone(),
+                                tool: entry.name.clone(),
+                                input_delta,
+                                received_bytes: entry.arguments.received_bytes(),
+                            });
+                        }
                     }
                 }
             }
@@ -239,20 +405,22 @@ impl OpenAiStreamAccumulator {
 
     fn finish(self) -> AgentResult<LlmChatResponse> {
         let mut tool_calls = Vec::new();
-        for (index, call) in self.tool_calls {
+        let error_usage = self.usage.clone();
+        for (slot, call) in self.tool_calls.into_iter().enumerate() {
             if call.name.trim().is_empty() {
                 continue;
             }
-            let args = parse_tool_arguments(&call.arguments).map_err(|error| {
+            let args = call.arguments.parse().map_err(|error| {
                 AgentError::new(format!(
                     "OpenAI 流式 tool_call `{}` 的 arguments 不是有效 JSON：{error}",
                     call.name
                 ))
+                .with_usage(error_usage.clone())
             })?;
             tool_calls.push(LlmToolCall {
                 id: call
                     .id
-                    .unwrap_or_else(|| format!("openai-stream-tool-call-{}", index + 1)),
+                    .unwrap_or_else(|| format!("openai-stream-tool-call-{}", slot + 1)),
                 name: call.name,
                 args,
             });
@@ -373,7 +541,10 @@ impl AnthropicStreamAccumulator {
                     if !input.is_null() && input != &json!({}) {
                         block.input_json = serde_json::to_string(input).unwrap_or_default();
                         on_delta(LlmStreamEvent::ToolInputProgress {
+                            tool_call_index: index,
+                            tool_call_id: block.id.clone(),
                             tool: block.name.clone().unwrap_or_default(),
+                            input_delta: block.input_json.clone(),
                             received_bytes: block.input_json.len() as u64,
                         });
                     }
@@ -420,10 +591,15 @@ impl AnthropicStreamAccumulator {
                     .unwrap_or_default();
                 block.kind = "tool_use".to_string();
                 block.input_json.push_str(partial_json);
-                on_delta(LlmStreamEvent::ToolInputProgress {
-                    tool: block.name.clone().unwrap_or_default(),
-                    received_bytes: block.input_json.len() as u64,
-                });
+                if !partial_json.is_empty() {
+                    on_delta(LlmStreamEvent::ToolInputProgress {
+                        tool_call_index: index,
+                        tool_call_id: block.id.clone(),
+                        tool: block.name.clone().unwrap_or_default(),
+                        input_delta: partial_json.to_string(),
+                        received_bytes: block.input_json.len() as u64,
+                    });
+                }
             }
             _ => {}
         }
@@ -433,6 +609,7 @@ impl AnthropicStreamAccumulator {
 
     fn finish(self) -> AgentResult<LlmChatResponse> {
         let mut tool_calls = Vec::new();
+        let error_usage = self.usage.clone();
         for (index, block) in self.blocks {
             if block.kind != "tool_use" {
                 continue;
@@ -444,6 +621,7 @@ impl AnthropicStreamAccumulator {
                 AgentError::new(format!(
                     "Anthropic 流式 tool_use `{name}` 的 input 不是有效 JSON：{error}"
                 ))
+                .with_usage(error_usage.clone())
             })?;
             tool_calls.push(LlmToolCall {
                 id: block
@@ -467,25 +645,12 @@ fn append_stream_fragment(target: &mut String, fragment: &str) {
     if fragment.is_empty() {
         return;
     }
-    if target.is_empty() || !target.ends_with(fragment) {
-        target.push_str(fragment);
-    }
-}
-
-fn append_argument_stream_fragment(target: &mut String, fragment: &str) {
-    if fragment.is_empty() {
-        return;
-    }
-
-    // Some OpenAI-compatible streaming APIs send cumulative function arguments snapshots instead
-    // of strict deltas. Appending those snapshots creates `{}{}`
-    // and later fails JSON parsing with "trailing characters".
     if target.is_empty() {
         target.push_str(fragment);
-    } else if fragment.starts_with(target.as_str()) {
+    } else if fragment.starts_with(target.as_str()) && fragment != target {
         target.clear();
         target.push_str(fragment);
-    } else if !target.ends_with(fragment) {
+    } else if fragment != target {
         target.push_str(fragment);
     }
 }
@@ -496,27 +661,56 @@ mod tests {
     use serde_json::json;
 
     fn openai_tool_call_frame(arguments: &str) -> String {
+        openai_tool_call_frame_for(Some(0), "call-1", "run_command", arguments)
+    }
+
+    fn openai_tool_call_frame_for(
+        index: Option<usize>,
+        id: &str,
+        name: &str,
+        arguments: &str,
+    ) -> String {
+        let mut tool_call = json!({
+            "id": id,
+            "function": {
+                "name": name,
+                "arguments": arguments
+            }
+        });
+        if let Some(index) = index {
+            tool_call["index"] = json!(index);
+        }
         format!(
             "data: {}\n\n",
             json!({
                 "choices": [
                     {
                         "delta": {
-                            "tool_calls": [
-                                {
-                                    "index": 0,
-                                    "id": "call-1",
-                                    "function": {
-                                        "name": "run_command",
-                                        "arguments": arguments
-                                    }
-                                }
-                            ]
+                            "tool_calls": [tool_call]
                         }
                     }
                 ]
             })
         )
+    }
+
+    fn joined_tool_input(events: &[LlmStreamEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LlmStreamEvent::ToolInputProgress {
+                    tool_call_index,
+                    tool_call_id,
+                    input_delta,
+                    ..
+                } => {
+                    assert_eq!(*tool_call_index, 0);
+                    assert_eq!(tool_call_id.as_deref(), Some("call-1"));
+                    Some(input_delta.as_str())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -538,6 +732,10 @@ mod tests {
         .unwrap();
 
         let response = accumulator.finish().unwrap();
+        assert_eq!(
+            joined_tool_input(&deltas),
+            "{\"command\":\"conda env list\",\"reason\":\"检查环境\"}"
+        );
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "run_command");
         assert_eq!(response.tool_calls[0].args["command"], "conda env list");
@@ -563,9 +761,135 @@ mod tests {
         .unwrap();
 
         let response = accumulator.finish().unwrap();
+        assert_eq!(
+            joined_tool_input(&deltas),
+            "{\"command\":\"conda env list\",\"reason\":\"检查环境\"}"
+        );
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "run_command");
         assert_eq!(response.tool_calls[0].args["command"], "conda env list");
         assert_eq!(response.tool_calls[0].args["reason"], "检查环境");
+    }
+
+    #[test]
+    fn openai_stream_preserves_incremental_fragments_that_match_existing_prefixes() {
+        let mut accumulator = LlmStreamAccumulator::new(AgentApiStyle::OpenAiCompatible);
+        let mut deltas = Vec::new();
+
+        for fragment in [
+            "{\"items\": [",
+            "{",
+            "\"title\":\"A\",\"status\":\"pending\"}]}",
+        ] {
+            process_sse_frame(
+                &openai_tool_call_frame(fragment),
+                &mut accumulator,
+                &mut |delta| deltas.push(delta),
+            )
+            .unwrap();
+        }
+
+        let response = accumulator.finish().unwrap();
+        assert_eq!(
+            joined_tool_input(&deltas),
+            "{\"items\": [{\"title\":\"A\",\"status\":\"pending\"}]}"
+        );
+        assert_eq!(response.tool_calls[0].args["items"][0]["title"], "A");
+    }
+
+    #[test]
+    fn openai_stream_preserves_repeated_incremental_fragments() {
+        let mut accumulator = LlmStreamAccumulator::new(AgentApiStyle::OpenAiCompatible);
+        let mut deltas = Vec::new();
+
+        for fragment in ["{\"text\":\"a", "a", "\"}"] {
+            process_sse_frame(
+                &openai_tool_call_frame(fragment),
+                &mut accumulator,
+                &mut |delta| deltas.push(delta),
+            )
+            .unwrap();
+        }
+
+        let response = accumulator.finish().unwrap();
+        assert_eq!(joined_tool_input(&deltas), "{\"text\":\"aa\"}");
+        assert_eq!(response.tool_calls[0].args["text"], "aa");
+    }
+
+    #[test]
+    fn openai_stream_separates_parallel_calls_by_id_when_index_is_missing() {
+        let mut accumulator = LlmStreamAccumulator::new(AgentApiStyle::OpenAiCompatible);
+        let mut deltas = Vec::new();
+
+        process_sse_frame(
+            &openai_tool_call_frame_for(None, "call-a", "write_file", "{\"draftId\":\"draft-a\"}"),
+            &mut accumulator,
+            &mut |delta| deltas.push(delta),
+        )
+        .unwrap();
+        process_sse_frame(
+            &openai_tool_call_frame_for(None, "call-b", "write_file", "{\"draftId\":\"draft-b\"}"),
+            &mut accumulator,
+            &mut |delta| deltas.push(delta),
+        )
+        .unwrap();
+
+        let streamed_calls = deltas
+            .iter()
+            .filter_map(|event| match event {
+                LlmStreamEvent::ToolInputProgress {
+                    tool_call_index,
+                    tool_call_id,
+                    ..
+                } => Some((*tool_call_index, tool_call_id.as_deref())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            streamed_calls,
+            vec![(0, Some("call-a")), (1, Some("call-b"))]
+        );
+        let response = accumulator.finish().unwrap();
+        assert_eq!(response.tool_calls.len(), 2);
+        assert_eq!(response.tool_calls[0].id, "call-a");
+        assert_eq!(response.tool_calls[0].args["draftId"], "draft-a");
+        assert_eq!(response.tool_calls[1].id, "call-b");
+        assert_eq!(response.tool_calls[1].args["draftId"], "draft-b");
+    }
+
+    #[test]
+    fn openai_stream_keeps_usage_when_tool_arguments_are_invalid() {
+        let mut accumulator = LlmStreamAccumulator::new(AgentApiStyle::OpenAiCompatible);
+        let mut deltas = Vec::new();
+
+        process_sse_frame(
+            &openai_tool_call_frame("{\"items\":["),
+            &mut accumulator,
+            &mut |delta| deltas.push(delta),
+        )
+        .unwrap();
+        process_sse_frame(
+            &format!(
+                "data: {}\n\n",
+                json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 12,
+                        "completion_tokens": 5,
+                        "total_tokens": 17
+                    }
+                })
+            ),
+            &mut accumulator,
+            &mut |delta| deltas.push(delta),
+        )
+        .unwrap();
+
+        let error = accumulator.finish().unwrap_err();
+        let usage = error.usage().unwrap();
+        assert_eq!(usage.input_tokens, Some(12));
+        assert_eq!(usage.output_tokens, Some(5));
+        assert_eq!(usage.total_tokens, Some(17));
+        assert_eq!(usage.billable_request_count, Some(1));
     }
 }

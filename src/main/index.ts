@@ -16,7 +16,7 @@ const coreServer = new CoreServer()
 const terminalBridge = new TerminalBridge()
 const faviconResourceCache = new FaviconResourceCache()
 let browserManager: BrowserWebContentsViewManager | null = null
-let isQuittingAfterTerminalShutdown = false
+let isQuittingAfterServiceShutdown = false
 
 const macWindowChromeOptions =
   process.platform === 'darwin'
@@ -139,7 +139,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', (event) => {
-  if (isQuittingAfterTerminalShutdown) {
+  if (isQuittingAfterServiceShutdown) {
     browserManager?.destroyAll()
     terminalBridge.killNow()
     coreServer.stop()
@@ -147,11 +147,8 @@ app.on('before-quit', (event) => {
   }
 
   event.preventDefault()
-  isQuittingAfterTerminalShutdown = true
-  void terminalBridge.stop().finally(() => {
-    coreServer.stop()
-    app.quit()
-  })
+  isQuittingAfterServiceShutdown = true
+  void Promise.allSettled([terminalBridge.stop(), coreServer.shutdown()]).finally(() => app.quit())
 })
 
 app.on('will-quit', () => {

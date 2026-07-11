@@ -615,6 +615,27 @@ pub struct AgentFileDraftSnapshot {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentFileWritePreview {
+    pub preview_id: String,
+    pub stream_id: String,
+    pub attempt: usize,
+    pub tool_call_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    pub draft_id: String,
+    pub file_path: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub line_count: u64,
+    pub byte_count: u64,
+    pub generated_bytes: u64,
+    pub content_offset_bytes: u64,
+    pub content_delta: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentFileWriteProposal {
     pub id: String,
     pub draft_id: String,
@@ -749,8 +770,21 @@ pub enum AgentEvent {
     ToolInputProgress {
         run_id: String,
         stream_id: String,
+        attempt: usize,
+        tool_call_index: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
         tool: String,
         received_bytes: u64,
+    },
+    FileWritePreviewUpdated {
+        run_id: String,
+        preview: AgentFileWritePreview,
+    },
+    FileWritePreviewCleared {
+        run_id: String,
+        stream_id: String,
+        attempt: usize,
     },
     Message {
         run_id: String,
@@ -811,6 +845,7 @@ pub enum AgentEvent {
 pub struct AgentError {
     message: String,
     cancelled: bool,
+    usage: Option<Box<AgentUsage>>,
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;
@@ -820,6 +855,7 @@ impl AgentError {
         Self {
             message: message.into(),
             cancelled: false,
+            usage: None,
         }
     }
 
@@ -827,11 +863,21 @@ impl AgentError {
         Self {
             message: "agent run 已取消。".to_string(),
             cancelled: true,
+            usage: None,
         }
     }
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled
+    }
+
+    pub fn usage(&self) -> Option<&AgentUsage> {
+        self.usage.as_deref()
+    }
+
+    pub fn with_usage(mut self, usage: Option<AgentUsage>) -> Self {
+        self.usage = usage.map(Box::new);
+        self
     }
 }
 

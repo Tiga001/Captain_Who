@@ -427,7 +427,7 @@ export function AppShell() {
       conversationId: string,
       messageId: string,
       updater: (message: ChatMessage) => ChatMessage,
-      options: { touchConversation?: boolean } = {}
+      options: { persist?: boolean; touchConversation?: boolean } = {}
     ) => {
       let messageToSave: ChatMessage | null = null
       let conversationMetaToSave: ChatConversation | null = null
@@ -452,7 +452,7 @@ export function AppShell() {
 
       setConversationsWithRef(nextConversations)
 
-      if (messageToSave) {
+      if (messageToSave && options.persist !== false) {
         enqueueChatMessageStateSave(conversationId, messageToSave)
       }
       if (options.touchConversation && conversationMetaToSave) {
@@ -567,6 +567,19 @@ export function AppShell() {
       }
 
       if (agentEvent.type === 'tool_input_progress') return
+
+      if (
+        agentEvent.type === 'file_write_preview_updated' ||
+        agentEvent.type === 'file_write_preview_cleared'
+      ) {
+        updateAssistantMessage(
+          conversationId,
+          assistantMessageId,
+          (message) => applyAgentEventToChatMessage(message, agentEvent),
+          { persist: false, touchConversation: false }
+        )
+        return
+      }
 
       if (agentEvent.runId) {
         flushPendingMessageDelta(agentEvent.runId)

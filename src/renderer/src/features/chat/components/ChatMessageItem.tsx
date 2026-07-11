@@ -1,12 +1,18 @@
 // Renderer UI.
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ChevronDown, Check, Copy, Database, Pencil } from 'lucide-react'
-import type { AgentProposedAction, AgentToolCall, AgentUsage } from '@mycopilot/protocol'
+import type {
+  AgentProposedAction,
+  AgentToolCall,
+  AgentToolResult,
+  AgentUsage
+} from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../config/translationFormat'
 import type {
   ChatAgentRunView,
   ChatAgentTimelineItem,
+  ChatFileWritePreview,
   ChatMessage,
   ChatReadActivityKind
 } from '../chatTypes'
@@ -50,6 +56,7 @@ import type { SettledToolStatus } from './toolActivities/toolActivityUtils'
 import { AssistantSources } from './toolActivities/WebSearchSources'
 
 const ACTIVE_STREAMING_GRACE_MS = 1200
+const FILE_WRITE_ACTIVITY_GRACE_MS = 2000
 const COPIED_INDICATOR_MS = 1300
 
 interface ChatMessageItemProps {
@@ -172,8 +179,22 @@ async function copyTextToClipboard(content: string) {
   document.body.removeChild(textarea)
 }
 
-function getToolResult(run: ChatAgentRunView, callId: string) {
+function getToolResult(run: ChatAgentRunView, callId: string): AgentToolResult | undefined {
   return run.toolResults.find((result) => result.callId === callId)
+}
+
+function getPreviousSuccessfulTodoResult(
+  run: ChatAgentRunView,
+  callId: string
+): AgentToolResult | undefined {
+  const currentCallIndex = run.toolCalls.findIndex((call) => call.id === callId)
+  for (let index = currentCallIndex - 1; index >= 0; index -= 1) {
+    const previousCall = run.toolCalls[index]
+    if (previousCall.tool !== 'todo_update') continue
+    const previousResult = getToolResult(run, previousCall.id)
+    if (previousResult?.ok) return previousResult
+  }
+  return undefined
 }
 
 function isRunSettled(run: ChatAgentRunView) {
@@ -286,6 +307,15 @@ function shouldShowThinkingActivity(run: ChatAgentRunView, timeline: ChatAgentTi
 
   const lastItem = getLastRenderableTimelineItem(run, timeline)
   return !isBottomTimelineItemSpecificPendingStatus(run, lastItem)
+}
+
+function hasRecentFileWriteActivity(run: ChatAgentRunView, now: number): boolean {
+  if (isRunSettled(run)) return false
+  return Boolean(
+    run.fileWritePreviews?.some(
+      (preview) => now - preview.receivedAt <= FILE_WRITE_ACTIVITY_GRACE_MS
+    )
+  )
 }
 
 function hasCollapsibleTimelineContent(run: ChatAgentRunView, timeline: ChatAgentTimelineItem[]) {
@@ -449,6 +479,17 @@ function getWriteFileDraftId(run: ChatAgentRunView, call: AgentToolCall): string
   return typeof draftId === 'string' && draftId ? draftId : undefined
 }
 
+function getLatestWriteFilePreview(
+  run: ChatAgentRunView,
+  draftId: string | undefined
+): ChatFileWritePreview | undefined {
+  if (!draftId) return undefined
+  return run.fileWritePreviews?.reduce<ChatFileWritePreview | undefined>((latest, preview) => {
+    if (preview.draftId !== draftId) return latest
+    return !latest || preview.receivedAt >= latest.receivedAt ? preview : latest
+  }, undefined)
+}
+
 function getWriteFileGroupItems(
   run: ChatAgentRunView,
   callIds: string[]
@@ -465,6 +506,7 @@ function getWriteFileGroupItems(
     const draft = draftId
       ? run.fileDrafts?.find((candidate) => candidate.draftId === draftId)
       : undefined
+    const preview = getLatestWriteFilePreview(run, draftId)
     const draftIsUnsettled =
       draft && ['drafting', 'ready', 'waiting_approval', 'applying'].includes(draft.status)
     const settledStatus =
@@ -477,6 +519,7 @@ function getWriteFileGroupItems(
       call,
       draft,
       draftId: draftId ?? call.id,
+      preview,
       result: result ?? existing?.result,
       settledStatus
     })
@@ -804,6 +847,8 @@ function AgentTimelineItemView({
         ? run.diffs.find((candidate) => candidate.id === call.id)
         : undefined
     const result = getToolResult(run, call.id)
+    const previousTodoResult =
+      call.tool === 'todo_update' ? getPreviousSuccessfulTodoResult(run, call.id) : undefined
     const settledStatus = getSettledToolStatus(run, result)
     return (
       <AgentToolActivity
@@ -811,6 +856,7 @@ function AgentTimelineItemView({
         call={call}
         diff={diff}
         projectId={projectId}
+        previousTodoResult={previousTodoResult}
         readActivity={readActivity}
         result={result}
         settledStatus={settledStatus}
@@ -908,10 +954,12 @@ function AgentRunView({
     !isRunSettled(run) &&
     Boolean(run.lastResponseAt) &&
     now - (run.lastResponseAt ?? 0) <= ACTIVE_STREAMING_GRACE_MS
+  const isStreamingFileWrite = hasRecentFileWriteActivity(run, now)
   const showThinkingActivity =
     !(canToggleTimeline && timelineCollapsed) &&
     !headerState.isThinking &&
     !isStreamingAssistantText &&
+    !isStreamingFileWrite &&
     shouldShowThinkingActivity(run, timeline)
   const showTokenLimitNotice = isRunSettled(run) && isTokenLimitFinishReason(run.finishReason)
   const webSearchSources = getUniqueWebSearchSources(run)

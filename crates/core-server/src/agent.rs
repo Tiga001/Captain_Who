@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use mycopilot_core::command::{run_approved_command, AgentCommandExecutionResult, CommandRunState};
 use mycopilot_core::file_write::{file_draft_snapshot, file_write_diff};
@@ -123,11 +124,13 @@ impl AgentService {
                     );
                 }
                 Err(error) => {
+                    let usage = error.usage().cloned();
                     let message = error.to_string();
                     let _ = service.persist_assistant_error(
                         &worker_conversation_id,
                         &worker_assistant_message_id,
                         &message,
+                        usage.clone(),
                     );
                     let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                         run_id: Some(worker_run_id.clone()),
@@ -139,7 +142,7 @@ impl AgentService {
                         success: false,
                         status: Some(AgentRunStatus::Failed),
                         content: Some(message),
-                        usage: None,
+                        usage,
                         finish_reason: None,
                         proposed_actions: Vec::new(),
                     }));
@@ -165,6 +168,80 @@ impl AgentService {
         };
         let cancelled_commands = self.command_runs.cancel_run(run_id);
         cancelled_run || cancelled_commands > 0
+    }
+
+    pub async fn shutdown_active_runs(&self, timeout: Duration) -> (usize, bool) {
+        let active_runs = {
+            let cancellations = self
+                .cancellations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            cancellations
+                .iter()
+                .map(|(run_id, token)| (run_id.clone(), token.clone()))
+                .collect::<Vec<_>>()
+        };
+
+        for (run_id, token) in &active_runs {
+            token.cancel();
+            self.command_runs.cancel_run(run_id);
+        }
+
+        if active_runs.is_empty() {
+            return (0, false);
+        }
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let active_run_count = self
+                .cancellations
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len();
+            if active_run_count == 0 {
+                return (active_runs.len(), false);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let remaining_run_ids = self
+                    .cancellations
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                self.persist_forced_cancelled_runs(&remaining_run_ids);
+                return (active_runs.len(), true);
+            }
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn persist_forced_cancelled_runs(&self, run_ids: &[String]) {
+        let contexts = {
+            let usage_contexts = self
+                .usage_contexts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            run_ids
+                .iter()
+                .filter_map(|run_id| {
+                    usage_contexts
+                        .get(run_id)
+                        .map(|state| state.context.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+        let completed_at = now_ms();
+        for context in contexts {
+            let _ = self.storage.update_chat_message_run_terminal_state(
+                &context.conversation_id,
+                &context.assistant_message_id,
+                status_for_run(AgentRunStatus::Cancelled),
+                run_status_label(AgentRunStatus::Cancelled),
+                completed_at,
+            );
+        }
     }
 
     fn host_action_executor(
@@ -771,6 +848,7 @@ impl AgentService {
                 self.update_pending_status(&record.snapshot.action_id, final_pending_status);
             }
             Err(error) => {
+                let usage = error.usage().cloned();
                 let message = error.to_string();
                 if let (Some(conversation_id), Some(assistant_message_id)) = (
                     record.snapshot.conversation_id.as_deref(),
@@ -780,6 +858,7 @@ impl AgentService {
                         conversation_id,
                         assistant_message_id,
                         &message,
+                        usage.clone(),
                     );
                 }
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {
@@ -792,7 +871,7 @@ impl AgentService {
                     success: false,
                     status: Some(AgentRunStatus::Failed),
                     content: Some(message),
-                    usage: None,
+                    usage,
                     finish_reason: None,
                     proposed_actions: Vec::new(),
                 }));
@@ -1116,13 +1195,36 @@ impl AgentService {
             output.usage.clone(),
             output.finish_reason.clone(),
         )?;
+        let completed_at = now_ms();
+        if output.status == AgentRunStatus::Cancelled {
+            return self.storage.update_chat_message_run_terminal_state(
+                conversation_id,
+                assistant_message_id,
+                status_for_run(output.status),
+                run_status_label(output.status),
+                completed_at,
+            );
+        }
         self.storage.update_chat_message_status_and_content(
             conversation_id,
             assistant_message_id,
             &output.content,
             status_for_run(output.status),
-            now_ms(),
-        )
+            completed_at,
+        )?;
+        if matches!(
+            output.status,
+            AgentRunStatus::Completed | AgentRunStatus::Failed
+        ) {
+            self.storage.update_chat_message_run_terminal_state(
+                conversation_id,
+                assistant_message_id,
+                status_for_run(output.status),
+                run_status_label(output.status),
+                completed_at,
+            )?;
+        }
+        Ok(())
     }
 
     fn persist_assistant_error(
@@ -1130,21 +1232,30 @@ impl AgentService {
         conversation_id: &str,
         assistant_message_id: &str,
         message: &str,
+        usage: Option<AgentUsage>,
     ) -> Result<(), String> {
         if let Some(run_id) = self.find_usage_run_id(conversation_id, assistant_message_id) {
             self.persist_run_usage(
                 &run_id,
                 AgentRunStatus::Failed,
-                None,
+                usage,
                 Some(message.to_string()),
             )?;
         }
+        let completed_at = now_ms();
         self.storage.update_chat_message_status_and_content(
             conversation_id,
             assistant_message_id,
             message,
             Some("error"),
-            now_ms(),
+            completed_at,
+        )?;
+        self.storage.update_chat_message_run_terminal_state(
+            conversation_id,
+            assistant_message_id,
+            Some("error"),
+            run_status_label(AgentRunStatus::Failed),
+            completed_at,
         )
     }
 
@@ -1333,5 +1444,79 @@ fn scope_for_path(input: &AgentChatInput, path: &str) -> String {
         "system_alias".to_string()
     } else {
         "workspace".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mycopilot_core::storage::models::ChatConversationRecord;
+    use mycopilot_core::AgentUsageSummaryRange;
+    use tempfile::tempdir;
+
+    #[test]
+    fn persists_usage_for_failed_runs() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-1".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Usage test".to_string(),
+                messages: Vec::new(),
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let service = AgentService::new(storage);
+        service.register_usage_context(
+            "run-1",
+            AgentRunUsageContext {
+                conversation_id: "conversation-1".to_string(),
+                assistant_message_id: "assistant-1".to_string(),
+                run_id: "run-1".to_string(),
+                project_id: None,
+                model_id: "model-1".to_string(),
+                model_name: "Model 1".to_string(),
+                provider_path: None,
+                input_price: None,
+                output_price: None,
+                started_at: 1,
+            },
+        );
+
+        service
+            .persist_run_usage(
+                "run-1",
+                AgentRunStatus::Failed,
+                Some(AgentUsage {
+                    input_tokens: Some(20),
+                    output_tokens: Some(8),
+                    output_thinking_tokens: None,
+                    total_tokens: Some(28),
+                    cached_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    billable_request_count: Some(3),
+                }),
+                Some("invalid tool arguments".to_string()),
+            )
+            .unwrap();
+
+        let summary = service
+            .get_usage_summary(&AgentUsageSummaryInput {
+                range: AgentUsageSummaryRange::All,
+                from: None,
+                to: None,
+            })
+            .unwrap();
+        assert_eq!(summary.request_count, 3);
+        assert_eq!(summary.input_tokens, Some(20));
+        assert_eq!(summary.output_tokens, Some(8));
+        assert_eq!(summary.total_tokens, Some(28));
     }
 }

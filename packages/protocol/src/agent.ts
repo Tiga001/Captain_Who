@@ -481,6 +481,24 @@ export interface AgentFileDraftSnapshot {
   updatedAt: number;
 }
 
+export interface AgentFileWritePreview {
+  previewId: string;
+  streamId: string;
+  attempt: number;
+  toolCallIndex: number;
+  toolCallId?: string;
+  draftId: string;
+  filePath: string;
+  additions: number;
+  deletions: number;
+  lineCount: number;
+  byteCount: number;
+  generatedBytes: number;
+  contentOffsetBytes: number;
+  contentDelta: string;
+  updatedAt: number;
+}
+
 export interface AgentFileWriteProposal {
   id: string;
   draftId: string;
@@ -590,8 +608,22 @@ export type AgentEvent =
       type: "tool_input_progress";
       runId: string;
       streamId: string;
+      attempt: number;
+      toolCallIndex: number;
+      toolCallId?: string;
       tool: string;
       receivedBytes: number;
+    }
+  | {
+      type: "file_write_preview_updated";
+      runId: string;
+      preview: AgentFileWritePreview;
+    }
+  | {
+      type: "file_write_preview_cleared";
+      runId: string;
+      streamId: string;
+      attempt: number;
     }
   | { type: "message"; runId: string; content: string }
   | { type: "tool_call"; runId: string; call: AgentToolCall }

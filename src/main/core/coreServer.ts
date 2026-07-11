@@ -24,6 +24,7 @@ import type {
   AppVersionResponse,
   CorePingRequest,
   CorePingResponse,
+  CoreShutdownResponse,
   ChatSearchInput,
   ChatSearchResult,
   StorageAgentPromptPreferencesRecord,
@@ -45,6 +46,7 @@ import type {
 import { CoreJsonRpcClient } from './jsonRpcClient'
 
 const CORE_PING_METHOD = 'core.ping'
+const CORE_SHUTDOWN_METHOD = 'core.shutdown'
 const APP_GET_VERSION_METHOD = 'app.getVersion'
 const AGENT_START_RUN_METHOD = 'agent.startRun'
 const AGENT_CANCEL_RUN_METHOD = 'agent.cancelRun'
@@ -96,6 +98,30 @@ export class CoreServer {
   }
 
   stop(): void {
+    this.rpc.stop()
+  }
+
+  async shutdown(): Promise<void> {
+    if (!this.rpc.isRunning()) return
+
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    const timeout = new Promise<void>((resolve) => {
+      timeoutId = setTimeout(resolve, 2500)
+      timeoutId.unref()
+    })
+    const shutdown = this.rpc
+      .request<CoreShutdownResponse>(CORE_SHUTDOWN_METHOD)
+      .then((response) => {
+        if (response.timedOut) {
+          console.warn('core-server shutdown timed out while waiting for active agent runs')
+        }
+      })
+      .catch((error) => {
+        console.warn('Failed to request core-server shutdown', error)
+      })
+
+    await Promise.race([shutdown, timeout])
+    if (timeoutId) clearTimeout(timeoutId)
     this.rpc.stop()
   }
 

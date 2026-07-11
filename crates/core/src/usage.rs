@@ -95,6 +95,18 @@ pub(crate) fn merge_total_usage(total: &mut Option<AgentUsage>, next: Option<Age
     }
 }
 
+pub(crate) fn usage_for_request(usage: Option<AgentUsage>) -> AgentUsage {
+    with_default_billable_request_count(usage.unwrap_or(AgentUsage {
+        input_tokens: None,
+        output_tokens: None,
+        output_thinking_tokens: None,
+        total_tokens: None,
+        cached_input_tokens: None,
+        cache_creation_input_tokens: None,
+        billable_request_count: None,
+    }))
+}
+
 fn usage_from_usage_value(usage: &Value) -> Option<AgentUsage> {
     let input_tokens = usage
         .get("prompt_tokens")
@@ -301,5 +313,14 @@ mod tests {
         assert_eq!(total.cached_input_tokens, Some(2));
         assert_eq!(total.cache_creation_input_tokens, Some(3));
         assert_eq!(total.billable_request_count, Some(2));
+    }
+
+    #[test]
+    fn counts_requests_even_when_token_usage_is_unavailable() {
+        let usage = usage_for_request(None);
+
+        assert_eq!(usage.billable_request_count, Some(1));
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
     }
 }

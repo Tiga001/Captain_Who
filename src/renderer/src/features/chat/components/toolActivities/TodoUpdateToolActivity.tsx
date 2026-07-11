@@ -1,6 +1,19 @@
 // Renderer UI for agent todo_update tool activity rows in chat history.
-import { CheckCircle2, Circle, ClipboardCheck, ClipboardList, LoaderCircle, XCircle } from 'lucide-react'
-import type { AgentTodoItem, AgentTodoState, AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
+import {
+  CheckCircle2,
+  Circle,
+  ClipboardCheck,
+  ClipboardList,
+  LoaderCircle,
+  XCircle
+} from 'lucide-react'
+import type {
+  AgentTodoItem,
+  AgentTodoState,
+  AgentToolCall,
+  AgentToolResult
+} from '@mycopilot/protocol'
+import type { ReactElement } from 'react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../../config/translationFormat'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
@@ -9,6 +22,7 @@ import type { SettledToolStatus } from './toolActivityUtils'
 interface TodoUpdateToolActivityProps {
   cancelled?: boolean
   call: AgentToolCall
+  previousResult?: AgentToolResult
   result?: AgentToolResult
   settledStatus?: SettledToolStatus
 }
@@ -33,14 +47,13 @@ function parseTodoItems(value: unknown): AgentTodoItem[] {
         return null
       }
 
-      const now = Date.now()
       return {
         id: typeof item.id === 'string' && item.id.trim() ? item.id : `todo-${index + 1}`,
         title: item.title,
         status,
         note: typeof item.note === 'string' ? item.note : undefined,
-        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
-        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : 0,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : 0
       }
     })
     .filter((item): item is AgentTodoItem => Boolean(item && item.title.trim()))
@@ -54,31 +67,33 @@ function parseTodoState(value: unknown): AgentTodoState | null {
   return {
     revision: typeof value.revision === 'number' ? value.revision : 0,
     items,
-    updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : Date.now()
+    updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : 0
   }
 }
 
-function getTodoState(call: AgentToolCall, result: AgentToolResult | undefined) {
+function getTodoState(
+  call: AgentToolCall,
+  result: AgentToolResult | undefined
+): AgentTodoState | null {
   return parseTodoState(result?.result) ?? parseTodoState(call.args)
 }
 
-function getCompletedCount(items: AgentTodoItem[]) {
+function getCompletedCount(items: AgentTodoItem[]): number {
   return items.filter((item) => item.status === 'completed').length
 }
 
-function getFocusedItem(items: AgentTodoItem[], completedCount: number) {
-  if (completedCount > 0) {
-    return items[Math.min(completedCount - 1, items.length - 1)]
-  }
-
-  return (
-    items.find((item) => item.status === 'in_progress' || item.status === 'blocked') ??
-    items.find((item) => item.status === 'pending') ??
-    items[0]
+function getNewlyCompletedItems(
+  previousTodo: AgentTodoState | null,
+  items: AgentTodoItem[]
+): AgentTodoItem[] {
+  if (!previousTodo) return []
+  const previousItems = new Map(previousTodo.items.map((item) => [item.id, item]))
+  return items.filter(
+    (item) => item.status === 'completed' && previousItems.get(item.id)?.status !== 'completed'
   )
 }
 
-function TodoItemIcon({ status }: { status: AgentTodoItem['status'] }) {
+function TodoItemIcon({ status }: { status: AgentTodoItem['status'] }): ReactElement {
   if (status === 'completed') return <CheckCircle2 aria-hidden="true" />
   if (status === 'in_progress') return <LoaderCircle aria-hidden="true" />
   if (status === 'blocked') return <XCircle aria-hidden="true" />
@@ -88,23 +103,25 @@ function TodoItemIcon({ status }: { status: AgentTodoItem['status'] }) {
 export function TodoUpdateToolActivity({
   cancelled = false,
   call,
+  previousResult,
   result,
   settledStatus
-}: TodoUpdateToolActivityProps) {
+}: TodoUpdateToolActivityProps): ReactElement {
   const { t } = useFrontendConfig()
   const todo = getTodoState(call, result)
+  const previousTodo = parseTodoState(previousResult?.result)
   const items = todo?.items.filter((item) => item.title.trim()) ?? []
   const total = items.length
   const completedCount = getCompletedCount(items)
   const isCompletedPlan = total > 0 && completedCount >= total
-  const isCreatedPlan = total > 0 && completedCount === 0
+  const isCreatedPlan = total > 0 && !previousTodo
   const status =
     result?.ok === false
       ? 'failed'
       : result
         ? 'completed'
         : (settledStatus ?? (cancelled ? 'cancelled' : 'running'))
-  const Icon = isCompletedPlan ? ClipboardCheck : ClipboardList
+  const Icon = status === 'completed' && !isCreatedPlan ? ClipboardCheck : ClipboardList
 
   let label = t('agent.todoActivity.running')
   if (status === 'cancelled') {
@@ -126,8 +143,8 @@ export function TodoUpdateToolActivity({
     }
   }
 
-  const focusedItem = getFocusedItem(items, completedCount)
-  const visibleItems = isCreatedPlan ? items : focusedItem ? [focusedItem] : []
+  const newlyCompletedItems = getNewlyCompletedItems(previousTodo, items)
+  const visibleItems = isCreatedPlan ? items : newlyCompletedItems
   const hasDetails = visibleItems.length > 0 || Boolean(result?.error)
 
   return (

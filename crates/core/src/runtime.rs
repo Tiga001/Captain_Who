@@ -3,6 +3,7 @@ mod attachments;
 mod file_transactions;
 mod hooks;
 mod tool_flow;
+mod tool_input_stream;
 
 use crate::cancellation::AgentCancellationToken;
 use crate::llm::{
@@ -38,6 +39,7 @@ use tool_flow::{
     redact_tool_call_for_event, redact_tool_result_for_event, redact_tool_result_for_llm,
     sanitize_max_tokens, sanitize_temperature, state_event, tool_calls_from_response,
 };
+use tool_input_stream::ToolInputStreamObservers;
 
 const DEFAULT_MAX_TOKENS: u32 = 30_000;
 const MAX_MAX_TOKENS: u32 = 128_000;
@@ -265,6 +267,7 @@ impl AgentRuntime {
                 let delta_run_id = run_id.clone();
                 let stream_id = format!("{}-stream-{}", run_id, iteration + 1);
                 let delta_cancellation_token = cancellation_token.clone();
+                let mut tool_input_stream = ToolInputStreamObservers::default();
                 complete_chat_streaming(request, cancellation_token.clone(), |stream_event| {
                     if delta_cancellation_token.is_cancelled() {
                         return;
@@ -273,13 +276,16 @@ impl AgentRuntime {
                         LlmStreamEvent::AttemptStarted {
                             attempt,
                             max_attempts,
-                        } if !user_text_blocked => {
-                            let _ = max_attempts;
-                            event_stream.emit(AgentEvent::MessageStreamStarted {
-                                run_id: delta_run_id.clone(),
-                                stream_id: stream_id.clone(),
-                                attempt,
-                            });
+                        } => {
+                            tool_input_stream.start_attempt(attempt);
+                            if !user_text_blocked {
+                                let _ = max_attempts;
+                                event_stream.emit(AgentEvent::MessageStreamStarted {
+                                    run_id: delta_run_id.clone(),
+                                    stream_id: stream_id.clone(),
+                                    attempt,
+                                });
+                            }
                         }
                         LlmStreamEvent::Delta(delta) if !user_text_blocked && !delta.is_empty() => {
                             event_stream.emit(AgentEvent::MessageDelta {
@@ -289,22 +295,57 @@ impl AgentRuntime {
                             });
                         }
                         LlmStreamEvent::ToolInputProgress {
+                            tool_call_index,
+                            tool_call_id,
                             tool,
+                            input_delta,
                             received_bytes,
                         } => {
-                            event_stream.emit(AgentEvent::ToolInputProgress {
-                                run_id: delta_run_id.clone(),
-                                stream_id: stream_id.clone(),
-                                tool,
+                            let observation = tool_input_stream.on_delta(
+                                tool_registry.as_ref(),
+                                &tool_context,
+                                &stream_id,
+                                tool_call_index,
+                                tool_call_id.as_deref(),
+                                &tool,
+                                &input_delta,
                                 received_bytes,
-                            });
+                            );
+                            if observation.as_ref().is_ok_and(|value| !value.handled) {
+                                event_stream.emit_transient(AgentEvent::ToolInputProgress {
+                                    run_id: delta_run_id.clone(),
+                                    stream_id: stream_id.clone(),
+                                    attempt: tool_input_stream.attempt(),
+                                    tool_call_index,
+                                    tool_call_id: tool_call_id.clone(),
+                                    tool: tool.clone(),
+                                    received_bytes,
+                                });
+                            }
+                            if let Ok(observation) = observation {
+                                if let Some(preview) = observation.preview {
+                                    emit_tool_input_preview(
+                                        &mut event_stream,
+                                        &delta_run_id,
+                                        preview,
+                                    );
+                                }
+                            }
                         }
-                        LlmStreamEvent::AttemptReset { reason } if !user_text_blocked => {
-                            event_stream.emit(AgentEvent::MessageStreamReset {
+                        LlmStreamEvent::AttemptReset { reason } => {
+                            event_stream.emit_transient(AgentEvent::FileWritePreviewCleared {
                                 run_id: delta_run_id.clone(),
                                 stream_id: stream_id.clone(),
-                                reason,
+                                attempt: tool_input_stream.attempt(),
                             });
+                            tool_input_stream.reset();
+                            if !user_text_blocked {
+                                event_stream.emit(AgentEvent::MessageStreamReset {
+                                    run_id: delta_run_id.clone(),
+                                    stream_id: stream_id.clone(),
+                                    reason,
+                                });
+                            }
                         }
                         LlmStreamEvent::Retrying {
                             attempt,
@@ -319,16 +360,18 @@ impl AgentRuntime {
                                 reason,
                             });
                         }
-                        LlmStreamEvent::Committed if !user_text_blocked => {
-                            event_stream.emit(AgentEvent::MessageStreamCommitted {
-                                run_id: delta_run_id.clone(),
-                                stream_id: stream_id.clone(),
-                            });
+                        LlmStreamEvent::Committed => {
+                            for preview in tool_input_stream.flush() {
+                                emit_tool_input_preview(&mut event_stream, &delta_run_id, preview);
+                            }
+                            if !user_text_blocked {
+                                event_stream.emit(AgentEvent::MessageStreamCommitted {
+                                    run_id: delta_run_id.clone(),
+                                    stream_id: stream_id.clone(),
+                                });
+                            }
                         }
-                        LlmStreamEvent::AttemptStarted { .. }
-                        | LlmStreamEvent::AttemptReset { .. }
-                        | LlmStreamEvent::Committed
-                        | LlmStreamEvent::Delta(_) => {}
+                        LlmStreamEvent::Delta(_) => {}
                     }
                 })
                 .await
@@ -338,6 +381,7 @@ impl AgentRuntime {
             let llm_response = match llm_response_result {
                 Ok(response) => response,
                 Err(error) if error.is_cancelled() => {
+                    merge_total_usage(&mut usage, error.usage().cloned());
                     return Ok(cancelled_output(
                         run_id,
                         event_stream,
@@ -346,7 +390,10 @@ impl AgentRuntime {
                         finish_reason,
                     ));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    merge_total_usage(&mut usage, error.usage().cloned());
+                    return Err(error.with_usage(usage));
+                }
             };
             if cancellation_token.is_cancelled() {
                 return Ok(cancelled_output(
@@ -689,8 +736,29 @@ impl AgentEventStream {
         self.events.push(event);
     }
 
+    fn emit_transient(&self, event: AgentEvent) {
+        if let Some(emitter) = &self.emitter {
+            emitter(event);
+        }
+    }
+
     fn into_events(self) -> Vec<AgentEvent> {
         self.events
+    }
+}
+
+fn emit_tool_input_preview(
+    event_stream: &mut AgentEventStream,
+    run_id: &str,
+    preview: crate::tools::ToolInputStreamPreview,
+) {
+    match preview {
+        crate::tools::ToolInputStreamPreview::FileWrite(preview) => {
+            event_stream.emit_transient(AgentEvent::FileWritePreviewUpdated {
+                run_id: run_id.to_string(),
+                preview,
+            });
+        }
     }
 }
 

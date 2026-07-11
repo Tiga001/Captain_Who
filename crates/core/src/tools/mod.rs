@@ -7,6 +7,7 @@ mod context;
 mod document_text;
 mod filesystem;
 mod git_diff;
+mod input_stream;
 mod limits;
 mod read_file;
 mod read_image;
@@ -21,10 +22,11 @@ mod web_fetch;
 mod web_search;
 mod workspace_map;
 mod write_file;
+mod write_file_stream;
 
 use crate::protocol::{
-    AgentError, AgentProposedAction, AgentResult, AgentSearchConfig, AgentSearchMode,
-    AgentToolCall, AgentToolDefinition, AgentToolResult,
+    AgentError, AgentFileWritePreview, AgentProposedAction, AgentResult, AgentSearchConfig,
+    AgentSearchMode, AgentToolCall, AgentToolDefinition, AgentToolResult,
 };
 use apply_patch::ApplyPatchTool;
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
@@ -101,6 +103,24 @@ impl ToolRegistry {
             .get(tool_name)
             .map(|tool| tool.requires_approval_for_call(args))
             .unwrap_or(false)
+    }
+
+    pub(crate) fn input_stream_observer(
+        &self,
+        tool_name: &str,
+        context: ToolExecutionContext,
+    ) -> Option<Box<dyn ToolInputStreamObserver>> {
+        self.tools
+            .get(tool_name)
+            .and_then(|tool| tool.input_stream_observer(context))
+    }
+
+    pub(crate) fn contains_tool(&self, tool_name: &str) -> bool {
+        self.tools.contains_key(tool_name)
+    }
+
+    pub(crate) fn contains_tool_prefix(&self, tool_name: &str) -> bool {
+        self.tools.keys().any(|name| name.starts_with(tool_name))
     }
 
     pub fn proposed_action(
@@ -198,6 +218,35 @@ pub(super) trait AgentTool: Send + Sync {
     fn requires_approval_for_call(&self, _args: &Value) -> bool {
         self.definition().requires_approval
     }
+
+    fn input_stream_observer(
+        &self,
+        _context: ToolExecutionContext,
+    ) -> Option<Box<dyn ToolInputStreamObserver>> {
+        None
+    }
+}
+
+pub(crate) struct ToolInputStreamChunk<'a> {
+    pub stream_id: &'a str,
+    pub attempt: usize,
+    pub tool_call_index: usize,
+    pub tool_call_id: Option<&'a str>,
+    pub input_delta: &'a str,
+    pub received_bytes: u64,
+}
+
+pub(crate) enum ToolInputStreamPreview {
+    FileWrite(AgentFileWritePreview),
+}
+
+pub(crate) trait ToolInputStreamObserver: Send {
+    fn on_delta(
+        &mut self,
+        chunk: &ToolInputStreamChunk<'_>,
+    ) -> AgentResult<Option<ToolInputStreamPreview>>;
+
+    fn flush(&mut self) -> AgentResult<Option<ToolInputStreamPreview>>;
 }
 
 #[cfg(test)]

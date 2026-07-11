@@ -5,6 +5,7 @@ import type {
   AgentChatOutput,
   AgentEvent,
   AgentFileDraftStatus,
+  AgentFileWritePreview,
   AgentProposedAction,
   AgentToolCall,
   AgentToolResult
@@ -12,6 +13,7 @@ import type {
 import type {
   ChatAgentRunView,
   ChatAgentTimelineItem,
+  ChatFileWritePreview,
   ChatMessage
 } from '../features/chat/chatTypes'
 import { THINKING_PLACEHOLDER } from './appConstants'
@@ -46,6 +48,7 @@ function createAgentRun(
     approvals: [],
     diffs: [],
     fileDrafts: [],
+    fileWritePreviews: [],
     messageStreamCheckpoints: {},
     webSearchActivities: [],
     readActivities: [],
@@ -73,6 +76,7 @@ export function ensureAgentRun(
     timeline: currentRun.timeline ?? [],
     readActivities: currentRun.readActivities ?? [],
     fileDrafts: currentRun.fileDrafts ?? [],
+    fileWritePreviews: currentRun.fileWritePreviews ?? [],
     messageStreamCheckpoints: currentRun.messageStreamCheckpoints ?? {}
   }
 }
@@ -117,6 +121,7 @@ export function settleAgentRunToolActivities(
 
   return {
     ...runWithStatus,
+    fileWritePreviews: [],
     webSearchActivities: settlePendingWebSearchActivities(
       runWithStatus,
       settledActivityStatus,
@@ -135,6 +140,34 @@ function upsertById<T>(items: T[], nextItem: T, getId: (item: T) => string) {
   }
 
   return items.map((item, index) => (index === itemIndex ? nextItem : item))
+}
+
+function upsertFileWritePreview(
+  previews: ChatFileWritePreview[],
+  incoming: AgentFileWritePreview,
+  receivedAt: number
+): ChatFileWritePreview[] {
+  const existing = previews.find((preview) => preview.previewId === incoming.previewId)
+  const { contentDelta, contentOffsetBytes, ...snapshot } = incoming
+  let content = existing?.content ?? ''
+
+  if (!existing || contentOffsetBytes === 0) {
+    content = contentDelta
+  } else if (contentOffsetBytes === existing.generatedBytes) {
+    content += contentDelta
+  } else if (incoming.generatedBytes <= existing.generatedBytes) {
+    return previews
+  }
+
+  return upsertById(
+    previews,
+    {
+      ...snapshot,
+      content,
+      receivedAt
+    },
+    (preview) => preview.previewId
+  )
 }
 
 function upsertAgentAction(actions: AgentProposedAction[], nextAction: AgentProposedAction) {
@@ -648,7 +681,41 @@ export function applyAgentEventToChatMessage(
     }
   }
 
-  if (agentEvent.type === 'llm_retry' || agentEvent.type === 'tool_input_progress') {
+  if (agentEvent.type === 'tool_input_progress') {
+    return message
+  }
+
+  if (agentEvent.type === 'file_write_preview_updated') {
+    const receivedAt = Date.now()
+    return {
+      ...message,
+      status: 'pending',
+      agentRun: {
+        ...currentRun,
+        status: 'running',
+        fileWritePreviews: upsertFileWritePreview(
+          currentRun.fileWritePreviews ?? [],
+          agentEvent.preview,
+          receivedAt
+        )
+      }
+    }
+  }
+
+  if (agentEvent.type === 'file_write_preview_cleared') {
+    return {
+      ...message,
+      agentRun: {
+        ...currentRun,
+        fileWritePreviews: (currentRun.fileWritePreviews ?? []).filter(
+          (preview) =>
+            preview.streamId !== agentEvent.streamId || preview.attempt !== agentEvent.attempt
+        )
+      }
+    }
+  }
+
+  if (agentEvent.type === 'llm_retry') {
     return message
   }
 
@@ -718,7 +785,15 @@ export function applyAgentEventToChatMessage(
         ),
         webSearchActivities: upsertWebSearchActivityFromResult(currentRun, agentEvent.result),
         readActivities: upsertReadActivityFromResult(currentRun, agentEvent.result),
-        fileDrafts: updateFileDraftFromToolResult(currentRun.fileDrafts ?? [], agentEvent.result)
+        fileDrafts: updateFileDraftFromToolResult(currentRun.fileDrafts ?? [], agentEvent.result),
+        fileWritePreviews:
+          agentEvent.result.tool === 'write_file' && !agentEvent.result.ok
+            ? (currentRun.fileWritePreviews ?? []).filter(
+                (preview) =>
+                  preview.toolCallId !== undefined &&
+                  preview.toolCallId !== agentEvent.result.callId
+              )
+            : (currentRun.fileWritePreviews ?? [])
       }
     }
   }
@@ -734,6 +809,9 @@ export function applyAgentEventToChatMessage(
           currentRun.fileDrafts ?? [],
           agentEvent.draft,
           (draft) => draft.draftId
+        ),
+        fileWritePreviews: (currentRun.fileWritePreviews ?? []).filter(
+          (preview) => preview.draftId !== agentEvent.draft.draftId
         )
       }
     }
