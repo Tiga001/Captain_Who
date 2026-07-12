@@ -1,9 +1,10 @@
-import { Plus } from 'lucide-react'
+import { Pencil, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import type { ReactElement } from 'react'
 import { ConfirmationDialog } from '../../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { ModelConfig } from './configurationTypes'
+import { formatContextWindow } from './modelPresentation'
 
 interface ModelManagerProps {
   models: ModelConfig[]
@@ -47,6 +48,7 @@ export function ModelManager({
       <div className="model-manager-table" role="table" aria-label={t('configuration.modelTable')}>
         <div className="model-manager-table__row model-manager-table__row--head" role="row">
           <span role="columnheader">{t('configuration.tableModel')}</span>
+          <span role="columnheader">{t('configuration.tableContext')}</span>
           <span role="columnheader">{t('configuration.tableImage')}</span>
           <span role="columnheader">{t('configuration.tableInput')}</span>
           <span role="columnheader">{t('configuration.tableOutput')}</span>
@@ -58,6 +60,17 @@ export function ModelManager({
             <span className="model-manager-table__model" role="cell">
               <strong>{model.displayName}</strong>
               {model.providerPath && <small>{model.providerPath}</small>}
+            </span>
+            <span
+              className="model-manager-table__context"
+              role="cell"
+              title={
+                model.contextWindowTokens
+                  ? `${model.contextWindowTokens.toLocaleString()} tokens`
+                  : t('configuration.contextNotConfigured')
+              }
+            >
+              {formatContextWindow(model.contextWindowTokens)}
             </span>
             <span className="model-manager-table__image" role="cell">
               <span
@@ -77,18 +90,22 @@ export function ModelManager({
             </span>
             <span className="model-manager-table__actions" role="cell">
               <button
-                className="secondary-settings-button"
+                className="model-manager-table__icon-button"
                 type="button"
+                title={t('configuration.edit')}
+                aria-label={`${t('configuration.edit')}: ${model.displayName}`}
                 onClick={() => onEdit(model)}
               >
-                {t('configuration.edit')}
+                <Pencil aria-hidden="true" />
               </button>
               <button
-                className="secondary-settings-button"
+                className="model-manager-table__icon-button model-manager-table__icon-button--danger"
                 type="button"
+                title={t('configuration.delete')}
+                aria-label={`${t('configuration.delete')}: ${model.displayName}`}
                 onClick={() => setPendingDeleteId(model.id)}
               >
-                {t('configuration.delete')}
+                <Trash2 aria-hidden="true" />
               </button>
             </span>
           </div>

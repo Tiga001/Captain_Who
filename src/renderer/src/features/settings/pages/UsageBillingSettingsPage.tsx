@@ -345,7 +345,6 @@ export function UsageBillingSettingsPage({
   return (
     <article className="settings-list-page usage-billing-settings-page">
       <h1>{t('settings.page.usageBilling')}</h1>
-      <p className="usage-cost-note">{t('configuration.priceNote')}</p>
 
       <section
         className="settings-list-section usage-summary-section"

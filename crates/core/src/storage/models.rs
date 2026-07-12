@@ -9,6 +9,8 @@ pub struct ModelConfigRecord {
     pub short_name: Option<String>,
     pub provider_path: Option<String>,
     pub supports_image: bool,
+    #[serde(default)]
+    pub context_window_tokens: Option<u32>,
     pub input_price: String,
     pub output_price: String,
     pub enabled: bool,
@@ -176,6 +178,7 @@ pub struct UiPreferencesRecord {
     pub sidebar_section_order: String,
     pub native_font_smoothing: bool,
     pub show_token_usage_details: bool,
+    pub show_context_window_usage: bool,
     pub translucent_sidebar: bool,
     pub translucent_sidebar_transparency: i64,
     pub full_permission_enabled: bool,

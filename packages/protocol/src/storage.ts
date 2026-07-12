@@ -6,6 +6,7 @@ export interface StorageModelConfigRecord {
   shortName?: string | null
   providerPath?: string | null
   supportsImage: boolean
+  contextWindowTokens?: number | null
   inputPrice: string
   outputPrice: string
   enabled: boolean
@@ -109,6 +110,7 @@ export interface StorageUiPreferencesRecord {
   sidebarSectionOrder: string
   nativeFontSmoothing: boolean
   showTokenUsageDetails: boolean
+  showContextWindowUsage: boolean
   translucentSidebar: boolean
   translucentSidebarTransparency: number
   fullPermissionEnabled: boolean

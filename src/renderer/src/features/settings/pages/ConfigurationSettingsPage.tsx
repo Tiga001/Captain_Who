@@ -45,6 +45,10 @@ export function ConfigurationSettingsPage() {
         editingModel && editingModel.id === values.id ? editingModel.providerPath : undefined,
       shortName: editingModel && editingModel.id === values.id ? editingModel.shortName : undefined,
       supportsImage: values.supportsImage,
+      contextWindowTokens:
+        values.contextWindowTokens.trim().length > 0
+          ? Number(values.contextWindowTokens.replaceAll(',', ''))
+          : undefined,
       inputPrice: values.inputPrice,
       outputPrice: values.outputPrice,
       enabled: editingModel?.enabled ?? true

@@ -1,8 +1,8 @@
 use crate::agent_support::*;
 pub use crate::agent_support::{
-    AgentActionExecutionOutput, AgentConversationTurnInput, AgentConversationTurnOutput,
-    AgentFileDraftContentPage, AgentFileWriteDiffPage, PendingActionStatus,
-    PendingAgentActionSnapshot,
+    AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
+    AgentConversationTurnInput, AgentConversationTurnOutput, AgentFileDraftContentPage,
+    AgentFileWriteDiffPage, PendingActionStatus, PendingAgentActionSnapshot,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -17,12 +17,13 @@ use mycopilot_core::storage::models::{
 };
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
-    next_run_id, send_chat_with_host_executor, AgentApprovalDecision, AgentApprovalDecisionStatus,
-    AgentApprovalStatus, AgentCancellationToken, AgentChatInput, AgentChatOutput, AgentError,
-    AgentEvent, AgentEventEmitter, AgentHostActionExecutor, AgentPatchResult, AgentProposedAction,
-    AgentResult, AgentRunCheckpoint, AgentRunStatus, AgentToolCall, AgentToolContinuation,
-    AgentToolResult, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
-    AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    inspect_context_window, next_run_id, send_chat_with_host_executor, AgentApprovalDecision,
+    AgentApprovalDecisionStatus, AgentApprovalStatus, AgentCancellationToken, AgentChatInput,
+    AgentChatOutput, AgentContextWindowSnapshot, AgentError, AgentEvent, AgentEventEmitter,
+    AgentHostActionExecutor, AgentPatchResult, AgentProposedAction, AgentResult,
+    AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentToolCall,
+    AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
+    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -147,25 +148,45 @@ impl AgentService {
 
             match result {
                 Ok(agent_output) => {
-                    let _ = service.persist_final_assistant_output(
+                    let persisted = service.persist_final_assistant_output(
                         &worker_conversation_id,
                         &worker_assistant_message_id,
                         &agent_output,
                     );
+                    if persisted.is_ok() {
+                        service.emit_persisted_context_window_snapshot(
+                            &notifications,
+                            &pending_agent_input,
+                            &worker_run_id,
+                            &worker_conversation_id,
+                        );
+                    }
                 }
                 Err(error) => {
                     let usage = error.usage().cloned();
+                    let code = error.code().map(ToString::to_string);
+                    let details = error.details().cloned();
                     let message = error.to_string();
-                    let _ = service.persist_assistant_error(
+                    let persisted = service.persist_assistant_error(
                         &worker_conversation_id,
                         &worker_assistant_message_id,
                         &message,
                         usage.clone(),
                     );
+                    if persisted.is_ok() {
+                        service.emit_persisted_context_window_snapshot(
+                            &notifications,
+                            &pending_agent_input,
+                            &worker_run_id,
+                            &worker_conversation_id,
+                        );
+                    }
                     let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                         run_id: Some(worker_run_id.clone()),
                         message: message.clone(),
                         recoverable: false,
+                        code,
+                        details,
                     }));
                     let _ = notifications.send(agent_event_notification(AgentEvent::Done {
                         run_id: worker_run_id.clone(),
@@ -1005,32 +1026,52 @@ impl AgentService {
                     record.snapshot.conversation_id.as_deref(),
                     record.snapshot.assistant_message_id.as_deref(),
                 ) {
-                    let _ = self.persist_final_assistant_output(
+                    let persisted = self.persist_final_assistant_output(
                         conversation_id,
                         assistant_message_id,
                         &agent_output,
                     );
+                    if persisted.is_ok() {
+                        self.emit_persisted_context_window_snapshot(
+                            &notifications,
+                            &record.agent_input,
+                            &run_id,
+                            conversation_id,
+                        );
+                    }
                 }
                 self.update_pending_status(&record.snapshot.action_id, final_pending_status);
             }
             Err(error) => {
                 let usage = error.usage().cloned();
+                let code = error.code().map(ToString::to_string);
+                let details = error.details().cloned();
                 let message = error.to_string();
                 if let (Some(conversation_id), Some(assistant_message_id)) = (
                     record.snapshot.conversation_id.as_deref(),
                     record.snapshot.assistant_message_id.as_deref(),
                 ) {
-                    let _ = self.persist_assistant_error(
+                    let persisted = self.persist_assistant_error(
                         conversation_id,
                         assistant_message_id,
                         &message,
                         usage.clone(),
                     );
+                    if persisted.is_ok() {
+                        self.emit_persisted_context_window_snapshot(
+                            &notifications,
+                            &record.agent_input,
+                            &run_id,
+                            conversation_id,
+                        );
+                    }
                 }
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                     run_id: Some(run_id.clone()),
                     message: message.clone(),
                     recoverable: false,
+                    code,
+                    details,
                 }));
                 let _ = notifications.send(agent_event_notification(AgentEvent::Done {
                     run_id: run_id.clone(),
@@ -1471,6 +1512,157 @@ impl AgentService {
     ) -> Result<AgentUsageClearOutput, String> {
         self.storage.clear_usage_records(input)
     }
+
+    pub fn get_context_window_snapshot(
+        &self,
+        input: AgentContextWindowSnapshotInput,
+    ) -> Result<AgentContextWindowSnapshotOutput, String> {
+        if !input.context_budget_enabled {
+            return Ok(AgentContextWindowSnapshotOutput { snapshot: None });
+        }
+
+        let model_id = input.model_id.trim();
+        if model_id.is_empty() {
+            return Err("modelId 不能为空。".to_string());
+        }
+        let settings = self
+            .storage
+            .load_model_settings()?
+            .ok_or_else(|| "请先配置模型。".to_string())?;
+        let model = settings
+            .models
+            .iter()
+            .find(|model| model.id == model_id)
+            .cloned()
+            .ok_or_else(|| format!("未找到模型配置：{model_id}"))?;
+        if !model.enabled {
+            return Err(format!("模型未启用：{model_id}"));
+        }
+
+        let conversation_id = normalized_optional(input.conversation_id.as_deref());
+        let conversation = match conversation_id.as_deref() {
+            Some(conversation_id) => self
+                .storage
+                .load_conversations()?
+                .into_iter()
+                .find(|conversation| conversation.id == conversation_id),
+            None => None,
+        };
+        let project_id = normalized_optional(input.project_id.as_deref()).or_else(|| {
+            conversation
+                .as_ref()
+                .and_then(|conversation| normalized_optional(conversation.project_id.as_deref()))
+        });
+        let project = resolve_project(&self.storage, project_id.as_deref())?;
+        let attachment_library = conversation_id
+            .as_deref()
+            .map(|conversation_id| {
+                self.storage
+                    .build_attachment_library_context(conversation_id, project_id.as_deref())
+            })
+            .transpose()?;
+        let messages = conversation
+            .as_ref()
+            .map(|conversation| conversation_history_messages(conversation, &[]))
+            .unwrap_or_default();
+        let prompt_preferences = match input.prompt_preferences {
+            Some(preferences) => preferences,
+            None => {
+                agent_prompt_preferences_from_record(self.storage.load_agent_prompt_preferences()?)
+            }
+        };
+        let agent_input = AgentChatInput {
+            api_url: settings.api_url.trim().to_string(),
+            api_token: String::new(),
+            model: model_provider_path(&model),
+            api_style: None,
+            context_window_tokens: model.context_window_tokens,
+            context_budget_enabled: true,
+            max_tokens: input.max_tokens,
+            temperature: None,
+            stream: Some(false),
+            context: Some(AgentRunContext {
+                conversation_id: conversation_id.clone(),
+                project_id: project_id.clone(),
+                workspace: project
+                    .as_ref()
+                    .map(|project| mycopilot_core::AgentWorkspaceContext {
+                        project_id: Some(project.id.clone()),
+                        display_name: Some(project.name.clone()),
+                        root_path: project.path.clone(),
+                    }),
+                attachment_library,
+                permissions: input.permissions,
+            }),
+            search_config: Some(AgentSearchConfig {
+                mode: search_mode_from_storage(&settings.search_mode),
+                tavily_api_key: non_empty(settings.tavily_api_key),
+            }),
+            prompt_preferences: Some(prompt_preferences),
+            approval_decision: None,
+            tool_continuation: None,
+            attachments: Vec::new(),
+            resume_checkpoint: None,
+            messages,
+        };
+
+        let snapshot = inspect_context_window(agent_input).map_err(|error| error.to_string())?;
+        Ok(AgentContextWindowSnapshotOutput { snapshot })
+    }
+
+    fn persisted_context_window_snapshot(
+        &self,
+        agent_input: &AgentChatInput,
+        conversation_id: &str,
+    ) -> Result<Option<AgentContextWindowSnapshot>, String> {
+        if !agent_input.context_budget_enabled {
+            return Ok(None);
+        }
+        let conversation = self
+            .storage
+            .load_conversations()?
+            .into_iter()
+            .find(|conversation| conversation.id == conversation_id)
+            .ok_or_else(|| format!("未找到对话：{conversation_id}"))?;
+        let mut preview_input = agent_input.clone();
+        preview_input.messages = conversation_history_messages(&conversation, &[]);
+        preview_input.attachments.clear();
+        preview_input.approval_decision = None;
+        preview_input.tool_continuation = None;
+        preview_input.resume_checkpoint = None;
+        if let Some(context) = preview_input.context.as_mut() {
+            context.conversation_id = Some(conversation_id.to_string());
+            context.attachment_library = Some(self.storage.build_attachment_library_context(
+                conversation_id,
+                context.project_id.as_deref(),
+            )?);
+        }
+        inspect_context_window(preview_input).map_err(|error| error.to_string())
+    }
+
+    fn emit_persisted_context_window_snapshot(
+        &self,
+        notifications: &CoreServerNotificationSender,
+        agent_input: &AgentChatInput,
+        run_id: &str,
+        conversation_id: &str,
+    ) {
+        let snapshot = match self.persisted_context_window_snapshot(agent_input, conversation_id) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!(
+                    "failed to refresh context window snapshot for conversation {conversation_id}: {error}"
+                );
+                return;
+            }
+        };
+        let _ = notifications.send(agent_event_notification(AgentEvent::ContextWindowUpdated {
+            run_id: run_id.to_string(),
+            conversation_id: Some(conversation_id.to_string()),
+            snapshot,
+        }));
+    }
 }
 
 fn load_persisted_pending_actions(
@@ -1669,10 +1861,70 @@ fn agent_input_project_id(input: &AgentChatInput) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mycopilot_core::storage::models::ChatConversationRecord;
-    use mycopilot_core::AgentUsageSummaryRange;
+    use mycopilot_core::storage::models::{
+        ChatConversationRecord, ModelConfigRecord, ModelSettingsRecord,
+    };
+    use mycopilot_core::{AgentPermissions, AgentUsageSummaryRange};
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[test]
+    fn context_window_snapshot_respects_feature_switch_and_model_budget() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_model_settings(ModelSettingsRecord {
+                api_url: "https://example.test/v1/chat/completions".to_string(),
+                api_token: "token".to_string(),
+                search_mode: "disabled".to_string(),
+                tavily_api_key: String::new(),
+                models: vec![ModelConfigRecord {
+                    id: "model-1".to_string(),
+                    display_name: "Model 1".to_string(),
+                    short_name: None,
+                    provider_path: None,
+                    supports_image: false,
+                    context_window_tokens: Some(128_000),
+                    input_price: "0.01".to_string(),
+                    output_price: "0.02".to_string(),
+                    enabled: true,
+                }],
+            })
+            .unwrap();
+        let service = AgentService::new(storage);
+        let enabled = service
+            .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+                context_budget_enabled: true,
+                conversation_id: None,
+                project_id: None,
+                model_id: "model-1".to_string(),
+                max_tokens: Some(30_000),
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+            })
+            .unwrap()
+            .snapshot
+            .unwrap();
+
+        assert_eq!(enabled.model, "model-1");
+        assert_eq!(enabled.context_window_tokens, Some(128_000));
+        assert_eq!(enabled.available_input_tokens, Some(91_600));
+        assert!(enabled.used_input_tokens > 0);
+
+        let disabled = service
+            .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+                context_budget_enabled: false,
+                conversation_id: None,
+                project_id: None,
+                model_id: "model-1".to_string(),
+                max_tokens: Some(30_000),
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+            })
+            .unwrap();
+        assert!(disabled.snapshot.is_none());
+    }
 
     #[test]
     fn persists_usage_for_failed_runs() {
@@ -1785,6 +2037,7 @@ mod tests {
             "apiUrl": "https://example.test/v1/chat/completions",
             "apiToken": "secret",
             "model": "test-model",
+            "contextWindowTokens": 128000,
             "messages": []
         }))
         .unwrap();
@@ -1863,5 +2116,6 @@ mod tests {
         assert!(record.agent_input.messages.is_empty());
         assert!(record.agent_input.attachments.is_empty());
         assert!(record.agent_input.api_token.is_empty());
+        assert_eq!(record.agent_input.context_window_tokens, Some(128_000));
     }
 }

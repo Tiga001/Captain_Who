@@ -1,3 +1,4 @@
+use super::measurement::{ContextEstimatorIdentity, ContextMessageEstimate, ContextTokenEstimator};
 use crate::llm::{LlmMessage, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
     AgentContextCheckpointGroup, AgentContextCheckpointImage, AgentContextCheckpointItem,
@@ -5,6 +6,7 @@ use crate::protocol::{
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextScope {
@@ -202,11 +204,22 @@ impl ContextMetadata {
 pub(crate) struct ContextItem {
     message: LlmMessage,
     metadata: ContextMetadata,
+    measurement: Option<ContextItemMeasurement>,
+}
+
+#[derive(Debug, Clone)]
+struct ContextItemMeasurement {
+    estimator: ContextEstimatorIdentity,
+    estimate: ContextMessageEstimate,
 }
 
 impl ContextItem {
     pub(crate) fn new(message: LlmMessage, metadata: ContextMetadata) -> Self {
-        Self { message, metadata }
+        Self {
+            message,
+            metadata,
+            measurement: None,
+        }
     }
 
     pub(crate) fn text(
@@ -241,20 +254,143 @@ impl ContextItem {
             metadata,
         )
     }
+
+    fn measure(&mut self, estimator: &dyn ContextTokenEstimator) -> ContextMessageEstimate {
+        let identity = estimator.identity();
+        if let Some(measurement) = &self.measurement {
+            if measurement.estimator == identity {
+                return measurement.estimate;
+            }
+        }
+
+        let estimate = estimator.estimate_message(&self.message);
+        self.measurement = Some(ContextItemMeasurement {
+            estimator: identity,
+            estimate,
+        });
+        estimate
+    }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct ContextFrame {
     items: Vec<ContextItem>,
+    revision: u64,
+    measurement: Option<ContextFrameMeasurementState>,
+}
+
+#[derive(Debug, Clone)]
+struct ContextFrameMeasurementState {
+    estimator: Arc<dyn ContextTokenEstimator>,
+    identity: ContextEstimatorIdentity,
+    aggregate: ContextMessageEstimate,
+    full_recount: Option<ContextFullRecount>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContextFullRecount {
+    revision: u64,
+    estimate: ContextMessageEstimate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextFrameMeasurement {
+    pub(crate) estimator: ContextEstimatorIdentity,
+    pub(crate) estimate: ContextMessageEstimate,
+    pub(crate) item_count: usize,
+    pub(crate) revision: u64,
 }
 
 impl ContextFrame {
     pub(crate) fn new(items: Vec<ContextItem>) -> Self {
-        Self { items }
+        let revision = u64::try_from(items.len()).unwrap_or(u64::MAX);
+        Self {
+            items,
+            revision,
+            measurement: None,
+        }
     }
 
-    pub(crate) fn push(&mut self, item: ContextItem) {
+    pub(crate) fn push(&mut self, mut item: ContextItem) {
+        if let Some(measurement) = &mut self.measurement {
+            let estimate = item.measure(measurement.estimator.as_ref());
+            measurement.aggregate.merge(estimate);
+            measurement.full_recount = None;
+        }
         self.items.push(item);
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    pub(crate) fn measure_incrementally(
+        &mut self,
+        estimator: Arc<dyn ContextTokenEstimator>,
+    ) -> ContextFrameMeasurement {
+        let identity = estimator.identity();
+        let needs_rebuild = self
+            .measurement
+            .as_ref()
+            .is_none_or(|measurement| measurement.identity != identity);
+        if needs_rebuild {
+            let aggregate =
+                self.items
+                    .iter_mut()
+                    .fold(ContextMessageEstimate::default(), |mut total, item| {
+                        total.merge(item.measure(estimator.as_ref()));
+                        total
+                    });
+            self.measurement = Some(ContextFrameMeasurementState {
+                estimator,
+                identity: identity.clone(),
+                aggregate,
+                full_recount: None,
+            });
+        }
+
+        let measurement = self
+            .measurement
+            .as_ref()
+            .expect("context measurement must exist after rebuilding");
+        ContextFrameMeasurement {
+            estimator: measurement.identity.clone(),
+            estimate: measurement.aggregate,
+            item_count: self.items.len(),
+            revision: self.revision,
+        }
+    }
+
+    pub(crate) fn measure_full(
+        &mut self,
+        estimator: Arc<dyn ContextTokenEstimator>,
+    ) -> ContextFrameMeasurement {
+        let incremental = self.measure_incrementally(estimator.clone());
+        if let Some(full_recount) = self
+            .measurement
+            .as_ref()
+            .and_then(|measurement| measurement.full_recount)
+            .filter(|measurement| measurement.revision == self.revision)
+        {
+            return ContextFrameMeasurement {
+                estimate: full_recount.estimate,
+                ..incremental
+            };
+        }
+
+        let messages = self
+            .items
+            .iter()
+            .map(|item| &item.message)
+            .collect::<Vec<_>>();
+        let estimate = estimator.estimate_messages(&messages);
+        if let Some(measurement) = &mut self.measurement {
+            measurement.full_recount = Some(ContextFullRecount {
+                revision: self.revision,
+                estimate,
+            });
+        }
+        ContextFrameMeasurement {
+            estimate,
+            ..incremental
+        }
     }
 
     pub(crate) fn checkpoint_items(&self) -> AgentResult<Vec<AgentContextCheckpointItem>> {
@@ -271,7 +407,7 @@ impl ContextFrame {
             .into_iter()
             .map(ContextItem::from_checkpoint)
             .collect::<AgentResult<Vec<_>>>()?;
-        Ok(Self { items })
+        Ok(Self::new(items))
     }
 
     pub(crate) fn validate_pending_tool_call(
@@ -477,6 +613,12 @@ impl ContextFrame {
             }
         }
         Ok(unresolved)
+    }
+}
+
+impl Default for ContextFrame {
+    fn default() -> Self {
+        Self::new(Vec::new())
     }
 }
 

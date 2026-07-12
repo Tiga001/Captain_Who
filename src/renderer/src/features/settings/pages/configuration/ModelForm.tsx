@@ -15,10 +15,19 @@ function isValidPriceInput(value: string): boolean {
   return Number.isFinite(parsed) && parsed >= 0
 }
 
+function isValidContextWindowInput(value: string): boolean {
+  const normalized = value.trim().replaceAll(',', '')
+  if (normalized.length === 0) return true
+  if (!/^\d+$/.test(normalized)) return false
+  const parsed = Number(normalized)
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 4_294_967_295
+}
+
 function toFormValues(model?: ModelConfig): ModelFormValues {
   return {
     id: model?.id ?? '',
     displayName: model?.displayName ?? '',
+    contextWindowTokens: model?.contextWindowTokens?.toString() ?? '',
     inputPrice: model?.inputPrice ?? '0',
     outputPrice: model?.outputPrice ?? '0',
     supportsImage: model?.supportsImage ?? false
@@ -30,9 +39,11 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
   const initialValues = useMemo(() => toFormValues(model), [model])
   const [values, setValues] = useState<ModelFormValues>(initialValues)
   const isEditing = Boolean(model)
+  const isContextWindowValid = isValidContextWindowInput(values.contextWindowTokens)
   const isInputPriceValid = isValidPriceInput(values.inputPrice)
   const isOutputPriceValid = isValidPriceInput(values.outputPrice)
-  const canSave = values.id.trim().length > 0 && isInputPriceValid && isOutputPriceValid
+  const canSave =
+    values.id.trim().length > 0 && isContextWindowValid && isInputPriceValid && isOutputPriceValid
 
   return (
     <form
@@ -45,6 +56,7 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
           ...values,
           id: values.id.trim(),
           displayName: values.displayName.trim(),
+          contextWindowTokens: values.contextWindowTokens.trim().replaceAll(',', ''),
           inputPrice: values.inputPrice.trim() || '0',
           outputPrice: values.outputPrice.trim() || '0'
         })
@@ -66,6 +78,34 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
               placeholder={t('configuration.modelIdPlaceholder')}
               onChange={(event) => setValues((current) => ({ ...current, id: event.target.value }))}
             />
+          </span>
+        </label>
+
+        <label className="configuration-field settings-list-row">
+          <span className="settings-list-row__text">
+            <span className="settings-list-row__title">
+              {t('configuration.contextWindowTokens')}
+            </span>
+          </span>
+          <span className="settings-list-row__control model-form-price-control">
+            <input
+              className="settings-list-control"
+              inputMode="numeric"
+              aria-invalid={!isContextWindowValid}
+              value={values.contextWindowTokens}
+              placeholder={t('configuration.contextWindowTokensPlaceholder')}
+              onChange={(event) =>
+                setValues((current) => ({
+                  ...current,
+                  contextWindowTokens: event.target.value
+                }))
+              }
+            />
+            {!isContextWindowValid && (
+              <small className="model-form-field-error">
+                {t('configuration.invalidContextWindowTokens')}
+              </small>
+            )}
           </span>
         </label>
 

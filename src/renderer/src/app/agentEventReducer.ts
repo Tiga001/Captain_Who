@@ -714,6 +714,10 @@ export function applyAgentEventToChatMessage(
     }
   }
 
+  if (agentEvent.type === 'context_window_updated') {
+    return message
+  }
+
   if (agentEvent.type === 'llm_retry') {
     return message
   }

@@ -5,6 +5,8 @@ import type {
   AgentCancelRunResponse,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
+  AgentContextWindowSnapshotInput,
+  AgentContextWindowSnapshotOutput,
   AgentEvent,
   AgentFileDraftContentPage,
   AgentFileDraftReadInput,
@@ -42,6 +44,7 @@ const CORE_PING_METHOD = 'core.ping'
 const CORE_SHUTDOWN_METHOD = 'core.shutdown'
 const AGENT_CANCEL_RUN_METHOD = 'agent.cancelRun'
 const AGENT_START_CONVERSATION_TURN_METHOD = 'agent.startConversationTurn'
+const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD = 'agent.getContextWindowSnapshot'
 const AGENT_LIST_PENDING_ACTIONS_METHOD = 'agent.listPendingActions'
 const AGENT_APPROVE_ACTION_METHOD = 'agent.approveAction'
 const AGENT_REJECT_ACTION_METHOD = 'agent.rejectAction'
@@ -114,6 +117,15 @@ export class CoreServer {
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput> {
     return this.rpc.request<AgentConversationTurnOutput, AgentConversationTurnInput>(
       AGENT_START_CONVERSATION_TURN_METHOD,
+      input
+    )
+  }
+
+  getContextWindowSnapshot(
+    input: AgentContextWindowSnapshotInput
+  ): Promise<AgentContextWindowSnapshotOutput> {
+    return this.rpc.request<AgentContextWindowSnapshotOutput, AgentContextWindowSnapshotInput>(
+      AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
       input
     )
   }

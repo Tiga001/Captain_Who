@@ -202,6 +202,28 @@ export interface AgentUsage {
   billableRequestCount?: number
 }
 
+export type AgentContextWindowStatus =
+  'unconfigured' | 'within_budget' | 'over_budget' | 'invalid_configuration'
+
+export type AgentContextWindowPhase = 'idle' | 'model_request'
+
+export type AgentContextWindowSource = 'estimated' | 'provider_reported'
+
+export interface AgentContextWindowSnapshot {
+  model: string
+  status: AgentContextWindowStatus
+  phase: AgentContextWindowPhase
+  source: AgentContextWindowSource
+  contextWindowTokens?: number
+  reservedOutputTokens: number
+  safetyMarginTokens: number
+  availableInputTokens?: number
+  usedInputTokens: number
+  remainingInputTokens?: number
+  requestIndex?: number
+  contextRevision: number
+}
+
 export type AgentUsageSummaryRange = 'last7Days' | 'last30Days' | 'all' | 'custom'
 
 export interface AgentUsageSummaryInput {
@@ -309,6 +331,7 @@ export interface AgentConversationTurnInput {
   conversationId?: string
   projectId?: string | null
   modelId: string
+  contextBudgetEnabled?: boolean
   content: string
   attachments?: AgentInputAttachment[]
   title?: string
@@ -318,6 +341,20 @@ export interface AgentConversationTurnInput {
   temperature?: number
   promptPreferences?: AgentPromptPreferences
   permissions?: AgentPermissions
+}
+
+export interface AgentContextWindowSnapshotInput {
+  contextBudgetEnabled: boolean
+  conversationId?: string
+  projectId?: string | null
+  modelId: string
+  maxTokens?: number
+  promptPreferences?: AgentPromptPreferences
+  permissions?: AgentPermissions
+}
+
+export interface AgentContextWindowSnapshotOutput {
+  snapshot?: AgentContextWindowSnapshot
 }
 
 export interface AgentConversationMessage {
@@ -590,6 +627,12 @@ export type AgentEvent =
   | { type: 'tool_result'; runId: string; result: AgentToolResult }
   | { type: 'todo_updated'; runId: string; todo: AgentTodoState }
   | { type: 'file_draft_updated'; runId: string; draft: AgentFileDraftSnapshot }
+  | {
+      type: 'context_window_updated'
+      runId: string
+      conversationId?: string
+      snapshot: AgentContextWindowSnapshot
+    }
   | { type: 'approval_required'; runId: string; action: AgentProposedAction }
   | { type: 'diff'; runId: string; diff: AgentDiffProposal }
   | {
@@ -599,7 +642,14 @@ export type AgentEvent =
       stream: AgentCommandOutputStream
       output: string
     }
-  | { type: 'error'; runId?: string; message: string; recoverable: boolean }
+  | {
+      type: 'error'
+      runId?: string
+      message: string
+      recoverable: boolean
+      code?: string
+      details?: unknown
+    }
   | {
       type: 'done'
       runId: string

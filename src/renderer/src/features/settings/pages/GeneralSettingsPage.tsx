@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { FocusEvent } from 'react'
 import type { AgentReadPermission, AgentWritePermission } from '@mycopilot/protocol'
 import { Check, ChevronDown } from 'lucide-react'
+import { featureFlags } from '../../../config/featureFlags'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import type { AppLanguage } from '../../../config/frontendTranslations'
 import type { UiPreferencesSnapshot } from '../../storage/storageClient'
@@ -111,9 +112,6 @@ export function GeneralSettingsPage({
             <span className="settings-list-row__text">
               <span className="settings-list-row__title" id="language-setting-heading">
                 {t('general.language')}
-              </span>
-              <span className="settings-list-row__description">
-                {t('general.languageDescription')}
               </span>
             </span>
 
@@ -303,6 +301,28 @@ export function GeneralSettingsPage({
           </div>
         </div>
       </section>
+
+      {featureFlags.contextWindowIndicator && (
+        <section className="settings-list-section" aria-labelledby="composer-section-heading">
+          <h2 id="composer-section-heading">{t('general.sectionComposer')}</h2>
+          <div className="settings-list general-settings-list">
+            <div className="settings-list-row">
+              <span className="settings-list-row__text">
+                <span className="settings-list-row__title">
+                  {t('general.showContextWindowUsage')}
+                </span>
+              </span>
+              <SettingsToggle
+                checked={uiPreferences.showContextWindowUsage}
+                label={t('general.showContextWindowUsage')}
+                onChange={(showContextWindowUsage) =>
+                  onUiPreferencesChange({ showContextWindowUsage })
+                }
+              />
+            </div>
+          </div>
+        </section>
+      )}
     </article>
   )
 }

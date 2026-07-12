@@ -7,8 +7,9 @@ mod tool_input_stream;
 
 use crate::cancellation::AgentCancellationToken;
 use crate::context::{
-    ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextFrame, ContextItem,
-    ContextMetadata, ContextRetention, ContextScope, ContextSource,
+    ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextBudgetReport,
+    ContextCapacityDetector, ContextFrame, ContextItem, ContextMetadata, ContextRetention,
+    ContextScope, ContextSource,
 };
 use crate::llm::{
     complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessageRole,
@@ -17,9 +18,10 @@ use crate::llm::{
 use crate::prompts::build_system_prompt;
 use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
-    AgentError, AgentEvent, AgentPatchPermission, AgentPromptPreferences, AgentProposedAction,
-    AgentResult, AgentRunContext, AgentRunStatus, AgentToolCall, AgentToolDefinition,
-    AgentToolResult,
+    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentContextWindowSource, AgentError,
+    AgentEvent, AgentExtensionSnapshot, AgentPatchPermission, AgentPromptPreferences,
+    AgentProposedAction, AgentResult, AgentRunContext, AgentRunStatus, AgentToolCall,
+    AgentToolDefinition, AgentToolResult,
 };
 use crate::storage::service::StorageService;
 use crate::tools::{ToolExecutionContext, ToolRegistry};
@@ -55,6 +57,7 @@ struct LlmRequestTemplate {
     api_token: String,
     model: String,
     api_style: crate::protocol::AgentApiStyle,
+    context_window_tokens: Option<u32>,
     max_tokens: u32,
     temperature: f32,
     stream: bool,
@@ -82,6 +85,14 @@ struct PreparedLlmRequest {
     context: ContextFrame,
     next_model_request_index: usize,
     tool_batch: ToolCallBatch,
+}
+
+struct PreparedRuntimeCapabilities {
+    runtime_extensions: RuntimeExtensions,
+    tool_registry: Arc<ToolRegistry>,
+    tool_definitions: Vec<AgentToolDefinition>,
+    command_auto_approve: bool,
+    patch_auto_approve: bool,
 }
 
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -149,6 +160,44 @@ pub fn next_run_id() -> String {
     generate_run_id()
 }
 
+pub fn inspect_context_window(
+    input: AgentChatInput,
+) -> AgentResult<Option<AgentContextWindowSnapshot>> {
+    if !input.context_budget_enabled {
+        return Ok(None);
+    }
+
+    let run_id = "context-window-preview";
+    let PreparedRuntimeCapabilities {
+        runtime_extensions,
+        tool_definitions,
+        ..
+    } = prepare_runtime_capabilities(&input, run_id, &[], true)?;
+    let api_style = input
+        .api_style
+        .unwrap_or_else(|| detect_api_style(input.api_url.trim()));
+    let max_tokens = sanitize_max_tokens(input.max_tokens);
+    let mut context = assemble_context_preview(
+        input.messages,
+        input.context.as_ref(),
+        input.prompt_preferences.as_ref(),
+        &tool_definitions,
+    )?;
+    runtime_extensions
+        .contribute_request_context(&ModelRequestContext::agent_work(), &mut context)?;
+
+    let detector = ContextCapacityDetector::for_model(&input.model, api_style, &tool_definitions);
+    detector.prepare_frame(&mut context);
+    let report = detector.inspect(&mut context, input.context_window_tokens, max_tokens);
+    Ok(Some(report.snapshot(
+        &input.model,
+        AgentContextWindowPhase::Idle,
+        AgentContextWindowSource::Estimated,
+        None,
+        None,
+    )))
+}
+
 pub struct AgentRuntime {
     max_tool_iterations: usize,
 }
@@ -199,51 +248,25 @@ impl AgentRuntime {
             .as_ref()
             .map(|checkpoint| checkpoint.extension_snapshots.as_slice())
             .unwrap_or_default();
-        let mut runtime_extensions = RuntimeExtensions::for_run(&run_id, extension_snapshots)?;
-        let mut tool_registry = ToolRegistry::defaults_with_search(input.search_config.as_ref());
-        runtime_extensions.register_tools(&mut tool_registry)?;
-        let tool_registry = Arc::new(tool_registry);
-        let command_permission = context
-            .as_ref()
-            .map(|context| context.permissions.command)
-            .unwrap_or(AgentCommandPermission::RequireApproval);
-        let command_auto_approve =
-            command_permission == AgentCommandPermission::AutoApprove && host_executor.is_some();
-        let patch_auto_approve = context
-            .as_ref()
-            .map(|context| {
-                context.permissions.patch == AgentPatchPermission::AutoApprove
-                    && context.permissions.write != crate::protocol::AgentWritePermission::Denied
-            })
-            .unwrap_or(false)
-            && host_executor.is_some();
-        let mut tool_definitions = tool_registry.definitions();
-        apply_permission_policy_to_tool_definitions(&mut tool_definitions, context.as_ref());
-        if command_auto_approve {
-            if let Some(definition) = tool_definitions
-                .iter_mut()
-                .find(|definition| definition.name == "run_command")
-            {
-                definition.requires_approval = false;
-                definition.description = "Run a validated shell command through the host execution layer. The current permission policy automatically approves this command request.".to_string();
-            }
-        }
-        if patch_auto_approve {
-            for definition in tool_definitions.iter_mut().filter(|definition| {
-                definition.name == "apply_patch" || definition.name == "write_file"
-            }) {
-                definition.requires_approval = false;
-                definition.description.push_str(
-                    " The current permission policy automatically approves the final validated file change.",
-                );
-            }
-        }
+        let PreparedRuntimeCapabilities {
+            mut runtime_extensions,
+            tool_registry,
+            tool_definitions,
+            command_auto_approve,
+            patch_auto_approve,
+        } = prepare_runtime_capabilities(
+            &input,
+            &run_id,
+            extension_snapshots,
+            host_executor.is_some(),
+        )?;
         let mut event_stream = AgentEventStream::new(emitter);
         event_stream.emit(AgentEvent::Started {
             run_id: run_id.clone(),
             tool_definitions: tool_definitions.clone(),
         });
         let transaction_storage = storage.clone();
+        let context_budget_enabled = input.context_budget_enabled;
         let mut file_transaction_guard = FileTransactionRunGuard::new(
             transaction_storage.clone(),
             run_id.clone(),
@@ -267,6 +290,16 @@ impl AgentRuntime {
         let mut usage = None;
         let mut finish_reason = None;
         let mut response_fence_corrections = 0_usize;
+        let context_capacity_detector = context_budget_enabled.then(|| {
+            ContextCapacityDetector::for_model(
+                &llm_request.model,
+                llm_request.api_style,
+                &llm_request.tools,
+            )
+        });
+        if let Some(detector) = &context_capacity_detector {
+            detector.prepare_frame(&mut active_context);
+        }
         if cancellation_token.is_cancelled() {
             return Ok(cancelled_output(
                 run_id,
@@ -298,6 +331,8 @@ impl AgentRuntime {
                     run_id: Some(run_id.clone()),
                     message: message.clone(),
                     recoverable: false,
+                    code: None,
+                    details: None,
                 });
                 break 'agent_loop message;
             }
@@ -328,6 +363,31 @@ impl AgentRuntime {
                     &request_context,
                     &llm_request.tools,
                 );
+                let request_budget_report = if let Some(detector) = &context_capacity_detector {
+                    let report = detector.inspect(
+                        &mut request_context,
+                        llm_request.context_window_tokens,
+                        llm_request.max_tokens,
+                    );
+                    emit_context_budget_if_enabled(&run_id, model_request_index + 1, &report);
+                    event_stream.emit(AgentEvent::ContextWindowUpdated {
+                        run_id: run_id.clone(),
+                        conversation_id: context
+                            .as_ref()
+                            .and_then(|context| context.conversation_id.clone()),
+                        snapshot: report.snapshot(
+                            &llm_request.model,
+                            AgentContextWindowPhase::ModelRequest,
+                            AgentContextWindowSource::Estimated,
+                            Some(model_request_index + 1),
+                            None,
+                        ),
+                    });
+                    detector.ensure_sendable(report.clone())?;
+                    Some(report)
+                } else {
+                    None
+                };
                 let request = llm_request.request(request_context);
                 let llm_response_result = if request.stream {
                     let delta_run_id = run_id.clone();
@@ -479,6 +539,27 @@ impl AgentRuntime {
                     ));
                 }
 
+                if let (Some(report), Some(input_tokens)) = (
+                    request_budget_report.as_ref(),
+                    llm_response
+                        .usage
+                        .as_ref()
+                        .and_then(|usage| usage.input_tokens),
+                ) {
+                    event_stream.emit(AgentEvent::ContextWindowUpdated {
+                        run_id: run_id.clone(),
+                        conversation_id: context
+                            .as_ref()
+                            .and_then(|context| context.conversation_id.clone()),
+                        snapshot: report.snapshot(
+                            &llm_request.model,
+                            AgentContextWindowPhase::ModelRequest,
+                            AgentContextWindowSource::ProviderReported,
+                            Some(model_request_index + 1),
+                            Some(input_tokens),
+                        ),
+                    });
+                }
                 merge_total_usage(&mut usage, llm_response.usage);
                 finish_reason = llm_response.finish_reason;
 
@@ -515,6 +596,8 @@ impl AgentRuntime {
                         run_id: Some(run_id.clone()),
                         message: message.clone(),
                         recoverable: false,
+                        code: None,
+                        details: None,
                     });
                     break 'agent_loop message;
                 }
@@ -893,10 +976,7 @@ fn emit_context_manifest_if_enabled(
     context: &ContextFrame,
     tools: &[AgentToolDefinition],
 ) {
-    let enabled = std::env::var("MYCOPILOT_CONTEXT_MANIFEST")
-        .ok()
-        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes"));
-    if !enabled {
+    if !context_diagnostics_enabled() {
         return;
     }
 
@@ -922,6 +1002,111 @@ fn emit_context_manifest_if_enabled(
     }
 }
 
+fn emit_context_budget_if_enabled(
+    run_id: &str,
+    request_index: usize,
+    report: &ContextBudgetReport,
+) {
+    if !context_diagnostics_enabled() {
+        return;
+    }
+
+    match serde_json::to_string(report) {
+        Ok(report) => {
+            eprintln!("[context-budget] run={run_id} request={request_index} {report}")
+        }
+        Err(error) => eprintln!(
+            "[context-budget] run={run_id} request={request_index} serialization_error={error}"
+        ),
+    }
+}
+
+fn context_diagnostics_enabled() -> bool {
+    std::env::var("MYCOPILOT_CONTEXT_MANIFEST")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
+}
+
+fn prepare_runtime_capabilities(
+    input: &AgentChatInput,
+    run_id: &str,
+    extension_snapshots: &[AgentExtensionSnapshot],
+    host_actions_available: bool,
+) -> AgentResult<PreparedRuntimeCapabilities> {
+    let runtime_extensions = RuntimeExtensions::for_run(run_id, extension_snapshots)?;
+    let mut tool_registry = ToolRegistry::defaults_with_search(input.search_config.as_ref());
+    runtime_extensions.register_tools(&mut tool_registry)?;
+
+    let context = input.context.as_ref();
+    let command_permission = context
+        .map(|context| context.permissions.command)
+        .unwrap_or(AgentCommandPermission::RequireApproval);
+    let command_auto_approve =
+        command_permission == AgentCommandPermission::AutoApprove && host_actions_available;
+    let patch_auto_approve = context
+        .map(|context| {
+            context.permissions.patch == AgentPatchPermission::AutoApprove
+                && context.permissions.write != crate::protocol::AgentWritePermission::Denied
+        })
+        .unwrap_or(false)
+        && host_actions_available;
+
+    let mut tool_definitions = tool_registry.definitions();
+    apply_permission_policy_to_tool_definitions(&mut tool_definitions, context);
+    if command_auto_approve {
+        if let Some(definition) = tool_definitions
+            .iter_mut()
+            .find(|definition| definition.name == "run_command")
+        {
+            definition.requires_approval = false;
+            definition.description = "Run a validated shell command through the host execution layer. The current permission policy automatically approves this command request.".to_string();
+        }
+    }
+    if patch_auto_approve {
+        for definition in tool_definitions.iter_mut().filter(|definition| {
+            definition.name == "apply_patch" || definition.name == "write_file"
+        }) {
+            definition.requires_approval = false;
+            definition.description.push_str(
+                " The current permission policy automatically approves the final validated file change.",
+            );
+        }
+    }
+
+    Ok(PreparedRuntimeCapabilities {
+        runtime_extensions,
+        tool_registry: Arc::new(tool_registry),
+        tool_definitions,
+        command_auto_approve,
+        patch_auto_approve,
+    })
+}
+
+fn assemble_context_preview(
+    messages: Vec<AgentChatMessage>,
+    context: Option<&AgentRunContext>,
+    prompt_preferences: Option<&AgentPromptPreferences>,
+    tool_definitions: &[AgentToolDefinition],
+) -> AgentResult<ContextFrame> {
+    if messages.iter().any(|message| {
+        matches!(message.role.trim(), "user" | "assistant") && !message.content.trim().is_empty()
+    }) {
+        return ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: build_system_prompt(context, prompt_preferences, tool_definitions),
+            messages,
+            attachments: ContextAttachments::default(),
+        });
+    }
+
+    Ok(ContextFrame::new(vec![ContextItem::text(
+        LlmMessageRole::System,
+        build_system_prompt(context, prompt_preferences, tool_definitions),
+        ContextSource::BackendSystemPrompt,
+        ContextScope::Run,
+        ContextRetention::Retained,
+    )]))
+}
+
 fn build_llm_request(
     input: AgentChatInput,
     tool_definitions: &[AgentToolDefinition],
@@ -935,6 +1120,7 @@ fn build_llm_request(
         api_token: input.api_token.trim().to_string(),
         model: input.model.trim().to_string(),
         api_style,
+        context_window_tokens: input.context_window_tokens,
         max_tokens: sanitize_max_tokens(input.max_tokens),
         temperature: sanitize_temperature(input.temperature),
         stream: input.stream.unwrap_or(false),

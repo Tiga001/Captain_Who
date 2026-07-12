@@ -4,6 +4,7 @@ export interface ModelConfig {
   shortName?: string
   providerPath?: string
   supportsImage: boolean
+  contextWindowTokens?: number
   inputPrice: string
   outputPrice: string
   enabled: boolean
@@ -14,6 +15,7 @@ export type SearchMode = 'auto' | 'disabled' | 'tavily'
 export interface ModelFormValues {
   id: string
   displayName: string
+  contextWindowTokens: string
   inputPrice: string
   outputPrice: string
   supportsImage: boolean

@@ -2,6 +2,7 @@ import type { ClipboardEvent } from 'react'
 import { Check } from 'lucide-react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { ModelConfig } from './configurationTypes'
+import { formatContextWindow } from './modelPresentation'
 
 interface ModelProviderSettingsProps {
   apiUrl: string
@@ -90,11 +91,23 @@ export function ModelProviderSettings({
               <Check />
             </span>
             <span className="available-model-row__name">{model.displayName}</span>
-            <span
-              className="model-capability-pill"
-              data-supported={model.supportsImage || undefined}
-            >
-              {model.supportsImage ? t('configuration.image') : t('configuration.text')}
+            <span className="available-model-row__metadata">
+              <span
+                className="model-context-pill"
+                title={
+                  model.contextWindowTokens
+                    ? `${model.contextWindowTokens.toLocaleString()} tokens`
+                    : t('configuration.contextNotConfigured')
+                }
+              >
+                {formatContextWindow(model.contextWindowTokens)}
+              </span>
+              <span
+                className="model-capability-pill"
+                data-supported={model.supportsImage || undefined}
+              >
+                {model.supportsImage ? t('configuration.image') : t('configuration.text')}
+              </span>
             </span>
           </label>
         ))}

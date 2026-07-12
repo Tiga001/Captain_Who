@@ -14,13 +14,13 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
     AgentApprovalDecisionStatus, AgentChatInput, AgentChatMessage, AgentChatOutput,
-    AgentCommandRequest, AgentDiffProposal, AgentEvent, AgentFileDraftSnapshot,
-    AgentFileWriteProposal, AgentFileWriteResult, AgentFileWriteResultStatus, AgentInputAttachment,
-    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentPatchResult,
-    AgentPatchResultStatus, AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences,
-    AgentPromptTone, AgentPromptWorkMode, AgentProposedAction, AgentRunContext, AgentRunStatus,
-    AgentSearchConfig, AgentSearchMode, AgentToolCall, AgentToolResult, AgentUsage,
-    AgentWorkspaceContext,
+    AgentCommandRequest, AgentContextWindowSnapshot, AgentDiffProposal, AgentEvent,
+    AgentFileDraftSnapshot, AgentFileWriteProposal, AgentFileWriteResult,
+    AgentFileWriteResultStatus, AgentInputAttachment, AgentInputAttachmentEncoding,
+    AgentInputAttachmentKind, AgentPatchResult, AgentPatchResultStatus, AgentPermissions,
+    AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
+    AgentProposedAction, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
+    AgentToolCall, AgentToolResult, AgentUsage, AgentWorkspaceContext,
 };
 use mycopilot_protocol_rs::AGENT_EVENT_NOTIFICATION_METHOD;
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,8 @@ pub struct AgentConversationTurnInput {
     pub conversation_id: Option<String>,
     pub project_id: Option<String>,
     pub model_id: String,
+    #[serde(default = "context_budget_enabled_by_default")]
+    pub context_budget_enabled: bool,
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<AgentInputAttachment>,
@@ -167,6 +169,30 @@ pub struct AgentConversationTurnInput {
     pub prompt_preferences: Option<AgentPromptPreferences>,
     #[serde(default)]
     pub permissions: AgentPermissions,
+}
+
+fn context_budget_enabled_by_default() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextWindowSnapshotInput {
+    pub context_budget_enabled: bool,
+    pub conversation_id: Option<String>,
+    pub project_id: Option<String>,
+    pub model_id: String,
+    pub max_tokens: Option<u32>,
+    pub prompt_preferences: Option<AgentPromptPreferences>,
+    #[serde(default)]
+    pub permissions: AgentPermissions,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextWindowSnapshotOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<AgentContextWindowSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -278,19 +304,10 @@ pub(super) fn prepare_conversation_turn(
     conversation.model_id = Some(model_id.clone());
     conversation.updated_at = timestamp;
 
-    let history_messages = conversation
-        .messages
-        .iter()
-        .filter(|message| message.id != user_message_id && message.id != assistant_message_id)
-        .filter(|message| message.status.as_deref() != Some("pending"))
-        .filter(|message| message.status.as_deref() != Some("error"))
-        .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
-        .filter(|message| !message.content.trim().is_empty())
-        .map(|message| AgentChatMessage {
-            role: message.role.clone(),
-            content: message.content.clone(),
-        })
-        .collect::<Vec<_>>();
+    let history_messages = conversation_history_messages(
+        &conversation,
+        &[user_message_id.as_str(), assistant_message_id.as_str()],
+    );
 
     let user_message = ChatMessageRecord {
         id: user_message_id.clone(),
@@ -337,6 +354,8 @@ pub(super) fn prepare_conversation_turn(
         api_token: settings.api_token.trim().to_string(),
         model: model_provider_path(&model),
         api_style: None,
+        context_window_tokens: model.context_window_tokens,
+        context_budget_enabled: input.context_budget_enabled,
         max_tokens: input.max_tokens,
         temperature: input.temperature,
         stream: Some(true),
@@ -387,6 +406,29 @@ pub(super) fn prepare_conversation_turn(
         },
         agent_input,
     })
+}
+
+pub(super) fn conversation_history_messages(
+    conversation: &ChatConversationRecord,
+    excluded_message_ids: &[&str],
+) -> Vec<AgentChatMessage> {
+    conversation
+        .messages
+        .iter()
+        .filter(|message| {
+            !excluded_message_ids
+                .iter()
+                .any(|excluded_id| message.id == *excluded_id)
+        })
+        .filter(|message| message.status.as_deref() != Some("pending"))
+        .filter(|message| message.status.as_deref() != Some("error"))
+        .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
+        .filter(|message| !message.content.trim().is_empty())
+        .map(|message| AgentChatMessage {
+            role: message.role.clone(),
+            content: message.content.clone(),
+        })
+        .collect()
 }
 
 pub fn agent_event_notification(event: AgentEvent) -> Value {

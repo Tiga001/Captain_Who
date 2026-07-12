@@ -62,6 +62,7 @@ export interface UiPreferencesSnapshot {
   sidebarSectionOrder: SidebarSectionOrder
   nativeFontSmoothing: boolean
   showTokenUsageDetails: boolean
+  showContextWindowUsage: boolean
   translucentSidebar: boolean
   translucentSidebarTransparency: number
   fullPermissionEnabled: boolean
@@ -237,6 +238,7 @@ export function defaultUiPreferences(): UiPreferencesSnapshot {
     sidebarSectionOrder: 'projects_first',
     nativeFontSmoothing: false,
     showTokenUsageDetails: true,
+    showContextWindowUsage: true,
     translucentSidebar: false,
     translucentSidebarTransparency: DEFAULT_TRANSLUCENT_SIDEBAR_TRANSPARENCY,
     fullPermissionEnabled: true,
@@ -278,6 +280,7 @@ function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
     shortName: model.shortName ?? undefined,
     providerPath: model.providerPath ?? undefined,
     supportsImage: model.supportsImage,
+    contextWindowTokens: model.contextWindowTokens ?? undefined,
     inputPrice: model.inputPrice,
     outputPrice: model.outputPrice,
     enabled: model.enabled
@@ -288,7 +291,8 @@ function mapModelToStorage(model: ModelConfig): StorageModelConfigRecord {
   return {
     ...model,
     shortName: model.shortName ?? null,
-    providerPath: model.providerPath ?? null
+    providerPath: model.providerPath ?? null,
+    contextWindowTokens: model.contextWindowTokens ?? null
   }
 }
 
@@ -465,6 +469,7 @@ function normalizeUiPreferences(
       preferences?.sidebarSectionOrder === 'conversations_first'
         ? 'conversations_first'
         : 'projects_first',
+    showContextWindowUsage: preferences?.showContextWindowUsage !== false,
     translucentSidebarTransparency: normalizeTranslucentSidebarTransparency(
       preferences?.translucentSidebarTransparency
     ),

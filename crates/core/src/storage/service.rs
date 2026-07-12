@@ -38,6 +38,9 @@ fn validate_model_settings(settings: &ModelSettingsRecord) -> Result<(), String>
         if !model_ids.insert(model_id) {
             return Err(format!("模型 ID 重复：{model_id}"));
         }
+        if model.context_window_tokens == Some(0) {
+            return Err(format!("模型 {model_id} 的上下文窗口必须大于 0。"));
+        }
         if !usage_repository::is_valid_price_per_1k(&model.input_price) {
             return Err(format!(
                 "模型 {model_id} 的输入价格必须是大于或等于 0 的有效数字。"
@@ -1094,6 +1097,7 @@ mod tests {
                 short_name: None,
                 provider_path: None,
                 supports_image: false,
+                context_window_tokens: Some(128_000),
                 input_price: "0.01".to_string(),
                 output_price: "0.02".to_string(),
                 enabled: true,
@@ -1107,6 +1111,38 @@ mod tests {
 
         let stored = service.load_model_settings().unwrap().unwrap();
         assert_eq!(stored.models[0].input_price, "0.01");
+        assert_eq!(stored.models[0].context_window_tokens, Some(128_000));
+    }
+
+    #[test]
+    fn rejects_zero_context_window_without_overwriting_saved_settings() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let valid = ModelSettingsRecord {
+            api_url: "https://example.com".to_string(),
+            api_token: "token".to_string(),
+            search_mode: "disabled".to_string(),
+            tavily_api_key: String::new(),
+            models: vec![ModelConfigRecord {
+                id: "model-a".to_string(),
+                display_name: "Model A".to_string(),
+                short_name: None,
+                provider_path: None,
+                supports_image: false,
+                context_window_tokens: Some(128_000),
+                input_price: "0.01".to_string(),
+                output_price: "0.02".to_string(),
+                enabled: true,
+            }],
+        };
+        service.save_model_settings(valid.clone()).unwrap();
+
+        let mut invalid = valid;
+        invalid.models[0].context_window_tokens = Some(0);
+        assert!(service.save_model_settings(invalid).is_err());
+
+        let stored = service.load_model_settings().unwrap().unwrap();
+        assert_eq!(stored.models[0].context_window_tokens, Some(128_000));
     }
 
     #[test]

@@ -187,6 +187,210 @@ fn transient_events_are_emitted_without_entering_output_history() {
     assert!(stream.into_events().is_empty());
 }
 
+#[test]
+fn context_window_inspection_switch_disables_all_measurement() {
+    let input = serde_json::from_value::<AgentChatInput>(serde_json::json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "",
+        "model": "test-model",
+        "contextWindowTokens": 128000,
+        "contextBudgetEnabled": false,
+        "messages": []
+    }))
+    .unwrap();
+
+    assert!(inspect_context_window(input).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn context_capacity_guard_rejects_the_initial_request_before_network_io() {
+    use tokio::net::TcpListener;
+    use tokio::time::{timeout, Duration};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let input = AgentChatInput {
+        api_url: format!("http://{address}/v1/chat/completions"),
+        api_token: "test-token".to_string(),
+        model: "test-model".to_string(),
+        api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
+        context_window_tokens: Some(8_000),
+        context_budget_enabled: true,
+        max_tokens: Some(1_000),
+        temperature: None,
+        stream: Some(false),
+        context: None,
+        search_config: None,
+        prompt_preferences: None,
+        approval_decision: None,
+        tool_continuation: None,
+        attachments: Vec::new(),
+        resume_checkpoint: None,
+        messages: vec![AgentChatMessage {
+            role: "user".to_string(),
+            content: "x".repeat(90_000),
+        }],
+    };
+
+    let error = AgentRuntime::default().send_chat(input).await.unwrap_err();
+
+    assert_eq!(error.code(), Some("context_capacity_exceeded"));
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details["status"].as_str()),
+        Some("over_budget")
+    );
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| { details["estimate"]["measurementMode"].as_str() }),
+        Some("incremental_cache")
+    );
+    assert!(timeout(Duration::from_millis(100), listener.accept())
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn context_capacity_guard_rechecks_after_tool_results_before_network_io() {
+    use crate::protocol::{
+        AgentCommandPermission, AgentPatchPermission, AgentPermissions, AgentReadPermission,
+        AgentWritePermission,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_http_request(stream: &mut TcpStream) {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+        let mut expected_length = None;
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                return;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if expected_length.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    expected_length = Some(header_end + 4 + content_length);
+                }
+            }
+            if expected_length.is_some_and(|length| request.len() >= length) {
+                return;
+            }
+        }
+    }
+
+    async fn write_json_response(stream: &mut TcpStream, body: Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    }
+
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let large_file = (0..2_000)
+        .map(|_| "x".repeat(120))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(workspace.join("large.txt"), large_file).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let second_request_seen = Arc::new(AtomicBool::new(false));
+    let second_request_seen_by_server = second_request_seen.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_http_request(&mut stream).await;
+        write_json_response(
+            &mut stream,
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "read-large-file",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{\"path\":\"large.txt\",\"maxLines\":2000}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+        )
+        .await;
+
+        if let Ok(Ok((_stream, _address))) =
+            tokio::time::timeout(Duration::from_millis(500), listener.accept()).await
+        {
+            second_request_seen_by_server.store(true, Ordering::SeqCst);
+        }
+    });
+    let input = AgentChatInput {
+        api_url: format!("http://{address}/v1/chat/completions"),
+        api_token: "test-token".to_string(),
+        model: "test-model".to_string(),
+        api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
+        context_window_tokens: Some(80_000),
+        context_budget_enabled: true,
+        max_tokens: Some(1_000),
+        temperature: None,
+        stream: Some(false),
+        context: Some(AgentRunContext {
+            conversation_id: Some("conversation-capacity".to_string()),
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("workspace".to_string()),
+                root_path: Some(workspace.to_string_lossy().to_string()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                command: AgentCommandPermission::RequireApproval,
+                patch: AgentPatchPermission::RequireApproval,
+            },
+        }),
+        search_config: None,
+        prompt_preferences: None,
+        approval_decision: None,
+        tool_continuation: None,
+        attachments: Vec::new(),
+        resume_checkpoint: None,
+        messages: vec![message("user", "Read large.txt and summarize it")],
+    };
+
+    let error = AgentRuntime::default().send_chat(input).await.unwrap_err();
+    server.await.unwrap();
+
+    assert_eq!(error.code(), Some("context_capacity_exceeded"));
+    assert!(!second_request_seen.load(Ordering::SeqCst));
+}
+
 #[tokio::test]
 async fn streams_write_file_previews_end_to_end_without_persisting_them() {
     use crate::protocol::{
@@ -401,6 +605,8 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         api_token: "test-token".to_string(),
         model: "test-model".to_string(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
+        context_window_tokens: Some(128_000),
+        context_budget_enabled: true,
         max_tokens: Some(1_000),
         temperature: None,
         stream: Some(true),
@@ -450,6 +656,15 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
             _ => None,
         })
         .collect::<Vec<_>>();
+    let context_snapshots = captured
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContextWindowUpdated { snapshot, .. } => Some(snapshot.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let preview_additions = previews
         .iter()
         .map(|preview| preview.additions)
@@ -462,6 +677,11 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
     assert!(preview_additions.len() >= 3, "{preview_additions:?}");
     assert_eq!(preview_additions.last().copied(), Some(4));
     assert_eq!(preview_content, "line 1\nline 2\nline 3\nline 4\n");
+    assert!(!context_snapshots.is_empty());
+    assert!(context_snapshots.iter().all(|snapshot| {
+        snapshot.phase == crate::protocol::AgentContextWindowPhase::ModelRequest
+            && snapshot.model == "test-model"
+    }));
     assert!(output.events.iter().all(|event| !matches!(
         event,
         AgentEvent::FileWritePreviewUpdated { .. } | AgentEvent::FileWritePreviewCleared { .. }
@@ -626,6 +846,8 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         api_token: "test-token".to_string(),
         model: "test-model".to_string(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
+        context_window_tokens: Some(128_000),
+        context_budget_enabled: true,
         max_tokens: Some(1_000),
         temperature: None,
         stream: Some(false),

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import type { AgentContextWindowSnapshot } from '@mycopilot/protocol'
 import type { LucideIcon } from 'lucide-react'
 import {
   ArrowUp,
@@ -34,6 +35,7 @@ import {
   getAttachmentTypeLabel
 } from '../attachmentDisplay'
 import type { ChatComposerDraft, ChatPermissionMode, ChatSubmitOptions } from '../chatTypes'
+import { ContextWindowIndicator } from './ContextWindowIndicator'
 import { useImagePreview } from './ImagePreview'
 import './ChatComposer.css'
 
@@ -52,6 +54,8 @@ const PERMISSION_OPTIONS: PermissionOption[] = [
 const TEXTAREA_MAX_HEIGHT = 220
 
 interface ChatComposerProps {
+  contextWindowIndicatorEnabled?: boolean
+  contextWindowSnapshot?: AgentContextWindowSnapshot
   draft: ChatComposerDraft
   defaultProjectId?: string | null
   isGenerating?: boolean
@@ -67,6 +71,8 @@ interface ChatComposerProps {
 }
 
 export function ChatComposer({
+  contextWindowIndicatorEnabled = false,
+  contextWindowSnapshot,
   draft,
   defaultProjectId = null,
   isGenerating = false,
@@ -522,6 +528,10 @@ export function ChatComposer({
         </div>
 
         <span className="chat-composer__spacer" />
+
+        {contextWindowIndicatorEnabled && contextWindowSnapshot && (
+          <ContextWindowIndicator snapshot={contextWindowSnapshot} />
+        )}
 
         <div className="composer-model-picker" ref={modelPickerRef}>
           <button

@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
-import type { AgentProposedAction, AgentTodoState } from '@mycopilot/protocol'
+import type {
+  AgentContextWindowSnapshot,
+  AgentProposedAction,
+  AgentTodoState
+} from '@mycopilot/protocol'
 import { ChatComposer } from './components/ChatComposer'
 import { AgentApprovalDialog } from './components/AgentApprovalDialog'
 import { AgentTodoProgress } from './components/AgentTodoProgress'
@@ -18,6 +22,8 @@ interface AgentApprovalOptions {
 }
 
 interface ChatConversationPageProps {
+  contextWindowIndicatorEnabled?: boolean
+  contextWindowSnapshot?: AgentContextWindowSnapshot
   conversation: ChatConversation
   composerDraft: ChatComposerDraft
   editSelectedModelAvailable: boolean
@@ -116,6 +122,8 @@ function getLatestAgentTodo(conversation: ChatConversation): LatestAgentTodo | n
 }
 
 export function ChatConversationPage({
+  contextWindowIndicatorEnabled = false,
+  contextWindowSnapshot,
   composerDraft,
   conversation,
   editSelectedModelAvailable,
@@ -268,6 +276,8 @@ export function ChatConversationPage({
           />
         ) : (
           <ChatComposer
+            contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
+            contextWindowSnapshot={contextWindowSnapshot}
             defaultProjectId={conversation.projectId}
             draft={composerDraft}
             isGenerating={isGenerating}

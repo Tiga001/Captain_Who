@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react'
 import type { AppWindowState } from '@mycopilot/host-api'
-import type { AgentEvent, AgentProposedAction } from '@mycopilot/protocol'
-import type { AgentInputAttachment } from '@mycopilot/protocol'
+import type {
+  AgentContextWindowSnapshot,
+  AgentEvent,
+  AgentInputAttachment,
+  AgentProposedAction
+} from '@mycopilot/protocol'
 import { ResizeHandle } from '../components/layout/ResizeHandle'
 import { LeftSidebar } from '../components/sidebar/LeftSidebar'
 import { RightSidebar } from '../components/sidebar/RightSidebar'
@@ -9,6 +13,7 @@ import { useToast } from '../components/toast/ToastContext'
 import { useModelSettings } from '../config/ModelSettingsProvider'
 import { useProjectSettings } from '../config/ProjectSettingsProvider'
 import { useFrontendConfig } from '../config/FrontendConfigProvider'
+import { featureFlags } from '../config/featureFlags'
 import { hostClient } from '../host/hostClient'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
 import { NewConversationPage } from '../features/chat/NewConversationPage'
@@ -25,6 +30,7 @@ import {
   approveAgentAction,
   cancelAgentAction,
   cancelAgentRun,
+  getContextWindowSnapshot,
   listPendingAgentActions,
   onAgentEvent,
   rejectAgentAction,
@@ -170,6 +176,10 @@ export function AppShell() {
   const cancelledPendingMessageIdsRef = useRef<Set<string>>(new Set())
   const cancelledRunIdsRef = useRef<Set<string>>(new Set())
   const editSubmissionSeqRef = useRef(0)
+  const contextWindowRequestSeqRef = useRef(0)
+  const [contextWindowSnapshots, setContextWindowSnapshots] = useState<
+    Record<string, AgentContextWindowSnapshot>
+  >({})
   const [drafts, setDrafts] = useState<Record<string, ChatComposerDraft>>({
     [NEW_CONVERSATION_DRAFT_ID]: createComposerDraft()
   })
@@ -185,6 +195,23 @@ export function AppShell() {
     () =>
       enabledModels.find((model) => model.id === activeDraft.modelId) ?? enabledModels[0] ?? null,
     [activeDraft.modelId, enabledModels]
+  )
+  const activeContextWindowKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
+  const activeModelProviderPath = activeDraftSelectedModel
+    ? (activeDraftSelectedModel.providerPath ?? activeDraftSelectedModel.id)
+    : null
+  const contextWindowIndicatorEnabled =
+    featureFlags.contextWindowIndicator && uiPreferences.showContextWindowUsage
+  const activeContextWindowSnapshot =
+    contextWindowIndicatorEnabled &&
+    activeModelProviderPath &&
+    contextWindowSnapshots[activeContextWindowKey]?.model === activeModelProviderPath
+      ? contextWindowSnapshots[activeContextWindowKey]
+      : undefined
+  const activeConversationIsGenerating = Boolean(
+    activeConversation?.messages.some(
+      (message) => message.role === 'assistant' && message.status === 'pending'
+    )
   )
   const permissionModeAvailability = getPermissionModeAvailability(uiPreferences)
   const hasUnreadConversations = conversations.some(
@@ -208,6 +235,59 @@ export function AppShell() {
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId
   }, [activeConversationId])
+
+  useEffect(() => {
+    if (
+      !contextWindowIndicatorEnabled ||
+      !activeDraftSelectedModel ||
+      activeConversationIsGenerating
+    ) {
+      return undefined
+    }
+
+    const requestSequence = contextWindowRequestSeqRef.current + 1
+    contextWindowRequestSeqRef.current = requestSequence
+    const snapshotKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
+    let cancelled = false
+
+    void getContextWindowSnapshot({
+      contextBudgetEnabled: contextWindowIndicatorEnabled,
+      conversationId: activeConversation?.id,
+      projectId: activeConversation?.projectId ?? activeDraft.projectId,
+      modelId: activeDraftSelectedModel.id,
+      maxTokens: DEFAULT_AGENT_MAX_TOKENS,
+      permissions: resolveChatPermissions(
+        activeDraft.permissionMode,
+        uiPreferences.customPermissions
+      )
+    })
+      .then(({ snapshot }) => {
+        if (cancelled || contextWindowRequestSeqRef.current !== requestSequence) return
+        setContextWindowSnapshots((current) => {
+          if (snapshot) return { ...current, [snapshotKey]: snapshot }
+          if (!(snapshotKey in current)) return current
+          const next = { ...current }
+          delete next[snapshotKey]
+          return next
+        })
+      })
+      .catch((error) => {
+        if (!cancelled) console.error('Failed to inspect context window', error)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activeConversation?.id,
+    activeConversation?.projectId,
+    activeConversationIsGenerating,
+    activeDraft.permissionMode,
+    activeDraft.projectId,
+    activeDraftSelectedModel,
+    contextWindowIndicatorEnabled,
+    uiPreferences.customPermissions
+  ])
 
   useEffect(() => {
     let cancelled = false
@@ -643,6 +723,17 @@ export function AppShell() {
 
   useEffect(() => {
     return onAgentEvent((agentEvent) => {
+      if (agentEvent.type === 'context_window_updated') {
+        const conversationId = agentEvent.conversationId
+        if (contextWindowIndicatorEnabled && conversationId) {
+          setContextWindowSnapshots((current) => ({
+            ...current,
+            [conversationId]: agentEvent.snapshot
+          }))
+        }
+        return
+      }
+
       const runId = agentEvent.runId
       if (!runId) return
       if (cancelledRunIdsRef.current.has(runId)) return
@@ -656,7 +747,7 @@ export function AppShell() {
 
       handleBoundAgentEvent(binding.conversationId, binding.pendingMessageId, agentEvent)
     })
-  }, [handleBoundAgentEvent])
+  }, [contextWindowIndicatorEnabled, handleBoundAgentEvent])
 
   useEffect(() => {
     const pendingMessageDeltas = pendingMessageDeltasRef.current
@@ -690,6 +781,7 @@ export function AppShell() {
           assistantMessageId,
           attachments,
           content,
+          contextBudgetEnabled: contextWindowIndicatorEnabled,
           conversationId,
           maxTokens: DEFAULT_AGENT_MAX_TOKENS,
           modelId,
@@ -786,6 +878,7 @@ export function AppShell() {
     },
     [
       cancelBackendAgentRun,
+      contextWindowIndicatorEnabled,
       handleBoundAgentEvent,
       setConversationsWithRef,
       uiPreferences.customPermissions,
@@ -1502,6 +1595,8 @@ export function AppShell() {
             <ChatConversationPage
               composerDraft={activeDraft}
               conversation={activeConversation}
+              contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
+              contextWindowSnapshot={activeContextWindowSnapshot}
               editSelectedModelAvailable={Boolean(activeDraftSelectedModel)}
               editSelectedModelSupportsImage={Boolean(activeDraftSelectedModel?.supportsImage)}
               initialScrollTop={activeConversationInitialScrollTop}
@@ -1543,6 +1638,8 @@ export function AppShell() {
             />
           ) : (
             <NewConversationPage
+              contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
+              contextWindowSnapshot={activeContextWindowSnapshot}
               draft={activeDraft}
               permissionModeAvailability={permissionModeAvailability}
               onDraftChange={(draft) => updateDraft(NEW_CONVERSATION_DRAFT_ID, draft)}

@@ -55,7 +55,6 @@ export function ProfileSettingsPage({
   return (
     <article className="settings-list-page profile-settings-page">
       <h1>{t('settings.page.profile')}</h1>
-      <p className="settings-list-page__description">{t('profile.accountDescription')}</p>
 
       <section className="profile-settings-hero" aria-label={t('profile.account')}>
         <div className="profile-settings-avatar" aria-label={t('profile.avatar')}>

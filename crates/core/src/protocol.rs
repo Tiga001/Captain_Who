@@ -10,6 +10,10 @@ pub struct AgentChatInput {
     pub api_token: String,
     pub model: String,
     pub api_style: Option<AgentApiStyle>,
+    #[serde(default)]
+    pub context_window_tokens: Option<u32>,
+    #[serde(default = "default_true")]
+    pub context_budget_enabled: bool,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stream: Option<bool>,
@@ -25,6 +29,10 @@ pub struct AgentChatInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_checkpoint: Option<AgentRunCheckpoint>,
     pub messages: Vec<AgentChatMessage>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -356,6 +364,50 @@ pub struct AgentAttachmentReference {
     pub read_path: String,
     pub storage_rel_path: String,
     pub created_at: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentContextWindowStatus {
+    Unconfigured,
+    WithinBudget,
+    OverBudget,
+    InvalidConfiguration,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentContextWindowPhase {
+    Idle,
+    ModelRequest,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentContextWindowSource {
+    Estimated,
+    ProviderReported,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextWindowSnapshot {
+    pub model: String,
+    pub status: AgentContextWindowStatus,
+    pub phase: AgentContextWindowPhase,
+    pub source: AgentContextWindowSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window_tokens: Option<u64>,
+    pub reserved_output_tokens: u64,
+    pub safety_margin_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_input_tokens: Option<u64>,
+    pub used_input_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_input_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_index: Option<usize>,
+    pub context_revision: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -878,6 +930,12 @@ pub enum AgentEvent {
         run_id: String,
         draft: AgentFileDraftSnapshot,
     },
+    ContextWindowUpdated {
+        run_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<String>,
+        snapshot: AgentContextWindowSnapshot,
+    },
     ApprovalRequired {
         run_id: String,
         action: AgentProposedAction,
@@ -898,6 +956,10 @@ pub enum AgentEvent {
         run_id: Option<String>,
         message: String,
         recoverable: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        details: Option<Value>,
     },
     Done {
         run_id: String,
@@ -920,6 +982,8 @@ pub struct AgentError {
     message: String,
     cancelled: bool,
     usage: Option<Box<AgentUsage>>,
+    code: Option<String>,
+    details: Option<Box<Value>>,
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;
@@ -930,6 +994,18 @@ impl AgentError {
             message: message.into(),
             cancelled: false,
             usage: None,
+            code: None,
+            details: None,
+        }
+    }
+
+    pub fn structured(code: impl Into<String>, message: impl Into<String>, details: Value) -> Self {
+        Self {
+            message: message.into(),
+            cancelled: false,
+            usage: None,
+            code: Some(code.into()),
+            details: Some(Box::new(details)),
         }
     }
 
@@ -938,6 +1014,8 @@ impl AgentError {
             message: "agent run 已取消。".to_string(),
             cancelled: true,
             usage: None,
+            code: None,
+            details: None,
         }
     }
 
@@ -947,6 +1025,14 @@ impl AgentError {
 
     pub fn usage(&self) -> Option<&AgentUsage> {
         self.usage.as_deref()
+    }
+
+    pub fn code(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+
+    pub fn details(&self) -> Option<&Value> {
+        self.details.as_deref()
     }
 
     pub fn with_usage(mut self, usage: Option<AgentUsage>) -> Self {

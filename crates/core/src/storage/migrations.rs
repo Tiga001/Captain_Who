@@ -103,6 +103,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             short_name TEXT,
             provider_path TEXT,
             supports_image INTEGER NOT NULL,
+            context_window_tokens INTEGER,
             input_price TEXT NOT NULL,
             output_price TEXT NOT NULL,
             enabled INTEGER NOT NULL,
@@ -309,6 +310,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     )?;
 
     add_column_if_missing(connection, "projects", "pinned_at", "INTEGER")?;
+    add_column_if_missing(connection, "models", "context_window_tokens", "INTEGER")?;
     add_column_if_missing(connection, "conversations", "pinned_at", "INTEGER")?;
     add_column_if_missing(connection, "conversations", "archived_at", "INTEGER")?;
     add_column_if_missing(connection, "conversations", "unread_at", "INTEGER")?;
@@ -340,6 +342,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         connection,
         "ui_preferences",
         "show_token_usage_details",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
+    add_column_if_missing(
+        connection,
+        "ui_preferences",
+        "show_context_window_usage",
         "INTEGER NOT NULL DEFAULT 1",
     )?;
     add_column_if_missing(
@@ -493,6 +501,44 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adds_nullable_context_window_to_existing_model_tables() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE models (
+                    id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    short_name TEXT,
+                    provider_path TEXT,
+                    supports_image INTEGER NOT NULL,
+                    input_price TEXT NOT NULL,
+                    output_price TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO models VALUES (
+                    'model-a', 'Model A', NULL, NULL, 0, '0', '0', 1, 0, 1, 1
+                );
+                ",
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        let context_window = connection
+            .query_row(
+                "SELECT context_window_tokens FROM models WHERE id = 'model-a'",
+                [],
+                |row| row.get::<_, Option<u32>>(0),
+            )
+            .unwrap();
+        assert_eq!(context_window, None);
+    }
 
     #[test]
     fn removes_initial_demo_profile_only_once() {

@@ -82,6 +82,7 @@ pub fn save_model_settings(
                 short_name,
                 provider_path,
                 supports_image,
+                context_window_tokens,
                 input_price,
                 output_price,
                 enabled,
@@ -89,7 +90,7 @@ pub fn save_model_settings(
                 created_at,
                 updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
             ",
             params![
                 &model.id,
@@ -97,6 +98,7 @@ pub fn save_model_settings(
                 &model.short_name,
                 &model.provider_path,
                 model.supports_image,
+                model.context_window_tokens,
                 &model.input_price,
                 &model.output_price,
                 model.enabled,
@@ -118,6 +120,7 @@ fn load_models(connection: &Connection) -> rusqlite::Result<Vec<ModelConfigRecor
             short_name,
             provider_path,
             supports_image,
+            context_window_tokens,
             input_price,
             output_price,
             enabled
@@ -134,9 +137,10 @@ fn load_models(connection: &Connection) -> rusqlite::Result<Vec<ModelConfigRecor
                 short_name: row.get(2)?,
                 provider_path: row.get(3)?,
                 supports_image: row.get(4)?,
-                input_price: row.get(5)?,
-                output_price: row.get(6)?,
-                enabled: row.get(7)?,
+                context_window_tokens: row.get(5)?,
+                input_price: row.get(6)?,
+                output_price: row.get(7)?,
+                enabled: row.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

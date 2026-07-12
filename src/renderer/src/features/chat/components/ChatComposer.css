@@ -664,6 +664,116 @@
   min-width: 16px;
 }
 
+.composer-context-window {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.composer-context-window__button {
+  display: grid;
+  width: 24px;
+  height: 32px;
+  padding: 0;
+  place-items: center;
+  color: var(--mc-color-icon-subtle);
+  background: transparent;
+}
+
+.composer-context-window__button svg {
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+  overflow: visible;
+  transform: rotate(-90deg);
+  stroke-width: 3;
+}
+
+.composer-context-window__track,
+.composer-context-window__progress {
+  fill: none;
+}
+
+.composer-context-window__track {
+  stroke: var(--mc-color-border-default);
+}
+
+.composer-context-window__progress {
+  stroke: var(--mc-color-icon-subtle);
+  stroke-linecap: round;
+  transition:
+    stroke-dasharray 180ms ease,
+    stroke 180ms ease;
+}
+
+.composer-context-window[data-level='warning'] .composer-context-window__progress {
+  stroke: var(--mc-color-text-accent);
+}
+
+.composer-context-window[data-level='critical'] .composer-context-window__progress {
+  stroke: var(--mc-color-text-danger);
+}
+
+.composer-context-window__popover {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  z-index: 30;
+  display: grid;
+  width: max-content;
+  max-width: calc(100vw - 40px);
+  padding: 9px 12px;
+  justify-items: center;
+  gap: 1px;
+  color: var(--mc-color-text-primary);
+  text-align: center;
+  background: var(--mc-color-surface-popover);
+  border: 1px solid var(--mc-color-border-default);
+  border-radius: var(--mc-radius-popover);
+  box-shadow: var(--mc-shadow-popover);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-50%, 4px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease,
+    visibility 120ms ease;
+}
+
+.composer-context-window:hover .composer-context-window__popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+  transition-delay: 500ms;
+}
+
+.composer-context-window:focus-within .composer-context-window__popover {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+  transition-delay: 0ms;
+}
+
+.composer-context-window__title {
+  color: var(--mc-color-text-subtle);
+  font-size: var(--mc-font-size-chat-toolbar);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-compact);
+}
+
+.composer-context-window__popover strong {
+  color: var(--mc-color-text-primary);
+  font-size: var(--mc-font-size-chat-toolbar);
+  font-weight: var(--mc-font-weight-strong);
+  line-height: var(--mc-line-height-compact);
+}
+
+.composer-context-window__popover > span:not(.composer-context-window__title) {
+  color: var(--mc-color-text-primary);
+  font-size: var(--mc-font-size-chat-toolbar);
+  line-height: var(--mc-line-height-compact);
+}
+
 .composer-submit-button {
   display: grid;
   width: 36px;

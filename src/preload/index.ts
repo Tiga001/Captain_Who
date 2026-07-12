@@ -59,6 +59,8 @@ const host: HostApi = {
   },
   agent: {
     startConversationTurn: (input) => ipcRenderer.invoke('host:agent.startConversationTurn', input),
+    getContextWindowSnapshot: (input) =>
+      ipcRenderer.invoke('host:agent.getContextWindowSnapshot', input),
     cancelRun: (input) => ipcRenderer.invoke('host:agent.cancelRun', input),
     listPendingActions: () => ipcRenderer.invoke('host:agent.listPendingActions'),
     approveAction: (input) => ipcRenderer.invoke('host:agent.approveAction', input),

@@ -413,6 +413,9 @@ export function registerHostIpc(
   ipcMain.handle('host:agent.startConversationTurn', (_event, input) =>
     coreServer.startConversationTurn(input)
   )
+  ipcMain.handle('host:agent.getContextWindowSnapshot', (_event, input) =>
+    coreServer.getContextWindowSnapshot(input)
+  )
   ipcMain.handle('host:agent.cancelRun', (_event, input) => coreServer.cancelRun(input))
   ipcMain.handle('host:agent.listPendingActions', () => coreServer.listPendingActions())
   ipcMain.handle('host:agent.approveAction', (_event, input) => coreServer.approveAction(input))

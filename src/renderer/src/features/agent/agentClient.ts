@@ -4,6 +4,8 @@ import type {
   AgentFileWriteDiffPage,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
+  AgentContextWindowSnapshotInput,
+  AgentContextWindowSnapshotOutput,
   AgentActionExecutionOutput,
   PendingAgentActionSnapshot,
   AgentUsageClearInput,
@@ -20,6 +22,12 @@ export async function startConversationTurn(
   input: StartConversationTurnInput
 ): Promise<StartConversationTurnOutput> {
   return hostClient.agent.startConversationTurn(input)
+}
+
+export async function getContextWindowSnapshot(
+  input: AgentContextWindowSnapshotInput
+): Promise<AgentContextWindowSnapshotOutput> {
+  return hostClient.agent.getContextWindowSnapshot(input)
 }
 
 export async function listPendingAgentActions(): Promise<PendingAgentActionSnapshot[]> {

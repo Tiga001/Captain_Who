@@ -5,6 +5,8 @@ import type {
   AgentCancelRunResponse,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
+  AgentContextWindowSnapshotInput,
+  AgentContextWindowSnapshotOutput,
   AgentEvent,
   AgentFileDraftContentPage,
   AgentFileDraftReadInput,
@@ -130,6 +132,9 @@ export interface TerminalHostApi {
 
 export interface AgentHostApi {
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput>
+  getContextWindowSnapshot(
+    input: AgentContextWindowSnapshotInput
+  ): Promise<AgentContextWindowSnapshotOutput>
   cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse>
   listPendingActions(): Promise<PendingAgentActionSnapshot[]>
   approveAction(input: AgentActionIdRequest): Promise<AgentActionExecutionOutput>
