@@ -163,6 +163,9 @@ export const enUSTranslations = {
   'profile.avatar': 'Avatar',
   'profile.uploadAvatar': 'Upload avatar',
   'profile.removeAvatar': 'Remove avatar',
+  'profile.removeAvatarTitle': 'Are you sure you want to remove your avatar?',
+  'profile.cancelRemoveAvatar': 'Cancel',
+  'profile.confirmRemoveAvatar': 'Remove',
   'profile.displayName': 'Display name',
   'profile.displayNameDescription':
     'When no avatar is uploaded, the first two characters of the display name are used.',
@@ -192,12 +195,16 @@ export const enUSTranslations = {
   'personalization.saveFailed': 'Save failed',
   'personalization.loadFailed': 'Failed to load personalization settings',
 
-  'appearance.description':
-    'Configure the interface theme, fonts, density, and display preferences.',
   'appearance.theme': 'Theme',
+  'appearance.preferences': 'Preferences',
   'appearance.theme.system': 'System',
   'appearance.theme.light': 'Light',
   'appearance.theme.dark': 'Dark',
+  'appearance.themeVariant.light': 'Light theme',
+  'appearance.themeVariant.dark': 'Dark theme',
+  'appearance.themeVariant.classicLight': 'Classic',
+  'appearance.themeVariant.classicDark': 'Classic',
+  'appearance.themeVariant.purpleGold': 'Purple Gold',
   'appearance.nativeFontSmoothing': 'macOS font smoothing',
   'appearance.nativeFontSmoothingDescription':
     'Use macOS/WebKit font antialiasing for smoother text edges.',
@@ -234,6 +241,8 @@ export const enUSTranslations = {
   'usageBilling.outputThinkingTokens': 'Output (thinking)',
   'usageBilling.totalTokens': 'Total',
   'usageBilling.estimatedCost': 'Estimated cost',
+  'usageBilling.deletedModel': 'Deleted',
+  'usageBilling.unpricedMessages': 'messages excluded because their price is invalid',
   'usageBilling.models': 'Model breakdown',
   'usageBilling.loading': 'Loading usage data',
   'usageBilling.empty': 'No usage data',
@@ -596,6 +605,8 @@ export const enUSTranslations = {
   'configuration.displayNamePlaceholder': 'Leave empty to use model ID',
   'configuration.inputPrice': 'Input price / 1k tokens',
   'configuration.outputPrice': 'Output price / 1k tokens',
+  'configuration.invalidPrice': 'Enter a valid price greater than or equal to 0',
+  'configuration.saveFailed': 'Failed to save model settings',
   'configuration.supportsImageInput': 'Supports image input',
   'configuration.save': 'Save'
 } as const

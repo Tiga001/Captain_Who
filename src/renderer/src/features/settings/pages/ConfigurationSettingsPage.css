@@ -393,6 +393,22 @@
   justify-self: end;
 }
 
+.model-form-price-control {
+  display: grid;
+  gap: 5px;
+}
+
+.model-form-price-control .settings-list-control[aria-invalid='true'] {
+  outline: 1px solid var(--mc-color-text-danger);
+  outline-offset: 1px;
+}
+
+.model-form-field-error {
+  color: var(--mc-color-text-danger);
+  font-size: var(--mc-font-size-xs);
+  line-height: var(--mc-line-height-normal);
+}
+
 .model-form-page__actions {
   display: flex;
   justify-content: flex-end;

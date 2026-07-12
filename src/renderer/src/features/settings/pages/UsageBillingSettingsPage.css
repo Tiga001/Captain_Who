@@ -525,6 +525,14 @@
   white-space: nowrap;
 }
 
+.usage-chart-tooltip__warning,
+.usage-cost-warning {
+  color: var(--mc-color-text-danger);
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-regular);
+  line-height: var(--mc-line-height-normal);
+}
+
 .usage-chart-day__label {
   position: relative;
   z-index: 1;
@@ -595,6 +603,10 @@
   font-size: var(--mc-font-size-settings-section-title);
   font-weight: var(--mc-font-weight-strong);
   line-height: var(--mc-line-height-control);
+}
+
+.usage-summary-card .usage-cost-warning {
+  margin-top: -3px;
 }
 
 .usage-secondary-grid {
@@ -684,10 +696,27 @@
   white-space: nowrap;
 }
 
+.usage-model-row__name .usage-model-row__deleted {
+  justify-self: start;
+  color: var(--settings-content-muted-color);
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-regular);
+  line-height: var(--mc-line-height-normal);
+}
+
 .usage-model-row__metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
+}
+
+.usage-model-row__cost {
+  display: grid;
+  gap: 2px;
+}
+
+.usage-model-row__cost .usage-cost-warning {
+  white-space: normal;
 }
 
 .usage-empty-state {

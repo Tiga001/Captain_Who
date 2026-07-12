@@ -1,3 +1,8 @@
+import type { TranslationKey } from './frontendTranslations'
+
+export type ColorScheme = 'light' | 'dark'
+export type ColorSchemePreference = 'system' | ColorScheme
+
 export const lightTheme = {
   colors: {
     text: {
@@ -92,6 +97,12 @@ export const lightTheme = {
   }
 } as const
 
+type WidenThemeStrings<T> = {
+  readonly [Key in keyof T]: T[Key] extends string ? string : WidenThemeStrings<T[Key]>
+}
+
+export type FrontendTheme = WidenThemeStrings<typeof lightTheme>
+
 const darkTheme = {
   colors: {
     text: {
@@ -184,13 +195,193 @@ const darkTheme = {
     card: '0 10px 28px rgba(0, 0, 0, 0.36)',
     dialog: '0 32px 72px rgba(0, 0, 0, 0.62), 0 8px 24px rgba(0, 0, 0, 0.44)'
   }
-} as const
+} as const satisfies FrontendTheme
+
+const purpleGoldDarkTheme = {
+  ...darkTheme,
+  colors: {
+    ...darkTheme.colors,
+    text: {
+      primary: '#F5F0E6',
+      strong: '#F5F0E6',
+      secondary: '#D8D0C2',
+      muted: '#A59BAD',
+      subtle: '#817788',
+      inverse: '#19111D',
+      danger: '#FF776C',
+      accent: '#D6B35F'
+    },
+    icon: {
+      default: '#F5F0E6',
+      muted: '#B9AFC0',
+      subtle: '#897E91',
+      accent: '#D6B35F',
+      danger: '#FF776C',
+      success: '#52CCA0'
+    },
+    avatar: {
+      background: '#6D3B83'
+    },
+    surface: {
+      leftPanel: '#1A1220',
+      mainPanel: '#120D16',
+      rightPanel: '#17101C',
+      elevated: '#1D1424',
+      muted: '#261B2E',
+      selected: '#3A2844',
+      selectedSubtle: '#2B1D34',
+      infoSubtle: 'rgba(214, 179, 95, 0.14)',
+      successSubtle: 'rgba(82, 204, 160, 0.15)',
+      neutralSubtle: '#2A202F',
+      disabled: '#403547',
+      dangerSubtle: 'rgba(255, 119, 108, 0.14)',
+      dangerSoft: 'rgba(255, 119, 108, 0.14)',
+      errorSubtle: 'rgba(255, 119, 108, 0.13)',
+      glass: 'rgba(27, 18, 33, 0.92)',
+      glassStrong: 'rgba(30, 20, 37, 0.96)',
+      glassInput: 'rgba(245, 240, 230, 0.08)'
+    },
+    border: {
+      hairline: 'rgba(224, 191, 117, 0.11)',
+      subtle: 'rgba(224, 191, 117, 0.13)',
+      default: '#4E3D55',
+      strong: '#6D5873',
+      error: 'rgba(255, 119, 108, 0.26)'
+    },
+    button: {
+      primaryBg: '#C5A253',
+      primaryBgHover: '#D7B966',
+      primaryText: '#19111D',
+      secondaryBg: '#281B30',
+      secondaryBgHover: '#35233F',
+      secondaryText: '#F5F0E6',
+      dangerBg: '#D95349',
+      dangerBgHover: '#EB675C',
+      dangerText: '#FFFFFF',
+      dangerSoftText: '#FF9188',
+      dangerSoftBg: 'rgba(255, 119, 108, 0.14)',
+      dangerSoftBgHover: 'rgba(255, 119, 108, 0.21)'
+    },
+    sidebar: {
+      textSecondary: '#D8D0C2',
+      textActive: '#F5F0E6'
+    },
+    settings: {
+      contentTitle: '#F5F0E6',
+      contentText: '#D8D0C2',
+      contentMuted: '#A59BAD'
+    },
+    state: {
+      hover: 'rgba(214, 179, 95, 0.08)',
+      active: 'rgba(214, 179, 95, 0.13)',
+      focusRing: '#D6B35F',
+      resizeHandle: '#D6B35F',
+      overlay: 'rgba(7, 2, 10, 0.58)',
+      overlayLight: 'rgba(7, 2, 10, 0.48)'
+    }
+  },
+  shadow: {
+    none: 'none',
+    hairline: '0 1px 2px rgba(7, 2, 10, 0.32)',
+    focus: '0 0 0 3px rgba(214, 179, 95, 0.24)',
+    composer: '0 18px 46px rgba(7, 2, 10, 0.46), 0 2px 8px rgba(7, 2, 10, 0.34)',
+    popover: '0 18px 48px rgba(7, 2, 10, 0.56), 0 3px 10px rgba(7, 2, 10, 0.38)',
+    popoverLarge: '0 22px 58px rgba(7, 2, 10, 0.62), 0 6px 18px rgba(7, 2, 10, 0.42)',
+    sidebarMenu: '0 22px 48px rgba(7, 2, 10, 0.58), 0 3px 10px rgba(7, 2, 10, 0.4)',
+    card: '0 10px 30px rgba(7, 2, 10, 0.46)',
+    dialog: '0 32px 72px rgba(7, 2, 10, 0.68), 0 8px 24px rgba(7, 2, 10, 0.5)'
+  }
+} as const satisfies FrontendTheme
+
+export interface FrontendThemeDefinition {
+  colorScheme: ColorScheme
+  labelKey: TranslationKey
+  order: number
+  tokens: FrontendTheme
+}
 
 export const frontendThemes = {
-  light: lightTheme,
-  dark: darkTheme
-} as const
+  'classic-light': {
+    colorScheme: 'light',
+    labelKey: 'appearance.themeVariant.classicLight',
+    order: 10,
+    tokens: lightTheme
+  },
+  'classic-dark': {
+    colorScheme: 'dark',
+    labelKey: 'appearance.themeVariant.classicDark',
+    order: 10,
+    tokens: darkTheme
+  },
+  'purple-gold-dark': {
+    colorScheme: 'dark',
+    labelKey: 'appearance.themeVariant.purpleGold',
+    order: 20,
+    tokens: purpleGoldDarkTheme
+  }
+} as const satisfies Record<string, FrontendThemeDefinition>
 
-export type FrontendThemeName = keyof typeof frontendThemes
-export type FrontendTheme = (typeof frontendThemes)[FrontendThemeName]
-export type ThemePreference = 'system' | FrontendThemeName
+export type FrontendThemeId = keyof typeof frontendThemes
+
+export type FrontendThemeIdForColorScheme<Scheme extends ColorScheme> = {
+  [ThemeId in FrontendThemeId]: (typeof frontendThemes)[ThemeId]['colorScheme'] extends Scheme
+    ? ThemeId
+    : never
+}[FrontendThemeId]
+
+export interface RegisteredFrontendTheme extends FrontendThemeDefinition {
+  id: FrontendThemeId
+}
+
+export type ThemeIdsByColorScheme = {
+  [Scheme in ColorScheme]: FrontendThemeIdForColorScheme<Scheme>
+}
+
+export const defaultThemeIdsByColorScheme = {
+  light: 'classic-light',
+  dark: 'classic-dark'
+} as const satisfies ThemeIdsByColorScheme
+
+const frontendThemeIds = Object.keys(frontendThemes) as FrontendThemeId[]
+
+export function isColorScheme(value: unknown): value is ColorScheme {
+  return value === 'light' || value === 'dark'
+}
+
+export function isColorSchemePreference(value: unknown): value is ColorSchemePreference {
+  return value === 'system' || isColorScheme(value)
+}
+
+export function isFrontendThemeId(value: unknown): value is FrontendThemeId {
+  return typeof value === 'string' && Object.hasOwn(frontendThemes, value)
+}
+
+export function getFrontendTheme(themeId: FrontendThemeId): RegisteredFrontendTheme {
+  const definition = frontendThemes[themeId]
+  return { id: themeId, ...definition }
+}
+
+export function getFrontendThemesForColorScheme(
+  colorScheme: ColorScheme
+): RegisteredFrontendTheme[] {
+  return frontendThemeIds
+    .map(getFrontendTheme)
+    .filter((theme) => theme.colorScheme === colorScheme)
+    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+}
+
+export function isThemeIdForColorScheme<Scheme extends ColorScheme>(
+  themeId: unknown,
+  colorScheme: Scheme
+): themeId is FrontendThemeIdForColorScheme<Scheme> {
+  return isFrontendThemeId(themeId) && frontendThemes[themeId].colorScheme === colorScheme
+}
+
+export function getDefaultThemeIdForColorScheme<Scheme extends ColorScheme>(
+  colorScheme: Scheme
+): FrontendThemeIdForColorScheme<Scheme> {
+  // The satisfies check above enforces this correlation; TypeScript loses it on generic indexing.
+  return defaultThemeIdsByColorScheme[
+    colorScheme
+  ] as unknown as FrontendThemeIdForColorScheme<Scheme>
+}

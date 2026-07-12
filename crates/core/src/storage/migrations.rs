@@ -208,6 +208,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             provider_path_key TEXT NOT NULL,
             request_count INTEGER NOT NULL DEFAULT 0,
             message_count INTEGER NOT NULL DEFAULT 0,
+            unpriced_message_count INTEGER NOT NULL DEFAULT 0,
             input_tokens INTEGER,
             output_tokens INTEGER,
             output_thinking_tokens INTEGER,
@@ -453,6 +454,22 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "agent_usage_records",
         "output_thinking_tokens",
         "INTEGER",
+    )?;
+    add_column_if_missing(
+        connection,
+        "agent_deleted_usage_daily_rollups",
+        "unpriced_message_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    connection.execute(
+        "
+        UPDATE agent_deleted_usage_daily_rollups
+        SET unpriced_message_count = message_count
+        WHERE unpriced_message_count = 0
+          AND estimated_cost IS NULL
+          AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL)
+        ",
+        [],
     )?;
     add_column_if_missing(
         connection,

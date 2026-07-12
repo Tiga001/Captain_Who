@@ -403,8 +403,10 @@ pub struct AgentUsageModelSummary {
     pub model_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_path: Option<String>,
+    pub is_configured: bool,
     pub request_count: u64,
     pub message_count: u64,
+    pub unpriced_message_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -426,6 +428,7 @@ pub struct AgentUsageModelSummary {
 pub struct AgentUsageSummaryOutput {
     pub request_count: u64,
     pub message_count: u64,
+    pub unpriced_message_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

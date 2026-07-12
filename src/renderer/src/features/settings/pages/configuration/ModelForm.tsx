@@ -8,6 +8,13 @@ interface ModelFormProps {
   onSave: (values: ModelFormValues) => void
 }
 
+function isValidPriceInput(value: string): boolean {
+  const normalized = value.trim().replaceAll(',', '')
+  if (normalized.length === 0) return true
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) && parsed >= 0
+}
+
 function toFormValues(model?: ModelConfig): ModelFormValues {
   return {
     id: model?.id ?? '',
@@ -23,7 +30,9 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
   const initialValues = useMemo(() => toFormValues(model), [model])
   const [values, setValues] = useState<ModelFormValues>(initialValues)
   const isEditing = Boolean(model)
-  const canSave = values.id.trim().length > 0
+  const isInputPriceValid = isValidPriceInput(values.inputPrice)
+  const isOutputPriceValid = isValidPriceInput(values.outputPrice)
+  const canSave = values.id.trim().length > 0 && isInputPriceValid && isOutputPriceValid
 
   return (
     <form
@@ -80,15 +89,19 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
           <span className="settings-list-row__text">
             <span className="settings-list-row__title">{t('configuration.inputPrice')}</span>
           </span>
-          <span className="settings-list-row__control">
+          <span className="settings-list-row__control model-form-price-control">
             <input
               className="settings-list-control"
               inputMode="decimal"
+              aria-invalid={!isInputPriceValid}
               value={values.inputPrice}
               onChange={(event) =>
                 setValues((current) => ({ ...current, inputPrice: event.target.value }))
               }
             />
+            {!isInputPriceValid && (
+              <small className="model-form-field-error">{t('configuration.invalidPrice')}</small>
+            )}
           </span>
         </label>
 
@@ -96,15 +109,19 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
           <span className="settings-list-row__text">
             <span className="settings-list-row__title">{t('configuration.outputPrice')}</span>
           </span>
-          <span className="settings-list-row__control">
+          <span className="settings-list-row__control model-form-price-control">
             <input
               className="settings-list-control"
               inputMode="decimal"
+              aria-invalid={!isOutputPriceValid}
               value={values.outputPrice}
               onChange={(event) =>
                 setValues((current) => ({ ...current, outputPrice: event.target.value }))
               }
             />
+            {!isOutputPriceValid && (
+              <small className="model-form-field-error">{t('configuration.invalidPrice')}</small>
+            )}
           </span>
         </label>
 

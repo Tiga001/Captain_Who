@@ -10,6 +10,7 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const DELETED_USAGE_ROLLUP_UPDATE_SQL: &str = "
     request_count = agent_deleted_usage_daily_rollups.request_count + excluded.request_count,
     message_count = agent_deleted_usage_daily_rollups.message_count + excluded.message_count,
+    unpriced_message_count = agent_deleted_usage_daily_rollups.unpriced_message_count + excluded.unpriced_message_count,
     input_tokens = CASE
         WHEN agent_deleted_usage_daily_rollups.input_tokens IS NULL AND excluded.input_tokens IS NULL THEN NULL
         ELSE COALESCE(agent_deleted_usage_daily_rollups.input_tokens, 0) + COALESCE(excluded.input_tokens, 0)
@@ -166,6 +167,7 @@ fn roll_up_deleted_usage(
             provider_path_key,
             request_count,
             message_count,
+            unpriced_message_count,
             input_tokens,
             output_tokens,
             output_thinking_tokens,
@@ -183,6 +185,10 @@ fn roll_up_deleted_usage(
             COALESCE(provider_path, ''),
             COALESCE(SUM(billable_request_count), 0),
             COUNT(*),
+            SUM(CASE
+                WHEN estimated_cost IS NULL AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL) THEN 1
+                ELSE 0
+            END),
             SUM(input_tokens),
             SUM(output_tokens),
             SUM(output_thinking_tokens),
@@ -219,6 +225,7 @@ pub fn usage_summary(
     Ok(AgentUsageSummaryOutput {
         request_count: totals.request_count,
         message_count: totals.message_count,
+        unpriced_message_count: totals.unpriced_message_count,
         input_tokens: totals.input_tokens,
         output_tokens: totals.output_tokens,
         output_thinking_tokens: totals.output_thinking_tokens,
@@ -282,6 +289,7 @@ pub fn estimate_usage_cost(
 struct UsageTotals {
     request_count: u64,
     message_count: u64,
+    unpriced_message_count: u64,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     output_thinking_tokens: Option<u64>,
@@ -302,6 +310,7 @@ fn query_usage_totals(
         SELECT
             COALESCE(SUM(request_count), 0),
             COALESCE(SUM(message_count), 0),
+            COALESCE(SUM(unpriced_message_count), 0),
             SUM(input_tokens),
             SUM(output_tokens),
             SUM(output_thinking_tokens),
@@ -313,6 +322,10 @@ fn query_usage_totals(
             SELECT
                 billable_request_count AS request_count,
                 1 AS message_count,
+                CASE
+                    WHEN estimated_cost IS NULL AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL) THEN 1
+                    ELSE 0
+                END AS unpriced_message_count,
                 input_tokens,
                 output_tokens,
                 output_thinking_tokens,
@@ -327,6 +340,7 @@ fn query_usage_totals(
             SELECT
                 request_count,
                 message_count,
+                unpriced_message_count,
                 input_tokens,
                 output_tokens,
                 output_thinking_tokens,
@@ -344,13 +358,14 @@ fn query_usage_totals(
             Ok(UsageTotals {
                 request_count: i64_to_u64(row.get::<_, i64>(0)?),
                 message_count: i64_to_u64(row.get::<_, i64>(1)?),
-                input_tokens: optional_i64_to_u64(row.get(2)?),
-                output_tokens: optional_i64_to_u64(row.get(3)?),
-                output_thinking_tokens: optional_i64_to_u64(row.get(4)?),
-                total_tokens: optional_i64_to_u64(row.get(5)?),
-                cached_input_tokens: optional_i64_to_u64(row.get(6)?),
-                cache_creation_input_tokens: optional_i64_to_u64(row.get(7)?),
-                estimated_cost: row.get(8)?,
+                unpriced_message_count: i64_to_u64(row.get::<_, i64>(2)?),
+                input_tokens: optional_i64_to_u64(row.get(3)?),
+                output_tokens: optional_i64_to_u64(row.get(4)?),
+                output_thinking_tokens: optional_i64_to_u64(row.get(5)?),
+                total_tokens: optional_i64_to_u64(row.get(6)?),
+                cached_input_tokens: optional_i64_to_u64(row.get(7)?),
+                cache_creation_input_tokens: optional_i64_to_u64(row.get(8)?),
+                estimated_cost: row.get(9)?,
             })
         },
     )
@@ -364,26 +379,18 @@ fn query_usage_models(
     let (rollup_from, rollup_to) = rollup_window(from, to);
     let mut statement = connection.prepare(
         "
-        SELECT
-            model_id,
-            model_name,
-            NULLIF(provider_path_key, ''),
-            COALESCE(SUM(request_count), 0),
-            COALESCE(SUM(message_count), 0),
-            SUM(input_tokens),
-            SUM(output_tokens),
-            SUM(output_thinking_tokens),
-            SUM(total_tokens),
-            SUM(cached_input_tokens),
-            SUM(cache_creation_input_tokens),
-            SUM(estimated_cost)
-        FROM (
+        WITH usage_entries AS (
             SELECT
                 model_id,
                 model_name,
                 COALESCE(provider_path, '') AS provider_path_key,
+                created_at AS observed_at,
                 billable_request_count AS request_count,
                 1 AS message_count,
+                CASE
+                    WHEN estimated_cost IS NULL AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL) THEN 1
+                    ELSE 0
+                END AS unpriced_message_count,
                 input_tokens,
                 output_tokens,
                 output_thinking_tokens,
@@ -399,8 +406,10 @@ fn query_usage_models(
                 model_id,
                 model_name,
                 provider_path_key,
+                usage_day AS observed_at,
                 request_count,
                 message_count,
+                unpriced_message_count,
                 input_tokens,
                 output_tokens,
                 output_thinking_tokens,
@@ -411,9 +420,63 @@ fn query_usage_models(
             FROM agent_deleted_usage_daily_rollups
             WHERE (?3 IS NULL OR usage_day >= ?3)
               AND (?4 IS NULL OR usage_day <= ?4)
+        ),
+        aggregated AS (
+            SELECT
+                model_id,
+                provider_path_key,
+                COALESCE(SUM(request_count), 0) AS request_count,
+                COALESCE(SUM(message_count), 0) AS message_count,
+                COALESCE(SUM(unpriced_message_count), 0) AS unpriced_message_count,
+                SUM(input_tokens) AS input_tokens,
+                SUM(output_tokens) AS output_tokens,
+                SUM(output_thinking_tokens) AS output_thinking_tokens,
+                SUM(total_tokens) AS total_tokens,
+                SUM(cached_input_tokens) AS cached_input_tokens,
+                SUM(cache_creation_input_tokens) AS cache_creation_input_tokens,
+                SUM(estimated_cost) AS estimated_cost
+            FROM usage_entries
+            GROUP BY model_id, provider_path_key
         )
-        GROUP BY model_id, model_name, provider_path_key
-        ORDER BY COALESCE(SUM(total_tokens), 0) DESC, model_name ASC
+        SELECT
+            aggregated.model_id,
+            COALESCE(
+                NULLIF((
+                    SELECT configured.display_name
+                    FROM models AS configured
+                    WHERE configured.id = aggregated.model_id
+                      AND COALESCE(configured.provider_path, '') = aggregated.provider_path_key
+                    LIMIT 1
+                ), ''),
+                (
+                    SELECT historical.model_name
+                    FROM usage_entries AS historical
+                    WHERE historical.model_id = aggregated.model_id
+                      AND historical.provider_path_key = aggregated.provider_path_key
+                    ORDER BY historical.observed_at DESC, historical.model_name DESC
+                    LIMIT 1
+                ),
+                aggregated.model_id
+            ) AS model_name,
+            NULLIF(aggregated.provider_path_key, ''),
+            EXISTS(
+                SELECT 1
+                FROM models AS configured
+                WHERE configured.id = aggregated.model_id
+                  AND COALESCE(configured.provider_path, '') = aggregated.provider_path_key
+            ) AS is_configured,
+            aggregated.request_count,
+            aggregated.message_count,
+            aggregated.unpriced_message_count,
+            aggregated.input_tokens,
+            aggregated.output_tokens,
+            aggregated.output_thinking_tokens,
+            aggregated.total_tokens,
+            aggregated.cached_input_tokens,
+            aggregated.cache_creation_input_tokens,
+            aggregated.estimated_cost
+        FROM aggregated
+        ORDER BY COALESCE(aggregated.total_tokens, 0) DESC, model_name ASC
         ",
     )?;
 
@@ -423,15 +486,17 @@ fn query_usage_models(
                 model_id: row.get(0)?,
                 model_name: row.get(1)?,
                 provider_path: row.get(2)?,
-                request_count: i64_to_u64(row.get::<_, i64>(3)?),
-                message_count: i64_to_u64(row.get::<_, i64>(4)?),
-                input_tokens: optional_i64_to_u64(row.get(5)?),
-                output_tokens: optional_i64_to_u64(row.get(6)?),
-                output_thinking_tokens: optional_i64_to_u64(row.get(7)?),
-                total_tokens: optional_i64_to_u64(row.get(8)?),
-                cached_input_tokens: optional_i64_to_u64(row.get(9)?),
-                cache_creation_input_tokens: optional_i64_to_u64(row.get(10)?),
-                estimated_cost: row.get(11)?,
+                is_configured: row.get(3)?,
+                request_count: i64_to_u64(row.get::<_, i64>(4)?),
+                message_count: i64_to_u64(row.get::<_, i64>(5)?),
+                unpriced_message_count: i64_to_u64(row.get::<_, i64>(6)?),
+                input_tokens: optional_i64_to_u64(row.get(7)?),
+                output_tokens: optional_i64_to_u64(row.get(8)?),
+                output_thinking_tokens: optional_i64_to_u64(row.get(9)?),
+                total_tokens: optional_i64_to_u64(row.get(10)?),
+                cached_input_tokens: optional_i64_to_u64(row.get(11)?),
+                cache_creation_input_tokens: optional_i64_to_u64(row.get(12)?),
+                estimated_cost: row.get(13)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -471,7 +536,14 @@ fn parse_price_per_1k(value: &str) -> Option<f64> {
     if normalized.is_empty() {
         return None;
     }
-    normalized.parse::<f64>().ok().filter(|price| *price >= 0.0)
+    normalized
+        .parse::<f64>()
+        .ok()
+        .filter(|price| price.is_finite() && *price >= 0.0)
+}
+
+pub(crate) fn is_valid_price_per_1k(value: &str) -> bool {
+    parse_price_per_1k(value).is_some()
 }
 
 fn optional_u64_to_i64(value: Option<u64>) -> Option<i64> {
@@ -518,6 +590,41 @@ mod tests {
                 params![conversation_id],
             )
             .unwrap();
+    }
+
+    fn usage_record(
+        conversation_id: &str,
+        message_id: &str,
+        model_name: &str,
+        created_at: i64,
+        input_tokens: u64,
+        estimated_cost: Option<f64>,
+    ) -> AgentUsageRecordInsert {
+        AgentUsageRecordInsert {
+            id: format!("usage-{message_id}"),
+            conversation_id: conversation_id.to_string(),
+            message_id: message_id.to_string(),
+            run_id: format!("run-{message_id}"),
+            project_id: None,
+            model_id: "model-a".to_string(),
+            model_name: model_name.to_string(),
+            provider_path: Some("provider/model-a".to_string()),
+            started_at: Some(created_at - 1),
+            completed_at: Some(created_at),
+            status: Some("completed".to_string()),
+            error: None,
+            created_at,
+            input_tokens: Some(input_tokens),
+            output_tokens: Some(0),
+            output_thinking_tokens: None,
+            total_tokens: Some(input_tokens),
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            billable_request_count: 1,
+            input_price: Some("0.01".to_string()),
+            output_price: Some("0.02".to_string()),
+            estimated_cost,
+        }
     }
 
     #[test]
@@ -604,6 +711,99 @@ mod tests {
         assert_eq!(summary.cache_creation_input_tokens, None);
         assert_eq!(summary.models.len(), 1);
         assert_eq!(summary.models[0].model_id, "model-a");
+    }
+
+    #[test]
+    fn groups_renamed_models_by_stable_identity_and_marks_deleted_configuration() {
+        let connection = in_memory_connection();
+        insert_conversation(&connection, "conversation-1");
+        insert_conversation(&connection, "conversation-2");
+        connection
+            .execute(
+                "
+                INSERT INTO models (
+                    id, display_name, short_name, provider_path, supports_image,
+                    input_price, output_price, enabled, position, created_at, updated_at
+                )
+                VALUES ('model-a', 'Current model name', NULL, 'provider/model-a', 0,
+                        '0.03', '0.04', 1, 0, 0, 0)
+                ",
+                [],
+            )
+            .unwrap();
+        upsert_usage_record(
+            &connection,
+            &usage_record(
+                "conversation-1",
+                "message-1",
+                "Old model name",
+                1_000,
+                100,
+                Some(1.0),
+            ),
+        )
+        .unwrap();
+        upsert_usage_record(
+            &connection,
+            &usage_record(
+                "conversation-2",
+                "message-2",
+                "Renamed model",
+                2_000,
+                200,
+                None,
+            ),
+        )
+        .unwrap();
+
+        let summarize = || {
+            usage_summary(
+                &connection,
+                &AgentUsageSummaryInput {
+                    range: AgentUsageSummaryRange::All,
+                    from: None,
+                    to: None,
+                },
+                3_000,
+            )
+            .unwrap()
+        };
+
+        let configured = summarize();
+        assert_eq!(configured.models.len(), 1);
+        assert_eq!(configured.message_count, 2);
+        assert_eq!(configured.unpriced_message_count, 1);
+        assert_eq!(configured.estimated_cost, Some(1.0));
+        assert_eq!(configured.models[0].model_name, "Current model name");
+        assert!(configured.models[0].is_configured);
+        assert_eq!(configured.models[0].input_tokens, Some(300));
+        assert_eq!(configured.models[0].unpriced_message_count, 1);
+
+        connection.execute("DELETE FROM models", []).unwrap();
+        let deleted = summarize();
+        assert_eq!(deleted.models.len(), 1);
+        assert_eq!(deleted.models[0].model_name, "Renamed model");
+        assert!(!deleted.models[0].is_configured);
+
+        connection
+            .execute(
+                "
+                INSERT INTO models (
+                    id, display_name, short_name, provider_path, supports_image,
+                    input_price, output_price, enabled, position, created_at, updated_at
+                )
+                VALUES ('model-a', 'Restored model', NULL, 'provider/model-a', 0,
+                        '0.05', '0.06', 1, 0, 3_000, 3_000)
+                ",
+                [],
+            )
+            .unwrap();
+        let restored = summarize();
+        assert_eq!(restored.models.len(), 1);
+        assert_eq!(restored.models[0].model_name, "Restored model");
+        assert!(restored.models[0].is_configured);
+        assert_eq!(restored.models[0].input_tokens, Some(300));
+        assert_eq!(restored.models[0].estimated_cost, Some(1.0));
     }
 
     #[test]
@@ -862,5 +1062,11 @@ mod tests {
         );
         assert_eq!(estimate_usage_cost(None, None, "0.01", "0.02"), None);
         assert_eq!(estimate_usage_cost(Some(1), None, "bad", "0.02"), None);
+        assert!(!is_valid_price_per_1k(""));
+        assert!(!is_valid_price_per_1k("-1"));
+        assert!(!is_valid_price_per_1k("NaN"));
+        assert!(!is_valid_price_per_1k("inf"));
+        assert!(is_valid_price_per_1k("0"));
+        assert!(is_valid_price_per_1k("0.021"));
     }
 }

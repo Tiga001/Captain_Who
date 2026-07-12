@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { UserCircle } from 'lucide-react'
+import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import {
   getDefaultProfileDisplayName,
@@ -23,6 +24,7 @@ export function ProfileSettingsPage({
 }: ProfileSettingsPageProps) {
   const { language, t } = useFrontendConfig()
   const [avatarError, setAvatarError] = useState('')
+  const [isRemoveAvatarConfirmationOpen, setIsRemoveAvatarConfirmationOpen] = useState(false)
   const displayName = getProfileDisplayName(uiPreferences, language)
   const handle = getProfileHandle(uiPreferences)
   const initials = getProfileInitials(displayName)
@@ -47,6 +49,7 @@ export function ProfileSettingsPage({
     if (!hasCustomAvatar) return
     setAvatarError('')
     onUiPreferencesChange({ profileAvatarDataUrl: null })
+    setIsRemoveAvatarConfirmationOpen(false)
   }
 
   return (
@@ -86,7 +89,7 @@ export function ProfileSettingsPage({
                 <button
                   className="profile-settings-button profile-settings-button--danger"
                   type="button"
-                  onClick={removeAvatar}
+                  onClick={() => setIsRemoveAvatarConfirmationOpen(true)}
                 >
                   {t('profile.removeAvatar')}
                 </button>
@@ -133,6 +136,16 @@ export function ProfileSettingsPage({
           </label>
         </div>
       </section>
+
+      {isRemoveAvatarConfirmationOpen && hasCustomAvatar && (
+        <ConfirmationDialog
+          title={t('profile.removeAvatarTitle')}
+          cancelLabel={t('profile.cancelRemoveAvatar')}
+          confirmLabel={t('profile.confirmRemoveAvatar')}
+          onCancel={() => setIsRemoveAvatarConfirmationOpen(false)}
+          onConfirm={removeAvatar}
+        />
+      )}
     </article>
   )
 }

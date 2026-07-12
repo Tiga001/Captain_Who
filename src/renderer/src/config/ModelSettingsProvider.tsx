@@ -1,6 +1,8 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { useToast } from '../components/toast/ToastContext'
 import { loadModelSettings, saveModelSettings } from '../features/storage/storageClient'
+import { useFrontendConfig } from './FrontendConfigProvider'
 import { INITIAL_MODELS, modelConfig } from './modelConfig'
 import type { ModelConfig, SearchMode } from './modelConfig'
 
@@ -23,6 +25,8 @@ interface ModelSettingsContextValue {
 const ModelSettingsContext = createContext<ModelSettingsContextValue | null>(null)
 
 export function ModelSettingsProvider({ children }: { children: ReactNode }) {
+  const { t } = useFrontendConfig()
+  const { showToast } = useToast()
   const [apiUrl, setApiUrl] = useState<string>(modelConfig.api.defaultUrl)
   const [apiToken, setApiToken] = useState<string>(modelConfig.api.defaultToken)
   const [searchMode, setSearchMode] = useState<SearchMode>(modelConfig.webSearch.defaultMode)
@@ -31,6 +35,8 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   )
   const [models, setModels] = useState<ModelConfig[]>(INITIAL_MODELS)
   const [isHydrated, setIsHydrated] = useState(false)
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const latestSaveRevisionRef = useRef(0)
 
   useEffect(() => {
     let isCancelled = false
@@ -64,16 +70,25 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isHydrated) return
 
-    void saveModelSettings({
+    const revision = latestSaveRevisionRef.current + 1
+    latestSaveRevisionRef.current = revision
+    const settings = {
       apiToken,
       apiUrl,
       models,
       searchMode,
       tavilyApiKey
-    }).catch((error) => {
+    }
+    const save = saveQueueRef.current.catch(() => undefined).then(() => saveModelSettings(settings))
+    saveQueueRef.current = save
+    void save.catch((error) => {
       console.error('Failed to save model settings to SQLite', error)
+      if (latestSaveRevisionRef.current === revision) {
+        const detail = error instanceof Error ? error.message : String(error)
+        showToast(`${t('configuration.saveFailed')}: ${detail}`, { durationMs: 5000 })
+      }
     })
-  }, [apiToken, apiUrl, isHydrated, models, searchMode, tavilyApiKey])
+  }, [apiToken, apiUrl, isHydrated, models, searchMode, showToast, t, tavilyApiKey])
 
   const value = useMemo<ModelSettingsContextValue>(() => {
     const enabledModels = models.filter((model) => model.enabled)

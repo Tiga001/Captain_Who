@@ -214,8 +214,10 @@ export interface AgentUsageModelSummary {
   modelId: string
   modelName: string
   providerPath?: string
+  isConfigured: boolean
   requestCount: number
   messageCount: number
+  unpricedMessageCount: number
   inputTokens?: number
   outputTokens?: number
   outputThinkingTokens?: number
@@ -228,6 +230,7 @@ export interface AgentUsageModelSummary {
 export interface AgentUsageSummaryOutput {
   requestCount: number
   messageCount: number
+  unpricedMessageCount: number
   inputTokens?: number
   outputTokens?: number
   outputThinkingTokens?: number

@@ -10,13 +10,13 @@ interface TerminalPanelProps {
 }
 
 export function TerminalPanel({ initialCwd, isActive }: TerminalPanelProps) {
-  const { resolvedTheme, t } = useFrontendConfig()
+  const { resolvedThemeId, t } = useFrontendConfig()
   const terminalContainerRef = useTerminalSessionContainer()
   const { errorMessage, status } = useTerminalSession({
     containerRef: terminalContainerRef,
     initialCwd,
     isActive,
-    themeKey: resolvedTheme
+    themeKey: resolvedThemeId
   })
   const statusLabel = {
     error: t('terminal.status.error'),

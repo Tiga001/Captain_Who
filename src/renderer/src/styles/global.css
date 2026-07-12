@@ -14,7 +14,7 @@
   --mc-sidebar-translucent-tint: var(--mc-color-surface-left-panel);
 }
 
-:root[data-theme='dark'] {
+:root[data-color-scheme='dark'] {
   --mc-sidebar-translucent-tint: #000000;
 }
 

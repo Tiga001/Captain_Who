@@ -9,7 +9,7 @@ interface ConfirmationDialogProps {
   cancelLabel: string
   confirmLabel: string
   confirmVariant?: ConfirmationDialogVariant
-  description: string
+  description?: string
   onCancel: () => void
   onConfirm: () => void | Promise<void>
   title: string
@@ -63,7 +63,7 @@ export function ConfirmationDialog({
         aria-modal="true"
         aria-busy={isConfirming || undefined}
         aria-labelledby={titleId}
-        aria-describedby={descriptionId}
+        aria-describedby={description ? descriptionId : undefined}
       >
         <button
           className="app-confirm-dialog__close"
@@ -75,7 +75,7 @@ export function ConfirmationDialog({
           <X aria-hidden="true" />
         </button>
         <h2 id={titleId}>{title}</h2>
-        <p id={descriptionId}>{description}</p>
+        {description && <p id={descriptionId}>{description}</p>}
         <div className="app-confirm-dialog__actions">
           <button
             className="app-confirm-dialog__button app-confirm-dialog__button--cancel"

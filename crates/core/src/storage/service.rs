@@ -28,6 +28,30 @@ pub struct StorageService {
     attachment_root: PathBuf,
 }
 
+fn validate_model_settings(settings: &ModelSettingsRecord) -> Result<(), String> {
+    let mut model_ids = HashSet::new();
+    for model in &settings.models {
+        let model_id = model.id.trim();
+        if model_id.is_empty() {
+            return Err("模型 ID 不能为空。".to_string());
+        }
+        if !model_ids.insert(model_id) {
+            return Err(format!("模型 ID 重复：{model_id}"));
+        }
+        if !usage_repository::is_valid_price_per_1k(&model.input_price) {
+            return Err(format!(
+                "模型 {model_id} 的输入价格必须是大于或等于 0 的有效数字。"
+            ));
+        }
+        if !usage_repository::is_valid_price_per_1k(&model.output_price) {
+            return Err(format!(
+                "模型 {model_id} 的输出价格必须是大于或等于 0 的有效数字。"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl StorageService {
     pub fn open(database_path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let attachment_root = database_path
@@ -63,6 +87,7 @@ impl StorageService {
     }
 
     pub fn save_model_settings(&self, settings: ModelSettingsRecord) -> Result<(), String> {
+        validate_model_settings(&settings)?;
         let mut connection = self.state.connection()?;
         config_repository::save_model_settings(&mut connection, settings).map_err(storage_error)
     }
@@ -1048,11 +1073,41 @@ mod tests {
     use super::*;
     use crate::storage::models::{
         ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ComposerDraftRecord,
-        ProjectRecord,
+        ModelConfigRecord, ModelSettingsRecord, ProjectRecord,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn rejects_invalid_model_prices_without_overwriting_saved_settings() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let valid = ModelSettingsRecord {
+            api_url: "https://example.com".to_string(),
+            api_token: "token".to_string(),
+            search_mode: "disabled".to_string(),
+            tavily_api_key: String::new(),
+            models: vec![ModelConfigRecord {
+                id: "model-a".to_string(),
+                display_name: "Model A".to_string(),
+                short_name: None,
+                provider_path: None,
+                supports_image: false,
+                input_price: "0.01".to_string(),
+                output_price: "0.02".to_string(),
+                enabled: true,
+            }],
+        };
+        service.save_model_settings(valid.clone()).unwrap();
+
+        let mut invalid = valid;
+        invalid.models[0].input_price = "not-a-price".to_string();
+        assert!(service.save_model_settings(invalid).is_err());
+
+        let stored = service.load_model_settings().unwrap().unwrap();
+        assert_eq!(stored.models[0].input_price, "0.01");
+    }
 
     #[test]
     fn input_attachments_are_persisted_and_rehydrated() {

@@ -1,12 +1,13 @@
-import { lightTheme } from './frontendTheme'
-import type { FrontendTheme, ThemePreference } from './frontendTheme'
+import { defaultThemeIdsByColorScheme, lightTheme } from './frontendTheme'
+import type { ColorSchemePreference, FrontendTheme } from './frontendTheme'
 import type { AppLanguage } from './frontendTranslations'
 
 export const FRONTEND_CONFIG_STORAGE_KEY = 'mycopilot.frontend-config'
 
 export const frontendConfig = {
   language: 'zh-CN' satisfies AppLanguage,
-  themePreference: 'system' satisfies ThemePreference,
+  colorSchemePreference: 'system' satisfies ColorSchemePreference,
+  themeIdsByColorScheme: defaultThemeIdsByColorScheme,
   typography: {
     fontFamily:
       '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Inter, ui-sans-serif, sans-serif',

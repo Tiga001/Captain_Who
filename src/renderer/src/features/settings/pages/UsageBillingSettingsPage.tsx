@@ -44,6 +44,7 @@ type UsageChartWindow = Omit<UsageChartBucket, 'summary'>
 
 type UsageValues = Partial<Record<UsageChartTokenKey, number>> & {
   estimatedCost?: number
+  unpricedMessageCount?: number
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -72,6 +73,13 @@ function formatEstimatedCost(value: number | undefined, language: string): strin
   return new Intl.NumberFormat(language, {
     maximumFractionDigits: 6,
     minimumFractionDigits: value > 0 && value < 0.01 ? 6 : 2
+  }).format(value)
+}
+
+function formatChartEstimatedCost(value: number | undefined, language: string): string {
+  if (typeof value !== 'number') return '—'
+  return new Intl.NumberFormat(language, {
+    maximumFractionDigits: value > 0 && value < 0.01 ? 4 : 2
   }).format(value)
 }
 
@@ -108,6 +116,10 @@ function getModelSubtitle(model: AgentUsageModelSummary): string {
 
 function getModelKey(model: AgentUsageModelSummary): string {
   return `${model.modelId}::${model.providerPath ?? ''}`
+}
+
+function getModelLabel(model: AgentUsageModelSummary, deletedLabel: string): string {
+  return model.isConfigured ? model.modelName : `${model.modelName} (${deletedLabel})`
 }
 
 function getRangeDayCount(range: UsageChartRange): number {
@@ -203,7 +215,8 @@ function getUsageValues(
     inputTokens: source?.inputTokens,
     outputTokens: source?.outputTokens,
     outputThinkingTokens: source?.outputThinkingTokens,
-    estimatedCost: source?.estimatedCost
+    estimatedCost: source?.estimatedCost,
+    unpricedMessageCount: source?.unpricedMessageCount
   }
 }
 
@@ -382,7 +395,11 @@ export function UsageBillingSettingsPage({
                 aria-expanded={isModelMenuOpen}
                 onClick={() => setModelMenuOpen((current) => !current)}
               >
-                <span>{selectedModel?.modelName ?? t('usageBilling.allModels')}</span>
+                <span>
+                  {selectedModel
+                    ? getModelLabel(selectedModel, t('usageBilling.deletedModel'))
+                    : t('usageBilling.allModels')}
+                </span>
                 <ChevronDown aria-hidden="true" />
               </button>
 
@@ -425,7 +442,7 @@ export function UsageBillingSettingsPage({
                           setModelMenuOpen(false)
                         }}
                       >
-                        <span>{model.modelName}</span>
+                        <span>{getModelLabel(model, t('usageBilling.deletedModel'))}</span>
                         {isSelected && <Check aria-hidden="true" />}
                       </button>
                     )
@@ -471,6 +488,10 @@ export function UsageBillingSettingsPage({
 
                   <div className="usage-chart-bars">
                     {chartData.map((day) => {
+                      const unpricedMessageCount = day.values.unpricedMessageCount ?? 0
+                      const completenessMarker = unpricedMessageCount > 0 ? '*' : ''
+                      const costLabel = `${formatEstimatedCost(day.values.estimatedCost, language)}${completenessMarker}`
+                      const chartCostLabel = `${formatChartEstimatedCost(day.values.estimatedCost, language)}${completenessMarker}`
                       const dayMaxValue = USAGE_CHART_SERIES.reduce((currentMax, series) => {
                         const value = day.values[series.key]
                         return typeof value === 'number' ? Math.max(currentMax, value) : currentMax
@@ -481,7 +502,7 @@ export function UsageBillingSettingsPage({
                         dayMaxRatio > 0 ? `${Math.min(dayMaxRatio * 100 + 2, 92)}%` : '8px'
                       const ariaLabel = [
                         day.fullDateLabel,
-                        `${t('usageBilling.estimatedCost')} ${formatEstimatedCost(day.values.estimatedCost, language)}`,
+                        `${t('usageBilling.estimatedCost')} ${costLabel}`,
                         `${t('usageBilling.inputTokens')} ${formatTokenCount(day.values.inputTokens, language, t('usageBilling.tokens'))}`,
                         `${t('usageBilling.outputTokens')} ${formatTokenCount(day.values.outputTokens, language, t('usageBilling.tokens'))}`,
                         `${t('usageBilling.outputThinkingTokens')} ${formatTokenCount(day.values.outputThinkingTokens, language, t('usageBilling.tokens'))}`
@@ -512,7 +533,7 @@ export function UsageBillingSettingsPage({
                               )
                             })}
                             <span className="usage-chart-cost" style={{ bottom: costBottom }}>
-                              {formatEstimatedCost(day.values.estimatedCost, language)}
+                              {chartCostLabel}
                             </span>
                           </div>
 
@@ -522,10 +543,14 @@ export function UsageBillingSettingsPage({
                             </strong>
                             <span className="usage-chart-tooltip__row">
                               <span>{t('usageBilling.estimatedCost')}</span>
-                              <strong>
-                                {formatEstimatedCost(day.values.estimatedCost, language)}
-                              </strong>
+                              <strong>{costLabel}</strong>
                             </span>
+                            {unpricedMessageCount > 0 && (
+                              <span className="usage-chart-tooltip__warning">
+                                {formatCount(unpricedMessageCount, language)}{' '}
+                                {t('usageBilling.unpricedMessages')}
+                              </span>
+                            )}
 
                             <span className="usage-chart-tooltip__row">
                               <span>
@@ -610,6 +635,12 @@ export function UsageBillingSettingsPage({
           <div className="usage-summary-card">
             <span>{t('usageBilling.estimatedCost')}</span>
             <strong>{formatEstimatedCost(visibleSummary?.estimatedCost, language)}</strong>
+            {(visibleSummary?.unpricedMessageCount ?? 0) > 0 && (
+              <small className="usage-cost-warning">
+                {formatCount(visibleSummary?.unpricedMessageCount, language)}{' '}
+                {t('usageBilling.unpricedMessages')}
+              </small>
+            )}
           </div>
         </div>
 
@@ -638,6 +669,11 @@ export function UsageBillingSettingsPage({
                     <div className="usage-model-row__name">
                       <strong>{model.modelName}</strong>
                       {subtitle && <span>{subtitle}</span>}
+                      {!model.isConfigured && (
+                        <small className="usage-model-row__deleted">
+                          {t('usageBilling.deletedModel')}
+                        </small>
+                      )}
                     </div>
                     <div className="usage-model-row__metrics">
                       <span>
@@ -649,9 +685,15 @@ export function UsageBillingSettingsPage({
                       <span>
                         {t('usageBilling.totalTokens')} {formatCount(model.totalTokens, language)}
                       </span>
-                      <span>
+                      <span className="usage-model-row__cost">
                         {t('usageBilling.estimatedCost')}{' '}
                         {formatEstimatedCost(model.estimatedCost, language)}
+                        {model.unpricedMessageCount > 0 && (
+                          <small className="usage-cost-warning">
+                            {formatCount(model.unpricedMessageCount, language)}{' '}
+                            {t('usageBilling.unpricedMessages')}
+                          </small>
+                        )}
                       </span>
                     </div>
                   </div>
