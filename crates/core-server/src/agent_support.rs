@@ -20,7 +20,8 @@ use mycopilot_core::{
     AgentInputAttachmentKind, AgentPatchResult, AgentPatchResultStatus, AgentPermissions,
     AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
     AgentProposedAction, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
-    AgentToolCall, AgentToolResult, AgentUsage, AgentWorkspaceContext,
+    AgentToolCall, AgentToolResult, AgentUsage, AgentWorkspaceContext, ConversationTurnTrace,
+    ConversationTurnTraceTerminalStatus,
 };
 use mycopilot_protocol_rs::AGENT_EVENT_NOTIFICATION_METHOD;
 use serde::{Deserialize, Serialize};
@@ -304,8 +305,10 @@ pub(super) fn prepare_conversation_turn(
     conversation.model_id = Some(model_id.clone());
     conversation.updated_at = timestamp;
 
+    let history_traces = storage.list_conversation_turn_traces(&conversation_id)?;
     let history_messages = conversation_history_messages(
         &conversation,
+        &history_traces,
         &[user_message_id.as_str(), assistant_message_id.as_str()],
     );
 
@@ -347,6 +350,7 @@ pub(super) fn prepare_conversation_turn(
     agent_messages.push(AgentChatMessage {
         role: "user".to_string(),
         content,
+        conversation_turn_trace: None,
     });
 
     let agent_input = AgentChatInput {
@@ -379,6 +383,7 @@ pub(super) fn prepare_conversation_turn(
         tool_continuation: None,
         attachments: input.attachments,
         resume_checkpoint: None,
+        assistant_message_id: Some(assistant_message_id.clone()),
         messages: agent_messages,
     };
 
@@ -410,8 +415,13 @@ pub(super) fn prepare_conversation_turn(
 
 pub(super) fn conversation_history_messages(
     conversation: &ChatConversationRecord,
+    traces: &[ConversationTurnTrace],
     excluded_message_ids: &[&str],
 ) -> Vec<AgentChatMessage> {
+    let traces = traces
+        .iter()
+        .map(|trace| (trace.assistant_message_id.as_str(), trace))
+        .collect::<std::collections::HashMap<_, _>>();
     conversation
         .messages
         .iter()
@@ -421,12 +431,28 @@ pub(super) fn conversation_history_messages(
                 .any(|excluded_id| message.id == *excluded_id)
         })
         .filter(|message| message.status.as_deref() != Some("pending"))
-        .filter(|message| message.status.as_deref() != Some("error"))
         .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
-        .filter(|message| !message.content.trim().is_empty())
-        .map(|message| AgentChatMessage {
-            role: message.role.clone(),
-            content: message.content.clone(),
+        .filter_map(|message| {
+            let trace = traces.get(message.id.as_str()).copied();
+            if message.status.as_deref() == Some("error") && trace.is_none() {
+                return None;
+            }
+            let content = if trace.is_some_and(|trace| {
+                trace.terminal_status == ConversationTurnTraceTerminalStatus::Cancelled
+            }) && message.content.trim() == THINKING_PLACEHOLDER
+            {
+                String::new()
+            } else {
+                message.content.clone()
+            };
+            if content.trim().is_empty() && trace.is_none() {
+                return None;
+            }
+            Some(AgentChatMessage {
+                role: message.role.clone(),
+                content,
+                conversation_turn_trace: trace.cloned(),
+            })
         })
         .collect()
 }

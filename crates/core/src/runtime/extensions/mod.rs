@@ -376,6 +376,9 @@ mod tests {
                     state: json!({ "secret": "internal state" }),
                 }],
                 pending_tool_call_id: "call-1".to_string(),
+                conversation_trace_items: Vec::new(),
+                next_conversation_trace_sequence: 0,
+                conversation_trace_truncated: false,
             },
         };
 

@@ -382,6 +382,7 @@ pub(super) fn cancelled_output(
         usage,
         finish_reason,
         proposed_actions: Vec::new(),
+        conversation_turn_trace: None,
     }
 }
 

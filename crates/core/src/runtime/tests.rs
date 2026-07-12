@@ -5,11 +5,13 @@ use crate::protocol::{
     AgentWorkspaceContext,
 };
 use crate::runtime::tool_flow::parse_tool_call_request;
+use crate::ConversationTurnTraceItem;
 
 fn message(role: &str, content: &str) -> AgentChatMessage {
     AgentChatMessage {
         role: role.to_string(),
         content: content.to_string(),
+        conversation_turn_trace: None,
     }
 }
 
@@ -226,9 +228,11 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
         tool_continuation: None,
         attachments: Vec::new(),
         resume_checkpoint: None,
+        assistant_message_id: None,
         messages: vec![AgentChatMessage {
             role: "user".to_string(),
             content: "x".repeat(90_000),
+            conversation_turn_trace: None,
         }],
     };
 
@@ -381,6 +385,7 @@ async fn context_capacity_guard_rechecks_after_tool_results_before_network_io() 
         tool_continuation: None,
         attachments: Vec::new(),
         resume_checkpoint: None,
+        assistant_message_id: None,
         messages: vec![message("user", "Read large.txt and summarize it")],
     };
 
@@ -632,6 +637,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         tool_continuation: None,
         attachments: Vec::new(),
         resume_checkpoint: None,
+        assistant_message_id: None,
         messages: vec![message("user", "create a preview")],
     };
     let output = AgentRuntime::default()
@@ -642,6 +648,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
             AgentCancellationToken::new(),
             None,
             Some(storage.clone()),
+            None,
         )
         .await
         .unwrap();
@@ -850,7 +857,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         context_budget_enabled: true,
         max_tokens: Some(1_000),
         temperature: None,
-        stream: Some(false),
+        stream: Some(true),
         context: Some(AgentRunContext {
             conversation_id: Some("conversation-checkpoint".to_string()),
             project_id: None,
@@ -873,6 +880,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         tool_continuation: None,
         attachments: Vec::new(),
         resume_checkpoint: None,
+        assistant_message_id: Some("assistant-checkpoint".to_string()),
         messages: vec![message("user", "collect evidence and write report.txt")],
     };
     let waiting = AgentRuntime::default()
@@ -883,10 +891,12 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             AgentCancellationToken::new(),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
     assert_eq!(waiting.status, AgentRunStatus::WaitingForApproval);
+    assert!(waiting.conversation_turn_trace.is_none());
     let checkpoint = waiting
         .events
         .iter()
@@ -898,6 +908,14 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     assert_eq!(checkpoint.pending_tool_call_id, "patch-approval");
     assert_eq!(checkpoint.queued_tool_calls.len(), 1);
     assert_eq!(checkpoint.extension_snapshots[0].extension_id, "todo");
+    assert!(checkpoint
+        .conversation_trace_items
+        .iter()
+        .any(|item| matches!(
+            item,
+            ConversationTurnTraceItem::AssistantNarration { content, .. }
+                if content == "I have the evidence and will prepare the report."
+        )));
 
     let mut resume_input = base_input;
     resume_input.messages.clear();
@@ -934,6 +952,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             AgentCancellationToken::new(),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -950,4 +969,39 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     assert!(messages.contains("read-before"));
     assert!(messages.contains("patch-approval"));
     assert!(messages.contains("read-queued"));
+    let trace = completed.conversation_turn_trace.as_ref().unwrap();
+    trace.validate().unwrap();
+    for call_id in [
+        "todo-before",
+        "read-before",
+        "patch-approval",
+        "read-queued",
+    ] {
+        assert_eq!(
+            trace
+                .items
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    ConversationTurnTraceItem::ToolCall { call_id: item_id, .. }
+                        if item_id == call_id
+                ))
+                .count(),
+            1,
+            "tool call {call_id} should be retained exactly once"
+        );
+        assert_eq!(
+            trace
+                .items
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    ConversationTurnTraceItem::ToolResult { call_id: item_id, .. }
+                        if item_id == call_id
+                ))
+                .count(),
+            1,
+            "tool result {call_id} should be retained exactly once"
+        );
+    }
 }

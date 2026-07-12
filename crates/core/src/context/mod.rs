@@ -10,6 +10,7 @@ mod assembler;
 mod budget;
 mod frame;
 mod measurement;
+mod trace_renderer;
 
 pub(crate) use assembler::{ContextAssembler, ContextAssemblyInput, ContextAttachments};
 pub(crate) use budget::{ContextBudgetReport, ContextCapacityDetector};
@@ -17,3 +18,4 @@ pub(crate) use frame::{
     ContextFrame, ContextGroup, ContextItem, ContextMetadata, ContextRetention, ContextScope,
     ContextSource,
 };
+pub(crate) use trace_renderer::ConversationTraceRenderer;

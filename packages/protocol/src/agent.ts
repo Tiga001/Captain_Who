@@ -78,6 +78,51 @@ export type AgentApprovalStatus = 'not_required' | 'required' | 'approved' | 're
 
 export type AgentApprovalDecisionStatus = 'approved' | 'rejected'
 
+export type ConversationTurnTraceTerminalStatus = 'completed' | 'failed' | 'cancelled'
+
+export type ConversationTraceToolResultStatus =
+  'succeeded' | 'failed' | 'rejected' | 'conflict' | 'cancelled'
+
+export type ConversationTurnTraceItem =
+  | {
+      type: 'assistant_narration'
+      sequence: number
+      content: string
+      truncated: boolean
+    }
+  | {
+      type: 'tool_call'
+      sequence: number
+      callId: string
+      tool: string
+      operation: unknown
+      approvalStatus: AgentApprovalStatus
+      truncated: boolean
+    }
+  | {
+      type: 'tool_result'
+      sequence: number
+      callId: string
+      tool: string
+      status: ConversationTraceToolResultStatus
+      success: boolean
+      observation: unknown
+      approvalStatus: AgentApprovalStatus
+      error?: string
+      truncated: boolean
+    }
+
+export interface ConversationTurnTrace {
+  schemaVersion: number
+  runId: string
+  conversationId: string
+  assistantMessageId: string
+  terminalStatus: ConversationTurnTraceTerminalStatus
+  terminalError?: string
+  truncated: boolean
+  items: ConversationTurnTraceItem[]
+}
+
 export type AgentTodoStatus = 'pending' | 'in_progress' | 'completed' | 'blocked'
 
 export type AgentPatchOperation = 'create' | 'update' | 'delete'
@@ -109,6 +154,7 @@ export type AgentCommandRiskLevel =
 export interface AgentChatMessage {
   role: AgentMessageRole
   content: string
+  conversationTurnTrace?: ConversationTurnTrace
 }
 
 export type AgentInputAttachmentKind = 'file' | 'image'
@@ -325,6 +371,7 @@ export interface AgentChatOutput {
   usage?: AgentUsage
   finishReason?: string
   proposedActions: AgentProposedAction[]
+  conversationTurnTrace?: ConversationTurnTrace
 }
 
 export interface AgentConversationTurnInput {

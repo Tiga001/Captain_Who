@@ -11,6 +11,7 @@ use crate::context::{
     ContextCapacityDetector, ContextFrame, ContextItem, ContextMetadata, ContextRetention,
     ContextScope, ContextSource,
 };
+use crate::conversation_trace::ConversationTraceRecorder;
 use crate::llm::{
     complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessageRole,
     LlmStreamEvent,
@@ -26,6 +27,9 @@ use crate::protocol::{
 use crate::storage::service::StorageService;
 use crate::tools::{ToolExecutionContext, ToolRegistry};
 use crate::usage::merge_total_usage;
+use crate::{
+    ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
+};
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
     create_run_checkpoint, restore_run_checkpoint, RestoredRunCheckpoint, ToolCallBatch,
@@ -37,6 +41,7 @@ use file_transactions::{
 use serde_json::{json, Value};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tool_flow::{
     approve_proposed_action, build_tool_observation_message, cancelled_output, done_event,
     execute_host_action_on_blocking_thread, execute_tool_on_blocking_thread,
@@ -85,6 +90,7 @@ struct PreparedLlmRequest {
     context: ContextFrame,
     next_model_request_index: usize,
     tool_batch: ToolCallBatch,
+    conversation_trace: ConversationTraceRecorder,
 }
 
 struct PreparedRuntimeCapabilities {
@@ -98,6 +104,8 @@ struct PreparedRuntimeCapabilities {
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub type AgentEventEmitter = Arc<dyn Fn(AgentEvent) + Send + Sync + 'static>;
+pub type AgentConversationTraceObserver =
+    Arc<dyn Fn(ConversationTraceSnapshot) + Send + Sync + 'static>;
 pub type AgentHostActionExecutor = Arc<
     dyn Fn(AgentProposedAction, AgentCancellationToken) -> AgentResult<AgentToolResult>
         + Send
@@ -132,6 +140,7 @@ pub async fn send_chat_with_events_and_cancellation(
             cancellation_token,
             None,
             None,
+            None,
         )
         .await
 }
@@ -144,6 +153,27 @@ pub async fn send_chat_with_host_executor(
     host_executor: AgentHostActionExecutor,
     storage: Arc<StorageService>,
 ) -> AgentResult<AgentChatOutput> {
+    send_chat_with_host_executor_and_trace_observer(
+        input,
+        run_id,
+        emitter,
+        cancellation_token,
+        host_executor,
+        storage,
+        None,
+    )
+    .await
+}
+
+pub async fn send_chat_with_host_executor_and_trace_observer(
+    input: AgentChatInput,
+    run_id: String,
+    emitter: AgentEventEmitter,
+    cancellation_token: AgentCancellationToken,
+    host_executor: AgentHostActionExecutor,
+    storage: Arc<StorageService>,
+    trace_observer: Option<AgentConversationTraceObserver>,
+) -> AgentResult<AgentChatOutput> {
     AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
             input,
@@ -152,6 +182,7 @@ pub async fn send_chat_with_host_executor(
             cancellation_token,
             Some(host_executor),
             Some(storage),
+            trace_observer,
         )
         .await
 }
@@ -228,10 +259,12 @@ impl AgentRuntime {
             AgentCancellationToken::new(),
             None,
             None,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_chat_with_events_and_cancellation(
         &self,
         mut input: AgentChatInput,
@@ -240,10 +273,27 @@ impl AgentRuntime {
         cancellation_token: AgentCancellationToken,
         host_executor: Option<AgentHostActionExecutor>,
         storage: Option<Arc<StorageService>>,
+        trace_observer: Option<AgentConversationTraceObserver>,
     ) -> AgentResult<AgentChatOutput> {
         let run_id = run_id.unwrap_or_else(generate_run_id);
         let context = input.context.clone();
-        let restored_checkpoint = restore_input_checkpoint(&mut input, &run_id)?;
+        let trace_conversation_id = context
+            .as_ref()
+            .and_then(|context| context.conversation_id.clone());
+        let trace_assistant_message_id = input.assistant_message_id.clone();
+        let trace_run_id = run_id.clone();
+        let setup_conversation_trace = conversation_trace_from_input_checkpoint(&input);
+        publish_trace_recorder_snapshot(&setup_conversation_trace, trace_observer.as_ref());
+        let restored_checkpoint =
+            restore_input_checkpoint(&mut input, &run_id).map_err(|error| {
+                attach_failed_runtime_trace(
+                    error,
+                    &setup_conversation_trace,
+                    &trace_run_id,
+                    trace_conversation_id.as_deref(),
+                    trace_assistant_message_id.as_deref(),
+                )
+            })?;
         let extension_snapshots = restored_checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.extension_snapshots.as_slice())
@@ -259,7 +309,16 @@ impl AgentRuntime {
             &run_id,
             extension_snapshots,
             host_executor.is_some(),
-        )?;
+        )
+        .map_err(|error| {
+            attach_failed_runtime_trace(
+                error,
+                &setup_conversation_trace,
+                &trace_run_id,
+                trace_conversation_id.as_deref(),
+                trace_assistant_message_id.as_deref(),
+            )
+        })?;
         let mut event_stream = AgentEventStream::new(emitter);
         event_stream.emit(AgentEvent::Started {
             run_id: run_id.clone(),
@@ -277,7 +336,18 @@ impl AgentRuntime {
             context: mut active_context,
             mut next_model_request_index,
             mut tool_batch,
-        } = build_llm_request(input, &tool_definitions, restored_checkpoint)?;
+            conversation_trace,
+        } = build_llm_request(input, &tool_definitions, restored_checkpoint).map_err(|error| {
+            attach_failed_runtime_trace(
+                error,
+                &setup_conversation_trace,
+                &trace_run_id,
+                trace_conversation_id.as_deref(),
+                trace_assistant_message_id.as_deref(),
+            )
+        })?;
+        let conversation_trace = Arc::new(Mutex::new(conversation_trace));
+        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref());
         let tool_context = ToolExecutionContext::from_run_context(context.as_ref())
             .with_cancellation(cancellation_token.clone())
             .with_runtime_services(run_id.clone(), storage);
@@ -300,18 +370,7 @@ impl AgentRuntime {
         if let Some(detector) = &context_capacity_detector {
             detector.prepare_frame(&mut active_context);
         }
-        if cancellation_token.is_cancelled() {
-            return Ok(cancelled_output(
-                run_id,
-                event_stream,
-                tool_definitions,
-                runtime_extensions.todo_state(),
-                usage,
-                finish_reason,
-            ));
-        }
-
-        let final_content = 'agent_loop: loop {
+        let result: AgentResult<AgentChatOutput> = async {
             if cancellation_token.is_cancelled() {
                 return Ok(cancelled_output(
                     run_id,
@@ -322,212 +381,8 @@ impl AgentRuntime {
                     finish_reason,
                 ));
             }
-            if tool_batch.take_suppressed_narration() {
-                active_context.push(suppressed_narration_context_item());
-            }
-            if tool_batch.is_empty() && next_model_request_index > self.max_tool_iterations {
-                let message = "工具调用次数超过限制，已停止继续执行。".to_string();
-                event_stream.emit(AgentEvent::Error {
-                    run_id: Some(run_id.clone()),
-                    message: message.clone(),
-                    recoverable: false,
-                    code: None,
-                    details: None,
-                });
-                break 'agent_loop message;
-            }
-            if tool_batch.is_empty() {
-                active_context.validate_complete_tool_protocol()?;
-                let model_request_index = next_model_request_index;
-                next_model_request_index = next_model_request_index.saturating_add(1);
-                let file_transactions =
-                    FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
-                let user_text_blocked = file_transactions.blocks_user_text();
-                let mut request_context = active_context.clone();
-                runtime_extensions.contribute_request_context(
-                    &ModelRequestContext::agent_work(),
-                    &mut request_context,
-                )?;
-                if let Some(context) = file_transactions.request_context() {
-                    request_context.push(ContextItem::text(
-                        LlmMessageRole::System,
-                        context,
-                        ContextSource::FileTransaction,
-                        ContextScope::Run,
-                        ContextRetention::RequestOnly,
-                    ));
-                }
-                emit_context_manifest_if_enabled(
-                    &run_id,
-                    model_request_index + 1,
-                    &request_context,
-                    &llm_request.tools,
-                );
-                let request_budget_report = if let Some(detector) = &context_capacity_detector {
-                    let report = detector.inspect(
-                        &mut request_context,
-                        llm_request.context_window_tokens,
-                        llm_request.max_tokens,
-                    );
-                    emit_context_budget_if_enabled(&run_id, model_request_index + 1, &report);
-                    event_stream.emit(AgentEvent::ContextWindowUpdated {
-                        run_id: run_id.clone(),
-                        conversation_id: context
-                            .as_ref()
-                            .and_then(|context| context.conversation_id.clone()),
-                        snapshot: report.snapshot(
-                            &llm_request.model,
-                            AgentContextWindowPhase::ModelRequest,
-                            AgentContextWindowSource::Estimated,
-                            Some(model_request_index + 1),
-                            None,
-                        ),
-                    });
-                    detector.ensure_sendable(report.clone())?;
-                    Some(report)
-                } else {
-                    None
-                };
-                let request = llm_request.request(request_context);
-                let llm_response_result = if request.stream {
-                    let delta_run_id = run_id.clone();
-                    let stream_id = format!("{}-stream-{}", run_id, model_request_index + 1);
-                    let delta_cancellation_token = cancellation_token.clone();
-                    let mut tool_input_stream = ToolInputStreamObservers::default();
-                    complete_chat_streaming(request, cancellation_token.clone(), |stream_event| {
-                        if delta_cancellation_token.is_cancelled() {
-                            return;
-                        }
-                        match stream_event {
-                            LlmStreamEvent::AttemptStarted {
-                                attempt,
-                                max_attempts,
-                            } => {
-                                tool_input_stream.start_attempt(attempt);
-                                if !user_text_blocked {
-                                    let _ = max_attempts;
-                                    event_stream.emit(AgentEvent::MessageStreamStarted {
-                                        run_id: delta_run_id.clone(),
-                                        stream_id: stream_id.clone(),
-                                        attempt,
-                                    });
-                                }
-                            }
-                            LlmStreamEvent::Delta(delta)
-                                if !user_text_blocked && !delta.is_empty() =>
-                            {
-                                event_stream.emit(AgentEvent::MessageDelta {
-                                    run_id: delta_run_id.clone(),
-                                    stream_id: Some(stream_id.clone()),
-                                    delta,
-                                });
-                            }
-                            LlmStreamEvent::ToolInputProgress {
-                                tool_call_index,
-                                tool_call_id,
-                                tool,
-                                input_delta,
-                                received_bytes,
-                            } => {
-                                let observation = tool_input_stream.on_delta(
-                                    tool_registry.as_ref(),
-                                    &tool_context,
-                                    &stream_id,
-                                    tool_call_index,
-                                    tool_call_id.as_deref(),
-                                    &tool,
-                                    &input_delta,
-                                    received_bytes,
-                                );
-                                if observation.as_ref().is_ok_and(|value| !value.handled) {
-                                    event_stream.emit_transient(AgentEvent::ToolInputProgress {
-                                        run_id: delta_run_id.clone(),
-                                        stream_id: stream_id.clone(),
-                                        attempt: tool_input_stream.attempt(),
-                                        tool_call_index,
-                                        tool_call_id: tool_call_id.clone(),
-                                        tool: tool.clone(),
-                                        received_bytes,
-                                    });
-                                }
-                                if let Ok(observation) = observation {
-                                    if let Some(preview) = observation.preview {
-                                        emit_tool_input_preview(
-                                            &mut event_stream,
-                                            &delta_run_id,
-                                            preview,
-                                        );
-                                    }
-                                }
-                            }
-                            LlmStreamEvent::AttemptReset { reason } => {
-                                event_stream.emit_transient(AgentEvent::FileWritePreviewCleared {
-                                    run_id: delta_run_id.clone(),
-                                    stream_id: stream_id.clone(),
-                                    attempt: tool_input_stream.attempt(),
-                                });
-                                tool_input_stream.reset();
-                                if !user_text_blocked {
-                                    event_stream.emit(AgentEvent::MessageStreamReset {
-                                        run_id: delta_run_id.clone(),
-                                        stream_id: stream_id.clone(),
-                                        reason,
-                                    });
-                                }
-                            }
-                            LlmStreamEvent::Retrying {
-                                attempt,
-                                max_attempts,
-                                reason,
-                            } => {
-                                event_stream.emit(AgentEvent::LlmRetry {
-                                    run_id: delta_run_id.clone(),
-                                    stream_id: stream_id.clone(),
-                                    attempt,
-                                    max_attempts,
-                                    reason,
-                                });
-                            }
-                            LlmStreamEvent::Committed => {
-                                for preview in tool_input_stream.flush() {
-                                    emit_tool_input_preview(
-                                        &mut event_stream,
-                                        &delta_run_id,
-                                        preview,
-                                    );
-                                }
-                                if !user_text_blocked {
-                                    event_stream.emit(AgentEvent::MessageStreamCommitted {
-                                        run_id: delta_run_id.clone(),
-                                        stream_id: stream_id.clone(),
-                                    });
-                                }
-                            }
-                            LlmStreamEvent::Delta(_) => {}
-                        }
-                    })
-                    .await
-                } else {
-                    complete_chat(request, cancellation_token.clone()).await
-                };
-                let llm_response = match llm_response_result {
-                    Ok(response) => response,
-                    Err(error) if error.is_cancelled() => {
-                        merge_total_usage(&mut usage, error.usage().cloned());
-                        return Ok(cancelled_output(
-                            run_id,
-                            event_stream,
-                            tool_definitions,
-                            runtime_extensions.todo_state(),
-                            usage,
-                            finish_reason,
-                        ));
-                    }
-                    Err(error) => {
-                        merge_total_usage(&mut usage, error.usage().cloned());
-                        return Err(error.with_usage(usage));
-                    }
-                };
+
+            let final_content = 'agent_loop: loop {
                 if cancellation_token.is_cancelled() {
                     return Ok(cancelled_output(
                         run_id,
@@ -538,59 +393,10 @@ impl AgentRuntime {
                         finish_reason,
                     ));
                 }
-
-                if let (Some(report), Some(input_tokens)) = (
-                    request_budget_report.as_ref(),
-                    llm_response
-                        .usage
-                        .as_ref()
-                        .and_then(|usage| usage.input_tokens),
-                ) {
-                    event_stream.emit(AgentEvent::ContextWindowUpdated {
-                        run_id: run_id.clone(),
-                        conversation_id: context
-                            .as_ref()
-                            .and_then(|context| context.conversation_id.clone()),
-                        snapshot: report.snapshot(
-                            &llm_request.model,
-                            AgentContextWindowPhase::ModelRequest,
-                            AgentContextWindowSource::ProviderReported,
-                            Some(model_request_index + 1),
-                            Some(input_tokens),
-                        ),
-                    });
+                if tool_batch.take_suppressed_narration() {
+                    active_context.push(suppressed_narration_context_item());
                 }
-                merge_total_usage(&mut usage, llm_response.usage);
-                finish_reason = llm_response.finish_reason;
-
-                let tool_requests = tool_calls_from_response(
-                    llm_response.tool_calls,
-                    &llm_response.content,
-                    &run_id,
-                    model_request_index,
-                );
-                if user_text_blocked && tool_requests.is_empty() {
-                    response_fence_corrections = response_fence_corrections.saturating_add(1);
-                    if response_fence_corrections > MAX_RESPONSE_FENCE_CORRECTIONS {
-                        return Err(AgentError::new(
-                            "模型连续输出文字但未结算文件事务，已停止以避免循环。请重试任务。",
-                        ));
-                    }
-                    active_context.push(ContextItem::text(
-                        LlmMessageRole::System,
-                        file_transactions.protocol_correction(),
-                        ContextSource::RuntimeGuard,
-                        ContextScope::Run,
-                        ContextRetention::Retained,
-                    ));
-                    continue;
-                }
-                if tool_requests.is_empty() {
-                    break 'agent_loop llm_response.content;
-                }
-                response_fence_corrections = 0;
-
-                if model_request_index >= self.max_tool_iterations {
+                if tool_batch.is_empty() && next_model_request_index > self.max_tool_iterations {
                     let message = "工具调用次数超过限制，已停止继续执行。".to_string();
                     event_stream.emit(AgentEvent::Error {
                         run_id: Some(run_id.clone()),
@@ -599,109 +405,245 @@ impl AgentRuntime {
                         code: None,
                         details: None,
                     });
-                    break 'agent_loop message;
+                    return Err(AgentError::new(message));
                 }
-
-                let suppressed_narration =
-                    user_text_blocked && !llm_response.content.trim().is_empty();
-                tool_batch = ToolCallBatch::from_model_response(
-                    &run_id,
-                    model_request_index,
-                    if user_text_blocked {
-                        String::new()
+                if tool_batch.is_empty() {
+                    active_context.validate_complete_tool_protocol()?;
+                    let model_request_index = next_model_request_index;
+                    next_model_request_index = next_model_request_index.saturating_add(1);
+                    let file_transactions =
+                        FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
+                    let user_text_blocked = file_transactions.blocks_user_text();
+                    let mut request_context = active_context.clone();
+                    runtime_extensions.contribute_request_context(
+                        &ModelRequestContext::agent_work(),
+                        &mut request_context,
+                    )?;
+                    if let Some(context) = file_transactions.request_context() {
+                        request_context.push(ContextItem::text(
+                            LlmMessageRole::System,
+                            context,
+                            ContextSource::FileTransaction,
+                            ContextScope::Run,
+                            ContextRetention::RequestOnly,
+                        ));
+                    }
+                    emit_context_manifest_if_enabled(
+                        &run_id,
+                        model_request_index + 1,
+                        &request_context,
+                        &llm_request.tools,
+                    );
+                    let request_budget_report = if let Some(detector) = &context_capacity_detector {
+                        let report = detector.inspect(
+                            &mut request_context,
+                            llm_request.context_window_tokens,
+                            llm_request.max_tokens,
+                        );
+                        emit_context_budget_if_enabled(&run_id, model_request_index + 1, &report);
+                        event_stream.emit(AgentEvent::ContextWindowUpdated {
+                            run_id: run_id.clone(),
+                            conversation_id: context
+                                .as_ref()
+                                .and_then(|context| context.conversation_id.clone()),
+                            snapshot: report.snapshot(
+                                &llm_request.model,
+                                AgentContextWindowPhase::ModelRequest,
+                                AgentContextWindowSource::Estimated,
+                                Some(model_request_index + 1),
+                                None,
+                            ),
+                        });
+                        detector.ensure_sendable(report.clone())?;
+                        Some(report)
                     } else {
-                        llm_response.content.clone()
-                    },
-                    tool_requests,
-                    suppressed_narration,
-                );
-            }
-
-            while let Some(queued_tool_call) = tool_batch.pop_front() {
-                if cancellation_token.is_cancelled() {
-                    return Ok(cancelled_output(
-                        run_id,
-                        event_stream,
-                        tool_definitions,
-                        runtime_extensions.todo_state(),
-                        usage,
-                        finish_reason,
-                    ));
-                }
-                let tool_exchange_group = queued_tool_call.context_group();
-                active_context.push(ContextItem::assistant(
-                    queued_tool_call.assistant_content,
-                    vec![queued_tool_call.call.clone()],
-                    ContextMetadata::new(
-                        ContextSource::ModelResponse,
-                        ContextScope::Run,
-                        ContextRetention::Retained,
-                    )
-                    .with_group(tool_exchange_group.clone()),
-                ));
-                let tool_request = queued_tool_call.call;
-                let tool_name = tool_request.name;
-                let tool_args = tool_request.args;
-                let reason = extract_reason_from_args(&tool_args);
-                let definition_requires_approval =
-                    tool_registry.requires_approval_for_call(&tool_name, &tool_args);
-                let auto_execute_command = tool_name == "run_command" && command_auto_approve;
-                let auto_execute_patch = (tool_name == "apply_patch" || tool_name == "write_file")
-                    && patch_auto_approve
-                    && definition_requires_approval;
-                let auto_execute_host_action = auto_execute_command || auto_execute_patch;
-                let requires_approval = definition_requires_approval && !auto_execute_host_action;
-                let call = AgentToolCall {
-                    id: tool_request.id,
-                    tool: tool_name,
-                    args: tool_args,
-                    approval_status: if auto_execute_host_action {
-                        AgentApprovalStatus::Approved
-                    } else if requires_approval {
-                        AgentApprovalStatus::Required
+                        None
+                    };
+                    let request = llm_request.request(request_context);
+                    let llm_response_result = if request.stream {
+                        let delta_run_id = run_id.clone();
+                        let stream_id = format!("{}-stream-{}", run_id, model_request_index + 1);
+                        let delta_cancellation_token = cancellation_token.clone();
+                        let mut tool_input_stream = ToolInputStreamObservers::default();
+                        complete_chat_streaming(
+                            request,
+                            cancellation_token.clone(),
+                            |stream_event| {
+                                if delta_cancellation_token.is_cancelled() {
+                                    return;
+                                }
+                                match stream_event {
+                                    LlmStreamEvent::AttemptStarted {
+                                        attempt,
+                                        max_attempts,
+                                    } => {
+                                        tool_input_stream.start_attempt(attempt);
+                                        if !user_text_blocked {
+                                            let _ = max_attempts;
+                                            event_stream.emit(AgentEvent::MessageStreamStarted {
+                                                run_id: delta_run_id.clone(),
+                                                stream_id: stream_id.clone(),
+                                                attempt,
+                                            });
+                                        }
+                                    }
+                                    LlmStreamEvent::Delta(delta)
+                                        if !user_text_blocked && !delta.is_empty() =>
+                                    {
+                                        event_stream.emit(AgentEvent::MessageDelta {
+                                            run_id: delta_run_id.clone(),
+                                            stream_id: Some(stream_id.clone()),
+                                            delta,
+                                        });
+                                    }
+                                    LlmStreamEvent::ToolInputProgress {
+                                        tool_call_index,
+                                        tool_call_id,
+                                        tool,
+                                        input_delta,
+                                        received_bytes,
+                                    } => {
+                                        let observation = tool_input_stream.on_delta(
+                                            tool_registry.as_ref(),
+                                            &tool_context,
+                                            &stream_id,
+                                            tool_call_index,
+                                            tool_call_id.as_deref(),
+                                            &tool,
+                                            &input_delta,
+                                            received_bytes,
+                                        );
+                                        if observation.as_ref().is_ok_and(|value| !value.handled) {
+                                            event_stream.emit_transient(
+                                                AgentEvent::ToolInputProgress {
+                                                    run_id: delta_run_id.clone(),
+                                                    stream_id: stream_id.clone(),
+                                                    attempt: tool_input_stream.attempt(),
+                                                    tool_call_index,
+                                                    tool_call_id: tool_call_id.clone(),
+                                                    tool: tool.clone(),
+                                                    received_bytes,
+                                                },
+                                            );
+                                        }
+                                        if let Ok(observation) = observation {
+                                            if let Some(preview) = observation.preview {
+                                                emit_tool_input_preview(
+                                                    &mut event_stream,
+                                                    &delta_run_id,
+                                                    preview,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    LlmStreamEvent::AttemptReset { reason } => {
+                                        event_stream.emit_transient(
+                                            AgentEvent::FileWritePreviewCleared {
+                                                run_id: delta_run_id.clone(),
+                                                stream_id: stream_id.clone(),
+                                                attempt: tool_input_stream.attempt(),
+                                            },
+                                        );
+                                        tool_input_stream.reset();
+                                        if !user_text_blocked {
+                                            event_stream.emit(AgentEvent::MessageStreamReset {
+                                                run_id: delta_run_id.clone(),
+                                                stream_id: stream_id.clone(),
+                                                reason,
+                                            });
+                                        }
+                                    }
+                                    LlmStreamEvent::Retrying {
+                                        attempt,
+                                        max_attempts,
+                                        reason,
+                                    } => {
+                                        event_stream.emit(AgentEvent::LlmRetry {
+                                            run_id: delta_run_id.clone(),
+                                            stream_id: stream_id.clone(),
+                                            attempt,
+                                            max_attempts,
+                                            reason,
+                                        });
+                                    }
+                                    LlmStreamEvent::Committed => {
+                                        for preview in tool_input_stream.flush() {
+                                            emit_tool_input_preview(
+                                                &mut event_stream,
+                                                &delta_run_id,
+                                                preview,
+                                            );
+                                        }
+                                        if !user_text_blocked {
+                                            event_stream.emit(AgentEvent::MessageStreamCommitted {
+                                                run_id: delta_run_id.clone(),
+                                                stream_id: stream_id.clone(),
+                                            });
+                                        }
+                                    }
+                                    LlmStreamEvent::Delta(_) => {}
+                                }
+                            },
+                        )
+                        .await
                     } else {
-                        AgentApprovalStatus::NotRequired
-                    },
-                    reason: reason.or_else(|| Some("agent requested tool call".to_string())),
-                };
-                event_stream.emit(AgentEvent::ToolCall {
-                    run_id: run_id.clone(),
-                    call: redact_tool_call_for_event(&call),
-                });
-                if cancellation_token.is_cancelled() {
-                    return Ok(cancelled_output(
-                        run_id,
-                        event_stream,
-                        tool_definitions,
-                        runtime_extensions.todo_state(),
-                        usage,
-                        finish_reason,
-                    ));
-                }
-
-                if requires_approval {
-                    let action = match tool_registry.proposed_action(&tool_context, &call) {
-                        Ok(action) => action,
-                        Err(error) => {
-                            let result = failed_tool_call_result(&call, error);
-                            event_stream.emit(AgentEvent::ToolResult {
-                                run_id: run_id.clone(),
-                                result: result.clone(),
-                            });
-                            active_context.push(ContextItem::tool_result(
-                                call.id.clone(),
-                                build_tool_observation_message(&result),
-                                true,
-                                ContextMetadata::new(
-                                    ContextSource::ToolResult,
-                                    ContextScope::Run,
-                                    ContextRetention::Retained,
-                                )
-                                .with_group(tool_exchange_group.clone()),
+                        complete_chat(request, cancellation_token.clone()).await
+                    };
+                    let llm_response = match llm_response_result {
+                        Ok(response) => response,
+                        Err(error) if error.is_cancelled() => {
+                            merge_total_usage(&mut usage, error.usage().cloned());
+                            return Ok(cancelled_output(
+                                run_id,
+                                event_stream,
+                                tool_definitions,
+                                runtime_extensions.todo_state(),
+                                usage,
+                                finish_reason,
                             ));
-                            continue;
+                        }
+                        Err(error) => {
+                            merge_total_usage(&mut usage, error.usage().cloned());
+                            return Err(error.with_usage(usage));
                         }
                     };
+                    if let (Some(report), Some(input_tokens)) = (
+                        request_budget_report.as_ref(),
+                        llm_response
+                            .usage
+                            .as_ref()
+                            .and_then(|usage| usage.input_tokens),
+                    ) {
+                        event_stream.emit(AgentEvent::ContextWindowUpdated {
+                            run_id: run_id.clone(),
+                            conversation_id: context
+                                .as_ref()
+                                .and_then(|context| context.conversation_id.clone()),
+                            snapshot: report.snapshot(
+                                &llm_request.model,
+                                AgentContextWindowPhase::ModelRequest,
+                                AgentContextWindowSource::ProviderReported,
+                                Some(model_request_index + 1),
+                                Some(input_tokens),
+                            ),
+                        });
+                    }
+                    merge_total_usage(&mut usage, llm_response.usage);
+                    finish_reason = llm_response.finish_reason;
+
+                    let tool_requests = tool_calls_from_response(
+                        llm_response.tool_calls,
+                        &llm_response.content,
+                        &run_id,
+                        model_request_index,
+                    );
+                    if !tool_requests.is_empty() && llm_request.stream && !user_text_blocked {
+                        conversation_trace
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .record_narration(&llm_response.content);
+                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref());
+                    }
                     if cancellation_token.is_cancelled() {
                         return Ok(cancelled_output(
                             run_id,
@@ -712,89 +654,56 @@ impl AgentRuntime {
                             finish_reason,
                         ));
                     }
-                    if let AgentProposedAction::Diff { diff } = &action {
-                        event_stream.emit(AgentEvent::Diff {
-                            run_id: run_id.clone(),
-                            diff: diff.clone(),
-                        });
+                    if user_text_blocked && tool_requests.is_empty() {
+                        response_fence_corrections = response_fence_corrections.saturating_add(1);
+                        if response_fence_corrections > MAX_RESPONSE_FENCE_CORRECTIONS {
+                            return Err(AgentError::new(
+                                "模型连续输出文字但未结算文件事务，已停止以避免循环。请重试任务。",
+                            ));
+                        }
+                        active_context.push(ContextItem::text(
+                            LlmMessageRole::System,
+                            file_transactions.protocol_correction(),
+                            ContextSource::RuntimeGuard,
+                            ContextScope::Run,
+                            ContextRetention::Retained,
+                        ));
+                        continue;
                     }
-                    let checkpoint = create_run_checkpoint(
-                        &run_id,
-                        &active_context,
-                        next_model_request_index,
-                        &tool_batch,
-                        runtime_extensions.snapshots()?,
-                        &call.id,
-                    )?;
-                    event_stream.emit(AgentEvent::ApprovalRequired {
-                        run_id: run_id.clone(),
-                        action: action.clone(),
-                        checkpoint,
-                    });
-                    event_stream.emit(state_event(
-                        &run_id,
-                        AgentRunStatus::WaitingForApproval,
-                        Some(run_id.clone()),
-                        None,
-                    ));
-                    event_stream.emit(done_event(
-                        &run_id,
-                        true,
-                        AgentRunStatus::WaitingForApproval,
-                        None,
-                        usage.clone(),
-                        finish_reason.clone(),
-                        vec![action.clone()],
-                    ));
-                    file_transaction_guard.preserve_for_approval();
+                    if tool_requests.is_empty() {
+                        break 'agent_loop llm_response.content;
+                    }
+                    response_fence_corrections = 0;
 
-                    return Ok(AgentChatOutput {
-                        content: String::new(),
-                        status: AgentRunStatus::WaitingForApproval,
-                        run_id,
-                        events: event_stream.into_events(),
-                        tool_definitions,
-                        todo: runtime_extensions.todo_state(),
-                        usage,
-                        finish_reason,
-                        proposed_actions: vec![action],
-                    });
+                    if model_request_index >= self.max_tool_iterations {
+                        let message = "工具调用次数超过限制，已停止继续执行。".to_string();
+                        event_stream.emit(AgentEvent::Error {
+                            run_id: Some(run_id.clone()),
+                            message: message.clone(),
+                            recoverable: false,
+                            code: None,
+                            details: None,
+                        });
+                        return Err(AgentError::new(message));
+                    }
+
+                    let suppressed_narration =
+                        user_text_blocked && !llm_response.content.trim().is_empty();
+                    tool_batch = ToolCallBatch::from_model_response(
+                        &run_id,
+                        model_request_index,
+                        if user_text_blocked {
+                            String::new()
+                        } else {
+                            llm_response.content.clone()
+                        },
+                        tool_requests,
+                        suppressed_narration,
+                    );
                 }
 
-                let result_result = if auto_execute_host_action {
-                    match tool_registry.proposed_action(&tool_context, &call) {
-                        Ok(action) => {
-                            let action = approve_proposed_action(action);
-                            if let AgentProposedAction::Diff { diff } = &action {
-                                event_stream.emit(AgentEvent::Diff {
-                                    run_id: run_id.clone(),
-                                    diff: diff.clone(),
-                                });
-                            }
-                            execute_host_action_on_blocking_thread(
-                                host_executor
-                                    .as_ref()
-                                    .expect("automatic host action requires host executor")
-                                    .clone(),
-                                action,
-                                cancellation_token.clone(),
-                            )
-                            .await
-                        }
-                        Err(error) => Ok(failed_tool_call_result(&call, error)),
-                    }
-                } else {
-                    execute_tool_on_blocking_thread(
-                        tool_registry.clone(),
-                        tool_context.clone(),
-                        call.clone(),
-                        cancellation_token.clone(),
-                    )
-                    .await
-                };
-                let result = match result_result {
-                    Ok(result) => result,
-                    Err(error) if error.is_cancelled() => {
+                while let Some(queued_tool_call) = tool_batch.pop_front() {
+                    if cancellation_token.is_cancelled() {
                         return Ok(cancelled_output(
                             run_id,
                             event_stream,
@@ -804,54 +713,265 @@ impl AgentRuntime {
                             finish_reason,
                         ));
                     }
-                    Err(error) => return Err(error),
-                };
-                if cancellation_token.is_cancelled()
-                    || result.error.as_deref() == Some("agent run 已取消。")
-                {
-                    return Ok(cancelled_output(
-                        run_id,
-                        event_stream,
-                        tool_definitions,
-                        runtime_extensions.todo_state(),
-                        usage,
-                        finish_reason,
+                    let tool_exchange_group = queued_tool_call.context_group();
+                    active_context.push(ContextItem::assistant(
+                        queued_tool_call.assistant_content,
+                        vec![queued_tool_call.call.clone()],
+                        ContextMetadata::new(
+                            ContextSource::ModelResponse,
+                            ContextScope::Run,
+                            ContextRetention::Retained,
+                        )
+                        .with_group(tool_exchange_group.clone()),
                     ));
-                }
-                let event_result = redact_tool_result_for_event(&result);
-                let llm_result = redact_tool_result_for_llm(&result);
-                event_stream.emit(AgentEvent::ToolResult {
-                    run_id: run_id.clone(),
-                    result: event_result.clone(),
-                });
-                if let Some(draft) = file_draft_from_tool_result(&event_result) {
-                    event_stream.emit(AgentEvent::FileDraftUpdated {
+                    let tool_request = queued_tool_call.call;
+                    let tool_name = tool_request.name;
+                    let tool_args = tool_request.args;
+                    let reason = extract_reason_from_args(&tool_args);
+                    let definition_requires_approval =
+                        tool_registry.requires_approval_for_call(&tool_name, &tool_args);
+                    let auto_execute_command = tool_name == "run_command" && command_auto_approve;
+                    let auto_execute_patch = (tool_name == "apply_patch"
+                        || tool_name == "write_file")
+                        && patch_auto_approve
+                        && definition_requires_approval;
+                    let auto_execute_host_action = auto_execute_command || auto_execute_patch;
+                    let requires_approval =
+                        definition_requires_approval && !auto_execute_host_action;
+                    let call = AgentToolCall {
+                        id: tool_request.id,
+                        tool: tool_name,
+                        args: tool_args,
+                        approval_status: if auto_execute_host_action {
+                            AgentApprovalStatus::Approved
+                        } else if requires_approval {
+                            AgentApprovalStatus::Required
+                        } else {
+                            AgentApprovalStatus::NotRequired
+                        },
+                        reason: reason.or_else(|| Some("agent requested tool call".to_string())),
+                    };
+                    conversation_trace
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .record_tool_call(&call);
+                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref());
+                    event_stream.emit(AgentEvent::ToolCall {
                         run_id: run_id.clone(),
-                        draft,
+                        call: redact_tool_call_for_event(&call),
                     });
-                }
-                for effect in runtime_extensions
-                    .on_event(RuntimeExtensionEvent::ToolCompleted { result: &result })?
-                {
-                    match effect {
-                        RuntimeEffect::EmitEvent(event) => event_stream.emit(event),
+                    if cancellation_token.is_cancelled() {
+                        return Ok(cancelled_output(
+                            run_id,
+                            event_stream,
+                            tool_definitions,
+                            runtime_extensions.todo_state(),
+                            usage,
+                            finish_reason,
+                        ));
                     }
-                }
 
-                active_context.push(ContextItem::tool_result(
-                    call.id.clone(),
-                    build_tool_observation_message(&llm_result),
-                    !result.ok,
-                    ContextMetadata::new(
-                        ContextSource::ToolResult,
-                        ContextScope::Run,
-                        ContextRetention::Retained,
-                    )
-                    .with_group(tool_exchange_group.clone()),
-                ));
-                if let Some(image_message) = llm_image_message_from_tool_result(&result) {
-                    active_context.push(ContextItem::new(
-                        image_message,
+                    if requires_approval {
+                        let action = match tool_registry.proposed_action(&tool_context, &call) {
+                            Ok(action) => {
+                                conversation_trace
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .enrich_tool_call(&action);
+                                publish_trace_snapshot(
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                );
+                                action
+                            }
+                            Err(error) => {
+                                let result = failed_tool_call_result(&call, error);
+                                conversation_trace
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .record_tool_result(&call, &result);
+                                publish_trace_snapshot(
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                );
+                                event_stream.emit(AgentEvent::ToolResult {
+                                    run_id: run_id.clone(),
+                                    result: result.clone(),
+                                });
+                                active_context.push(ContextItem::tool_result(
+                                    call.id.clone(),
+                                    build_tool_observation_message(&result),
+                                    true,
+                                    ContextMetadata::new(
+                                        ContextSource::ToolResult,
+                                        ContextScope::Run,
+                                        ContextRetention::Retained,
+                                    )
+                                    .with_group(tool_exchange_group.clone()),
+                                ));
+                                continue;
+                            }
+                        };
+                        if cancellation_token.is_cancelled() {
+                            return Ok(cancelled_output(
+                                run_id,
+                                event_stream,
+                                tool_definitions,
+                                runtime_extensions.todo_state(),
+                                usage,
+                                finish_reason,
+                            ));
+                        }
+                        if let AgentProposedAction::Diff { diff } = &action {
+                            event_stream.emit(AgentEvent::Diff {
+                                run_id: run_id.clone(),
+                                diff: diff.clone(),
+                            });
+                        }
+                        let checkpoint = {
+                            let trace = conversation_trace
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            create_run_checkpoint(
+                                &run_id,
+                                &active_context,
+                                next_model_request_index,
+                                &tool_batch,
+                                runtime_extensions.snapshots()?,
+                                &call.id,
+                                &trace,
+                            )?
+                        };
+                        event_stream.emit(AgentEvent::ApprovalRequired {
+                            run_id: run_id.clone(),
+                            action: action.clone(),
+                            checkpoint,
+                        });
+                        event_stream.emit(state_event(
+                            &run_id,
+                            AgentRunStatus::WaitingForApproval,
+                            Some(run_id.clone()),
+                            None,
+                        ));
+                        event_stream.emit(done_event(
+                            &run_id,
+                            true,
+                            AgentRunStatus::WaitingForApproval,
+                            None,
+                            usage.clone(),
+                            finish_reason.clone(),
+                            vec![action.clone()],
+                        ));
+                        file_transaction_guard.preserve_for_approval();
+
+                        return Ok(AgentChatOutput {
+                            content: String::new(),
+                            status: AgentRunStatus::WaitingForApproval,
+                            run_id,
+                            events: event_stream.into_events(),
+                            tool_definitions,
+                            todo: runtime_extensions.todo_state(),
+                            usage,
+                            finish_reason,
+                            proposed_actions: vec![action],
+                            conversation_turn_trace: None,
+                        });
+                    }
+
+                    let result_result = if auto_execute_host_action {
+                        match tool_registry.proposed_action(&tool_context, &call) {
+                            Ok(action) => {
+                                let action = approve_proposed_action(action);
+                                conversation_trace
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .enrich_tool_call(&action);
+                                publish_trace_snapshot(
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                );
+                                if let AgentProposedAction::Diff { diff } = &action {
+                                    event_stream.emit(AgentEvent::Diff {
+                                        run_id: run_id.clone(),
+                                        diff: diff.clone(),
+                                    });
+                                }
+                                execute_host_action_on_blocking_thread(
+                                    host_executor
+                                        .as_ref()
+                                        .expect("automatic host action requires host executor")
+                                        .clone(),
+                                    action,
+                                    cancellation_token.clone(),
+                                )
+                                .await
+                            }
+                            Err(error) => Ok(failed_tool_call_result(&call, error)),
+                        }
+                    } else {
+                        execute_tool_on_blocking_thread(
+                            tool_registry.clone(),
+                            tool_context.clone(),
+                            call.clone(),
+                            cancellation_token.clone(),
+                        )
+                        .await
+                    };
+                    let result = match result_result {
+                        Ok(result) => result,
+                        Err(error) if error.is_cancelled() => {
+                            return Ok(cancelled_output(
+                                run_id,
+                                event_stream,
+                                tool_definitions,
+                                runtime_extensions.todo_state(),
+                                usage,
+                                finish_reason,
+                            ));
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    conversation_trace
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .record_tool_result(&call, &result);
+                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref());
+                    if cancellation_token.is_cancelled()
+                        || result.error.as_deref() == Some("agent run 已取消。")
+                    {
+                        return Ok(cancelled_output(
+                            run_id,
+                            event_stream,
+                            tool_definitions,
+                            runtime_extensions.todo_state(),
+                            usage,
+                            finish_reason,
+                        ));
+                    }
+                    let event_result = redact_tool_result_for_event(&result);
+                    let llm_result = redact_tool_result_for_llm(&result);
+                    event_stream.emit(AgentEvent::ToolResult {
+                        run_id: run_id.clone(),
+                        result: event_result.clone(),
+                    });
+                    if let Some(draft) = file_draft_from_tool_result(&event_result) {
+                        event_stream.emit(AgentEvent::FileDraftUpdated {
+                            run_id: run_id.clone(),
+                            draft,
+                        });
+                    }
+                    for effect in runtime_extensions
+                        .on_event(RuntimeExtensionEvent::ToolCompleted { result: &result })?
+                    {
+                        match effect {
+                            RuntimeEffect::EmitEvent(event) => event_stream.emit(event),
+                        }
+                    }
+
+                    active_context.push(ContextItem::tool_result(
+                        call.id.clone(),
+                        build_tool_observation_message(&llm_result),
+                        !result.ok,
                         ContextMetadata::new(
                             ContextSource::ToolResult,
                             ContextScope::Run,
@@ -859,69 +979,234 @@ impl AgentRuntime {
                         )
                         .with_group(tool_exchange_group.clone()),
                     ));
+                    if let Some(image_message) = llm_image_message_from_tool_result(&result) {
+                        active_context.push(ContextItem::new(
+                            image_message,
+                            ContextMetadata::new(
+                                ContextSource::ToolResult,
+                                ContextScope::Run,
+                                ContextRetention::Retained,
+                            )
+                            .with_group(tool_exchange_group.clone()),
+                        ));
+                    }
+                    if cancellation_token.is_cancelled() {
+                        return Ok(cancelled_output(
+                            run_id,
+                            event_stream,
+                            tool_definitions,
+                            runtime_extensions.todo_state(),
+                            usage,
+                            finish_reason,
+                        ));
+                    }
                 }
-                if cancellation_token.is_cancelled() {
-                    return Ok(cancelled_output(
-                        run_id,
-                        event_stream,
-                        tool_definitions,
-                        runtime_extensions.todo_state(),
-                        usage,
-                        finish_reason,
-                    ));
-                }
-            }
-        };
+            };
 
-        if cancellation_token.is_cancelled() {
-            return Ok(cancelled_output(
+            if cancellation_token.is_cancelled() {
+                return Ok(cancelled_output(
+                    run_id,
+                    event_stream,
+                    tool_definitions,
+                    runtime_extensions.todo_state(),
+                    usage,
+                    finish_reason,
+                ));
+            }
+            let final_file_transactions =
+                FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
+            if final_file_transactions.blocks_user_text() {
+                return Err(AgentError::new(
+                    "文件事务尚未结算，不能结束当前运行或输出最终回复。",
+                ));
+            }
+            file_transaction_guard.complete();
+            let content = final_content;
+            if !llm_request.stream {
+                event_stream.emit(AgentEvent::MessageDelta {
+                    run_id: run_id.clone(),
+                    stream_id: None,
+                    delta: content.clone(),
+                });
+            }
+            event_stream.emit(state_event(&run_id, AgentRunStatus::Completed, None, None));
+            event_stream.emit(done_event(
+                &run_id,
+                true,
+                AgentRunStatus::Completed,
+                Some(content.clone()),
+                usage.clone(),
+                finish_reason.clone(),
+                Vec::new(),
+            ));
+
+            Ok(AgentChatOutput {
+                content,
+                status: AgentRunStatus::Completed,
                 run_id,
-                event_stream,
+                events: event_stream.into_events(),
                 tool_definitions,
-                runtime_extensions.todo_state(),
+                todo: runtime_extensions.todo_state(),
                 usage,
                 finish_reason,
-            ));
+                proposed_actions: Vec::<AgentProposedAction>::new(),
+                conversation_turn_trace: None,
+            })
         }
-        let final_file_transactions =
-            FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
-        if final_file_transactions.blocks_user_text() {
-            return Err(AgentError::new(
-                "文件事务尚未结算，不能结束当前运行或输出最终回复。",
-            ));
-        }
-        file_transaction_guard.complete();
-        let content = final_content;
-        if !llm_request.stream {
-            event_stream.emit(AgentEvent::MessageDelta {
-                run_id: run_id.clone(),
-                stream_id: None,
-                delta: content.clone(),
-            });
-        }
-        event_stream.emit(state_event(&run_id, AgentRunStatus::Completed, None, None));
-        event_stream.emit(done_event(
-            &run_id,
-            true,
-            AgentRunStatus::Completed,
-            Some(content.clone()),
-            usage.clone(),
-            finish_reason.clone(),
-            Vec::new(),
-        ));
+        .await;
 
-        Ok(AgentChatOutput {
-            content,
-            status: AgentRunStatus::Completed,
-            run_id,
-            events: event_stream.into_events(),
-            tool_definitions,
-            todo: runtime_extensions.todo_state(),
-            usage,
-            finish_reason,
-            proposed_actions: Vec::<AgentProposedAction>::new(),
-        })
+        finalize_runtime_trace(
+            result,
+            &conversation_trace,
+            &trace_run_id,
+            trace_conversation_id.as_deref(),
+            trace_assistant_message_id.as_deref(),
+        )
     }
+}
+
+fn publish_trace_recorder_snapshot(
+    recorder: &ConversationTraceRecorder,
+    observer: Option<&AgentConversationTraceObserver>,
+) {
+    if let Some(observer) = observer {
+        observer(recorder.snapshot());
+    }
+}
+
+fn publish_trace_snapshot(
+    recorder: &Arc<Mutex<ConversationTraceRecorder>>,
+    observer: Option<&AgentConversationTraceObserver>,
+) {
+    if observer.is_none() {
+        return;
+    }
+    let recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
+    publish_trace_recorder_snapshot(&recorder, observer);
+}
+
+fn finalize_runtime_trace(
+    result: AgentResult<AgentChatOutput>,
+    recorder: &Arc<Mutex<ConversationTraceRecorder>>,
+    run_id: &str,
+    conversation_id: Option<&str>,
+    assistant_message_id: Option<&str>,
+) -> AgentResult<AgentChatOutput> {
+    let Some(conversation_id) = conversation_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return result;
+    };
+    let Some(assistant_message_id) = assistant_message_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return result;
+    };
+
+    match result {
+        Ok(mut output) => {
+            let terminal_status = match output.status {
+                AgentRunStatus::Completed => Some(ConversationTurnTraceTerminalStatus::Completed),
+                AgentRunStatus::Failed => Some(ConversationTurnTraceTerminalStatus::Failed),
+                AgentRunStatus::Cancelled => Some(ConversationTurnTraceTerminalStatus::Cancelled),
+                AgentRunStatus::Idle
+                | AgentRunStatus::Running
+                | AgentRunStatus::WaitingForApproval => None,
+            };
+            if let Some(terminal_status) = terminal_status {
+                output.conversation_turn_trace = Some(finish_trace(
+                    recorder,
+                    run_id,
+                    conversation_id,
+                    assistant_message_id,
+                    terminal_status,
+                    None,
+                ));
+            }
+            Ok(output)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let trace = finish_trace(
+                recorder,
+                run_id,
+                conversation_id,
+                assistant_message_id,
+                ConversationTurnTraceTerminalStatus::Failed,
+                Some(&message),
+            );
+            Err(error.with_conversation_turn_trace(trace))
+        }
+    }
+}
+
+fn conversation_trace_from_input_checkpoint(input: &AgentChatInput) -> ConversationTraceRecorder {
+    let Some(checkpoint) = input.resume_checkpoint.as_ref() else {
+        return ConversationTraceRecorder::default();
+    };
+    let mut recorder = ConversationTraceRecorder::from_checkpoint(
+        checkpoint.conversation_trace_items.clone(),
+        checkpoint.next_conversation_trace_sequence,
+        checkpoint.conversation_trace_truncated,
+    );
+    if let Some(continuation) = input.tool_continuation.as_ref() {
+        recorder.record_tool_call(&continuation.call);
+        recorder.record_tool_result(&continuation.call, &continuation.result);
+    }
+    recorder
+}
+
+fn attach_failed_runtime_trace(
+    error: AgentError,
+    recorder: &ConversationTraceRecorder,
+    run_id: &str,
+    conversation_id: Option<&str>,
+    assistant_message_id: Option<&str>,
+) -> AgentError {
+    let (Some(conversation_id), Some(assistant_message_id)) = (
+        conversation_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        assistant_message_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    ) else {
+        return error;
+    };
+    let message = error.to_string();
+    let trace = recorder.finish(
+        run_id,
+        conversation_id,
+        assistant_message_id,
+        ConversationTurnTraceTerminalStatus::Failed,
+        Some(&message),
+    );
+    debug_assert!(trace.validate().is_ok());
+    error.with_conversation_turn_trace(trace)
+}
+
+fn finish_trace(
+    recorder: &Arc<Mutex<ConversationTraceRecorder>>,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    terminal_status: ConversationTurnTraceTerminalStatus,
+    terminal_error: Option<&str>,
+) -> ConversationTurnTrace {
+    let trace = recorder
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .finish(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            terminal_status,
+            terminal_error,
+        );
+    debug_assert!(trace.validate().is_ok());
+    trace
 }
 
 struct AgentEventStream {
@@ -1126,30 +1411,38 @@ fn build_llm_request(
         stream: input.stream.unwrap_or(false),
         tools: tool_definitions.to_vec(),
     };
-    let (context, next_model_request_index, tool_batch) = match restored_checkpoint {
-        Some(restored) => (
-            restored.context,
-            restored.next_model_request_index,
-            restored.tool_batch,
-        ),
-        None => {
-            let attachment_context = build_attachment_context(&input.attachments)?;
-            let context = assemble_initial_context(
-                input.messages,
-                attachment_context,
-                input.context.as_ref(),
-                input.prompt_preferences.as_ref(),
-                tool_definitions,
-            )?;
-            (context, 0, ToolCallBatch::default())
-        }
-    };
+    let (context, next_model_request_index, tool_batch, conversation_trace) =
+        match restored_checkpoint {
+            Some(restored) => (
+                restored.context,
+                restored.next_model_request_index,
+                restored.tool_batch,
+                restored.conversation_trace,
+            ),
+            None => {
+                let attachment_context = build_attachment_context(&input.attachments)?;
+                let context = assemble_initial_context(
+                    input.messages,
+                    attachment_context,
+                    input.context.as_ref(),
+                    input.prompt_preferences.as_ref(),
+                    tool_definitions,
+                )?;
+                (
+                    context,
+                    0,
+                    ToolCallBatch::default(),
+                    ConversationTraceRecorder::default(),
+                )
+            }
+        };
 
     Ok(PreparedLlmRequest {
         template,
         context,
         next_model_request_index,
         tool_batch,
+        conversation_trace,
     })
 }
 

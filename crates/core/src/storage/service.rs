@@ -13,13 +13,13 @@ use crate::storage::models::{
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
     chat_repository, chat_search_repository, composer_draft_repository, config_repository,
-    file_draft_repository, now_ms, pending_action_repository, preferences_repository,
-    project_repository, storage_error, usage_repository, StorageState,
+    conversation_trace_repository, file_draft_repository, now_ms, pending_action_repository,
+    preferences_repository, project_repository, storage_error, usage_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
     AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentToolResult, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, ConversationTurnTrace,
 };
 use base64::Engine;
 
@@ -427,6 +427,82 @@ impl StorageService {
         )
         .map_err(storage_error)?;
         Ok(messages)
+    }
+
+    pub fn replace_conversation_turn_trace(
+        &self,
+        trace: &ConversationTurnTrace,
+        created_at: i64,
+        completed_at: i64,
+    ) -> Result<(), String> {
+        let mut connection = self.state.connection()?;
+        conversation_trace_repository::replace_trace(
+            &mut connection,
+            trace,
+            created_at,
+            completed_at,
+        )
+        .map_err(storage_error)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_chat_message_with_conversation_trace(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        content: &str,
+        message_status: Option<&str>,
+        run_status: &str,
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        completed_at: i64,
+    ) -> Result<(), String> {
+        let mut connection = self.state.connection()?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        chat_repository::update_message_status_and_content(
+            &transaction,
+            conversation_id,
+            message_id,
+            content,
+            message_status,
+            completed_at,
+        )
+        .map_err(storage_error)?;
+        chat_repository::update_message_run_terminal_state(
+            &transaction,
+            conversation_id,
+            message_id,
+            message_status,
+            run_status,
+            completed_at,
+        )
+        .map_err(storage_error)?;
+        conversation_trace_repository::replace_trace_in_connection(
+            &transaction,
+            trace,
+            trace_created_at,
+            completed_at,
+        )
+        .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)
+    }
+
+    pub fn get_conversation_turn_trace(
+        &self,
+        assistant_message_id: &str,
+    ) -> Result<Option<ConversationTurnTrace>, String> {
+        let connection = self.state.connection()?;
+        conversation_trace_repository::get_trace_for_message(&connection, assistant_message_id)
+            .map_err(storage_error)
+    }
+
+    pub fn list_conversation_turn_traces(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ConversationTurnTrace>, String> {
+        let connection = self.state.connection()?;
+        conversation_trace_repository::list_traces_for_conversation(&connection, conversation_id)
+            .map_err(storage_error)
     }
 
     pub fn save_chat_message_state(

@@ -421,6 +421,29 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS conversation_turn_traces (
+            assistant_message_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            run_id TEXT NOT NULL UNIQUE,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            terminal_status TEXT NOT NULL CHECK (terminal_status IN ('completed', 'failed', 'cancelled')),
+            terminal_error TEXT,
+            truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+            created_at INTEGER NOT NULL,
+            completed_at INTEGER NOT NULL CHECK (completed_at >= created_at),
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS conversation_turn_trace_items (
+            assistant_message_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            item_kind TEXT NOT NULL CHECK (item_kind IN ('assistant_narration', 'tool_call', 'tool_result')),
+            item_json TEXT NOT NULL,
+            PRIMARY KEY (assistant_message_id, sequence),
+            FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_models_position ON models(position);
         CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at);
         CREATE INDEX IF NOT EXISTS idx_conversations_project_id ON conversations(project_id);
@@ -429,6 +452,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_conversations_unread_at ON conversations(unread_at);
         CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at);
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, position);
+        CREATE INDEX IF NOT EXISTS idx_conversation_turn_traces_conversation_id ON conversation_turn_traces(conversation_id, completed_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_conversation_id ON attachments(conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_project_id ON attachments(project_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);

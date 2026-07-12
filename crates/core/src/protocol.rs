@@ -1,3 +1,4 @@
+use crate::conversation_trace::{ConversationTurnTrace, ConversationTurnTraceItem};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
@@ -28,6 +29,8 @@ pub struct AgentChatInput {
     pub attachments: Vec<AgentInputAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_checkpoint: Option<AgentRunCheckpoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_message_id: Option<String>,
     pub messages: Vec<AgentChatMessage>,
 }
 
@@ -54,6 +57,12 @@ pub struct AgentRunCheckpoint {
     pub suppressed_narration: bool,
     pub extension_snapshots: Vec<AgentExtensionSnapshot>,
     pub pending_tool_call_id: String,
+    #[serde(default)]
+    pub conversation_trace_items: Vec<ConversationTurnTraceItem>,
+    #[serde(default)]
+    pub next_conversation_trace_sequence: u64,
+    #[serde(default)]
+    pub conversation_trace_truncated: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -104,9 +113,12 @@ pub struct AgentQueuedToolCallCheckpoint {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_turn_trace: Option<ConversationTurnTrace>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -160,6 +172,8 @@ pub struct AgentChatOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
     pub proposed_actions: Vec<AgentProposedAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_turn_trace: Option<ConversationTurnTrace>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -984,6 +998,7 @@ pub struct AgentError {
     usage: Option<Box<AgentUsage>>,
     code: Option<String>,
     details: Option<Box<Value>>,
+    conversation_turn_trace: Option<Box<ConversationTurnTrace>>,
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;
@@ -996,6 +1011,7 @@ impl AgentError {
             usage: None,
             code: None,
             details: None,
+            conversation_turn_trace: None,
         }
     }
 
@@ -1006,6 +1022,7 @@ impl AgentError {
             usage: None,
             code: Some(code.into()),
             details: Some(Box::new(details)),
+            conversation_turn_trace: None,
         }
     }
 
@@ -1016,6 +1033,7 @@ impl AgentError {
             usage: None,
             code: None,
             details: None,
+            conversation_turn_trace: None,
         }
     }
 
@@ -1035,8 +1053,17 @@ impl AgentError {
         self.details.as_deref()
     }
 
+    pub fn conversation_turn_trace(&self) -> Option<&ConversationTurnTrace> {
+        self.conversation_turn_trace.as_deref()
+    }
+
     pub fn with_usage(mut self, usage: Option<AgentUsage>) -> Self {
         self.usage = usage.map(Box::new);
+        self
+    }
+
+    pub fn with_conversation_turn_trace(mut self, trace: ConversationTurnTrace) -> Self {
+        self.conversation_turn_trace = Some(Box::new(trace));
         self
     }
 }
@@ -1058,5 +1085,28 @@ impl From<String> for AgentError {
 impl From<&str> for AgentError {
     fn from(message: &str) -> Self {
         Self::new(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::completed_conversation_trace_without_items;
+
+    #[test]
+    fn chat_message_serializes_conversation_trace_with_camel_case_protocol_names() {
+        let message = AgentChatMessage {
+            role: "assistant".to_string(),
+            content: "done".to_string(),
+            conversation_turn_trace: Some(completed_conversation_trace_without_items(
+                "run-1",
+                "conversation-1",
+                "assistant-1",
+            )),
+        };
+        let serialized = serde_json::to_string(&message).unwrap();
+
+        assert!(serialized.contains("\"conversationTurnTrace\""));
+        assert!(!serialized.contains("conversation_turn_trace"));
     }
 }

@@ -546,7 +546,11 @@ mod tests {
         ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextGroup, ContextItem,
         ContextMetadata, ContextRetention, ContextScope, ContextSource,
     };
-    use crate::protocol::{AgentChatMessage, AgentToolSafety};
+    use crate::conversation_trace::{
+        ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
+        ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    };
+    use crate::protocol::{AgentApprovalStatus, AgentChatMessage, AgentToolSafety};
     use serde_json::json;
 
     fn message(role: LlmMessageRole, content: &str) -> LlmMessage {
@@ -585,6 +589,54 @@ mod tests {
         AgentChatMessage {
             role: role.to_string(),
             content: content.to_string(),
+            conversation_turn_trace: None,
+        }
+    }
+
+    fn traced_chat_message(content: &str) -> AgentChatMessage {
+        AgentChatMessage {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            conversation_turn_trace: Some(ConversationTurnTrace {
+                schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                run_id: "historical-run-1".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                assistant_message_id: "assistant-1".to_string(),
+                terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+                terminal_error: None,
+                truncated: false,
+                items: vec![
+                    ConversationTurnTraceItem::AssistantNarration {
+                        sequence: 10,
+                        content: "I will inspect src/lib.rs.".to_string(),
+                        truncated: false,
+                    },
+                    ConversationTurnTraceItem::ToolCall {
+                        sequence: 11,
+                        call_id: "call-1".to_string(),
+                        tool: "read_file".to_string(),
+                        operation: json!({ "path": "src/lib.rs", "startLine": 1 }),
+                        approval_status: AgentApprovalStatus::NotRequired,
+                        truncated: false,
+                    },
+                    ConversationTurnTraceItem::ToolResult {
+                        sequence: 12,
+                        call_id: "call-1".to_string(),
+                        tool: "read_file".to_string(),
+                        status: ConversationTraceToolResultStatus::Succeeded,
+                        success: true,
+                        observation: json!({
+                            "path": "src/lib.rs",
+                            "startLine": 1,
+                            "endLine": 20,
+                            "truncated": false
+                        }),
+                        approval_status: AgentApprovalStatus::NotRequired,
+                        error: None,
+                        truncated: false,
+                    },
+                ],
+            }),
         }
     }
 
@@ -819,6 +871,92 @@ mod tests {
         assert_eq!(
             anthropic["messages"][4]["content"][0]["tool_use_id"],
             "call-context-1"
+        );
+    }
+
+    #[test]
+    fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
+        let context = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "System rules".to_string(),
+            messages: vec![
+                chat_message("user", "Inspect the file"),
+                traced_chat_message("The file is valid."),
+                chat_message("user", "What did you inspect?"),
+            ],
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap();
+        context.validate_complete_tool_protocol().unwrap();
+
+        let request = |api_style| LlmChatRequest {
+            api_url: "https://example.test".to_string(),
+            api_token: "token".to_string(),
+            model: "model".to_string(),
+            api_style,
+            max_tokens: 1024,
+            temperature: 0.2,
+            stream: false,
+            messages: context.to_messages(),
+            tools: vec![tool_definition()],
+        };
+
+        let openai = build_payload(&request(AgentApiStyle::OpenAiCompatible));
+        assert_eq!(openai["messages"][1]["content"], "Inspect the file");
+        assert_eq!(
+            openai["messages"][2]["content"],
+            "I will inspect src/lib.rs."
+        );
+        let openai_call_id = openai["messages"][3]["tool_calls"][0]["id"]
+            .as_str()
+            .unwrap();
+        assert!(openai_call_id.starts_with("conversation_trace_historical-run-1_"));
+        assert_eq!(openai["messages"][3]["content"], Value::Null);
+        assert_eq!(openai["messages"][4]["role"], "tool");
+        assert_eq!(openai["messages"][4]["tool_call_id"], openai_call_id);
+        assert!(openai["messages"][4]["content"]
+            .as_str()
+            .unwrap()
+            .contains("\"status\":\"succeeded\""));
+        assert_eq!(openai["messages"][5]["content"], "The file is valid.");
+        assert!(openai["messages"][6]["content"]
+            .as_str()
+            .unwrap()
+            .contains("historical_agent_activity_terminal"));
+        assert_eq!(openai["messages"][7]["content"], "What did you inspect?");
+
+        let anthropic = build_payload(&request(AgentApiStyle::AnthropicCompatible));
+        assert_eq!(anthropic["system"], "System rules");
+        assert_eq!(anthropic["messages"][0]["role"], "user");
+        assert_eq!(
+            anthropic["messages"][1]["content"][0]["text"],
+            "I will inspect src/lib.rs."
+        );
+        assert_eq!(anthropic["messages"][1]["content"][1]["type"], "tool_use");
+        let anthropic_call_id = anthropic["messages"][1]["content"][1]["id"]
+            .as_str()
+            .unwrap();
+        assert_eq!(anthropic_call_id, openai_call_id);
+        assert_eq!(anthropic["messages"][2]["role"], "user");
+        assert_eq!(
+            anthropic["messages"][2]["content"][0]["type"],
+            "tool_result"
+        );
+        assert_eq!(
+            anthropic["messages"][2]["content"][0]["tool_use_id"],
+            anthropic_call_id
+        );
+        assert_eq!(anthropic["messages"][2]["content"][0]["is_error"], false);
+        assert_eq!(
+            anthropic["messages"][3]["content"][0]["text"],
+            "The file is valid."
+        );
+        assert!(anthropic["messages"][3]["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("historical_agent_activity_terminal"));
+        assert_eq!(
+            anthropic["messages"][4]["content"][0]["text"],
+            "What did you inspect?"
         );
     }
 

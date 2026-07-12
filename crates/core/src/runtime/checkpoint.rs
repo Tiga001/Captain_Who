@@ -7,6 +7,7 @@
 
 use super::tool_flow::{build_tool_observation_message, redact_tool_result_for_llm};
 use crate::context::{ContextFrame, ContextGroup};
+use crate::conversation_trace::ConversationTraceRecorder;
 use crate::llm::LlmToolCall;
 use crate::protocol::{
     AgentContextCheckpointToolCall, AgentError, AgentExtensionSnapshot,
@@ -89,6 +90,7 @@ pub(super) struct RestoredRunCheckpoint {
     pub(super) next_model_request_index: usize,
     pub(super) tool_batch: ToolCallBatch,
     pub(super) extension_snapshots: Vec<AgentExtensionSnapshot>,
+    pub(super) conversation_trace: ConversationTraceRecorder,
 }
 
 pub(super) fn create_run_checkpoint(
@@ -98,8 +100,11 @@ pub(super) fn create_run_checkpoint(
     tool_batch: &ToolCallBatch,
     extension_snapshots: Vec<AgentExtensionSnapshot>,
     pending_tool_call_id: &str,
+    conversation_trace: &ConversationTraceRecorder,
 ) -> AgentResult<AgentRunCheckpoint> {
     context.validate_pending_tool_call(pending_tool_call_id)?;
+    let (conversation_trace_items, next_conversation_trace_sequence, conversation_trace_truncated) =
+        conversation_trace.checkpoint();
     Ok(AgentRunCheckpoint {
         version: RUN_CHECKPOINT_VERSION,
         run_id: run_id.to_string(),
@@ -113,6 +118,9 @@ pub(super) fn create_run_checkpoint(
         suppressed_narration: tool_batch.suppressed_narration,
         extension_snapshots,
         pending_tool_call_id: pending_tool_call_id.to_string(),
+        conversation_trace_items,
+        next_conversation_trace_sequence,
+        conversation_trace_truncated,
     })
 }
 
@@ -145,6 +153,11 @@ pub(super) fn restore_run_checkpoint(
         ));
     }
 
+    let mut conversation_trace = ConversationTraceRecorder::from_checkpoint(
+        checkpoint.conversation_trace_items,
+        checkpoint.next_conversation_trace_sequence,
+        checkpoint.conversation_trace_truncated,
+    );
     let mut context = ContextFrame::from_checkpoint_items(checkpoint.context_items)?;
     let continuation_call = LlmToolCall {
         id: continuation.call.id.clone(),
@@ -157,6 +170,8 @@ pub(super) fn restore_run_checkpoint(
         build_tool_observation_message(&llm_result),
         !continuation.result.ok,
     )?;
+    conversation_trace.record_tool_call(&continuation.call);
+    conversation_trace.record_tool_result(&continuation.call, &continuation.result);
 
     let queue = restore_queued_tool_calls(
         checkpoint.queued_tool_calls,
@@ -171,6 +186,7 @@ pub(super) fn restore_run_checkpoint(
             suppressed_narration: checkpoint.suppressed_narration,
         },
         extension_snapshots: checkpoint.extension_snapshots,
+        conversation_trace,
     })
 }
 
@@ -281,8 +297,10 @@ mod tests {
             }],
             true,
         );
+        let trace = ConversationTraceRecorder::default();
         let checkpoint =
-            create_run_checkpoint("run-1", &context, 1, &batch, Vec::new(), "write-1").unwrap();
+            create_run_checkpoint("run-1", &context, 1, &batch, Vec::new(), "write-1", &trace)
+                .unwrap();
         let continuation = AgentToolContinuation {
             call: AgentToolCall {
                 id: "write-1".to_string(),

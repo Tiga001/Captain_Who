@@ -2,6 +2,7 @@ use crate::storage::models::{
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ChatMessageStateRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 
 pub fn conversation_exists(
     connection: &Connection,
@@ -94,13 +95,21 @@ pub fn save_conversation(
         ],
     )?;
 
-    transaction.execute(
-        "DELETE FROM messages WHERE conversation_id = ?1",
-        params![&conversation.id],
-    )?;
-
     for (index, message) in conversation.messages.iter().enumerate() {
-        transaction.execute(
+        let existing_conversation_id = transaction
+            .query_row(
+                "SELECT conversation_id FROM messages WHERE id = ?1",
+                params![&message.id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if existing_conversation_id
+            .as_deref()
+            .is_some_and(|existing| existing != conversation.id.as_str())
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let affected = transaction.execute(
             "
             INSERT INTO messages (
                 id,
@@ -114,6 +123,15 @@ pub fn save_conversation(
                 position
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(id) DO UPDATE SET
+                role = excluded.role,
+                content = excluded.content,
+                status = excluded.status,
+                agent_run_json = excluded.agent_run_json,
+                ui_state_json = excluded.ui_state_json,
+                created_at = excluded.created_at,
+                position = excluded.position
+            WHERE messages.conversation_id = excluded.conversation_id
             ",
             params![
                 &message.id,
@@ -127,6 +145,37 @@ pub fn save_conversation(
                 index as i64
             ],
         )?;
+        if affected != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if message.role != "assistant" {
+            transaction.execute(
+                "DELETE FROM conversation_turn_traces WHERE assistant_message_id = ?1",
+                params![&message.id],
+            )?;
+        }
+    }
+
+    let retained_message_ids = conversation
+        .messages
+        .iter()
+        .map(|message| message.id.as_str())
+        .collect::<HashSet<_>>();
+    let existing_message_ids = {
+        let mut statement =
+            transaction.prepare("SELECT id FROM messages WHERE conversation_id = ?1")?;
+        let message_ids = statement
+            .query_map(params![&conversation.id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        message_ids
+    };
+    for message_id in existing_message_ids {
+        if !retained_message_ids.contains(message_id.as_str()) {
+            transaction.execute(
+                "DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2",
+                params![&conversation.id, message_id],
+            )?;
+        }
     }
 
     transaction.commit()
@@ -416,4 +465,111 @@ fn list_messages(
         .collect();
 
     messages
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{conversation_trace_repository, migrations};
+    use crate::{
+        ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+        CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    };
+
+    #[test]
+    fn full_conversation_save_preserves_retained_trace_and_deletes_missing_trace() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let mut conversation = conversation();
+        save_conversation(&mut connection, conversation.clone()).unwrap();
+        let trace = ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-1".to_string(),
+            conversation_id: conversation.id.clone(),
+            assistant_message_id: "assistant-1".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: false,
+            items: vec![ConversationTurnTraceItem::AssistantNarration {
+                sequence: 0,
+                content: "Inspecting the workspace.".to_string(),
+                truncated: false,
+            }],
+        };
+        conversation_trace_repository::replace_trace(&mut connection, &trace, 10, 20).unwrap();
+
+        conversation.title = "Updated title".to_string();
+        conversation.messages[1].content = "Updated final answer".to_string();
+        conversation
+            .messages
+            .push(message("user-2", "user", "follow-up", 3, Some("sent")));
+        save_conversation(&mut connection, conversation.clone()).unwrap();
+
+        assert_eq!(
+            conversation_trace_repository::get_trace_for_message(&connection, "assistant-1")
+                .unwrap(),
+            Some(trace.clone())
+        );
+        let stored = list_conversations(&connection).unwrap();
+        assert_eq!(stored[0].messages.len(), 3);
+        assert_eq!(stored[0].messages[1].content, "Updated final answer");
+
+        conversation.messages[1].role = "user".to_string();
+        save_conversation(&mut connection, conversation.clone()).unwrap();
+        assert!(
+            conversation_trace_repository::get_trace_for_message(&connection, "assistant-1")
+                .unwrap()
+                .is_none()
+        );
+        conversation.messages[1].role = "assistant".to_string();
+        save_conversation(&mut connection, conversation.clone()).unwrap();
+        conversation_trace_repository::replace_trace(&mut connection, &trace, 10, 20).unwrap();
+
+        conversation
+            .messages
+            .retain(|message| message.id != "assistant-1");
+        save_conversation(&mut connection, conversation).unwrap();
+        assert!(
+            conversation_trace_repository::get_trace_for_message(&connection, "assistant-1")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    fn conversation() -> ChatConversationRecord {
+        ChatConversationRecord {
+            id: "conversation-1".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Conversation".to_string(),
+            messages: vec![
+                message("user-1", "user", "request", 1, Some("sent")),
+                message("assistant-1", "assistant", "final answer", 2, Some("sent")),
+            ],
+            created_at: 1,
+            updated_at: 2,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        }
+    }
+
+    fn message(
+        id: &str,
+        role: &str,
+        content: &str,
+        created_at: i64,
+        status: Option<&str>,
+    ) -> ChatMessageRecord {
+        ChatMessageRecord {
+            id: id.to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            created_at,
+            status: status.map(ToString::to_string),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        }
+    }
 }

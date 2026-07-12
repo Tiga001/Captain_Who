@@ -17,13 +17,18 @@ use mycopilot_core::storage::models::{
 };
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
-    inspect_context_window, next_run_id, send_chat_with_host_executor, AgentApprovalDecision,
+    cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
+    cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
+    conversation_trace_snapshot_from_checkpoint_and_continuation,
+    failed_conversation_trace_without_items, inspect_context_window, next_run_id,
+    send_chat_with_host_executor_and_trace_observer, AgentApprovalDecision,
     AgentApprovalDecisionStatus, AgentApprovalStatus, AgentCancellationToken, AgentChatInput,
-    AgentChatOutput, AgentContextWindowSnapshot, AgentError, AgentEvent, AgentEventEmitter,
-    AgentHostActionExecutor, AgentPatchResult, AgentProposedAction, AgentResult,
-    AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentToolCall,
-    AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
+    AgentChatOutput, AgentContextWindowSnapshot, AgentConversationTraceObserver, AgentError,
+    AgentEvent, AgentEventEmitter, AgentHostActionExecutor, AgentPatchResult, AgentProposedAction,
+    AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentSearchConfig,
+    AgentToolCall, AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
     AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    ConversationTraceSnapshot, ConversationTurnTrace,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -40,6 +45,7 @@ pub struct AgentService {
     cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
     pending_actions: Arc<Mutex<HashMap<String, PendingActionRecord>>>,
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
+    trace_snapshots: Arc<Mutex<HashMap<String, ConversationTraceSnapshot>>>,
     command_runs: CommandRunState,
     deleting_projects: Arc<Mutex<HashSet<String>>>,
 }
@@ -52,6 +58,7 @@ impl AgentService {
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             pending_actions: Arc::new(Mutex::new(pending_actions)),
             usage_contexts: Arc::new(Mutex::new(HashMap::new())),
+            trace_snapshots: Arc::new(Mutex::new(HashMap::new())),
             command_runs: CommandRunState::default(),
             deleting_projects: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -123,15 +130,21 @@ impl AgentService {
                 Some(worker_conversation_id.clone()),
                 Some(worker_assistant_message_id.clone()),
             );
-            let result = send_chat_with_host_executor(
+            let trace_observer = service.trace_observer(&worker_run_id);
+            let result = send_chat_with_host_executor_and_trace_observer(
                 prepared.agent_input,
                 worker_run_id.clone(),
                 emitter,
                 cancellation_token,
                 host_executor,
                 service.storage.clone(),
+                Some(trace_observer),
             )
             .await;
+            let keep_trace_snapshot = matches!(
+                &result,
+                Ok(output) if output.status == AgentRunStatus::WaitingForApproval
+            );
 
             let deleting_projects = service
                 .deleting_projects
@@ -160,6 +173,14 @@ impl AgentService {
                             &worker_run_id,
                             &worker_conversation_id,
                         );
+                    } else if let Err(error) = persisted {
+                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                            run_id: Some(worker_run_id.clone()),
+                            message: format!("无法原子持久化 assistant 终态与会话轨迹：{error}"),
+                            recoverable: true,
+                            code: Some("conversation_trace_persistence_failed".to_string()),
+                            details: None,
+                        }));
                     }
                 }
                 Err(error) => {
@@ -167,11 +188,21 @@ impl AgentService {
                     let code = error.code().map(ToString::to_string);
                     let details = error.details().cloned();
                     let message = error.to_string();
+                    let conversation_turn_trace =
+                        error.conversation_turn_trace().cloned().unwrap_or_else(|| {
+                            failed_conversation_trace_without_items(
+                                &worker_run_id,
+                                &worker_conversation_id,
+                                &worker_assistant_message_id,
+                                &message,
+                            )
+                        });
                     let persisted = service.persist_assistant_error(
                         &worker_conversation_id,
                         &worker_assistant_message_id,
                         &message,
                         usage.clone(),
+                        &conversation_turn_trace,
                     );
                     if persisted.is_ok() {
                         service.emit_persisted_context_window_snapshot(
@@ -180,6 +211,16 @@ impl AgentService {
                             &worker_run_id,
                             &worker_conversation_id,
                         );
+                    } else if let Err(error) = persisted {
+                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                            run_id: Some(worker_run_id.clone()),
+                            message: format!(
+                                "无法原子持久化 assistant 失败终态与会话轨迹：{error}"
+                            ),
+                            recoverable: true,
+                            code: Some("conversation_trace_persistence_failed".to_string()),
+                            details: None,
+                        }));
                     }
                     let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                         run_id: Some(worker_run_id.clone()),
@@ -201,6 +242,9 @@ impl AgentService {
             }
 
             drop(deleting_projects);
+            if !keep_trace_snapshot {
+                service.discard_trace_snapshot(&worker_run_id);
+            }
             service.unregister_cancellation(&worker_run_id);
         });
 
@@ -321,6 +365,7 @@ impl AgentService {
     }
 
     fn persist_forced_cancelled_runs(&self, run_ids: &[String]) {
+        const REASON: &str = "Core shutdown timed out while cancelling the active run.";
         let contexts = {
             let usage_contexts = self
                 .usage_contexts
@@ -335,15 +380,40 @@ impl AgentService {
                 })
                 .collect::<Vec<_>>()
         };
+        let snapshots = self
+            .trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
         let completed_at = now_ms();
         for context in contexts {
-            let _ = self.storage.update_chat_message_run_terminal_state(
+            let trace = cancelled_conversation_trace_from_snapshot(
+                snapshots.get(&context.run_id).cloned().unwrap_or_default(),
+                &context.run_id,
                 &context.conversation_id,
                 &context.assistant_message_id,
+                REASON,
+            );
+            let persisted = self.storage.finalize_chat_message_with_conversation_trace(
+                &context.conversation_id,
+                &context.assistant_message_id,
+                "",
                 status_for_run(AgentRunStatus::Cancelled),
                 run_status_label(AgentRunStatus::Cancelled),
+                &trace,
+                context.started_at,
                 completed_at,
             );
+            if persisted.is_ok() {
+                let _ = self.persist_run_usage(
+                    &context.run_id,
+                    AgentRunStatus::Cancelled,
+                    None,
+                    Some(REASON.to_string()),
+                );
+            } else if let Err(error) = persisted {
+                eprintln!("failed to persist forced cancelled conversation trace: {error}");
+            }
         }
     }
 
@@ -428,9 +498,8 @@ impl AgentService {
                     .deleting_projects
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                if cancellation_token.is_cancelled()
-                    || agent_input_project_id(&agent_input)
-                        .is_some_and(|project_id| deleting_projects.contains(project_id))
+                if agent_input_project_id(&agent_input)
+                    .is_some_and(|project_id| deleting_projects.contains(project_id))
                 {
                     return Err(AgentError::cancelled());
                 }
@@ -635,18 +704,84 @@ impl AgentService {
         }
         record.snapshot.status = PendingActionStatus::Cancelled;
         self.persist_pending_status(action_id, PendingActionStatus::Cancelled);
+        let record = record.clone();
+        drop(pending_actions);
+        drop(deleting_projects);
+        if let Err(error) = self.finalize_cancelled_pending_action(&record) {
+            let mut pending_actions = self
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|lock_error| lock_error.into_inner());
+            if let Some(pending) = pending_actions.get_mut(action_id) {
+                pending.snapshot.status = PendingActionStatus::Pending;
+            }
+            drop(pending_actions);
+            self.persist_pending_status(action_id, PendingActionStatus::Pending);
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    fn finalize_cancelled_pending_action(
+        &self,
+        record: &PendingActionRecord,
+    ) -> Result<(), String> {
+        const REASON: &str = "Pending action was cancelled by the user.";
+        let mut call = tool_call_for_action(&record.snapshot.action);
+        call.approval_status = AgentApprovalStatus::Rejected;
+        let execution = action_execution_for_decision(
+            &self.storage,
+            record,
+            &call,
+            AgentApprovalDecisionStatus::Rejected,
+            Some(REASON),
+        );
+        let completed_at = now_ms();
         self.record_action_audit(
             record,
             Some("cancelled"),
             "cancelled",
+            execution.patch_result.as_ref(),
             None,
-            None,
-            None,
-            Some("Pending action was cancelled by the user."),
-            Some(now_ms()),
-            Some(now_ms()),
+            Some(&execution.tool_result),
+            Some(REASON),
+            Some(completed_at),
+            Some(completed_at),
         );
-        Ok(true)
+
+        let (Some(conversation_id), Some(assistant_message_id), Some(checkpoint)) = (
+            record.snapshot.conversation_id.as_deref(),
+            record.snapshot.assistant_message_id.as_deref(),
+            record.agent_input.resume_checkpoint.as_ref(),
+        ) else {
+            return Ok(());
+        };
+        let trace = cancelled_conversation_trace_from_checkpoint(
+            checkpoint,
+            conversation_id,
+            assistant_message_id,
+            &call,
+            &execution.tool_result,
+            REASON,
+        );
+        self.storage.finalize_chat_message_with_conversation_trace(
+            conversation_id,
+            assistant_message_id,
+            "",
+            status_for_run(AgentRunStatus::Cancelled),
+            run_status_label(AgentRunStatus::Cancelled),
+            &trace,
+            completed_at,
+            completed_at,
+        )?;
+        self.persist_run_usage(
+            &record.snapshot.run_id,
+            AgentRunStatus::Cancelled,
+            None,
+            Some(REASON.to_string()),
+        )?;
+        self.discard_trace_snapshot(&record.snapshot.run_id);
+        Ok(())
     }
 
     fn queue_action_continuation(
@@ -765,6 +900,11 @@ impl AgentService {
             call: call.clone(),
             result: tool_result.clone(),
         });
+        self.update_trace_snapshot_with_continuation(
+            &record.snapshot.run_id,
+            record.agent_input.resume_checkpoint.as_ref(),
+            agent_input.tool_continuation.as_ref(),
+        );
 
         let run_id = record.snapshot.run_id.clone();
         let service = self.clone();
@@ -776,6 +916,7 @@ impl AgentService {
                     agent_input,
                     notifications,
                     final_pending_status,
+                    None,
                 )
                 .await;
         });
@@ -799,6 +940,7 @@ impl AgentService {
                 usage: None,
                 finish_reason: None,
                 proposed_actions: Vec::new(),
+                conversation_turn_trace: None,
             },
         })
     }
@@ -837,6 +979,7 @@ impl AgentService {
                 usage: None,
                 finish_reason: None,
                 proposed_actions: Vec::new(),
+                conversation_turn_trace: None,
             },
         })
     }
@@ -849,6 +992,10 @@ impl AgentService {
     ) {
         let run_id = record.snapshot.run_id.clone();
         let action_id = record.snapshot.action_id.clone();
+        self.seed_trace_snapshot_from_checkpoint(
+            &run_id,
+            record.agent_input.resume_checkpoint.as_ref(),
+        );
         if self.is_agent_input_project_deleting(&record.agent_input) {
             self.discard_usage_context(&run_id);
             return;
@@ -869,6 +1016,7 @@ impl AgentService {
 
         let guard = self.command_runs.register(&action_id, &run_id);
         let cancel_flag = guard.cancel_flag();
+        let run_cancellation_token = cancellation_token.clone();
         let workspace_root = workspace_root_optional(&record.agent_input);
         let permissions = permissions_from_input(&record.agent_input);
         let command_for_error = command.clone();
@@ -886,7 +1034,7 @@ impl AgentService {
         .map_err(|error| format!("命令执行任务失败：{error}"))
         .and_then(|result| result)
         .unwrap_or_else(|error| failed_command_result(&command_for_error, error));
-        self.unregister_cancellation(&run_id);
+        let run_was_cancelled = run_cancellation_token.is_cancelled();
 
         let (agent_input, final_pending_status) = {
             let deleting_projects = self
@@ -897,6 +1045,7 @@ impl AgentService {
                 .is_some_and(|project_id| deleting_projects.contains(project_id))
             {
                 self.discard_usage_context(&run_id);
+                self.unregister_cancellation(&run_id);
                 return;
             }
 
@@ -941,9 +1090,87 @@ impl AgentService {
             });
             (agent_input, final_pending_status)
         };
+        self.update_trace_snapshot_with_continuation(
+            &run_id,
+            record.agent_input.resume_checkpoint.as_ref(),
+            agent_input.tool_continuation.as_ref(),
+        );
 
-        self.run_action_continuation(record, agent_input, notifications, final_pending_status)
-            .await;
+        if run_was_cancelled {
+            const REASON: &str =
+                "Agent run was cancelled while the approved command was executing.";
+            let persisted = if let (
+                Some(conversation_id),
+                Some(assistant_message_id),
+                Some(checkpoint),
+                Some(continuation),
+            ) = (
+                record.snapshot.conversation_id.as_deref(),
+                record.snapshot.assistant_message_id.as_deref(),
+                record.agent_input.resume_checkpoint.as_ref(),
+                agent_input.tool_continuation.as_ref(),
+            ) {
+                let trace = cancelled_conversation_trace_from_checkpoint(
+                    checkpoint,
+                    conversation_id,
+                    assistant_message_id,
+                    &continuation.call,
+                    &continuation.result,
+                    REASON,
+                );
+                let output = AgentChatOutput {
+                    content: String::new(),
+                    status: AgentRunStatus::Cancelled,
+                    run_id: run_id.clone(),
+                    events: Vec::new(),
+                    tool_definitions: Vec::new(),
+                    todo: None,
+                    usage: None,
+                    finish_reason: Some(REASON.to_string()),
+                    proposed_actions: Vec::new(),
+                    conversation_turn_trace: Some(trace),
+                };
+                self.persist_final_assistant_output(conversation_id, assistant_message_id, &output)
+            } else {
+                Err("cancelled command is missing its conversation trace checkpoint".to_string())
+            };
+            if let Err(error) = persisted {
+                self.update_pending_status(&action_id, PendingActionStatus::Failed);
+                self.unregister_cancellation(&run_id);
+                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                    run_id: Some(run_id),
+                    message: format!(
+                        "无法原子持久化已取消命令的 assistant 终态与会话轨迹：{error}"
+                    ),
+                    recoverable: true,
+                    code: Some("conversation_trace_persistence_failed".to_string()),
+                    details: None,
+                }));
+                return;
+            }
+            self.update_pending_status(&action_id, PendingActionStatus::Cancelled);
+            self.discard_trace_snapshot(&run_id);
+            self.unregister_cancellation(&run_id);
+            let _ = notifications.send(agent_event_notification(AgentEvent::Done {
+                run_id,
+                success: false,
+                status: Some(AgentRunStatus::Cancelled),
+                content: None,
+                usage: None,
+                finish_reason: Some(REASON.to_string()),
+                proposed_actions: Vec::new(),
+            }));
+            return;
+        }
+
+        self.run_action_continuation(
+            record,
+            agent_input,
+            notifications,
+            final_pending_status,
+            Some(run_cancellation_token),
+        )
+        .await;
     }
 
     async fn run_action_continuation(
@@ -952,13 +1179,15 @@ impl AgentService {
         agent_input: AgentChatInput,
         notifications: CoreServerNotificationSender,
         final_pending_status: PendingActionStatus,
+        existing_cancellation_token: Option<AgentCancellationToken>,
     ) {
         let run_id = record.snapshot.run_id.clone();
         if self.is_agent_input_project_deleting(&record.agent_input) {
             self.discard_usage_context(&run_id);
+            self.unregister_cancellation(&run_id);
             return;
         }
-        let cancellation_token = AgentCancellationToken::new();
+        let cancellation_token = existing_cancellation_token.unwrap_or_default();
         self.register_cancellation(&run_id, cancellation_token.clone());
         if self.is_agent_input_project_deleting(&record.agent_input) {
             cancellation_token.cancel();
@@ -997,15 +1226,21 @@ impl AgentService {
             record.snapshot.conversation_id.clone(),
             record.snapshot.assistant_message_id.clone(),
         );
-        let result = send_chat_with_host_executor(
+        let trace_observer = self.trace_observer(&run_id);
+        let result = send_chat_with_host_executor_and_trace_observer(
             agent_input,
             run_id.clone(),
             emitter,
             cancellation_token,
             host_executor,
             self.storage.clone(),
+            Some(trace_observer),
         )
         .await;
+        let keep_trace_snapshot = matches!(
+            &result,
+            Ok(output) if output.status == AgentRunStatus::WaitingForApproval
+        );
 
         let deleting_projects = self
             .deleting_projects
@@ -1038,6 +1273,14 @@ impl AgentService {
                             &run_id,
                             conversation_id,
                         );
+                    } else if let Err(error) = persisted {
+                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                            run_id: Some(run_id.clone()),
+                            message: format!("无法原子持久化 assistant 终态与会话轨迹：{error}"),
+                            recoverable: true,
+                            code: Some("conversation_trace_persistence_failed".to_string()),
+                            details: None,
+                        }));
                     }
                 }
                 self.update_pending_status(&record.snapshot.action_id, final_pending_status);
@@ -1047,6 +1290,22 @@ impl AgentService {
                 let code = error.code().map(ToString::to_string);
                 let details = error.details().cloned();
                 let message = error.to_string();
+                let conversation_turn_trace = match (
+                    error.conversation_turn_trace().cloned(),
+                    record.snapshot.conversation_id.as_deref(),
+                    record.snapshot.assistant_message_id.as_deref(),
+                ) {
+                    (Some(trace), _, _) => Some(trace),
+                    (None, Some(conversation_id), Some(assistant_message_id)) => {
+                        Some(failed_conversation_trace_without_items(
+                            &run_id,
+                            conversation_id,
+                            assistant_message_id,
+                            &message,
+                        ))
+                    }
+                    _ => None,
+                };
                 if let (Some(conversation_id), Some(assistant_message_id)) = (
                     record.snapshot.conversation_id.as_deref(),
                     record.snapshot.assistant_message_id.as_deref(),
@@ -1056,6 +1315,9 @@ impl AgentService {
                         assistant_message_id,
                         &message,
                         usage.clone(),
+                        conversation_turn_trace
+                            .as_ref()
+                            .expect("trace exists when conversation and assistant ids exist"),
                     );
                     if persisted.is_ok() {
                         self.emit_persisted_context_window_snapshot(
@@ -1064,6 +1326,16 @@ impl AgentService {
                             &run_id,
                             conversation_id,
                         );
+                    } else if let Err(error) = persisted {
+                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                            run_id: Some(run_id.clone()),
+                            message: format!(
+                                "无法原子持久化 assistant 失败终态与会话轨迹：{error}"
+                            ),
+                            recoverable: true,
+                            code: Some("conversation_trace_persistence_failed".to_string()),
+                            details: None,
+                        }));
                     }
                 }
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {
@@ -1087,6 +1359,9 @@ impl AgentService {
         }
 
         drop(deleting_projects);
+        if !keep_trace_snapshot {
+            self.discard_trace_snapshot(&run_id);
+        }
         self.unregister_cancellation(&run_id);
     }
 
@@ -1318,12 +1593,71 @@ impl AgentService {
         );
     }
 
+    fn trace_observer(&self, run_id: &str) -> AgentConversationTraceObserver {
+        let snapshots = self.trace_snapshots.clone();
+        let run_id = run_id.to_string();
+        Arc::new(move |snapshot| {
+            snapshots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(run_id.clone(), snapshot);
+        })
+    }
+
+    fn seed_trace_snapshot_from_checkpoint(
+        &self,
+        run_id: &str,
+        checkpoint: Option<&AgentRunCheckpoint>,
+    ) {
+        let Some(checkpoint) = checkpoint else {
+            return;
+        };
+        self.trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(run_id.to_string())
+            .or_insert_with(|| ConversationTraceSnapshot {
+                items: checkpoint.conversation_trace_items.clone(),
+                next_sequence: checkpoint.next_conversation_trace_sequence,
+                truncated: checkpoint.conversation_trace_truncated,
+            });
+    }
+
+    fn update_trace_snapshot_with_continuation(
+        &self,
+        run_id: &str,
+        checkpoint: Option<&AgentRunCheckpoint>,
+        continuation: Option<&AgentToolContinuation>,
+    ) {
+        let (Some(checkpoint), Some(continuation)) = (checkpoint, continuation) else {
+            return;
+        };
+        let snapshot = conversation_trace_snapshot_from_checkpoint_and_continuation(
+            checkpoint,
+            &continuation.call,
+            &continuation.result,
+        );
+        self.trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(run_id.to_string(), snapshot);
+    }
+
+    fn discard_trace_snapshot(&self, run_id: &str) {
+        self.trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(run_id);
+    }
+
     fn discard_usage_context(&self, run_id: &str) {
         let mut contexts = self
             .usage_contexts
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         contexts.remove(run_id);
+        drop(contexts);
+        self.discard_trace_snapshot(run_id);
     }
 
     fn find_usage_run_id(
@@ -1429,42 +1763,75 @@ impl AgentService {
         assistant_message_id: &str,
         output: &AgentChatOutput,
     ) -> Result<(), String> {
+        let completed_at = now_ms();
+        if matches!(
+            output.status,
+            AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
+        ) {
+            let trace =
+                output
+                    .conversation_turn_trace
+                    .clone()
+                    .unwrap_or_else(|| match output.status {
+                        AgentRunStatus::Completed => completed_conversation_trace_without_items(
+                            &output.run_id,
+                            conversation_id,
+                            assistant_message_id,
+                        ),
+                        AgentRunStatus::Cancelled => cancelled_conversation_trace_without_items(
+                            &output.run_id,
+                            conversation_id,
+                            assistant_message_id,
+                            output
+                                .finish_reason
+                                .as_deref()
+                                .unwrap_or("Agent run was cancelled."),
+                        ),
+                        AgentRunStatus::Failed => failed_conversation_trace_without_items(
+                            &output.run_id,
+                            conversation_id,
+                            assistant_message_id,
+                            output
+                                .finish_reason
+                                .as_deref()
+                                .unwrap_or("Agent run failed."),
+                        ),
+                        _ => unreachable!(),
+                    });
+            self.storage.finalize_chat_message_with_conversation_trace(
+                conversation_id,
+                assistant_message_id,
+                if output.status == AgentRunStatus::Cancelled {
+                    ""
+                } else {
+                    &output.content
+                },
+                status_for_run(output.status),
+                run_status_label(output.status),
+                &trace,
+                completed_at,
+                completed_at,
+            )?;
+            return self.persist_run_usage(
+                &output.run_id,
+                output.status,
+                output.usage.clone(),
+                output.finish_reason.clone(),
+            );
+        }
         self.persist_run_usage(
             &output.run_id,
             output.status,
             output.usage.clone(),
             output.finish_reason.clone(),
         )?;
-        let completed_at = now_ms();
-        if output.status == AgentRunStatus::Cancelled {
-            return self.storage.update_chat_message_run_terminal_state(
-                conversation_id,
-                assistant_message_id,
-                status_for_run(output.status),
-                run_status_label(output.status),
-                completed_at,
-            );
-        }
         self.storage.update_chat_message_status_and_content(
             conversation_id,
             assistant_message_id,
             &output.content,
             status_for_run(output.status),
             completed_at,
-        )?;
-        if matches!(
-            output.status,
-            AgentRunStatus::Completed | AgentRunStatus::Failed
-        ) {
-            self.storage.update_chat_message_run_terminal_state(
-                conversation_id,
-                assistant_message_id,
-                status_for_run(output.status),
-                run_status_label(output.status),
-                completed_at,
-            )?;
-        }
-        Ok(())
+        )
     }
 
     fn persist_assistant_error(
@@ -1473,8 +1840,21 @@ impl AgentService {
         assistant_message_id: &str,
         message: &str,
         usage: Option<AgentUsage>,
+        conversation_turn_trace: &ConversationTurnTrace,
     ) -> Result<(), String> {
-        if let Some(run_id) = self.find_usage_run_id(conversation_id, assistant_message_id) {
+        let run_id = self.find_usage_run_id(conversation_id, assistant_message_id);
+        let completed_at = now_ms();
+        self.storage.finalize_chat_message_with_conversation_trace(
+            conversation_id,
+            assistant_message_id,
+            message,
+            Some("error"),
+            run_status_label(AgentRunStatus::Failed),
+            conversation_turn_trace,
+            completed_at,
+            completed_at,
+        )?;
+        if let Some(run_id) = run_id {
             self.persist_run_usage(
                 &run_id,
                 AgentRunStatus::Failed,
@@ -1482,21 +1862,7 @@ impl AgentService {
                 Some(message.to_string()),
             )?;
         }
-        let completed_at = now_ms();
-        self.storage.update_chat_message_status_and_content(
-            conversation_id,
-            assistant_message_id,
-            message,
-            Some("error"),
-            completed_at,
-        )?;
-        self.storage.update_chat_message_run_terminal_state(
-            conversation_id,
-            assistant_message_id,
-            Some("error"),
-            run_status_label(AgentRunStatus::Failed),
-            completed_at,
-        )
+        Ok(())
     }
 
     pub fn get_usage_summary(
@@ -1561,10 +1927,15 @@ impl AgentService {
                     .build_attachment_library_context(conversation_id, project_id.as_deref())
             })
             .transpose()?;
-        let messages = conversation
-            .as_ref()
-            .map(|conversation| conversation_history_messages(conversation, &[]))
-            .unwrap_or_default();
+        let messages = match conversation.as_ref() {
+            Some(conversation) => {
+                let traces = self
+                    .storage
+                    .list_conversation_turn_traces(&conversation.id)?;
+                conversation_history_messages(conversation, &traces, &[])
+            }
+            None => Vec::new(),
+        };
         let prompt_preferences = match input.prompt_preferences {
             Some(preferences) => preferences,
             None => {
@@ -1603,6 +1974,7 @@ impl AgentService {
             tool_continuation: None,
             attachments: Vec::new(),
             resume_checkpoint: None,
+            assistant_message_id: None,
             messages,
         };
 
@@ -1625,7 +1997,10 @@ impl AgentService {
             .find(|conversation| conversation.id == conversation_id)
             .ok_or_else(|| format!("未找到对话：{conversation_id}"))?;
         let mut preview_input = agent_input.clone();
-        preview_input.messages = conversation_history_messages(&conversation, &[]);
+        let traces = self
+            .storage
+            .list_conversation_turn_traces(conversation_id)?;
+        preview_input.messages = conversation_history_messages(&conversation, &traces, &[]);
         preview_input.attachments.clear();
         preview_input.approval_decision = None;
         preview_input.tool_continuation = None;
@@ -1862,11 +2237,226 @@ fn agent_input_project_id(input: &AgentChatInput) -> Option<&str> {
 mod tests {
     use super::*;
     use mycopilot_core::storage::models::{
-        ChatConversationRecord, ModelConfigRecord, ModelSettingsRecord,
+        ChatConversationRecord, ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord,
     };
-    use mycopilot_core::{AgentPermissions, AgentUsageSummaryRange};
+    use mycopilot_core::{
+        AgentCommandRequest, AgentCommandRiskLevel, AgentPermissions, AgentUsageSummaryRange,
+        AgentWorkspaceContext, ConversationTraceToolResultStatus, ConversationTurnTraceItem,
+        ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    };
     use serde_json::json;
     use tempfile::tempdir;
+
+    fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> ConversationTurnTrace {
+        ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-history".to_string(),
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: false,
+            items: vec![
+                ConversationTurnTraceItem::AssistantNarration {
+                    sequence: 0,
+                    content: "I am creating the requested file.".to_string(),
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::ToolCall {
+                    sequence: 1,
+                    call_id: "write-history".to_string(),
+                    tool: "write_file".to_string(),
+                    operation: json!({
+                        "filePath": "src/history.rs",
+                        "mode": "create"
+                    }),
+                    approval_status: AgentApprovalStatus::Approved,
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    sequence: 2,
+                    call_id: "write-history".to_string(),
+                    tool: "write_file".to_string(),
+                    status: ConversationTraceToolResultStatus::Succeeded,
+                    success: true,
+                    observation: json!({
+                        "filePath": "src/history.rs",
+                        "status": "applied",
+                        "additions": 3,
+                        "deletions": 0
+                    }),
+                    approval_status: AgentApprovalStatus::Approved,
+                    error: None,
+                    truncated: false,
+                },
+            ],
+        }
+    }
+
+    fn test_model_settings() -> ModelSettingsRecord {
+        ModelSettingsRecord {
+            api_url: "https://example.test/v1/chat/completions".to_string(),
+            api_token: "token".to_string(),
+            search_mode: "disabled".to_string(),
+            tavily_api_key: String::new(),
+            models: vec![ModelConfigRecord {
+                id: "model-1".to_string(),
+                display_name: "Model 1".to_string(),
+                short_name: None,
+                provider_path: None,
+                supports_image: false,
+                context_window_tokens: Some(128_000),
+                input_price: "0.01".to_string(),
+                output_price: "0.02".to_string(),
+                enabled: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn next_turn_loads_backend_trace_and_never_parses_agent_run_json() {
+        let fixture = tempdir().unwrap();
+        let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+        storage.save_model_settings(test_model_settings()).unwrap();
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-history".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Trace history".to_string(),
+                messages: vec![
+                    ChatMessageRecord {
+                        id: "user-history".to_string(),
+                        role: "user".to_string(),
+                        content: "Create the file".to_string(),
+                        created_at: 1,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                    ChatMessageRecord {
+                        id: "assistant-history".to_string(),
+                        role: "assistant".to_string(),
+                        content: "Created src/history.rs.".to_string(),
+                        created_at: 2,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: Some(
+                            json!({
+                                "timeline": [{ "content": "FRONTEND_TIMELINE_MUST_NOT_ENTER_CONTEXT" }],
+                                "toolCalls": [{ "args": { "filePath": "frontend/fake.rs" } }]
+                            })
+                            .to_string(),
+                        ),
+                        ui_state_json: None,
+                    },
+                ],
+                created_at: 1,
+                updated_at: 2,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let trace = completed_trace("conversation-history", "assistant-history");
+        storage
+            .replace_conversation_turn_trace(&trace, 1, 2)
+            .unwrap();
+
+        let prepared = prepare_conversation_turn(
+            &storage,
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-history".to_string()),
+                project_id: None,
+                model_id: "model-1".to_string(),
+                context_budget_enabled: true,
+                content: "What changed?".to_string(),
+                attachments: Vec::new(),
+                title: None,
+                user_message_id: Some("user-next".to_string()),
+                assistant_message_id: Some("assistant-next".to_string()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+            },
+            "run-next",
+        )
+        .unwrap();
+
+        assert_eq!(prepared.agent_input.messages.len(), 3);
+        assert_eq!(prepared.agent_input.messages[0].content, "Create the file");
+        assert_eq!(
+            prepared.agent_input.messages[1]
+                .conversation_turn_trace
+                .as_ref(),
+            Some(&trace)
+        );
+        assert_eq!(
+            prepared.agent_input.messages[1].content,
+            "Created src/history.rs."
+        );
+        assert_eq!(prepared.agent_input.messages[2].content, "What changed?");
+        let serialized = serde_json::to_string(&prepared.agent_input.messages).unwrap();
+        assert!(serialized.contains("src/history.rs"));
+        assert!(!serialized.contains("FRONTEND_TIMELINE_MUST_NOT_ENTER_CONTEXT"));
+        assert!(!serialized.contains("frontend/fake.rs"));
+    }
+
+    #[test]
+    fn legacy_messages_without_trace_keep_final_text_and_legacy_errors_stay_excluded() {
+        let conversation = ChatConversationRecord {
+            id: "conversation-legacy".to_string(),
+            project_id: None,
+            model_id: None,
+            title: "Legacy".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    id: "assistant-legacy".to_string(),
+                    role: "assistant".to_string(),
+                    content: "Legacy final answer".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: Some("not valid json".to_string()),
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: "assistant-error".to_string(),
+                    role: "assistant".to_string(),
+                    content: "Legacy error".to_string(),
+                    created_at: 2,
+                    status: Some("error".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+            ],
+            created_at: 1,
+            updated_at: 2,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        };
+
+        let history = conversation_history_messages(&conversation, &[], &[]);
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].content, "Legacy final answer");
+        assert!(history[0].conversation_turn_trace.is_none());
+
+        let mut failed_trace = completed_trace("conversation-legacy", "assistant-error");
+        failed_trace.terminal_status = ConversationTurnTraceTerminalStatus::Failed;
+        failed_trace.terminal_error = Some("permission denied".to_string());
+        let history_with_trace =
+            conversation_history_messages(&conversation, &[failed_trace.clone()], &[]);
+        assert_eq!(history_with_trace.len(), 2);
+        assert_eq!(
+            history_with_trace[1].conversation_turn_trace.as_ref(),
+            Some(&failed_trace)
+        );
+    }
 
     #[test]
     fn context_window_snapshot_respects_feature_switch_and_model_budget() {
@@ -2082,6 +2672,9 @@ mod tests {
             suppressed_narration: false,
             extension_snapshots: Vec::new(),
             pending_tool_call_id: "call-checkpoint".to_string(),
+            conversation_trace_items: Vec::new(),
+            next_conversation_trace_sequence: 0,
+            conversation_trace_truncated: false,
         };
         let checkpoint = agent_input_with_run_checkpoint(&base_input, &run_checkpoint);
         let action = AgentProposedAction::ToolCall {
@@ -2117,5 +2710,437 @@ mod tests {
         assert!(record.agent_input.attachments.is_empty());
         assert!(record.agent_input.api_token.is_empty());
         assert_eq!(record.agent_input.context_window_tokens, Some(128_000));
+    }
+
+    #[test]
+    fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-cancel".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Cancel trace".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "assistant-cancel".to_string(),
+                    role: "assistant".to_string(),
+                    content: THINKING_PLACEHOLDER.to_string(),
+                    created_at: 1,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let service = AgentService::new(storage.clone());
+        service.register_usage_context(
+            "run-cancel",
+            AgentRunUsageContext {
+                conversation_id: "conversation-cancel".to_string(),
+                assistant_message_id: "assistant-cancel".to_string(),
+                run_id: "run-cancel".to_string(),
+                project_id: None,
+                model_id: "model-1".to_string(),
+                model_name: "Model 1".to_string(),
+                provider_path: None,
+                input_price: None,
+                output_price: None,
+                started_at: 1,
+            },
+        );
+        let call = AgentToolCall {
+            id: "call-cancel".to_string(),
+            tool: "approval_tool".to_string(),
+            args: json!({ "path": "safe.txt" }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+            version: 1,
+            run_id: "run-cancel".to_string(),
+            context_items: Vec::new(),
+            next_model_request_index: 1,
+            queued_tool_calls: Vec::new(),
+            suppressed_narration: false,
+            extension_snapshots: Vec::new(),
+            pending_tool_call_id: call.id.clone(),
+            conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: call.id.clone(),
+                tool: call.tool.clone(),
+                operation: json!({ "path": "safe.txt" }),
+                approval_status: AgentApprovalStatus::Required,
+                truncated: false,
+            }],
+            next_conversation_trace_sequence: 1,
+            conversation_trace_truncated: false,
+        });
+        service.store_pending_action(
+            "run-cancel",
+            "conversation-cancel",
+            "assistant-cancel",
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input,
+        );
+
+        assert!(service.cancel_action(&call.id).unwrap());
+
+        let trace = storage
+            .get_conversation_turn_trace("assistant-cancel")
+            .unwrap()
+            .unwrap();
+        trace.validate().unwrap();
+        assert_eq!(
+            trace.terminal_status,
+            ConversationTurnTraceTerminalStatus::Cancelled
+        );
+        assert_eq!(trace.items.len(), 2);
+        assert!(matches!(
+            &trace.items[1],
+            ConversationTurnTraceItem::ToolResult {
+                call_id,
+                approval_status: AgentApprovalStatus::Rejected,
+                ..
+            } if call_id == "call-cancel"
+        ));
+        let conversation = storage
+            .load_conversations()
+            .unwrap()
+            .into_iter()
+            .find(|conversation| conversation.id == "conversation-cancel")
+            .unwrap();
+        assert_eq!(conversation.messages[0].content, "");
+        assert_eq!(conversation.messages[0].status.as_deref(), Some("sent"));
+    }
+
+    #[test]
+    fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-forced".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Forced cancellation".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "assistant-forced".to_string(),
+                    role: "assistant".to_string(),
+                    content: THINKING_PLACEHOLDER.to_string(),
+                    created_at: 1,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let service = AgentService::new(storage.clone());
+        service.register_usage_context(
+            "run-forced",
+            AgentRunUsageContext {
+                conversation_id: "conversation-forced".to_string(),
+                assistant_message_id: "assistant-forced".to_string(),
+                run_id: "run-forced".to_string(),
+                project_id: None,
+                model_id: "model-1".to_string(),
+                model_name: "Model 1".to_string(),
+                provider_path: None,
+                input_price: None,
+                output_price: None,
+                started_at: 1,
+            },
+        );
+        let checkpoint = AgentRunCheckpoint {
+            version: 1,
+            run_id: "run-forced".to_string(),
+            context_items: Vec::new(),
+            next_model_request_index: 1,
+            queued_tool_calls: Vec::new(),
+            suppressed_narration: false,
+            extension_snapshots: Vec::new(),
+            pending_tool_call_id: "pending-command".to_string(),
+            conversation_trace_items: vec![
+                ConversationTurnTraceItem::ToolCall {
+                    sequence: 0,
+                    call_id: "write-forced".to_string(),
+                    tool: "write_file".to_string(),
+                    operation: json!({ "filePath": "created.txt", "mode": "create" }),
+                    approval_status: AgentApprovalStatus::Approved,
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    sequence: 1,
+                    call_id: "write-forced".to_string(),
+                    tool: "write_file".to_string(),
+                    status: ConversationTraceToolResultStatus::Succeeded,
+                    success: true,
+                    observation: json!({
+                        "filePath": "created.txt",
+                        "status": "applied",
+                        "additions": 3,
+                        "deletions": 0
+                    }),
+                    approval_status: AgentApprovalStatus::Approved,
+                    error: None,
+                    truncated: false,
+                },
+            ],
+            next_conversation_trace_sequence: 2,
+            conversation_trace_truncated: false,
+        };
+        service.seed_trace_snapshot_from_checkpoint("run-forced", Some(&checkpoint));
+
+        service.persist_forced_cancelled_runs(&["run-forced".to_string()]);
+
+        let trace = storage
+            .get_conversation_turn_trace("assistant-forced")
+            .unwrap()
+            .unwrap();
+        trace.validate().unwrap();
+        assert_eq!(
+            trace.terminal_status,
+            ConversationTurnTraceTerminalStatus::Cancelled
+        );
+        assert_eq!(trace.items.len(), 2);
+        assert!(serde_json::to_string(&trace)
+            .unwrap()
+            .contains("created.txt"));
+    }
+
+    #[test]
+    fn terminal_message_and_trace_roll_back_together_when_trace_is_invalid() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-atomic".to_string(),
+                project_id: None,
+                model_id: None,
+                title: "Atomic trace".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "assistant-atomic".to_string(),
+                    role: "assistant".to_string(),
+                    content: THINKING_PLACEHOLDER.to_string(),
+                    created_at: 1,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let invalid_trace = ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-atomic".to_string(),
+            conversation_id: "conversation-atomic".to_string(),
+            assistant_message_id: "assistant-atomic".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: false,
+            items: vec![ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: "unresolved".to_string(),
+                tool: "read_file".to_string(),
+                operation: json!({ "path": "file.txt" }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                truncated: false,
+            }],
+        };
+
+        assert!(storage
+            .finalize_chat_message_with_conversation_trace(
+                "conversation-atomic",
+                "assistant-atomic",
+                "final answer",
+                Some("sent"),
+                "completed",
+                &invalid_trace,
+                1,
+                2,
+            )
+            .is_err());
+
+        let conversation = storage.load_conversations().unwrap().remove(0);
+        assert_eq!(conversation.messages[0].content, THINKING_PLACEHOLDER);
+        assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
+        assert!(storage
+            .get_conversation_turn_trace("assistant-atomic")
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_run_during_approved_command_finishes_cancelled_without_resuming_model() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-command-cancel".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Command cancellation".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "assistant-command-cancel".to_string(),
+                    role: "assistant".to_string(),
+                    content: THINKING_PLACEHOLDER.to_string(),
+                    created_at: 1,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let service = AgentService::new(storage.clone());
+        service.register_usage_context(
+            "run-command-cancel",
+            AgentRunUsageContext {
+                conversation_id: "conversation-command-cancel".to_string(),
+                assistant_message_id: "assistant-command-cancel".to_string(),
+                run_id: "run-command-cancel".to_string(),
+                project_id: None,
+                model_id: "model-1".to_string(),
+                model_name: "Model 1".to_string(),
+                provider_path: None,
+                input_price: None,
+                output_price: None,
+                started_at: 1,
+            },
+        );
+        let command = AgentCommandRequest {
+            id: "command-cancel".to_string(),
+            command: "sleep 5".to_string(),
+            cwd: None,
+            timeout_ms: Some(10_000),
+            approval_status: AgentApprovalStatus::Approved,
+            risk_level: Some(AgentCommandRiskLevel::ReadOnly),
+            reason: Some("exercise cancellation".to_string()),
+        };
+        let call = command_tool_call(&command);
+        let checkpoint = AgentRunCheckpoint {
+            version: 1,
+            run_id: "run-command-cancel".to_string(),
+            context_items: Vec::new(),
+            next_model_request_index: 1,
+            queued_tool_calls: Vec::new(),
+            suppressed_narration: false,
+            extension_snapshots: Vec::new(),
+            pending_tool_call_id: call.id.clone(),
+            conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: call.id.clone(),
+                tool: call.tool.clone(),
+                operation: call.args.clone(),
+                approval_status: AgentApprovalStatus::Required,
+                truncated: false,
+            }],
+            next_conversation_trace_sequence: 1,
+            conversation_trace_truncated: false,
+        };
+        let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://should-not-be-called.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        agent_input.context = Some(AgentRunContext {
+            conversation_id: Some("conversation-command-cancel".to_string()),
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("test".to_string()),
+                root_path: Some(fixture.path().to_string_lossy().into_owned()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions::default(),
+        });
+        agent_input.resume_checkpoint = Some(checkpoint);
+        let record = PendingActionRecord {
+            snapshot: PendingAgentActionSnapshot {
+                action_id: command.id.clone(),
+                action_type: "command".to_string(),
+                tool_name: "run_command".to_string(),
+                tool_call_id: Some(command.id.clone()),
+                run_id: "run-command-cancel".to_string(),
+                conversation_id: Some("conversation-command-cancel".to_string()),
+                assistant_message_id: Some("assistant-command-cancel".to_string()),
+                action: AgentProposedAction::Command {
+                    command: command.clone(),
+                },
+                created_at: 1,
+                status: PendingActionStatus::Approved,
+            },
+            agent_input,
+        };
+        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let execution_service = service.clone();
+        let task = tokio::spawn(async move {
+            execution_service
+                .run_command_execution(record, call, notifications)
+                .await;
+        });
+
+        let mut cancelled = false;
+        for _ in 0..100 {
+            if service.cancel_run("run-command-cancel") {
+                cancelled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(cancelled);
+        task.await.unwrap();
+
+        let trace = storage
+            .get_conversation_turn_trace("assistant-command-cancel")
+            .unwrap()
+            .unwrap();
+        trace.validate().unwrap();
+        assert_eq!(
+            trace.terminal_status,
+            ConversationTurnTraceTerminalStatus::Cancelled
+        );
+        assert!(matches!(
+            trace.items.last(),
+            Some(ConversationTurnTraceItem::ToolResult {
+                status: ConversationTraceToolResultStatus::Cancelled,
+                ..
+            })
+        ));
     }
 }

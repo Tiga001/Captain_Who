@@ -63,6 +63,7 @@ impl ContextRetention {
 pub(crate) enum ContextSource {
     BackendSystemPrompt,
     ConversationHistory,
+    ConversationTrace,
     CurrentTurn,
     InputAttachment,
     ToolContinuation,
@@ -78,6 +79,7 @@ impl ContextSource {
         match self {
             Self::BackendSystemPrompt => "backend_system_prompt",
             Self::ConversationHistory => "conversation_history",
+            Self::ConversationTrace => "conversation_trace",
             Self::CurrentTurn => "current_turn",
             Self::InputAttachment => "input_attachment",
             Self::ToolContinuation => "tool_continuation",
@@ -93,6 +95,7 @@ impl ContextSource {
         match value {
             "backend_system_prompt" => Some(Self::BackendSystemPrompt),
             "conversation_history" => Some(Self::ConversationHistory),
+            "conversation_trace" => Some(Self::ConversationTrace),
             "current_turn" => Some(Self::CurrentTurn),
             "input_attachment" => Some(Self::InputAttachment),
             "tool_continuation" => Some(Self::ToolContinuation),
