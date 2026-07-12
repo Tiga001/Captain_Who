@@ -4,14 +4,9 @@ import type { AgentReadPermission, AgentWritePermission } from '@mycopilot/proto
 import { Check, ChevronDown } from 'lucide-react'
 import { featureFlags } from '../../../config/featureFlags'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
-import type { AppLanguage } from '../../../config/frontendTranslations'
+import { appLanguageOptions } from '../../../config/languageRegistry'
 import type { UiPreferencesSnapshot } from '../../storage/storageClient'
 import './GeneralSettingsPage.css'
-
-const LANGUAGE_DISPLAY_OPTIONS: Array<{ value: AppLanguage; label: string }> = [
-  { value: 'zh-CN', label: '中文（中国）' },
-  { value: 'en-US', label: 'English (United States)' }
-]
 
 interface GeneralSettingsPageProps {
   onUiPreferencesChange: (patch: Partial<UiPreferencesSnapshot>) => void
@@ -83,8 +78,7 @@ export function GeneralSettingsPage({
   const { language, setLanguage, t } = useFrontendConfig()
   const [isLanguageMenuOpen, setLanguageMenuOpen] = useState(false)
   const selectedLanguage =
-    LANGUAGE_DISPLAY_OPTIONS.find((option) => option.value === language) ??
-    LANGUAGE_DISPLAY_OPTIONS[0]
+    appLanguageOptions.find((option) => option.value === language) ?? appLanguageOptions[0]
   const canAutoApproveFileEdits = uiPreferences.customPermissions.write !== 'denied'
 
   const closeLanguageMenuOnBlur = (event: FocusEvent<HTMLSpanElement>) => {
@@ -138,7 +132,7 @@ export function GeneralSettingsPage({
                   role="listbox"
                   aria-label={t('general.languageAria')}
                 >
-                  {LANGUAGE_DISPLAY_OPTIONS.map((option) => {
+                  {appLanguageOptions.map((option) => {
                     const isSelected = option.value === language
                     return (
                       <button

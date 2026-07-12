@@ -1,11 +1,15 @@
-import { enUSTranslations } from './frontendTranslations.enUS'
-import { zhCNTranslations } from './frontendTranslations.zhCN'
-
-export type AppLanguage = 'zh-CN' | 'en-US'
-
-export type TranslationKey = keyof typeof zhCNTranslations
-
-export const translations: Record<AppLanguage, Record<TranslationKey, string>> = {
-  'zh-CN': zhCNTranslations,
-  'en-US': enUSTranslations
-}
+export {
+  DEFAULT_APP_LANGUAGE,
+  appLanguageOptions,
+  getLanguageDefinition,
+  getTranslation,
+  isAppLanguage,
+  languageRegistry
+} from './languageRegistry'
+export type {
+  AppLanguage,
+  AppLanguageOption,
+  LanguageDefinition,
+  LanguageDirection,
+  TranslationKey
+} from './languageRegistry'

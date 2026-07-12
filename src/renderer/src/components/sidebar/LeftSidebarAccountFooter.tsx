@@ -1,7 +1,7 @@
 // Account footer menu and profile display for the left sidebar.
 import { Settings } from 'lucide-react'
 import { useRef, useState } from 'react'
-import type { AppLanguage, TranslationKey } from '../../config/frontendTranslations'
+import type { TranslationKey } from '../../config/frontendTranslations'
 import {
   getProfileDisplayName,
   getProfileHandle,
@@ -11,21 +11,19 @@ import type { UiPreferencesSnapshot } from '../../features/storage/storageClient
 import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePointer'
 
 interface LeftSidebarAccountFooterProps {
-  language: AppLanguage
   onOpenSettings: () => void
   t: (key: TranslationKey) => string
   uiPreferences: UiPreferencesSnapshot
 }
 
 export function LeftSidebarAccountFooter({
-  language,
   onOpenSettings,
   t,
   uiPreferences
 }: LeftSidebarAccountFooterProps) {
   const [isAccountMenuOpen, setAccountMenuOpen] = useState(false)
   const accountMenuRef = useRef<HTMLDivElement>(null)
-  const profileDisplayName = getProfileDisplayName(uiPreferences, language)
+  const profileDisplayName = getProfileDisplayName(uiPreferences, t('profile.defaultDisplayName'))
   const profileHandle = getProfileHandle(uiPreferences)
   const profileInitials = getProfileInitials(profileDisplayName)
 

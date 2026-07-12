@@ -162,6 +162,7 @@ export const zhCNTranslations = {
   'profile.removeAvatarTitle': '确定要移除头像吗？',
   'profile.cancelRemoveAvatar': '取消',
   'profile.confirmRemoveAvatar': '移除',
+  'profile.defaultDisplayName': '用户',
   'profile.displayName': '显示名称',
   'profile.displayNameDescription': '没有头像时，会取显示名称前两个字符作为头像。',
   'profile.handle': 'ID',

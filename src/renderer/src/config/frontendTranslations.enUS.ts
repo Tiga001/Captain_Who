@@ -167,6 +167,7 @@ export const enUSTranslations = {
   'profile.removeAvatarTitle': 'Are you sure you want to remove your avatar?',
   'profile.cancelRemoveAvatar': 'Cancel',
   'profile.confirmRemoveAvatar': 'Remove',
+  'profile.defaultDisplayName': 'USER',
   'profile.displayName': 'Display name',
   'profile.displayNameDescription':
     'When no avatar is uploaded, the first two characters of the display name are used.',

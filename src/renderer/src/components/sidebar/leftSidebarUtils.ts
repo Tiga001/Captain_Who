@@ -1,5 +1,6 @@
 // Pure sidebar helpers for ordering, labels, and menu placement.
 import type { AppProject } from '../../config/projectConfig'
+import type { AppLanguage } from '../../config/frontendTranslations'
 import type { ChatConversation } from '../../features/chat/chatTypes'
 import type {
   SidebarConversationSort,
@@ -16,6 +17,31 @@ const SIDEBAR_MENU_WIDTH = 224
 export const SIDEBAR_SECTION_MENU_ESTIMATED_HEIGHT = 172
 export const SIDEBAR_PROJECT_MENU_ESTIMATED_HEIGHT = 224
 
+type ConversationAgeUnit = 'day' | 'hour' | 'minute' | 'month' | 'week' | 'year'
+type ConversationAgeFormatterKey = `${AppLanguage}:${ConversationAgeUnit}`
+
+const conversationAgeFormatters = new Map<ConversationAgeFormatterKey, Intl.NumberFormat>()
+
+function formatConversationAgeUnit(
+  value: number,
+  unit: ConversationAgeUnit,
+  language: AppLanguage
+) {
+  const formatterKey: ConversationAgeFormatterKey = `${language}:${unit}`
+  let formatter = conversationAgeFormatters.get(formatterKey)
+
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(language, {
+      style: 'unit',
+      unit,
+      unitDisplay: 'narrow'
+    })
+    conversationAgeFormatters.set(formatterKey, formatter)
+  }
+
+  return formatter.format(value)
+}
+
 export function formatTemplate(template: string, values: Record<string, number | string>) {
   return Object.entries(values).reduce(
     (text, [key, value]) => text.split(`{${key}}`).join(String(value)),
@@ -26,7 +52,7 @@ export function formatTemplate(template: string, values: Record<string, number |
 export function formatConversationAge(
   updatedAt: number,
   now: number,
-  language: string,
+  language: AppLanguage,
   justNow: string
 ) {
   const elapsed = Math.max(0, now - updatedAt)
@@ -34,31 +60,31 @@ export function formatConversationAge(
   if (minutes < 1) return justNow
 
   if (minutes < 60) {
-    return language === 'zh-CN' ? `${minutes} 分` : `${minutes}m`
+    return formatConversationAgeUnit(minutes, 'minute', language)
   }
 
   const hours = Math.floor(elapsed / 3_600_000)
   if (hours < 24) {
-    return language === 'zh-CN' ? `${hours} 小时` : `${hours}h`
+    return formatConversationAgeUnit(hours, 'hour', language)
   }
 
   const days = Math.floor(elapsed / 86_400_000)
   if (days < 7) {
-    return language === 'zh-CN' ? `${days} 天` : `${days}d`
+    return formatConversationAgeUnit(days, 'day', language)
   }
 
   const weeks = Math.floor(days / 7)
   if (weeks < 5) {
-    return language === 'zh-CN' ? `${weeks} 周` : `${weeks}w`
+    return formatConversationAgeUnit(weeks, 'week', language)
   }
 
   const months = Math.floor(days / 30)
   if (months < 12) {
-    return language === 'zh-CN' ? `${months} 个月` : `${months}mo`
+    return formatConversationAgeUnit(months, 'month', language)
   }
 
   const years = Math.floor(days / 365)
-  return language === 'zh-CN' ? `${Math.max(1, years)} 年` : `${Math.max(1, years)}y`
+  return formatConversationAgeUnit(Math.max(1, years), 'year', language)
 }
 
 export function sortConversations(

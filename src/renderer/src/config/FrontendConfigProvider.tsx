@@ -19,7 +19,7 @@ import {
   normalizeFrontendThemePreferences,
   resolveFrontendTheme
 } from './frontendThemePreferences'
-import { translations } from './frontendTranslations'
+import { getLanguageDefinition, getTranslation, isAppLanguage } from './languageRegistry'
 import type {
   ColorScheme,
   ColorSchemePreference,
@@ -47,10 +47,6 @@ interface FrontendConfigContextValue {
 }
 
 const FrontendConfigContext = createContext<FrontendConfigContextValue | null>(null)
-
-function isAppLanguage(value: string | null | undefined): value is AppLanguage {
-  return value === 'zh-CN' || value === 'en-US'
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
@@ -137,6 +133,12 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
     document.documentElement.style.colorScheme = resolvedTheme.colorScheme
   }, [colorSchemePreference, resolvedTheme])
 
+  useLayoutEffect(() => {
+    const definition = getLanguageDefinition(language)
+    document.documentElement.lang = language
+    document.documentElement.dir = definition.direction
+  }, [language])
+
   useEffect(() => {
     void hostClient.app.setNativeThemeSource(colorSchemePreference)
   }, [colorSchemePreference])
@@ -155,7 +157,6 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    document.documentElement.lang = language
     window.localStorage.setItem(
       FRONTEND_CONFIG_STORAGE_KEY,
       JSON.stringify({
@@ -176,7 +177,7 @@ export function FrontendConfigProvider({ children }: { children: ReactNode }) {
       setColorSchemePreference,
       setLanguage,
       setThemeForColorScheme,
-      t: (key) => translations[language][key] ?? translations[frontendConfig.language][key],
+      t: (key) => getTranslation(language, key),
       themeIdsByColorScheme
     }),
     [

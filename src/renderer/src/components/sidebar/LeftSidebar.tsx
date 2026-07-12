@@ -934,7 +934,6 @@ export function LeftSidebar({
       </div>
 
       <LeftSidebarAccountFooter
-        language={language}
         onOpenSettings={onOpenSettings}
         t={t}
         uiPreferences={uiPreferences}

@@ -1,11 +1,12 @@
 import { defaultThemeIdsByColorScheme, lightTheme } from './frontendTheme'
+import { DEFAULT_APP_LANGUAGE } from './languageRegistry'
 import type { ColorSchemePreference, FrontendTheme } from './frontendTheme'
 import type { AppLanguage } from './frontendTranslations'
 
 export const FRONTEND_CONFIG_STORAGE_KEY = 'mycopilot.frontend-config'
 
 export const frontendConfig = {
-  language: 'zh-CN' satisfies AppLanguage,
+  language: DEFAULT_APP_LANGUAGE satisfies AppLanguage,
   colorSchemePreference: 'system' satisfies ColorSchemePreference,
   themeIdsByColorScheme: defaultThemeIdsByColorScheme,
   typography: {

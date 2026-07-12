@@ -3,7 +3,6 @@ import { UserCircle } from 'lucide-react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import {
-  getDefaultProfileDisplayName,
   getProfileDisplayName,
   getProfileHandle,
   getProfileInitials,
@@ -22,10 +21,11 @@ export function ProfileSettingsPage({
   onUiPreferencesChange,
   uiPreferences
 }: ProfileSettingsPageProps) {
-  const { language, t } = useFrontendConfig()
+  const { t } = useFrontendConfig()
   const [avatarError, setAvatarError] = useState('')
   const [isRemoveAvatarConfirmationOpen, setIsRemoveAvatarConfirmationOpen] = useState(false)
-  const displayName = getProfileDisplayName(uiPreferences, language)
+  const defaultDisplayName = t('profile.defaultDisplayName')
+  const displayName = getProfileDisplayName(uiPreferences, defaultDisplayName)
   const handle = getProfileHandle(uiPreferences)
   const initials = getProfileInitials(displayName)
   const explicitDisplayName = normalizeProfileDisplayName(uiPreferences.profileDisplayName)
@@ -108,7 +108,7 @@ export function ProfileSettingsPage({
               <input
                 className="settings-list-control"
                 value={explicitDisplayName}
-                placeholder={getDefaultProfileDisplayName(language)}
+                placeholder={defaultDisplayName}
                 onChange={(event) =>
                   onUiPreferencesChange({ profileDisplayName: event.target.value })
                 }

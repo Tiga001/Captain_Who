@@ -2,6 +2,7 @@ import { Archive, Folder, RotateCcw, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import type { AppLanguage } from '../../../config/frontendTranslations'
 import type { AppProject } from '../../../config/projectConfig'
 import type { ChatConversation } from '../../chat/chatTypes'
 import { SettingsSelect } from '../components/SettingsSelect'
@@ -22,27 +23,24 @@ type PendingDeleteConfirmation =
   | { conversationIds: string[]; type: 'all' }
   | { conversationIds: string[]; scopeName: string; type: 'filtered' }
 
-function formatArchivedDate(timestamp: number, language: string) {
-  const date = new Date(timestamp)
+const archivedDateFormatters = new Map<AppLanguage, Intl.DateTimeFormat>()
 
-  if (language === 'zh-CN') {
-    return new Intl.DateTimeFormat('zh-CN', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false
-    }).format(date)
+function getArchivedDateFormatter(language: AppLanguage) {
+  let formatter = archivedDateFormatters.get(language)
+
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(language, {
+      dateStyle: 'medium',
+      timeStyle: 'short'
+    })
+    archivedDateFormatters.set(language, formatter)
   }
 
-  return new Intl.DateTimeFormat('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit'
-  }).format(date)
+  return formatter
+}
+
+function formatArchivedDate(timestamp: number, language: AppLanguage) {
+  return getArchivedDateFormatter(language).format(timestamp)
 }
 
 function getProjectName(projectId: string | null, projects: AppProject[], noProjectLabel: string) {

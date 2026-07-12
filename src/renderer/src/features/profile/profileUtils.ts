@@ -1,11 +1,6 @@
-import type { AppLanguage } from '../../config/frontendTranslations'
 import type { UiPreferencesSnapshot } from '../storage/storageClient'
 
 const DEFAULT_PROFILE_HANDLE = 'USER'
-
-export function getDefaultProfileDisplayName(language: AppLanguage) {
-  return language === 'zh-CN' ? '用户' : 'USER'
-}
 
 export function normalizeProfileDisplayName(value: string | null | undefined) {
   if (typeof value !== 'string') return ''
@@ -18,11 +13,11 @@ function normalizeProfileHandle(value: string | null | undefined) {
   return normalizedValue || DEFAULT_PROFILE_HANDLE
 }
 
-export function getProfileDisplayName(uiPreferences: UiPreferencesSnapshot, language: AppLanguage) {
-  return (
-    normalizeProfileDisplayName(uiPreferences.profileDisplayName) ||
-    getDefaultProfileDisplayName(language)
-  )
+export function getProfileDisplayName(
+  uiPreferences: UiPreferencesSnapshot,
+  defaultDisplayName: string
+) {
+  return normalizeProfileDisplayName(uiPreferences.profileDisplayName) || defaultDisplayName
 }
 
 export function getProfileHandle(uiPreferences: UiPreferencesSnapshot) {
