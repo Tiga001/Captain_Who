@@ -58,7 +58,7 @@
   height: 44px;
   padding: 0 16px;
   color: var(--settings-content-text-color);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-input);
   border: 1px solid var(--mc-color-border-strong);
   border-radius: var(--mc-radius-row);
   outline: 0;
@@ -104,7 +104,7 @@
   display: grid;
   margin-top: 14px;
   overflow: hidden;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-card);
 }
@@ -144,7 +144,7 @@
 
 .available-model-row input:not(:checked) + .available-model-row__check {
   color: transparent;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-input);
   border: 1px solid var(--mc-color-border-default);
 }
 
@@ -286,7 +286,7 @@
   display: grid;
   margin-top: 24px;
   overflow: hidden;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-card);
 }

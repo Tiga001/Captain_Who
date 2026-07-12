@@ -42,7 +42,7 @@
   gap: 18px;
   color: var(--settings-content-text-color);
   text-align: left;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-card);
   cursor: pointer;
@@ -251,7 +251,7 @@
   padding: 16px;
   resize: vertical;
   color: var(--settings-content-text-color);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-input);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-card);
   outline: 0;

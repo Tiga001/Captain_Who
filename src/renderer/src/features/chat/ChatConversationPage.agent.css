@@ -94,7 +94,7 @@
     110deg,
     var(--mc-color-text-muted) 0%,
     var(--mc-color-text-muted) 42%,
-    rgba(255, 255, 255, 0.72) 50%,
+    var(--mc-color-shimmer-highlight) 50%,
     var(--mc-color-text-muted) 58%,
     var(--mc-color-text-muted) 100%
   );
@@ -213,7 +213,7 @@
   max-width: calc(100vw - 32px);
   padding: 8px;
   color: var(--mc-color-text-secondary);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: 18px;
   box-shadow: var(--mc-shadow-popover);
@@ -740,11 +740,11 @@ button.apply-patch-activity__path:focus-visible {
 }
 
 .apply-patch-activity__additions {
-  color: #16a34a !important;
+  color: var(--mc-color-diff-addition-text) !important;
 }
 
 .apply-patch-activity__deletions {
-  color: var(--mc-color-text-danger) !important;
+  color: var(--mc-color-diff-deletion-text) !important;
 }
 
 .apply-patch-activity__note {
@@ -832,10 +832,13 @@ button.apply-patch-activity__path:focus-visible {
 }
 
 .file-write-activity__additions {
-  color: #16a34a !important;
+  color: var(--mc-color-diff-addition-text) !important;
 }
 
-.file-write-activity__deletions,
+.file-write-activity__deletions {
+  color: var(--mc-color-diff-deletion-text) !important;
+}
+
 .file-write-activity__error {
   color: var(--mc-color-text-danger) !important;
 }
@@ -891,7 +894,7 @@ button.apply-patch-activity__path:focus-visible {
   min-width: max-content;
   padding: 10px 12px;
   margin: 0;
-  font-family: var(--mc-font-family-mono);
+  font-family: var(--mc-mono-font-family);
   font-size: var(--mc-font-size-chat-metadata);
   line-height: var(--mc-line-height-relaxed);
   white-space: pre;

@@ -119,7 +119,7 @@
 
 .general-permission-segment button[data-selected='true'] {
   color: var(--settings-content-text-color);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   box-shadow: 0 1px 2px color-mix(in srgb, var(--settings-content-text-color) 12%, transparent);
   font-weight: var(--mc-font-weight-strong);
 }

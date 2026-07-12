@@ -59,7 +59,7 @@
 
 .usage-range-control button[data-active='true'] {
   color: var(--settings-content-text-color);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   box-shadow: var(--mc-shadow-hairline);
 }
 
@@ -158,7 +158,7 @@
   padding: 0 12px;
   gap: 10px;
   color: var(--settings-content-text-color);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-input);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-row);
   cursor: pointer;
@@ -242,9 +242,9 @@
 }
 
 .usage-chart-panel {
-  --usage-chart-input-color: #3269e8;
-  --usage-chart-output-color: #2457df;
-  --usage-chart-output-thinking-color: #8f3f71;
+  --usage-chart-input-color: var(--mc-color-data-viz-input);
+  --usage-chart-output-color: var(--mc-color-data-viz-output);
+  --usage-chart-output-thinking-color: var(--mc-color-data-viz-output-thinking);
   --usage-chart-plot-height: 320px;
   --usage-chart-label-height: 34px;
   margin-top: 28px;
@@ -554,7 +554,7 @@
   margin-top: 18px;
   padding: 0 18px;
   color: var(--settings-content-muted-color);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-card);
   font-size: calc(var(--mc-font-size-sidebar-action) - 1px);
@@ -566,7 +566,7 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-top: 24px;
   overflow: hidden;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-card);
 }
@@ -623,7 +623,7 @@
   min-height: 48px;
   padding: 0 18px;
   gap: 14px;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-card);
 }
@@ -652,7 +652,7 @@
 .usage-model-list {
   display: grid;
   overflow: hidden;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-card);
 }
@@ -725,7 +725,7 @@
   min-height: 64px;
   padding: 0 18px;
   color: var(--settings-content-muted-color);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-card);
   font-size: calc(var(--mc-font-size-sidebar-action) - 1px);

@@ -1,76 +1,48 @@
-import { useCallback, useId, useRef, useState } from 'react'
-import type { CSSProperties, FocusEvent, KeyboardEvent } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
-import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
-import { getFrontendThemesForColorScheme } from '../../../config/frontendTheme'
-import type {
-  ColorScheme,
-  FrontendTheme,
-  FrontendThemeId,
-  RegisteredFrontendTheme
-} from '../../../config/frontendTheme'
+import { useCallback, useId, useRef, useState } from 'react'
+import type { FocusEvent, KeyboardEvent, ReactNode } from 'react'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
+import './SettingsSelect.css'
 
-type ThemeSwatchStyle = CSSProperties & {
-  '--theme-swatch-background': string
-  '--theme-swatch-border': string
-  '--theme-swatch-foreground': string
+export interface SettingsSelectOption<Value extends string = string> {
+  label: string
+  value: Value
 }
 
-interface AppearanceThemeSelectProps {
-  colorScheme: ColorScheme
-  labelId: string
-  onChange: (themeId: FrontendThemeId) => void
-  value: FrontendThemeId
+interface SettingsSelectProps<Value extends string> {
+  ariaLabel: string
+  className?: string
+  leadingIcon?: ReactNode
+  onChange: (value: Value) => void
+  options: ReadonlyArray<SettingsSelectOption<Value>>
+  value: Value
 }
 
-function getThemeSwatchStyle(theme: FrontendTheme): ThemeSwatchStyle {
-  return {
-    '--theme-swatch-background': theme.colors.surface.card,
-    '--theme-swatch-border': theme.colors.border.default,
-    '--theme-swatch-foreground': theme.colors.text.accent
-  }
-}
-
-function ThemeSwatch({ theme }: { theme: RegisteredFrontendTheme }): React.JSX.Element {
-  return (
-    <span
-      aria-hidden="true"
-      className="appearance-theme-swatch"
-      style={getThemeSwatchStyle(theme.tokens)}
-    >
-      Aa
-    </span>
-  )
-}
-
-export function AppearanceThemeSelect({
-  colorScheme,
-  labelId,
+export function SettingsSelect<Value extends string>({
+  ariaLabel,
+  className,
+  leadingIcon,
   onChange,
+  options,
   value
-}: AppearanceThemeSelectProps): React.JSX.Element | null {
-  const { t } = useFrontendConfig()
+}: SettingsSelectProps<Value>): React.JSX.Element | null {
   const [isOpen, setOpen] = useState(false)
   const rootRef = useRef<HTMLSpanElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([])
   const listboxId = useId()
-  const valueId = useId()
-  const options = getFrontendThemesForColorScheme(colorScheme)
   const selectedIndex = Math.max(
     0,
-    options.findIndex((theme) => theme.id === value)
+    options.findIndex((option) => option.value === value)
   )
-  const selectedTheme = options[selectedIndex]
-
+  const selectedOption = options[selectedIndex]
   const closeMenu = useCallback(() => setOpen(false), [])
+
   useDismissOnOutsidePointer(rootRef, isOpen, closeMenu)
 
-  if (!selectedTheme) return null
+  if (!selectedOption) return null
 
   const focusOption = (index: number) => {
-    if (options.length === 0) return
     const normalizedIndex = (index + options.length) % options.length
     optionRefs.current[normalizedIndex]?.focus()
   }
@@ -85,8 +57,8 @@ export function AppearanceThemeSelect({
     window.requestAnimationFrame(() => triggerRef.current?.focus())
   }
 
-  const selectTheme = (themeId: FrontendThemeId) => {
-    onChange(themeId)
+  const selectOption = (option: SettingsSelectOption<Value>) => {
+    onChange(option.value)
     closeMenuAndRestoreFocus()
   }
 
@@ -95,12 +67,15 @@ export function AppearanceThemeSelect({
   }
 
   const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    if (event.key === 'ArrowDown') {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
       openMenu(selectedIndex)
-    } else if (event.key === 'ArrowUp') {
+    } else if (event.key === 'Home') {
       event.preventDefault()
-      openMenu(selectedIndex)
+      openMenu(0)
+    } else if (event.key === 'End') {
+      event.preventDefault()
+      openMenu(options.length - 1)
     } else if (event.key === 'Escape' && isOpen) {
       event.preventDefault()
       closeMenu()
@@ -128,7 +103,7 @@ export function AppearanceThemeSelect({
 
   return (
     <span
-      className="appearance-theme-select"
+      className={['settings-select', className].filter(Boolean).join(' ')}
       data-open={isOpen || undefined}
       onBlur={handleBlur}
       ref={rootRef}
@@ -137,36 +112,38 @@ export function AppearanceThemeSelect({
         aria-controls={isOpen ? listboxId : undefined}
         aria-expanded={isOpen}
         aria-haspopup="listbox"
-        aria-labelledby={`${labelId} ${valueId}`}
-        className="appearance-theme-select__button"
+        aria-label={`${ariaLabel}: ${selectedOption.label}`}
+        className="settings-select__button"
         onClick={() => (isOpen ? closeMenu() : openMenu())}
         onKeyDown={handleTriggerKeyDown}
         ref={triggerRef}
         type="button"
       >
-        <ThemeSwatch theme={selectedTheme} />
-        <span className="appearance-theme-select__value" id={valueId}>
-          {t(selectedTheme.labelKey)}
-        </span>
-        <ChevronDown aria-hidden="true" />
+        {leadingIcon && (
+          <span className="settings-select__leading" aria-hidden="true">
+            {leadingIcon}
+          </span>
+        )}
+        <span className="settings-select__value">{selectedOption.label}</span>
+        <ChevronDown aria-hidden="true" className="settings-select__chevron" />
       </button>
 
       {isOpen && (
         <span
-          aria-labelledby={labelId}
-          className="appearance-theme-select__menu"
+          aria-label={ariaLabel}
+          className="settings-select__menu"
           id={listboxId}
           role="listbox"
         >
-          {options.map((theme, index) => {
-            const isSelected = theme.id === selectedTheme.id
+          {options.map((option, index) => {
+            const isSelected = option.value === selectedOption.value
             return (
               <button
                 aria-selected={isSelected}
-                className="appearance-theme-select__option"
+                className="settings-select__option"
                 data-selected={isSelected || undefined}
-                key={theme.id}
-                onClick={() => selectTheme(theme.id)}
+                key={option.value}
+                onClick={() => selectOption(option)}
                 onKeyDown={(event) => handleOptionKeyDown(event, index)}
                 ref={(node) => {
                   optionRefs.current[index] = node
@@ -175,8 +152,7 @@ export function AppearanceThemeSelect({
                 tabIndex={isSelected ? 0 : -1}
                 type="button"
               >
-                <ThemeSwatch theme={theme} />
-                <span className="appearance-theme-select__option-label">{t(theme.labelKey)}</span>
+                <span className="settings-select__option-label">{option.label}</span>
                 {isSelected && <Check aria-hidden="true" />}
               </button>
             )

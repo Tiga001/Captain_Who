@@ -5,7 +5,7 @@
   min-height: 96px;
   padding: 14px 12px 4px 16px;
   color: var(--mc-color-text-primary);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 0.5px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-composer);
   box-shadow: var(--mc-shadow-composer);
@@ -113,7 +113,7 @@
   flex: 0 0 auto;
   align-items: center;
   color: var(--mc-color-text-primary);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   box-shadow: var(--mc-shadow-none);
 }
@@ -370,7 +370,7 @@
   width: 172px;
   padding: 6px;
   gap: 2px;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-popover);
   box-shadow: var(--mc-shadow-popover);
@@ -385,7 +385,7 @@
   width: 316px;
   padding: 12px;
   gap: 4px;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-popover);
   box-shadow: var(--mc-shadow-popover-large);
@@ -442,7 +442,7 @@
   max-width: min(264px, calc(100vw - 48px));
   padding: 8px;
   gap: 1px;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-popover);
   box-shadow: var(--mc-shadow-popover-large);
@@ -458,7 +458,7 @@
   max-width: min(380px, calc(100vw - 48px));
   padding: 16px 18px;
   gap: 10px;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-popover);
   box-shadow: var(--mc-shadow-popover-large);

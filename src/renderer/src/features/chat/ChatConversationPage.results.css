@@ -5,11 +5,7 @@
   max-width: 900px;
   overflow: hidden;
   color: var(--mc-color-text-primary);
-  background: color-mix(
-    in srgb,
-    var(--mc-color-surface-elevated) 86%,
-    var(--mc-color-text-primary) 3%
-  );
+  background: color-mix(in srgb, var(--mc-color-surface-card) 86%, var(--mc-color-text-primary) 3%);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-2xl);
 }
@@ -197,11 +193,11 @@
 }
 
 .edit-summary-card__additions {
-  color: #16a34a;
+  color: var(--mc-color-diff-addition-text);
 }
 
 .edit-summary-card__deletions {
-  color: var(--mc-color-text-danger);
+  color: var(--mc-color-diff-deletion-text);
 }
 
 .edit-summary-card__more {
@@ -304,7 +300,7 @@
   height: 92px;
   padding: 0;
   overflow: hidden;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-xl);
   cursor: zoom-in;
@@ -577,8 +573,8 @@ button.attachment-list-activity__item:focus-visible {
   flex: 0 0 auto;
   place-items: center;
   margin-top: 0.16em;
-  color: #fff;
-  background: #2f6fab;
+  color: var(--mc-color-source-badge-text);
+  background: var(--mc-color-source-badge-background);
   border-radius: 4px;
   font-size: 11px;
   font-weight: var(--mc-font-weight-heavy);
@@ -588,7 +584,7 @@ button.attachment-list-activity__item:focus-visible {
 .web-source-badge--image {
   overflow: hidden;
   color: transparent;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
 }
 
@@ -665,7 +661,7 @@ button.attachment-list-activity__item:focus-visible {
 .assistant-sources__button:hover,
 .assistant-sources__button:focus-visible {
   color: var(--mc-color-text-primary);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border-color: var(--mc-color-border-default);
 }
 
@@ -689,7 +685,7 @@ button.attachment-list-activity__item:focus-visible {
   gap: 14px;
   overflow: hidden;
   color: var(--mc-color-text-primary);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-popover);
   box-shadow: var(--mc-shadow-popover-large);

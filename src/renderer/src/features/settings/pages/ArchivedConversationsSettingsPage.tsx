@@ -1,9 +1,11 @@
-import { Archive, ChevronDown, Folder, RotateCcw, Trash2 } from 'lucide-react'
+import { Archive, Folder, RotateCcw, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import type { AppProject } from '../../../config/projectConfig'
 import type { ChatConversation } from '../../chat/chatTypes'
+import { SettingsSelect } from '../components/SettingsSelect'
+import type { SettingsSelectOption } from '../components/SettingsSelect'
 import './ArchivedConversationsSettingsPage.css'
 
 interface ArchivedConversationsSettingsPageProps {
@@ -68,6 +70,14 @@ export function ArchivedConversationsSettingsPage({
   const [projectFilter, setProjectFilter] = useState<ProjectFilter>('all')
   const [pendingDeleteConfirmation, setPendingDeleteConfirmation] =
     useState<PendingDeleteConfirmation | null>(null)
+  const projectFilterOptions = useMemo<Array<SettingsSelectOption<ProjectFilter>>>(
+    () => [
+      { value: 'all', label: t('archive.allProjects') },
+      { value: 'none', label: t('archive.noProject') },
+      ...projects.map((project) => ({ value: project.id, label: project.name }))
+    ],
+    [projects, t]
+  )
   const archivedConversations = useMemo(
     () =>
       conversations
@@ -136,23 +146,14 @@ export function ArchivedConversationsSettingsPage({
         aria-label={t('settings.page.archivedConversations')}
       >
         <div className="archived-conversations-panel__toolbar">
-          <label className="archived-conversations-project-filter">
-            <Folder aria-hidden="true" />
-            <select
-              value={projectFilter}
-              aria-label={t('archive.projectFilter')}
-              onChange={(event) => setProjectFilter(event.target.value)}
-            >
-              <option value="all">{t('archive.allProjects')}</option>
-              <option value="none">{t('archive.noProject')}</option>
-              {projects.map((project) => (
-                <option value={project.id} key={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-            <ChevronDown aria-hidden="true" />
-          </label>
+          <SettingsSelect
+            ariaLabel={t('archive.projectFilter')}
+            className="archived-conversations-project-filter"
+            leadingIcon={<Folder />}
+            onChange={setProjectFilter}
+            options={projectFilterOptions}
+            value={projectFilter}
+          />
         </div>
 
         <div className="archived-conversations-list">

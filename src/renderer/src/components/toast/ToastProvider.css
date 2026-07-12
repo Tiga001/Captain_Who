@@ -19,7 +19,7 @@
   padding: 9px 15px;
   color: var(--mc-color-text-primary);
   text-align: center;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-pill);
   box-shadow: var(--mc-shadow-popover);

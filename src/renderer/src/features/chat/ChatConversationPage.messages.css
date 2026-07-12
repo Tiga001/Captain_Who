@@ -232,7 +232,7 @@
   flex: 0 1 auto;
   align-items: center;
   color: var(--mc-color-text-primary);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   box-shadow: var(--mc-shadow-none);
 }
@@ -462,7 +462,7 @@ button.chat-message-attachment:focus-visible {
   left: 50%;
   padding: 6px 9px;
   color: var(--mc-color-text-secondary);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-lg);
   box-shadow: var(--mc-shadow-card);
@@ -499,7 +499,7 @@ button.chat-message-attachment:focus-visible {
   max-width: min(280px, calc(100vw - 48px));
   padding: 10px 12px;
   color: var(--mc-color-text-primary);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-popover);
   box-shadow: var(--mc-shadow-card);

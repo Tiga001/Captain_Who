@@ -11,11 +11,7 @@
   --right-panel: var(--mc-color-surface-right-panel);
   --mac-window-control-safe-width: 84px;
   --mc-sidebar-translucent-opacity: 46%;
-  --mc-sidebar-translucent-tint: var(--mc-color-surface-left-panel);
-}
-
-:root[data-color-scheme='dark'] {
-  --mc-sidebar-translucent-tint: #000000;
+  --mc-sidebar-translucent-tint: var(--mc-color-sidebar-translucent-tint);
 }
 
 * {

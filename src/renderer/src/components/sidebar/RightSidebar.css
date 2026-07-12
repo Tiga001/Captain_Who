@@ -15,7 +15,7 @@
   min-width: 0;
   align-items: center;
   padding: 8px 14px 7px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid var(--mc-color-border-right-toolbar-divider);
   -webkit-app-region: drag;
 }
 
@@ -248,7 +248,7 @@
   display: grid;
   width: 280px;
   padding: 8px;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-popover);
   box-shadow: var(--mc-shadow-composer);

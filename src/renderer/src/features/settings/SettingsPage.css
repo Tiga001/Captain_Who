@@ -10,7 +10,7 @@
   display: grid;
   grid-template-columns: minmax(220px, var(--mc-layout-settings-nav-width)) minmax(0, 1fr);
   color: var(--settings-content-text-color);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-main-panel);
   font-family: var(--mc-font-family);
   font-size: var(--mc-font-size-settings-body);
   user-select: none;
@@ -29,7 +29,7 @@
   right: 0;
   bottom: 0;
   left: var(--settings-nav-current-width);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-main-panel);
   content: '';
   pointer-events: none;
 }
@@ -137,7 +137,7 @@
   margin-top: 10px;
   gap: 8px;
   color: var(--mc-color-icon-subtle);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-input);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-lg);
   box-shadow: var(--mc-shadow-hairline);
@@ -223,7 +223,7 @@
   min-height: 0;
   overflow-y: auto;
   color: var(--settings-content-text-color);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-main-panel);
   scrollbar-color: var(--mc-color-border-default) transparent;
   scrollbar-width: thin;
 }
@@ -289,7 +289,7 @@
 .settings-list {
   display: grid;
   overflow: hidden;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-card);
 }

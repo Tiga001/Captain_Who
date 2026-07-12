@@ -161,7 +161,7 @@
   display: grid;
   width: 286px;
   padding: 8px;
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-popover);
   box-shadow: var(--mc-shadow-popover);

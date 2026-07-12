@@ -6,7 +6,7 @@
   padding: 18px 12px 9px 16px;
   gap: 8px;
   color: var(--mc-color-text-primary);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-card);
   border: 0.5px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-composer);
   box-shadow: var(--mc-shadow-composer);

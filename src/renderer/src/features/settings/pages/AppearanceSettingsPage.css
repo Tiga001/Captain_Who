@@ -29,11 +29,11 @@
 }
 
 .appearance-theme-preview {
-  --preview-shell: #f2f2f2;
-  --preview-window: #ffffff;
-  --preview-panel: #ffffff;
-  --preview-line: #d8d8d8;
-  --preview-divider: #eeeeee;
+  --preview-shell: var(--mc-color-surface-left-panel);
+  --preview-window: var(--mc-color-surface-main-panel);
+  --preview-panel: var(--mc-color-surface-card);
+  --preview-line: var(--mc-color-text-muted);
+  --preview-divider: var(--mc-color-border-subtle);
   position: relative;
   display: block;
   width: 100%;

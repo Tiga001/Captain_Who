@@ -46,7 +46,7 @@ function getThemePreviewPalette(theme: FrontendTheme) {
   return {
     divider: theme.colors.border.subtle,
     line: theme.colors.text.muted,
-    panel: theme.colors.surface.elevated,
+    panel: theme.colors.surface.card,
     shell: theme.colors.surface.leftPanel,
     window: theme.colors.surface.mainPanel
   }

@@ -177,8 +177,8 @@
   height: 24px;
   align-items: center;
   padding: 0 12px;
-  color: #37c86a;
-  background: color-mix(in srgb, #37c86a 18%, transparent);
+  color: var(--mc-color-status-success-text);
+  background: var(--mc-color-status-success-surface);
   border-radius: var(--mc-radius-pill);
   font-size: var(--mc-font-size-sidebar-action);
   font-weight: var(--mc-font-weight-heavy);

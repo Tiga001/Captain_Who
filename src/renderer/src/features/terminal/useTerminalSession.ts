@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
+import { lightTheme } from '../../config/frontendTheme'
 import {
   createTerminalSession,
   killTerminalSession,
@@ -48,34 +49,55 @@ function getCssColor(name: string, fallback: string) {
   return value || fallback
 }
 
-function getTerminalTheme() {
-  const foreground = getCssColor('--mc-color-text-primary', '#d7dce2')
-  const muted = getCssColor('--mc-color-text-muted', '#8b949e')
-  const background = getCssColor('--mc-color-surface-right-panel', '#0f1011')
-  const accent = getCssColor('--mc-color-text-accent', '#6cb6ff')
-  const danger = getCssColor('--mc-color-text-danger', '#ff7b72')
+const TERMINAL_COLOR_VARIABLES = {
+  background: '--mc-color-terminal-background',
+  foreground: '--mc-color-terminal-foreground',
+  cursor: '--mc-color-terminal-cursor',
+  selectionBackground: '--mc-color-terminal-selection-background',
+  black: '--mc-color-terminal-black',
+  red: '--mc-color-terminal-red',
+  green: '--mc-color-terminal-green',
+  yellow: '--mc-color-terminal-yellow',
+  blue: '--mc-color-terminal-blue',
+  magenta: '--mc-color-terminal-magenta',
+  cyan: '--mc-color-terminal-cyan',
+  white: '--mc-color-terminal-white',
+  brightBlack: '--mc-color-terminal-bright-black',
+  brightRed: '--mc-color-terminal-bright-red',
+  brightGreen: '--mc-color-terminal-bright-green',
+  brightYellow: '--mc-color-terminal-bright-yellow',
+  brightBlue: '--mc-color-terminal-bright-blue',
+  brightMagenta: '--mc-color-terminal-bright-magenta',
+  brightCyan: '--mc-color-terminal-bright-cyan',
+  brightWhite: '--mc-color-terminal-bright-white'
+} as const satisfies Record<keyof typeof lightTheme.colors.terminal, string>
 
+function getTerminalColor<Key extends keyof typeof TERMINAL_COLOR_VARIABLES>(key: Key) {
+  return getCssColor(TERMINAL_COLOR_VARIABLES[key], lightTheme.colors.terminal[key])
+}
+
+function getTerminalTheme() {
   return {
-    background,
-    black: getCssColor('--mc-color-surface-muted', '#1f2328'),
-    blue: accent,
-    brightBlack: muted,
-    brightBlue: accent,
-    brightCyan: accent,
-    brightGreen: getCssColor('--mc-color-icon-success', '#7ee787'),
-    brightMagenta: getCssColor('--mc-color-icon-accent', '#d2a8ff'),
-    brightRed: danger,
-    brightWhite: foreground,
-    brightYellow: getCssColor('--mc-color-text-strong', '#ffdf8b'),
-    cursor: foreground,
-    cyan: accent,
-    foreground,
-    green: getCssColor('--mc-color-icon-success', '#7ee787'),
-    magenta: getCssColor('--mc-color-icon-accent', '#d2a8ff'),
-    red: danger,
-    selectionBackground: getCssColor('--mc-color-surface-selected', '#365a7d'),
-    white: foreground,
-    yellow: getCssColor('--mc-color-text-strong', '#f2cc60')
+    background: getTerminalColor('background'),
+    black: getTerminalColor('black'),
+    blue: getTerminalColor('blue'),
+    brightBlack: getTerminalColor('brightBlack'),
+    brightBlue: getTerminalColor('brightBlue'),
+    brightCyan: getTerminalColor('brightCyan'),
+    brightGreen: getTerminalColor('brightGreen'),
+    brightMagenta: getTerminalColor('brightMagenta'),
+    brightRed: getTerminalColor('brightRed'),
+    brightWhite: getTerminalColor('brightWhite'),
+    brightYellow: getTerminalColor('brightYellow'),
+    cursor: getTerminalColor('cursor'),
+    cyan: getTerminalColor('cyan'),
+    foreground: getTerminalColor('foreground'),
+    green: getTerminalColor('green'),
+    magenta: getTerminalColor('magenta'),
+    red: getTerminalColor('red'),
+    selectionBackground: getTerminalColor('selectionBackground'),
+    white: getTerminalColor('white'),
+    yellow: getTerminalColor('yellow')
   }
 }
 

@@ -14,7 +14,11 @@ import type {
   ThemeIdsByColorScheme
 } from './frontendTheme'
 
-export const FRONTEND_THEME_PREFERENCES_VERSION = 2
+export const FRONTEND_THEME_PREFERENCES_VERSION = 3
+
+const legacyThemeIdAliases: Readonly<Record<string, FrontendThemeId>> = {
+  'catppuccin-dark': 'catppuccin-mocha-dark'
+}
 
 export interface FrontendThemePreferences {
   colorSchemePreference: ColorSchemePreference
@@ -36,8 +40,12 @@ export function normalizeThemeIdForColorScheme<Scheme extends ColorScheme>(
   value: unknown,
   fallback: unknown = getDefaultThemeIdForColorScheme(colorScheme)
 ): FrontendThemeIdForColorScheme<Scheme> {
-  if (isThemeIdForColorScheme(value, colorScheme)) return value
-  if (isThemeIdForColorScheme(fallback, colorScheme)) return fallback
+  const normalizedValue = typeof value === 'string' ? (legacyThemeIdAliases[value] ?? value) : value
+  const normalizedFallback =
+    typeof fallback === 'string' ? (legacyThemeIdAliases[fallback] ?? fallback) : fallback
+
+  if (isThemeIdForColorScheme(normalizedValue, colorScheme)) return normalizedValue
+  if (isThemeIdForColorScheme(normalizedFallback, colorScheme)) return normalizedFallback
   return getDefaultThemeIdForColorScheme(colorScheme)
 }
 
