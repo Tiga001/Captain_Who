@@ -1,0 +1,169 @@
+//! Authoritative, conversation-level durable context state.
+//!
+//! This state exists independently of any presentation feature. Capacity protection, future
+//! compaction and the frontend context indicator all consume projections of the same measured
+//! baseline.
+
+use super::{
+    ContextCapacityDetector, ContextFrame, ContextItem, ContextRetention, ContextScope,
+    ContextSource, ConversationTraceRenderer, MeasuredContextBaseline,
+};
+use crate::llm::LlmMessageRole;
+use crate::protocol::{
+    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentError, AgentResult,
+};
+use crate::{ConversationTurnTrace, ConversationTurnTraceTerminalStatus};
+
+#[derive(Debug, Clone)]
+pub struct AgentContextBaseline {
+    configuration_revision: String,
+    frame: MeasuredContextBaseline,
+}
+
+impl AgentContextBaseline {
+    pub(crate) fn matches_configuration(&self, configuration_revision: &str) -> bool {
+        self.configuration_revision == configuration_revision
+    }
+
+    pub(crate) fn into_frame(self) -> ContextFrame {
+        ContextFrame::from_measured_baseline(self.frame)
+    }
+
+    pub(crate) fn rebase_restored_frame(self, frame: ContextFrame) -> ContextFrame {
+        frame.rebase_onto_measured_baseline(self.frame)
+    }
+}
+
+/// Cached durable state for one conversation and one context configuration.
+pub struct AgentConversationContextState {
+    configuration_revision: String,
+    model: String,
+    context_window_tokens: Option<u32>,
+    reserved_output_tokens: u32,
+    detector: ContextCapacityDetector,
+    frame: ContextFrame,
+}
+
+impl AgentConversationContextState {
+    pub(crate) fn new(
+        configuration_revision: String,
+        model: String,
+        context_window_tokens: Option<u32>,
+        reserved_output_tokens: u32,
+        detector: ContextCapacityDetector,
+        mut frame: ContextFrame,
+    ) -> Self {
+        // Durable storage has no notion of an active "current turn". Normalizing the source once
+        // avoids rewriting frozen history when a later user message is appended.
+        frame.begin_new_conversation_turn();
+        detector.prepare_frame(&mut frame);
+        Self {
+            configuration_revision,
+            model,
+            context_window_tokens,
+            reserved_output_tokens,
+            detector,
+            frame,
+        }
+    }
+
+    pub fn configuration_revision(&self) -> &str {
+        &self.configuration_revision
+    }
+
+    pub fn append_user_message(&mut self, content: &str) {
+        let content = content.trim();
+        if content.is_empty() {
+            return;
+        }
+        self.frame.push(ContextItem::text(
+            LlmMessageRole::User,
+            content,
+            ContextSource::ConversationHistory,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        ));
+    }
+
+    pub fn append_trace_items(
+        &mut self,
+        trace: &ConversationTurnTrace,
+        committed_item_count: usize,
+    ) -> AgentResult<usize> {
+        if committed_item_count > trace.items.len() {
+            return Err(AgentError::new(
+                "会话上下文状态的 trace 游标超过已持久化项目数量。",
+            ));
+        }
+        if committed_item_count == trace.items.len() {
+            return Ok(committed_item_count);
+        }
+        let suffix = ConversationTurnTrace {
+            schema_version: trace.schema_version,
+            run_id: trace.run_id.clone(),
+            conversation_id: trace.conversation_id.clone(),
+            assistant_message_id: trace.assistant_message_id.clone(),
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            terminal_error: None,
+            truncated: trace.truncated,
+            items: trace.items[committed_item_count..].to_vec(),
+        };
+        let rendered = ConversationTraceRenderer::render(&suffix)?;
+        for item in rendered.activity_items {
+            self.frame.push(item);
+        }
+        Ok(trace.items.len())
+    }
+
+    pub fn finalize_conversation_turn(
+        &mut self,
+        trace: &ConversationTurnTrace,
+        committed_item_count: usize,
+        assistant_content: &str,
+    ) -> AgentResult<usize> {
+        if !trace.terminal_status.is_terminal() {
+            return Err(AgentError::new("运行中的会话轨迹不能作为上下文终态提交。"));
+        }
+        let committed_item_count = self.append_trace_items(trace, committed_item_count)?;
+        let assistant_content = assistant_content.trim();
+        if !assistant_content.is_empty() {
+            self.frame.push(ContextItem::text(
+                LlmMessageRole::Assistant,
+                assistant_content,
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ));
+        }
+        let terminal_only = ConversationTurnTrace {
+            items: Vec::new(),
+            ..trace.clone()
+        };
+        if let Some(terminal_item) =
+            ConversationTraceRenderer::render(&terminal_only)?.terminal_item
+        {
+            self.frame.push(terminal_item);
+        }
+        Ok(committed_item_count)
+    }
+
+    pub fn shared_baseline(&mut self) -> AgentResult<AgentContextBaseline> {
+        // Ensure pending durable appends have measurements before freezing the next immutable
+        // chunk. Existing chunks are reused by Arc and are never measured again.
+        self.detector.prepare_frame(&mut self.frame);
+        Ok(AgentContextBaseline {
+            configuration_revision: self.configuration_revision.clone(),
+            frame: self.frame.share_measured_persistent_baseline()?,
+        })
+    }
+
+    pub fn snapshot(&mut self, phase: AgentContextWindowPhase) -> AgentContextWindowSnapshot {
+        self.detector
+            .inspect(
+                &mut self.frame,
+                self.context_window_tokens,
+                self.reserved_output_tokens,
+            )
+            .persistent_snapshot(&self.model, phase)
+    }
+}

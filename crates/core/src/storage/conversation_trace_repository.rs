@@ -23,35 +23,39 @@ pub fn replace_trace(
     completed_at: i64,
 ) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
-    replace_trace_in_connection(&transaction, trace, created_at, completed_at)?;
+    commit_trace_in_connection(&transaction, trace, created_at, completed_at)?;
     transaction.commit()
 }
 
-pub(crate) fn replace_trace_in_connection(
+pub fn append_in_progress_trace(
+    connection: &mut Connection,
+    trace: &ConversationTurnTrace,
+    created_at: i64,
+    updated_at: i64,
+) -> rusqlite::Result<bool> {
+    if trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress {
+        return Err(invalid_trace_input(
+            "incremental conversation trace commit requires in_progress status",
+        ));
+    }
+    let transaction = connection.transaction()?;
+    let changed = commit_trace_in_connection(&transaction, trace, created_at, updated_at)?;
+    transaction.commit()?;
+    Ok(changed)
+}
+
+pub(crate) fn commit_trace_in_connection(
     connection: &Connection,
     trace: &ConversationTurnTrace,
     created_at: i64,
-    completed_at: i64,
-) -> rusqlite::Result<()> {
+    committed_at: i64,
+) -> rusqlite::Result<bool> {
     trace.validate().map_err(invalid_trace_input)?;
-    if completed_at < created_at {
+    if committed_at < created_at {
         return Err(invalid_trace_input(
-            "conversation trace completed_at cannot precede created_at",
+            "conversation trace commit time cannot precede created_at",
         ));
     }
-
-    let serialized_items = trace
-        .items
-        .iter()
-        .map(|item| {
-            let sequence = i64::try_from(item.sequence()).map_err(|_| {
-                invalid_trace_input("conversation trace item sequence exceeds SQLite INTEGER")
-            })?;
-            let payload = serde_json::to_string(item)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            Ok((sequence, item.kind(), payload))
-        })
-        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let message_role = connection
         .query_row(
@@ -78,61 +82,139 @@ pub(crate) fn replace_trace_in_connection(
         }
     }
 
-    connection.execute(
-        "
-        INSERT INTO conversation_turn_traces (
-            assistant_message_id,
-            conversation_id,
-            run_id,
-            schema_version,
-            terminal_status,
-            terminal_error,
-            truncated,
-            created_at,
-            completed_at
-        )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-        ON CONFLICT(assistant_message_id) DO UPDATE SET
-            conversation_id = excluded.conversation_id,
-            run_id = excluded.run_id,
-            schema_version = excluded.schema_version,
-            terminal_status = excluded.terminal_status,
-            terminal_error = excluded.terminal_error,
-            truncated = excluded.truncated,
-            created_at = excluded.created_at,
-            completed_at = excluded.completed_at
-        ",
-        params![
-            &trace.assistant_message_id,
-            &trace.conversation_id,
-            &trace.run_id,
-            i64::from(trace.schema_version),
-            trace.terminal_status.as_str(),
-            &trace.terminal_error,
-            trace.truncated,
-            created_at,
-            completed_at,
-        ],
-    )?;
-    connection.execute(
-        "DELETE FROM conversation_turn_trace_items WHERE assistant_message_id = ?1",
-        params![&trace.assistant_message_id],
-    )?;
-    for (sequence, kind, payload) in serialized_items {
+    let existing = get_trace_for_message(connection, &trace.assistant_message_id)?;
+    let existing_item_count = if let Some(existing) = &existing {
+        validate_append_only_transition(existing, trace)?;
+        existing.items.len()
+    } else {
+        0
+    };
+    let state_changed = existing.as_ref().is_none_or(|existing| {
+        existing.terminal_status != trace.terminal_status
+            || existing.terminal_error != trace.terminal_error
+            || existing.truncated != trace.truncated
+            || existing.items.len() != trace.items.len()
+    });
+    if !state_changed {
+        return Ok(false);
+    }
+
+    if existing.is_none() {
         connection.execute(
             "
-            INSERT INTO conversation_turn_trace_items (
+            INSERT INTO conversation_turn_traces (
                 assistant_message_id,
-                sequence,
-                item_kind,
-                item_json
+                conversation_id,
+                run_id,
+                schema_version,
+                terminal_status,
+                terminal_error,
+                truncated,
+                created_at,
+                updated_at,
+                completed_at
             )
-            VALUES (?1, ?2, ?3, ?4)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ",
-            params![&trace.assistant_message_id, sequence, kind, payload],
+            params![
+                &trace.assistant_message_id,
+                &trace.conversation_id,
+                &trace.run_id,
+                i64::from(trace.schema_version),
+                trace.terminal_status.as_str(),
+                &trace.terminal_error,
+                trace.truncated,
+                created_at,
+                committed_at,
+                trace.terminal_status.is_terminal().then_some(committed_at),
+            ],
         )?;
     }
 
+    for item in trace.items.iter().skip(existing_item_count) {
+        insert_trace_item(connection, &trace.assistant_message_id, item)?;
+    }
+
+    if existing.is_some() {
+        connection.execute(
+            "
+            UPDATE conversation_turn_traces
+            SET terminal_status = ?1,
+                terminal_error = ?2,
+                truncated = ?3,
+                updated_at = ?4,
+                completed_at = ?5
+            WHERE assistant_message_id = ?6
+            ",
+            params![
+                trace.terminal_status.as_str(),
+                &trace.terminal_error,
+                trace.truncated,
+                committed_at,
+                trace.terminal_status.is_terminal().then_some(committed_at),
+                &trace.assistant_message_id,
+            ],
+        )?;
+    }
+
+    Ok(true)
+}
+
+fn validate_append_only_transition(
+    existing: &ConversationTurnTrace,
+    next: &ConversationTurnTrace,
+) -> rusqlite::Result<()> {
+    if existing.schema_version != next.schema_version
+        || existing.run_id != next.run_id
+        || existing.conversation_id != next.conversation_id
+        || existing.assistant_message_id != next.assistant_message_id
+    {
+        return Err(invalid_trace_input(
+            "conversation trace identity cannot change after its first commit",
+        ));
+    }
+    if existing.terminal_status.is_terminal() && existing.terminal_status != next.terminal_status {
+        return Err(invalid_trace_input(
+            "terminal conversation trace cannot transition to another status",
+        ));
+    }
+    if existing.truncated && !next.truncated {
+        return Err(invalid_trace_input(
+            "conversation trace truncated state cannot be cleared",
+        ));
+    }
+    if existing.items.len() > next.items.len()
+        || existing.items != next.items[..existing.items.len()]
+    {
+        return Err(invalid_trace_input(
+            "conversation trace updates must preserve every committed item as an exact prefix",
+        ));
+    }
+    Ok(())
+}
+
+fn insert_trace_item(
+    connection: &Connection,
+    assistant_message_id: &str,
+    item: &ConversationTurnTraceItem,
+) -> rusqlite::Result<()> {
+    let sequence = i64::try_from(item.sequence()).map_err(|_| {
+        invalid_trace_input("conversation trace item sequence exceeds SQLite INTEGER")
+    })?;
+    let payload = serde_json::to_string(item)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    connection.execute(
+        "
+        INSERT INTO conversation_turn_trace_items (
+            assistant_message_id,
+            sequence,
+            item_kind,
+            item_json
+        )
+        VALUES (?1, ?2, ?3, ?4)
+        ",
+        params![assistant_message_id, sequence, item.kind(), payload],
+    )?;
     Ok(())
 }
 
@@ -184,7 +266,7 @@ pub fn list_traces_for_conversation(
         ORDER BY
             message.position ASC,
             message.created_at ASC,
-            trace.completed_at ASC,
+            trace.updated_at ASC,
             trace.assistant_message_id ASC
         ",
     )?;
@@ -284,6 +366,7 @@ fn load_trace(
 
 fn terminal_status_from_str(value: &str) -> Option<ConversationTurnTraceTerminalStatus> {
     match value {
+        "in_progress" => Some(ConversationTurnTraceTerminalStatus::InProgress),
         "completed" => Some(ConversationTurnTraceTerminalStatus::Completed),
         "failed" => Some(ConversationTurnTraceTerminalStatus::Failed),
         "cancelled" => Some(ConversationTurnTraceTerminalStatus::Cancelled),
@@ -344,23 +427,23 @@ mod tests {
     }
 
     #[test]
-    fn replace_is_atomic_and_idempotent() {
+    fn incremental_commit_and_terminal_finalization_are_atomic_and_idempotent() {
         let mut connection = test_connection();
         insert_conversation(&connection, "conversation-1");
         insert_message(&connection, "conversation-1", "assistant-1", 1);
-        let initial = trace("conversation-1", "assistant-1", "run-1");
+        let completed = trace("conversation-1", "assistant-1", "run-1");
+        let initial = ConversationTurnTrace {
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            items: vec![completed.items[0].clone()],
+            ..completed.clone()
+        };
         replace_trace(&mut connection, &initial, 10, 20).unwrap();
 
         let replacement = ConversationTurnTrace {
             terminal_status: ConversationTurnTraceTerminalStatus::Failed,
             terminal_error: Some("model request failed".to_string()),
             truncated: true,
-            items: vec![ConversationTurnTraceItem::AssistantNarration {
-                sequence: 0,
-                content: "I started the task.".to_string(),
-                truncated: false,
-            }],
-            ..initial
+            ..completed
         };
         replace_trace(&mut connection, &replacement, 10, 30).unwrap();
         replace_trace(&mut connection, &replacement, 10, 30).unwrap();
@@ -382,7 +465,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(trace_count, 1);
-        assert_eq!(item_count, 1);
+        assert_eq!(item_count, 3);
     }
 
     #[test]
@@ -390,7 +473,12 @@ mod tests {
         let mut connection = test_connection();
         insert_conversation(&connection, "conversation-1");
         insert_message(&connection, "conversation-1", "assistant-1", 1);
-        let initial = trace("conversation-1", "assistant-1", "run-1");
+        let completed = trace("conversation-1", "assistant-1", "run-1");
+        let initial = ConversationTurnTrace {
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            items: vec![completed.items[0].clone()],
+            ..completed.clone()
+        };
         replace_trace(&mut connection, &initial, 10, 20).unwrap();
         connection
             .execute_batch(
@@ -404,7 +492,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut replacement = initial.clone();
+        let mut replacement = completed;
         replacement.terminal_status = ConversationTurnTraceTerminalStatus::Failed;
         replacement.terminal_error = Some("replacement should roll back".to_string());
         assert!(replace_trace(&mut connection, &replacement, 10, 30).is_err());
@@ -415,6 +503,41 @@ mod tests {
         assert_eq!(
             get_trace_for_message(&connection, "assistant-1").unwrap(),
             Some(initial)
+        );
+    }
+
+    #[test]
+    fn committed_prefix_cannot_be_rewritten_shrunk_or_reopened() {
+        let mut connection = test_connection();
+        insert_conversation(&connection, "conversation-1");
+        insert_message(&connection, "conversation-1", "assistant-1", 1);
+        let completed = trace("conversation-1", "assistant-1", "run-1");
+        let running = ConversationTurnTrace {
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            items: vec![completed.items[0].clone()],
+            ..completed.clone()
+        };
+
+        assert!(append_in_progress_trace(&mut connection, &running, 10, 20).unwrap());
+        assert!(!append_in_progress_trace(&mut connection, &running, 10, 21).unwrap());
+
+        let mut rewritten = running.clone();
+        if let ConversationTurnTraceItem::AssistantNarration { content, .. } =
+            &mut rewritten.items[0]
+        {
+            *content = "rewritten".to_string();
+        }
+        assert!(append_in_progress_trace(&mut connection, &rewritten, 10, 22).is_err());
+
+        let mut shrunk = running.clone();
+        shrunk.items.clear();
+        assert!(append_in_progress_trace(&mut connection, &shrunk, 10, 23).is_err());
+
+        replace_trace(&mut connection, &completed, 10, 24).unwrap();
+        assert!(append_in_progress_trace(&mut connection, &running, 10, 25).is_err());
+        assert_eq!(
+            get_trace_for_message(&connection, "assistant-1").unwrap(),
+            Some(completed)
         );
     }
 

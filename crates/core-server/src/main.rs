@@ -202,10 +202,11 @@ fn handle_request(
                 Ok(settings) => settings,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(
-                request.id,
-                storage.save_model_settings(settings).map(|_| json!(null)),
-            )
+            let result = storage.save_model_settings(settings).map(|_| json!(null));
+            if result.is_ok() {
+                agent_service.invalidate_all_conversation_context_states();
+            }
+            storage_response(request.id, result)
         }
         STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD => {
             storage_response(request.id, storage.load_agent_prompt_preferences())
@@ -215,10 +216,11 @@ fn handle_request(
                 Ok(preferences) => preferences,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(
-                request.id,
-                storage.save_agent_prompt_preferences(preferences),
-            )
+            let result = storage.save_agent_prompt_preferences(preferences);
+            if result.is_ok() {
+                agent_service.invalidate_all_conversation_context_states();
+            }
+            storage_response(request.id, result)
         }
         STORAGE_LOAD_PROJECTS_METHOD => storage_response(request.id, storage.load_projects()),
         STORAGE_SAVE_PROJECT_METHOD => {
@@ -277,7 +279,7 @@ fn handle_request(
             };
             storage_response(
                 request.id,
-                storage
+                agent_service
                     .delete_conversation(&input.conversation_id)
                     .map(|_| json!(null)),
             )
@@ -289,7 +291,7 @@ fn handle_request(
             };
             storage_response(
                 request.id,
-                storage
+                agent_service
                     .delete_chat_messages(&input.conversation_id, &input.message_ids)
                     .map(|_| json!(null)),
             )

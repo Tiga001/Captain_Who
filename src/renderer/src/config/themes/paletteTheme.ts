@@ -136,6 +136,10 @@ export function createPaletteTheme(recipe: PaletteThemeRecipe): FrontendTheme {
         dangerSoftBg: withAlpha(semantic.danger, isDark ? 0.14 : 0.09),
         dangerSoftBgHover: withAlpha(semantic.danger, isDark ? 0.22 : 0.14)
       },
+      control: {
+        selectedBackground: accent,
+        selectedText: text.inverse
+      },
       sidebar: {
         textSecondary: text.secondary,
         textActive: text.strong,

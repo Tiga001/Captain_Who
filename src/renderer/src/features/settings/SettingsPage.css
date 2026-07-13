@@ -366,7 +366,7 @@
 }
 
 .settings-switch[data-state='on'] {
-  background: var(--mc-color-text-accent);
+  background: var(--mc-color-control-selected-background);
 }
 
 .settings-switch__thumb {

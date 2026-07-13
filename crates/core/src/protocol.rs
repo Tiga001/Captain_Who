@@ -407,11 +407,12 @@ pub struct AgentContextWindowSnapshot {
     pub reserved_output_tokens: u64,
     pub safety_margin_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub available_input_tokens: Option<u64>,
-    /// Fixed request costs plus context that survives into later conversation turns.
-    pub persistent_input_tokens: u64,
+    /// Input capacity left for durable conversation history after fixed request costs.
+    pub durable_capacity_tokens: Option<u64>,
+    /// Conversation history and trace content that survives into later turns.
+    pub durable_input_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub remaining_input_tokens: Option<i64>,
+    pub remaining_durable_tokens: Option<i64>,
     /// Opaque fingerprint that changes when the fixed or durable assembled context changes.
     pub persistent_revision: String,
 }

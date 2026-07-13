@@ -260,10 +260,11 @@ export interface AgentContextWindowSnapshot {
   contextWindowTokens?: number
   reservedOutputTokens: number
   safetyMarginTokens: number
-  availableInputTokens?: number
-  /** Fixed request costs plus context retained for later conversation turns. */
-  persistentInputTokens: number
-  remainingInputTokens?: number
+  /** Input capacity left for durable history after fixed request costs. */
+  durableCapacityTokens?: number
+  /** Conversation history and trace content retained for later turns. */
+  durableInputTokens: number
+  remainingDurableTokens?: number
   /** Opaque fingerprint that changes with fixed or durable context. */
   persistentRevision: string
 }

@@ -80,7 +80,7 @@ impl ContextRetention {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ContextSource {
     BackendSystemPrompt,
     ConversationHistory,
@@ -207,6 +207,16 @@ impl ContextMetadata {
         self
     }
 
+    fn replace_source(&mut self, from: ContextSource, to: ContextSource) {
+        for source in &mut self.sources {
+            if *source == from {
+                *source = to;
+            }
+        }
+        self.sources.sort_by_key(|source| source.as_str());
+        self.sources.dedup();
+    }
+
     pub(crate) fn sources(&self) -> &[ContextSource] {
         &self.sources
     }
@@ -311,10 +321,22 @@ impl ContextItem {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ContextFrame {
+    baseline: Option<MeasuredContextBaseline>,
+    /// Items appended after the shared durable baseline. Runtime clones only this overlay.
     items: Vec<ContextItem>,
     revision: u64,
     persistent_revision: u64,
     measurement: Option<ContextFrameMeasurementState>,
+}
+
+/// Immutable, already-measured conversation context shared by the server cache and active runs.
+/// Chunks preserve append-only updates without copying older durable items.
+#[derive(Debug, Clone)]
+pub(crate) struct MeasuredContextBaseline {
+    chunks: Arc<[Arc<[ContextItem]>]>,
+    revision: u64,
+    persistent_revision: u64,
+    measurement: ContextFrameMeasurementState,
 }
 
 #[derive(Debug, Clone)]
@@ -374,16 +396,96 @@ pub(crate) struct ContextFrameMeasurement {
     pub(crate) persistent_revision: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextFramePlanningItem {
+    pub(crate) index: usize,
+    pub(crate) usage_class: ContextUsageClass,
+    pub(crate) estimated_tokens: u64,
+    pub(crate) role: LlmMessageRole,
+    pub(crate) sources: Vec<ContextSource>,
+    pub(crate) group_id: Option<String>,
+    pub(crate) tool_names: Vec<String>,
+    pub(crate) image_count: usize,
+    pub(crate) is_error: bool,
+}
+
 impl ContextFrame {
     pub(crate) fn new(items: Vec<ContextItem>) -> Self {
         let revision = u64::try_from(items.len()).unwrap_or(u64::MAX);
         let persistent_revision = persistent_frame_revision(&items);
         Self {
+            baseline: None,
             items,
             revision,
             persistent_revision,
             measurement: None,
         }
+    }
+
+    pub(crate) fn from_measured_baseline(baseline: MeasuredContextBaseline) -> Self {
+        Self {
+            revision: baseline.revision,
+            persistent_revision: baseline.persistent_revision,
+            measurement: Some(baseline.measurement.clone()),
+            baseline: Some(baseline),
+            items: Vec::new(),
+        }
+    }
+
+    /// Reuses the longest whole-chunk prefix that is byte-for-byte equivalent to this restored
+    /// checkpoint. Remaining checkpoint items become the run overlay and are measured once.
+    pub(crate) fn rebase_onto_measured_baseline(
+        mut self,
+        candidate: MeasuredContextBaseline,
+    ) -> Self {
+        self.materialize_baseline();
+        let Some((baseline, prefix_item_count)) = candidate.matching_prefix(&self.items) else {
+            return self;
+        };
+        let overlay = self.items.split_off(prefix_item_count);
+        let mut rebased = Self::from_measured_baseline(baseline);
+        for item in overlay {
+            rebased.push(item);
+        }
+        rebased
+    }
+
+    /// Freezes all persistent overlay items into a shareable measured baseline. The frame keeps
+    /// the same baseline, so subsequent durable appends become a new chunk rather than copying
+    /// previously frozen history.
+    pub(crate) fn share_measured_persistent_baseline(
+        &mut self,
+    ) -> AgentResult<MeasuredContextBaseline> {
+        let measurement = self
+            .measurement
+            .clone()
+            .ok_or_else(|| AgentError::new("共享上下文基线前必须先完成计量。"))?;
+        if self
+            .iter_items()
+            .any(|item| !item.metadata.usage_class().is_persistent())
+        {
+            return Err(AgentError::new(
+                "共享上下文基线只能包含 fixed 或 durable 内容。",
+            ));
+        }
+
+        let mut chunks = self
+            .baseline
+            .as_ref()
+            .map(|baseline| baseline.chunks.to_vec())
+            .unwrap_or_default();
+        if !self.items.is_empty() {
+            let overlay = std::mem::take(&mut self.items);
+            chunks.push(Arc::from(overlay.into_boxed_slice()));
+        }
+        let baseline = MeasuredContextBaseline {
+            chunks: Arc::from(chunks.into_boxed_slice()),
+            revision: self.revision,
+            persistent_revision: self.persistent_revision,
+            measurement,
+        };
+        self.baseline = Some(baseline.clone());
+        Ok(baseline)
     }
 
     pub(crate) fn push(&mut self, mut item: ContextItem) {
@@ -401,6 +503,17 @@ impl ContextFrame {
         self.revision = self.revision.saturating_add(1);
     }
 
+    pub(crate) fn begin_new_conversation_turn(&mut self) {
+        self.materialize_baseline();
+        for item in &mut self.items {
+            item.metadata.replace_source(
+                ContextSource::CurrentTurn,
+                ContextSource::ConversationHistory,
+            );
+        }
+        self.persistent_revision = persistent_frame_revision(&self.items);
+    }
+
     pub(crate) fn measure_incrementally(
         &mut self,
         estimator: Arc<dyn ContextTokenEstimator>,
@@ -411,6 +524,7 @@ impl ContextFrame {
             .as_ref()
             .is_none_or(|measurement| measurement.identity != identity);
         if needs_rebuild {
+            self.materialize_baseline();
             let mut breakdown = ContextFrameEstimateBreakdown::default();
             for item in &mut self.items {
                 let usage_class = item.metadata.usage_class();
@@ -455,8 +569,7 @@ impl ContextFrame {
         }
 
         let messages = self
-            .items
-            .iter()
+            .iter_items()
             .map(|item| &item.message)
             .collect::<Vec<_>>();
         let estimate = estimator.estimate_messages(&messages);
@@ -472,8 +585,49 @@ impl ContextFrame {
         }
     }
 
+    /// Produces a content-free inventory for deterministic compaction planning. The planner must
+    /// consume the same cached estimator identity as the capacity report and may not remeasure
+    /// messages independently.
+    pub(crate) fn planning_items(&self) -> AgentResult<Vec<ContextFramePlanningItem>> {
+        let measurement = self
+            .measurement
+            .as_ref()
+            .ok_or_else(|| AgentError::new("生成压缩计划前必须先完成上下文计量。"))?;
+        self.iter_items()
+            .enumerate()
+            .map(|(index, item)| {
+                let estimate = item
+                    .measurement
+                    .as_ref()
+                    .filter(|item_measurement| item_measurement.estimator == measurement.identity)
+                    .map(|item_measurement| item_measurement.estimate)
+                    .ok_or_else(|| {
+                        AgentError::new(format!(
+                            "上下文第 {index} 项缺少与容量报告一致的计量结果。"
+                        ))
+                    })?;
+                Ok(ContextFramePlanningItem {
+                    index,
+                    usage_class: item.metadata.usage_class(),
+                    estimated_tokens: estimate.total_tokens(),
+                    role: item.message.role,
+                    sources: item.metadata.sources().to_vec(),
+                    group_id: item.metadata.group().map(|group| group.id().to_string()),
+                    tool_names: item
+                        .message
+                        .tool_calls
+                        .iter()
+                        .map(|call| call.name.clone())
+                        .collect(),
+                    image_count: estimate.image_count,
+                    is_error: item.message.is_error,
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn checkpoint_items(&self) -> AgentResult<Vec<AgentContextCheckpointItem>> {
-        self.items.iter().map(ContextItem::to_checkpoint).collect()
+        self.iter_items().map(ContextItem::to_checkpoint).collect()
     }
 
     pub(crate) fn from_checkpoint_items(
@@ -524,8 +678,7 @@ impl ContextFrame {
             )));
         }
         let group = self
-            .items
-            .iter()
+            .iter_items()
             .rev()
             .find(|item| {
                 item.message
@@ -564,7 +717,7 @@ impl ContextFrame {
     }
 
     pub(crate) fn contains_group_id(&self, group_id: &str) -> bool {
-        self.items.iter().any(|item| {
+        self.iter_items().any(|item| {
             item.metadata
                 .group()
                 .is_some_and(|group| group.id() == group_id)
@@ -572,7 +725,7 @@ impl ContextFrame {
     }
 
     pub(crate) fn contains_tool_call_id(&self, tool_call_id: &str) -> bool {
-        self.items.iter().any(|item| {
+        self.iter_items().any(|item| {
             item.message
                 .tool_calls
                 .iter()
@@ -582,18 +735,26 @@ impl ContextFrame {
 
     #[cfg(test)]
     pub(crate) fn to_messages(&self) -> Vec<LlmMessage> {
-        self.items.iter().map(|item| item.message.clone()).collect()
+        self.iter_items().map(|item| item.message.clone()).collect()
     }
 
     pub(crate) fn into_messages(self) -> Vec<LlmMessage> {
-        self.items.into_iter().map(|item| item.message).collect()
+        let baseline_item_count = self
+            .baseline
+            .as_ref()
+            .map_or(0, MeasuredContextBaseline::item_count);
+        let mut messages = Vec::with_capacity(baseline_item_count + self.items.len());
+        if let Some(baseline) = self.baseline {
+            messages.extend(baseline.iter_items().map(|item| item.message.clone()));
+        }
+        messages.extend(self.items.into_iter().map(|item| item.message));
+        messages
     }
 
     pub(crate) fn manifest(&self) -> ContextManifest<'_> {
         ContextManifest {
             entries: self
-                .items
-                .iter()
+                .iter_items()
                 .enumerate()
                 .map(|(index, item)| ContextManifestEntry {
                     index,
@@ -634,7 +795,7 @@ impl ContextFrame {
     fn unresolved_tool_calls(&self) -> AgentResult<BTreeMap<String, (LlmToolCall, ContextGroup)>> {
         let mut unresolved = BTreeMap::new();
         let mut seen_call_ids = BTreeSet::new();
-        for item in &self.items {
+        for item in self.iter_items() {
             match item.message.role {
                 LlmMessageRole::Assistant if !item.message.tool_calls.is_empty() => {
                     if !unresolved.is_empty() {
@@ -693,6 +854,83 @@ impl ContextFrame {
         }
         Ok(unresolved)
     }
+
+    fn iter_items(&self) -> impl DoubleEndedIterator<Item = &ContextItem> {
+        self.baseline
+            .iter()
+            .flat_map(MeasuredContextBaseline::iter_items)
+            .chain(self.items.iter())
+    }
+
+    fn materialize_baseline(&mut self) {
+        let Some(baseline) = self.baseline.take() else {
+            return;
+        };
+        let mut items = Vec::with_capacity(baseline.item_count() + self.items.len());
+        items.extend(baseline.iter_items().cloned());
+        items.append(&mut self.items);
+        self.items = items;
+    }
+}
+
+impl MeasuredContextBaseline {
+    fn iter_items(&self) -> impl DoubleEndedIterator<Item = &ContextItem> {
+        self.chunks.iter().flat_map(|chunk| chunk.iter())
+    }
+
+    fn item_count(&self) -> usize {
+        self.chunks.iter().map(|chunk| chunk.len()).sum()
+    }
+
+    fn matching_prefix(&self, items: &[ContextItem]) -> Option<(Self, usize)> {
+        let mut matching_chunks = Vec::new();
+        let mut item_offset = 0_usize;
+        let mut breakdown = ContextFrameEstimateBreakdown::default();
+
+        for chunk in self.chunks.iter() {
+            let end = item_offset.checked_add(chunk.len())?;
+            let Some(candidate_items) = items.get(item_offset..end) else {
+                break;
+            };
+            if !chunk
+                .iter()
+                .zip(candidate_items)
+                .all(|(left, right)| left.same_context_content(right))
+            {
+                break;
+            }
+            for item in chunk.iter() {
+                let estimate = item
+                    .measurement
+                    .as_ref()
+                    .filter(|measurement| measurement.estimator == self.measurement.identity)
+                    .map(|measurement| measurement.estimate)?;
+                breakdown.merge(item.metadata.usage_class(), estimate);
+            }
+            matching_chunks.push(chunk.clone());
+            item_offset = end;
+        }
+
+        if matching_chunks.is_empty() {
+            return None;
+        }
+        let persistent_revision =
+            persistent_frame_revision_iter(matching_chunks.iter().flat_map(|chunk| chunk.iter()));
+        Some((
+            Self {
+                chunks: Arc::from(matching_chunks.into_boxed_slice()),
+                revision: u64::try_from(item_offset).unwrap_or(u64::MAX),
+                persistent_revision,
+                measurement: ContextFrameMeasurementState {
+                    estimator: self.measurement.estimator.clone(),
+                    identity: self.measurement.identity.clone(),
+                    breakdown,
+                    full_recount: None,
+                },
+            },
+            item_offset,
+        ))
+    }
 }
 
 impl Default for ContextFrame {
@@ -702,8 +940,11 @@ impl Default for ContextFrame {
 }
 
 fn persistent_frame_revision(items: &[ContextItem]) -> u64 {
+    persistent_frame_revision_iter(items.iter())
+}
+
+fn persistent_frame_revision_iter<'a>(items: impl Iterator<Item = &'a ContextItem>) -> u64 {
     items
-        .iter()
         .filter(|item| item.metadata.usage_class().is_persistent())
         .fold(ContextRevisionHasher::new().finish(), |revision, item| {
             combine_context_revisions(revision, context_item_revision(item))
@@ -735,6 +976,12 @@ fn context_item_revision(item: &ContextItem) -> u64 {
         hasher.write_str(group.kind().as_str());
     }
     hasher.finish()
+}
+
+impl ContextItem {
+    fn same_context_content(&self, other: &Self) -> bool {
+        self.message == other.message && self.metadata == other.metadata
+    }
 }
 
 impl ContextItem {

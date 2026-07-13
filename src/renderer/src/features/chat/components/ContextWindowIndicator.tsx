@@ -16,15 +16,15 @@ function formatTokens(tokens: number, language: string): string {
 
 export function ContextWindowIndicator({ snapshot }: ContextWindowIndicatorProps) {
   const { language, t } = useFrontendConfig()
-  const totalTokens = snapshot.availableInputTokens
+  const totalTokens = snapshot.durableCapacityTokens
   if (!totalTokens || snapshot.status === 'unconfigured') return null
 
-  const rawPercent = (snapshot.persistentInputTokens / totalTokens) * 100
+  const rawPercent = (snapshot.durableInputTokens / totalTokens) * 100
   const progressPercent = Math.min(100, Math.max(0, rawPercent))
   const usedPercent = Math.round(progressPercent)
   const remainingPercent = Math.max(0, 100 - usedPercent)
   const level = rawPercent >= 90 ? 'critical' : rawPercent >= 75 ? 'warning' : 'normal'
-  const usedTokens = formatTokens(snapshot.persistentInputTokens, language)
+  const usedTokens = formatTokens(snapshot.durableInputTokens, language)
   const availableTokens = formatTokens(totalTokens, language)
 
   return (

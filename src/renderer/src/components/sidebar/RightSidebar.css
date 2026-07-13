@@ -321,6 +321,17 @@
 }
 
 .right-sidebar__home {
+  --right-sidebar-tool-background: color-mix(
+    in srgb,
+    var(--mc-color-surface-right-panel) 55%,
+    var(--mc-color-border-default)
+  );
+  --right-sidebar-tool-background-hover: color-mix(
+    in srgb,
+    var(--mc-color-surface-right-panel) 25%,
+    var(--mc-color-border-default)
+  );
+
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -347,16 +358,19 @@
   padding: 0 16px;
   text-align: left;
   color: inherit;
-  background: var(--mc-color-surface-muted);
-  border: 0;
+  background: var(--right-sidebar-tool-background);
+  border: 1px solid var(--mc-color-border-subtle);
   border-radius: var(--mc-radius-row);
   cursor: pointer;
   -webkit-app-region: no-drag;
-  transition: background-color 120ms ease;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
 }
 
 .right-sidebar__tool-card:hover {
-  background: var(--mc-color-surface-selected);
+  background: var(--right-sidebar-tool-background-hover);
+  border-color: var(--mc-color-border-default);
 }
 
 .right-sidebar__tool-heading {

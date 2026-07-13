@@ -199,11 +199,16 @@ impl ContextBudgetReport {
         model: &str,
         phase: AgentContextWindowPhase,
     ) -> AgentContextWindowSnapshot {
-        let persistent_input_tokens = self.usage.persistent_input_tokens();
-        let (status, remaining_input_tokens) = snapshot_capacity_state(
+        let fixed_input_tokens = self.usage.breakdown.fixed.input_tokens;
+        let durable_input_tokens = self.usage.breakdown.durable.input_tokens;
+        let durable_capacity_tokens = self
+            .available_input_tokens
+            .map(|available| available.saturating_sub(fixed_input_tokens));
+        let (status, remaining_durable_tokens) = durable_snapshot_capacity_state(
             self.context_window_tokens,
             self.available_input_tokens,
-            persistent_input_tokens,
+            fixed_input_tokens,
+            durable_input_tokens,
         );
 
         AgentContextWindowSnapshot {
@@ -213,9 +218,9 @@ impl ContextBudgetReport {
             context_window_tokens: self.context_window_tokens,
             reserved_output_tokens: self.reserved_output_tokens,
             safety_margin_tokens: self.safety_margin_tokens,
-            available_input_tokens: self.available_input_tokens,
-            persistent_input_tokens,
-            remaining_input_tokens,
+            durable_capacity_tokens,
+            durable_input_tokens,
+            remaining_durable_tokens,
             persistent_revision: format!("{:016x}", self.usage.persistent_revision),
         }
     }
@@ -514,10 +519,11 @@ fn build_budget_report(
     }
 }
 
-fn snapshot_capacity_state(
+fn durable_snapshot_capacity_state(
     context_window_tokens: Option<u64>,
     available_input_tokens: Option<u64>,
-    persistent_input_tokens: u64,
+    fixed_input_tokens: u64,
+    durable_input_tokens: u64,
 ) -> (AgentContextWindowStatus, Option<i64>) {
     if context_window_tokens.is_none() {
         return (AgentContextWindowStatus::Unconfigured, None);
@@ -529,16 +535,21 @@ fn snapshot_capacity_state(
         return (AgentContextWindowStatus::InvalidConfiguration, None);
     }
 
-    let remaining_input_tokens = Some(saturating_signed_difference(
-        available_input_tokens,
-        persistent_input_tokens,
+    let durable_capacity_tokens = available_input_tokens.saturating_sub(fixed_input_tokens);
+    let remaining_durable_tokens = Some(saturating_signed_difference(
+        durable_capacity_tokens,
+        durable_input_tokens,
     ));
-    if persistent_input_tokens > available_input_tokens {
-        (AgentContextWindowStatus::OverBudget, remaining_input_tokens)
+    if fixed_input_tokens > available_input_tokens || durable_input_tokens > durable_capacity_tokens
+    {
+        (
+            AgentContextWindowStatus::OverBudget,
+            remaining_durable_tokens,
+        )
     } else {
         (
             AgentContextWindowStatus::WithinBudget,
-            remaining_input_tokens,
+            remaining_durable_tokens,
         )
     }
 }
@@ -698,8 +709,8 @@ mod tests {
             AgentContextWindowPhase::DurableCommit
         );
         assert_eq!(
-            expanded_snapshot.persistent_input_tokens,
-            initial_snapshot.persistent_input_tokens
+            expanded_snapshot.durable_input_tokens,
+            initial_snapshot.durable_input_tokens
         );
         assert_eq!(
             expanded_snapshot.persistent_revision,
@@ -722,12 +733,49 @@ mod tests {
         let committed = detector.inspect(&mut frame, Some(128_000), 30_000);
         let committed_snapshot =
             committed.persistent_snapshot("provider/model", AgentContextWindowPhase::DurableCommit);
-        assert!(
-            committed_snapshot.persistent_input_tokens > expanded_snapshot.persistent_input_tokens
-        );
+        assert!(committed_snapshot.durable_input_tokens > expanded_snapshot.durable_input_tokens);
         assert_ne!(
             committed_snapshot.persistent_revision,
             expanded_snapshot.persistent_revision
+        );
+    }
+
+    #[test]
+    fn persistent_snapshot_excludes_fixed_costs_from_the_display_ratio() {
+        let mut frame = ContextFrame::new(vec![
+            ContextItem::text(
+                LlmMessageRole::System,
+                "fixed system rules ".repeat(1_000),
+                ContextSource::BackendSystemPrompt,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "durable conversation",
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+        ]);
+        let detector = detector(&[read_tool()]);
+
+        let report = detector.inspect(&mut frame, Some(128_000), 30_000);
+        let snapshot = report.persistent_snapshot("provider/model", AgentContextWindowPhase::Idle);
+
+        assert_eq!(
+            snapshot.durable_input_tokens,
+            report.usage.breakdown.durable.input_tokens
+        );
+        assert_eq!(
+            snapshot.durable_capacity_tokens,
+            report.available_input_tokens.map(|available| {
+                available.saturating_sub(report.usage.breakdown.fixed.input_tokens)
+            })
+        );
+        assert!(
+            report.usage.persistent_input_tokens() > snapshot.durable_input_tokens,
+            "fixed system and tool costs must not appear as used durable history"
         );
     }
 
@@ -995,6 +1043,105 @@ mod tests {
             ContextRetention::Retained,
         ));
         assert_eq!(counters.message_calls.load(Ordering::SeqCst), 9);
+    }
+
+    #[test]
+    fn compaction_inventory_reuses_cached_item_measurements() {
+        let counters = Arc::new(EstimatorCounters::default());
+        let detector = counting_detector("planner", counters.clone(), None, &[]);
+        let mut context = frame(vec![
+            LlmMessage::text(LlmMessageRole::System, "rules"),
+            LlmMessage::text(LlmMessageRole::User, "history"),
+            LlmMessage::text(LlmMessageRole::Assistant, "answer"),
+        ]);
+
+        detector.prepare_frame(&mut context);
+        let measured_calls = counters.message_calls.load(Ordering::SeqCst);
+        assert_eq!(measured_calls, 3);
+
+        let first = context.planning_items().unwrap();
+        let second = context.planning_items().unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 3);
+        assert_eq!(
+            counters.message_calls.load(Ordering::SeqCst),
+            measured_calls,
+            "building compaction inventory must not invoke the estimator again"
+        );
+        assert_eq!(counters.full_recount_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn shared_durable_baseline_is_not_remeasured_by_run_overlays() {
+        let counters = Arc::new(EstimatorCounters::default());
+        let detector = counting_detector("shared", counters.clone(), None, &[]);
+        let mut durable = frame(vec![
+            LlmMessage::text(LlmMessageRole::System, "rules"),
+            LlmMessage::text(LlmMessageRole::User, "history"),
+            LlmMessage::text(LlmMessageRole::Assistant, "answer"),
+        ]);
+
+        detector.prepare_frame(&mut durable);
+        let baseline = durable.share_measured_persistent_baseline().unwrap();
+        assert_eq!(counters.message_calls.load(Ordering::SeqCst), 3);
+
+        let mut first_run = ContextFrame::from_measured_baseline(baseline.clone());
+        let mut second_run = ContextFrame::from_measured_baseline(baseline);
+        detector.prepare_frame(&mut first_run);
+        detector.prepare_frame(&mut second_run);
+        assert_eq!(counters.message_calls.load(Ordering::SeqCst), 3);
+
+        first_run.push(ContextItem::text(
+            LlmMessageRole::Assistant,
+            "run narration",
+            ContextSource::ModelResponse,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ));
+        second_run.push(ContextItem::text(
+            LlmMessageRole::System,
+            "request-only todo",
+            ContextSource::RuntimeExtension,
+            ContextScope::Run,
+            ContextRetention::RequestOnly,
+        ));
+        detector.inspect(&mut first_run, None, 1_000);
+        detector.inspect(&mut second_run, None, 1_000);
+
+        assert_eq!(counters.message_calls.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn checkpoint_restore_reuses_matching_durable_baseline_prefix() {
+        let counters = Arc::new(EstimatorCounters::default());
+        let detector = counting_detector("checkpoint-shared", counters.clone(), None, &[]);
+        let durable_messages = vec![
+            LlmMessage::text(LlmMessageRole::System, "rules"),
+            LlmMessage::text(LlmMessageRole::User, "history"),
+            LlmMessage::text(LlmMessageRole::Assistant, "answer"),
+        ];
+        let mut durable = frame(durable_messages.clone());
+        detector.prepare_frame(&mut durable);
+        let baseline = durable.share_measured_persistent_baseline().unwrap();
+        assert_eq!(counters.message_calls.load(Ordering::SeqCst), 3);
+
+        let mut checkpoint_source = frame(durable_messages);
+        checkpoint_source.push(ContextItem::text(
+            LlmMessageRole::Assistant,
+            "run activity before approval",
+            ContextSource::ModelResponse,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ));
+        let checkpoint = checkpoint_source.checkpoint_items().unwrap();
+        let restored = ContextFrame::from_checkpoint_items(checkpoint).unwrap();
+        let mut rebased = restored.rebase_onto_measured_baseline(baseline);
+
+        assert_eq!(counters.message_calls.load(Ordering::SeqCst), 4);
+        detector.prepare_frame(&mut rebased);
+        assert_eq!(counters.message_calls.load(Ordering::SeqCst), 4);
+        assert_eq!(rebased.to_messages().len(), 4);
     }
 
     #[test]

@@ -156,6 +156,19 @@ impl StorageService {
         Ok(conversations)
     }
 
+    pub fn load_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ChatConversationRecord>, String> {
+        let connection = self.state.connection()?;
+        let mut conversation = chat_repository::get_conversation(&connection, conversation_id)
+            .map_err(storage_error)?;
+        if let Some(conversation) = &mut conversation {
+            self.attach_message_attachments(&connection, std::slice::from_mut(conversation))?;
+        }
+        Ok(conversation)
+    }
+
     pub fn search_chats(&self, input: &ChatSearchInput) -> Result<Vec<ChatSearchResult>, String> {
         let connection = self.state.connection()?;
         chat_search_repository::search_chats(&connection, input).map_err(storage_error)
@@ -445,6 +458,22 @@ impl StorageService {
         .map_err(storage_error)
     }
 
+    pub fn append_in_progress_conversation_turn_trace(
+        &self,
+        trace: &ConversationTurnTrace,
+        created_at: i64,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        let mut connection = self.state.connection()?;
+        conversation_trace_repository::append_in_progress_trace(
+            &mut connection,
+            trace,
+            created_at,
+            updated_at,
+        )
+        .map_err(storage_error)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn finalize_chat_message_with_conversation_trace(
         &self,
@@ -477,7 +506,7 @@ impl StorageService {
             completed_at,
         )
         .map_err(storage_error)?;
-        conversation_trace_repository::replace_trace_in_connection(
+        conversation_trace_repository::commit_trace_in_connection(
             &transaction,
             trace,
             trace_created_at,
@@ -1248,8 +1277,11 @@ mod tests {
             )
             .unwrap();
 
-        let conversations = service.load_conversations().unwrap();
-        let attachment = &conversations[0].messages[0].attachments[0];
+        let conversation = service
+            .load_conversation("conversation-1")
+            .unwrap()
+            .unwrap();
+        let attachment = &conversation.messages[0].attachments[0];
 
         assert_eq!(attachment.id, "attachment-1");
         assert_eq!(attachment.kind, "image");

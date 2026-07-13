@@ -137,8 +137,8 @@
   width: 22px;
   height: 22px;
   place-items: center;
-  color: var(--mc-color-text-inverse);
-  background: var(--mc-color-button-primary-bg);
+  color: var(--mc-color-control-selected-text);
+  background: var(--mc-color-control-selected-background);
   border-radius: var(--mc-radius-xs);
 }
 

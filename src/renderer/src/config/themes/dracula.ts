@@ -1,45 +1,59 @@
 import { createPaletteTheme } from './paletteTheme'
 import type { PaletteThemeRecipe } from './paletteTheme'
 
+const alucardUiPalette = {
+  background: '#FFFBEB',
+  floating: '#EFEDDC',
+  backgroundLighter: '#ECE9DF',
+  backgroundLight: '#DEDCCF',
+  backgroundDark: '#CECCC0',
+  backgroundDarker: '#BCBAB3',
+  selection: '#CFCFDE'
+} as const
+
+const alucardFunctionalPalette = {
+  focus: '#815CD6'
+} as const
+
 const alucardRecipe = {
   colorScheme: 'light',
   text: {
     primary: '#1F1F1F',
     strong: '#1F1F1F',
-    secondary: '#3F3F3F',
+    secondary: '#6C664B',
     muted: '#6C664B',
-    subtle: '#7B7560',
-    inverse: '#FFFBEB'
+    subtle: '#6C664B',
+    inverse: alucardUiPalette.background
   },
   surface: {
-    leftPanel: '#EFEDDC',
-    mainPanel: '#FFFBEB',
-    rightPanel: '#FFFDF5',
-    card: '#FFFDF5',
-    input: '#F7F3E4',
-    popover: '#FFFDF5',
-    muted: '#EFEDDC',
-    selected: '#DEDCCF',
-    selectedSubtle: '#ECE9DF',
-    disabled: '#CECCC0'
+    leftPanel: alucardUiPalette.backgroundLight,
+    mainPanel: alucardUiPalette.background,
+    rightPanel: alucardUiPalette.backgroundLighter,
+    card: alucardUiPalette.backgroundLighter,
+    input: alucardUiPalette.floating,
+    popover: alucardUiPalette.floating,
+    muted: alucardUiPalette.backgroundLight,
+    selected: alucardUiPalette.selection,
+    selectedSubtle: alucardUiPalette.backgroundLight,
+    disabled: alucardUiPalette.backgroundDark
   },
   border: {
-    default: '#CECCC0',
-    strong: '#BCBAB3'
+    default: alucardUiPalette.backgroundDark,
+    strong: alucardUiPalette.backgroundDarker
   },
-  accent: '#644AC9',
+  accent: alucardFunctionalPalette.focus,
   semantic: {
     danger: '#CB3A2A',
     success: '#14710A',
     info: '#036A96'
   },
   button: {
-    primaryBg: '#644AC9',
-    primaryBgHover: '#5238B4',
-    primaryText: '#FFFFFF',
+    primaryBg: alucardFunctionalPalette.focus,
+    primaryBgHover: '#644AC9',
+    primaryText: alucardUiPalette.background,
     dangerBg: '#B33124',
     dangerBgHover: '#93291F',
-    dangerText: '#FFFFFF'
+    dangerText: alucardUiPalette.background
   },
   visual: {
     avatar: '#A3144D',
@@ -47,14 +61,14 @@ const alucardRecipe = {
     output: '#644AC9',
     outputThinking: '#A3144D',
     sourceBadgeBackground: '#036A96',
-    sourceBadgeText: '#FFFFFF'
+    sourceBadgeText: alucardUiPalette.background
   },
   terminal: {
-    background: '#FFFBEB',
+    background: alucardUiPalette.background,
     foreground: '#1F1F1F',
     cursor: '#1F1F1F',
-    selectionBackground: '#CFCFDE',
-    black: '#FFFBEB',
+    selectionBackground: alucardUiPalette.selection,
+    black: alucardUiPalette.background,
     red: '#CB3A2A',
     green: '#14710A',
     yellow: '#846E15',

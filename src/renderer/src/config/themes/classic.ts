@@ -96,6 +96,10 @@ export const classicLightTheme = {
       dangerSoftBg: '#ffe9ea',
       dangerSoftBgHover: '#fbd9dc'
     },
+    control: {
+      selectedBackground: '#0169CC',
+      selectedText: '#ffffff'
+    },
     sidebar: {
       textSecondary: '#2F3338',
       textActive: '#1A1C1F',
@@ -225,6 +229,10 @@ export const classicDarkTheme = {
       dangerSoftText: '#FF8379',
       dangerSoftBg: 'rgba(255, 95, 84, 0.14)',
       dangerSoftBgHover: 'rgba(255, 95, 84, 0.2)'
+    },
+    control: {
+      selectedBackground: '#0169CC',
+      selectedText: '#FCFCFC'
     },
     sidebar: {
       textSecondary: '#ECECEC',

@@ -1,7 +1,7 @@
 use crate::storage::models::{
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ChatMessageStateRecord,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashSet;
 
 pub fn conversation_exists(
@@ -30,20 +30,7 @@ pub fn list_conversations(
     )?;
 
     let mut conversations = conversation_statement
-        .query_map([], |row| {
-            Ok(ChatConversationRecord {
-                id: row.get(0)?,
-                project_id: row.get(1)?,
-                model_id: row.get(2)?,
-                title: row.get(3)?,
-                messages: Vec::new(),
-                created_at: row.get(4)?,
-                updated_at: row.get(5)?,
-                pinned_at: row.get(6)?,
-                archived_at: row.get(7)?,
-                unread_at: row.get(8)?,
-            })
-        })?
+        .query_map([], conversation_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     for conversation in &mut conversations {
@@ -51,6 +38,42 @@ pub fn list_conversations(
     }
 
     Ok(conversations)
+}
+
+pub fn get_conversation(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<ChatConversationRecord>> {
+    let mut conversation = connection
+        .query_row(
+            "
+            SELECT id, project_id, model_id, title, created_at, updated_at, pinned_at, archived_at, unread_at
+            FROM conversations
+            WHERE id = ?1
+            ",
+            params![conversation_id],
+            conversation_from_row,
+        )
+        .optional()?;
+    if let Some(conversation) = &mut conversation {
+        conversation.messages = list_messages(connection, &conversation.id)?;
+    }
+    Ok(conversation)
+}
+
+fn conversation_from_row(row: &Row<'_>) -> rusqlite::Result<ChatConversationRecord> {
+    Ok(ChatConversationRecord {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        model_id: row.get(2)?,
+        title: row.get(3)?,
+        messages: Vec::new(),
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        pinned_at: row.get(6)?,
+        archived_at: row.get(7)?,
+        unread_at: row.get(8)?,
+    })
 }
 
 pub fn save_conversation(
@@ -482,6 +505,13 @@ mod tests {
         migrations::run_migrations(&connection).unwrap();
         let mut conversation = conversation();
         save_conversation(&mut connection, conversation.clone()).unwrap();
+
+        let stored = get_conversation(&connection, "conversation-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.messages.len(), 2);
+        assert!(get_conversation(&connection, "missing").unwrap().is_none());
+
         let trace = ConversationTurnTrace {
             schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
             run_id: "run-1".to_string(),

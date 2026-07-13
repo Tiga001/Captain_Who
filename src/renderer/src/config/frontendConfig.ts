@@ -255,6 +255,8 @@ export function getFrontendCssVariables(
     '--mc-color-button-danger-soft-text': theme.colors.button.dangerSoftText,
     '--mc-color-button-danger-soft-bg': theme.colors.button.dangerSoftBg,
     '--mc-color-button-danger-soft-bg-hover': theme.colors.button.dangerSoftBgHover,
+    '--mc-color-control-selected-background': theme.colors.control.selectedBackground,
+    '--mc-color-control-selected-text': theme.colors.control.selectedText,
     '--mc-color-sidebar-text-secondary': theme.colors.sidebar.textSecondary,
     '--mc-color-sidebar-text-active': theme.colors.sidebar.textActive,
     '--mc-color-sidebar-translucent-tint': theme.colors.sidebar.translucentTint,

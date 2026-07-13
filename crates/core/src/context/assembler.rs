@@ -88,7 +88,7 @@ impl ContextAssembler {
                 ));
             }
             if let Some(trace) = trace {
-                items.push(trace.terminal_item);
+                items.extend(trace.terminal_item);
             }
         }
 

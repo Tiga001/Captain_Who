@@ -24,6 +24,85 @@ fn add_column_if_missing(
         })
 }
 
+fn table_has_column(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(columns.iter().any(|candidate| candidate == column))
+}
+
+fn upgrade_conversation_trace_commit_schema(connection: &Connection) -> rusqlite::Result<()> {
+    if table_has_column(connection, "conversation_turn_traces", "updated_at")? {
+        return Ok(());
+    }
+
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let migration = connection.execute_batch(
+        "
+        BEGIN IMMEDIATE;
+
+        ALTER TABLE conversation_turn_trace_items
+            RENAME TO conversation_turn_trace_items_legacy;
+        ALTER TABLE conversation_turn_traces
+            RENAME TO conversation_turn_traces_legacy;
+
+        CREATE TABLE conversation_turn_traces (
+            assistant_message_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            run_id TEXT NOT NULL UNIQUE,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            terminal_status TEXT NOT NULL CHECK (terminal_status IN ('in_progress', 'completed', 'failed', 'cancelled')),
+            terminal_error TEXT,
+            truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            completed_at INTEGER CHECK (completed_at IS NULL OR completed_at >= created_at),
+            CHECK (
+                (terminal_status = 'in_progress' AND terminal_error IS NULL AND completed_at IS NULL)
+                OR (terminal_status != 'in_progress' AND completed_at IS NOT NULL)
+            ),
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE conversation_turn_trace_items (
+            assistant_message_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            item_kind TEXT NOT NULL CHECK (item_kind IN ('assistant_narration', 'tool_call', 'tool_result')),
+            item_json TEXT NOT NULL,
+            PRIMARY KEY (assistant_message_id, sequence),
+            FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
+        );
+
+        INSERT INTO conversation_turn_traces (
+            assistant_message_id, conversation_id, run_id, schema_version,
+            terminal_status, terminal_error, truncated, created_at, updated_at, completed_at
+        )
+        SELECT
+            assistant_message_id, conversation_id, run_id, schema_version,
+            terminal_status, terminal_error, truncated, created_at, completed_at, completed_at
+        FROM conversation_turn_traces_legacy;
+
+        INSERT INTO conversation_turn_trace_items (
+            assistant_message_id, sequence, item_kind, item_json
+        )
+        SELECT assistant_message_id, sequence, item_kind, item_json
+        FROM conversation_turn_trace_items_legacy;
+
+        DROP TABLE conversation_turn_trace_items_legacy;
+        DROP TABLE conversation_turn_traces_legacy;
+        COMMIT;
+        ",
+    );
+    if let Err(error) = migration {
+        let _ = connection.execute_batch("ROLLBACK;");
+        let _ = connection.execute_batch("PRAGMA foreign_keys = ON;");
+        return Err(error);
+    }
+    connection.execute_batch("PRAGMA foreign_keys = ON;")
+}
+
 fn run_one_time_maintenance(connection: &Connection) -> rusqlite::Result<()> {
     let transaction = connection.unchecked_transaction()?;
     let already_completed = transaction.query_row(
@@ -426,11 +505,16 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             conversation_id TEXT NOT NULL,
             run_id TEXT NOT NULL UNIQUE,
             schema_version INTEGER NOT NULL CHECK (schema_version > 0),
-            terminal_status TEXT NOT NULL CHECK (terminal_status IN ('completed', 'failed', 'cancelled')),
+            terminal_status TEXT NOT NULL CHECK (terminal_status IN ('in_progress', 'completed', 'failed', 'cancelled')),
             terminal_error TEXT,
             truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
             created_at INTEGER NOT NULL,
-            completed_at INTEGER NOT NULL CHECK (completed_at >= created_at),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            completed_at INTEGER CHECK (completed_at IS NULL OR completed_at >= created_at),
+            CHECK (
+                (terminal_status = 'in_progress' AND terminal_error IS NULL AND completed_at IS NULL)
+                OR (terminal_status != 'in_progress' AND completed_at IS NOT NULL)
+            ),
             FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
         );
@@ -472,6 +556,15 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_project_id ON agent_file_drafts(project_id);
         CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_expires_at ON agent_file_drafts(expires_at);
         CREATE INDEX IF NOT EXISTS idx_composer_drafts_updated_at ON composer_drafts(updated_at);
+        ",
+    )?;
+
+    upgrade_conversation_trace_commit_schema(connection)?;
+    connection.execute_batch(
+        "
+        DROP INDEX IF EXISTS idx_conversation_turn_traces_conversation_id;
+        CREATE INDEX idx_conversation_turn_traces_conversation_id
+            ON conversation_turn_traces(conversation_id, updated_at);
         ",
     )?;
 
@@ -562,6 +655,121 @@ mod tests {
             )
             .unwrap();
         assert_eq!(context_window, None);
+    }
+
+    #[test]
+    fn upgrades_terminal_only_trace_table_for_append_only_running_commits() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT,
+                    model_id TEXT,
+                    title TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    pinned_at INTEGER,
+                    archived_at INTEGER,
+                    unread_at INTEGER
+                );
+                CREATE TABLE messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT,
+                    agent_run_json TEXT,
+                    ui_state_json TEXT,
+                    created_at INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                );
+                CREATE TABLE conversation_turn_traces (
+                    assistant_message_id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL UNIQUE,
+                    schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+                    terminal_status TEXT NOT NULL CHECK (terminal_status IN ('completed', 'failed', 'cancelled')),
+                    terminal_error TEXT,
+                    truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+                    created_at INTEGER NOT NULL,
+                    completed_at INTEGER NOT NULL CHECK (completed_at >= created_at),
+                    FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                );
+                CREATE TABLE conversation_turn_trace_items (
+                    assistant_message_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK (sequence >= 0),
+                    item_kind TEXT NOT NULL CHECK (item_kind IN ('assistant_narration', 'tool_call', 'tool_result')),
+                    item_json TEXT NOT NULL,
+                    PRIMARY KEY (assistant_message_id, sequence),
+                    FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
+                );
+                INSERT INTO conversations VALUES ('conversation-1', NULL, NULL, 'title', 1, 1, NULL, NULL, NULL);
+                INSERT INTO messages VALUES ('assistant-1', 'conversation-1', 'assistant', 'done', 'sent', NULL, NULL, 1, 0);
+                INSERT INTO conversation_turn_traces VALUES (
+                    'assistant-1', 'conversation-1', 'run-1', 1, 'completed', NULL, 0, 1, 2
+                );
+                INSERT INTO conversation_turn_trace_items VALUES (
+                    'assistant-1', 0, 'assistant_narration',
+                    '{\"type\":\"assistant_narration\",\"sequence\":0,\"content\":\"hello\",\"truncated\":false}'
+                );
+                ",
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        assert!(table_has_column(&connection, "conversation_turn_traces", "updated_at").unwrap());
+        let migrated = connection
+            .query_row(
+                "SELECT terminal_status, updated_at, completed_at FROM conversation_turn_traces WHERE assistant_message_id = 'assistant-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(migrated, ("completed".to_string(), 2, Some(2)));
+        let migrated_item_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_turn_trace_items WHERE assistant_message_id = 'assistant-1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(migrated_item_count, 1);
+        connection
+            .execute(
+                "INSERT INTO messages VALUES ('assistant-running', 'conversation-1', 'assistant', '', 'pending', NULL, NULL, 3, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversation_turn_traces (
+                    assistant_message_id, conversation_id, run_id, schema_version,
+                    terminal_status, terminal_error, truncated, created_at, updated_at, completed_at
+                 ) VALUES ('assistant-running', 'conversation-1', 'run-running', 1,
+                    'in_progress', NULL, 0, 3, 3, NULL)",
+                [],
+            )
+            .unwrap();
+        let sql = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'conversation_turn_traces'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert!(sql.contains("in_progress"));
     }
 
     #[test]

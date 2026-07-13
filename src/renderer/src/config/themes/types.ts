@@ -69,6 +69,10 @@ export interface FrontendTheme {
       readonly dangerSoftBg: string
       readonly dangerSoftBgHover: string
     }
+    readonly control: {
+      readonly selectedBackground: string
+      readonly selectedText: string
+    }
     readonly sidebar: {
       readonly textSecondary: string
       readonly textActive: string

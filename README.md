@@ -11,6 +11,7 @@ MyCopilot 是一个本地优先的桌面 AI 工作助手。界面由 Electron、
 - 可审批的文件/命令操作，以及默认、完全、自定义三种权限模式
 - Tavily 联网搜索与网页读取
 - 内置终端、浏览器、用量统计和本地费用估算
+- 跨轮 Agent 工具轨迹、上下文容量保护与长期使用量提示
 
 ## 架构
 
@@ -26,6 +27,8 @@ crates/core-server/       Electron 启动的 Rust sidecar
 ```
 
 开发模式下，Electron 通过 Cargo 启动 `core-server`；生产包会把 release 二进制复制到 `process.resourcesPath`。Electron 与 Rust 之间使用逐行 JSON-RPC 通信。
+
+Agent 上下文的组装、长期轨迹、会话状态、分类计量、容量保护、压缩规划、审批恢复和前端用量投影见[上下文管理架构](docs/context-management.md)。
 
 ## 环境要求
 

@@ -5,7 +5,10 @@ use crate::protocol::{
     AgentWorkspaceContext,
 };
 use crate::runtime::tool_flow::parse_tool_call_request;
-use crate::ConversationTurnTraceItem;
+use crate::{
+    ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
+    ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+};
 
 fn message(role: &str, content: &str) -> AgentChatMessage {
     AgentChatMessage {
@@ -202,6 +205,166 @@ fn context_window_preview_is_available_independently_of_indicator_events() {
     .unwrap();
 
     assert!(inspect_context_window(input).unwrap().is_some());
+}
+
+fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput {
+    AgentChatInput {
+        api_url: "https://example.test/v1/chat/completions".to_string(),
+        api_token: String::new(),
+        model: "test-model".to_string(),
+        api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
+        context_window_tokens: Some(128_000),
+        context_window_indicator_enabled: true,
+        max_tokens: Some(30_000),
+        temperature: None,
+        stream: Some(true),
+        context: None,
+        search_config: None,
+        prompt_preferences: None,
+        approval_decision: None,
+        tool_continuation: None,
+        attachments: Vec::new(),
+        resume_checkpoint: None,
+        assistant_message_id: None,
+        messages,
+    }
+}
+
+fn conversation_context_trace(
+    terminal_status: ConversationTurnTraceTerminalStatus,
+    items: Vec<ConversationTurnTraceItem>,
+) -> ConversationTurnTrace {
+    ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-context".to_string(),
+        conversation_id: "conversation-context".to_string(),
+        assistant_message_id: "assistant-context".to_string(),
+        terminal_status,
+        terminal_error: None,
+        truncated: false,
+        items,
+    }
+}
+
+fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> AgentChatMessage {
+    AgentChatMessage {
+        role: "assistant".to_string(),
+        content: content.to_string(),
+        conversation_turn_trace: Some(trace),
+    }
+}
+
+fn full_conversation_context_snapshot(
+    messages: Vec<AgentChatMessage>,
+) -> AgentContextWindowSnapshot {
+    create_conversation_context_state(conversation_context_input(messages))
+        .unwrap()
+        .snapshot(AgentContextWindowPhase::DurableCommit)
+}
+
+#[test]
+fn conversation_context_state_incremental_updates_match_full_rebuilds() {
+    let first_user = message("user", "Inspect the project and update src/lib.rs");
+    let mut state =
+        create_conversation_context_state(conversation_context_input(vec![first_user.clone()]))
+            .unwrap();
+
+    let narration = ConversationTurnTraceItem::AssistantNarration {
+        sequence: 0,
+        content: "I will inspect the current implementation first.".to_string(),
+        truncated: false,
+    };
+    let narrated_trace = conversation_context_trace(
+        ConversationTurnTraceTerminalStatus::InProgress,
+        vec![narration.clone()],
+    );
+    let cursor = state.append_trace_items(&narrated_trace, 0).unwrap();
+    assert_eq!(cursor, 1);
+    assert_eq!(
+        state.snapshot(AgentContextWindowPhase::DurableCommit),
+        full_conversation_context_snapshot(vec![
+            first_user.clone(),
+            traced_assistant_message("", narrated_trace.clone()),
+        ])
+    );
+
+    let call = ConversationTurnTraceItem::ToolCall {
+        sequence: 1,
+        call_id: "call-context".to_string(),
+        tool: "read_file".to_string(),
+        operation: json!({ "path": "src/lib.rs" }),
+        approval_status: AgentApprovalStatus::NotRequired,
+        truncated: false,
+    };
+    let result = ConversationTurnTraceItem::ToolResult {
+        sequence: 2,
+        call_id: "call-context".to_string(),
+        tool: "read_file".to_string(),
+        status: ConversationTraceToolResultStatus::Succeeded,
+        success: true,
+        observation: json!({ "path": "src/lib.rs", "endLine": 40 }),
+        approval_status: AgentApprovalStatus::NotRequired,
+        error: None,
+        truncated: false,
+    };
+    let closed_trace = conversation_context_trace(
+        ConversationTurnTraceTerminalStatus::InProgress,
+        vec![narration, call, result],
+    );
+    let cursor = state.append_trace_items(&closed_trace, cursor).unwrap();
+    assert_eq!(cursor, 3);
+    assert_eq!(
+        state.snapshot(AgentContextWindowPhase::DurableCommit),
+        full_conversation_context_snapshot(vec![
+            first_user.clone(),
+            traced_assistant_message("", closed_trace.clone()),
+        ])
+    );
+
+    let completed_trace = ConversationTurnTrace {
+        terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+        ..closed_trace
+    };
+    let final_content = "I updated the implementation and verified the tests.";
+    state
+        .finalize_conversation_turn(&completed_trace, cursor, final_content)
+        .unwrap();
+    assert_eq!(
+        state.snapshot(AgentContextWindowPhase::DurableCommit),
+        full_conversation_context_snapshot(vec![
+            first_user.clone(),
+            traced_assistant_message(final_content, completed_trace.clone()),
+        ])
+    );
+
+    let follow_up = "Now explain the change.";
+    state.append_user_message(follow_up);
+    assert_eq!(
+        state.snapshot(AgentContextWindowPhase::DurableCommit),
+        full_conversation_context_snapshot(vec![
+            first_user,
+            traced_assistant_message(final_content, completed_trace),
+            message("user", follow_up),
+        ])
+    );
+}
+
+#[test]
+fn runtime_shared_baseline_matches_full_context_assembly() {
+    let input = conversation_context_input(vec![
+        message("user", "First question"),
+        message("assistant", "First answer"),
+        message("user", "Current question"),
+    ]);
+    let capabilities = prepare_runtime_capabilities(&input, "baseline-test", &[], true).unwrap();
+    let full =
+        build_llm_request(input.clone(), &capabilities.tool_definitions, None, None).unwrap();
+    let mut durable_state = create_conversation_context_state(input.clone()).unwrap();
+    let baseline = durable_state.shared_baseline().unwrap();
+    let shared =
+        build_llm_request(input, &capabilities.tool_definitions, None, Some(baseline)).unwrap();
+
+    assert_eq!(shared.context.to_messages(), full.context.to_messages());
 }
 
 #[tokio::test]
@@ -684,11 +847,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
     assert!(preview_additions.len() >= 3, "{preview_additions:?}");
     assert_eq!(preview_additions.last().copied(), Some(4));
     assert_eq!(preview_content, "line 1\nline 2\nline 3\nline 4\n");
-    assert_eq!(context_snapshots.len(), 1);
-    assert!(context_snapshots.iter().all(|snapshot| {
-        snapshot.phase == crate::protocol::AgentContextWindowPhase::DurableCommit
-            && snapshot.model == "test-model"
-    }));
+    assert!(context_snapshots.is_empty());
     assert!(output.events.iter().all(|event| !matches!(
         event,
         AgentEvent::FileWritePreviewUpdated { .. } | AgentEvent::FileWritePreviewCleared { .. }

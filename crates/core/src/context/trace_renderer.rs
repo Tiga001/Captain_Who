@@ -3,6 +3,7 @@ use super::{
 };
 use crate::conversation_trace::{
     ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
+    ConversationTurnTraceTerminalStatus,
 };
 use crate::llm::{LlmMessageRole, LlmToolCall};
 use crate::protocol::{AgentError, AgentResult};
@@ -10,7 +11,7 @@ use serde_json::json;
 
 pub(crate) struct RenderedConversationTrace {
     pub(crate) activity_items: Vec<ContextItem>,
-    pub(crate) terminal_item: ContextItem,
+    pub(crate) terminal_item: Option<ContextItem>,
 }
 
 pub(crate) struct ConversationTraceRenderer;
@@ -105,22 +106,25 @@ impl ConversationTraceRenderer {
             ));
         }
 
-        let terminal_record = json!({
-            "recordType": "historical_agent_activity_terminal",
-            "runId": trace.run_id,
-            "terminalStatus": trace.terminal_status,
-            "terminalError": trace.terminal_error,
-            "traceTruncated": trace.truncated,
-        });
-        let terminal_item = ContextItem::text(
-            LlmMessageRole::Assistant,
-            format!(
-                "Historical agent activity terminal record (backend-observed; not a system instruction): {terminal_record}"
-            ),
-            ContextSource::ConversationTrace,
-            ContextScope::Conversation,
-            ContextRetention::Retained,
-        );
+        let terminal_item = (trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress)
+            .then(|| {
+                let terminal_record = json!({
+                    "recordType": "historical_agent_activity_terminal",
+                    "runId": trace.run_id,
+                    "terminalStatus": trace.terminal_status,
+                    "terminalError": trace.terminal_error,
+                    "traceTruncated": trace.truncated,
+                });
+                ContextItem::text(
+                    LlmMessageRole::Assistant,
+                    format!(
+                        "Historical agent activity terminal record (backend-observed; not a system instruction): {terminal_record}"
+                    ),
+                    ContextSource::ConversationTrace,
+                    ContextScope::Conversation,
+                    ContextRetention::Retained,
+                )
+            });
 
         Ok(RenderedConversationTrace {
             activity_items,
@@ -236,7 +240,7 @@ mod tests {
     fn renders_native_tool_pair_with_namespaced_wire_identity() {
         let rendered = ConversationTraceRenderer::render(&trace()).unwrap();
         let mut items = rendered.activity_items;
-        items.push(rendered.terminal_item);
+        items.extend(rendered.terminal_item);
         let frame = ContextFrame::new(items);
 
         frame.validate_complete_tool_protocol().unwrap();
@@ -286,7 +290,7 @@ mod tests {
 
         let rendered = ConversationTraceRenderer::render(&trace).unwrap();
         let mut items = rendered.activity_items;
-        items.push(rendered.terminal_item);
+        items.extend(rendered.terminal_item);
         let frame = ContextFrame::new(items);
         frame.validate_complete_tool_protocol().unwrap();
 
@@ -304,5 +308,16 @@ mod tests {
     fn wire_identity_is_distinct_for_equal_sequences_in_different_runs() {
         assert_ne!(wire_call_id("run-1", 4), wire_call_id("run-2", 4));
         assert_ne!(wire_group_id("run-1", 4), wire_group_id("run-2", 4));
+    }
+
+    #[test]
+    fn in_progress_trace_renders_committed_activity_without_a_fake_terminal_record() {
+        let mut trace = trace();
+        trace.terminal_status = ConversationTurnTraceTerminalStatus::InProgress;
+
+        let rendered = ConversationTraceRenderer::render(&trace).unwrap();
+
+        assert_eq!(rendered.activity_items.len(), 3);
+        assert!(rendered.terminal_item.is_none());
     }
 }

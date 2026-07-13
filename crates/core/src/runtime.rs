@@ -7,14 +7,15 @@ mod tool_input_stream;
 
 use crate::cancellation::AgentCancellationToken;
 use crate::context::{
-    ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextBudgetReport,
-    ContextCapacityDetector, ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata,
+    AgentContextBaseline, AgentConversationContextState, ContextAssembler, ContextAssemblyInput,
+    ContextAttachments, ContextBudgetReport, ContextCapacityDetector, ContextCompactionPlan,
+    ContextCompactionPlanner, ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata,
     ContextRetention, ContextScope, ContextSource,
 };
 use crate::conversation_trace::ConversationTraceRecorder;
 use crate::llm::{
-    complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessageRole,
-    LlmStreamEvent,
+    complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessage,
+    LlmMessageRole, LlmStreamEvent,
 };
 use crate::prompts::build_system_prompt;
 use crate::protocol::{
@@ -24,6 +25,7 @@ use crate::protocol::{
     AgentResult, AgentRunContext, AgentRunStatus, AgentToolCall, AgentToolDefinition,
     AgentToolResult,
 };
+use crate::revision::content_revision;
 use crate::storage::service::StorageService;
 use crate::tools::{ToolExecutionContext, ToolRegistry};
 use crate::usage::merge_total_usage;
@@ -104,8 +106,12 @@ struct PreparedRuntimeCapabilities {
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub type AgentEventEmitter = Arc<dyn Fn(AgentEvent) + Send + Sync + 'static>;
-pub type AgentConversationTraceObserver =
-    Arc<dyn Fn(ConversationTraceSnapshot) + Send + Sync + 'static>;
+pub type AgentConversationTraceObserver = Arc<
+    dyn Fn(ConversationTraceSnapshot) -> AgentResult<Option<AgentContextBaseline>>
+        + Send
+        + Sync
+        + 'static,
+>;
 pub type AgentHostActionExecutor = Arc<
     dyn Fn(AgentProposedAction, AgentCancellationToken) -> AgentResult<AgentToolResult>
         + Send
@@ -194,32 +200,88 @@ pub fn next_run_id() -> String {
 pub fn inspect_context_window(
     input: AgentChatInput,
 ) -> AgentResult<Option<AgentContextWindowSnapshot>> {
-    let run_id = "context-window-preview";
-    let PreparedRuntimeCapabilities {
-        runtime_extensions,
-        tool_definitions,
-        ..
-    } = prepare_runtime_capabilities(&input, run_id, &[], true)?;
-    let api_style = input
-        .api_style
-        .unwrap_or_else(|| detect_api_style(input.api_url.trim()));
-    let max_tokens = sanitize_max_tokens(input.max_tokens);
-    let mut context = assemble_context_preview(
+    let mut state = create_conversation_context_state(input)?;
+    Ok(Some(state.snapshot(AgentContextWindowPhase::Idle)))
+}
+
+pub fn conversation_context_configuration_revision(input: &AgentChatInput) -> AgentResult<String> {
+    Ok(prepare_conversation_context(input)?.configuration_revision)
+}
+
+pub fn create_conversation_context_state(
+    input: AgentChatInput,
+) -> AgentResult<AgentConversationContextState> {
+    let prepared = prepare_conversation_context(&input)?;
+    let frame = assemble_context_preview(
         input.messages,
         input.context.as_ref(),
         input.prompt_preferences.as_ref(),
+        &prepared.tool_definitions,
+    )?;
+    let detector = ContextCapacityDetector::for_model(
+        &input.model,
+        prepared.api_style,
+        &prepared.tool_definitions,
+    );
+    Ok(AgentConversationContextState::new(
+        prepared.configuration_revision,
+        input.model,
+        input.context_window_tokens,
+        sanitize_max_tokens(input.max_tokens),
+        detector,
+        frame,
+    ))
+}
+
+struct PreparedConversationContext {
+    tool_definitions: Vec<AgentToolDefinition>,
+    api_style: crate::protocol::AgentApiStyle,
+    configuration_revision: String,
+}
+
+fn prepare_conversation_context(
+    input: &AgentChatInput,
+) -> AgentResult<PreparedConversationContext> {
+    let run_id = "conversation-context-state";
+    let PreparedRuntimeCapabilities {
+        tool_definitions, ..
+    } = prepare_runtime_capabilities(input, run_id, &[], true)?;
+    let api_style = input
+        .api_style
+        .unwrap_or_else(|| detect_api_style(input.api_url.trim()));
+    let configuration_revision = conversation_context_configuration_revision_from_parts(
+        input,
+        api_style,
         &tool_definitions,
     )?;
-    runtime_extensions
-        .contribute_request_context(&ModelRequestContext::agent_work(), &mut context)?;
+    Ok(PreparedConversationContext {
+        tool_definitions,
+        api_style,
+        configuration_revision,
+    })
+}
 
-    let detector = ContextCapacityDetector::for_model(&input.model, api_style, &tool_definitions);
-    detector.prepare_frame(&mut context);
-    let report = detector.inspect(&mut context, input.context_window_tokens, max_tokens);
-    Ok(Some(report.persistent_snapshot(
-        &input.model,
-        AgentContextWindowPhase::Idle,
-    )))
+fn conversation_context_configuration_revision_from_parts(
+    input: &AgentChatInput,
+    api_style: crate::protocol::AgentApiStyle,
+    tool_definitions: &[AgentToolDefinition],
+) -> AgentResult<String> {
+    let system_prompt = build_system_prompt(
+        input.context.as_ref(),
+        input.prompt_preferences.as_ref(),
+        tool_definitions,
+    );
+    let material = serde_json::to_vec(&json!({
+        "schemaVersion": 1,
+        "model": input.model.trim(),
+        "apiStyle": api_style,
+        "contextWindowTokens": input.context_window_tokens,
+        "reservedOutputTokens": sanitize_max_tokens(input.max_tokens),
+        "systemPrompt": system_prompt,
+        "toolDefinitions": tool_definitions,
+    }))
+    .map_err(|error| AgentError::new(format!("无法生成上下文计量配置指纹：{error}")))?;
+    Ok(content_revision(&material))
 }
 
 pub struct AgentRuntime {
@@ -276,7 +338,8 @@ impl AgentRuntime {
         let trace_assistant_message_id = input.assistant_message_id.clone();
         let trace_run_id = run_id.clone();
         let setup_conversation_trace = conversation_trace_from_input_checkpoint(&input);
-        publish_trace_recorder_snapshot(&setup_conversation_trace, trace_observer.as_ref());
+        let shared_context_baseline =
+            publish_trace_recorder_snapshot(&setup_conversation_trace, trace_observer.as_ref())?;
         let restored_checkpoint =
             restore_input_checkpoint(&mut input, &run_id).map_err(|error| {
                 attach_failed_runtime_trace(
@@ -318,7 +381,6 @@ impl AgentRuntime {
             tool_definitions: tool_definitions.clone(),
         });
         let transaction_storage = storage.clone();
-        let context_window_indicator_enabled = input.context_window_indicator_enabled;
         let context_window_configured = input.context_window_tokens.is_some();
         let mut file_transaction_guard = FileTransactionRunGuard::new(
             transaction_storage.clone(),
@@ -331,7 +393,13 @@ impl AgentRuntime {
             mut next_model_request_index,
             mut tool_batch,
             conversation_trace,
-        } = build_llm_request(input, &tool_definitions, restored_checkpoint).map_err(|error| {
+        } = build_llm_request(
+            input,
+            &tool_definitions,
+            restored_checkpoint,
+            shared_context_baseline,
+        )
+        .map_err(|error| {
             attach_failed_runtime_trace(
                 error,
                 &setup_conversation_trace,
@@ -341,7 +409,7 @@ impl AgentRuntime {
             )
         })?;
         let conversation_trace = Arc::new(Mutex::new(conversation_trace));
-        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref());
+        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
         let tool_context = ToolExecutionContext::from_run_context(context.as_ref())
             .with_cancellation(cancellation_token.clone())
             .with_runtime_services(run_id.clone(), storage);
@@ -361,6 +429,8 @@ impl AgentRuntime {
                 &llm_request.tools,
             )
         });
+        let context_compaction_planner = context_window_configured
+            .then(|| ContextCompactionPlanner::for_tools(&llm_request.tools));
         if let Some(detector) = &context_capacity_detector {
             detector.prepare_frame(&mut active_context);
         }
@@ -437,27 +507,21 @@ impl AgentRuntime {
                         // Future blocking compaction consumes this view before the capacity gate;
                         // it must not remeasure or reinterpret the request independently.
                         let compaction_query = report.compaction_query();
+                        let compaction_plan = context_compaction_planner
+                            .as_ref()
+                            .expect("configured capacity detector must have a compaction planner")
+                            .plan(&compaction_query, &request_context.planning_items()?);
                         emit_context_budget_if_enabled(
                             &run_id,
                             model_request_index + 1,
                             &report,
                             &compaction_query,
+                            &compaction_plan,
                         );
-                        if context_window_indicator_enabled && model_request_index == 0 {
-                            event_stream.emit(AgentEvent::ContextWindowUpdated {
-                                run_id: run_id.clone(),
-                                conversation_id: context
-                                    .as_ref()
-                                    .and_then(|context| context.conversation_id.clone()),
-                                snapshot: report.persistent_snapshot(
-                                    &llm_request.model,
-                                    AgentContextWindowPhase::DurableCommit,
-                                ),
-                            });
-                        }
                         detector.ensure_sendable(report.clone())?;
                     }
                     let request = llm_request.request(request_context);
+                    let mut committed_message_stream_id = None;
                     let llm_response_result = if request.stream {
                         let delta_run_id = run_id.clone();
                         let stream_id = format!("{}-stream-{}", run_id, model_request_index + 1);
@@ -573,10 +637,7 @@ impl AgentRuntime {
                                             );
                                         }
                                         if !user_text_blocked {
-                                            event_stream.emit(AgentEvent::MessageStreamCommitted {
-                                                run_id: delta_run_id.clone(),
-                                                stream_id: stream_id.clone(),
-                                            });
+                                            committed_message_stream_id = Some(stream_id.clone());
                                         }
                                     }
                                     LlmStreamEvent::Delta(_) => {}
@@ -619,7 +680,13 @@ impl AgentRuntime {
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())
                             .record_narration(&llm_response.content);
-                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref());
+                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+                    }
+                    if let Some(stream_id) = committed_message_stream_id.take() {
+                        event_stream.emit(AgentEvent::MessageStreamCommitted {
+                            run_id: run_id.clone(),
+                            stream_id,
+                        });
                     }
                     if cancellation_token.is_cancelled() {
                         return Ok(cancelled_output(
@@ -732,7 +799,7 @@ impl AgentRuntime {
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .record_tool_call(&call);
-                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref());
+                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     event_stream.emit(AgentEvent::ToolCall {
                         run_id: run_id.clone(),
                         call: redact_tool_call_for_event(&call),
@@ -758,7 +825,7 @@ impl AgentRuntime {
                                 publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
-                                );
+                                )?;
                                 action
                             }
                             Err(error) => {
@@ -770,7 +837,7 @@ impl AgentRuntime {
                                 publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
-                                );
+                                )?;
                                 event_stream.emit(AgentEvent::ToolResult {
                                     run_id: run_id.clone(),
                                     result: result.clone(),
@@ -866,7 +933,7 @@ impl AgentRuntime {
                                 publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
-                                );
+                                )?;
                                 if let AgentProposedAction::Diff { diff } = &action {
                                     event_stream.emit(AgentEvent::Diff {
                                         run_id: run_id.clone(),
@@ -912,7 +979,7 @@ impl AgentRuntime {
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .record_tool_result(&call, &result);
-                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref());
+                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     if cancellation_token.is_cancelled()
                         || result.error.as_deref() == Some("agent run 已取消。")
                     {
@@ -1045,21 +1112,22 @@ impl AgentRuntime {
 fn publish_trace_recorder_snapshot(
     recorder: &ConversationTraceRecorder,
     observer: Option<&AgentConversationTraceObserver>,
-) {
+) -> AgentResult<Option<AgentContextBaseline>> {
     if let Some(observer) = observer {
-        observer(recorder.snapshot());
+        return observer(recorder.snapshot());
     }
+    Ok(None)
 }
 
 fn publish_trace_snapshot(
     recorder: &Arc<Mutex<ConversationTraceRecorder>>,
     observer: Option<&AgentConversationTraceObserver>,
-) {
+) -> AgentResult<Option<AgentContextBaseline>> {
     if observer.is_none() {
-        return;
+        return Ok(None);
     }
     let recorder = recorder.lock().unwrap_or_else(|error| error.into_inner());
-    publish_trace_recorder_snapshot(&recorder, observer);
+    publish_trace_recorder_snapshot(&recorder, observer)
 }
 
 fn finalize_runtime_trace(
@@ -1269,6 +1337,7 @@ fn emit_context_budget_if_enabled(
     request_index: usize,
     report: &ContextBudgetReport,
     compaction_query: &ContextCompactionQuery,
+    compaction_plan: &ContextCompactionPlan,
 ) {
     if !context_diagnostics_enabled() {
         return;
@@ -1277,6 +1346,7 @@ fn emit_context_budget_if_enabled(
     let diagnostic = json!({
         "capacity": report,
         "compactionQuery": compaction_query,
+        "compactionPlan": compaction_plan,
     });
     match serde_json::to_string(&diagnostic) {
         Ok(diagnostic) => {
@@ -1378,6 +1448,7 @@ fn build_llm_request(
     input: AgentChatInput,
     tool_definitions: &[AgentToolDefinition],
     restored_checkpoint: Option<RestoredRunCheckpoint>,
+    shared_context_baseline: Option<AgentContextBaseline>,
 ) -> AgentResult<PreparedLlmRequest> {
     let api_style = input
         .api_style
@@ -1393,23 +1464,43 @@ fn build_llm_request(
         stream: input.stream.unwrap_or(false),
         tools: tool_definitions.to_vec(),
     };
+    let configuration_revision = conversation_context_configuration_revision_from_parts(
+        &input,
+        api_style,
+        tool_definitions,
+    )?;
+    let shared_context_baseline = shared_context_baseline
+        .filter(|baseline| baseline.matches_configuration(&configuration_revision));
     let (context, next_model_request_index, tool_batch, conversation_trace) =
         match restored_checkpoint {
-            Some(restored) => (
-                restored.context,
-                restored.next_model_request_index,
-                restored.tool_batch,
-                restored.conversation_trace,
-            ),
+            Some(restored) => {
+                let context = match shared_context_baseline {
+                    Some(baseline) => baseline.rebase_restored_frame(restored.context),
+                    None => restored.context,
+                };
+                (
+                    context,
+                    restored.next_model_request_index,
+                    restored.tool_batch,
+                    restored.conversation_trace,
+                )
+            }
             None => {
                 let attachment_context = build_attachment_context(&input.attachments)?;
-                let context = assemble_initial_context(
-                    input.messages,
-                    attachment_context,
-                    input.context.as_ref(),
-                    input.prompt_preferences.as_ref(),
-                    tool_definitions,
-                )?;
+                let mut context = match shared_context_baseline {
+                    Some(baseline) => baseline.into_frame(),
+                    None => assemble_initial_context(
+                        input.messages,
+                        AttachmentContext {
+                            text: String::new(),
+                            images: Vec::new(),
+                        },
+                        input.context.as_ref(),
+                        input.prompt_preferences.as_ref(),
+                        tool_definitions,
+                    )?,
+                };
+                append_attachment_context(&mut context, attachment_context);
                 (
                     context,
                     0,
@@ -1426,6 +1517,22 @@ fn build_llm_request(
         tool_batch,
         conversation_trace,
     })
+}
+
+fn append_attachment_context(frame: &mut ContextFrame, attachment_context: AttachmentContext) {
+    if attachment_context.text.trim().is_empty() && attachment_context.images.is_empty() {
+        return;
+    }
+    let mut message = LlmMessage::text(LlmMessageRole::User, attachment_context.text);
+    message.images = attachment_context.images;
+    frame.push(ContextItem::new(
+        message,
+        ContextMetadata::new(
+            ContextSource::InputAttachment,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ),
+    ));
 }
 
 fn restore_input_checkpoint(

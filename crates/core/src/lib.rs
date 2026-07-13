@@ -15,6 +15,7 @@ mod tools;
 mod usage;
 
 pub use cancellation::AgentCancellationToken;
+pub use context::{AgentContextBaseline, AgentConversationContextState};
 pub use conversation_trace::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
@@ -45,6 +46,7 @@ pub use protocol::{
 };
 pub use revision::content_revision;
 pub use runtime::{
+    conversation_context_configuration_revision, create_conversation_context_state,
     inspect_context_window, next_run_id, send_chat, send_chat_with_events,
     send_chat_with_events_and_cancellation, send_chat_with_host_executor,
     send_chat_with_host_executor_and_trace_observer, AgentConversationTraceObserver,

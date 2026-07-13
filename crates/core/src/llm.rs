@@ -37,7 +37,7 @@ pub(crate) struct LlmChatResponse {
     pub finish_reason: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LlmMessage {
     pub role: LlmMessageRole,
     pub content: String,
@@ -94,7 +94,7 @@ pub(crate) enum LlmMessageRole {
     Tool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LlmImage {
     pub mime_type: String,
     pub data_base64: String,
@@ -111,7 +111,7 @@ impl LlmMessageRole {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LlmToolCall {
     pub id: String,
     pub name: String,

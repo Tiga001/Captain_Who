@@ -1,0 +1,299 @@
+# 上下文管理架构
+
+本文说明 MyCopilot 如何组装模型请求、保存跨轮 Agent 轨迹、维护会话级上下文状态、估算请求容量，以及前端上下文圆环如何自然地成为后端长期状态的一个只读投影。
+
+## 设计目标
+
+- 所有模型请求都从同一套 provider-neutral 上下文结构生成。
+- 当前 tool loop 能看到完整、必要的工具结果，同时避免把大块临时数据永久写入历史。
+- 下一轮模型能看到上一轮公开过程、工具调用和有限结果，不依赖前端 timeline JSON。
+- 容量保护、未来压缩判断和前端圆环共用同一套分类与计量规则。
+- 长期消息只测量一次；当前 run 在共享不可变基线上追加 overlay。
+- 前端展示开关只能控制事件和 UI，不能控制后端上下文状态的生命周期。
+- 审批暂停不会丢失当前运行上下文。
+- 计量可以增量更新，并能在未来替换为模型专用 tokenizer。
+
+当前已经实现无副作用的压缩规划，但尚未实现摘要生成、上下文替换和压缩持久化；因此自动压缩仍未启用。项目级记忆和语义检索也尚未实现。
+
+## 总体数据流
+
+```text
+SQLite messages + ConversationTurnTrace
+                    |
+                    v
+       conversation_history_messages
+                    |
+                    v
+             ContextAssembler
+                    |
+                    v
+      AgentConversationContextState
+       (durable items + measured cache)
+             /                 \
+            v                   v
+ shared immutable baseline   persistent snapshot
+            |                   |
+            v                   v
+ ContextFrame + run overlay  frontend indicator
+            |
+            v
+ capacity report + compaction plan + capacity gate + provider payload
+```
+
+`ContextAssembler` 是从持久化数据建立上下文的唯一结构化入口。它负责验证消息、恢复历史工具协议、添加系统提示词并生成 `ContextFrame`。core-server 随后把该 frame 提升为 `AgentConversationContextState`。OpenAI 与 Anthropic 的 wire payload 都从共享基线和当前 run overlay 生成，不从前端 timeline 反推。
+
+## 上下文来源与顺序
+
+一个历史 assistant turn 按以下顺序进入下一轮：
+
+```text
+assistant narration
+tool call
+tool result
+assistant final reply
+terminal record
+```
+
+新一轮 user 消息位于这些历史活动之后。
+
+主要来源包括：
+
+| 来源                         | 内容                                            | 是否跨轮           |
+| ---------------------------- | ----------------------------------------------- | ------------------ |
+| BackendSystemPrompt          | 后端系统提示词和工具行为约束                    | 每次重新生成       |
+| ConversationHistory          | user/assistant 最终文本                         | 是                 |
+| ConversationTrace            | 公开 narration、工具调用、有限工具结果、终态    | 是                 |
+| CurrentTurn                  | 当前 user 输入                                  | 完成本轮后转为历史 |
+| ModelResponse                | 当前 tool loop 中的模型输出与工具调用           | 仅当前运行         |
+| ToolResult                   | 当前 tool loop 使用的完整或脱敏工具 observation | 仅当前运行         |
+| InputAttachment              | 当前请求的附件正文或图片                        | 仅当前运行         |
+| RuntimeExtension             | Todo 等扩展临时注入                             | 单次请求           |
+| RuntimeGuard/FileTransaction | 协议纠正和文件事务约束                          | 单次请求或当前运行 |
+
+## 分类模型
+
+每个 `ContextItem` 都携带 `source`、`scope`、`retention` 和可选的原子工具交换分组。计量时映射为四类：
+
+| 分类          | 含义                                | 主要消费者                         |
+| ------------- | ----------------------------------- | ---------------------------------- |
+| fixed         | 系统提示词、工具定义和请求协议开销  | 容量保护、压缩查询、圆环净容量预留 |
+| durable       | 会话历史和持久化 trace              | 容量保护、压缩查询、圆环           |
+| run_transient | 当前 tool loop 的模型输出和工具正文 | 容量保护、压缩查询                 |
+| request_only  | Todo、文件事务提示等本次请求注入    | 容量保护、压缩查询                 |
+
+圆环显示的是 `durable / durable_capacity`，其中：
+
+```text
+durable_capacity = available_input - fixed
+```
+
+系统提示词、工具定义和协议固定开销不计入“已用”分子，但会先从可供长期历史使用的分母中扣除。这样圆环表达的是对话历史与持久化 trace 实际占用了多少净长期容量。网页正文等临时 observation 不会让圆环先增加、运行结束后又减少；只有压缩、删除或回退等真正改写长期历史的操作允许圆环下降。
+
+## ConversationTurnTrace
+
+`ConversationTurnTrace` 是后端生成、provider-neutral、版本化的长期 Agent 活动记录。它不读取 `agent_run_json`，也不保存隐藏 reasoning。
+
+一次工具执行只发生一次，但结果形成三种视图：
+
+1. runtime observation：供当前 tool loop 使用，可包含较完整正文。
+2. durable projection：限量、脱敏后写入 trace，供未来轮次使用。
+3. presentation event：供前端 timeline 展示。
+
+运行中的 trace 使用 append-only SQLite 记录：
+
+- 稳定 narration 可以立即提交。
+- tool call 必须等 tool result 闭合后一起提交。
+- 已提交前缀不能重写、缩短或重新打开。
+- assistant 最终消息、运行终态和 terminal trace 在同一事务中提交。
+
+SQLite 表：
+
+- `conversation_turn_traces`
+- `conversation_turn_trace_items`
+
+删除 assistant 消息或会话时由外键级联删除对应 trace。
+
+## 审批与完整运行检查点
+
+审批会暂停当前 Rust 运行任务。暂停前保存：
+
+- 完整 `ContextFrame`
+- 下一次模型请求序号
+- 待审批调用和后续工具队列
+- 扩展快照，例如 Todo
+- ConversationTrace recorder 状态
+
+审批完成后恢复同一个 run 的检查点，先把审批结果作为工具结果补回上下文，再继续请求模型。计量缓存属于派生数据，不写入检查点；恢复后由 `ContextFrame` 根据 estimator identity 重建一次。
+
+## 统一计量源
+
+计量链分为三层：
+
+1. `ContextTokenEstimator`：估算单条消息、工具定义、图片和协议开销。
+2. `ContextFrame`：缓存每个 item 的估算并维护四类增量汇总。
+3. `ContextCapacityDetector`：结合模型窗口、输出预留和安全余量生成 `ContextBudgetReport`。
+
+一个 `ContextBudgetReport` 可以派生：
+
+- 完整请求容量判断
+- `ContextCompactionQuery`
+- 长期 `AgentContextWindowSnapshot`
+
+这些消费者不维护自己的 token 公式。
+
+当前 estimator 是启发式实现：ASCII 约 3 字符/token，非 ASCII 约 2 token/字符，图片使用固定预留。接口已经支持 estimator identity、版本和整帧复核，但尚未接入模型专用 tokenizer。
+
+## 容量公式
+
+```text
+safety_margin = max(context_window * 5%, 1024)
+available_input = context_window - reserved_output - safety_margin
+```
+
+tool loop 在每次真正发送 provider 请求前检查完整请求：
+
+```text
+fixed + durable + run_transient + request_only <= available_input
+```
+
+超限时请求不会发送。`ContextCompactionQuery` 和 `ContextCompactionPlan` 都从同一个报告及其已缓存逐项计量生成，但当前还没有压缩执行器，因此现在仍会直接返回结构化容量错误。
+
+## 压缩规划器
+
+`ContextCompactionPlanner` 在每次 provider 请求完成上下文组装和计量之后、容量 gate 之前运行。它是纯决策模块：不读取 SQLite、不调用模型、不修改 `ContextFrame`，也不改变当前请求是否发送。
+
+输入只有两部分：
+
+1. `ContextCompactionQuery`：来自本次请求唯一的 `ContextBudgetReport`。
+2. `ContextFramePlanningItem`：只包含分类、已缓存 token、角色、来源、原子分组和工具安全属性，不包含消息正文。
+
+因此规划不会触发第二次 tokenizer 计量。输出 `ContextCompactionPlan` 包含：
+
+- `not_required`、`required`、`insufficient_compactable_context` 等明确状态；
+- 触发线、动态目标、必须回收量和预计回收量；
+- request/durable 目标是否达到，以及是否为 `best_effort`；
+- 受保护 token 及原因；
+- 按 `run_overlay`、`durable_history` 划分的候选范围；
+- 每一步允许的最大摘要输出 token；
+- 是否包含副作用工具或错误记录。
+
+规划器有两条相互独立但使用同一计量报告的压力通道：
+
+1. 完整请求压力：`fixed + durable + run_transient + request_only` 达到可用输入的 75% 时触发，目标由当前 run 增长动态决定，负责避免 tool loop 被临时大结果撑爆。
+2. 长期上下文压力：圆环同口径的 `durable / (available_input - fixed)` 达到 75% 时触发，目标直接设为净长期容量的 15%。
+
+规划器会分别计算完整请求和 durable 的理想回收量，候选选择不能只压缩 run overlay 来假装长期目标已经完成。15% 是软目标：受保护内容过多时，规划器仍对所有能安全产生收益的候选生成 `required + best_effort` 计划，并明确报告预计压缩后仍高于目标。只有完全没有有效压缩步骤时才返回 `insufficient_compactable_context`。
+
+摘要预算也不是“原文固定乘一个百分比”。规划器先计算本次必须回收的 token，再给摘要保留仍能达到目标的最大输出预算，并使用绝对输出上限防止摘要本身过大。后续执行器可以生成更短摘要，但不能超过计划预算。
+
+计划里的所有 item range 都绑定同一个 `contextRevision`。未来执行器必须先从该版本的只读快照提取全部候选，再原子提交替换；不能先修改一段上下文，再拿已经偏移的旧索引继续修改。
+
+候选选择遵守以下规则：
+
+- fixed、request-only、当前 user 消息、附件、图片和 runtime guard 绝对保护；
+- 同一个工具 call/result 分组不可拆开，混合分类的原子分组整体保护；
+- 优先处理较旧的 run overlay，其次是较旧的 durable history；
+- 最近内容、失败记录和有副作用的工具活动降低选择优先级，但不是永远不可压缩；
+- 未知工具按有副作用处理；
+- 安全候选无法达到理想目标时仍生成 best-effort 计划；没有任何候选能产生实际收益时才返回 `insufficient_compactable_context`。
+
+设置 `MYCOPILOT_CONTEXT_MANIFEST=1` 时，现有上下文诊断会同时打印 capacity report、compaction query 和 compaction plan，供开发期核验。正常运行不会向前端新增事件。
+
+## 会话状态与运行视图
+
+系统不再为前端圆环维护独立计量器。后端只有一个通用的会话级派生状态：`AgentConversationContextState`。
+
+它由 core-server 所有，事实来源是 SQLite，包含：
+
+- 已确定的 fixed 与 durable `ContextItem`；
+- 每个 item 的 estimator 结果和分类汇总；
+- 模型、系统提示词、工具定义和预算配置的 revision；
+- 活动 run/message 身份与已提交 trace 游标。
+
+状态把已测量的长期内容冻结成按块共享的 `AgentContextBaseline`。块是不可变的，新增 user、narration 或闭合的 tool call/result 只形成新块，不复制或重测旧块。
+
+`AgentRuntime` 启动时从 trace observer 获得同一份 baseline，并建立运行视图：
+
+```text
+运行视图 = shared durable baseline + current run overlay + request-only overlay
+```
+
+因此会话状态与运行时仍有不同生命周期，但不再是两套独立计量：长期内容和长期分类汇总由 Arc 共享。运行时只测量当前附件、模型输出、工具结果、Todo 和文件事务提示等增量。
+
+审批恢复时，检查点会与当前 baseline 按不可变块匹配。匹配的长期前缀直接复用，只有检查点中的 run overlay 重新测量；配置或内容不一致时安全回退为完整重建。
+
+## 会话级状态缓存
+
+core-server 使用最多 32 个会话的 LRU 缓存。缓存项包含 `AgentConversationContextState`、配置 revision、活动 run/message 身份和已提交 trace 游标。
+
+缓存命中时：
+
+- 新 user 消息测量一次。
+- 新 narration 只测量新增项。
+- 新工具调用只在 call/result 闭合提交后测量。
+- 最终 assistant 回复和 terminal record 各测量一次。
+- 新 run 直接共享已经测量的长期 baseline，不再重新扫描历史。
+
+以下情况使状态失效并在下次运行或读取时从 SQLite 整体重建：
+
+- 消息删除或回退
+- 会话或项目删除
+- 模型配置变化
+- Agent 提示词配置变化
+- 强制取消导致长期终态改变
+- 未来的上下文压缩或其他历史重写
+
+配置 revision 覆盖模型、API 风格、窗口、输出预留、系统提示词和工具 definitions。前端圆环开关不属于 revision，也不会删除状态。
+
+## 前端同步
+
+前端在切换会话、模型、权限或上下文展示设置时主动请求一次快照。运行中，core-server 在 durable trace 成功提交后可发送 `context_window_updated`。
+
+该事件来自 `AgentConversationContextState.snapshot()`，只是 durable 使用量和净长期容量的展示投影。关闭圆环只会停止查询和事件发送；会话状态仍为 runtime 容量保护和未来压缩服务。
+
+前端同时维护请求序号和事件序号，防止较慢的主动查询覆盖更新的运行事件。输入框尚未发送的草稿不参与圆环计算。
+
+## Hook 与未来压缩
+
+Runtime extension 当前支持：
+
+- 注册工具
+- 为单次模型请求贡献上下文
+- 处理已完成的 runtime event
+- 在审批检查点中保存和恢复扩展状态
+
+`ModelRequestPurpose::ContextCompaction`、`ContextCompactionQuery` 和 `ContextCompactionPlan` 已就位，但阻塞式压缩执行流程尚未实现。未来执行器应当：
+
+1. 在每次 provider 请求计量之后、容量拒绝和真正发送 Agent 工作请求之前读取现有计划。
+2. 仅在计划为 `required` 时阻塞主 tool loop，并向前端发送明确状态。
+3. 按计划的原子范围和摘要预算生成摘要，不自行重新解释容量策略。
+4. 原子替换 run overlay 或长期历史，并为长期改写建立正式持久化结构。
+5. 使受影响的会话上下文状态失效。
+6. 从权威状态重建上下文，重新计量和规划；只有新报告可发送时才恢复 Agent 工作请求。
+
+## 当前限制与后续方向
+
+- 已有压缩规划，但尚无摘要执行、上下文替换和摘要持久化。
+- 尚无项目级记忆；`ContextScope::Project` 仅保留类型位置。
+- 尚无语义相关片段检索。
+- 启发式 token 计量不是 provider 精确 tokenizer。
+- 会话缓存按数量限制，尚未按估算内存或 token 总量限制。
+- 历史改写后的缓存失效目前由 core-server 调用方显式触发，未来应收敛为统一的 durable-history mutation 入口。
+
+## 主要代码位置
+
+| 模块                 | 路径                                                                   |
+| -------------------- | ---------------------------------------------------------------------- |
+| 上下文组装           | `crates/core/src/context/assembler.rs`                                 |
+| ContextFrame 与分类  | `crates/core/src/context/frame.rs`                                     |
+| 会话状态与共享基线   | `crates/core/src/context/state.rs`                                     |
+| Token estimator      | `crates/core/src/context/measurement.rs`                               |
+| 预算、容量与压缩查询 | `crates/core/src/context/budget.rs`                                    |
+| 压缩规划器           | `crates/core/src/context/compaction.rs`                                |
+| 历史 trace 渲染      | `crates/core/src/context/trace_renderer.rs`                            |
+| Agent tool loop      | `crates/core/src/runtime.rs`                                           |
+| 审批检查点           | `crates/core/src/runtime/checkpoint.rs`                                |
+| Runtime extensions   | `crates/core/src/runtime/extensions/`                                  |
+| Trace 持久化         | `crates/core/src/storage/conversation_trace_repository.rs`             |
+| 会话状态 LRU 与接线  | `crates/core-server/src/agent.rs`                                      |
+| 前端圆环             | `src/renderer/src/features/chat/components/ContextWindowIndicator.tsx` |

@@ -71,6 +71,7 @@ pub const CONVERSATION_TRACE_LIMITS: ConversationTraceLimits = ConversationTrace
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationTurnTraceTerminalStatus {
+    InProgress,
     Completed,
     Failed,
     Cancelled,
@@ -79,10 +80,15 @@ pub enum ConversationTurnTraceTerminalStatus {
 impl ConversationTurnTraceTerminalStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::InProgress => "in_progress",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
         }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        !matches!(self, Self::InProgress)
     }
 }
 
@@ -203,6 +209,11 @@ impl ConversationTurnTrace {
             validate_durable_identifier(label, identifier)?;
         }
         if let Some(error) = self.terminal_error.as_deref() {
+            if self.terminal_status == ConversationTurnTraceTerminalStatus::InProgress {
+                return Err(
+                    "in-progress conversation trace cannot have a terminal error".to_string(),
+                );
+            }
             validate_durable_text(
                 "terminal_error",
                 error,
@@ -326,6 +337,49 @@ impl ConversationTurnTrace {
             return Err("conversation trace ends with an unresolved tool call".to_string());
         }
         Ok(())
+    }
+}
+
+impl ConversationTraceSnapshot {
+    /// Returns the append-only prefix that is safe to commit while a run is still active.
+    /// A pending tool call remains in the runtime checkpoint but is not durable until its result
+    /// closes the exchange.
+    pub fn committed_prefix(&self) -> Self {
+        let unresolved_call_index = self.items.iter().enumerate().rev().find_map(|(index, item)| {
+            let ConversationTurnTraceItem::ToolCall { call_id, .. } = item else {
+                return None;
+            };
+            let closed = self.items[index + 1..].iter().any(|candidate| {
+                matches!(candidate, ConversationTurnTraceItem::ToolResult { call_id: result_id, .. } if result_id == call_id)
+            });
+            (!closed).then_some(index)
+        });
+        let items = unresolved_call_index
+            .map_or_else(|| self.items.clone(), |index| self.items[..index].to_vec());
+        Self {
+            items,
+            next_sequence: self.next_sequence,
+            truncated: self.truncated,
+        }
+    }
+
+    pub fn in_progress_trace(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+    ) -> ConversationTurnTrace {
+        let committed = self.committed_prefix();
+        ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: run_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            terminal_error: None,
+            truncated: committed.truncated,
+            items: committed.items,
+        }
     }
 }
 
@@ -505,11 +559,7 @@ impl ConversationTraceRecorder {
             .count();
         if narration_count >= CONVERSATION_TRACE_LIMITS.max_narrations {
             self.truncated = true;
-            if let Some(index) = self.items.iter().position(|item| {
-                matches!(item, ConversationTurnTraceItem::AssistantNarration { .. })
-            }) {
-                self.items.remove(index);
-            }
+            return;
         }
         let (content, truncated) =
             bounded_text(content.trim(), CONVERSATION_TRACE_LIMITS.narration_chars);
@@ -521,6 +571,10 @@ impl ConversationTraceRecorder {
                 truncated,
             });
         self.truncated |= truncated;
+        if !trace_items_fit_aggregate_limit(&self.items) {
+            self.items.pop();
+            self.truncated = true;
+        }
     }
 
     pub(crate) fn record_tool_call(&mut self, call: &AgentToolCall) {
@@ -535,14 +589,23 @@ impl ConversationTraceRecorder {
             .iter()
             .filter(|item| matches!(item, ConversationTurnTraceItem::ToolCall { .. }))
             .count();
-        if exchange_count >= CONVERSATION_TRACE_LIMITS.max_tool_exchanges {
+        let non_side_effect_exchange_count = self
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(item, ConversationTurnTraceItem::ToolCall { tool, .. } if !is_side_effecting_tool(tool))
+            })
+            .count();
+        const SIDE_EFFECT_EXCHANGE_RESERVE: usize = 128;
+        let non_side_effect_limit = CONVERSATION_TRACE_LIMITS
+            .max_tool_exchanges
+            .saturating_sub(SIDE_EFFECT_EXCHANGE_RESERVE);
+        if exchange_count >= CONVERSATION_TRACE_LIMITS.max_tool_exchanges
+            || (!is_side_effecting_tool(&call.tool)
+                && non_side_effect_exchange_count >= non_side_effect_limit)
+        {
             self.truncated = true;
-            if !is_side_effecting_tool(&call.tool) {
-                return;
-            }
-            if !self.evict_oldest_exchange(false) && !self.evict_oldest_exchange(true) {
-                return;
-            }
+            return;
         }
         let (operation, truncated) = project_tool_call(call);
         let sequence = self.take_sequence();
@@ -723,6 +786,11 @@ impl ConversationTraceRecorder {
             truncated: projection.truncated,
         });
         self.truncated |= projection.truncated;
+        if !trace_items_fit_aggregate_limit(&self.items) {
+            self.items.pop();
+            self.items.remove(call_index);
+            self.truncated = true;
+        }
     }
 
     pub(crate) fn finish(
@@ -735,7 +803,6 @@ impl ConversationTraceRecorder {
     ) -> ConversationTurnTrace {
         let mut recorder = self.clone();
         recorder.close_unresolved(terminal_status, terminal_error);
-        recorder.fit_aggregate_limit();
         let (terminal_error, terminal_error_truncated) = terminal_error
             .map(durable_error_text)
             .map(|(error, truncated)| (Some(error), truncated))
@@ -789,6 +856,9 @@ impl ConversationTraceRecorder {
         };
         let (error, truncated) = durable_error_text(terminal_error.unwrap_or(fallback));
         let sequence = self.take_sequence();
+        let call_index = self.items.iter().rposition(|item| {
+            matches!(item, ConversationTurnTraceItem::ToolCall { call_id: candidate, .. } if candidate == &call_id)
+        });
         self.items.push(ConversationTurnTraceItem::ToolResult {
             sequence,
             call_id,
@@ -804,6 +874,13 @@ impl ConversationTraceRecorder {
             truncated,
         });
         self.truncated |= truncated;
+        if !trace_items_fit_aggregate_limit(&self.items) {
+            self.items.pop();
+            if let Some(call_index) = call_index {
+                self.items.remove(call_index);
+            }
+            self.truncated = true;
+        }
     }
 
     fn rebuild_deduplication_state(&mut self) {
@@ -859,52 +936,14 @@ impl ConversationTraceRecorder {
         self.next_sequence = self.next_sequence.saturating_add(1);
         sequence
     }
+}
 
-    fn evict_oldest_exchange(&mut self, include_side_effects: bool) -> bool {
-        let Some(call_index) = self.items.iter().position(|item| {
-            matches!(
-                item,
-                ConversationTurnTraceItem::ToolCall { tool, .. }
-                    if include_side_effects || !is_side_effecting_tool(tool)
-            )
-        }) else {
-            return false;
-        };
-        let call_id = match &self.items[call_index] {
-            ConversationTurnTraceItem::ToolCall { call_id, .. } => call_id.clone(),
-            _ => unreachable!(),
-        };
-        let result_index = self.items.iter().enumerate().skip(call_index + 1).find_map(
-            |(index, item)| match item {
-                ConversationTurnTraceItem::ToolResult {
-                    call_id: result_id, ..
-                } if result_id == &call_id => Some(index),
-                ConversationTurnTraceItem::ToolCall { .. } => None,
-                _ => None,
-            },
-        );
-        if let Some(result_index) = result_index {
-            self.items.remove(result_index);
-        }
-        self.items.remove(call_index);
-        true
-    }
-
-    fn fit_aggregate_limit(&mut self) {
-        while serialized_chars(&self.items) > CONVERSATION_TRACE_LIMITS.max_trace_json_chars / 2 {
-            self.truncated = true;
-            if let Some(index) = self.items.iter().position(|item| {
-                matches!(item, ConversationTurnTraceItem::AssistantNarration { .. })
-            }) {
-                self.items.remove(index);
-                continue;
-            }
-            if self.evict_oldest_exchange(false) || self.evict_oldest_exchange(true) {
-                continue;
-            }
-            break;
-        }
-    }
+fn trace_items_fit_aggregate_limit(items: &[ConversationTurnTraceItem]) -> bool {
+    const TRACE_HEADER_RESERVE_CHARS: usize = 16_384;
+    serialized_chars(items)
+        <= CONVERSATION_TRACE_LIMITS
+            .max_trace_json_chars
+            .saturating_sub(TRACE_HEADER_RESERVE_CHARS)
 }
 
 struct ToolResultProjection {
@@ -1993,7 +2032,7 @@ fn looks_like_wrapped_base64(value: &str) -> bool {
     false
 }
 
-fn serialized_chars(value: &impl Serialize) -> usize {
+fn serialized_chars(value: &(impl Serialize + ?Sized)) -> usize {
     serde_json::to_string(value)
         .map(|value| value.chars().count())
         .unwrap_or(usize::MAX)
@@ -2395,6 +2434,39 @@ mod tests {
             ConversationTurnTraceItem::ToolResult { tool, observation, .. }
                 if tool == "write_file" && observation["filePath"] == "important.txt"
         )));
+        assert!(trace.items.iter().any(|item| matches!(
+            item,
+            ConversationTurnTraceItem::ToolCall { call_id, .. } if call_id == "read-0"
+        )));
+    }
+
+    #[test]
+    fn narration_limit_never_evicts_an_already_recorded_prefix() {
+        let mut recorder = ConversationTraceRecorder::default();
+        for index in 0..=CONVERSATION_TRACE_LIMITS.max_narrations {
+            recorder.record_narration(&format!("narration-{index}"));
+        }
+        let trace = recorder.finish(
+            "run-narration-limit",
+            "conversation-narration-limit",
+            "assistant-narration-limit",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+
+        trace.validate().unwrap();
+        assert!(trace.truncated);
+        assert_eq!(trace.items.len(), CONVERSATION_TRACE_LIMITS.max_narrations);
+        assert!(matches!(
+            &trace.items[0],
+            ConversationTurnTraceItem::AssistantNarration { content, .. }
+                if content == "narration-0"
+        ));
+        assert!(trace.items.iter().all(|item| !matches!(
+            item,
+            ConversationTurnTraceItem::AssistantNarration { content, .. }
+                if content == &format!("narration-{}", CONVERSATION_TRACE_LIMITS.max_narrations)
+        )));
     }
 
     #[test]
@@ -2623,5 +2695,40 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn running_snapshot_commits_narration_and_only_closed_tool_exchanges() {
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_narration("I will inspect the file.");
+        let call = call("read_file", json!({ "path": "src/lib.rs" }));
+        recorder.record_tool_call(&call);
+
+        let pending = recorder.snapshot();
+        assert_eq!(pending.items.len(), 2);
+        let committed = pending.in_progress_trace("run", "conversation", "assistant");
+        committed.validate().unwrap();
+        assert_eq!(committed.items.len(), 1);
+        assert_eq!(
+            committed.terminal_status,
+            ConversationTurnTraceTerminalStatus::InProgress
+        );
+
+        recorder.record_tool_result(
+            &call,
+            &AgentToolResult {
+                call_id: call.id.clone(),
+                tool: call.tool.clone(),
+                ok: true,
+                result: Some(json!({ "path": "src/lib.rs", "endLine": 20 })),
+                error: None,
+            },
+        );
+        let closed = recorder
+            .snapshot()
+            .in_progress_trace("run", "conversation", "assistant");
+        closed.validate().unwrap();
+        assert_eq!(closed.items.len(), 3);
+        assert_eq!(closed.items[0], committed.items[0]);
     }
 }

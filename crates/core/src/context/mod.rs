@@ -8,14 +8,18 @@
 
 mod assembler;
 mod budget;
+mod compaction;
 mod frame;
 mod measurement;
+mod state;
 mod trace_renderer;
 
 pub(crate) use assembler::{ContextAssembler, ContextAssemblyInput, ContextAttachments};
 pub(crate) use budget::{ContextBudgetReport, ContextCapacityDetector, ContextCompactionQuery};
+pub(crate) use compaction::{ContextCompactionPlan, ContextCompactionPlanner};
 pub(crate) use frame::{
     ContextFrame, ContextGroup, ContextItem, ContextMetadata, ContextRetention, ContextScope,
-    ContextSource,
+    ContextSource, MeasuredContextBaseline,
 };
+pub use state::{AgentContextBaseline, AgentConversationContextState};
 pub(crate) use trace_renderer::ConversationTraceRenderer;

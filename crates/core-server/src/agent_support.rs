@@ -269,10 +269,7 @@ pub(super) fn prepare_conversation_turn(
     let assistant_message_id = normalized_optional(input.assistant_message_id.as_deref())
         .unwrap_or_else(|| create_id("message"));
 
-    let existing = storage
-        .load_conversations()?
-        .into_iter()
-        .find(|conversation| conversation.id == conversation_id);
+    let existing = storage.load_conversation(&conversation_id)?;
     let input_project_id = normalized_optional(input.project_id.as_deref());
     let resolved_project_id = input_project_id.or_else(|| {
         existing
@@ -429,7 +426,14 @@ pub(super) fn conversation_history_messages(
                 .iter()
                 .any(|excluded_id| message.id == *excluded_id)
         })
-        .filter(|message| message.status.as_deref() != Some("pending"))
+        .filter(|message| {
+            if message.status.as_deref() != Some("pending") {
+                return true;
+            }
+            traces.get(message.id.as_str()).is_some_and(|trace| {
+                trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
+            })
+        })
         .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
         .filter_map(|message| {
             let trace = traces.get(message.id.as_str()).copied();
@@ -437,8 +441,10 @@ pub(super) fn conversation_history_messages(
                 return None;
             }
             let content = if trace.is_some_and(|trace| {
+                trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
+            }) || (trace.is_some_and(|trace| {
                 trace.terminal_status == ConversationTurnTraceTerminalStatus::Cancelled
-            }) && message.content.trim() == THINKING_PLACEHOLDER
+            }) && message.content.trim() == THINKING_PLACEHOLDER)
             {
                 String::new()
             } else {
