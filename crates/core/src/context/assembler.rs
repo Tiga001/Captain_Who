@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_message_creation_time_as_stable_utc_context_metadata() {
+    fn renders_message_creation_time_with_explicit_local_offset() {
         let mut timestamped = message("user", "historical question");
         timestamped.created_at = Some(0);
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
@@ -315,10 +315,11 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(
-            frame.to_messages()[1].content,
-            "[Message created at: 1970-01-01T00:00:00Z]\nhistorical question"
+        let expected = format!(
+            "[Message created at: {}]\nhistorical question",
+            format_message_created_at(0).unwrap()
         );
+        assert_eq!(frame.to_messages()[1].content, expected);
     }
 
     #[test]
@@ -432,7 +433,7 @@ mod tests {
             && message.tool_calls.is_empty()));
         assert!(!messages
             .iter()
-            .any(|message| message.content.contains("1970-01-01T00:00:00Z")));
+            .any(|message| message.content.starts_with("[Message created at:")));
     }
 
     #[test]

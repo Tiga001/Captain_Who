@@ -48,7 +48,7 @@ SQLite messages + ConversationTurnTrace + active ContextCompactionSummary
 
 `ContextAssembler` 是从持久化投影建立上下文的唯一结构化入口。它负责验证摘要和消息、恢复历史工具协议、添加系统提示词并生成 `ContextFrame`。存在 active summary 时，core-server 保留 SQLite 原始消息用于 UI 和审计，但只向 assembler 交付“摘要 + 未覆盖消息尾部”。core-server 随后把该 frame 提升为 `AgentConversationContextState`。OpenAI 与 Anthropic 的 wire payload 都从共享基线和当前 run overlay 生成，不从前端 timeline 反推。
 
-SQLite `messages.created_at` 保存 Unix 毫秒时间戳。持久化消息进入 `AgentChatMessage` 后仍保留该字段；assembler 在请求边界把它统一渲染成 UTC RFC 3339 前缀，例如 `[Message created at: 2026-07-13T07:32:18.123Z]`。数据库原始正文不会被改写；时间前缀作为真实模型输入参与统一 token 计量和基线缓存。正文为空但带历史 trace 的 assistant 消息不会因时间前缀变成伪文本消息。压缩源同样携带这一时间，并以相同的 UTC RFC 3339 格式交给摘要模型。
+SQLite `messages.created_at` 保存 Unix 毫秒时间戳。持久化消息进入 `AgentChatMessage` 后仍保留该字段；assembler 在请求边界按操作系统本地时区把它渲染成带 UTC 偏移的 RFC 3339 前缀，例如 `[Message created at: 2026-07-13T15:32:18.123+08:00]`。这与前端对同一时间戳的本地显示语义一致，同时保留完整的绝对时间信息；系统无法确定本地偏移时安全回退到 UTC。数据库原始正文不会被改写；时间前缀作为真实模型输入参与统一 token 计量和基线缓存。正文为空但带历史 trace 的 assistant 消息不会因时间前缀变成伪文本消息。压缩源同样携带这一时间，并以相同格式交给摘要模型。
 
 ## 上下文来源与顺序
 

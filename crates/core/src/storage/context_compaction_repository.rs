@@ -376,7 +376,7 @@ fn source_revision(
     source_messages: &[ContextCompactionSourceMessage],
 ) -> Result<String, ContextCompactionRepositoryError> {
     let material = serde_json::to_vec(&json!({
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "conversationId": conversation_id,
         "coveredMessageIds": covered_message_ids,
         "previousSummary": previous_summary,

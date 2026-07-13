@@ -31,6 +31,7 @@ interface RightSidebarProps {
   isMaximized: boolean
   maximizedToolbarControls?: ReactNode
   onToggleMaximized: () => void
+  workspaceKey?: string | null
   workspaceName?: string | null
   workspacePath?: string
 }
@@ -64,26 +65,28 @@ function getWorkspaceTabTitle(
 ): string | null {
   const pathName = workspacePath?.split(/[\\/]/).filter(Boolean).at(-1)?.trim()
 
-  return pathName || workspaceName || null
+  return workspaceName || pathName || null
 }
 
 function getWorkspaceKey(
+  workspaceKey: string | null | undefined,
   workspacePath: string | undefined,
   workspaceName: string | null | undefined
 ): string {
-  return workspacePath || workspaceName || 'home'
+  return workspaceKey || workspacePath || workspaceName || 'home'
 }
 
 function getTerminalPageTitle(
   pages: RightSidebarPage[],
+  workspaceKey: string | null | undefined,
   workspacePath: string | undefined,
   workspaceName: string | null | undefined,
   fallbackTitle: string
 ): string {
-  const workspaceKey = getWorkspaceKey(workspacePath, workspaceName)
+  const resolvedWorkspaceKey = getWorkspaceKey(workspaceKey, workspacePath, workspaceName)
   const baseTitle = getWorkspaceTabTitle(workspacePath, workspaceName) || fallbackTitle
   const existingCount = pages.filter(
-    (page) => page.moduleId === 'terminal' && page.workspaceKey === workspaceKey
+    (page) => page.moduleId === 'terminal' && page.workspaceKey === resolvedWorkspaceKey
   ).length
 
   return existingCount === 0 ? baseTitle : `${baseTitle} (${existingCount})`
@@ -92,12 +95,13 @@ function getTerminalPageTitle(
 function getPageTitle(
   moduleId: RightSidebarModuleId,
   pages: RightSidebarPage[],
+  workspaceKey: string | null | undefined,
   workspacePath: string | undefined,
   workspaceName: string | null | undefined,
   fallbackTitle: string
 ): string {
   if (moduleId === 'terminal') {
-    return getTerminalPageTitle(pages, workspacePath, workspaceName, fallbackTitle)
+    return getTerminalPageTitle(pages, workspaceKey, workspacePath, workspaceName, fallbackTitle)
   }
 
   const sequence = pages.filter((page) => page.moduleId === moduleId).length
@@ -108,6 +112,7 @@ export function RightSidebar({
   isMaximized,
   maximizedToolbarControls,
   onToggleMaximized,
+  workspaceKey,
   workspaceName,
   workspacePath
 }: RightSidebarProps): ReactNode {
@@ -163,9 +168,18 @@ export function RightSidebar({
           iconUrl: moduleId === 'browser' ? null : undefined,
           id: pageId,
           moduleId,
-          title: getPageTitle(moduleId, currentPages, workspacePath, workspaceName, fallbackTitle),
+          title: getPageTitle(
+            moduleId,
+            currentPages,
+            workspaceKey,
+            workspacePath,
+            workspaceName,
+            fallbackTitle
+          ),
           workspaceKey:
-            moduleId === 'terminal' ? getWorkspaceKey(workspacePath, workspaceName) : null,
+            moduleId === 'terminal'
+              ? getWorkspaceKey(workspaceKey, workspacePath, workspaceName)
+              : null,
           workspacePath: moduleId === 'terminal' ? workspacePath : undefined
         }
 
@@ -174,7 +188,7 @@ export function RightSidebar({
       setActivePageId(pageId)
       setIsModuleMenuOpen(false)
     },
-    [t, workspaceName, workspacePath]
+    [t, workspaceKey, workspaceName, workspacePath]
   )
 
   const closePage = useCallback((pageId: string) => {

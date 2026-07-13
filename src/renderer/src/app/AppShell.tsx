@@ -249,6 +249,15 @@ export function AppShell() {
   const hasUnreadConversations = conversations.some(
     (conversation) => !conversation.archivedAt && Boolean(conversation.unreadAt)
   )
+  const rightSidebarTerminalProjectId = activeConversation
+    ? activeConversation.projectId
+    : activeDraft.projectId
+  const rightSidebarTerminalProject = useMemo(() => {
+    if (!rightSidebarTerminalProjectId) return null
+
+    return projects.find((project) => project.id === rightSidebarTerminalProjectId) ?? null
+  }, [rightSidebarTerminalProjectId, projects])
+  const rightSidebarTerminalPath = rightSidebarTerminalProject?.path?.trim() || undefined
 
   // Agent tool events arrive faster than React state commits. Keep the ref and state in one
   // update path so an older render snapshot cannot overwrite newer tool-call results.
@@ -1696,8 +1705,9 @@ export function AppShell() {
       <aside className="side-panel side-panel--right">
         <RightSidebar
           isMaximized={rightMaximized}
-          workspaceName={projects[0]?.name ?? 'MyCopilot'}
-          workspacePath={projects[0]?.path}
+          workspaceKey={rightSidebarTerminalProject?.id}
+          workspaceName={rightSidebarTerminalProject?.name}
+          workspacePath={rightSidebarTerminalPath}
           onToggleMaximized={toggleRightSidebarMaximized}
           maximizedToolbarControls={
             rightMaximized ? (

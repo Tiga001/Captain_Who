@@ -9,7 +9,7 @@ use crate::protocol::{AgentError, AgentResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION: u32 = 1;
+pub const CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

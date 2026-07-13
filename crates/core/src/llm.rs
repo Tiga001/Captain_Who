@@ -543,8 +543,8 @@ pub(crate) fn detect_api_style(api_url: &str) -> AgentApiStyle {
 mod tests {
     use super::*;
     use crate::context::{
-        ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextGroup, ContextItem,
-        ContextMetadata, ContextRetention, ContextScope, ContextSource,
+        format_message_created_at, ContextAssembler, ContextAssemblyInput, ContextAttachments,
+        ContextGroup, ContextItem, ContextMetadata, ContextRetention, ContextScope, ContextSource,
     };
     use crate::conversation_trace::{
         ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
@@ -858,9 +858,13 @@ mod tests {
 
         let openai = build_payload(&request(AgentApiStyle::OpenAiCompatible));
         assert_eq!(openai["messages"][0]["role"], "system");
+        let expected_timestamped_history = format!(
+            "[Message created at: {}]\nEarlier question",
+            format_message_created_at(0).unwrap()
+        );
         assert_eq!(
             openai["messages"][1]["content"],
-            "[Message created at: 1970-01-01T00:00:00Z]\nEarlier question"
+            expected_timestamped_history
         );
         assert_eq!(openai["messages"][3]["content"], "Continue the edit");
         assert_eq!(
@@ -873,7 +877,7 @@ mod tests {
         assert_eq!(anthropic["system"], "System rules");
         assert_eq!(
             anthropic["messages"][0]["content"][0]["text"],
-            "[Message created at: 1970-01-01T00:00:00Z]\nEarlier question"
+            expected_timestamped_history
         );
         assert_eq!(
             anthropic["messages"][2]["content"][0]["text"],

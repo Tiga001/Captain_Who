@@ -1,3 +1,4 @@
+use crate::context::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION;
 use rusqlite::Connection;
 
 const REMOVE_INITIAL_DEMO_PROFILE_TASK: &str = "remove_initial_demo_profile";
@@ -687,6 +688,11 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         ",
     )?;
 
+    connection.execute(
+        "DELETE FROM context_compaction_summaries WHERE schema_version != ?1",
+        [CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION],
+    )?;
+
     upgrade_conversation_trace_commit_schema(connection)?;
     connection.execute_batch(
         "
@@ -1050,5 +1056,86 @@ mod tests {
                 .unwrap();
             assert_eq!(api_url, expected_url);
         }
+    }
+
+    #[test]
+    fn removes_only_incompatible_context_compaction_summaries() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute_batch(
+                "
+                INSERT INTO conversations (
+                    id, project_id, model_id, title, created_at, updated_at,
+                    pinned_at, archived_at, unread_at
+                ) VALUES ('conversation-1', NULL, NULL, 'title', 1, 1, NULL, NULL, NULL);
+                INSERT INTO messages (
+                    id, conversation_id, role, content, status, agent_run_json,
+                    ui_state_json, created_at, position
+                ) VALUES
+                    ('user-1', 'conversation-1', 'user', 'question', 'sent', NULL, NULL, 1, 0),
+                    ('assistant-1', 'conversation-1', 'assistant', 'answer', 'sent', NULL, NULL, 2, 1);
+                ",
+            )
+            .unwrap();
+        let incompatible_version = CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION - 1;
+        connection
+            .execute(
+                "INSERT INTO context_compaction_summaries (
+                    id, conversation_id, schema_version, source_revision,
+                    previous_summary_id, covered_through_message_id, content,
+                    generation_kind, generation_model, source_input_tokens,
+                    summary_input_tokens, created_at
+                ) VALUES (
+                    'old-summary', 'conversation-1', ?1, 'old-revision', NULL,
+                    'assistant-1', 'old', 'test', NULL, 10, 1, 3
+                )",
+                [incompatible_version],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO context_compaction_summaries (
+                    id, conversation_id, schema_version, source_revision,
+                    previous_summary_id, covered_through_message_id, content,
+                    generation_kind, generation_model, source_input_tokens,
+                    summary_input_tokens, created_at
+                ) VALUES (
+                    'current-summary', 'conversation-1', ?1, 'current-revision', NULL,
+                    'assistant-1', 'current', 'test', NULL, 10, 1, 4
+                )",
+                [CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "
+                INSERT INTO context_compaction_summary_sources (summary_id, ordinal, message_id)
+                VALUES ('old-summary', 0, 'user-1');
+                INSERT INTO conversation_context_compaction_heads (
+                    conversation_id, summary_id, revision, updated_at
+                ) VALUES ('conversation-1', 'old-summary', 1, 3);
+                ",
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        let remaining = connection
+            .query_row(
+                "SELECT group_concat(id, ',') FROM context_compaction_summaries",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        assert_eq!(remaining.as_deref(), Some("current-summary"));
+        let active_heads = connection
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_context_compaction_heads",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(active_heads, 0);
     }
 }

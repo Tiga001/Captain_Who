@@ -195,13 +195,13 @@ fn build_compaction_request_context(
         })
         .collect::<AgentResult<Vec<_>>>()?;
     let payload = serde_json::to_string(&json!({
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "previousSummary": previous_summary,
         "newMessages": source_messages,
     }))
     .map_err(|error| AgentError::new(format!("无法序列化上下文压缩源数据：{error}")))?;
     let user_prompt = format!(
-        "Compact the following conversation-history JSON into one replacement summary. Each newMessages.createdAt value is a backend-recorded UTC RFC 3339 timestamp. The payload contains {} newly covered messages. Keep the replacement within {} estimated input tokens and make it substantially shorter than the source.\n\nHISTORY_PAYLOAD_JSON\n{}",
+        "Compact the following conversation-history JSON into one replacement summary. Each newMessages.createdAt value is a backend-recorded RFC 3339 timestamp with an explicit UTC offset. The payload contains {} newly covered messages. Keep the replacement within {} estimated input tokens and make it substantially shorter than the source.\n\nHISTORY_PAYLOAD_JSON\n{}",
         request.prefix.source_messages.len(),
         request.maximum_summary_tokens,
         payload
@@ -444,8 +444,14 @@ mod tests {
         assert!(source.contains("PREVIOUS_SUMMARY_MARKER"));
         assert!(source.contains("NEW_USER_MARKER"));
         assert!(source.contains("NEW_ASSISTANT_MARKER"));
-        assert!(source.contains("\"createdAt\":\"1970-01-01T00:00:01Z\""));
-        assert!(source.contains("\"createdAt\":\"1970-01-01T00:00:02Z\""));
+        assert!(source.contains(&format!(
+            "\"createdAt\":\"{}\"",
+            format_message_created_at(1_000).unwrap()
+        )));
+        assert!(source.contains(&format!(
+            "\"createdAt\":\"{}\"",
+            format_message_created_at(2_000).unwrap()
+        )));
         assert_eq!(
             output.draft.generation,
             ContextCompactionGeneration::model("summary-model")
