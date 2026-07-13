@@ -251,23 +251,21 @@ export interface AgentUsage {
 export type AgentContextWindowStatus =
   'unconfigured' | 'within_budget' | 'over_budget' | 'invalid_configuration'
 
-export type AgentContextWindowPhase = 'idle' | 'model_request'
-
-export type AgentContextWindowSource = 'estimated' | 'provider_reported'
+export type AgentContextWindowPhase = 'idle' | 'durable_commit'
 
 export interface AgentContextWindowSnapshot {
   model: string
   status: AgentContextWindowStatus
   phase: AgentContextWindowPhase
-  source: AgentContextWindowSource
   contextWindowTokens?: number
   reservedOutputTokens: number
   safetyMarginTokens: number
   availableInputTokens?: number
-  usedInputTokens: number
+  /** Fixed request costs plus context retained for later conversation turns. */
+  persistentInputTokens: number
   remainingInputTokens?: number
-  requestIndex?: number
-  contextRevision: number
+  /** Opaque fingerprint that changes with fixed or durable context. */
+  persistentRevision: string
 }
 
 export type AgentUsageSummaryRange = 'last7Days' | 'last30Days' | 'all' | 'custom'
@@ -378,7 +376,7 @@ export interface AgentConversationTurnInput {
   conversationId?: string
   projectId?: string | null
   modelId: string
-  contextBudgetEnabled?: boolean
+  contextWindowIndicatorEnabled?: boolean
   content: string
   attachments?: AgentInputAttachment[]
   title?: string
@@ -391,7 +389,6 @@ export interface AgentConversationTurnInput {
 }
 
 export interface AgentContextWindowSnapshotInput {
-  contextBudgetEnabled: boolean
   conversationId?: string
   projectId?: string | null
   modelId: string

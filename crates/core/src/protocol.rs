@@ -14,7 +14,7 @@ pub struct AgentChatInput {
     #[serde(default)]
     pub context_window_tokens: Option<u32>,
     #[serde(default = "default_true")]
-    pub context_budget_enabled: bool,
+    pub context_window_indicator_enabled: bool,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stream: Option<bool>,
@@ -393,14 +393,7 @@ pub enum AgentContextWindowStatus {
 #[serde(rename_all = "snake_case")]
 pub enum AgentContextWindowPhase {
     Idle,
-    ModelRequest,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentContextWindowSource {
-    Estimated,
-    ProviderReported,
+    DurableCommit,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -409,19 +402,18 @@ pub struct AgentContextWindowSnapshot {
     pub model: String,
     pub status: AgentContextWindowStatus,
     pub phase: AgentContextWindowPhase,
-    pub source: AgentContextWindowSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<u64>,
     pub reserved_output_tokens: u64,
     pub safety_margin_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub available_input_tokens: Option<u64>,
-    pub used_input_tokens: u64,
+    /// Fixed request costs plus context that survives into later conversation turns.
+    pub persistent_input_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_input_tokens: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_index: Option<usize>,
-    pub context_revision: u64,
+    /// Opaque fingerprint that changes when the fixed or durable assembled context changes.
+    pub persistent_revision: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

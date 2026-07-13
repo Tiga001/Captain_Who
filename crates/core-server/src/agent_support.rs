@@ -157,8 +157,8 @@ pub struct AgentConversationTurnInput {
     pub conversation_id: Option<String>,
     pub project_id: Option<String>,
     pub model_id: String,
-    #[serde(default = "context_budget_enabled_by_default")]
-    pub context_budget_enabled: bool,
+    #[serde(default = "context_window_indicator_enabled_by_default")]
+    pub context_window_indicator_enabled: bool,
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<AgentInputAttachment>,
@@ -172,14 +172,13 @@ pub struct AgentConversationTurnInput {
     pub permissions: AgentPermissions,
 }
 
-fn context_budget_enabled_by_default() -> bool {
+fn context_window_indicator_enabled_by_default() -> bool {
     true
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentContextWindowSnapshotInput {
-    pub context_budget_enabled: bool,
     pub conversation_id: Option<String>,
     pub project_id: Option<String>,
     pub model_id: String,
@@ -359,7 +358,7 @@ pub(super) fn prepare_conversation_turn(
         model: model_provider_path(&model),
         api_style: None,
         context_window_tokens: model.context_window_tokens,
-        context_budget_enabled: input.context_budget_enabled,
+        context_window_indicator_enabled: input.context_window_indicator_enabled,
         max_tokens: input.max_tokens,
         temperature: input.temperature,
         stream: Some(true),

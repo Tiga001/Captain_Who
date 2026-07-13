@@ -177,6 +177,7 @@ export function AppShell() {
   const cancelledRunIdsRef = useRef<Set<string>>(new Set())
   const editSubmissionSeqRef = useRef(0)
   const contextWindowRequestSeqRef = useRef(0)
+  const contextWindowEventSeqRef = useRef<Map<string, number>>(new Map())
   const [contextWindowSnapshots, setContextWindowSnapshots] = useState<
     Record<string, AgentContextWindowSnapshot>
   >({})
@@ -208,11 +209,6 @@ export function AppShell() {
     contextWindowSnapshots[activeContextWindowKey]?.model === activeModelProviderPath
       ? contextWindowSnapshots[activeContextWindowKey]
       : undefined
-  const activeConversationIsGenerating = Boolean(
-    activeConversation?.messages.some(
-      (message) => message.role === 'assistant' && message.status === 'pending'
-    )
-  )
   const permissionModeAvailability = getPermissionModeAvailability(uiPreferences)
   const hasUnreadConversations = conversations.some(
     (conversation) => !conversation.archivedAt && Boolean(conversation.unreadAt)
@@ -237,21 +233,17 @@ export function AppShell() {
   }, [activeConversationId])
 
   useEffect(() => {
-    if (
-      !contextWindowIndicatorEnabled ||
-      !activeDraftSelectedModel ||
-      activeConversationIsGenerating
-    ) {
+    if (!contextWindowIndicatorEnabled || !activeDraftSelectedModel) {
       return undefined
     }
 
     const requestSequence = contextWindowRequestSeqRef.current + 1
     contextWindowRequestSeqRef.current = requestSequence
     const snapshotKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
+    const eventSequenceAtRequest = contextWindowEventSeqRef.current.get(snapshotKey) ?? 0
     let cancelled = false
 
     void getContextWindowSnapshot({
-      contextBudgetEnabled: contextWindowIndicatorEnabled,
       conversationId: activeConversation?.id,
       projectId: activeConversation?.projectId ?? activeDraft.projectId,
       modelId: activeDraftSelectedModel.id,
@@ -263,6 +255,9 @@ export function AppShell() {
     })
       .then(({ snapshot }) => {
         if (cancelled || contextWindowRequestSeqRef.current !== requestSequence) return
+        if ((contextWindowEventSeqRef.current.get(snapshotKey) ?? 0) !== eventSequenceAtRequest) {
+          return
+        }
         setContextWindowSnapshots((current) => {
           if (snapshot) return { ...current, [snapshotKey]: snapshot }
           if (!(snapshotKey in current)) return current
@@ -281,7 +276,6 @@ export function AppShell() {
   }, [
     activeConversation?.id,
     activeConversation?.projectId,
-    activeConversationIsGenerating,
     activeDraft.permissionMode,
     activeDraft.projectId,
     activeDraftSelectedModel,
@@ -726,6 +720,10 @@ export function AppShell() {
       if (agentEvent.type === 'context_window_updated') {
         const conversationId = agentEvent.conversationId
         if (contextWindowIndicatorEnabled && conversationId) {
+          contextWindowEventSeqRef.current.set(
+            conversationId,
+            (contextWindowEventSeqRef.current.get(conversationId) ?? 0) + 1
+          )
           setContextWindowSnapshots((current) => ({
             ...current,
             [conversationId]: agentEvent.snapshot
@@ -781,7 +779,7 @@ export function AppShell() {
           assistantMessageId,
           attachments,
           content,
-          contextBudgetEnabled: contextWindowIndicatorEnabled,
+          contextWindowIndicatorEnabled,
           conversationId,
           maxTokens: DEFAULT_AGENT_MAX_TOKENS,
           modelId,

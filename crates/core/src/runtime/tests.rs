@@ -190,18 +190,18 @@ fn transient_events_are_emitted_without_entering_output_history() {
 }
 
 #[test]
-fn context_window_inspection_switch_disables_all_measurement() {
+fn context_window_preview_is_available_independently_of_indicator_events() {
     let input = serde_json::from_value::<AgentChatInput>(serde_json::json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "",
         "model": "test-model",
         "contextWindowTokens": 128000,
-        "contextBudgetEnabled": false,
+        "contextWindowIndicatorEnabled": false,
         "messages": []
     }))
     .unwrap();
 
-    assert!(inspect_context_window(input).unwrap().is_none());
+    assert!(inspect_context_window(input).unwrap().is_some());
 }
 
 #[tokio::test]
@@ -217,7 +217,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
         model: "test-model".to_string(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(8_000),
-        context_budget_enabled: true,
+        context_window_indicator_enabled: false,
         max_tokens: Some(1_000),
         temperature: None,
         stream: Some(false),
@@ -248,7 +248,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
     assert_eq!(
         error
             .details()
-            .and_then(|details| { details["estimate"]["measurementMode"].as_str() }),
+            .and_then(|details| details["usage"]["measurementMode"].as_str()),
         Some("incremental_cache")
     );
     assert!(timeout(Duration::from_millis(100), listener.accept())
@@ -359,7 +359,7 @@ async fn context_capacity_guard_rechecks_after_tool_results_before_network_io() 
         model: "test-model".to_string(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(80_000),
-        context_budget_enabled: true,
+        context_window_indicator_enabled: true,
         max_tokens: Some(1_000),
         temperature: None,
         stream: Some(false),
@@ -611,7 +611,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         model: "test-model".to_string(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(128_000),
-        context_budget_enabled: true,
+        context_window_indicator_enabled: true,
         max_tokens: Some(1_000),
         temperature: None,
         stream: Some(true),
@@ -684,9 +684,9 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
     assert!(preview_additions.len() >= 3, "{preview_additions:?}");
     assert_eq!(preview_additions.last().copied(), Some(4));
     assert_eq!(preview_content, "line 1\nline 2\nline 3\nline 4\n");
-    assert!(!context_snapshots.is_empty());
+    assert_eq!(context_snapshots.len(), 1);
     assert!(context_snapshots.iter().all(|snapshot| {
-        snapshot.phase == crate::protocol::AgentContextWindowPhase::ModelRequest
+        snapshot.phase == crate::protocol::AgentContextWindowPhase::DurableCommit
             && snapshot.model == "test-model"
     }));
     assert!(output.events.iter().all(|event| !matches!(
@@ -854,7 +854,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         model: "test-model".to_string(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(128_000),
-        context_budget_enabled: true,
+        context_window_indicator_enabled: true,
         max_tokens: Some(1_000),
         temperature: None,
         stream: Some(true),

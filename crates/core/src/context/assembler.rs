@@ -21,21 +21,12 @@ pub(crate) struct ContextAssembler;
 
 impl ContextAssembler {
     pub(crate) fn assemble(input: ContextAssemblyInput) -> AgentResult<ContextFrame> {
-        let mut normalized = normalize_messages(input.messages)?;
+        let normalized = normalize_messages(input.messages)?;
         let current_turn_index = normalized
             .iter()
             .rposition(|message| message.role == "user");
         let has_attachment_text = !input.attachments.text.trim().is_empty();
         let has_attachment_images = !input.attachments.images.is_empty();
-
-        if has_attachment_text {
-            if let Some(index) = current_turn_index {
-                normalized[index].content = format!(
-                    "{}\n\n{}",
-                    normalized[index].content, input.attachments.text
-                );
-            }
-        }
 
         if normalized.is_empty() {
             return Err(AgentError::new("没有可发送的对话内容。"));
@@ -67,8 +58,8 @@ impl ContextAssembler {
                 items.extend(trace.activity_items.iter().cloned());
             }
 
-            let mut llm_message = LlmMessage::text(role, message.content);
-            let mut metadata = ContextMetadata::new(
+            let llm_message = LlmMessage::text(role, message.content);
+            let metadata = ContextMetadata::new(
                 if is_current_turn {
                     ContextSource::CurrentTurn
                 } else {
@@ -78,15 +69,23 @@ impl ContextAssembler {
                 ContextRetention::Retained,
             );
 
-            if is_current_turn && (has_attachment_text || has_attachment_images) {
-                metadata = metadata.with_source(ContextSource::InputAttachment);
-                llm_message
-                    .images
-                    .extend(attachment_images.take().unwrap_or_default());
-            }
-
             if !llm_message.content.trim().is_empty() {
                 items.push(ContextItem::new(llm_message, metadata));
+            }
+            if is_current_turn && (has_attachment_text || has_attachment_images) {
+                let mut attachment_message =
+                    LlmMessage::text(LlmMessageRole::User, input.attachments.text.clone());
+                attachment_message
+                    .images
+                    .extend(attachment_images.take().unwrap_or_default());
+                items.push(ContextItem::new(
+                    attachment_message,
+                    ContextMetadata::new(
+                        ContextSource::InputAttachment,
+                        ContextScope::Run,
+                        ContextRetention::Retained,
+                    ),
+                ));
             }
             if let Some(trace) = trace {
                 items.push(trace.terminal_item);
@@ -225,23 +224,24 @@ mod tests {
         .unwrap();
 
         let messages = frame.to_messages();
-        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.len(), 5);
         assert_eq!(messages[0].role, LlmMessageRole::System);
         assert_eq!(messages[1].content, "old question");
         assert_eq!(messages[3].role, LlmMessageRole::User);
-        assert!(messages[3].content.contains("attachment body"));
-        assert_eq!(messages[3].images.len(), 1);
+        assert_eq!(messages[3].content, "current question");
+        assert_eq!(messages[4].content, "attachment body");
+        assert_eq!(messages[4].images.len(), 1);
 
         let manifest = frame.manifest();
         assert_eq!(manifest.entries[0].sources, vec!["backend_system_prompt"]);
         assert_eq!(manifest.entries[1].sources, vec!["conversation_history"]);
-        assert_eq!(
-            manifest.entries[3].sources,
-            vec!["current_turn", "input_attachment"]
-        );
+        assert_eq!(manifest.entries[3].sources, vec!["current_turn"]);
         assert_eq!(manifest.entries[3].scope, "conversation");
         assert_eq!(manifest.entries[3].retention, "retained");
-        assert_eq!(manifest.entries[3].image_base64_bytes, 3);
+        assert_eq!(manifest.entries[4].sources, vec!["input_attachment"]);
+        assert_eq!(manifest.entries[4].scope, "run");
+        assert_eq!(manifest.entries[4].retention, "retained");
+        assert_eq!(manifest.entries[4].image_base64_bytes, 3);
         let serialized = serde_json::to_string(&manifest).unwrap();
         assert!(!serialized.contains("current question"));
         assert!(!serialized.contains("attachment body"));

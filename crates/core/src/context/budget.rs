@@ -1,14 +1,17 @@
-//! Capacity policy for measured context frames.
+//! Classified context accounting and capacity policy for measured request frames.
 //!
 //! `ContextFrame` owns incremental message measurements. This module adds run-stable request
 //! costs (tool definitions and protocol structure), applies the configured model window, and
 //! decides whether a whole-frame verification pass is required near capacity.
 
-use super::frame::{ContextFrame, ContextFrameMeasurement};
-use super::measurement::{ContextMessageEstimate, ContextTokenEstimator, HeuristicTokenEstimator};
+use super::frame::{ContextFrame, ContextFrameEstimateBucket, ContextFrameMeasurement};
+use super::measurement::{
+    combine_context_revisions, ContextMessageEstimate, ContextRevisionHasher,
+    ContextTokenEstimator, HeuristicTokenEstimator,
+};
 use crate::protocol::{
-    AgentApiStyle, AgentContextWindowPhase, AgentContextWindowSnapshot, AgentContextWindowSource,
-    AgentContextWindowStatus, AgentError, AgentResult, AgentToolDefinition,
+    AgentApiStyle, AgentContextWindowPhase, AgentContextWindowSnapshot, AgentContextWindowStatus,
+    AgentError, AgentResult, AgentToolDefinition,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -32,15 +35,11 @@ pub(crate) enum ContextMeasurementMode {
     FullRecount,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ContextTokenEstimate {
-    pub(crate) estimator_id: String,
-    pub(crate) estimator_version: u32,
-    pub(crate) measurement_mode: ContextMeasurementMode,
+pub(crate) struct ContextTokenCategoryEstimate {
+    pub(crate) input_tokens: u64,
     pub(crate) context_item_count: usize,
-    pub(crate) context_revision: u64,
-    pub(crate) estimated_input_tokens: u64,
     pub(crate) message_content_tokens: u64,
     pub(crate) message_structure_tokens: u64,
     pub(crate) tool_call_tokens: u64,
@@ -48,8 +47,137 @@ pub(crate) struct ContextTokenEstimate {
     pub(crate) tool_definition_count: usize,
     pub(crate) image_tokens: u64,
     pub(crate) image_count: usize,
-    pub(crate) image_token_reserve_per_image: u64,
     pub(crate) request_structure_tokens: u64,
+}
+
+impl ContextTokenCategoryEstimate {
+    fn from_frame_bucket(bucket: ContextFrameEstimateBucket) -> Self {
+        let ContextMessageEstimate {
+            message_content_tokens,
+            message_structure_tokens,
+            tool_call_tokens,
+            image_tokens,
+            image_count,
+        } = bucket.estimate;
+        Self {
+            input_tokens: bucket.estimate.total_tokens(),
+            context_item_count: bucket.item_count,
+            message_content_tokens,
+            message_structure_tokens,
+            tool_call_tokens,
+            tool_definition_tokens: 0,
+            tool_definition_count: 0,
+            image_tokens,
+            image_count,
+            request_structure_tokens: 0,
+        }
+    }
+
+    fn add_fixed_request_costs(&mut self, fixed: &FixedRequestEstimate) {
+        self.tool_definition_tokens = self
+            .tool_definition_tokens
+            .saturating_add(fixed.tool_definition_tokens);
+        self.tool_definition_count = self
+            .tool_definition_count
+            .saturating_add(fixed.tool_definition_count);
+        self.request_structure_tokens = self
+            .request_structure_tokens
+            .saturating_add(fixed.request_structure_tokens);
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(fixed.tool_definition_tokens)
+            .saturating_add(fixed.request_structure_tokens);
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.context_item_count = self
+            .context_item_count
+            .saturating_add(other.context_item_count);
+        self.message_content_tokens = self
+            .message_content_tokens
+            .saturating_add(other.message_content_tokens);
+        self.message_structure_tokens = self
+            .message_structure_tokens
+            .saturating_add(other.message_structure_tokens);
+        self.tool_call_tokens = self.tool_call_tokens.saturating_add(other.tool_call_tokens);
+        self.tool_definition_tokens = self
+            .tool_definition_tokens
+            .saturating_add(other.tool_definition_tokens);
+        self.tool_definition_count = self
+            .tool_definition_count
+            .saturating_add(other.tool_definition_count);
+        self.image_tokens = self.image_tokens.saturating_add(other.image_tokens);
+        self.image_count = self.image_count.saturating_add(other.image_count);
+        self.request_structure_tokens = self
+            .request_structure_tokens
+            .saturating_add(other.request_structure_tokens);
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ContextTokenBreakdown {
+    pub(crate) fixed: ContextTokenCategoryEstimate,
+    pub(crate) durable: ContextTokenCategoryEstimate,
+    pub(crate) run_transient: ContextTokenCategoryEstimate,
+    pub(crate) request_only: ContextTokenCategoryEstimate,
+    pub(crate) total: ContextTokenCategoryEstimate,
+}
+
+impl ContextTokenBreakdown {
+    fn from_frame(frame: &ContextFrameMeasurement, fixed: &FixedRequestEstimate) -> Self {
+        let mut fixed_category =
+            ContextTokenCategoryEstimate::from_frame_bucket(frame.breakdown.fixed);
+        fixed_category.add_fixed_request_costs(fixed);
+        let durable = ContextTokenCategoryEstimate::from_frame_bucket(frame.breakdown.durable);
+        let run_transient =
+            ContextTokenCategoryEstimate::from_frame_bucket(frame.breakdown.run_transient);
+        let request_only =
+            ContextTokenCategoryEstimate::from_frame_bucket(frame.breakdown.request_only);
+        let mut total = ContextTokenCategoryEstimate::default();
+        for category in [&fixed_category, &durable, &run_transient, &request_only] {
+            total.merge(category);
+        }
+        Self {
+            fixed: fixed_category,
+            durable,
+            run_transient,
+            request_only,
+            total,
+        }
+    }
+
+    pub(crate) fn persistent_input_tokens(&self) -> u64 {
+        self.fixed
+            .input_tokens
+            .saturating_add(self.durable.input_tokens)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ContextTokenEstimate {
+    pub(crate) estimator_id: String,
+    pub(crate) estimator_version: u32,
+    pub(crate) measurement_mode: ContextMeasurementMode,
+    pub(crate) context_revision: u64,
+    pub(crate) persistent_revision: u64,
+    pub(crate) breakdown: ContextTokenBreakdown,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) verified_total_input_tokens: Option<u64>,
+    pub(crate) image_token_reserve_per_image: u64,
+}
+
+impl ContextTokenEstimate {
+    pub(crate) fn request_input_tokens(&self) -> u64 {
+        self.verified_total_input_tokens
+            .unwrap_or(self.breakdown.total.input_tokens)
+    }
+
+    pub(crate) fn persistent_input_tokens(&self) -> u64 {
+        self.breakdown.persistent_input_tokens()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -62,40 +190,65 @@ pub(crate) struct ContextBudgetReport {
     pub(crate) available_input_tokens: Option<u64>,
     pub(crate) remaining_input_tokens: Option<i64>,
     pub(crate) excess_input_tokens: Option<u64>,
-    pub(crate) estimate: ContextTokenEstimate,
+    pub(crate) usage: ContextTokenEstimate,
 }
 
 impl ContextBudgetReport {
-    pub(crate) fn snapshot(
+    pub(crate) fn persistent_snapshot(
         &self,
         model: &str,
         phase: AgentContextWindowPhase,
-        source: AgentContextWindowSource,
-        request_index: Option<usize>,
-        used_input_tokens: Option<u64>,
     ) -> AgentContextWindowSnapshot {
-        let used_input_tokens = used_input_tokens.unwrap_or(self.estimate.estimated_input_tokens);
+        let persistent_input_tokens = self.usage.persistent_input_tokens();
         let (status, remaining_input_tokens) = snapshot_capacity_state(
             self.context_window_tokens,
             self.available_input_tokens,
-            used_input_tokens,
+            persistent_input_tokens,
         );
 
         AgentContextWindowSnapshot {
             model: model.to_string(),
             status,
             phase,
-            source,
             context_window_tokens: self.context_window_tokens,
             reserved_output_tokens: self.reserved_output_tokens,
             safety_margin_tokens: self.safety_margin_tokens,
             available_input_tokens: self.available_input_tokens,
-            used_input_tokens,
+            persistent_input_tokens,
             remaining_input_tokens,
-            request_index,
-            context_revision: self.estimate.context_revision,
+            persistent_revision: format!("{:016x}", self.usage.persistent_revision),
         }
     }
+
+    pub(crate) fn compaction_query(&self) -> ContextCompactionQuery {
+        ContextCompactionQuery {
+            status: self.status,
+            available_input_tokens: self.available_input_tokens,
+            remaining_input_tokens: self.remaining_input_tokens,
+            request_input_tokens: self.usage.request_input_tokens(),
+            additive_input_tokens: self.usage.breakdown.total.input_tokens,
+            persistent_input_tokens: self.usage.persistent_input_tokens(),
+            context_revision: self.usage.context_revision,
+            persistent_revision: self.usage.persistent_revision,
+            breakdown: self.usage.breakdown.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+/// Stable handoff consumed by the future blocking compaction hook before capacity enforcement.
+/// It is derived from the same report as the capacity gate and never triggers a second recount.
+pub(crate) struct ContextCompactionQuery {
+    pub(crate) status: ContextBudgetStatus,
+    pub(crate) available_input_tokens: Option<u64>,
+    pub(crate) remaining_input_tokens: Option<i64>,
+    pub(crate) request_input_tokens: u64,
+    pub(crate) additive_input_tokens: u64,
+    pub(crate) persistent_input_tokens: u64,
+    pub(crate) context_revision: u64,
+    pub(crate) persistent_revision: u64,
+    pub(crate) breakdown: ContextTokenBreakdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,7 +281,7 @@ impl ContextCapacityError {
             ContextCapacityErrorCode::CapacityExceeded => format!(
                 "上下文容量不足（{}）：本次请求预计需要 {} 个输入 token；模型总窗口为 {}，预留 {} 个输出 token 和 {} 个安全余量后，可用输入容量为 {}，超出 {}。请求尚未发送。请缩短对话或工具结果，或核对模型的上下文窗口配置。",
                 self.code.as_str(),
-                report.estimate.estimated_input_tokens,
+                report.usage.request_input_tokens(),
                 context_window,
                 report.reserved_output_tokens,
                 report.safety_margin_tokens,
@@ -153,6 +306,7 @@ struct FixedRequestEstimate {
     tool_definition_tokens: u64,
     tool_definition_count: usize,
     request_structure_tokens: u64,
+    revision: u64,
 }
 
 /// Run-scoped capacity gate for fully assembled context frames.
@@ -175,10 +329,13 @@ impl ContextCapacityDetector {
     }
 
     fn new(estimator: Arc<dyn ContextTokenEstimator>, tools: &[AgentToolDefinition]) -> Self {
+        let identity = estimator.identity();
+        let request_structure_tokens = estimator.request_structure_tokens();
         let fixed = FixedRequestEstimate {
             tool_definition_tokens: estimator.estimate_tool_definitions(tools),
             tool_definition_count: tools.len(),
-            request_structure_tokens: estimator.request_structure_tokens(),
+            request_structure_tokens,
+            revision: fixed_request_revision(&identity, tools, request_structure_tokens),
         };
         Self { estimator, fixed }
     }
@@ -244,37 +401,44 @@ impl ContextCapacityDetector {
         frame: ContextFrameMeasurement,
         measurement_mode: ContextMeasurementMode,
     ) -> ContextTokenEstimate {
-        let ContextMessageEstimate {
-            message_content_tokens,
-            message_structure_tokens,
-            tool_call_tokens,
-            image_tokens,
-            image_count,
-        } = frame.estimate;
-        let estimated_input_tokens = frame
-            .estimate
-            .total_tokens()
-            .saturating_add(self.fixed.tool_definition_tokens)
-            .saturating_add(self.fixed.request_structure_tokens);
+        let verified_total_input_tokens = frame.verified_total.map(|estimate| {
+            estimate
+                .total_tokens()
+                .saturating_add(self.fixed.tool_definition_tokens)
+                .saturating_add(self.fixed.request_structure_tokens)
+        });
+        let breakdown = ContextTokenBreakdown::from_frame(&frame, &self.fixed);
 
         ContextTokenEstimate {
             estimator_id: frame.estimator.label(),
             estimator_version: frame.estimator.version,
             measurement_mode,
-            context_item_count: frame.item_count,
             context_revision: frame.revision,
-            estimated_input_tokens,
-            message_content_tokens,
-            message_structure_tokens,
-            tool_call_tokens,
-            tool_definition_tokens: self.fixed.tool_definition_tokens,
-            tool_definition_count: self.fixed.tool_definition_count,
-            image_tokens,
-            image_count,
+            persistent_revision: combine_context_revisions(
+                frame.persistent_revision,
+                self.fixed.revision,
+            ),
+            breakdown,
+            verified_total_input_tokens,
             image_token_reserve_per_image: self.estimator.image_token_reserve_per_image(),
-            request_structure_tokens: self.fixed.request_structure_tokens,
         }
     }
+}
+
+fn fixed_request_revision(
+    estimator: &super::measurement::ContextEstimatorIdentity,
+    tools: &[AgentToolDefinition],
+    request_structure_tokens: u64,
+) -> u64 {
+    let mut hasher = ContextRevisionHasher::new();
+    hasher.write_str(estimator.family);
+    hasher.write_u64(u64::from(estimator.version));
+    hasher.write_str(estimator.variant.as_deref().unwrap_or_default());
+    hasher.write_u64(request_structure_tokens);
+    for tool in tools {
+        hasher.write_str(&serde_json::to_string(tool).unwrap_or_else(|_| "null".to_string()));
+    }
+    hasher.finish()
 }
 
 fn select_token_estimator(
@@ -298,7 +462,7 @@ fn build_budget_report(
             available_input_tokens: None,
             remaining_input_tokens: None,
             excess_input_tokens: None,
-            estimate,
+            usage: estimate,
         };
     };
 
@@ -313,12 +477,12 @@ fn build_budget_report(
             available_input_tokens: Some(0),
             remaining_input_tokens: None,
             excess_input_tokens: None,
-            estimate,
+            usage: estimate,
         };
     }
 
     let available_input_tokens = context_window_tokens - required_reserve;
-    let estimated_input_tokens = estimate.estimated_input_tokens;
+    let estimated_input_tokens = estimate.request_input_tokens();
     if estimated_input_tokens > available_input_tokens {
         ContextBudgetReport {
             status: ContextBudgetStatus::OverBudget,
@@ -331,7 +495,7 @@ fn build_budget_report(
                 estimated_input_tokens,
             )),
             excess_input_tokens: Some(estimated_input_tokens - available_input_tokens),
-            estimate,
+            usage: estimate,
         }
     } else {
         ContextBudgetReport {
@@ -345,7 +509,7 @@ fn build_budget_report(
                 estimated_input_tokens,
             )),
             excess_input_tokens: None,
-            estimate,
+            usage: estimate,
         }
     }
 }
@@ -353,7 +517,7 @@ fn build_budget_report(
 fn snapshot_capacity_state(
     context_window_tokens: Option<u64>,
     available_input_tokens: Option<u64>,
-    used_input_tokens: u64,
+    persistent_input_tokens: u64,
 ) -> (AgentContextWindowStatus, Option<i64>) {
     if context_window_tokens.is_none() {
         return (AgentContextWindowStatus::Unconfigured, None);
@@ -367,9 +531,9 @@ fn snapshot_capacity_state(
 
     let remaining_input_tokens = Some(saturating_signed_difference(
         available_input_tokens,
-        used_input_tokens,
+        persistent_input_tokens,
     ));
-    if used_input_tokens > available_input_tokens {
+    if persistent_input_tokens > available_input_tokens {
         (AgentContextWindowStatus::OverBudget, remaining_input_tokens)
     } else {
         (
@@ -393,7 +557,7 @@ fn should_recount(threshold_percent: Option<u8>, report: &ContextBudgetReport) -
         return false;
     };
     let threshold_percent = u64::from(threshold_percent.clamp(1, 100));
-    report.estimate.estimated_input_tokens.saturating_mul(100)
+    report.usage.request_input_tokens().saturating_mul(100)
         >= available_input_tokens.saturating_mul(threshold_percent)
 }
 
@@ -469,9 +633,9 @@ mod tests {
 
         assert_eq!(report.status, ContextBudgetStatus::Unconfigured);
         assert_eq!(report.context_window_tokens, None);
-        assert!(report.estimate.estimated_input_tokens > 0);
+        assert!(report.usage.request_input_tokens() > 0);
         assert_eq!(
-            report.estimate.measurement_mode,
+            report.usage.measurement_mode,
             ContextMeasurementMode::IncrementalCache
         );
         assert!(detector.ensure_sendable(report).is_ok());
@@ -510,25 +674,61 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_can_replace_estimate_with_provider_reported_input() {
+    fn persistent_snapshot_does_not_follow_run_transient_growth() {
         let mut frame = frame(vec![LlmMessage::text(LlmMessageRole::User, "hello")]);
         let detector = detector(&[]);
-        let report = detector.inspect(&mut frame, Some(128_000), 30_000);
+        let initial = detector.inspect(&mut frame, Some(128_000), 30_000);
+        let initial_snapshot =
+            initial.persistent_snapshot("provider/model", AgentContextWindowPhase::DurableCommit);
 
-        let snapshot = report.snapshot(
-            "provider/model",
-            AgentContextWindowPhase::ModelRequest,
-            AgentContextWindowSource::ProviderReported,
-            Some(2),
-            Some(42_000),
+        frame.push(ContextItem::text(
+            LlmMessageRole::Assistant,
+            "large transient observation ".repeat(20_000),
+            ContextSource::ToolResult,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ));
+        let expanded = detector.inspect(&mut frame, Some(128_000), 30_000);
+        let expanded_snapshot =
+            expanded.persistent_snapshot("provider/model", AgentContextWindowPhase::DurableCommit);
+
+        assert_eq!(initial_snapshot.model, "provider/model");
+        assert_eq!(
+            initial_snapshot.phase,
+            AgentContextWindowPhase::DurableCommit
+        );
+        assert_eq!(
+            expanded_snapshot.persistent_input_tokens,
+            initial_snapshot.persistent_input_tokens
+        );
+        assert_eq!(
+            expanded_snapshot.persistent_revision,
+            initial_snapshot.persistent_revision
+        );
+        assert!(expanded.usage.request_input_tokens() > initial.usage.request_input_tokens());
+        assert_eq!(expanded.status, ContextBudgetStatus::OverBudget);
+        assert_eq!(
+            expanded_snapshot.status,
+            AgentContextWindowStatus::WithinBudget
         );
 
-        assert_eq!(snapshot.model, "provider/model");
-        assert_eq!(snapshot.source, AgentContextWindowSource::ProviderReported);
-        assert_eq!(snapshot.request_index, Some(2));
-        assert_eq!(snapshot.used_input_tokens, 42_000);
-        assert_eq!(snapshot.remaining_input_tokens, Some(49_600));
-        assert_eq!(snapshot.status, AgentContextWindowStatus::WithinBudget);
+        frame.push(ContextItem::text(
+            LlmMessageRole::Assistant,
+            "persisted final answer",
+            ContextSource::ConversationHistory,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        ));
+        let committed = detector.inspect(&mut frame, Some(128_000), 30_000);
+        let committed_snapshot =
+            committed.persistent_snapshot("provider/model", AgentContextWindowPhase::DurableCommit);
+        assert!(
+            committed_snapshot.persistent_input_tokens > expanded_snapshot.persistent_input_tokens
+        );
+        assert_ne!(
+            committed_snapshot.persistent_revision,
+            expanded_snapshot.persistent_revision
+        );
     }
 
     #[test]
@@ -566,16 +766,117 @@ mod tests {
         let plain_detector = detector(&[]);
         let rich_detector = detector(&tools);
 
-        let plain_estimate = plain_detector.inspect(&mut plain, None, 1_000).estimate;
-        let rich_estimate = rich_detector.inspect(&mut rich, None, 1_000).estimate;
+        let plain_estimate = plain_detector.inspect(&mut plain, None, 1_000).usage;
+        let rich_estimate = rich_detector.inspect(&mut rich, None, 1_000).usage;
 
-        assert_eq!(rich_estimate.image_count, 1);
-        assert_eq!(rich_estimate.image_tokens, 4_096);
+        assert_eq!(rich_estimate.breakdown.total.image_count, 1);
+        assert_eq!(rich_estimate.breakdown.total.image_tokens, 4_096);
         assert_eq!(rich_estimate.image_token_reserve_per_image, 4_096);
-        assert!(rich_estimate.tool_call_tokens > 0);
-        assert!(rich_estimate.tool_definition_tokens > 0);
-        assert_eq!(rich_estimate.tool_definition_count, 1);
-        assert!(rich_estimate.estimated_input_tokens > plain_estimate.estimated_input_tokens);
+        assert!(rich_estimate.breakdown.total.tool_call_tokens > 0);
+        assert!(rich_estimate.breakdown.fixed.tool_definition_tokens > 0);
+        assert_eq!(rich_estimate.breakdown.fixed.tool_definition_count, 1);
+        assert!(rich_estimate.request_input_tokens() > plain_estimate.request_input_tokens());
+    }
+
+    #[test]
+    fn one_classified_report_feeds_capacity_compaction_and_persistent_views() {
+        let mut frame = ContextFrame::new(vec![
+            ContextItem::text(
+                LlmMessageRole::System,
+                "system rules",
+                ContextSource::BackendSystemPrompt,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "persisted question",
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::Assistant,
+                "historical tool activity",
+                ContextSource::ConversationTrace,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::Assistant,
+                "current run narration",
+                ContextSource::ModelResponse,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::System,
+                "current todo state",
+                ContextSource::RuntimeExtension,
+                ContextScope::Run,
+                ContextRetention::RequestOnly,
+            ),
+        ]);
+        let detector = detector(&[read_tool()]);
+
+        let report = detector.inspect(&mut frame, Some(128_000), 30_000);
+        let breakdown = &report.usage.breakdown;
+        let category_sum = breakdown
+            .fixed
+            .input_tokens
+            .saturating_add(breakdown.durable.input_tokens)
+            .saturating_add(breakdown.run_transient.input_tokens)
+            .saturating_add(breakdown.request_only.input_tokens);
+
+        assert_eq!(breakdown.fixed.context_item_count, 1);
+        assert_eq!(breakdown.durable.context_item_count, 2);
+        assert_eq!(breakdown.run_transient.context_item_count, 1);
+        assert_eq!(breakdown.request_only.context_item_count, 1);
+        assert_eq!(breakdown.total.input_tokens, category_sum);
+        assert_eq!(breakdown.total.context_item_count, 5);
+        assert_eq!(
+            report.usage.persistent_input_tokens(),
+            breakdown
+                .fixed
+                .input_tokens
+                .saturating_add(breakdown.durable.input_tokens)
+        );
+
+        let compaction = report.compaction_query();
+        assert_eq!(compaction.breakdown, breakdown.clone());
+        assert_eq!(
+            compaction.request_input_tokens,
+            report.usage.request_input_tokens()
+        );
+        assert_eq!(
+            compaction.persistent_input_tokens,
+            report.usage.persistent_input_tokens()
+        );
+    }
+
+    #[test]
+    fn persistent_revision_fingerprints_content_and_fixed_tool_contracts() {
+        let mut original = frame(vec![LlmMessage::text(LlmMessageRole::User, "hello")]);
+        let mut changed = frame(vec![LlmMessage::text(LlmMessageRole::User, "world")]);
+        let mut same_with_tool = frame(vec![LlmMessage::text(LlmMessageRole::User, "hello")]);
+        let plain_detector = detector(&[]);
+        let tool_detector = detector(&[read_tool()]);
+
+        let original = plain_detector
+            .inspect(&mut original, Some(128_000), 30_000)
+            .persistent_snapshot("model", AgentContextWindowPhase::Idle);
+        let changed = plain_detector
+            .inspect(&mut changed, Some(128_000), 30_000)
+            .persistent_snapshot("model", AgentContextWindowPhase::Idle);
+        let same_with_tool = tool_detector
+            .inspect(&mut same_with_tool, Some(128_000), 30_000)
+            .persistent_snapshot("model", AgentContextWindowPhase::Idle);
+
+        assert_ne!(original.persistent_revision, changed.persistent_revision);
+        assert_ne!(
+            original.persistent_revision,
+            same_with_tool.persistent_revision
+        );
     }
 
     #[derive(Debug, Default)]
@@ -757,11 +1058,11 @@ mod tests {
         let second = detector.inspect(&mut frame, Some(10_000), 1_000);
 
         assert_eq!(
-            first.estimate.measurement_mode,
+            first.usage.measurement_mode,
             ContextMeasurementMode::FullRecount
         );
         assert_eq!(
-            second.estimate.measurement_mode,
+            second.usage.measurement_mode,
             ContextMeasurementMode::FullRecount
         );
         assert_eq!(counters.full_recount_calls.load(Ordering::SeqCst), 1);

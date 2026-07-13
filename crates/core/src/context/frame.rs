@@ -1,4 +1,7 @@
-use super::measurement::{ContextEstimatorIdentity, ContextMessageEstimate, ContextTokenEstimator};
+use super::measurement::{
+    combine_context_revisions, ContextEstimatorIdentity, ContextMessageEstimate,
+    ContextRevisionHasher, ContextTokenEstimator,
+};
 use crate::llm::{LlmMessage, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
     AgentContextCheckpointGroup, AgentContextCheckpointImage, AgentContextCheckpointItem,
@@ -40,6 +43,24 @@ impl ContextScope {
 pub(crate) enum ContextRetention {
     Retained,
     RequestOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextUsageClass {
+    /// Stable request baseline such as the backend system prompt.
+    Fixed,
+    /// Conversation or project state that is retained for later turns.
+    Durable,
+    /// Current-run history required by the active tool loop but not rebuilt next turn.
+    RunTransient,
+    /// Ephemeral state injected into exactly one provider request.
+    RequestOnly,
+}
+
+impl ContextUsageClass {
+    pub(crate) fn is_persistent(self) -> bool {
+        matches!(self, Self::Fixed | Self::Durable)
+    }
 }
 
 impl ContextRetention {
@@ -201,6 +222,19 @@ impl ContextMetadata {
     pub(crate) fn group(&self) -> Option<&ContextGroup> {
         self.group.as_ref()
     }
+
+    pub(crate) fn usage_class(&self) -> ContextUsageClass {
+        if self.retention == ContextRetention::RequestOnly {
+            return ContextUsageClass::RequestOnly;
+        }
+        if self.sources.contains(&ContextSource::BackendSystemPrompt) {
+            return ContextUsageClass::Fixed;
+        }
+        match self.scope {
+            ContextScope::Conversation | ContextScope::Project => ContextUsageClass::Durable,
+            ContextScope::Run => ContextUsageClass::RunTransient,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -279,6 +313,7 @@ impl ContextItem {
 pub(crate) struct ContextFrame {
     items: Vec<ContextItem>,
     revision: u64,
+    persistent_revision: u64,
     measurement: Option<ContextFrameMeasurementState>,
 }
 
@@ -286,8 +321,40 @@ pub(crate) struct ContextFrame {
 struct ContextFrameMeasurementState {
     estimator: Arc<dyn ContextTokenEstimator>,
     identity: ContextEstimatorIdentity,
-    aggregate: ContextMessageEstimate,
+    breakdown: ContextFrameEstimateBreakdown,
     full_recount: Option<ContextFullRecount>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ContextFrameEstimateBucket {
+    pub(crate) estimate: ContextMessageEstimate,
+    pub(crate) item_count: usize,
+}
+
+impl ContextFrameEstimateBucket {
+    fn merge(&mut self, estimate: ContextMessageEstimate) {
+        self.estimate.merge(estimate);
+        self.item_count = self.item_count.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ContextFrameEstimateBreakdown {
+    pub(crate) fixed: ContextFrameEstimateBucket,
+    pub(crate) durable: ContextFrameEstimateBucket,
+    pub(crate) run_transient: ContextFrameEstimateBucket,
+    pub(crate) request_only: ContextFrameEstimateBucket,
+}
+
+impl ContextFrameEstimateBreakdown {
+    fn merge(&mut self, class: ContextUsageClass, estimate: ContextMessageEstimate) {
+        match class {
+            ContextUsageClass::Fixed => self.fixed.merge(estimate),
+            ContextUsageClass::Durable => self.durable.merge(estimate),
+            ContextUsageClass::RunTransient => self.run_transient.merge(estimate),
+            ContextUsageClass::RequestOnly => self.request_only.merge(estimate),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -299,25 +366,35 @@ struct ContextFullRecount {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContextFrameMeasurement {
     pub(crate) estimator: ContextEstimatorIdentity,
-    pub(crate) estimate: ContextMessageEstimate,
-    pub(crate) item_count: usize,
+    pub(crate) breakdown: ContextFrameEstimateBreakdown,
+    /// A boundary-sensitive tokenizer may verify only the complete request total. Category totals
+    /// remain additive and are never distorted to imitate that provider-wide number.
+    pub(crate) verified_total: Option<ContextMessageEstimate>,
     pub(crate) revision: u64,
+    pub(crate) persistent_revision: u64,
 }
 
 impl ContextFrame {
     pub(crate) fn new(items: Vec<ContextItem>) -> Self {
         let revision = u64::try_from(items.len()).unwrap_or(u64::MAX);
+        let persistent_revision = persistent_frame_revision(&items);
         Self {
             items,
             revision,
+            persistent_revision,
             measurement: None,
         }
     }
 
     pub(crate) fn push(&mut self, mut item: ContextItem) {
+        let usage_class = item.metadata.usage_class();
+        if usage_class.is_persistent() {
+            self.persistent_revision =
+                combine_context_revisions(self.persistent_revision, context_item_revision(&item));
+        }
         if let Some(measurement) = &mut self.measurement {
             let estimate = item.measure(measurement.estimator.as_ref());
-            measurement.aggregate.merge(estimate);
+            measurement.breakdown.merge(usage_class, estimate);
             measurement.full_recount = None;
         }
         self.items.push(item);
@@ -334,17 +411,15 @@ impl ContextFrame {
             .as_ref()
             .is_none_or(|measurement| measurement.identity != identity);
         if needs_rebuild {
-            let aggregate =
-                self.items
-                    .iter_mut()
-                    .fold(ContextMessageEstimate::default(), |mut total, item| {
-                        total.merge(item.measure(estimator.as_ref()));
-                        total
-                    });
+            let mut breakdown = ContextFrameEstimateBreakdown::default();
+            for item in &mut self.items {
+                let usage_class = item.metadata.usage_class();
+                breakdown.merge(usage_class, item.measure(estimator.as_ref()));
+            }
             self.measurement = Some(ContextFrameMeasurementState {
                 estimator,
                 identity: identity.clone(),
-                aggregate,
+                breakdown,
                 full_recount: None,
             });
         }
@@ -355,9 +430,10 @@ impl ContextFrame {
             .expect("context measurement must exist after rebuilding");
         ContextFrameMeasurement {
             estimator: measurement.identity.clone(),
-            estimate: measurement.aggregate,
-            item_count: self.items.len(),
+            breakdown: measurement.breakdown,
+            verified_total: None,
             revision: self.revision,
+            persistent_revision: self.persistent_revision,
         }
     }
 
@@ -373,7 +449,7 @@ impl ContextFrame {
             .filter(|measurement| measurement.revision == self.revision)
         {
             return ContextFrameMeasurement {
-                estimate: full_recount.estimate,
+                verified_total: Some(full_recount.estimate),
                 ..incremental
             };
         }
@@ -391,7 +467,7 @@ impl ContextFrame {
             });
         }
         ContextFrameMeasurement {
-            estimate,
+            verified_total: Some(estimate),
             ..incremental
         }
     }
@@ -623,6 +699,42 @@ impl Default for ContextFrame {
     fn default() -> Self {
         Self::new(Vec::new())
     }
+}
+
+fn persistent_frame_revision(items: &[ContextItem]) -> u64 {
+    items
+        .iter()
+        .filter(|item| item.metadata.usage_class().is_persistent())
+        .fold(ContextRevisionHasher::new().finish(), |revision, item| {
+            combine_context_revisions(revision, context_item_revision(item))
+        })
+}
+
+fn context_item_revision(item: &ContextItem) -> u64 {
+    let mut hasher = ContextRevisionHasher::new();
+    hasher.write_str(item.message.role.as_str());
+    hasher.write_str(&item.message.content);
+    hasher.write_str(item.message.tool_call_id.as_deref().unwrap_or_default());
+    hasher.write_u64(item.message.is_error.into());
+    for image in &item.message.images {
+        hasher.write_str(&image.mime_type);
+        hasher.write_str(&image.data_base64);
+    }
+    for call in &item.message.tool_calls {
+        hasher.write_str(&call.id);
+        hasher.write_str(&call.name);
+        hasher.write_str(&serde_json::to_string(&call.args).unwrap_or_else(|_| "null".to_string()));
+    }
+    for source in item.metadata.sources() {
+        hasher.write_str(source.as_str());
+    }
+    hasher.write_str(item.metadata.scope().as_str());
+    hasher.write_str(item.metadata.retention().as_str());
+    if let Some(group) = item.metadata.group() {
+        hasher.write_str(group.id());
+        hasher.write_str(group.kind().as_str());
+    }
+    hasher.finish()
 }
 
 impl ContextItem {

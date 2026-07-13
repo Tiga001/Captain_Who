@@ -17,6 +17,47 @@ const REQUEST_STRUCTURE_TOKENS: u64 = 16;
 const MESSAGE_STRUCTURE_TOKENS: u64 = 8;
 const TOOL_CALL_STRUCTURE_TOKENS: u64 = 12;
 const IMAGE_TOKEN_RESERVE: u64 = 4_096;
+const CONTEXT_REVISION_FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const CONTEXT_REVISION_FNV_PRIME: u64 = 0x100000001b3;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ContextRevisionHasher {
+    state: u64,
+}
+
+impl ContextRevisionHasher {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: CONTEXT_REVISION_FNV_OFFSET,
+        }
+    }
+
+    pub(crate) fn write_u64(&mut self, value: u64) {
+        self.write_raw(&value.to_le_bytes());
+    }
+
+    pub(crate) fn write_str(&mut self, value: &str) {
+        self.write_u64(u64::try_from(value.len()).unwrap_or(u64::MAX));
+        self.write_raw(value.as_bytes());
+    }
+
+    pub(crate) fn finish(self) -> u64 {
+        self.state
+    }
+
+    fn write_raw(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.state = (self.state ^ u64::from(*byte)).wrapping_mul(CONTEXT_REVISION_FNV_PRIME);
+        }
+    }
+}
+
+pub(crate) fn combine_context_revisions(left: u64, right: u64) -> u64 {
+    let mut hasher = ContextRevisionHasher::new();
+    hasher.write_u64(left);
+    hasher.write_u64(right);
+    hasher.finish()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContextEstimatorIdentity {

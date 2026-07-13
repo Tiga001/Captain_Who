@@ -8,8 +8,8 @@ mod tool_input_stream;
 use crate::cancellation::AgentCancellationToken;
 use crate::context::{
     ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextBudgetReport,
-    ContextCapacityDetector, ContextFrame, ContextItem, ContextMetadata, ContextRetention,
-    ContextScope, ContextSource,
+    ContextCapacityDetector, ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata,
+    ContextRetention, ContextScope, ContextSource,
 };
 use crate::conversation_trace::ConversationTraceRecorder;
 use crate::llm::{
@@ -19,10 +19,10 @@ use crate::llm::{
 use crate::prompts::build_system_prompt;
 use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
-    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentContextWindowSource, AgentError,
-    AgentEvent, AgentExtensionSnapshot, AgentPatchPermission, AgentPromptPreferences,
-    AgentProposedAction, AgentResult, AgentRunContext, AgentRunStatus, AgentToolCall,
-    AgentToolDefinition, AgentToolResult,
+    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentError, AgentEvent,
+    AgentExtensionSnapshot, AgentPatchPermission, AgentPromptPreferences, AgentProposedAction,
+    AgentResult, AgentRunContext, AgentRunStatus, AgentToolCall, AgentToolDefinition,
+    AgentToolResult,
 };
 use crate::storage::service::StorageService;
 use crate::tools::{ToolExecutionContext, ToolRegistry};
@@ -194,10 +194,6 @@ pub fn next_run_id() -> String {
 pub fn inspect_context_window(
     input: AgentChatInput,
 ) -> AgentResult<Option<AgentContextWindowSnapshot>> {
-    if !input.context_budget_enabled {
-        return Ok(None);
-    }
-
     let run_id = "context-window-preview";
     let PreparedRuntimeCapabilities {
         runtime_extensions,
@@ -220,12 +216,9 @@ pub fn inspect_context_window(
     let detector = ContextCapacityDetector::for_model(&input.model, api_style, &tool_definitions);
     detector.prepare_frame(&mut context);
     let report = detector.inspect(&mut context, input.context_window_tokens, max_tokens);
-    Ok(Some(report.snapshot(
+    Ok(Some(report.persistent_snapshot(
         &input.model,
         AgentContextWindowPhase::Idle,
-        AgentContextWindowSource::Estimated,
-        None,
-        None,
     )))
 }
 
@@ -325,7 +318,8 @@ impl AgentRuntime {
             tool_definitions: tool_definitions.clone(),
         });
         let transaction_storage = storage.clone();
-        let context_budget_enabled = input.context_budget_enabled;
+        let context_window_indicator_enabled = input.context_window_indicator_enabled;
+        let context_window_configured = input.context_window_tokens.is_some();
         let mut file_transaction_guard = FileTransactionRunGuard::new(
             transaction_storage.clone(),
             run_id.clone(),
@@ -360,7 +354,7 @@ impl AgentRuntime {
         let mut usage = None;
         let mut finish_reason = None;
         let mut response_fence_corrections = 0_usize;
-        let context_capacity_detector = context_budget_enabled.then(|| {
+        let context_capacity_detector = context_window_configured.then(|| {
             ContextCapacityDetector::for_model(
                 &llm_request.model,
                 llm_request.api_style,
@@ -434,31 +428,35 @@ impl AgentRuntime {
                         &request_context,
                         &llm_request.tools,
                     );
-                    let request_budget_report = if let Some(detector) = &context_capacity_detector {
+                    if let Some(detector) = &context_capacity_detector {
                         let report = detector.inspect(
                             &mut request_context,
                             llm_request.context_window_tokens,
                             llm_request.max_tokens,
                         );
-                        emit_context_budget_if_enabled(&run_id, model_request_index + 1, &report);
-                        event_stream.emit(AgentEvent::ContextWindowUpdated {
-                            run_id: run_id.clone(),
-                            conversation_id: context
-                                .as_ref()
-                                .and_then(|context| context.conversation_id.clone()),
-                            snapshot: report.snapshot(
-                                &llm_request.model,
-                                AgentContextWindowPhase::ModelRequest,
-                                AgentContextWindowSource::Estimated,
-                                Some(model_request_index + 1),
-                                None,
-                            ),
-                        });
+                        // Future blocking compaction consumes this view before the capacity gate;
+                        // it must not remeasure or reinterpret the request independently.
+                        let compaction_query = report.compaction_query();
+                        emit_context_budget_if_enabled(
+                            &run_id,
+                            model_request_index + 1,
+                            &report,
+                            &compaction_query,
+                        );
+                        if context_window_indicator_enabled && model_request_index == 0 {
+                            event_stream.emit(AgentEvent::ContextWindowUpdated {
+                                run_id: run_id.clone(),
+                                conversation_id: context
+                                    .as_ref()
+                                    .and_then(|context| context.conversation_id.clone()),
+                                snapshot: report.persistent_snapshot(
+                                    &llm_request.model,
+                                    AgentContextWindowPhase::DurableCommit,
+                                ),
+                            });
+                        }
                         detector.ensure_sendable(report.clone())?;
-                        Some(report)
-                    } else {
-                        None
-                    };
+                    }
                     let request = llm_request.request(request_context);
                     let llm_response_result = if request.stream {
                         let delta_run_id = run_id.clone();
@@ -607,27 +605,6 @@ impl AgentRuntime {
                             return Err(error.with_usage(usage));
                         }
                     };
-                    if let (Some(report), Some(input_tokens)) = (
-                        request_budget_report.as_ref(),
-                        llm_response
-                            .usage
-                            .as_ref()
-                            .and_then(|usage| usage.input_tokens),
-                    ) {
-                        event_stream.emit(AgentEvent::ContextWindowUpdated {
-                            run_id: run_id.clone(),
-                            conversation_id: context
-                                .as_ref()
-                                .and_then(|context| context.conversation_id.clone()),
-                            snapshot: report.snapshot(
-                                &llm_request.model,
-                                AgentContextWindowPhase::ModelRequest,
-                                AgentContextWindowSource::ProviderReported,
-                                Some(model_request_index + 1),
-                                Some(input_tokens),
-                            ),
-                        });
-                    }
                     merge_total_usage(&mut usage, llm_response.usage);
                     finish_reason = llm_response.finish_reason;
 
@@ -1291,14 +1268,19 @@ fn emit_context_budget_if_enabled(
     run_id: &str,
     request_index: usize,
     report: &ContextBudgetReport,
+    compaction_query: &ContextCompactionQuery,
 ) {
     if !context_diagnostics_enabled() {
         return;
     }
 
-    match serde_json::to_string(report) {
-        Ok(report) => {
-            eprintln!("[context-budget] run={run_id} request={request_index} {report}")
+    let diagnostic = json!({
+        "capacity": report,
+        "compactionQuery": compaction_query,
+    });
+    match serde_json::to_string(&diagnostic) {
+        Ok(diagnostic) => {
+            eprintln!("[context-budget] run={run_id} request={request_index} {diagnostic}")
         }
         Err(error) => eprintln!(
             "[context-budget] run={run_id} request={request_index} serialization_error={error}"
