@@ -1,3 +1,4 @@
+use crate::context::ContextCompactionSummary;
 use crate::conversation_trace::{ConversationTurnTrace, ConversationTurnTraceItem};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,6 +32,8 @@ pub struct AgentChatInput {
     pub resume_checkpoint: Option<AgentRunCheckpoint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assistant_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_compaction_summary: Option<ContextCompactionSummary>,
     pub messages: Vec<AgentChatMessage>,
 }
 
@@ -80,6 +83,15 @@ pub struct AgentContextCheckpointItem {
     pub retention: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<AgentContextCheckpointGroup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<AgentContextCheckpointOrigin>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextCheckpointOrigin {
+    pub kind: String,
+    pub id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -115,8 +127,12 @@ pub struct AgentQueuedToolCallCheckpoint {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentChatMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_turn_trace: Option<ConversationTurnTrace>,
 }
@@ -943,6 +959,12 @@ pub enum AgentEvent {
         conversation_id: Option<String>,
         snapshot: AgentContextWindowSnapshot,
     },
+    ContextCompactionStarted {
+        run_id: String,
+    },
+    ContextCompactionFinished {
+        run_id: String,
+    },
     ApprovalRequired {
         run_id: String,
         action: AgentProposedAction,
@@ -1089,8 +1111,10 @@ mod tests {
     #[test]
     fn chat_message_serializes_conversation_trace_with_camel_case_protocol_names() {
         let message = AgentChatMessage {
+            message_id: None,
             role: "assistant".to_string(),
             content: "done".to_string(),
+            created_at: Some(0),
             conversation_turn_trace: Some(completed_conversation_trace_without_items(
                 "run-1",
                 "conversation-1",
@@ -1100,6 +1124,7 @@ mod tests {
         let serialized = serde_json::to_string(&message).unwrap();
 
         assert!(serialized.contains("\"conversationTurnTrace\""));
+        assert!(serialized.contains("\"createdAt\":0"));
         assert!(!serialized.contains("conversation_turn_trace"));
     }
 }

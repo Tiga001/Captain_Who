@@ -528,6 +528,49 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS context_compaction_summaries (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            source_revision TEXT NOT NULL,
+            previous_summary_id TEXT,
+            covered_through_message_id TEXT NOT NULL,
+            content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+            generation_kind TEXT NOT NULL CHECK (generation_kind IN ('test', 'model')),
+            generation_model TEXT,
+            source_input_tokens INTEGER NOT NULL CHECK (source_input_tokens >= 0),
+            summary_input_tokens INTEGER NOT NULL CHECK (
+                summary_input_tokens >= 0 AND summary_input_tokens <= source_input_tokens
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (previous_summary_id) REFERENCES context_compaction_summaries(id) ON DELETE SET NULL,
+            FOREIGN KEY (covered_through_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            CHECK (
+                (generation_kind = 'test' AND generation_model IS NULL)
+                OR (generation_kind = 'model' AND length(trim(generation_model)) > 0)
+            )
+        );
+
+        CREATE TABLE IF NOT EXISTS context_compaction_summary_sources (
+            summary_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            message_id TEXT NOT NULL,
+            PRIMARY KEY (summary_id, ordinal),
+            UNIQUE (summary_id, message_id),
+            FOREIGN KEY (summary_id) REFERENCES context_compaction_summaries(id) ON DELETE CASCADE,
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS conversation_context_compaction_heads (
+            conversation_id TEXT PRIMARY KEY,
+            summary_id TEXT NOT NULL UNIQUE,
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (summary_id) REFERENCES context_compaction_summaries(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_models_position ON models(position);
         CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at);
         CREATE INDEX IF NOT EXISTS idx_conversations_project_id ON conversations(project_id);
@@ -537,6 +580,8 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at);
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, position);
         CREATE INDEX IF NOT EXISTS idx_conversation_turn_traces_conversation_id ON conversation_turn_traces(conversation_id, completed_at);
+        CREATE INDEX IF NOT EXISTS idx_context_compaction_summaries_conversation_id ON context_compaction_summaries(conversation_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_context_compaction_summary_sources_message_id ON context_compaction_summary_sources(message_id);
         CREATE INDEX IF NOT EXISTS idx_attachments_conversation_id ON attachments(conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_project_id ON attachments(project_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
@@ -556,6 +601,89 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_project_id ON agent_file_drafts(project_id);
         CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_expires_at ON agent_file_drafts(expires_at);
         CREATE INDEX IF NOT EXISTS idx_composer_drafts_updated_at ON composer_drafts(updated_at);
+
+        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_message_delete
+        BEFORE DELETE ON messages
+        WHEN EXISTS (
+            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.id
+        )
+        BEGIN
+            DELETE FROM context_compaction_summaries
+            WHERE conversation_id = OLD.conversation_id;
+        END;
+
+        DROP TRIGGER IF EXISTS invalidate_context_compaction_before_message_update;
+        CREATE TRIGGER invalidate_context_compaction_before_message_update
+        BEFORE UPDATE OF role, content, status, created_at, position ON messages
+        WHEN (
+            OLD.role IS NOT NEW.role
+            OR OLD.content IS NOT NEW.content
+            OR OLD.status IS NOT NEW.status
+            OR OLD.created_at IS NOT NEW.created_at
+            OR OLD.position IS NOT NEW.position
+        ) AND EXISTS (
+            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.id
+        )
+        BEGIN
+            DELETE FROM context_compaction_summaries
+            WHERE conversation_id = OLD.conversation_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_trace_insert
+        BEFORE INSERT ON conversation_turn_trace_items
+        WHEN EXISTS (
+            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = NEW.assistant_message_id
+        )
+        BEGIN
+            DELETE FROM context_compaction_summaries
+            WHERE conversation_id = (
+                SELECT conversation_id FROM messages WHERE id = NEW.assistant_message_id
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_trace_item_update
+        BEFORE UPDATE ON conversation_turn_trace_items
+        WHEN EXISTS (
+            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.assistant_message_id
+        )
+        BEGIN
+            DELETE FROM context_compaction_summaries
+            WHERE conversation_id = (
+                SELECT conversation_id FROM messages WHERE id = OLD.assistant_message_id
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_trace_item_delete
+        BEFORE DELETE ON conversation_turn_trace_items
+        WHEN EXISTS (
+            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.assistant_message_id
+        )
+        BEGIN
+            DELETE FROM context_compaction_summaries
+            WHERE conversation_id = (
+                SELECT conversation_id FROM messages WHERE id = OLD.assistant_message_id
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_trace_update
+        BEFORE UPDATE OF terminal_status, terminal_error, truncated ON conversation_turn_traces
+        WHEN EXISTS (
+            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.assistant_message_id
+        )
+        BEGIN
+            DELETE FROM context_compaction_summaries
+            WHERE conversation_id = OLD.conversation_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_trace_delete
+        BEFORE DELETE ON conversation_turn_traces
+        WHEN EXISTS (
+            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.assistant_message_id
+        )
+        BEGIN
+            DELETE FROM context_compaction_summaries
+            WHERE conversation_id = OLD.conversation_id;
+        END;
         ",
     )?;
 

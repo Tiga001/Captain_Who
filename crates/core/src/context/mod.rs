@@ -9,17 +9,33 @@
 mod assembler;
 mod budget;
 mod compaction;
+mod compaction_summary;
 mod frame;
 mod measurement;
+mod message_time;
 mod state;
 mod trace_renderer;
 
 pub(crate) use assembler::{ContextAssembler, ContextAssemblyInput, ContextAttachments};
 pub(crate) use budget::{ContextBudgetReport, ContextCapacityDetector, ContextCompactionQuery};
-pub(crate) use compaction::{ContextCompactionPlan, ContextCompactionPlanner};
-pub(crate) use frame::{
-    ContextFrame, ContextGroup, ContextItem, ContextMetadata, ContextRetention, ContextScope,
-    ContextSource, MeasuredContextBaseline,
+#[cfg(test)]
+pub(crate) use compaction::{
+    ContextCompactionDurablePrefix, ContextCompactionProtectedEstimate, ContextCompactionStep,
 };
+pub(crate) use compaction::{
+    ContextCompactionPlan, ContextCompactionPlanStatus, ContextCompactionPlanner,
+    ContextCompactionScope,
+};
+pub(crate) use compaction_summary::render_compaction_summary_content_for_context;
+pub use compaction_summary::{
+    ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionPrefix,
+    ContextCompactionSourceMessage, ContextCompactionSummary, ContextCompactionSummaryDraft,
+    CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+};
+pub(crate) use frame::{
+    ContextFrame, ContextGroup, ContextItem, ContextMetadata, ContextOrigin, ContextRetention,
+    ContextScope, ContextSource, MeasuredContextBaseline,
+};
+pub(crate) use message_time::format_message_created_at;
 pub use state::{AgentContextBaseline, AgentConversationContextState};
 pub(crate) use trace_renderer::ConversationTraceRenderer;

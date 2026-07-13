@@ -210,6 +210,7 @@ export const zhCNTranslations = {
   'appearance.themeVariant.ayuDark': 'Ayu Dark',
   'appearance.themeVariant.gruvbox': 'Gruvbox',
   'appearance.themeVariant.one': 'One',
+  'appearance.themeVariant.zju': 'ZJU',
   'appearance.nativeFontSmoothing': 'macOS 字体平滑',
   'appearance.nativeFontSmoothingDescription': '使用 macOS/WebKit 字体抗锯齿，让文字边缘更平滑。',
   'appearance.translucentSidebar': '半透明侧边栏',
@@ -319,6 +320,7 @@ export const zhCNTranslations = {
   'chat.usageCacheCreationInputTokens': '缓存写入',
 
   'agent.thinking': '正在思考',
+  'agent.compactingContext': '正在自动压缩上下文',
   'agent.separator': '，',
   'agent.processed': '已处理 {duration}',
   'agent.stoppedAfter': '你在 {duration} 后停止了',

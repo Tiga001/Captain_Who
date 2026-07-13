@@ -6,7 +6,9 @@
 //! and then restart the normal assembly and measurement cycle.
 
 use super::budget::{ContextBudgetStatus, ContextCompactionQuery};
-use super::frame::{ContextFramePlanningItem, ContextSource, ContextUsageClass};
+use super::frame::{
+    ContextFramePlanningItem, ContextOrigin, ContextOriginKind, ContextSource, ContextUsageClass,
+};
 use crate::llm::LlmMessageRole;
 use crate::protocol::{AgentToolDefinition, AgentToolSafety};
 use serde::Serialize;
@@ -98,6 +100,16 @@ pub(crate) struct ContextCompactionStep {
     pub(crate) expected_reclaimed_tokens: u64,
     pub(crate) contains_side_effects: bool,
     pub(crate) contains_errors: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) durable_prefix: Option<ContextCompactionDurablePrefix>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ContextCompactionDurablePrefix {
+    pub(crate) previous_summary_id: Option<String>,
+    pub(crate) covered_message_ids: Vec<String>,
+    pub(crate) covered_through_message_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -193,7 +205,7 @@ impl ContextCompactionPlanner {
         let mut protected_reasons = BTreeMap::<String, u64>::new();
         let mut protected_unit_count = 0_usize;
         let mut candidates = Vec::new();
-        for unit in units {
+        for unit in units.iter().cloned() {
             if let Some(reason) = absolute_protection_reason(&unit, last_durable_user_index) {
                 protected_unit_count = protected_unit_count.saturating_add(1);
                 merge_reason_tokens(&mut protected_reasons, reason, unit.tokens);
@@ -362,6 +374,7 @@ impl ContextCompactionPlanner {
             }
             selected.push(candidate.clone());
         }
+        normalize_stable_durable_prefix(&mut selected, &units, &candidates);
 
         let steps = build_steps(
             &selected,
@@ -452,6 +465,9 @@ struct AtomicContextUnit {
     contains_errors: bool,
     contains_side_effects: bool,
     mixed_usage_classes: bool,
+    origin: Option<ContextOrigin>,
+    first_role: LlmMessageRole,
+    last_role: LlmMessageRole,
 }
 
 #[derive(Debug, Clone)]
@@ -490,13 +506,26 @@ fn build_atomic_units(
     let mut cursor = 0_usize;
     while cursor < items.len() {
         let first = &items[cursor];
-        let end = match first.group_id.as_deref() {
-            Some(group_id) => items[cursor..]
+        let end = match (
+            first.usage_class == ContextUsageClass::Durable,
+            first.origin.as_ref(),
+        ) {
+            (true, Some(origin)) => items[cursor..]
                 .iter()
-                .take_while(|item| item.group_id.as_deref() == Some(group_id))
+                .take_while(|item| {
+                    item.usage_class == ContextUsageClass::Durable
+                        && item.origin.as_ref() == Some(origin)
+                })
                 .count()
                 .saturating_add(cursor),
-            None => cursor.saturating_add(1),
+            _ => match first.group_id.as_deref() {
+                Some(group_id) => items[cursor..]
+                    .iter()
+                    .take_while(|item| item.group_id.as_deref() == Some(group_id))
+                    .count()
+                    .saturating_add(cursor),
+                None => cursor.saturating_add(1),
+            },
         };
         let slice = &items[cursor..end];
         let usage_class = first.usage_class;
@@ -524,6 +553,9 @@ fn build_atomic_units(
             contains_errors: slice.iter().any(|item| item.is_error),
             contains_side_effects,
             mixed_usage_classes: slice.iter().any(|item| item.usage_class != usage_class),
+            origin: first.origin.clone(),
+            first_role: first.role,
+            last_role: slice.last().map_or(first.role, |item| item.role),
         });
         cursor = end;
     }
@@ -716,9 +748,120 @@ fn build_steps(
                 contains_errors: candidates
                     .iter()
                     .any(|candidate| candidate.unit.contains_errors),
+                durable_prefix: (scope == ContextCompactionScope::DurableHistory)
+                    .then(|| durable_prefix_for_candidates(&candidates))
+                    .flatten(),
             })
         })
         .collect()
+}
+
+fn normalize_stable_durable_prefix(
+    selected: &mut Vec<CompactionCandidate>,
+    units: &[AtomicContextUnit],
+    candidates: &[CompactionCandidate],
+) {
+    let durable_units = units
+        .iter()
+        .filter(|unit| unit.usage_class == ContextUsageClass::Durable)
+        .collect::<Vec<_>>();
+    if durable_units.is_empty() || durable_units.iter().any(|unit| unit.origin.is_none()) {
+        return;
+    }
+    let Some(furthest_selected_start) = selected
+        .iter()
+        .filter(|candidate| candidate.scope == ContextCompactionScope::DurableHistory)
+        .map(|candidate| candidate.unit.start_index)
+        .max()
+    else {
+        return;
+    };
+    let candidates_by_start = candidates
+        .iter()
+        .filter(|candidate| candidate.scope == ContextCompactionScope::DurableHistory)
+        .map(|candidate| (candidate.unit.start_index, candidate))
+        .collect::<BTreeMap<_, _>>();
+    let mut prefix = Vec::new();
+    let mut last_valid_prefix_len = 0;
+    let mut reached_selected_boundary = false;
+    for unit in durable_units {
+        let Some(candidate) = candidates_by_start.get(&unit.start_index) else {
+            break;
+        };
+        prefix.push((*candidate).clone());
+        reached_selected_boundary |= unit.start_index >= furthest_selected_start;
+        if durable_prefix_for_owned_candidates(&prefix).is_some() {
+            last_valid_prefix_len = prefix.len();
+        }
+        if reached_selected_boundary && last_valid_prefix_len == prefix.len() {
+            break;
+        }
+    }
+    prefix.truncate(last_valid_prefix_len);
+    selected.retain(|candidate| candidate.scope != ContextCompactionScope::DurableHistory);
+    selected.extend(prefix);
+}
+
+fn durable_prefix_for_candidates(
+    candidates: &[&CompactionCandidate],
+) -> Option<ContextCompactionDurablePrefix> {
+    durable_prefix_for_units(candidates.iter().map(|candidate| &candidate.unit))
+}
+
+fn durable_prefix_for_owned_candidates(
+    candidates: &[CompactionCandidate],
+) -> Option<ContextCompactionDurablePrefix> {
+    durable_prefix_for_units(candidates.iter().map(|candidate| &candidate.unit))
+}
+
+fn durable_prefix_for_units<'a>(
+    units: impl IntoIterator<Item = &'a AtomicContextUnit>,
+) -> Option<ContextCompactionDurablePrefix> {
+    let mut previous_summary_id = None;
+    let mut covered_message_ids = Vec::new();
+    let mut expect_user = true;
+    for (index, unit) in units.into_iter().enumerate() {
+        let origin = unit.origin.as_ref()?;
+        match origin.kind() {
+            ContextOriginKind::CompactionSummary => {
+                if index != 0
+                    || previous_summary_id
+                        .replace(origin.id().to_string())
+                        .is_some()
+                {
+                    return None;
+                }
+                if unit.first_role != LlmMessageRole::Assistant
+                    || unit.last_role != LlmMessageRole::Assistant
+                {
+                    return None;
+                }
+            }
+            ContextOriginKind::ConversationMessage => {
+                let expected_role = if expect_user {
+                    LlmMessageRole::User
+                } else {
+                    LlmMessageRole::Assistant
+                };
+                if unit.first_role != expected_role || unit.last_role != expected_role {
+                    return None;
+                }
+                if covered_message_ids.last().map(String::as_str) != Some(origin.id()) {
+                    covered_message_ids.push(origin.id().to_string());
+                }
+                expect_user = !expect_user;
+            }
+        }
+    }
+    if !expect_user {
+        return None;
+    }
+    let covered_through_message_id = covered_message_ids.last()?.clone();
+    Some(ContextCompactionDurablePrefix {
+        previous_summary_id,
+        covered_message_ids,
+        covered_through_message_id,
+    })
 }
 
 fn merge_candidate_ranges(candidates: &[&CompactionCandidate]) -> Vec<ContextCompactionItemRange> {
@@ -832,6 +975,7 @@ mod tests {
             tool_names: Vec::new(),
             image_count: 0,
             is_error: false,
+            origin: None,
         }
     }
 
@@ -842,6 +986,14 @@ mod tests {
     ) -> ContextFramePlanningItem {
         item.group_id = Some(group_id.to_string());
         item.tool_names = tool.into_iter().map(ToString::to_string).collect();
+        item
+    }
+
+    fn origin_item(
+        mut item: ContextFramePlanningItem,
+        origin: ContextOrigin,
+    ) -> ContextFramePlanningItem {
+        item.origin = Some(origin);
         item
     }
 
@@ -940,6 +1092,221 @@ mod tests {
         assert_eq!(plan.status, ContextCompactionPlanStatus::NotRequired);
         assert_eq!(plan.soft_trigger_input_tokens, Some(750));
         assert!(plan.steps.is_empty());
+    }
+
+    #[test]
+    fn stable_durable_origins_produce_one_complete_message_prefix_boundary() {
+        let items = vec![
+            planning_item(
+                0,
+                ContextUsageClass::Fixed,
+                1_000,
+                LlmMessageRole::System,
+                ContextSource::BackendSystemPrompt,
+            ),
+            origin_item(
+                planning_item(
+                    1,
+                    ContextUsageClass::Durable,
+                    500,
+                    LlmMessageRole::Assistant,
+                    ContextSource::ConversationSummary,
+                ),
+                ContextOrigin::compaction_summary("summary-previous"),
+            ),
+            origin_item(
+                planning_item(
+                    2,
+                    ContextUsageClass::Durable,
+                    1_500,
+                    LlmMessageRole::User,
+                    ContextSource::ConversationHistory,
+                ),
+                ContextOrigin::conversation_message("user-1"),
+            ),
+            origin_item(
+                planning_item(
+                    3,
+                    ContextUsageClass::Durable,
+                    1_000,
+                    LlmMessageRole::Assistant,
+                    ContextSource::ConversationTrace,
+                ),
+                ContextOrigin::conversation_message("assistant-1"),
+            ),
+            origin_item(
+                planning_item(
+                    4,
+                    ContextUsageClass::Durable,
+                    2_000,
+                    LlmMessageRole::Assistant,
+                    ContextSource::ConversationTrace,
+                ),
+                ContextOrigin::conversation_message("assistant-1"),
+            ),
+            origin_item(
+                planning_item(
+                    5,
+                    ContextUsageClass::Durable,
+                    2_000,
+                    LlmMessageRole::Tool,
+                    ContextSource::ConversationTrace,
+                ),
+                ContextOrigin::conversation_message("assistant-1"),
+            ),
+            origin_item(
+                planning_item(
+                    6,
+                    ContextUsageClass::Durable,
+                    1_000,
+                    LlmMessageRole::Assistant,
+                    ContextSource::ConversationHistory,
+                ),
+                ContextOrigin::conversation_message("assistant-1"),
+            ),
+            origin_item(
+                planning_item(
+                    7,
+                    ContextUsageClass::Durable,
+                    500,
+                    LlmMessageRole::User,
+                    ContextSource::CurrentTurn,
+                ),
+                ContextOrigin::conversation_message("user-current"),
+            ),
+        ];
+
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(
+                ContextBudgetStatus::WithinBudget,
+                Some(10_000),
+                1_000,
+                8_500,
+                0,
+                0,
+            ),
+            &items,
+        );
+
+        let step = plan
+            .steps
+            .iter()
+            .find(|step| step.scope == ContextCompactionScope::DurableHistory)
+            .unwrap();
+        assert_eq!(
+            step.ranges,
+            vec![ContextCompactionItemRange {
+                start_index: 1,
+                end_index_exclusive: 7,
+            }]
+        );
+        assert_eq!(step.atomic_unit_count, 3);
+        assert_eq!(
+            step.durable_prefix,
+            Some(ContextCompactionDurablePrefix {
+                previous_summary_id: Some("summary-previous".to_string()),
+                covered_message_ids: vec!["user-1".to_string(), "assistant-1".to_string()],
+                covered_through_message_id: "assistant-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn durable_selection_extends_past_a_large_user_message_to_close_the_turn() {
+        let mut items = vec![planning_item(
+            0,
+            ContextUsageClass::Fixed,
+            1_000,
+            LlmMessageRole::System,
+            ContextSource::BackendSystemPrompt,
+        )];
+        for (index, tokens, role, source, origin) in [
+            (
+                1,
+                500,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationSummary,
+                ContextOrigin::compaction_summary("summary-previous"),
+            ),
+            (
+                2,
+                1_000,
+                LlmMessageRole::User,
+                ContextSource::ConversationHistory,
+                ContextOrigin::conversation_message("user-1"),
+            ),
+            (
+                3,
+                1_000,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                ContextOrigin::conversation_message("assistant-1"),
+            ),
+            (
+                4,
+                5_500,
+                LlmMessageRole::User,
+                ContextSource::ConversationHistory,
+                ContextOrigin::conversation_message("user-2"),
+            ),
+            (
+                5,
+                500,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                ContextOrigin::conversation_message("assistant-2"),
+            ),
+            (
+                6,
+                500,
+                LlmMessageRole::User,
+                ContextSource::CurrentTurn,
+                ContextOrigin::conversation_message("user-current"),
+            ),
+        ] {
+            items.push(origin_item(
+                planning_item(index, ContextUsageClass::Durable, tokens, role, source),
+                origin,
+            ));
+        }
+
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(
+                ContextBudgetStatus::WithinBudget,
+                Some(10_000),
+                1_000,
+                9_000,
+                0,
+                0,
+            ),
+            &items,
+        );
+
+        let step = plan
+            .steps
+            .iter()
+            .find(|step| step.scope == ContextCompactionScope::DurableHistory)
+            .unwrap();
+        assert_eq!(
+            step.ranges,
+            vec![ContextCompactionItemRange {
+                start_index: 1,
+                end_index_exclusive: 6,
+            }]
+        );
+        assert_eq!(
+            step.durable_prefix,
+            Some(ContextCompactionDurablePrefix {
+                previous_summary_id: Some("summary-previous".to_string()),
+                covered_message_ids: vec![
+                    "user-1".to_string(),
+                    "assistant-1".to_string(),
+                    "user-2".to_string(),
+                    "assistant-2".to_string(),
+                ],
+                covered_through_message_id: "assistant-2".to_string(),
+            })
+        );
     }
 
     #[test]

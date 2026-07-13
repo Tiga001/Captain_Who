@@ -1,5 +1,6 @@
 // Support types and helper functions for core-server agent orchestration.
 use crate::agent::{AGENT_EVENT_NAME, ID_COUNTER, THINKING_PLACEHOLDER};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -302,9 +303,12 @@ pub(super) fn prepare_conversation_turn(
     conversation.updated_at = timestamp;
 
     let history_traces = storage.list_conversation_turn_traces(&conversation_id)?;
-    let history_messages = conversation_history_messages(
+    let context_compaction_summary =
+        storage.get_active_context_compaction_summary(&conversation_id)?;
+    let history_messages = conversation_history_messages_with_compaction(
         &conversation,
         &history_traces,
+        context_compaction_summary.as_ref(),
         &[user_message_id.as_str(), assistant_message_id.as_str()],
     );
 
@@ -344,8 +348,10 @@ pub(super) fn prepare_conversation_turn(
 
     let mut agent_messages = history_messages;
     agent_messages.push(AgentChatMessage {
+        message_id: Some(user_message_id.clone()),
         role: "user".to_string(),
         content,
+        created_at: Some(timestamp),
         conversation_turn_trace: None,
     });
 
@@ -380,6 +386,7 @@ pub(super) fn prepare_conversation_turn(
         attachments: input.attachments,
         resume_checkpoint: None,
         assistant_message_id: Some(assistant_message_id.clone()),
+        context_compaction_summary,
         messages: agent_messages,
     };
 
@@ -409,18 +416,38 @@ pub(super) fn prepare_conversation_turn(
     })
 }
 
+#[cfg(test)]
 pub(super) fn conversation_history_messages(
     conversation: &ChatConversationRecord,
     traces: &[ConversationTurnTrace],
+    excluded_message_ids: &[&str],
+) -> Vec<AgentChatMessage> {
+    conversation_history_messages_with_compaction(conversation, traces, None, excluded_message_ids)
+}
+
+pub(super) fn conversation_history_messages_with_compaction(
+    conversation: &ChatConversationRecord,
+    traces: &[ConversationTurnTrace],
+    compaction_summary: Option<&mycopilot_core::ContextCompactionSummary>,
     excluded_message_ids: &[&str],
 ) -> Vec<AgentChatMessage> {
     let traces = traces
         .iter()
         .map(|trace| (trace.assistant_message_id.as_str(), trace))
         .collect::<std::collections::HashMap<_, _>>();
+    let covered_message_ids = compaction_summary
+        .map(|summary| {
+            summary
+                .covered_message_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
     conversation
         .messages
         .iter()
+        .filter(|message| !covered_message_ids.contains(message.id.as_str()))
         .filter(|message| {
             !excluded_message_ids
                 .iter()
@@ -454,8 +481,10 @@ pub(super) fn conversation_history_messages(
                 return None;
             }
             Some(AgentChatMessage {
+                message_id: Some(message.id.clone()),
                 role: message.role.clone(),
                 content,
+                created_at: Some(message.created_at),
                 conversation_turn_trace: trace.cloned(),
             })
         })

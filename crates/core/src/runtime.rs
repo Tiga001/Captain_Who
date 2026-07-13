@@ -1,5 +1,7 @@
 mod attachments;
 mod checkpoint;
+mod context_compaction;
+mod context_compaction_model;
 mod extensions;
 mod file_transactions;
 mod tool_flow;
@@ -36,6 +38,7 @@ use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
     create_run_checkpoint, restore_run_checkpoint, RestoredRunCheckpoint, ToolCallBatch,
 };
+use context_compaction::{ContextCompactionExecution, ContextCompactionExecutor};
 use extensions::{ModelRequestContext, RuntimeEffect, RuntimeExtensionEvent, RuntimeExtensions};
 use file_transactions::{
     FileTransactionRunGuard, FileTransactionState, MAX_RESPONSE_FENCE_CORRECTIONS,
@@ -58,6 +61,7 @@ const DEFAULT_MAX_TOKENS: u32 = 30_000;
 const MAX_MAX_TOKENS: u32 = 128_000;
 const DEFAULT_TEMPERATURE: f32 = 0.6;
 const MAX_TOOL_ITERATIONS: usize = 10_000;
+const MAX_CONTEXT_COMPACTION_ATTEMPTS_PER_REQUEST: usize = 3;
 
 struct LlmRequestTemplate {
     api_url: String,
@@ -119,6 +123,56 @@ pub type AgentHostActionExecutor = Arc<
         + 'static,
 >;
 
+/// Optional capabilities supplied by the process that hosts the agent runtime.
+///
+/// Keeping these dependencies in one value prevents the runtime entry point from growing a new
+/// positional parameter for every durable-state or orchestration capability.
+#[derive(Clone, Default)]
+pub struct AgentRuntimeHostServices {
+    host_executor: Option<AgentHostActionExecutor>,
+    storage: Option<Arc<StorageService>>,
+    trace_observer: Option<AgentConversationTraceObserver>,
+    context_compaction_services: Option<AgentContextCompactionServices>,
+}
+
+impl AgentRuntimeHostServices {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_host_actions(
+        mut self,
+        host_executor: AgentHostActionExecutor,
+        storage: Arc<StorageService>,
+    ) -> Self {
+        self.host_executor = Some(host_executor);
+        self.storage = Some(storage);
+        self
+    }
+
+    pub fn with_storage(mut self, storage: Arc<StorageService>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    pub fn with_trace_observer(mut self, observer: AgentConversationTraceObserver) -> Self {
+        self.trace_observer = Some(observer);
+        self
+    }
+
+    pub fn with_context_compaction(mut self, services: AgentContextCompactionServices) -> Self {
+        self.context_compaction_services = Some(services);
+        self
+    }
+}
+pub use context_compaction::{
+    AgentContextCompactionCommitOutcome, AgentContextCompactionCommitRequest,
+    AgentContextCompactionGenerationOutput, AgentContextCompactionGenerationRequest,
+    AgentContextCompactionPrepareOutcome, AgentContextCompactionPrepareRequest,
+    AgentContextCompactionServices,
+};
+pub use context_compaction_model::AgentContextCompactionModelGenerator;
+
 pub async fn send_chat(input: AgentChatInput) -> AgentResult<AgentChatOutput> {
     AgentRuntime::default().send_chat(input).await
 }
@@ -145,8 +199,6 @@ pub async fn send_chat_with_events_and_cancellation(
             Some(emitter),
             cancellation_token,
             None,
-            None,
-            None,
         )
         .await
 }
@@ -159,26 +211,22 @@ pub async fn send_chat_with_host_executor(
     host_executor: AgentHostActionExecutor,
     storage: Arc<StorageService>,
 ) -> AgentResult<AgentChatOutput> {
-    send_chat_with_host_executor_and_trace_observer(
+    send_chat_with_host_services(
         input,
         run_id,
         emitter,
         cancellation_token,
-        host_executor,
-        storage,
-        None,
+        AgentRuntimeHostServices::new().with_host_actions(host_executor, storage),
     )
     .await
 }
 
-pub async fn send_chat_with_host_executor_and_trace_observer(
+pub async fn send_chat_with_host_services(
     input: AgentChatInput,
     run_id: String,
     emitter: AgentEventEmitter,
     cancellation_token: AgentCancellationToken,
-    host_executor: AgentHostActionExecutor,
-    storage: Arc<StorageService>,
-    trace_observer: Option<AgentConversationTraceObserver>,
+    host_services: AgentRuntimeHostServices,
 ) -> AgentResult<AgentChatOutput> {
     AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
@@ -186,9 +234,7 @@ pub async fn send_chat_with_host_executor_and_trace_observer(
             Some(run_id),
             Some(emitter),
             cancellation_token,
-            Some(host_executor),
-            Some(storage),
-            trace_observer,
+            Some(host_services),
         )
         .await
 }
@@ -213,6 +259,7 @@ pub fn create_conversation_context_state(
 ) -> AgentResult<AgentConversationContextState> {
     let prepared = prepare_conversation_context(&input)?;
     let frame = assemble_context_preview(
+        input.context_compaction_summary.clone(),
         input.messages,
         input.context.as_ref(),
         input.prompt_preferences.as_ref(),
@@ -313,23 +360,24 @@ impl AgentRuntime {
             emitter,
             AgentCancellationToken::new(),
             None,
-            None,
-            None,
         )
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn send_chat_with_events_and_cancellation(
         &self,
         mut input: AgentChatInput,
         run_id: Option<String>,
         emitter: Option<AgentEventEmitter>,
         cancellation_token: AgentCancellationToken,
-        host_executor: Option<AgentHostActionExecutor>,
-        storage: Option<Arc<StorageService>>,
-        trace_observer: Option<AgentConversationTraceObserver>,
+        host_services: Option<AgentRuntimeHostServices>,
     ) -> AgentResult<AgentChatOutput> {
+        let AgentRuntimeHostServices {
+            host_executor,
+            storage,
+            trace_observer,
+            context_compaction_services,
+        } = host_services.unwrap_or_default();
         let run_id = run_id.unwrap_or_else(generate_run_id);
         let context = input.context.clone();
         let trace_conversation_id = context
@@ -431,6 +479,9 @@ impl AgentRuntime {
         });
         let context_compaction_planner = context_window_configured
             .then(|| ContextCompactionPlanner::for_tools(&llm_request.tools));
+        let context_compaction_executor = context_compaction_services
+            .map(ContextCompactionExecutor::new)
+            .filter(|_| context_window_configured);
         if let Some(detector) = &context_capacity_detector {
             detector.prepare_frame(&mut active_context);
         }
@@ -478,48 +529,118 @@ impl AgentRuntime {
                     let file_transactions =
                         FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
                     let user_text_blocked = file_transactions.blocks_user_text();
-                    let mut request_context = active_context.clone();
-                    runtime_extensions.contribute_request_context(
-                        &ModelRequestContext::agent_work(),
-                        &mut request_context,
-                    )?;
-                    if let Some(context) = file_transactions.request_context() {
-                        request_context.push(ContextItem::text(
-                            LlmMessageRole::System,
-                            context,
-                            ContextSource::FileTransaction,
-                            ContextScope::Run,
-                            ContextRetention::RequestOnly,
-                        ));
-                    }
-                    emit_context_manifest_if_enabled(
-                        &run_id,
-                        model_request_index + 1,
-                        &request_context,
-                        &llm_request.tools,
-                    );
-                    if let Some(detector) = &context_capacity_detector {
-                        let report = detector.inspect(
+                    let mut compaction_attempts = 0_usize;
+                    let request_context = loop {
+                        let mut request_context = active_context.clone();
+                        runtime_extensions.contribute_request_context(
+                            &ModelRequestContext::agent_work(),
                             &mut request_context,
-                            llm_request.context_window_tokens,
-                            llm_request.max_tokens,
-                        );
-                        // Future blocking compaction consumes this view before the capacity gate;
-                        // it must not remeasure or reinterpret the request independently.
-                        let compaction_query = report.compaction_query();
-                        let compaction_plan = context_compaction_planner
-                            .as_ref()
-                            .expect("configured capacity detector must have a compaction planner")
-                            .plan(&compaction_query, &request_context.planning_items()?);
-                        emit_context_budget_if_enabled(
+                        )?;
+                        if let Some(context) = file_transactions.request_context() {
+                            request_context.push(ContextItem::text(
+                                LlmMessageRole::System,
+                                context,
+                                ContextSource::FileTransaction,
+                                ContextScope::Run,
+                                ContextRetention::RequestOnly,
+                            ));
+                        }
+                        emit_context_manifest_if_enabled(
                             &run_id,
                             model_request_index + 1,
-                            &report,
-                            &compaction_query,
-                            &compaction_plan,
+                            &request_context,
+                            &llm_request.tools,
                         );
-                        detector.ensure_sendable(report.clone())?;
-                    }
+                        if let Some(detector) = &context_capacity_detector {
+                            let report = detector.inspect(
+                                &mut request_context,
+                                llm_request.context_window_tokens,
+                                llm_request.max_tokens,
+                            );
+                            let compaction_query = report.compaction_query();
+                            let compaction_plan = context_compaction_planner
+                                .as_ref()
+                                .expect(
+                                    "configured capacity detector must have a compaction planner",
+                                )
+                                .plan(&compaction_query, &request_context.planning_items()?);
+                            emit_context_budget_if_enabled(
+                                &run_id,
+                                model_request_index + 1,
+                                &report,
+                                &compaction_query,
+                                &compaction_plan,
+                            );
+                            if compaction_attempts < MAX_CONTEXT_COMPACTION_ATTEMPTS_PER_REQUEST {
+                                if let Some(executor) = &context_compaction_executor {
+                                    if executor.is_applicable(
+                                        &compaction_plan,
+                                        &run_id,
+                                        trace_conversation_id.as_deref(),
+                                        trace_assistant_message_id.as_deref(),
+                                    ) {
+                                        event_stream.emit_transient(
+                                            AgentEvent::ContextCompactionStarted {
+                                                run_id: run_id.clone(),
+                                            },
+                                        );
+                                        let execution = executor
+                                            .execute(
+                                                &compaction_plan,
+                                                &run_id,
+                                                trace_conversation_id.as_deref(),
+                                                trace_assistant_message_id.as_deref(),
+                                                &cancellation_token,
+                                            )
+                                            .await;
+                                        event_stream.emit_transient(
+                                            AgentEvent::ContextCompactionFinished {
+                                                run_id: run_id.clone(),
+                                            },
+                                        );
+                                        match execution {
+                                            Ok(ContextCompactionExecution::Rebase {
+                                                baseline,
+                                                usage: compaction_usage,
+                                            }) => {
+                                                merge_total_usage(&mut usage, compaction_usage);
+                                                active_context = (*baseline)
+                                                    .replace_persistent_context(active_context);
+                                                detector.prepare_frame(&mut active_context);
+                                                compaction_attempts =
+                                                    compaction_attempts.saturating_add(1);
+                                                continue;
+                                            }
+                                            Ok(ContextCompactionExecution::NotApplicable) => {}
+                                            Err(error) if error.is_cancelled() => {
+                                                merge_total_usage(
+                                                    &mut usage,
+                                                    error.usage().cloned(),
+                                                );
+                                                return Ok(cancelled_output(
+                                                    run_id,
+                                                    event_stream,
+                                                    tool_definitions,
+                                                    runtime_extensions.todo_state(),
+                                                    usage,
+                                                    finish_reason,
+                                                ));
+                                            }
+                                            Err(error) => {
+                                                merge_total_usage(
+                                                    &mut usage,
+                                                    error.usage().cloned(),
+                                                );
+                                                return Err(error.with_usage(usage));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            detector.ensure_sendable(report)?;
+                        }
+                        break request_context;
+                    };
                     let request = llm_request.request(request_context);
                     let mut committed_message_stream_id = None;
                     let llm_response_result = if request.stream {
@@ -1420,16 +1541,21 @@ fn prepare_runtime_capabilities(
 }
 
 fn assemble_context_preview(
+    compaction_summary: Option<crate::ContextCompactionSummary>,
     messages: Vec<AgentChatMessage>,
     context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<ContextFrame> {
-    if messages.iter().any(|message| {
-        matches!(message.role.trim(), "user" | "assistant") && !message.content.trim().is_empty()
-    }) {
+    if compaction_summary.is_some()
+        || messages.iter().any(|message| {
+            matches!(message.role.trim(), "user" | "assistant")
+                && !message.content.trim().is_empty()
+        })
+    {
         return ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: build_system_prompt(context, prompt_preferences, tool_definitions),
+            compaction_summary,
             messages,
             attachments: ContextAttachments::default(),
         });
@@ -1490,6 +1616,7 @@ fn build_llm_request(
                 let mut context = match shared_context_baseline {
                     Some(baseline) => baseline.into_frame(),
                     None => assemble_initial_context(
+                        input.context_compaction_summary,
                         input.messages,
                         AttachmentContext {
                             text: String::new(),
@@ -1654,6 +1781,7 @@ fn set_schema_property_description(schema: &mut Value, property: &str, descripti
 }
 
 fn assemble_initial_context(
+    compaction_summary: Option<crate::ContextCompactionSummary>,
     messages: Vec<AgentChatMessage>,
     attachment_context: AttachmentContext,
     context: Option<&AgentRunContext>,
@@ -1662,6 +1790,7 @@ fn assemble_initial_context(
 ) -> AgentResult<ContextFrame> {
     ContextAssembler::assemble(ContextAssemblyInput {
         system_prompt: build_system_prompt(context, prompt_preferences, tool_definitions),
+        compaction_summary,
         messages,
         attachments: ContextAttachments {
             text: attachment_context.text,

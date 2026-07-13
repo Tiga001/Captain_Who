@@ -958,6 +958,13 @@ function AgentRunView({
     const hasFirstResponse = Boolean(run?.firstResponseAt)
     const hasVisibleToolStatus = Boolean(run && hasCollapsibleTimelineContent(run, timeline))
 
+    if (run?.contextCompactionStartedAt && !isRunSettled(run)) {
+      return {
+        isThinking: true,
+        label: t('agent.compactingContext')
+      }
+    }
+
     if (run && !hasFirstResponse && !hasVisibleToolStatus && !isRunSettled(run)) {
       return {
         isThinking: true,

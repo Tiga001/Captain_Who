@@ -253,10 +253,11 @@ fn restore_queued_tool_calls(
 mod tests {
     use super::*;
     use crate::context::{
-        ContextItem, ContextMetadata, ContextRetention, ContextScope, ContextSource,
+        ContextCapacityDetector, ContextItem, ContextMetadata, ContextRetention, ContextScope,
+        ContextSource,
     };
     use crate::llm::LlmMessageRole;
-    use crate::protocol::{AgentApprovalStatus, AgentToolCall, AgentToolResult};
+    use crate::protocol::{AgentApiStyle, AgentApprovalStatus, AgentToolCall, AgentToolResult};
     use serde_json::json;
 
     #[test]
@@ -326,5 +327,123 @@ mod tests {
         let queued = restored.tool_batch.pop_front().unwrap();
         assert_eq!(queued.call.id, "read-2");
         assert!(restored.tool_batch.take_suppressed_narration());
+    }
+
+    #[test]
+    fn approval_resume_preserves_compacted_context_without_restoring_raw_history() {
+        let pending = LlmToolCall {
+            id: "write-after-compaction".to_string(),
+            name: "write_file".to_string(),
+            args: json!({ "phase": "finish", "path": "report.txt" }),
+        };
+        let active = ContextFrame::new(vec![
+            ContextItem::text(
+                LlmMessageRole::System,
+                "system rules",
+                ContextSource::BackendSystemPrompt,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "RAW_HISTORY_MUST_NOT_RETURN",
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::Assistant,
+                "old answer",
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "current request",
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::assistant(
+                "I will write the report.",
+                vec![pending.clone()],
+                ContextMetadata::new(
+                    ContextSource::ModelResponse,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                )
+                .with_group(ContextGroup::tool_exchange("compacted-write-exchange")),
+            ),
+        ]);
+        let mut compacted = ContextFrame::new(vec![
+            ContextItem::text(
+                LlmMessageRole::System,
+                "system rules",
+                ContextSource::BackendSystemPrompt,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::Assistant,
+                "COMPACTED_HISTORY_SURVIVES_RESUME",
+                ContextSource::ConversationSummary,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "current request",
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+        ]);
+        let detector =
+            ContextCapacityDetector::for_model("test-model", AgentApiStyle::OpenAiCompatible, &[]);
+        detector.prepare_frame(&mut compacted);
+        let compacted_baseline = compacted.share_measured_persistent_baseline().unwrap();
+        let active = active.replace_persistent_baseline(compacted_baseline);
+        let checkpoint = create_run_checkpoint(
+            "run-compacted",
+            &active,
+            2,
+            &ToolCallBatch::default(),
+            Vec::new(),
+            &pending.id,
+            &ConversationTraceRecorder::default(),
+        )
+        .unwrap();
+        let continuation = AgentToolContinuation {
+            call: AgentToolCall {
+                id: pending.id.clone(),
+                tool: pending.name.clone(),
+                args: pending.args.clone(),
+                approval_status: AgentApprovalStatus::Approved,
+                reason: None,
+            },
+            result: AgentToolResult {
+                call_id: pending.id,
+                tool: pending.name,
+                ok: true,
+                result: Some(json!({ "status": "applied" })),
+                error: None,
+            },
+        };
+
+        let restored = restore_run_checkpoint(checkpoint, "run-compacted", &continuation).unwrap();
+        restored.context.validate_complete_tool_protocol().unwrap();
+        let combined_content = restored
+            .context
+            .to_messages()
+            .into_iter()
+            .map(|message| message.content)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(combined_content.contains("COMPACTED_HISTORY_SURVIVES_RESUME"));
+        assert!(combined_content.contains("current request"));
+        assert!(combined_content.contains("applied"));
+        assert!(!combined_content.contains("RAW_HISTORY_MUST_NOT_RETURN"));
     }
 }

@@ -78,6 +78,7 @@ export interface ChatAgentRunView {
   firstResponseAt?: number
   lastResponseAt?: number
   completedAt?: number
+  contextCompactionStartedAt?: number
   toolDefinitions: AgentToolDefinition[]
   todo?: AgentTodoState
   toolCalls: AgentToolCall[]

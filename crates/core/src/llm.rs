@@ -587,16 +587,20 @@ mod tests {
 
     fn chat_message(role: &str, content: &str) -> AgentChatMessage {
         AgentChatMessage {
+            message_id: None,
             role: role.to_string(),
             content: content.to_string(),
+            created_at: None,
             conversation_turn_trace: None,
         }
     }
 
     fn traced_chat_message(content: &str) -> AgentChatMessage {
         AgentChatMessage {
+            message_id: Some("assistant-history".to_string()),
             role: "assistant".to_string(),
             content: content.to_string(),
+            created_at: None,
             conversation_turn_trace: Some(ConversationTurnTrace {
                 schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
                 run_id: "historical-run-1".to_string(),
@@ -800,10 +804,13 @@ mod tests {
 
     #[test]
     fn assembled_context_preserves_order_across_provider_payloads() {
+        let mut timestamped_history = chat_message("user", "Earlier question");
+        timestamped_history.created_at = Some(0);
         let mut context = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "System rules".to_string(),
+            compaction_summary: None,
             messages: vec![
-                chat_message("user", "Earlier question"),
+                timestamped_history,
                 chat_message("assistant", "Earlier answer"),
                 chat_message("user", "Continue the edit"),
             ],
@@ -851,6 +858,10 @@ mod tests {
 
         let openai = build_payload(&request(AgentApiStyle::OpenAiCompatible));
         assert_eq!(openai["messages"][0]["role"], "system");
+        assert_eq!(
+            openai["messages"][1]["content"],
+            "[Message created at: 1970-01-01T00:00:00Z]\nEarlier question"
+        );
         assert_eq!(openai["messages"][3]["content"], "Continue the edit");
         assert_eq!(
             openai["messages"][4]["tool_calls"][0]["id"],
@@ -860,6 +871,10 @@ mod tests {
 
         let anthropic = build_payload(&request(AgentApiStyle::AnthropicCompatible));
         assert_eq!(anthropic["system"], "System rules");
+        assert_eq!(
+            anthropic["messages"][0]["content"][0]["text"],
+            "[Message created at: 1970-01-01T00:00:00Z]\nEarlier question"
+        );
         assert_eq!(
             anthropic["messages"][2]["content"][0]["text"],
             "Continue the edit"
@@ -878,6 +893,7 @@ mod tests {
     fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
         let context = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "System rules".to_string(),
+            compaction_summary: None,
             messages: vec![
                 chat_message("user", "Inspect the file"),
                 traced_chat_message("The file is valid."),

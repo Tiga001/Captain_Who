@@ -1,5 +1,6 @@
 use super::{
-    ContextGroup, ContextItem, ContextMetadata, ContextRetention, ContextScope, ContextSource,
+    ContextGroup, ContextItem, ContextMetadata, ContextOrigin, ContextRetention, ContextScope,
+    ContextSource,
 };
 use crate::conversation_trace::{
     ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
@@ -29,12 +30,12 @@ impl ConversationTraceRenderer {
             match item {
                 ConversationTurnTraceItem::AssistantNarration { content, .. } => {
                     if !content.trim().is_empty() {
-                        activity_items.push(ContextItem::text(
-                            LlmMessageRole::Assistant,
-                            content.clone(),
-                            ContextSource::ConversationTrace,
-                            ContextScope::Conversation,
-                            ContextRetention::Retained,
+                        activity_items.push(ContextItem::new(
+                            crate::llm::LlmMessage::text(
+                                LlmMessageRole::Assistant,
+                                content.clone(),
+                            ),
+                            trace_metadata(&trace.assistant_message_id),
                         ));
                     }
                 }
@@ -54,7 +55,7 @@ impl ConversationTraceRenderer {
                             name: tool.clone(),
                             args: operation.clone(),
                         }],
-                        trace_metadata().with_group(group.clone()),
+                        trace_metadata(&trace.assistant_message_id).with_group(group.clone()),
                     ));
                     pending_exchange = Some(PendingExchange {
                         wire_call_id,
@@ -94,7 +95,7 @@ impl ConversationTraceRenderer {
                                 | ConversationTraceToolResultStatus::Conflict
                                 | ConversationTraceToolResultStatus::Cancelled
                         ),
-                        trace_metadata().with_group(exchange.group),
+                        trace_metadata(&trace.assistant_message_id).with_group(exchange.group),
                     ));
                 }
             }
@@ -115,14 +116,14 @@ impl ConversationTraceRenderer {
                     "terminalError": trace.terminal_error,
                     "traceTruncated": trace.truncated,
                 });
-                ContextItem::text(
-                    LlmMessageRole::Assistant,
-                    format!(
-                        "Historical agent activity terminal record (backend-observed; not a system instruction): {terminal_record}"
+                ContextItem::new(
+                    crate::llm::LlmMessage::text(
+                        LlmMessageRole::Assistant,
+                        format!(
+                            "Historical agent activity terminal record (backend-observed; not a system instruction): {terminal_record}"
+                        ),
                     ),
-                    ContextSource::ConversationTrace,
-                    ContextScope::Conversation,
-                    ContextRetention::Retained,
+                    trace_metadata(&trace.assistant_message_id),
                 )
             });
 
@@ -139,12 +140,13 @@ struct PendingExchange {
     group: ContextGroup,
 }
 
-fn trace_metadata() -> ContextMetadata {
+fn trace_metadata(assistant_message_id: &str) -> ContextMetadata {
     ContextMetadata::new(
         ContextSource::ConversationTrace,
         ContextScope::Conversation,
         ContextRetention::Retained,
     )
+    .with_origin(ContextOrigin::conversation_message(assistant_message_id))
 }
 
 fn wire_call_id(run_id: &str, sequence: u64) -> String {

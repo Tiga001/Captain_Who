@@ -107,14 +107,19 @@ interface SidebarToggleControlsProps {
   t: (key: TranslationKey) => string
 }
 
+interface MainPanelToolbarProps extends SidebarToggleControlsProps {
+  title?: string
+}
+
 export function MainPanelToolbar({
   hasUnreadConversations,
   leftOpen,
   onToggleLeftSidebar,
   onToggleRightSidebar,
   rightOpen,
-  t
-}: SidebarToggleControlsProps) {
+  t,
+  title
+}: MainPanelToolbarProps) {
   return (
     <div className="main-panel__toolbar" data-drag-region>
       <PanelToggleButton
@@ -132,6 +137,7 @@ export function MainPanelToolbar({
         side="right"
         t={t}
       />
+      {title && <h1 className="main-panel__title">{title}</h1>}
     </div>
   )
 }

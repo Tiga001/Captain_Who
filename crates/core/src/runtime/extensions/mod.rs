@@ -6,10 +6,11 @@
 //! control flow and applies explicit effects returned by extensions.
 //!
 //! Per model request, the runtime first clones retained context, then atomically appends extension
-//! contributions and runtime-owned guards before sending the provider request. A later compaction
-//! extension can build its own request with `ContextCompaction`, replace retained context through
-//! the runtime, and restart this preparation phase so transient Todo state is injected exactly
-//! once into the rebuilt agent-work request.
+//! contributions and runtime-owned guards before sending the provider request. Blocking operations
+//! such as context compaction remain runtime-owned: after replacing retained context, the runtime
+//! restarts request preparation so transient Todo state and guards are injected exactly once into
+//! the rebuilt agent-work request. Extensions may later contribute purpose-specific context to a
+//! compaction-generation request, but they never control that restart.
 
 mod todo;
 

@@ -1,5 +1,6 @@
 use super::{
-    ContextFrame, ContextItem, ContextMetadata, ContextRetention, ContextScope, ContextSource,
+    format_message_created_at, ContextCompactionSummary, ContextFrame, ContextItem,
+    ContextMetadata, ContextOrigin, ContextRetention, ContextScope, ContextSource,
     ConversationTraceRenderer,
 };
 use crate::llm::{LlmImage, LlmMessage, LlmMessageRole};
@@ -13,6 +14,7 @@ pub(crate) struct ContextAttachments {
 
 pub(crate) struct ContextAssemblyInput {
     pub(crate) system_prompt: String,
+    pub(crate) compaction_summary: Option<ContextCompactionSummary>,
     pub(crate) messages: Vec<AgentChatMessage>,
     pub(crate) attachments: ContextAttachments,
 }
@@ -21,6 +23,7 @@ pub(crate) struct ContextAssembler;
 
 impl ContextAssembler {
     pub(crate) fn assemble(input: ContextAssemblyInput) -> AgentResult<ContextFrame> {
+        let has_compaction_summary = input.compaction_summary.is_some();
         let normalized = normalize_messages(input.messages)?;
         let current_turn_index = normalized
             .iter()
@@ -28,10 +31,10 @@ impl ContextAssembler {
         let has_attachment_text = !input.attachments.text.trim().is_empty();
         let has_attachment_images = !input.attachments.images.is_empty();
 
-        if normalized.is_empty() {
+        if normalized.is_empty() && !has_compaction_summary {
             return Err(AgentError::new("没有可发送的对话内容。"));
         }
-        if !normalized.iter().any(|message| message.role != "system") {
+        if !has_compaction_summary && !normalized.iter().any(|message| message.role != "system") {
             return Err(AgentError::new("对话里缺少用户或助手消息。"));
         }
 
@@ -43,6 +46,18 @@ impl ContextAssembler {
             ContextScope::Run,
             ContextRetention::Retained,
         ));
+        if let Some(summary) = input.compaction_summary {
+            summary.validate()?;
+            items.push(ContextItem::new(
+                LlmMessage::text(LlmMessageRole::Assistant, summary.render_for_context()),
+                ContextMetadata::new(
+                    ContextSource::ConversationSummary,
+                    ContextScope::Conversation,
+                    ContextRetention::Retained,
+                )
+                .with_origin(ContextOrigin::compaction_summary(summary.id)),
+            ));
+        }
 
         let mut attachment_images = Some(input.attachments.images);
         for (index, message) in normalized.into_iter().enumerate() {
@@ -58,8 +73,8 @@ impl ContextAssembler {
                 items.extend(trace.activity_items.iter().cloned());
             }
 
-            let llm_message = LlmMessage::text(role, message.content);
-            let metadata = ContextMetadata::new(
+            let llm_message = LlmMessage::text(role, render_message_content(&message)?);
+            let mut metadata = ContextMetadata::new(
                 if is_current_turn {
                     ContextSource::CurrentTurn
                 } else {
@@ -68,6 +83,9 @@ impl ContextAssembler {
                 ContextScope::Conversation,
                 ContextRetention::Retained,
             );
+            if let Some(message_id) = message.message_id {
+                metadata = metadata.with_origin(ContextOrigin::conversation_message(message_id));
+            }
 
             if !llm_message.content.trim().is_empty() {
                 items.push(ContextItem::new(llm_message, metadata));
@@ -107,6 +125,20 @@ fn role_from_str(role: &str) -> AgentResult<LlmMessageRole> {
     }
 }
 
+fn render_message_content(message: &AgentChatMessage) -> AgentResult<String> {
+    let Some(created_at) = message.created_at else {
+        return Ok(message.content.clone());
+    };
+    if message.content.trim().is_empty() {
+        return Ok(String::new());
+    }
+    let timestamp = format_message_created_at(created_at)?;
+    Ok(format!(
+        "[Message created at: {timestamp}]\n{}",
+        message.content
+    ))
+}
+
 fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentChatMessage>> {
     let mut normalized = Vec::new();
 
@@ -125,8 +157,10 @@ fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentC
 
         match role {
             "system" | "user" | "assistant" => normalized.push(AgentChatMessage {
+                message_id: message.message_id,
                 role: role.to_string(),
                 content: content.to_string(),
+                created_at: message.created_at,
                 conversation_turn_trace: trace,
             }),
             _ => return Err(AgentError::new(format!("不支持的消息角色：{role}"))),
@@ -146,18 +180,39 @@ mod tests {
     use crate::protocol::AgentApprovalStatus;
     use serde_json::json;
 
+    fn compaction_summary() -> ContextCompactionSummary {
+        ContextCompactionSummary {
+            schema_version: crate::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+            id: "summary-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            source_revision: "source-revision-1".to_string(),
+            previous_summary_id: None,
+            covered_through_message_id: "assistant-old".to_string(),
+            covered_message_ids: vec!["user-old".to_string(), "assistant-old".to_string()],
+            content: "The user requested an old task and the agent completed it.".to_string(),
+            generation: crate::ContextCompactionGeneration::test(),
+            source_input_tokens: 100,
+            summary_input_tokens: 20,
+            created_at: 1,
+        }
+    }
+
     fn message(role: &str, content: &str) -> AgentChatMessage {
         AgentChatMessage {
+            message_id: None,
             role: role.to_string(),
             content: content.to_string(),
+            created_at: None,
             conversation_turn_trace: None,
         }
     }
 
     fn traced_assistant(content: &str) -> AgentChatMessage {
         AgentChatMessage {
+            message_id: Some("assistant-previous".to_string()),
             role: "assistant".to_string(),
             content: content.to_string(),
+            created_at: None,
             conversation_turn_trace: Some(ConversationTurnTrace {
                 schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
                 run_id: "run-previous".to_string(),
@@ -208,6 +263,7 @@ mod tests {
     fn assembles_ordered_context_with_provenance() {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "backend rules".to_string(),
+            compaction_summary: None,
             messages: vec![
                 message("user", "old question"),
                 message("assistant", "old answer"),
@@ -248,9 +304,28 @@ mod tests {
     }
 
     #[test]
+    fn renders_message_creation_time_as_stable_utc_context_metadata() {
+        let mut timestamped = message("user", "historical question");
+        timestamped.created_at = Some(0);
+        let frame = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "rules".to_string(),
+            compaction_summary: None,
+            messages: vec![timestamped],
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap();
+
+        assert_eq!(
+            frame.to_messages()[1].content,
+            "[Message created at: 1970-01-01T00:00:00Z]\nhistorical question"
+        );
+    }
+
+    #[test]
     fn normalizes_supported_messages_and_rejects_unknown_roles() {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
+            compaction_summary: None,
             messages: vec![
                 message(" user ", " hello "),
                 message("assistant", " "),
@@ -266,6 +341,7 @@ mod tests {
 
         let error = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
+            compaction_summary: None,
             messages: vec![message("tool", "result")],
             attachments: ContextAttachments::default(),
         })
@@ -277,6 +353,7 @@ mod tests {
     fn assembles_conversation_trace_before_final_reply_and_terminal_before_next_user() {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
+            compaction_summary: None,
             messages: vec![
                 message("user", "create a file"),
                 traced_assistant("Created src/new.rs."),
@@ -329,11 +406,14 @@ mod tests {
 
     #[test]
     fn keeps_trace_when_historical_assistant_final_text_is_empty() {
+        let mut historical_assistant = traced_assistant("");
+        historical_assistant.created_at = Some(0);
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
+            compaction_summary: None,
             messages: vec![
                 message("user", "do the work"),
-                traced_assistant(""),
+                historical_assistant,
                 message("user", "continue"),
             ],
             attachments: ContextAttachments::default(),
@@ -350,10 +430,48 @@ mod tests {
         assert!(!messages.iter().any(|message| message.content.is_empty()
             && message.role == LlmMessageRole::Assistant
             && message.tool_calls.is_empty()));
+        assert!(!messages
+            .iter()
+            .any(|message| message.content.contains("1970-01-01T00:00:00Z")));
     }
 
     #[test]
     fn project_scope_is_reserved_in_the_manifest_vocabulary() {
         assert_eq!(ContextScope::Project.as_str(), "project");
+    }
+
+    #[test]
+    fn assembles_compaction_summary_before_uncovered_tail() {
+        let frame = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "rules".to_string(),
+            compaction_summary: Some(compaction_summary()),
+            messages: vec![message("user", "continue from the summary")],
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap();
+
+        let messages = frame.to_messages();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, LlmMessageRole::System);
+        assert_eq!(messages[1].role, LlmMessageRole::Assistant);
+        assert!(messages[1].content.contains("old task"));
+        assert_eq!(messages[2].content, "continue from the summary");
+        assert_eq!(
+            frame.manifest().entries[1].sources,
+            vec!["conversation_summary"]
+        );
+    }
+
+    #[test]
+    fn summary_only_context_is_valid_after_covering_the_latest_completed_turn() {
+        let frame = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "rules".to_string(),
+            compaction_summary: Some(compaction_summary()),
+            messages: Vec::new(),
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap();
+
+        assert_eq!(frame.to_messages().len(), 2);
     }
 }

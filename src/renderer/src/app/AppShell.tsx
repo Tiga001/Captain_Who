@@ -124,6 +124,28 @@ function getEditableLastTurn(conversation: ChatConversation) {
   }
 }
 
+function getActiveRunModelId(conversation: ChatConversation | null) {
+  if (!conversation?.modelId) return null
+
+  const latestAssistantMessage = [...conversation.messages]
+    .reverse()
+    .find((message) => message.role === 'assistant')
+  if (!latestAssistantMessage) return null
+
+  const runStatus = latestAssistantMessage.agentRun?.status
+  const runIsActive =
+    latestAssistantMessage.status === 'pending' ||
+    runStatus === 'starting' ||
+    runStatus === 'running' ||
+    runStatus === 'waiting_for_approval'
+
+  return runIsActive ? conversation.modelId : null
+}
+
+function getContextWindowSnapshotKey(scopeId: string, model: string) {
+  return JSON.stringify([scopeId, model])
+}
+
 const DEFAULT_APP_WINDOW_STATE: AppWindowState = {
   isFullScreen: false,
   isMaximized: false
@@ -132,7 +154,7 @@ const DEFAULT_APP_WINDOW_STATE: AppWindowState = {
 export function AppShell() {
   const { t } = useFrontendConfig()
   const { showToast } = useToast()
-  const { enabledModels } = useModelSettings()
+  const { enabledModels, models } = useModelSettings()
   const { projects, deleteProject, renameProject, showProjectInFolder, togglePinProject } =
     useProjectSettings()
   const {
@@ -197,17 +219,31 @@ export function AppShell() {
       enabledModels.find((model) => model.id === activeDraft.modelId) ?? enabledModels[0] ?? null,
     [activeDraft.modelId, enabledModels]
   )
+  const activeRunModelId = useMemo(
+    () => getActiveRunModelId(activeConversation),
+    [activeConversation]
+  )
+  // The composer selects the next run. Capacity reporting stays pinned to the immutable model of
+  // the current run until that run reaches a terminal state.
+  const contextWindowModel = useMemo(
+    () =>
+      activeRunModelId
+        ? (models.find((model) => model.id === activeRunModelId) ?? null)
+        : activeDraftSelectedModel,
+    [activeDraftSelectedModel, activeRunModelId, models]
+  )
   const activeContextWindowKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
-  const activeModelProviderPath = activeDraftSelectedModel
-    ? (activeDraftSelectedModel.providerPath ?? activeDraftSelectedModel.id)
+  const contextWindowModelProviderPath = contextWindowModel
+    ? (contextWindowModel.providerPath ?? contextWindowModel.id)
+    : null
+  const activeContextWindowSnapshotKey = contextWindowModelProviderPath
+    ? getContextWindowSnapshotKey(activeContextWindowKey, contextWindowModelProviderPath)
     : null
   const contextWindowIndicatorEnabled =
     featureFlags.contextWindowIndicator && uiPreferences.showContextWindowUsage
   const activeContextWindowSnapshot =
-    contextWindowIndicatorEnabled &&
-    activeModelProviderPath &&
-    contextWindowSnapshots[activeContextWindowKey]?.model === activeModelProviderPath
-      ? contextWindowSnapshots[activeContextWindowKey]
+    contextWindowIndicatorEnabled && activeContextWindowSnapshotKey
+      ? contextWindowSnapshots[activeContextWindowSnapshotKey]
       : undefined
   const permissionModeAvailability = getPermissionModeAvailability(uiPreferences)
   const hasUnreadConversations = conversations.some(
@@ -233,20 +269,21 @@ export function AppShell() {
   }, [activeConversationId])
 
   useEffect(() => {
-    if (!contextWindowIndicatorEnabled || !activeDraftSelectedModel) {
+    if (!contextWindowIndicatorEnabled || !contextWindowModel || !contextWindowModelProviderPath) {
       return undefined
     }
 
     const requestSequence = contextWindowRequestSeqRef.current + 1
     contextWindowRequestSeqRef.current = requestSequence
-    const snapshotKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
+    const scopeKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
+    const snapshotKey = getContextWindowSnapshotKey(scopeKey, contextWindowModelProviderPath)
     const eventSequenceAtRequest = contextWindowEventSeqRef.current.get(snapshotKey) ?? 0
     let cancelled = false
 
     void getContextWindowSnapshot({
       conversationId: activeConversation?.id,
       projectId: activeConversation?.projectId ?? activeDraft.projectId,
-      modelId: activeDraftSelectedModel.id,
+      modelId: contextWindowModel.id,
       maxTokens: DEFAULT_AGENT_MAX_TOKENS,
       permissions: resolveChatPermissions(
         activeDraft.permissionMode,
@@ -259,7 +296,9 @@ export function AppShell() {
           return
         }
         setContextWindowSnapshots((current) => {
-          if (snapshot) return { ...current, [snapshotKey]: snapshot }
+          if (snapshot?.model === contextWindowModelProviderPath) {
+            return { ...current, [snapshotKey]: snapshot }
+          }
           if (!(snapshotKey in current)) return current
           const next = { ...current }
           delete next[snapshotKey]
@@ -278,7 +317,8 @@ export function AppShell() {
     activeConversation?.projectId,
     activeDraft.permissionMode,
     activeDraft.projectId,
-    activeDraftSelectedModel,
+    contextWindowModel,
+    contextWindowModelProviderPath,
     contextWindowIndicatorEnabled,
     uiPreferences.customPermissions
   ])
@@ -720,13 +760,14 @@ export function AppShell() {
       if (agentEvent.type === 'context_window_updated') {
         const conversationId = agentEvent.conversationId
         if (contextWindowIndicatorEnabled && conversationId) {
+          const snapshotKey = getContextWindowSnapshotKey(conversationId, agentEvent.snapshot.model)
           contextWindowEventSeqRef.current.set(
-            conversationId,
-            (contextWindowEventSeqRef.current.get(conversationId) ?? 0) + 1
+            snapshotKey,
+            (contextWindowEventSeqRef.current.get(snapshotKey) ?? 0) + 1
           )
           setContextWindowSnapshots((current) => ({
             ...current,
-            [conversationId]: agentEvent.snapshot
+            [snapshotKey]: agentEvent.snapshot
           }))
         }
         return
@@ -1586,6 +1627,7 @@ export function AppShell() {
           onToggleRightSidebar={toggleRightSidebar}
           rightOpen={rightOpen}
           t={t}
+          title={activeConversation?.title}
         />
 
         <div className="main-panel__surface">

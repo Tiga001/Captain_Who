@@ -5,7 +5,7 @@ use super::measurement::{
 use crate::llm::{LlmMessage, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
     AgentContextCheckpointGroup, AgentContextCheckpointImage, AgentContextCheckpointItem,
-    AgentContextCheckpointToolCall, AgentError, AgentResult,
+    AgentContextCheckpointOrigin, AgentContextCheckpointToolCall, AgentError, AgentResult,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -83,6 +83,7 @@ impl ContextRetention {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ContextSource {
     BackendSystemPrompt,
+    ConversationSummary,
     ConversationHistory,
     ConversationTrace,
     CurrentTurn,
@@ -93,12 +94,14 @@ pub(crate) enum ContextSource {
     RuntimeExtension,
     FileTransaction,
     RuntimeGuard,
+    CompactionRequest,
 }
 
 impl ContextSource {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::BackendSystemPrompt => "backend_system_prompt",
+            Self::ConversationSummary => "conversation_summary",
             Self::ConversationHistory => "conversation_history",
             Self::ConversationTrace => "conversation_trace",
             Self::CurrentTurn => "current_turn",
@@ -109,12 +112,14 @@ impl ContextSource {
             Self::RuntimeExtension => "runtime_extension",
             Self::FileTransaction => "file_transaction",
             Self::RuntimeGuard => "runtime_guard",
+            Self::CompactionRequest => "compaction_request",
         }
     }
 
     fn from_str(value: &str) -> Option<Self> {
         match value {
             "backend_system_prompt" => Some(Self::BackendSystemPrompt),
+            "conversation_summary" => Some(Self::ConversationSummary),
             "conversation_history" => Some(Self::ConversationHistory),
             "conversation_trace" => Some(Self::ConversationTrace),
             "current_turn" => Some(Self::CurrentTurn),
@@ -125,6 +130,7 @@ impl ContextSource {
             "runtime_extension" => Some(Self::RuntimeExtension),
             "file_transaction" => Some(Self::FileTransaction),
             "runtime_guard" => Some(Self::RuntimeGuard),
+            "compaction_request" => Some(Self::CompactionRequest),
             _ => None,
         }
     }
@@ -156,6 +162,59 @@ pub(crate) struct ContextGroup {
     kind: ContextGroupKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextOriginKind {
+    ConversationMessage,
+    CompactionSummary,
+}
+
+impl ContextOriginKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ConversationMessage => "conversation_message",
+            Self::CompactionSummary => "compaction_summary",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "conversation_message" => Some(Self::ConversationMessage),
+            "compaction_summary" => Some(Self::CompactionSummary),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextOrigin {
+    kind: ContextOriginKind,
+    id: String,
+}
+
+impl ContextOrigin {
+    pub(crate) fn conversation_message(id: impl Into<String>) -> Self {
+        Self {
+            kind: ContextOriginKind::ConversationMessage,
+            id: id.into(),
+        }
+    }
+
+    pub(crate) fn compaction_summary(id: impl Into<String>) -> Self {
+        Self {
+            kind: ContextOriginKind::CompactionSummary,
+            id: id.into(),
+        }
+    }
+
+    pub(crate) fn kind(&self) -> ContextOriginKind {
+        self.kind
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+}
+
 impl ContextGroup {
     pub(crate) fn tool_exchange(id: impl Into<String>) -> Self {
         Self {
@@ -179,6 +238,7 @@ pub(crate) struct ContextMetadata {
     scope: ContextScope,
     retention: ContextRetention,
     group: Option<ContextGroup>,
+    origin: Option<ContextOrigin>,
 }
 
 impl ContextMetadata {
@@ -192,6 +252,7 @@ impl ContextMetadata {
             scope,
             retention,
             group: None,
+            origin: None,
         }
     }
 
@@ -204,6 +265,11 @@ impl ContextMetadata {
 
     pub(crate) fn with_group(mut self, group: ContextGroup) -> Self {
         self.group = Some(group);
+        self
+    }
+
+    pub(crate) fn with_origin(mut self, origin: ContextOrigin) -> Self {
+        self.origin = Some(origin);
         self
     }
 
@@ -231,6 +297,10 @@ impl ContextMetadata {
 
     pub(crate) fn group(&self) -> Option<&ContextGroup> {
         self.group.as_ref()
+    }
+
+    pub(crate) fn origin(&self) -> Option<&ContextOrigin> {
+        self.origin.as_ref()
     }
 
     pub(crate) fn usage_class(&self) -> ContextUsageClass {
@@ -407,6 +477,7 @@ pub(crate) struct ContextFramePlanningItem {
     pub(crate) tool_names: Vec<String>,
     pub(crate) image_count: usize,
     pub(crate) is_error: bool,
+    pub(crate) origin: Option<ContextOrigin>,
 }
 
 impl ContextFrame {
@@ -448,6 +519,23 @@ impl ContextFrame {
             rebased.push(item);
         }
         rebased
+    }
+
+    /// Replaces every fixed/durable item with a newly committed authoritative baseline while
+    /// retaining the current run overlay in order. This is used after durable compaction; tool
+    /// observations remain available to the active loop even though older conversation history
+    /// has been replaced by a summary.
+    pub(crate) fn replace_persistent_baseline(self, baseline: MeasuredContextBaseline) -> Self {
+        let overlay = self
+            .iter_items()
+            .filter(|item| !item.metadata.usage_class().is_persistent())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut replaced = Self::from_measured_baseline(baseline);
+        for item in overlay {
+            replaced.push(item);
+        }
+        replaced
     }
 
     /// Freezes all persistent overlay items into a shareable measured baseline. The frame keeps
@@ -621,6 +709,7 @@ impl ContextFrame {
                         .collect(),
                     image_count: estimate.image_count,
                     is_error: item.message.is_error,
+                    origin: item.metadata.origin().cloned(),
                 })
             })
             .collect()
@@ -975,6 +1064,10 @@ fn context_item_revision(item: &ContextItem) -> u64 {
         hasher.write_str(group.id());
         hasher.write_str(group.kind().as_str());
     }
+    if let Some(origin) = item.metadata.origin() {
+        hasher.write_str(origin.kind().as_str());
+        hasher.write_str(origin.id());
+    }
     hasher.finish()
 }
 
@@ -1028,6 +1121,13 @@ impl ContextItem {
                     id: group.id().to_string(),
                     kind: group.kind().as_str().to_string(),
                 }),
+            origin: self
+                .metadata
+                .origin()
+                .map(|origin| AgentContextCheckpointOrigin {
+                    kind: origin.kind().as_str().to_string(),
+                    id: origin.id().to_string(),
+                }),
         })
     }
 
@@ -1080,6 +1180,17 @@ impl ContextItem {
                 return Err(AgentError::new("运行检查点包含空上下文分组 id。"));
             }
             metadata = metadata.with_group(ContextGroup { id: group.id, kind });
+        }
+        if let Some(origin) = item.origin {
+            let kind = ContextOriginKind::from_str(&origin.kind)
+                .ok_or_else(|| AgentError::new("运行检查点包含未知上下文来源身份类型。"))?;
+            if origin.id.trim().is_empty() {
+                return Err(AgentError::new("运行检查点包含空上下文来源身份。"));
+            }
+            metadata = metadata.with_origin(ContextOrigin {
+                kind,
+                id: origin.id,
+            });
         }
 
         Ok(Self::new(
@@ -1151,7 +1262,9 @@ pub(crate) struct ContextManifestEntry<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::ContextCapacityDetector;
     use crate::llm::LlmImage;
+    use crate::protocol::AgentApiStyle;
     use serde_json::json;
 
     #[test]
@@ -1230,5 +1343,73 @@ mod tests {
         )]);
 
         assert!(frame.checkpoint_items().is_err());
+    }
+
+    #[test]
+    fn persistent_replacement_keeps_run_overlay_and_discards_old_history() {
+        let detector =
+            ContextCapacityDetector::for_model("test-model", AgentApiStyle::OpenAiCompatible, &[]);
+        let mut replacement = ContextFrame::new(vec![
+            ContextItem::text(
+                LlmMessageRole::System,
+                "new rules",
+                ContextSource::BackendSystemPrompt,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::Assistant,
+                "compacted history",
+                ContextSource::ConversationSummary,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "current request",
+                ContextSource::CurrentTurn,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+        ]);
+        detector.prepare_frame(&mut replacement);
+        let replacement = replacement.share_measured_persistent_baseline().unwrap();
+
+        let mut active = ContextFrame::new(vec![
+            ContextItem::text(
+                LlmMessageRole::System,
+                "old rules",
+                ContextSource::BackendSystemPrompt,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "very old history",
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::Assistant,
+                "current run narration",
+                ContextSource::ModelResponse,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+        ]);
+        detector.prepare_frame(&mut active);
+
+        let replaced = active.replace_persistent_baseline(replacement);
+        let messages = replaced.to_messages();
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].content, "new rules");
+        assert_eq!(messages[1].content, "compacted history");
+        assert_eq!(messages[2].content, "current request");
+        assert_eq!(messages[3].content, "current run narration");
+        assert!(messages
+            .iter()
+            .all(|message| !message.content.contains("very old history")));
     }
 }

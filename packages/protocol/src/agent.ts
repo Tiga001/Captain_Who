@@ -152,6 +152,7 @@ export type AgentCommandRiskLevel =
   'read_only' | 'writes_workspace' | 'network' | 'destructive' | 'unknown'
 
 export interface AgentChatMessage {
+  messageId?: string
   role: AgentMessageRole
   content: string
   conversationTurnTrace?: ConversationTurnTrace
@@ -678,6 +679,8 @@ export type AgentEvent =
       conversationId?: string
       snapshot: AgentContextWindowSnapshot
     }
+  | { type: 'context_compaction_started'; runId: string }
+  | { type: 'context_compaction_finished'; runId: string }
   | { type: 'approval_required'; runId: string; action: AgentProposedAction }
   | { type: 'diff'; runId: string; diff: AgentDiffProposal }
   | {

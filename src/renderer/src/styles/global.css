@@ -97,6 +97,23 @@ button {
   -webkit-app-region: drag;
 }
 
+html[data-theme='zju-light'] .app-shell::after,
+html[data-theme='zju-light'] .settings-page__drag-region::before {
+  position: absolute;
+  z-index: 100;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 2px;
+  background: linear-gradient(
+    to right,
+    var(--mc-color-control-selected-background) 0 calc(100% - 72px),
+    var(--mc-color-text-danger) calc(100% - 72px) 100%
+  );
+  content: '';
+  pointer-events: none;
+}
+
 .window-toolbar::after {
   position: absolute;
   right: 0;
@@ -209,6 +226,27 @@ button {
   right: 0;
   height: var(--titlebar-height);
   -webkit-app-region: drag;
+}
+
+.main-panel__title {
+  position: absolute;
+  top: 0;
+  right: 64px;
+  left: 64px;
+  overflow: hidden;
+  margin: 0;
+  color: var(--mc-color-text-strong);
+  font-size: var(--mc-font-size-md);
+  font-weight: var(--mc-font-weight-strong);
+  line-height: var(--titlebar-height);
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.app-shell[data-left-open='false'] .main-panel__title {
+  left: calc(var(--mac-window-control-safe-width) + 44px);
 }
 
 .panel-toggle {

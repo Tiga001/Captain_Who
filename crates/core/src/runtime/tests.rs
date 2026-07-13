@@ -12,8 +12,10 @@ use crate::{
 
 fn message(role: &str, content: &str) -> AgentChatMessage {
     AgentChatMessage {
+        message_id: None,
         role: role.to_string(),
         content: content.to_string(),
+        created_at: None,
         conversation_turn_trace: None,
     }
 }
@@ -39,6 +41,7 @@ fn runtime_messages_add_backend_system_prompt() {
         permissions: Default::default(),
     };
     let context = assemble_initial_context(
+        None,
         vec![message("user", "Read src/main.rs")],
         empty_attachment_context(),
         Some(&context),
@@ -57,6 +60,7 @@ fn runtime_messages_add_backend_system_prompt() {
 #[test]
 fn runtime_messages_include_text_attachment_content() {
     let context = assemble_initial_context(
+        None,
         vec![message("user", "Summarize this attachment")],
         AttachmentContext {
             text: "用户输入框附件内容如下。\n\n### notes.txt\nhello from attachment".to_string(),
@@ -226,6 +230,7 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         attachments: Vec::new(),
         resume_checkpoint: None,
         assistant_message_id: None,
+        context_compaction_summary: None,
         messages,
     }
 }
@@ -248,8 +253,10 @@ fn conversation_context_trace(
 
 fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> AgentChatMessage {
     AgentChatMessage {
+        message_id: Some(trace.assistant_message_id.clone()),
         role: "assistant".to_string(),
         content: content.to_string(),
+        created_at: None,
         conversation_turn_trace: Some(trace),
     }
 }
@@ -338,7 +345,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
     );
 
     let follow_up = "Now explain the change.";
-    state.append_user_message(follow_up);
+    state.append_user_message(None, follow_up);
     assert_eq!(
         state.snapshot(AgentContextWindowPhase::DurableCommit),
         full_conversation_context_snapshot(vec![
@@ -368,6 +375,270 @@ fn runtime_shared_baseline_matches_full_context_assembly() {
 }
 
 #[tokio::test]
+async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_context() {
+    use crate::context::{ContextCompactionGeneration, ContextCompactionSummary};
+    use crate::protocol::AgentApiStyle;
+    use crate::{AgentUsage, ContextCompactionPrefix, ContextCompactionSummaryDraft};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_http_body(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+        let mut expected_length = None;
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if expected_length.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    expected_length = Some(header_end + 4 + content_length);
+                }
+            }
+            if expected_length.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        let body_start = request
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .unwrap();
+        request[body_start..].to_vec()
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (body_sender, body_receiver) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let body = read_http_body(&mut stream).await;
+        body_sender.send(body).unwrap();
+        let response_body = serde_json::to_vec(&json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "done" },
+                "finish_reason": "stop"
+            }]
+        }))
+        .unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&response_body).await.unwrap();
+    });
+
+    let old_user = AgentChatMessage {
+        message_id: Some("user-old".to_string()),
+        role: "user".to_string(),
+        content: format!("OLD_USER_MARKER {}", "x".repeat(60_000)),
+        created_at: None,
+        conversation_turn_trace: None,
+    };
+    let old_assistant = AgentChatMessage {
+        message_id: Some("assistant-old".to_string()),
+        role: "assistant".to_string(),
+        content: format!("OLD_ASSISTANT_MARKER {}", "y".repeat(60_000)),
+        created_at: None,
+        conversation_turn_trace: None,
+    };
+    let current_user = AgentChatMessage {
+        message_id: Some("user-current".to_string()),
+        role: "user".to_string(),
+        content: "continue".to_string(),
+        created_at: None,
+        conversation_turn_trace: None,
+    };
+    let input = AgentChatInput {
+        api_url: format!("http://{address}/v1/chat/completions"),
+        api_token: "test-token".to_string(),
+        model: "test-model".to_string(),
+        api_style: Some(AgentApiStyle::OpenAiCompatible),
+        context_window_tokens: Some(50_000),
+        context_window_indicator_enabled: false,
+        max_tokens: Some(1_000),
+        temperature: None,
+        stream: Some(false),
+        context: Some(AgentRunContext {
+            conversation_id: Some("conversation-1".to_string()),
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: Default::default(),
+        }),
+        search_config: None,
+        prompt_preferences: None,
+        approval_decision: None,
+        tool_continuation: None,
+        attachments: Vec::new(),
+        resume_checkpoint: None,
+        assistant_message_id: Some("assistant-current".to_string()),
+        context_compaction_summary: None,
+        messages: vec![old_user, old_assistant, current_user.clone()],
+    };
+    let compacted_summary = ContextCompactionSummary {
+        schema_version: crate::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+        id: "summary-runtime".to_string(),
+        conversation_id: "conversation-1".to_string(),
+        source_revision: "source-runtime".to_string(),
+        previous_summary_id: None,
+        covered_through_message_id: "assistant-old".to_string(),
+        covered_message_ids: vec!["user-old".to_string(), "assistant-old".to_string()],
+        content: "COMPACTED_HISTORY_MARKER: the old task was completed.".to_string(),
+        generation: ContextCompactionGeneration::test(),
+        source_input_tokens: 40_000,
+        summary_input_tokens: 32,
+        created_at: 1,
+    };
+    let mut compacted_state = create_conversation_context_state(AgentChatInput {
+        context_compaction_summary: Some(compacted_summary),
+        messages: vec![current_user],
+        ..input.clone()
+    })
+    .unwrap();
+    let compacted_baseline = compacted_state.shared_baseline().unwrap();
+    let prepare_count = Arc::new(AtomicUsize::new(0));
+    let generate_count = Arc::new(AtomicUsize::new(0));
+    let commit_count = Arc::new(AtomicUsize::new(0));
+    let prepare_counter = prepare_count.clone();
+    let generate_counter = generate_count.clone();
+    let commit_counter = commit_count.clone();
+    let services = AgentContextCompactionServices::new(
+        move |request, _| {
+            prepare_counter.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(
+                request.newly_covered_message_ids,
+                vec!["user-old".to_string(), "assistant-old".to_string()]
+            );
+            async move {
+                Ok(AgentContextCompactionPrepareOutcome::Ready(Arc::new(
+                    ContextCompactionPrefix {
+                        conversation_id: "conversation-1".to_string(),
+                        source_revision: "source-runtime".to_string(),
+                        covered_through_message_id: "assistant-old".to_string(),
+                        covered_message_ids: vec![
+                            "user-old".to_string(),
+                            "assistant-old".to_string(),
+                        ],
+                        previous_summary: None,
+                        source_messages: vec![
+                            crate::ContextCompactionSourceMessage {
+                                message_id: "user-old".to_string(),
+                                role: "user".to_string(),
+                                content: "old request".to_string(),
+                                created_at: 1,
+                                status: Some("sent".to_string()),
+                                conversation_turn_trace: None,
+                            },
+                            crate::ContextCompactionSourceMessage {
+                                message_id: "assistant-old".to_string(),
+                                role: "assistant".to_string(),
+                                content: "old answer".to_string(),
+                                created_at: 2,
+                                status: Some("sent".to_string()),
+                                conversation_turn_trace: None,
+                            },
+                        ],
+                    },
+                )))
+            }
+        },
+        move |request, _| {
+            generate_counter.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(AgentContextCompactionGenerationOutput {
+                    draft: ContextCompactionSummaryDraft {
+                        id: "summary-runtime".to_string(),
+                        source_revision: request.prefix.source_revision.clone(),
+                        content: "COMPACTED_HISTORY_MARKER: the old task was completed."
+                            .to_string(),
+                        generation: ContextCompactionGeneration::test(),
+                        source_input_tokens: request.source_input_tokens,
+                        summary_input_tokens: 32,
+                        created_at: 1,
+                    },
+                    usage: Some(AgentUsage {
+                        input_tokens: Some(100),
+                        output_tokens: Some(20),
+                        output_thinking_tokens: None,
+                        total_tokens: Some(120),
+                        cached_input_tokens: None,
+                        cache_creation_input_tokens: None,
+                        billable_request_count: Some(1),
+                    }),
+                })
+            }
+        },
+        move |request, _| {
+            let baseline = compacted_baseline.clone();
+            commit_counter.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.draft.id, "summary-runtime");
+            async move {
+                Ok(AgentContextCompactionCommitOutcome::Applied {
+                    summary_id: "summary-runtime".to_string(),
+                    baseline: Box::new(baseline),
+                })
+            }
+        },
+    );
+    let emitted_events = Arc::new(Mutex::new(Vec::new()));
+    let emitted_events_for_callback = emitted_events.clone();
+    let emitter: AgentEventEmitter = Arc::new(move |event| {
+        emitted_events_for_callback.lock().unwrap().push(event);
+    });
+
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some("run-compaction".to_string()),
+            Some(emitter),
+            AgentCancellationToken::new(),
+            Some(AgentRuntimeHostServices::new().with_context_compaction(services)),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+    let request_body = String::from_utf8(body_receiver.await.unwrap()).unwrap();
+
+    assert_eq!(output.content, "done");
+    assert_eq!(prepare_count.load(Ordering::SeqCst), 1);
+    assert_eq!(generate_count.load(Ordering::SeqCst), 1);
+    assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    let usage = output.usage.as_ref().unwrap();
+    assert_eq!(usage.input_tokens, Some(100));
+    assert_eq!(usage.output_tokens, Some(20));
+    assert_eq!(usage.billable_request_count, Some(2));
+    assert!(request_body.contains("COMPACTED_HISTORY_MARKER"));
+    assert!(!request_body.contains("OLD_USER_MARKER"));
+    assert!(!request_body.contains("OLD_ASSISTANT_MARKER"));
+    let compaction_events = emitted_events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ContextCompactionStarted { .. } => Some("started"),
+            AgentEvent::ContextCompactionFinished { .. } => Some("finished"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(compaction_events, vec!["started", "finished"]);
+}
+
+#[tokio::test]
 async fn context_capacity_guard_rejects_the_initial_request_before_network_io() {
     use tokio::net::TcpListener;
     use tokio::time::{timeout, Duration};
@@ -392,9 +663,12 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
         attachments: Vec::new(),
         resume_checkpoint: None,
         assistant_message_id: None,
+        context_compaction_summary: None,
         messages: vec![AgentChatMessage {
+            message_id: None,
             role: "user".to_string(),
             content: "x".repeat(90_000),
+            created_at: None,
             conversation_turn_trace: None,
         }],
     };
@@ -549,6 +823,7 @@ async fn context_capacity_guard_rechecks_after_tool_results_before_network_io() 
         attachments: Vec::new(),
         resume_checkpoint: None,
         assistant_message_id: None,
+        context_compaction_summary: None,
         messages: vec![message("user", "Read large.txt and summarize it")],
     };
 
@@ -801,6 +1076,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         attachments: Vec::new(),
         resume_checkpoint: None,
         assistant_message_id: None,
+        context_compaction_summary: None,
         messages: vec![message("user", "create a preview")],
     };
     let output = AgentRuntime::default()
@@ -809,9 +1085,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
             Some("run-preview".to_string()),
             Some(emitter),
             AgentCancellationToken::new(),
-            None,
-            Some(storage.clone()),
-            None,
+            Some(AgentRuntimeHostServices::new().with_storage(storage.clone())),
         )
         .await
         .unwrap();
@@ -1040,6 +1314,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         attachments: Vec::new(),
         resume_checkpoint: None,
         assistant_message_id: Some("assistant-checkpoint".to_string()),
+        context_compaction_summary: None,
         messages: vec![message("user", "collect evidence and write report.txt")],
     };
     let waiting = AgentRuntime::default()
@@ -1048,8 +1323,6 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             Some("run-checkpoint".to_string()),
             None,
             AgentCancellationToken::new(),
-            None,
-            None,
             None,
         )
         .await
@@ -1109,8 +1382,6 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             Some("run-checkpoint".to_string()),
             None,
             AgentCancellationToken::new(),
-            None,
-            None,
             None,
         )
         .await

@@ -5,7 +5,9 @@ pub use crate::agent_support::{
     AgentFileWriteDiffPage, PendingActionStatus, PendingAgentActionSnapshot,
 };
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,16 +24,19 @@ use mycopilot_core::{
     conversation_context_configuration_revision,
     conversation_trace_snapshot_from_checkpoint_and_continuation,
     create_conversation_context_state, failed_conversation_trace_without_items,
-    inspect_context_window, next_run_id, send_chat_with_host_executor_and_trace_observer,
-    AgentApprovalDecision, AgentApprovalDecisionStatus, AgentApprovalStatus,
-    AgentCancellationToken, AgentChatInput, AgentChatOutput, AgentContextBaseline,
-    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentConversationContextState,
-    AgentConversationTraceObserver, AgentError, AgentEvent, AgentEventEmitter,
-    AgentHostActionExecutor, AgentPatchResult, AgentProposedAction, AgentResult,
-    AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentToolCall,
-    AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
-    ConversationTraceSnapshot, ConversationTurnTrace,
+    inspect_context_window, next_run_id, send_chat_with_host_services, AgentApprovalDecision,
+    AgentApprovalDecisionStatus, AgentApprovalStatus, AgentCancellationToken, AgentChatInput,
+    AgentChatOutput, AgentContextBaseline, AgentContextCompactionCommitOutcome,
+    AgentContextCompactionCommitRequest, AgentContextCompactionGenerationOutput,
+    AgentContextCompactionGenerationRequest, AgentContextCompactionModelGenerator,
+    AgentContextCompactionPrepareOutcome, AgentContextCompactionServices, AgentContextWindowPhase,
+    AgentContextWindowSnapshot, AgentConversationContextState, AgentConversationTraceObserver,
+    AgentError, AgentEvent, AgentEventEmitter, AgentHostActionExecutor, AgentPatchResult,
+    AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus,
+    AgentRuntimeHostServices, AgentSearchConfig, AgentToolCall, AgentToolContinuation,
+    AgentToolResult, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
+    AgentUsageSummaryInput, AgentUsageSummaryOutput, ConversationTraceSnapshot,
+    ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -40,6 +45,18 @@ pub(crate) const AGENT_EVENT_NAME: &str = "agent.event";
 pub(crate) const THINKING_PLACEHOLDER: &str = "正在思考...";
 pub(crate) static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 const MAX_CONVERSATION_CONTEXT_STATE_CACHE_ENTRIES: usize = 32;
+
+type ContextCompactionGenerationFuture = Pin<
+    Box<dyn Future<Output = AgentResult<AgentContextCompactionGenerationOutput>> + Send + 'static>,
+>;
+type ContextCompactionSummaryGenerator = Arc<
+    dyn Fn(
+            AgentContextCompactionGenerationRequest,
+            AgentCancellationToken,
+        ) -> ContextCompactionGenerationFuture
+        + Send
+        + Sync,
+>;
 
 pub type CoreServerNotificationSender = UnboundedSender<Value>;
 
@@ -67,6 +84,7 @@ pub struct AgentService {
     trace_snapshots: Arc<Mutex<HashMap<String, ConversationTraceSnapshot>>>,
     conversation_context_states: Arc<Mutex<HashMap<String, ConversationContextStateEntry>>>,
     conversation_context_state_clock: Arc<AtomicU64>,
+    context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
     command_runs: CommandRunState,
     deleting_projects: Arc<Mutex<HashSet<String>>>,
 }
@@ -82,9 +100,19 @@ impl AgentService {
             trace_snapshots: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_states: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_state_clock: Arc::new(AtomicU64::new(1)),
+            context_compaction_summary_generator: None,
             command_runs: CommandRunState::default(),
             deleting_projects: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    #[cfg(test)]
+    fn with_context_compaction_summary_generator(
+        mut self,
+        generator: ContextCompactionSummaryGenerator,
+    ) -> Self {
+        self.context_compaction_summary_generator = Some(generator);
+        self
     }
 
     pub fn start_conversation_turn(
@@ -161,14 +189,23 @@ impl AgentService {
                 pending_agent_input.clone(),
                 notifications.clone(),
             );
-            let result = send_chat_with_host_executor_and_trace_observer(
+            let context_compaction_services = service.context_compaction_services(
+                &worker_run_id,
+                &worker_conversation_id,
+                &worker_assistant_message_id,
+                pending_agent_input.clone(),
+                notifications.clone(),
+            );
+            let host_services = AgentRuntimeHostServices::new()
+                .with_host_actions(host_executor, service.storage.clone())
+                .with_trace_observer(trace_observer)
+                .with_context_compaction(context_compaction_services);
+            let result = send_chat_with_host_services(
                 prepared.agent_input,
                 worker_run_id.clone(),
                 emitter,
                 cancellation_token,
-                host_executor,
-                service.storage.clone(),
-                Some(trace_observer),
+                host_services,
             )
             .await;
             let keep_trace_snapshot = matches!(
@@ -1309,14 +1346,23 @@ impl AgentService {
             record.agent_input.clone(),
             notifications.clone(),
         );
-        let result = send_chat_with_host_executor_and_trace_observer(
+        let context_compaction_services = self.context_compaction_services(
+            &run_id,
+            trace_conversation_id,
+            trace_assistant_message_id,
+            record.agent_input.clone(),
+            notifications.clone(),
+        );
+        let host_services = AgentRuntimeHostServices::new()
+            .with_host_actions(host_executor, self.storage.clone())
+            .with_trace_observer(trace_observer)
+            .with_context_compaction(context_compaction_services);
+        let result = send_chat_with_host_services(
             agent_input,
             run_id.clone(),
             emitter,
             cancellation_token,
-            host_executor,
-            self.storage.clone(),
-            Some(trace_observer),
+            host_services,
         )
         .await;
         let keep_trace_snapshot = matches!(
@@ -1725,6 +1771,217 @@ impl AgentService {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn context_compaction_services(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        agent_input: AgentChatInput,
+        notifications: CoreServerNotificationSender,
+    ) -> AgentContextCompactionServices {
+        let generator: ContextCompactionSummaryGenerator = self
+            .context_compaction_summary_generator
+            .clone()
+            .unwrap_or_else(|| {
+                let generator = AgentContextCompactionModelGenerator::from_chat_input(&agent_input);
+                Arc::new(move |request, cancellation| {
+                    let generator = generator.clone();
+                    Box::pin(async move { generator.generate(request, cancellation).await })
+                })
+            });
+        let run_id = run_id.to_string();
+        let conversation_id = conversation_id.to_string();
+        let assistant_message_id = assistant_message_id.to_string();
+
+        let prepare_service = self.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare_conversation_id = conversation_id.clone();
+        let prepare_assistant_message_id = assistant_message_id.clone();
+        let prepare_agent_input = agent_input.clone();
+        let prepare_notifications = notifications.clone();
+
+        let commit_service = self.clone();
+        let commit_run_id = run_id;
+        let commit_conversation_id = conversation_id;
+        let commit_assistant_message_id = assistant_message_id;
+        let commit_agent_input = agent_input;
+        let commit_notifications = notifications;
+
+        AgentContextCompactionServices::new(
+            move |request, cancellation| {
+                let service = prepare_service.clone();
+                let run_id = prepare_run_id.clone();
+                let conversation_id = prepare_conversation_id.clone();
+                let assistant_message_id = prepare_assistant_message_id.clone();
+                let agent_input = prepare_agent_input.clone();
+                let notifications = prepare_notifications.clone();
+                async move {
+                    cancellation.check()?;
+                    validate_compaction_request_identity(
+                        &request.run_id,
+                        &request.conversation_id,
+                        &request.assistant_message_id,
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                    )?;
+                    let prefix = service
+                        .storage
+                        .prepare_context_compaction_prefix_if_current(
+                            &conversation_id,
+                            &request.covered_through_message_id,
+                            request.expected_previous_summary_id.as_deref(),
+                        )
+                        .map_err(AgentError::new)?;
+                    match prefix {
+                        Some(prefix) => Ok(AgentContextCompactionPrepareOutcome::Ready(Arc::new(
+                            prefix,
+                        ))),
+                        None => service
+                            .rebuild_running_context_after_compaction(
+                                &agent_input,
+                                &run_id,
+                                &conversation_id,
+                                &assistant_message_id,
+                                &notifications,
+                            )
+                            .map(|baseline| {
+                                AgentContextCompactionPrepareOutcome::Refresh(Box::new(baseline))
+                            })
+                            .map_err(AgentError::new),
+                    }
+                }
+            },
+            move |request, cancellation| generator(request, cancellation),
+            move |request: AgentContextCompactionCommitRequest, cancellation| {
+                let service = commit_service.clone();
+                let run_id = commit_run_id.clone();
+                let conversation_id = commit_conversation_id.clone();
+                let assistant_message_id = commit_assistant_message_id.clone();
+                let agent_input = commit_agent_input.clone();
+                let notifications = commit_notifications.clone();
+                async move {
+                    cancellation.check()?;
+                    validate_compaction_request_identity(
+                        &request.run_id,
+                        &request.conversation_id,
+                        &request.assistant_message_id,
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                    )?;
+                    let committed = service
+                        .storage
+                        .commit_context_compaction_prefix_if_current(
+                            request.prefix.as_ref(),
+                            request.draft,
+                        )
+                        .map_err(AgentError::new)?;
+                    service.invalidate_conversation_context_state(&conversation_id);
+                    let baseline = service
+                        .rebuild_running_context_after_compaction(
+                            &agent_input,
+                            &run_id,
+                            &conversation_id,
+                            &assistant_message_id,
+                            &notifications,
+                        )
+                        .map_err(AgentError::new)?;
+                    match committed {
+                        Some(summary) => Ok(AgentContextCompactionCommitOutcome::Applied {
+                            summary_id: summary.id,
+                            baseline: Box::new(baseline),
+                        }),
+                        None => Ok(AgentContextCompactionCommitOutcome::Refresh(Box::new(
+                            baseline,
+                        ))),
+                    }
+                }
+            },
+        )
+    }
+
+    fn rebuild_running_context_after_compaction(
+        &self,
+        agent_input: &AgentChatInput,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        notifications: &CoreServerNotificationSender,
+    ) -> Result<AgentContextBaseline, String> {
+        self.invalidate_conversation_context_state(conversation_id);
+        let conversation = self
+            .storage
+            .load_conversation(conversation_id)?
+            .ok_or_else(|| format!("未找到对话：{conversation_id}"))?;
+        let traces = self
+            .storage
+            .list_conversation_turn_traces(conversation_id)?;
+        let summary = self
+            .storage
+            .get_active_context_compaction_summary(conversation_id)?;
+        let mut preview_input = agent_input.clone();
+        preview_input.messages = conversation_history_messages_with_compaction(
+            &conversation,
+            &traces,
+            summary.as_ref(),
+            &[assistant_message_id],
+        );
+        preview_input.context_compaction_summary = summary;
+        preview_input.attachments.clear();
+        preview_input.approval_decision = None;
+        preview_input.tool_continuation = None;
+        preview_input.resume_checkpoint = None;
+        if let Some(context) = preview_input.context.as_mut() {
+            context.conversation_id = Some(conversation_id.to_string());
+            context.attachment_library = Some(self.storage.build_attachment_library_context(
+                conversation_id,
+                context.project_id.as_deref(),
+            )?);
+        }
+
+        let mut state =
+            create_conversation_context_state(preview_input).map_err(|error| error.to_string())?;
+        // Freeze the exact persistent prefix that the runtime should adopt. The active run trace
+        // remains in its richer run overlay and is appended only to the server's durable cache.
+        let runtime_baseline = state.shared_baseline().map_err(|error| error.to_string())?;
+        let active_trace = traces
+            .iter()
+            .find(|trace| trace.assistant_message_id == assistant_message_id);
+        let committed_trace_items = match active_trace {
+            Some(trace) => {
+                if trace.run_id != run_id
+                    || trace.conversation_id != conversation_id
+                    || trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress
+                {
+                    return Err("压缩后重建上下文时，运行中 trace 身份或状态不一致。".to_string());
+                }
+                state
+                    .append_trace_items(trace, 0)
+                    .map_err(|error| error.to_string())?
+            }
+            None => 0,
+        };
+        // Measure and freeze the appended trace chunk once for the conversation cache and circle.
+        state.shared_baseline().map_err(|error| error.to_string())?;
+        let snapshot = agent_input
+            .context_window_indicator_enabled
+            .then(|| state.snapshot(AgentContextWindowPhase::DurableCommit));
+        let entry = ConversationContextStateEntry {
+            configuration_revision: state.configuration_revision().to_string(),
+            state,
+            active_run_id: Some(run_id.to_string()),
+            active_assistant_message_id: Some(assistant_message_id.to_string()),
+            committed_trace_items,
+            terminal: false,
+            last_access: self.next_conversation_context_state_access(),
+        };
+        self.insert_conversation_context_state(conversation_id, entry);
+        self.emit_context_window_snapshot(notifications, run_id, conversation_id, snapshot);
+        Ok(runtime_baseline)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn persist_in_progress_trace_snapshot(
         &self,
         run_id: &str,
@@ -1798,9 +2055,13 @@ impl AgentService {
                             .iter()
                             .rev()
                             .find(|message| message.role == "user")
-                            .map(|message| message.content.as_str())
-                            .unwrap_or_default();
-                        entry.state.append_user_message(current_user);
+                            .map(|message| {
+                                (message.message_id.as_deref(), message.content.as_str())
+                            })
+                            .unwrap_or((None, ""));
+                        entry
+                            .state
+                            .append_user_message(current_user.0, current_user.1);
                         entry.active_run_id = Some(run_id.to_string());
                         entry.active_assistant_message_id = Some(assistant_message_id.to_string());
                         entry.committed_trace_items = 0;
@@ -2189,12 +2450,23 @@ impl AgentService {
                     .build_attachment_library_context(conversation_id, project_id.as_deref())
             })
             .transpose()?;
+        let context_compaction_summary = match conversation_id.as_deref() {
+            Some(conversation_id) => self
+                .storage
+                .get_active_context_compaction_summary(conversation_id)?,
+            None => None,
+        };
         let messages = match conversation.as_ref() {
             Some(conversation) => {
                 let traces = self
                     .storage
                     .list_conversation_turn_traces(&conversation.id)?;
-                conversation_history_messages(conversation, &traces, &[])
+                conversation_history_messages_with_compaction(
+                    conversation,
+                    &traces,
+                    context_compaction_summary.as_ref(),
+                    &[],
+                )
             }
             None => Vec::new(),
         };
@@ -2237,6 +2509,7 @@ impl AgentService {
             attachments: Vec::new(),
             resume_checkpoint: None,
             assistant_message_id: None,
+            context_compaction_summary,
             messages,
         };
 
@@ -2264,7 +2537,16 @@ impl AgentService {
         let traces = self
             .storage
             .list_conversation_turn_traces(conversation_id)?;
-        preview_input.messages = conversation_history_messages(&conversation, &traces, &[]);
+        let context_compaction_summary = self
+            .storage
+            .get_active_context_compaction_summary(conversation_id)?;
+        preview_input.messages = conversation_history_messages_with_compaction(
+            &conversation,
+            &traces,
+            context_compaction_summary.as_ref(),
+            &[],
+        );
+        preview_input.context_compaction_summary = context_compaction_summary;
         preview_input.attachments.clear();
         preview_input.approval_decision = None;
         preview_input.tool_continuation = None;
@@ -2499,6 +2781,31 @@ impl AgentService {
     }
 }
 
+fn validate_compaction_request_identity(
+    request_run_id: &str,
+    request_conversation_id: &str,
+    request_assistant_message_id: &str,
+    expected_run_id: &str,
+    expected_conversation_id: &str,
+    expected_assistant_message_id: &str,
+) -> AgentResult<()> {
+    if request_run_id == expected_run_id
+        && request_conversation_id == expected_conversation_id
+        && request_assistant_message_id == expected_assistant_message_id
+    {
+        return Ok(());
+    }
+    Err(AgentError::structured(
+        "context_compaction_identity_mismatch",
+        "上下文压缩请求与当前运行身份不一致。",
+        serde_json::json!({
+            "requestRunId": request_run_id,
+            "requestConversationId": request_conversation_id,
+            "requestAssistantMessageId": request_assistant_message_id,
+        }),
+    ))
+}
+
 fn load_persisted_pending_actions(
     storage: &Arc<StorageService>,
 ) -> HashMap<String, PendingActionRecord> {
@@ -2700,8 +3007,10 @@ mod tests {
     };
     use mycopilot_core::{
         AgentCommandRequest, AgentCommandRiskLevel, AgentPermissions, AgentUsageSummaryRange,
-        AgentWorkspaceContext, ConversationTraceToolResultStatus, ConversationTurnTraceItem,
-        ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        AgentWorkspaceContext, ContextCompactionGeneration, ContextCompactionSummary,
+        ContextCompactionSummaryDraft, ConversationTraceToolResultStatus,
+        ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+        CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -2770,6 +3079,60 @@ mod tests {
                 enabled: true,
             }],
         }
+    }
+
+    fn test_context_compaction_generator() -> ContextCompactionSummaryGenerator {
+        Arc::new(|request, cancellation| {
+            Box::pin(async move {
+                cancellation.check()?;
+                let summary_input_tokens = request
+                    .maximum_summary_tokens
+                    .min(request.source_input_tokens)
+                    .min(32);
+                Ok(AgentContextCompactionGenerationOutput {
+                    draft: ContextCompactionSummaryDraft {
+                        id: format!(
+                            "test-summary-{}",
+                            ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+                        ),
+                        source_revision: request.prefix.source_revision.clone(),
+                        content: "Test summary of the completed historical turn.".to_string(),
+                        generation: ContextCompactionGeneration::test(),
+                        source_input_tokens: request.source_input_tokens,
+                        summary_input_tokens,
+                        created_at: now_ms(),
+                    },
+                    usage: None,
+                })
+            })
+        })
+    }
+
+    #[test]
+    fn production_compaction_services_install_the_current_model_generator() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let service = AgentService::new(storage);
+        let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "model-1",
+            "apiStyle": "open_ai_compatible",
+            "contextWindowTokens": 128000,
+            "maxTokens": 4000,
+            "messages": []
+        }))
+        .unwrap();
+        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        let _services = service.context_compaction_services(
+            "run-production-generator",
+            "conversation-production-generator",
+            "assistant-production-generator",
+            agent_input,
+            notifications,
+        );
     }
 
     #[test]
@@ -2846,6 +3209,7 @@ mod tests {
 
         assert_eq!(prepared.agent_input.messages.len(), 3);
         assert_eq!(prepared.agent_input.messages[0].content, "Create the file");
+        assert_eq!(prepared.agent_input.messages[0].created_at, Some(1));
         assert_eq!(
             prepared.agent_input.messages[1]
                 .conversation_turn_trace
@@ -2856,11 +3220,104 @@ mod tests {
             prepared.agent_input.messages[1].content,
             "Created src/history.rs."
         );
+        assert_eq!(prepared.agent_input.messages[1].created_at, Some(2));
         assert_eq!(prepared.agent_input.messages[2].content, "What changed?");
+        assert!(prepared.agent_input.messages[2].created_at.is_some());
         let serialized = serde_json::to_string(&prepared.agent_input.messages).unwrap();
         assert!(serialized.contains("src/history.rs"));
         assert!(!serialized.contains("FRONTEND_TIMELINE_MUST_NOT_ENTER_CONTEXT"));
         assert!(!serialized.contains("frontend/fake.rs"));
+    }
+
+    #[test]
+    fn next_turn_loads_active_summary_and_only_the_uncovered_tail() {
+        let fixture = tempdir().unwrap();
+        let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+        storage.save_model_settings(test_model_settings()).unwrap();
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-summary".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Summary history".to_string(),
+                messages: vec![
+                    ChatMessageRecord {
+                        id: "user-old".to_string(),
+                        role: "user".to_string(),
+                        content: "Old request".to_string(),
+                        created_at: 1,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                    ChatMessageRecord {
+                        id: "assistant-old".to_string(),
+                        role: "assistant".to_string(),
+                        content: "Old answer".to_string(),
+                        created_at: 2,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                ],
+                created_at: 1,
+                updated_at: 2,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let prefix = storage
+            .prepare_context_compaction_prefix("conversation-summary", "assistant-old")
+            .unwrap();
+        storage
+            .commit_context_compaction_prefix(
+                &prefix,
+                ContextCompactionSummaryDraft {
+                    id: "summary-active".to_string(),
+                    source_revision: prefix.source_revision.clone(),
+                    content: "The old request was completed.".to_string(),
+                    generation: ContextCompactionGeneration::test(),
+                    source_input_tokens: 100,
+                    summary_input_tokens: 10,
+                    created_at: 3,
+                },
+            )
+            .unwrap();
+
+        let prepared = prepare_conversation_turn(
+            &storage,
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-summary".to_string()),
+                project_id: None,
+                model_id: "model-1".to_string(),
+                context_window_indicator_enabled: true,
+                content: "Continue".to_string(),
+                attachments: Vec::new(),
+                title: None,
+                user_message_id: Some("user-next".to_string()),
+                assistant_message_id: Some("assistant-next".to_string()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+            },
+            "run-next",
+        )
+        .unwrap();
+
+        assert_eq!(prepared.agent_input.messages.len(), 1);
+        assert_eq!(prepared.agent_input.messages[0].content, "Continue");
+        assert_eq!(
+            prepared
+                .agent_input
+                .context_compaction_summary
+                .as_ref()
+                .map(|summary| summary.id.as_str()),
+            Some("summary-active")
+        );
     }
 
     #[test]
@@ -2951,6 +3408,74 @@ mod tests {
     }
 
     #[test]
+    fn compaction_projection_hides_covered_prefix_but_keeps_raw_conversation_intact() {
+        let conversation = ChatConversationRecord {
+            id: "conversation-compacted".to_string(),
+            project_id: None,
+            model_id: None,
+            title: "Compacted".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    id: "user-old".to_string(),
+                    role: "user".to_string(),
+                    content: "old request".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: "assistant-old".to_string(),
+                    role: "assistant".to_string(),
+                    content: "old answer".to_string(),
+                    created_at: 2,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: "user-tail".to_string(),
+                    role: "user".to_string(),
+                    content: "new request".to_string(),
+                    created_at: 3,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+            ],
+            created_at: 1,
+            updated_at: 3,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        };
+        let summary = ContextCompactionSummary {
+            schema_version: CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+            id: "summary-1".to_string(),
+            conversation_id: conversation.id.clone(),
+            source_revision: "revision-1".to_string(),
+            previous_summary_id: None,
+            covered_through_message_id: "assistant-old".to_string(),
+            covered_message_ids: vec!["user-old".to_string(), "assistant-old".to_string()],
+            content: "old turn summary".to_string(),
+            generation: ContextCompactionGeneration::test(),
+            source_input_tokens: 100,
+            summary_input_tokens: 10,
+            created_at: 4,
+        };
+
+        let projected =
+            conversation_history_messages_with_compaction(&conversation, &[], Some(&summary), &[]);
+
+        assert_eq!(conversation.messages.len(), 3);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].content, "new request");
+    }
+
+    #[test]
     fn context_window_snapshot_reports_net_durable_budget() {
         let fixture = tempdir().unwrap();
         let storage =
@@ -2994,6 +3519,283 @@ mod tests {
             .durable_capacity_tokens
             .is_some_and(|value| value > 0));
         assert_eq!(enabled.durable_input_tokens, 0);
+    }
+
+    #[test]
+    fn committed_test_summary_rebuilds_the_shared_durable_snapshot() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(test_model_settings()).unwrap();
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-capacity-summary".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Capacity summary".to_string(),
+                messages: vec![
+                    ChatMessageRecord {
+                        id: "user-long".to_string(),
+                        role: "user".to_string(),
+                        content: "u".repeat(12_000),
+                        created_at: 1,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                    ChatMessageRecord {
+                        id: "assistant-long".to_string(),
+                        role: "assistant".to_string(),
+                        content: "a".repeat(12_000),
+                        created_at: 2,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                ],
+                created_at: 1,
+                updated_at: 2,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let service = AgentService::new(storage.clone());
+        let snapshot_input = AgentContextWindowSnapshotInput {
+            conversation_id: Some("conversation-capacity-summary".to_string()),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            max_tokens: Some(30_000),
+            prompt_preferences: None,
+            permissions: AgentPermissions::default(),
+        };
+        let before = service
+            .get_context_window_snapshot(snapshot_input.clone())
+            .unwrap()
+            .snapshot
+            .unwrap();
+
+        let prefix = storage
+            .prepare_context_compaction_prefix("conversation-capacity-summary", "assistant-long")
+            .unwrap();
+        storage
+            .commit_context_compaction_prefix(
+                &prefix,
+                ContextCompactionSummaryDraft {
+                    id: "summary-capacity".to_string(),
+                    source_revision: prefix.source_revision.clone(),
+                    content: "The prior request was completed.".to_string(),
+                    generation: ContextCompactionGeneration::test(),
+                    source_input_tokens: before.durable_input_tokens,
+                    summary_input_tokens: 16,
+                    created_at: 3,
+                },
+            )
+            .unwrap();
+        service.invalidate_conversation_context_state("conversation-capacity-summary");
+
+        let after = service
+            .get_context_window_snapshot(snapshot_input)
+            .unwrap()
+            .snapshot
+            .unwrap();
+        assert!(after.durable_input_tokens < before.durable_input_tokens);
+        assert_eq!(
+            storage
+                .load_conversation("conversation-capacity-summary")
+                .unwrap()
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(test_model_settings()).unwrap();
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-compaction-host".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Compaction host".to_string(),
+                messages: vec![
+                    ChatMessageRecord {
+                        id: "user-old".to_string(),
+                        role: "user".to_string(),
+                        content: "An old request with substantial detail.".repeat(200),
+                        created_at: 1,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                    ChatMessageRecord {
+                        id: "assistant-old".to_string(),
+                        role: "assistant".to_string(),
+                        content: "The old request was completed with detailed results.".repeat(200),
+                        created_at: 2,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                    ChatMessageRecord {
+                        id: "user-current".to_string(),
+                        role: "user".to_string(),
+                        content: "Continue the work.".to_string(),
+                        created_at: 3,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                    ChatMessageRecord {
+                        id: "assistant-current".to_string(),
+                        role: "assistant".to_string(),
+                        content: THINKING_PLACEHOLDER.to_string(),
+                        created_at: 4,
+                        status: Some("pending".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                ],
+                created_at: 1,
+                updated_at: 4,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        storage
+            .append_in_progress_conversation_turn_trace(
+                &ConversationTurnTrace {
+                    schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                    run_id: "run-compaction-host".to_string(),
+                    conversation_id: "conversation-compaction-host".to_string(),
+                    assistant_message_id: "assistant-current".to_string(),
+                    terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+                    terminal_error: None,
+                    truncated: false,
+                    items: Vec::new(),
+                },
+                4,
+                4,
+            )
+            .unwrap();
+        let service = AgentService::new(storage.clone())
+            .with_context_compaction_summary_generator(test_context_compaction_generator());
+        let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "model-1",
+            "contextWindowTokens": 16000,
+            "contextWindowIndicatorEnabled": true,
+            "maxTokens": 1000,
+            "assistantMessageId": "assistant-current",
+            "context": {
+                "conversationId": "conversation-compaction-host"
+            },
+            "messages": []
+        }))
+        .unwrap();
+        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let services = service.context_compaction_services(
+            "run-compaction-host",
+            "conversation-compaction-host",
+            "assistant-current",
+            agent_input,
+            notifications,
+        );
+        let cancellation = AgentCancellationToken::new();
+        let prepare_request = mycopilot_core::AgentContextCompactionPrepareRequest {
+            run_id: "run-compaction-host".to_string(),
+            conversation_id: "conversation-compaction-host".to_string(),
+            assistant_message_id: "assistant-current".to_string(),
+            expected_previous_summary_id: None,
+            newly_covered_message_ids: vec!["user-old".to_string(), "assistant-old".to_string()],
+            covered_through_message_id: "assistant-old".to_string(),
+            source_input_tokens: 5_000,
+            maximum_summary_tokens: 256,
+        };
+        let prefix = match services
+            .prepare(prepare_request.clone(), cancellation.clone())
+            .await
+            .unwrap()
+        {
+            AgentContextCompactionPrepareOutcome::Ready(prefix) => prefix,
+            AgentContextCompactionPrepareOutcome::Refresh(_) => {
+                panic!("fresh plan unexpectedly required a refresh")
+            }
+        };
+        let generated = services
+            .generate(
+                AgentContextCompactionGenerationRequest {
+                    prefix: prefix.clone(),
+                    source_input_tokens: prepare_request.source_input_tokens,
+                    maximum_summary_tokens: prepare_request.maximum_summary_tokens,
+                },
+                cancellation.clone(),
+            )
+            .await
+            .unwrap();
+        let expected_summary_id = generated.draft.id.clone();
+        let committed = services
+            .commit(
+                AgentContextCompactionCommitRequest {
+                    run_id: prepare_request.run_id,
+                    conversation_id: prepare_request.conversation_id,
+                    assistant_message_id: prepare_request.assistant_message_id,
+                    prefix,
+                    draft: generated.draft,
+                },
+                cancellation,
+            )
+            .await
+            .unwrap();
+        match committed {
+            AgentContextCompactionCommitOutcome::Applied { summary_id, .. } => {
+                assert_eq!(summary_id, expected_summary_id)
+            }
+            AgentContextCompactionCommitOutcome::Refresh(_) => {
+                panic!("fresh summary unexpectedly became stale")
+            }
+        }
+
+        let active = storage
+            .get_active_context_compaction_summary("conversation-compaction-host")
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.id, expected_summary_id);
+        assert_eq!(active.covered_through_message_id, "assistant-old");
+        assert_eq!(
+            storage
+                .load_conversation("conversation-compaction-host")
+                .unwrap()
+                .unwrap()
+                .messages
+                .len(),
+            4
+        );
+        let states = service
+            .conversation_context_states
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let state = states.get("conversation-compaction-host").unwrap();
+        assert_eq!(state.active_run_id.as_deref(), Some("run-compaction-host"));
+        assert!(!state.terminal);
+        drop(states);
+        assert_eq!(
+            receiver.try_recv().unwrap()["params"]["type"].as_str(),
+            Some("context_window_updated")
+        );
     }
 
     #[test]
@@ -3450,6 +4252,7 @@ mod tests {
                     scope: "run".to_string(),
                     retention: "retained".to_string(),
                     group: None,
+                    origin: None,
                 },
                 mycopilot_core::AgentContextCheckpointItem {
                     role: "assistant".to_string(),
@@ -3469,6 +4272,7 @@ mod tests {
                         id: "exchange-checkpoint".to_string(),
                         kind: "tool_exchange".to_string(),
                     }),
+                    origin: None,
                 },
             ],
             next_model_request_index: 1,

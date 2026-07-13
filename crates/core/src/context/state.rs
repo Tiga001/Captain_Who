@@ -5,8 +5,9 @@
 //! baseline.
 
 use super::{
-    ContextCapacityDetector, ContextFrame, ContextItem, ContextRetention, ContextScope,
-    ContextSource, ConversationTraceRenderer, MeasuredContextBaseline,
+    ContextCapacityDetector, ContextFrame, ContextItem, ContextMetadata, ContextOrigin,
+    ContextRetention, ContextScope, ContextSource, ConversationTraceRenderer,
+    MeasuredContextBaseline,
 };
 use crate::llm::LlmMessageRole;
 use crate::protocol::{
@@ -31,6 +32,10 @@ impl AgentContextBaseline {
 
     pub(crate) fn rebase_restored_frame(self, frame: ContextFrame) -> ContextFrame {
         frame.rebase_onto_measured_baseline(self.frame)
+    }
+
+    pub(crate) fn replace_persistent_context(self, frame: ContextFrame) -> ContextFrame {
+        frame.replace_persistent_baseline(self.frame)
     }
 }
 
@@ -71,17 +76,22 @@ impl AgentConversationContextState {
         &self.configuration_revision
     }
 
-    pub fn append_user_message(&mut self, content: &str) {
+    pub fn append_user_message(&mut self, message_id: Option<&str>, content: &str) {
         let content = content.trim();
         if content.is_empty() {
             return;
         }
-        self.frame.push(ContextItem::text(
-            LlmMessageRole::User,
-            content,
+        let mut metadata = ContextMetadata::new(
             ContextSource::ConversationHistory,
             ContextScope::Conversation,
             ContextRetention::Retained,
+        );
+        if let Some(message_id) = message_id {
+            metadata = metadata.with_origin(ContextOrigin::conversation_message(message_id));
+        }
+        self.frame.push(ContextItem::new(
+            crate::llm::LlmMessage::text(LlmMessageRole::User, content),
+            metadata,
         ));
     }
 
@@ -127,12 +137,16 @@ impl AgentConversationContextState {
         let committed_item_count = self.append_trace_items(trace, committed_item_count)?;
         let assistant_content = assistant_content.trim();
         if !assistant_content.is_empty() {
-            self.frame.push(ContextItem::text(
-                LlmMessageRole::Assistant,
-                assistant_content,
-                ContextSource::ConversationHistory,
-                ContextScope::Conversation,
-                ContextRetention::Retained,
+            self.frame.push(ContextItem::new(
+                crate::llm::LlmMessage::text(LlmMessageRole::Assistant, assistant_content),
+                ContextMetadata::new(
+                    ContextSource::ConversationHistory,
+                    ContextScope::Conversation,
+                    ContextRetention::Retained,
+                )
+                .with_origin(ContextOrigin::conversation_message(
+                    &trace.assistant_message_id,
+                )),
             ));
         }
         let terminal_only = ConversationTurnTrace {

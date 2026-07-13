@@ -120,6 +120,7 @@ export function settleAgentRunToolActivities(
 
   return {
     ...runWithStatus,
+    contextCompactionStartedAt: undefined,
     fileWritePreviews: [],
     webSearchActivities: settlePendingWebSearchActivities(
       runWithStatus,
@@ -716,6 +717,28 @@ export function applyAgentEventToChatMessage(
 
   if (agentEvent.type === 'context_window_updated') {
     return message
+  }
+
+  if (agentEvent.type === 'context_compaction_started') {
+    return {
+      ...message,
+      status: 'pending',
+      agentRun: {
+        ...currentRun,
+        status: 'running',
+        contextCompactionStartedAt: Date.now()
+      }
+    }
+  }
+
+  if (agentEvent.type === 'context_compaction_finished') {
+    return {
+      ...message,
+      agentRun: {
+        ...currentRun,
+        contextCompactionStartedAt: undefined
+      }
+    }
   }
 
   if (agentEvent.type === 'llm_retry') {

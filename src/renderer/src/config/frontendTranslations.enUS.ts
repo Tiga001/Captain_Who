@@ -217,6 +217,7 @@ export const enUSTranslations = {
   'appearance.themeVariant.ayuDark': 'Ayu Dark',
   'appearance.themeVariant.gruvbox': 'Gruvbox',
   'appearance.themeVariant.one': 'One',
+  'appearance.themeVariant.zju': 'ZJU',
   'appearance.nativeFontSmoothing': 'macOS font smoothing',
   'appearance.nativeFontSmoothingDescription':
     'Use macOS/WebKit font antialiasing for smoother text edges.',
@@ -331,6 +332,7 @@ export const enUSTranslations = {
   'chat.usageCacheCreationInputTokens': 'Cache write',
 
   'agent.thinking': 'Thinking',
+  'agent.compactingContext': 'Compacting context',
   'agent.separator': ', ',
   'agent.processed': 'Processed {duration}',
   'agent.stoppedAfter': 'You stopped after {duration}',

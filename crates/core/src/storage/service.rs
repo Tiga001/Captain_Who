@@ -13,13 +13,16 @@ use crate::storage::models::{
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
     chat_repository, chat_search_repository, composer_draft_repository, config_repository,
-    conversation_trace_repository, file_draft_repository, now_ms, pending_action_repository,
-    preferences_repository, project_repository, storage_error, usage_repository, StorageState,
+    context_compaction_repository, conversation_trace_repository, file_draft_repository, now_ms,
+    pending_action_repository, preferences_repository, project_repository, storage_error,
+    usage_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
     AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentToolResult, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, ConversationTurnTrace,
+    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    ContextCompactionPrefix, ContextCompactionSummary, ContextCompactionSummaryDraft,
+    ConversationTurnTrace,
 };
 use base64::Engine;
 
@@ -532,6 +535,107 @@ impl StorageService {
         let connection = self.state.connection()?;
         conversation_trace_repository::list_traces_for_conversation(&connection, conversation_id)
             .map_err(storage_error)
+    }
+
+    pub fn get_active_context_compaction_summary(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ContextCompactionSummary>, String> {
+        let connection = self.state.connection()?;
+        context_compaction_repository::get_active_summary(&connection, conversation_id)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn prepare_context_compaction_prefix(
+        &self,
+        conversation_id: &str,
+        covered_through_message_id: &str,
+    ) -> Result<ContextCompactionPrefix, String> {
+        let connection = self.state.connection()?;
+        context_compaction_repository::prepare_prefix(
+            &connection,
+            conversation_id,
+            covered_through_message_id,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Returns `None` when the planner's active-summary identity is stale. The caller should
+    /// refresh its durable baseline and plan again instead of treating this as a failed run.
+    pub fn prepare_context_compaction_prefix_if_current(
+        &self,
+        conversation_id: &str,
+        covered_through_message_id: &str,
+        expected_active_summary_id: Option<&str>,
+    ) -> Result<Option<ContextCompactionPrefix>, String> {
+        let connection = self.state.connection()?;
+        let active =
+            match context_compaction_repository::get_active_summary(&connection, conversation_id) {
+                Ok(active) => active,
+                Err(error) if error.is_stale() => return Ok(None),
+                Err(error) => return Err(error.to_string()),
+            };
+        if active.as_ref().map(|summary| summary.id.as_str()) != expected_active_summary_id {
+            return Ok(None);
+        }
+        match context_compaction_repository::prepare_prefix(
+            &connection,
+            conversation_id,
+            covered_through_message_id,
+        ) {
+            Ok(prefix) => Ok(Some(prefix)),
+            Err(error) if error.is_stale() => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub fn commit_context_compaction_prefix(
+        &self,
+        expected_prefix: &ContextCompactionPrefix,
+        draft: ContextCompactionSummaryDraft,
+    ) -> Result<ContextCompactionSummary, String> {
+        let mut connection = self.state.connection()?;
+        context_compaction_repository::commit_prefix_replacement(
+            &mut connection,
+            expected_prefix,
+            draft,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    /// Commits only if the prepared durable prefix is still current. `None` is a normal stale
+    /// outcome and must cause a baseline refresh plus replanning.
+    pub fn commit_context_compaction_prefix_if_current(
+        &self,
+        expected_prefix: &ContextCompactionPrefix,
+        draft: ContextCompactionSummaryDraft,
+    ) -> Result<Option<ContextCompactionSummary>, String> {
+        let mut connection = self.state.connection()?;
+        match context_compaction_repository::commit_prefix_replacement(
+            &mut connection,
+            expected_prefix,
+            draft,
+        ) {
+            Ok(summary) => Ok(Some(summary)),
+            Err(error) if error.is_stale() => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub fn rollback_context_compaction_summary(
+        &self,
+        conversation_id: &str,
+        expected_summary_id: &str,
+        updated_at: i64,
+    ) -> Result<Option<ContextCompactionSummary>, String> {
+        let mut connection = self.state.connection()?;
+        context_compaction_repository::rollback_active_summary(
+            &mut connection,
+            conversation_id,
+            expected_summary_id,
+            updated_at,
+        )
+        .map_err(|error| error.to_string())
     }
 
     pub fn save_chat_message_state(

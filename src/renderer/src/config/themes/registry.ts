@@ -6,6 +6,7 @@ import { everforestDarkTheme, everforestLightTheme } from './everforest'
 import { githubDarkTheme, githubLightTheme } from './github'
 import { gruvboxDarkTheme, gruvboxLightTheme } from './gruvbox'
 import { oneDarkTheme, oneLightTheme } from './one'
+import { zjuLightTheme } from './zju'
 import type { ColorScheme, ColorSchemePreference, FrontendThemeDefinition } from './types'
 
 export const frontendThemes = {
@@ -110,6 +111,12 @@ export const frontendThemes = {
     labelKey: 'appearance.themeVariant.one',
     order: 90,
     tokens: oneDarkTheme
+  },
+  'zju-light': {
+    colorScheme: 'light',
+    labelKey: 'appearance.themeVariant.zju',
+    order: 90,
+    tokens: zjuLightTheme
   }
 } as const satisfies Record<string, FrontendThemeDefinition>
 
