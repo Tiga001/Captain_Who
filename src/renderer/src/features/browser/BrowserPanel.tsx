@@ -10,6 +10,7 @@ import {
   RefreshCw
 } from 'lucide-react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePointer'
 import type { BrowserPageMetadata } from './browserClient'
 import { getFallbackPageTitle, normalizeBrowserUrl } from './browserUrl'
 import { useBrowserView } from './useBrowserView'
@@ -36,7 +37,9 @@ export function BrowserPanel({
 }: BrowserPanelProps) {
   const { t } = useFrontendConfig()
   const hostRef = useRef<HTMLDivElement>(null)
+  const menuAnchorRef = useRef<HTMLDivElement>(null)
   const [addressValue, setAddressValue] = useState('')
+  const [isAddressEditing, setIsAddressEditing] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [zoom, setZoomState] = useState(1)
   const viewId = useMemo(() => `right-sidebar-browser-${pageId}`, [pageId])
@@ -58,6 +61,9 @@ export function BrowserPanel({
     viewId
   })
 
+  const closeMenu = useCallback(() => setIsMenuOpen(false), [])
+  useDismissOnOutsidePointer(menuAnchorRef, isMenuOpen, closeMenu)
+
   useEffect(() => {
     if (!isActive) {
       setIsMenuOpen(false)
@@ -65,10 +71,10 @@ export function BrowserPanel({
   }, [isActive])
 
   useEffect(() => {
-    if (currentUrl) {
-      setAddressValue(currentUrl)
+    if (!isAddressEditing) {
+      setAddressValue(currentUrl ?? '')
     }
-  }, [currentUrl])
+  }, [currentUrl, isAddressEditing])
 
   useEffect(() => {
     const metadataTitle =
@@ -103,6 +109,7 @@ export function BrowserPanel({
     })
 
     await navigateToUrl(url)
+    setIsAddressEditing(false)
   }, [addressValue, navigateToUrl, onPageMetadataChange, t])
 
   const updateZoom = useCallback(
@@ -155,6 +162,13 @@ export function BrowserPanel({
 
         <form
           className="browser-panel__address"
+          onBlur={(event) => {
+            const nextTarget = event.relatedTarget
+            if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return
+
+            setIsAddressEditing(false)
+            setAddressValue(currentUrl ?? '')
+          }}
           onSubmit={(event) => {
             event.preventDefault()
             void submitAddress()
@@ -166,7 +180,11 @@ export function BrowserPanel({
             spellCheck={false}
             placeholder={t('browser.addressPlaceholder')}
             aria-label={t('browser.addressPlaceholder')}
-            onChange={(event) => setAddressValue(event.target.value)}
+            onChange={(event) => {
+              setIsAddressEditing(true)
+              setAddressValue(event.target.value)
+            }}
+            onFocus={() => setIsAddressEditing(true)}
           />
           <button
             className="browser-panel__open-button"
@@ -177,7 +195,7 @@ export function BrowserPanel({
           </button>
         </form>
 
-        <div className="browser-panel__menu-anchor">
+        <div className="browser-panel__menu-anchor" ref={menuAnchorRef}>
           <button
             className="browser-panel__icon-button"
             type="button"

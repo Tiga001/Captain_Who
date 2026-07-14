@@ -62,6 +62,9 @@ export function useBrowserView({
   const isObscuredRef = useRef(isObscured)
   const currentUrlRef = useRef<string | null>(null)
   const viewCreatedRef = useRef(false)
+  const lastBoundsRef = useRef<BrowserBounds | null>(null)
+  const nativeVisibleRef = useRef(false)
+  const boundsSyncSeqRef = useRef(0)
 
   useEffect(() => {
     isActiveRef.current = isActive
@@ -76,6 +79,26 @@ export function useBrowserView({
     setNavigationState(state)
     setErrorMessage(state.errorText ?? null)
   }, [])
+
+  const markNativeViewUnavailable = useCallback(() => {
+    createPromiseRef.current = null
+    lastBoundsRef.current = null
+    nativeVisibleRef.current = false
+    viewCreatedRef.current = false
+  }, [])
+
+  const handleBrowserOperationError = useCallback(
+    (operation: string, error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`Failed to ${operation} browser view`, error)
+      setErrorMessage(message)
+
+      if (message.includes('Browser view not found')) {
+        markNativeViewUnavailable()
+      }
+    },
+    [markNativeViewUnavailable]
+  )
 
   const ensureViewCreated = useCallback(async () => {
     if (viewCreatedRef.current && createPromiseRef.current) {
@@ -92,6 +115,8 @@ export function useBrowserView({
         }
 
         viewCreatedRef.current = true
+        lastBoundsRef.current = null
+        nativeVisibleRef.current = false
         applyNavigationState(state)
         return state
       })
@@ -105,12 +130,13 @@ export function useBrowserView({
   }, [applyNavigationState, viewId])
 
   const hideNativeView = useCallback(() => {
-    if (!viewCreatedRef.current) return
+    if (!viewCreatedRef.current || !nativeVisibleRef.current) return
 
+    nativeVisibleRef.current = false
     void hideBrowserView(viewId).catch((error) => {
-      console.error('Failed to hide browser view', error)
+      handleBrowserOperationError('hide', error)
     })
-  }, [viewId])
+  }, [handleBrowserOperationError, viewId])
 
   const syncBounds = useCallback(() => {
     const host = hostRef.current
@@ -124,38 +150,66 @@ export function useBrowserView({
       bounds !== null
 
     if (!shouldShow || !bounds) {
+      boundsSyncSeqRef.current += 1
       hideNativeView()
       return
     }
 
-    void setBrowserViewBounds(viewId, bounds)
-      .then(() => showBrowserView(viewId))
-      .then(applyNavigationState)
-      .catch((error) => {
-        console.error('Failed to position browser view', error)
+    const syncSeq = boundsSyncSeqRef.current + 1
+    boundsSyncSeqRef.current = syncSeq
+    const boundsChanged =
+      !lastBoundsRef.current || !areBrowserBoundsEqual(lastBoundsRef.current, bounds)
+    const updateBounds = boundsChanged
+      ? setBrowserViewBounds(viewId, bounds).then(() => {
+          lastBoundsRef.current = bounds
+        })
+      : Promise.resolve()
+
+    void updateBounds
+      .then(() => {
+        if (
+          boundsSyncSeqRef.current !== syncSeq ||
+          nativeVisibleRef.current ||
+          !viewCreatedRef.current ||
+          !isActiveRef.current ||
+          isObscuredRef.current ||
+          !currentUrlRef.current
+        ) {
+          return null
+        }
+
+        return showBrowserView(viewId)
       })
-  }, [applyNavigationState, hideNativeView, hostRef, viewId])
+      .then((state) => {
+        if (!state) return
+
+        nativeVisibleRef.current = true
+        applyNavigationState(state)
+      })
+      .catch((error) => {
+        handleBrowserOperationError('position', error)
+      })
+  }, [applyNavigationState, handleBrowserOperationError, hideNativeView, hostRef, viewId])
 
   useEffect(() => {
     isDisposedRef.current = false
 
     return () => {
       isDisposedRef.current = true
-      viewCreatedRef.current = false
+      markNativeViewUnavailable()
       createPromiseRef.current = null
       void destroyBrowserView(viewId).catch((error) => {
         console.error('Failed to destroy browser view', error)
       })
     }
-  }, [viewId])
+  }, [markNativeViewUnavailable, viewId])
 
   useEffect(() => {
     return listenToBrowserViewEvents((event) => {
       if (!isBrowserEventForView(event, viewId)) return
 
       if (event.type === 'browser.destroyed') {
-        viewCreatedRef.current = false
-        createPromiseRef.current = null
+        markNativeViewUnavailable()
         return
       }
 
@@ -167,7 +221,7 @@ export function useBrowserView({
         applyNavigationState(event.state)
       }
     })
-  }, [applyNavigationState, viewId])
+  }, [applyNavigationState, markNativeViewUnavailable, viewId])
 
   useEffect(() => {
     syncBounds()
@@ -204,44 +258,73 @@ export function useBrowserView({
 
   const navigateToUrl = useCallback(
     async (url: string) => {
-      await ensureViewCreated()
-      setErrorMessage(null)
-      const state = await navigateBrowserView({ id: viewId, url })
-      applyNavigationState(state)
-      syncBounds()
+      try {
+        await ensureViewCreated()
+        setErrorMessage(null)
+        const state = await navigateBrowserView({ id: viewId, url })
+        applyNavigationState(state)
+        syncBounds()
+      } catch (error) {
+        handleBrowserOperationError('navigate', error)
+      }
     },
-    [applyNavigationState, ensureViewCreated, syncBounds, viewId]
+    [applyNavigationState, ensureViewCreated, handleBrowserOperationError, syncBounds, viewId]
   )
 
   const reload = useCallback(async () => {
-    if (!currentUrlRef.current) return
+    if (!currentUrlRef.current || !viewCreatedRef.current) return
 
-    const state = await reloadBrowserView(viewId)
-    applyNavigationState(state)
-  }, [applyNavigationState, viewId])
+    try {
+      const state = await reloadBrowserView(viewId)
+      applyNavigationState(state)
+    } catch (error) {
+      handleBrowserOperationError('reload', error)
+    }
+  }, [applyNavigationState, handleBrowserOperationError, viewId])
 
   const goBack = useCallback(async () => {
-    const state = await goBackBrowserView(viewId)
-    applyNavigationState(state)
-  }, [applyNavigationState, viewId])
+    if (!viewCreatedRef.current) return
+
+    try {
+      const state = await goBackBrowserView(viewId)
+      applyNavigationState(state)
+    } catch (error) {
+      handleBrowserOperationError('go back in', error)
+    }
+  }, [applyNavigationState, handleBrowserOperationError, viewId])
 
   const goForward = useCallback(async () => {
-    const state = await goForwardBrowserView(viewId)
-    applyNavigationState(state)
-  }, [applyNavigationState, viewId])
+    if (!viewCreatedRef.current) return
+
+    try {
+      const state = await goForwardBrowserView(viewId)
+      applyNavigationState(state)
+    } catch (error) {
+      handleBrowserOperationError('go forward in', error)
+    }
+  }, [applyNavigationState, handleBrowserOperationError, viewId])
 
   const setZoom = useCallback(
     async (zoomFactor: number) => {
-      await ensureViewCreated()
-      return setBrowserViewZoom(viewId, zoomFactor)
+      try {
+        await ensureViewCreated()
+        return await setBrowserViewZoom(viewId, zoomFactor)
+      } catch (error) {
+        handleBrowserOperationError('set zoom for', error)
+        return { id: viewId, zoomFactor }
+      }
     },
-    [ensureViewCreated, viewId]
+    [ensureViewCreated, handleBrowserOperationError, viewId]
   )
 
   const clearBrowsingData = useCallback(async () => {
-    await ensureViewCreated()
-    await clearBrowserViewBrowsingData(viewId)
-  }, [ensureViewCreated, viewId])
+    try {
+      await ensureViewCreated()
+      await clearBrowserViewBrowsingData(viewId)
+    } catch (error) {
+      handleBrowserOperationError('clear browsing data for', error)
+    }
+  }, [ensureViewCreated, handleBrowserOperationError, viewId])
 
   return useMemo(
     () => ({
@@ -294,6 +377,15 @@ function isBrowserEventForView(event: BrowserViewEvent, viewId: BrowserViewId): 
   }
 
   return event.state.id === viewId
+}
+
+function areBrowserBoundsEqual(left: BrowserBounds, right: BrowserBounds): boolean {
+  return (
+    left.height === right.height &&
+    left.width === right.width &&
+    left.x === right.x &&
+    left.y === right.y
+  )
 }
 
 function getVisibleHostBounds(host: HTMLElement): BrowserBounds | null {

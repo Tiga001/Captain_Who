@@ -12,6 +12,8 @@ import type {
 } from '@mycopilot/protocol'
 
 interface BrowserViewRecord {
+  bounds: Rectangle
+  isVisible: boolean
   state: BrowserNavigationState
   view: WebContentsView
   webContents: WebContents
@@ -60,10 +62,13 @@ export class BrowserWebContentsViewManager {
     })
 
     view.setVisible(false)
-    view.setBounds({ height: 0, width: 0, x: 0, y: 0 })
+    const initialBounds = { height: 0, width: 0, x: 0, y: 0 }
+    view.setBounds(initialBounds)
     this.ownerWindow.contentView.addChildView(view)
 
     const record: BrowserViewRecord = {
+      bounds: initialBounds,
+      isVisible: false,
       state: createInitialNavigationState(id),
       view,
       webContents: view.webContents,
@@ -95,16 +100,23 @@ export class BrowserWebContentsViewManager {
 
   async setBounds(id: BrowserViewId, bounds: BrowserBounds): Promise<void> {
     const record = this.requireRecord(id)
-    record.view.setBounds(toElectronBounds(bounds))
+    const nextBounds = toElectronBounds(bounds)
+    if (areBoundsEqual(record.bounds, nextBounds)) return
+
+    record.bounds = nextBounds
+    record.view.setBounds(nextBounds)
   }
 
   async showView(id: BrowserViewId): Promise<BrowserNavigationState> {
     const record = this.requireRecord(id)
-    const bounds = record.view.getBounds()
-    const shouldShow = bounds.width > 0 && bounds.height > 0
+    const shouldShow = record.bounds.width > 0 && record.bounds.height > 0
+    const wasVisible = record.isVisible
 
-    record.view.setVisible(shouldShow)
-    if (shouldShow) {
+    if (wasVisible !== shouldShow) {
+      record.view.setVisible(shouldShow)
+      record.isVisible = shouldShow
+    }
+    if (shouldShow && !wasVisible) {
       this.ownerWindow.contentView.addChildView(record.view)
     }
 
@@ -115,6 +127,9 @@ export class BrowserWebContentsViewManager {
     const record = this.views.get(id)
     if (!record) return
 
+    if (!record.isVisible) return
+
+    record.isVisible = false
     record.view.setVisible(false)
   }
 
@@ -386,9 +401,6 @@ export class BrowserWebContentsViewManager {
         record.view.setVisible(false)
         this.ownerWindow.contentView.removeChildView(record.view)
       }
-      if (record.webContents.isLoading()) {
-        record.webContents.once('did-stop-loading', () => this.closeDisposedWebContents(record))
-      }
       this.closeDisposedWebContents(record)
     }
 
@@ -449,6 +461,15 @@ function normalizeBoundsValue(value: number, minimum: number): number {
   }
 
   return Math.max(minimum, Math.round(value))
+}
+
+function areBoundsEqual(left: Rectangle, right: Rectangle): boolean {
+  return (
+    left.height === right.height &&
+    left.width === right.width &&
+    left.x === right.x &&
+    left.y === right.y
+  )
 }
 
 function normalizeAllowedHttpUrl(input: string): string {
