@@ -21,9 +21,10 @@ import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
 import type { StorageImageFileRecord } from '@mycopilot/protocol'
 import type { StorageProjectRecord } from '@mycopilot/protocol'
 import type { AppWindowState } from '@mycopilot/host-api'
+import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
 
 import { CoreServer } from './core/coreServer'
-import { BrowserWebContentsViewManager } from './browser/BrowserWebContentsViewManager'
+import { clearManagedWebviewData } from './webviews/managedWebviewSecurity'
 import { TerminalBridge } from './terminal/TerminalBridge'
 import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
 import { FaviconResourceCache } from './resources/FaviconResourceCache'
@@ -377,7 +378,6 @@ export function registerHostIpc(
   coreServer: CoreServer,
   terminalBridge: TerminalBridge,
   faviconResourceCache: FaviconResourceCache,
-  getBrowserManager: () => BrowserWebContentsViewManager,
   isTrustedRenderer: (event: IpcMainInvokeEvent) => boolean
 ): void {
   const attachmentDialogBridge = new AttachmentDialogBridge()
@@ -436,26 +436,11 @@ export function registerHostIpc(
   ipcMain.handle('host:attachments.selectInputAttachments', (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)
   )
-  ipcMain.handle('host:browser.createView', (_event, request) =>
-    getBrowserManager().createView(request)
-  )
-  ipcMain.handle('host:browser.destroyView', (_event, id) => getBrowserManager().destroyView(id))
-  ipcMain.handle('host:browser.setBounds', (_event, id, bounds) =>
-    getBrowserManager().setBounds(id, bounds)
-  )
-  ipcMain.handle('host:browser.showView', (_event, id) => getBrowserManager().showView(id))
-  ipcMain.handle('host:browser.hideView', (_event, id) => getBrowserManager().hideView(id))
-  ipcMain.handle('host:browser.navigate', (_event, request) =>
-    getBrowserManager().navigate(request)
-  )
-  ipcMain.handle('host:browser.reload', (_event, id) => getBrowserManager().reload(id))
-  ipcMain.handle('host:browser.goBack', (_event, id) => getBrowserManager().goBack(id))
-  ipcMain.handle('host:browser.goForward', (_event, id) => getBrowserManager().goForward(id))
-  ipcMain.handle('host:browser.setZoom', (_event, id, zoomFactor) =>
-    getBrowserManager().setZoom(id, zoomFactor)
-  )
-  ipcMain.handle('host:browser.clearBrowsingData', async (_event, id) => {
-    await Promise.all([getBrowserManager().clearBrowsingData(id), faviconResourceCache.clear()])
+  ipcMain.handle('host:browser.clearBrowsingData', async () => {
+    await Promise.all([
+      clearManagedWebviewData(BROWSER_WEBVIEW_PARTITION),
+      faviconResourceCache.clear()
+    ])
   })
   ipcMain.handle('host:clipboard.writeImage', (_event, input) => writeImageToClipboard(input))
   ipcMain.handle('host:resources.resolveFavicon', (_event, input) =>

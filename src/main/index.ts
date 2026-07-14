@@ -4,7 +4,10 @@ import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import type { AppWindowState } from '@mycopilot/host-api'
 import icon from '../../resources/icon.png?asset'
-import { BrowserWebContentsViewManager } from './browser/BrowserWebContentsViewManager'
+import {
+  configureManagedWebviewHost,
+  initializeManagedWebviewSessions
+} from './webviews/managedWebviewSecurity'
 import { CoreServer } from './core/coreServer'
 import { openExternalUrl, registerHostIpc } from './ipc'
 import { FaviconResourceCache, registerResourceSchemes } from './resources/FaviconResourceCache'
@@ -15,7 +18,6 @@ registerResourceSchemes()
 const coreServer = new CoreServer()
 const terminalBridge = new TerminalBridge()
 const faviconResourceCache = new FaviconResourceCache()
-let browserManager: BrowserWebContentsViewManager | null = null
 let isQuittingAfterServiceShutdown = false
 const trustedRendererEntries = new Map<number, string>()
 
@@ -89,29 +91,22 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      webSecurity: true
+      webSecurity: true,
+      webviewTag: true
     }
   })
 
   const rendererWebContents = mainWindow.webContents
   const rendererWebContentsId = rendererWebContents.id
-  const windowBrowserManager = new BrowserWebContentsViewManager(mainWindow)
   trustedRendererEntries.set(rendererWebContentsId, rendererEntryUrl)
-  browserManager = windowBrowserManager
+  configureManagedWebviewHost(rendererWebContents)
   const handleWindowStateChange = (): void => sendAppWindowState(mainWindow)
 
   rendererWebContents.once('destroyed', () => {
     trustedRendererEntries.delete(rendererWebContentsId)
   })
-  mainWindow.once('close', () => {
-    windowBrowserManager.destroyAll()
-  })
   mainWindow.once('closed', () => {
-    windowBrowserManager.destroyAll()
     trustedRendererEntries.delete(rendererWebContentsId)
-    if (browserManager === windowBrowserManager) {
-      browserManager = null
-    }
   })
 
   mainWindow.on('ready-to-show', () => {
@@ -154,24 +149,13 @@ app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.mycopilot.next')
   coreServer.start()
   faviconResourceCache.registerProtocol()
+  initializeManagedWebviewSessions()
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  registerHostIpc(
-    coreServer,
-    terminalBridge,
-    faviconResourceCache,
-    () => {
-      if (!browserManager) {
-        throw new Error('Browser view manager is not available')
-      }
-
-      return browserManager
-    },
-    isTrustedRendererEvent
-  )
+  registerHostIpc(coreServer, terminalBridge, faviconResourceCache, isTrustedRendererEvent)
 
   createWindow()
 
@@ -188,7 +172,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', (event) => {
   if (isQuittingAfterServiceShutdown) {
-    browserManager?.destroyAll()
     terminalBridge.killNow()
     coreServer.stop()
     return
@@ -200,7 +183,6 @@ app.on('before-quit', (event) => {
 })
 
 app.on('will-quit', () => {
-  browserManager?.destroyAll()
   terminalBridge.killNow()
   coreServer.stop()
 })

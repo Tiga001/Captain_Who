@@ -22,13 +22,6 @@ import type {
   AgentUsageSummaryOutput,
   AttachmentInputPayload,
   AttachmentSelectInputRequest,
-  BrowserBounds,
-  BrowserCreateViewRequest,
-  BrowserNavigateRequest,
-  BrowserNavigationState,
-  BrowserViewEvent,
-  BrowserViewId,
-  BrowserZoomState,
   CorePingRequest,
   CorePingResponse,
   ResourceFaviconRequest,
@@ -61,18 +54,7 @@ export interface AttachmentsHostApi {
 }
 
 export interface BrowserHostApi {
-  createView(request: BrowserCreateViewRequest): Promise<BrowserNavigationState>
-  destroyView(id: BrowserViewId): Promise<void>
-  setBounds(id: BrowserViewId, bounds: BrowserBounds): Promise<void>
-  showView(id: BrowserViewId): Promise<BrowserNavigationState>
-  hideView(id: BrowserViewId): Promise<void>
-  navigate(request: BrowserNavigateRequest): Promise<BrowserNavigationState>
-  reload(id: BrowserViewId): Promise<BrowserNavigationState>
-  goBack(id: BrowserViewId): Promise<BrowserNavigationState>
-  goForward(id: BrowserViewId): Promise<BrowserNavigationState>
-  setZoom(id: BrowserViewId, zoomFactor: number): Promise<BrowserZoomState>
-  clearBrowsingData(id: BrowserViewId): Promise<void>
-  onEvent(handler: (event: BrowserViewEvent) => void): () => void
+  clearBrowsingData(): Promise<void>
 }
 
 export interface StorageHostApi {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -9,17 +9,19 @@ import {
   Plus,
   RefreshCw
 } from 'lucide-react'
+import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePointer'
-import type { BrowserPageMetadata } from './browserClient'
+import { WebviewSurface } from '../rightSidebar/surfaces/WebviewSurface'
+import type { BrowserPageMetadata } from './browserTypes'
 import { getFallbackPageTitle, normalizeBrowserUrl } from './browserUrl'
-import { useBrowserView } from './useBrowserView'
+import { useBrowserWebview } from './useBrowserWebview'
 import './BrowserPanel.css'
 
 interface BrowserPanelProps {
   isActive: boolean
-  isObscured?: boolean
   onPageMetadataChange?: (metadata: BrowserPageMetadata) => void
+  onSurfaceFocus?: () => void
   pageId: string
 }
 
@@ -31,18 +33,17 @@ function clampZoom(value: number) {
 
 export function BrowserPanel({
   isActive,
-  isObscured = false,
   onPageMetadataChange,
+  onSurfaceFocus,
   pageId
 }: BrowserPanelProps) {
   const { t } = useFrontendConfig()
-  const hostRef = useRef<HTMLDivElement>(null)
   const menuAnchorRef = useRef<HTMLDivElement>(null)
   const [addressValue, setAddressValue] = useState('')
   const [isAddressEditing, setIsAddressEditing] = useState(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [zoom, setZoomState] = useState(1)
-  const viewId = useMemo(() => `right-sidebar-browser-${pageId}`, [pageId])
+  const viewId = `right-sidebar-browser-${pageId}`
   const {
     clearBrowsingData,
     currentUrl,
@@ -53,15 +54,15 @@ export function BrowserPanel({
     navigationState,
     navigateToUrl,
     reload,
+    setWebview,
     setZoom
-  } = useBrowserView({
-    hostRef,
-    isActive,
-    isObscured: isObscured || isMenuOpen,
-    viewId
-  })
+  } = useBrowserWebview({ isActive })
 
   const closeMenu = useCallback(() => setIsMenuOpen(false), [])
+  const handleSurfaceFocus = useCallback(() => {
+    closeMenu()
+    onSurfaceFocus?.()
+  }, [closeMenu, onSurfaceFocus])
   useDismissOnOutsidePointer(menuAnchorRef, isMenuOpen, closeMenu)
 
   useEffect(() => {
@@ -244,7 +245,17 @@ export function BrowserPanel({
         </div>
       </header>
 
-      <div className="browser-panel__content" ref={hostRef}>
+      <div className="browser-panel__content">
+        <WebviewSurface
+          accessibleTitle={t('browser.title')}
+          isActive={isActive}
+          isVisible={Boolean(currentUrl)}
+          openLinksInSameSurface
+          onFocus={handleSurfaceFocus}
+          onReady={setWebview}
+          partition={BROWSER_WEBVIEW_PARTITION}
+          surfaceId={viewId}
+        />
         {!currentUrl && (
           <div className="browser-panel__empty">
             <Globe2 aria-hidden="true" />
