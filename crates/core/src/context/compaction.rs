@@ -15,6 +15,8 @@ use crate::protocol::{AgentToolDefinition, AgentToolSafety};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+const DEFAULT_COMPACTION_TRIGGER_PERCENT: u64 = 95;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ContextCompactionPolicy {
     soft_trigger_percent: u64,
@@ -32,11 +34,11 @@ pub(crate) struct ContextCompactionPolicy {
 impl Default for ContextCompactionPolicy {
     fn default() -> Self {
         Self {
-            soft_trigger_percent: 75,
+            soft_trigger_percent: DEFAULT_COMPACTION_TRIGGER_PERCENT,
             base_headroom_percent: 25,
             run_growth_reserve_percent: 50,
             maximum_headroom_percent: 40,
-            durable_trigger_percent: 75,
+            durable_trigger_percent: DEFAULT_COMPACTION_TRIGGER_PERCENT,
             durable_target_percent: 15,
             minimum_reclaim_tokens: 512,
             maximum_reclaim_floor_tokens: 4_096,
@@ -841,6 +843,70 @@ mod tests {
 
         assert_eq!(plan.status, ContextCompactionPlanStatus::NotRequired);
         assert!(plan.steps.is_empty());
+        assert_eq!(plan.soft_trigger_input_tokens, Some(950));
+        assert_eq!(plan.durable_trigger_input_tokens, Some(855));
+    }
+
+    #[test]
+    fn starts_compaction_at_the_ninety_five_percent_request_threshold() {
+        let planner = ContextCompactionPlanner::for_tools(&[]);
+        let below_items = vec![
+            item(
+                0,
+                ContextUsageClass::Fixed,
+                100,
+                LlmMessageRole::System,
+                ContextSource::BackendSystemPrompt,
+                None,
+            ),
+            item(
+                1,
+                ContextUsageClass::Durable,
+                849,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-old")),
+            ),
+        ];
+        let threshold_items = vec![
+            below_items[0].clone(),
+            item(
+                1,
+                ContextUsageClass::Durable,
+                850,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-old")),
+            ),
+        ];
+
+        let below = planner.plan(
+            &query(
+                ContextBudgetStatus::WithinBudget,
+                Some(1_000),
+                100,
+                849,
+                0,
+                0,
+            ),
+            &below_items,
+            false,
+        );
+        let at_threshold = planner.plan(
+            &query(
+                ContextBudgetStatus::WithinBudget,
+                Some(1_000),
+                100,
+                850,
+                0,
+                0,
+            ),
+            &threshold_items,
+            false,
+        );
+
+        assert_eq!(below.status, ContextCompactionPlanStatus::NotRequired);
+        assert_eq!(at_threshold.status, ContextCompactionPlanStatus::Required);
     }
 
     #[test]
@@ -956,7 +1022,7 @@ mod tests {
         let plan = ContextCompactionPlanner::for_tools(&[]).plan(
             &query(
                 ContextBudgetStatus::WithinBudget,
-                Some(7_000),
+                Some(6_400),
                 100,
                 6_000,
                 0,
@@ -1107,7 +1173,7 @@ mod tests {
         let plan = ContextCompactionPlanner::for_tools(&[]).plan(
             &query(
                 ContextBudgetStatus::WithinBudget,
-                Some(7_000),
+                Some(6_800),
                 500,
                 6_000,
                 0,

@@ -242,7 +242,7 @@ fixed + durable + run_transient + request_only <= available_input
 
 当前规则：
 
-- 完整请求或 durable 使用量到达 75% 时可以触发；
+- 完整请求或 durable 使用量到达 95% 时可以触发；
 - 期望把 durable 压到净长期容量的约 15%；
 - 15% 是软目标，无法达到时仍执行有实际收益的 best-effort 压缩；
 - fixed、request-only、附件、图片、runtime guard、当前请求首次发送前的用户消息绝对保护；
