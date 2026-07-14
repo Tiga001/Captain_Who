@@ -19,6 +19,10 @@ use crate::llm::{
     complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessage,
     LlmMessageRole, LlmStreamEvent,
 };
+use crate::model_request_observation::{
+    ModelRequestEstimate, ModelRequestObservation, ModelRequestObservationBuilder,
+    ModelRequestPurpose,
+};
 use crate::prompts::build_system_prompt;
 use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
@@ -118,6 +122,7 @@ pub type AgentConversationTraceObserver = Arc<
         + Sync
         + 'static,
 >;
+pub type AgentModelRequestObserver = Arc<dyn Fn(ModelRequestObservation) + Send + Sync + 'static>;
 pub type AgentHostActionExecutor = Arc<
     dyn Fn(AgentProposedAction, AgentCancellationToken) -> AgentResult<AgentToolResult>
         + Send
@@ -134,6 +139,7 @@ pub struct AgentRuntimeHostServices {
     host_executor: Option<AgentHostActionExecutor>,
     storage: Option<Arc<StorageService>>,
     trace_observer: Option<AgentConversationTraceObserver>,
+    model_request_observer: Option<AgentModelRequestObserver>,
     context_compaction_services: Option<AgentContextCompactionServices>,
 }
 
@@ -159,6 +165,11 @@ impl AgentRuntimeHostServices {
 
     pub fn with_trace_observer(mut self, observer: AgentConversationTraceObserver) -> Self {
         self.trace_observer = Some(observer);
+        self
+    }
+
+    pub fn with_model_request_observer(mut self, observer: AgentModelRequestObserver) -> Self {
+        self.model_request_observer = Some(observer);
         self
     }
 
@@ -378,6 +389,7 @@ impl AgentRuntime {
             host_executor,
             storage,
             trace_observer,
+            model_request_observer,
             context_compaction_services,
         } = host_services.unwrap_or_default();
         let run_id = run_id.unwrap_or_else(generate_run_id);
@@ -386,6 +398,14 @@ impl AgentRuntime {
             .as_ref()
             .and_then(|context| context.conversation_id.clone());
         let trace_assistant_message_id = input.assistant_message_id.clone();
+        let (observation_conversation_id, observation_assistant_message_id) =
+            match (&trace_conversation_id, &trace_assistant_message_id) {
+                (Some(conversation_id), Some(assistant_message_id)) => (
+                    Some(conversation_id.clone()),
+                    Some(assistant_message_id.clone()),
+                ),
+                _ => (None, None),
+            };
         let trace_run_id = run_id.clone();
         let setup_conversation_trace = conversation_trace_from_input_checkpoint(&input);
         let shared_context_baseline =
@@ -534,8 +554,9 @@ impl AgentRuntime {
                         FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
                     let user_text_blocked = file_transactions.blocks_user_text();
                     let mut compaction_attempts = 0_usize;
-                    let request_context = loop {
+                    let (request_context, request_estimate) = loop {
                         let mut request_context = active_context.clone();
+                        let mut request_estimate = None;
                         runtime_extensions.contribute_request_context(
                             &ModelRequestContext::agent_work(),
                             &mut request_context,
@@ -581,44 +602,44 @@ impl AgentRuntime {
                             );
                             if compaction_attempts < MAX_CONTEXT_COMPACTION_ATTEMPTS_PER_REQUEST {
                                 if let Some(executor) = &context_compaction_executor {
-                                    if executor.is_applicable(
-                                        &compaction_plan,
-                                        &run_id,
-                                        trace_conversation_id.as_deref(),
-                                        trace_assistant_message_id.as_deref(),
-                                        visible_trace_item_count,
-                                    ) {
-                                        let operation_id = format!(
-                                            "{run_id}-context-compaction-{}-{}",
-                                            model_request_index + 1,
-                                            compaction_attempts + 1
-                                        );
+                                    let operation_id = format!(
+                                        "{run_id}-context-compaction-{}-{}",
+                                        model_request_index + 1,
+                                        compaction_attempts + 1
+                                    );
+                                    let attempt = executor
+                                        .begin(
+                                            &compaction_plan,
+                                            &operation_id,
+                                            &run_id,
+                                            trace_conversation_id.as_deref(),
+                                            trace_assistant_message_id.as_deref(),
+                                            u64::try_from(model_request_index + 1)
+                                                .unwrap_or(u64::MAX),
+                                            u64::try_from(compaction_attempts + 1)
+                                                .unwrap_or(u64::MAX),
+                                            &llm_request.model,
+                                            llm_request.api_style,
+                                            visible_trace_item_count,
+                                            &cancellation_token,
+                                        )
+                                        .await?;
+                                    if let Some(attempt) = attempt {
                                         event_stream.emit_transient(
                                             AgentEvent::ContextCompactionStarted {
                                                 run_id: run_id.clone(),
                                                 operation_id: operation_id.clone(),
                                             },
                                         );
-                                        let execution = executor
-                                            .execute(
-                                                &compaction_plan,
-                                                &run_id,
-                                                trace_conversation_id.as_deref(),
-                                                trace_assistant_message_id.as_deref(),
-                                                visible_trace_item_count,
-                                                &cancellation_token,
-                                            )
-                                            .await;
+                                        let execution =
+                                            executor.execute(attempt, &cancellation_token).await;
                                         let outcome = match &execution {
                                             Ok(ContextCompactionExecution::Applied { .. }) => {
                                                 AgentContextCompactionEventOutcome::Applied
                                             }
                                             Ok(ContextCompactionExecution::Refreshed {
                                                 ..
-                                            })
-                                            | Ok(ContextCompactionExecution::NotApplicable) => {
-                                                AgentContextCompactionEventOutcome::Skipped
-                                            }
+                                            }) => AgentContextCompactionEventOutcome::Skipped,
                                             Err(error) if error.is_cancelled() => {
                                                 AgentContextCompactionEventOutcome::Cancelled
                                             }
@@ -644,11 +665,18 @@ impl AgentRuntime {
                                                 active_context = (*baseline)
                                                     .replace_persistent_context(active_context);
                                                 detector.prepare_frame(&mut active_context);
+                                                // Compaction changes the durable baseline identity.
+                                                // Replace any pending pre-compaction trace baseline
+                                                // before the next successful model response can
+                                                // promote it and resurrect the old full history.
+                                                pending_trace_baseline = publish_trace_snapshot(
+                                                    &conversation_trace,
+                                                    trace_observer.as_ref(),
+                                                )?;
                                                 compaction_attempts =
                                                     compaction_attempts.saturating_add(1);
                                                 continue;
                                             }
-                                            Ok(ContextCompactionExecution::NotApplicable) => {}
                                             Err(error) if error.is_cancelled() => {
                                                 merge_total_usage(
                                                     &mut usage,
@@ -674,10 +702,25 @@ impl AgentRuntime {
                                     }
                                 }
                             }
+                            request_estimate =
+                                Some(ModelRequestEstimate::from_budget_report(&report));
                             detector.ensure_sendable(report)?;
                         }
-                        break request_context;
+                        break (request_context, request_estimate);
                     };
+                    let observation_builder = ModelRequestObservationBuilder::new(
+                        format!("model-request-{run_id}-agent-{}", model_request_index + 1),
+                        run_id.clone(),
+                        observation_conversation_id.clone(),
+                        observation_assistant_message_id.clone(),
+                        None,
+                        u64::try_from(model_request_index + 1).unwrap_or(u64::MAX),
+                        ModelRequestPurpose::AgentLoop,
+                        llm_request.model.clone(),
+                        llm_request.api_style,
+                        request_estimate,
+                        crate::storage::now_ms(),
+                    );
                     let request = llm_request.request(request_context);
                     let mut committed_message_stream_id = None;
                     let llm_response_result = if request.stream {
@@ -807,19 +850,37 @@ impl AgentRuntime {
                         complete_chat(request, cancellation_token.clone()).await
                     };
                     let llm_response = match llm_response_result {
-                        Ok(response) => response,
-                        Err(error) if error.is_cancelled() => {
-                            merge_total_usage(&mut usage, error.usage().cloned());
-                            return Ok(cancelled_output(
-                                run_id,
-                                event_stream,
-                                tool_definitions,
-                                runtime_extensions.todo_state(),
-                                usage,
-                                finish_reason,
-                            ));
+                        Ok(response) => {
+                            let observation = observation_builder.completed(
+                                response.usage.clone(),
+                                response.finish_reason.clone(),
+                                crate::storage::now_ms(),
+                            )?;
+                            if let Some(observer) = &model_request_observer {
+                                observer(observation);
+                            }
+                            response
                         }
                         Err(error) => {
+                            let observation = observation_builder.failed(
+                                error.usage().cloned(),
+                                &error,
+                                crate::storage::now_ms(),
+                            )?;
+                            if let Some(observer) = &model_request_observer {
+                                observer(observation);
+                            }
+                            if error.is_cancelled() {
+                                merge_total_usage(&mut usage, error.usage().cloned());
+                                return Ok(cancelled_output(
+                                    run_id,
+                                    event_stream,
+                                    tool_definitions,
+                                    runtime_extensions.todo_state(),
+                                    usage,
+                                    finish_reason,
+                                ));
+                            }
                             merge_total_usage(&mut usage, error.usage().cloned());
                             return Err(error.with_usage(usage));
                         }

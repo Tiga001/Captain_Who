@@ -4,7 +4,8 @@ use crate::context::{
     ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
     ContextJournalCursor,
 };
-use crate::storage::conversation_trace_repository;
+use crate::storage::{context_compaction_receipt_repository, conversation_trace_repository};
+use crate::{ContextCompactionReceipt, ContextCompactionReceiptStatus, ModelRequestObservation};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::json;
 use std::error::Error;
@@ -141,6 +142,53 @@ pub fn commit_prefix_replacement(
     expected_prefix: &ContextCompactionPrefix,
     draft: ContextCompactionSummaryDraft,
 ) -> Result<ContextCompactionSummary, ContextCompactionRepositoryError> {
+    validate_commit_inputs(expected_prefix, &draft)?;
+    let transaction = connection.transaction()?;
+    let summary = commit_prefix_replacement_in_transaction(&transaction, expected_prefix, draft)?;
+    transaction.commit()?;
+    Ok(summary)
+}
+
+/// Atomically applies a generated summary together with its provider observation and audit
+/// receipt. A caller may safely treat an `Ok` result as proof that all four durable facts became
+/// visible together: request observation, immutable summary, active head and applied receipt.
+pub fn commit_prefix_replacement_with_receipt(
+    connection: &mut Connection,
+    expected_prefix: &ContextCompactionPrefix,
+    draft: ContextCompactionSummaryDraft,
+    receipt: &ContextCompactionReceipt,
+    observation: &ModelRequestObservation,
+) -> Result<ContextCompactionSummary, ContextCompactionRepositoryError> {
+    validate_commit_inputs(expected_prefix, &draft)?;
+    receipt
+        .validate()
+        .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
+    if receipt.status != ContextCompactionReceiptStatus::Applied
+        || receipt.conversation_id != expected_prefix.conversation_id
+        || receipt.source_revision.as_deref() != Some(expected_prefix.source_revision.as_str())
+        || receipt.summary_id.as_deref() != Some(draft.id.as_str())
+    {
+        return Err(ContextCompactionRepositoryError::Invalid(
+            "applied receipt 与待提交的压缩前缀或摘要草稿不一致。".to_string(),
+        ));
+    }
+
+    let transaction = connection.transaction()?;
+    let summary = commit_prefix_replacement_in_transaction(&transaction, expected_prefix, draft)?;
+    context_compaction_receipt_repository::record_receipt_in_connection(
+        &transaction,
+        receipt,
+        Some(observation),
+    )
+    .map_err(map_receipt_error)?;
+    transaction.commit()?;
+    Ok(summary)
+}
+
+fn validate_commit_inputs(
+    expected_prefix: &ContextCompactionPrefix,
+    draft: &ContextCompactionSummaryDraft,
+) -> Result<(), ContextCompactionRepositoryError> {
     expected_prefix
         .validate()
         .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
@@ -152,8 +200,14 @@ pub fn commit_prefix_replacement(
             "摘要草稿不是基于待替换日志前缀生成的。".to_string(),
         ));
     }
+    Ok(())
+}
 
-    let transaction = connection.transaction()?;
+fn commit_prefix_replacement_in_transaction(
+    transaction: &Transaction<'_>,
+    expected_prefix: &ContextCompactionPrefix,
+    draft: ContextCompactionSummaryDraft,
+) -> Result<ContextCompactionSummary, ContextCompactionRepositoryError> {
     let active_summary_id = transaction
         .query_row(
             "SELECT summary_id
@@ -173,7 +227,7 @@ pub fn commit_prefix_replacement(
         ));
     }
     let current_prefix = prepare_prefix(
-        &transaction,
+        transaction,
         &expected_prefix.conversation_id,
         &expected_prefix.covered_through,
     )?;
@@ -193,7 +247,7 @@ pub fn commit_prefix_replacement(
     let summary = draft
         .finish(&current_prefix)
         .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
-    insert_summary(&transaction, &summary)?;
+    insert_summary(transaction, &summary)?;
     let current_head_revision = transaction
         .query_row(
             "SELECT revision
@@ -219,8 +273,20 @@ pub fn commit_prefix_replacement(
             summary.created_at,
         ],
     )?;
-    transaction.commit()?;
     Ok(summary)
+}
+
+fn map_receipt_error(
+    error: context_compaction_receipt_repository::ContextCompactionReceiptRepositoryError,
+) -> ContextCompactionRepositoryError {
+    match error {
+        context_compaction_receipt_repository::ContextCompactionReceiptRepositoryError::Database(
+            error,
+        ) => ContextCompactionRepositoryError::Database(error),
+        context_compaction_receipt_repository::ContextCompactionReceiptRepositoryError::Invalid(
+            message,
+        ) => ContextCompactionRepositoryError::Invalid(message),
+    }
 }
 
 pub fn rollback_active_summary(
@@ -639,6 +705,97 @@ mod tests {
         }
     }
 
+    fn planned_receipt() -> ContextCompactionReceipt {
+        ContextCompactionReceipt {
+            schema_version: crate::CONTEXT_COMPACTION_RECEIPT_SCHEMA_VERSION,
+            operation_id: "operation-1".to_string(),
+            run_id: "run-2".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-2".to_string(),
+            request_index: 1,
+            attempt_index: 1,
+            model: "test-model".to_string(),
+            api_style: crate::AgentApiStyle::OpenAiCompatible,
+            status: crate::ContextCompactionReceiptStatus::InProgress,
+            stage: crate::ContextCompactionReceiptStage::Planned,
+            plan: crate::ContextCompactionReceiptPlan {
+                context_revision: "0000000000000001".to_string(),
+                persistent_revision: "0000000000000001".to_string(),
+                request_input_tokens: 120,
+                available_input_tokens: Some(120),
+                request_trigger_input_tokens: Some(100),
+                request_target_input_tokens: Some(30),
+                request_pressure: true,
+                durable_input_tokens: 100,
+                durable_capacity_tokens: Some(120),
+                durable_trigger_input_tokens: Some(100),
+                durable_target_input_tokens: Some(30),
+                durable_pressure: true,
+                source_input_tokens: 100,
+                target_replacement_tokens: 30,
+                expected_reclaimed_tokens: 70,
+                planned_reclaimed_tokens: 70,
+                projected_request_input_tokens: 50,
+                projected_durable_input_tokens: 30,
+                best_effort: false,
+                protected_input_tokens: 0,
+                protected_reasons: Default::default(),
+                atomic_unit_count: 2,
+                previous_summary_id: None,
+                covered_through: ContextJournalCursor::message("assistant-1"),
+            },
+            source_revision: None,
+            generation_observation_id: None,
+            summary_id: None,
+            result: None,
+            error: None,
+            started_at: 10,
+            updated_at: 10,
+            completed_at: None,
+        }
+    }
+
+    fn completed_observation() -> ModelRequestObservation {
+        crate::model_request_observation::ModelRequestObservationBuilder::new(
+            "model-request-operation-1",
+            "run-2",
+            Some("conversation-1".to_string()),
+            Some("assistant-2".to_string()),
+            Some("operation-1".to_string()),
+            1,
+            crate::ModelRequestPurpose::ContextCompaction,
+            "test-model",
+            crate::AgentApiStyle::OpenAiCompatible,
+            None,
+            10,
+        )
+        .completed(
+            Some(crate::AgentUsage {
+                input_tokens: Some(90),
+                output_tokens: Some(10),
+                output_thinking_tokens: None,
+                total_tokens: Some(100),
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                billable_request_count: Some(1),
+            }),
+            Some("stop".to_string()),
+            11,
+        )
+        .unwrap()
+    }
+
+    fn applied_receipt(
+        mut receipt: ContextCompactionReceipt,
+        prefix: &ContextCompactionPrefix,
+        draft: &ContextCompactionSummaryDraft,
+        observation: &ModelRequestObservation,
+    ) -> ContextCompactionReceipt {
+        receipt.attach_prepared_prefix(prefix, 11).unwrap();
+        receipt.complete_applied(draft, observation, 12).unwrap();
+        receipt
+    }
+
     #[test]
     fn compacts_complete_history_then_advances_inside_current_run() {
         let mut connection = setup();
@@ -665,6 +822,144 @@ mod tests {
             )
             .unwrap();
         assert_eq!(raw_count, 4);
+    }
+
+    #[test]
+    fn audited_success_commits_observation_summary_head_and_receipt_together() {
+        let mut connection = setup();
+        let prefix = prepare_prefix(
+            &connection,
+            "conversation-1",
+            &ContextJournalCursor::message("assistant-1"),
+        )
+        .unwrap();
+        let draft = draft(&prefix, "summary-audited");
+        let observation = completed_observation();
+        let receipt = planned_receipt();
+        context_compaction_receipt_repository::record_receipt(&mut connection, &receipt, None)
+            .unwrap();
+        let receipt = applied_receipt(receipt, &prefix, &draft, &observation);
+
+        let summary = commit_prefix_replacement_with_receipt(
+            &mut connection,
+            &prefix,
+            draft,
+            &receipt,
+            &observation,
+        )
+        .unwrap();
+
+        assert_eq!(summary.id, "summary-audited");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT summary_id FROM conversation_context_compaction_heads WHERE conversation_id = 'conversation-1'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "summary-audited"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM model_request_observations",
+                    [],
+                    |row| { row.get::<_, u64>(0) }
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            context_compaction_receipt_repository::get_receipt(&connection, "operation-1")
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::ContextCompactionReceiptStatus::Applied
+        );
+
+        connection
+            .execute("DELETE FROM conversations WHERE id = 'conversation-1'", [])
+            .unwrap();
+        for table in [
+            "model_request_observations",
+            "context_compaction_receipts",
+            "context_compaction_summaries",
+            "conversation_context_compaction_heads",
+        ] {
+            assert_eq!(
+                connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get::<_, u64>(0)
+                    })
+                    .unwrap(),
+                0,
+                "{table} must cascade with its conversation"
+            );
+        }
+    }
+
+    #[test]
+    fn audited_success_rolls_every_fact_back_when_terminal_receipt_write_fails() {
+        let mut connection = setup();
+        let prefix = prepare_prefix(
+            &connection,
+            "conversation-1",
+            &ContextJournalCursor::message("assistant-1"),
+        )
+        .unwrap();
+        let draft = draft(&prefix, "summary-rolled-back");
+        let observation = completed_observation();
+        let receipt = planned_receipt();
+        context_compaction_receipt_repository::record_receipt(&mut connection, &receipt, None)
+            .unwrap();
+        let receipt = applied_receipt(receipt, &prefix, &draft, &observation);
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_applied_receipt
+                 BEFORE UPDATE ON context_compaction_receipts
+                 WHEN NEW.status = 'applied'
+                 BEGIN
+                    SELECT RAISE(ABORT, 'forced receipt failure');
+                 END;",
+            )
+            .unwrap();
+
+        let error = commit_prefix_replacement_with_receipt(
+            &mut connection,
+            &prefix,
+            draft,
+            &receipt,
+            &observation,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ContextCompactionRepositoryError::Database(_)
+        ));
+        for table in [
+            "context_compaction_summaries",
+            "conversation_context_compaction_heads",
+            "model_request_observations",
+        ] {
+            assert_eq!(
+                connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get::<_, u64>(0)
+                    })
+                    .unwrap(),
+                0,
+                "{table} must roll back"
+            );
+        }
+        assert_eq!(
+            context_compaction_receipt_repository::get_receipt(&connection, "operation-1")
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::ContextCompactionReceiptStatus::InProgress
+        );
     }
 
     #[test]

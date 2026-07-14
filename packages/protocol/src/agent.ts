@@ -403,6 +403,203 @@ export interface AgentContextWindowSnapshotOutput {
   snapshot?: AgentContextWindowSnapshot
 }
 
+export type AgentObservedApiStyle = 'open_ai_compatible' | 'anthropic_compatible'
+export type ModelRequestPurpose = 'agent_loop' | 'context_compaction'
+export type ModelRequestObservationStatus = 'completed' | 'failed' | 'cancelled'
+export type ModelRequestMeasurementMode = 'incremental_cache' | 'full_recount'
+export type ModelRequestCapacityStatus =
+  'unconfigured' | 'within_budget' | 'over_budget' | 'invalid_configuration'
+export type ModelRequestUsageNormalization =
+  'open_ai_input_tokens' | 'anthropic_input_plus_cache' | 'unavailable'
+
+export interface ModelRequestEstimate {
+  estimatorId: string
+  estimatorVersion: number
+  measurementMode: ModelRequestMeasurementMode
+  capacityStatus: ModelRequestCapacityStatus
+  contextRevision: string
+  persistentRevision: string
+  fixedInputTokens: number
+  durableInputTokens: number
+  runTransientInputTokens: number
+  requestOnlyInputTokens: number
+  additiveInputTokens: number
+  verifiedTotalInputTokens?: number
+  estimatedInputTokens: number
+  contextWindowTokens?: number
+  reservedOutputTokens: number
+  safetyMarginTokens: number
+}
+
+export interface ModelRequestActualUsage {
+  raw: AgentUsage
+  normalizedInputTokens?: number
+  normalization: ModelRequestUsageNormalization
+}
+
+export interface ModelRequestObservation {
+  schemaVersion: number
+  id: string
+  runId: string
+  conversationId?: string
+  assistantMessageId?: string
+  operationId?: string
+  requestIndex: number
+  purpose: ModelRequestPurpose
+  model: string
+  apiStyle: AgentObservedApiStyle
+  status: ModelRequestObservationStatus
+  estimate?: ModelRequestEstimate
+  actualUsage?: ModelRequestActualUsage
+  finishReason?: string
+  errorCode?: string
+  errorMessage?: string
+  startedAt: number
+  completedAt: number
+}
+
+export type ContextJournalCursor =
+  | { kind: 'message'; messageId: string }
+  | { kind: 'trace_item'; assistantMessageId: string; sequence: number }
+
+export type ContextCompactionReceiptStatus =
+  'in_progress' | 'applied' | 'refreshed' | 'failed' | 'cancelled' | 'interrupted'
+export type ContextCompactionReceiptStage =
+  'planned' | 'preparing' | 'generating' | 'committing' | 'completed'
+
+export interface ContextCompactionReceiptPlan {
+  contextRevision: string
+  persistentRevision: string
+  requestInputTokens: number
+  availableInputTokens?: number
+  requestTriggerInputTokens?: number
+  requestTargetInputTokens?: number
+  requestPressure: boolean
+  durableInputTokens: number
+  durableCapacityTokens?: number
+  durableTriggerInputTokens?: number
+  durableTargetInputTokens?: number
+  durablePressure: boolean
+  sourceInputTokens: number
+  targetReplacementTokens: number
+  expectedReclaimedTokens: number
+  plannedReclaimedTokens: number
+  projectedRequestInputTokens: number
+  projectedDurableInputTokens: number
+  bestEffort: boolean
+  protectedInputTokens: number
+  protectedReasons: Record<string, number>
+  atomicUnitCount: number
+  previousSummaryId?: string
+  coveredThrough: ContextJournalCursor
+}
+
+export interface ContextCompactionReceiptResult {
+  summaryId: string
+  sourceInputTokens: number
+  summaryInputTokens: number
+  continuityInputTokens: number
+  replacementInputTokens: number
+  reclaimedInputTokens: number
+}
+
+export interface ContextCompactionReceiptError {
+  code?: string
+  message: string
+}
+
+export interface ContextCompactionReceipt {
+  schemaVersion: number
+  operationId: string
+  runId: string
+  conversationId: string
+  assistantMessageId: string
+  requestIndex: number
+  attemptIndex: number
+  model: string
+  apiStyle: AgentObservedApiStyle
+  status: ContextCompactionReceiptStatus
+  stage: ContextCompactionReceiptStage
+  plan: ContextCompactionReceiptPlan
+  sourceRevision?: string
+  generationObservationId?: string
+  summaryId?: string
+  result?: ContextCompactionReceiptResult
+  error?: ContextCompactionReceiptError
+  startedAt: number
+  updatedAt: number
+  completedAt?: number
+}
+
+export type ContextCompactionAuditVerdict = 'pass' | 'warning' | 'fail' | 'in_progress'
+export type ContextCompactionAuditCheckStatus = 'pass' | 'warning' | 'fail'
+export type ContextCompactionSummaryRelation = 'active' | 'superseded' | 'detached' | 'missing'
+
+export interface ContextCompactionSummaryEvidence {
+  summaryId: string
+  relation: ContextCompactionSummaryRelation
+  sourceRevision?: string
+  sourceInputTokens?: number
+  summaryInputTokens?: number
+  continuityInputTokens?: number
+  replacementInputTokens?: number
+}
+
+export interface ContextCompactionAuditCheck {
+  code: string
+  status: ContextCompactionAuditCheckStatus
+  message: string
+  details?: unknown
+}
+
+export interface ContextCompactionAuditReport {
+  operationId: string
+  verdict: ContextCompactionAuditVerdict
+  receipt: ContextCompactionReceipt
+  generationObservation?: ModelRequestObservation
+  summary?: ContextCompactionSummaryEvidence
+  checks: ContextCompactionAuditCheck[]
+}
+
+export interface ModelRequestEstimationErrorGroup {
+  model: string
+  apiStyle: AgentObservedApiStyle
+  purpose: ModelRequestPurpose
+  observationCount: number
+  comparableSampleCount: number
+  estimateUnavailableCount: number
+  actualUsageUnavailableCount: number
+  retryAffectedCount: number
+  estimatedInputTokens: number
+  normalizedActualInputTokens: number
+  /** Sum of estimated minus actual input tokens; positive means overestimation. */
+  estimatedMinusActualTokens: number
+  weightedSignedErrorBasisPoints?: number
+  weightedAbsoluteErrorBasisPoints?: number
+  medianAbsolutePercentageErrorBasisPoints?: number
+  p95AbsolutePercentageErrorBasisPoints?: number
+  underestimationCount: number
+  overestimationCount: number
+  exactCount: number
+}
+
+export interface ContextCompactionAuditBundle {
+  conversationId: string
+  generatedAt: number
+  reports: ContextCompactionAuditReport[]
+  estimationErrorGroups: ModelRequestEstimationErrorGroup[]
+}
+
+export interface AgentContextCompactionAuditInput {
+  conversationId: string
+  operationId?: string
+  limit?: number
+}
+
+export interface AgentContextCompactionAuditOutput {
+  report: ContextCompactionAuditBundle
+}
+
 export interface AgentConversationMessage {
   id: string
   role: 'user' | 'assistant'

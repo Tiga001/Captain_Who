@@ -6,6 +6,7 @@ pub const CORE_SHUTDOWN_METHOD: &str = "core.shutdown";
 pub const AGENT_CANCEL_RUN_METHOD: &str = "agent.cancelRun";
 pub const AGENT_START_CONVERSATION_TURN_METHOD: &str = "agent.startConversationTurn";
 pub const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD: &str = "agent.getContextWindowSnapshot";
+pub const AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD: &str = "agent.getContextCompactionAudit";
 pub const AGENT_LIST_PENDING_ACTIONS_METHOD: &str = "agent.listPendingActions";
 pub const AGENT_APPROVE_ACTION_METHOD: &str = "agent.approveAction";
 pub const AGENT_REJECT_ACTION_METHOD: &str = "agent.rejectAction";

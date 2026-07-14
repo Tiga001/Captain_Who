@@ -13,16 +13,18 @@ use crate::storage::models::{
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
     chat_repository, chat_search_repository, composer_draft_repository, config_repository,
+    context_compaction_audit_repository, context_compaction_receipt_repository,
     context_compaction_repository, conversation_history_repository, conversation_trace_repository,
-    file_draft_repository, now_ms, pending_action_repository, preferences_repository,
-    project_repository, storage_error, usage_repository, StorageState,
+    file_draft_repository, model_request_observation_repository, now_ms, pending_action_repository,
+    preferences_repository, project_repository, storage_error, usage_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
     AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentToolResult, AgentUsageClearInput,
     AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
-    ContextCompactionPrefix, ContextCompactionSummary, ContextCompactionSummaryDraft,
-    ContextJournalCursor, ConversationTurnTrace,
+    ContextCompactionAuditBundle, ContextCompactionPrefix, ContextCompactionReceipt,
+    ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
+    ConversationTurnTrace, ModelRequestObservation,
 };
 use base64::Engine;
 
@@ -79,6 +81,14 @@ impl StorageService {
                 }
                 if let Err(error) = service.cleanup_orphan_attachment_files(&connection) {
                     eprintln!("failed to cleanup orphan attachment files: {error}");
+                }
+                if let Err(error) =
+                    context_compaction_receipt_repository::mark_in_progress_receipts_interrupted(
+                        &mut connection,
+                        now_ms(),
+                    )
+                {
+                    eprintln!("failed to mark interrupted context compactions: {error}");
                 }
             }
             Err(error) => eprintln!("failed to open storage for startup maintenance: {error}"),
@@ -576,6 +586,41 @@ impl StorageService {
             .map_err(|error| error.to_string())
     }
 
+    pub fn save_model_request_observation(
+        &self,
+        observation: &ModelRequestObservation,
+    ) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        model_request_observation_repository::insert_observation(&connection, observation)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn record_context_compaction_receipt(
+        &self,
+        receipt: &ContextCompactionReceipt,
+        observation: Option<&ModelRequestObservation>,
+    ) -> Result<(), String> {
+        let mut connection = self.state.connection()?;
+        context_compaction_receipt_repository::record_receipt(&mut connection, receipt, observation)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn get_context_compaction_audit(
+        &self,
+        conversation_id: &str,
+        operation_id: Option<&str>,
+        limit: usize,
+    ) -> Result<ContextCompactionAuditBundle, String> {
+        let connection = self.state.connection()?;
+        context_compaction_audit_repository::get_audit_bundle(
+            &connection,
+            conversation_id,
+            operation_id,
+            limit,
+        )
+        .map_err(|error| error.to_string())
+    }
+
     pub fn prepare_context_compaction_prefix(
         &self,
         conversation_id: &str,
@@ -641,6 +686,30 @@ impl StorageService {
             &mut connection,
             expected_prefix,
             draft,
+        ) {
+            Ok(summary) => Ok(Some(summary)),
+            Err(error) if error.is_stale() => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Atomically commits a successful compaction and its diagnostic evidence. `None` means the
+    /// prepared prefix became stale; the transaction leaves no observation, summary, head or
+    /// terminal receipt behind in that case.
+    pub fn commit_context_compaction_prefix_with_receipt_if_current(
+        &self,
+        expected_prefix: &ContextCompactionPrefix,
+        draft: ContextCompactionSummaryDraft,
+        receipt: &ContextCompactionReceipt,
+        observation: &ModelRequestObservation,
+    ) -> Result<Option<ContextCompactionSummary>, String> {
+        let mut connection = self.state.connection()?;
+        match context_compaction_repository::commit_prefix_replacement_with_receipt(
+            &mut connection,
+            expected_prefix,
+            draft,
+            receipt,
+            observation,
         ) {
             Ok(summary) => Ok(Some(summary)),
             Err(error) if error.is_stale() => Ok(None),

@@ -435,7 +435,7 @@ pub struct AgentContextWindowSnapshot {
     pub persistent_revision: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1028,6 +1028,7 @@ pub struct AgentError {
     code: Option<String>,
     details: Option<Box<Value>>,
     conversation_turn_trace: Option<Box<ConversationTurnTrace>>,
+    model_request_observation: Option<Box<crate::ModelRequestObservation>>,
 }
 
 pub type AgentResult<T> = Result<T, AgentError>;
@@ -1041,6 +1042,7 @@ impl AgentError {
             code: None,
             details: None,
             conversation_turn_trace: None,
+            model_request_observation: None,
         }
     }
 
@@ -1052,6 +1054,7 @@ impl AgentError {
             code: Some(code.into()),
             details: Some(Box::new(details)),
             conversation_turn_trace: None,
+            model_request_observation: None,
         }
     }
 
@@ -1063,6 +1066,7 @@ impl AgentError {
             code: None,
             details: None,
             conversation_turn_trace: None,
+            model_request_observation: None,
         }
     }
 
@@ -1086,6 +1090,10 @@ impl AgentError {
         self.conversation_turn_trace.as_deref()
     }
 
+    pub fn model_request_observation(&self) -> Option<&crate::ModelRequestObservation> {
+        self.model_request_observation.as_deref()
+    }
+
     pub fn with_usage(mut self, usage: Option<AgentUsage>) -> Self {
         self.usage = usage.map(Box::new);
         self
@@ -1093,6 +1101,14 @@ impl AgentError {
 
     pub fn with_conversation_turn_trace(mut self, trace: ConversationTurnTrace) -> Self {
         self.conversation_turn_trace = Some(Box::new(trace));
+        self
+    }
+
+    pub fn with_model_request_observation(
+        mut self,
+        observation: crate::ModelRequestObservation,
+    ) -> Self {
+        self.model_request_observation = Some(Box::new(observation));
         self
     }
 }

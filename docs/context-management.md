@@ -20,7 +20,7 @@
 
 压缩不会删除原始消息或 Agent 轨迹，只会生成一版摘要并向后移动一个稳定游标。删除消息、回退或删除会话才会改变原始日志。
 
-系统明确不实现第二套 observation 仓库、向量索引或 run-overlay 专用压缩路径。`conversation_history` 只是同一原始日志上的只读查询入口，不复制记录。
+系统明确不实现第二套工具正文仓库、向量索引或 run-overlay 专用压缩路径。`conversation_history` 只是同一原始日志上的只读查询入口，不复制记录。`ModelRequestObservation` 是例外但不属于内容仓库：它只记录发送边界的分类 token 估算、provider usage 和请求终态，不保存 prompt、消息正文、工具结果或密钥。
 
 ## 总体数据流
 
@@ -50,8 +50,14 @@ raw suffix after cursor
           v                   v
  capacity + compaction      frontend circle
           |
-          v
+        v
  OpenAI / Anthropic payload
+        |
+        v
+ ModelRequestObservation
+        |
+        v
+ compaction receipt / read-only audit
 ```
 
 `ContextAssembler` 是模型上下文的唯一结构化组装入口。OpenAI 和 Anthropic payload 都由组装后的 provider-neutral `LlmMessage` 生成，不读取前端 `agent_run_json`，也不从 timeline 反推历史。
@@ -212,12 +218,16 @@ JSON 信封被明确标记为不可信历史数据。`newItems` 比 `previousSum
 ```text
 容量检测
   -> 纯规划器选择一个安全日志前缀
+  -> 创建 planned ContextCompactionReceipt
   -> prepare 从 SQLite 读取前缀并计算 sourceRevision
+  -> receipt 进入 generating
   -> 后端从该前缀生成确定性 continuity
   -> generate 在事务外调用当前 run 固定模型
+  -> 生成 ModelRequestObservation，但成功路径暂不单独提交
+  -> receipt 进入 committing
   -> commit 在写事务内重新读取同一前缀
   -> 校验 active head、游标和 sourceRevision
-  -> 原子插入摘要、continuity、计量值并切换 head
+  -> 原子写入 observation、不可变摘要、active head 和 applied receipt
   -> 从 SQLite 权威日志重建基线
   -> 重新计量、重新规划，再决定是否发送主请求
 ```
@@ -225,6 +235,57 @@ JSON 信封被明确标记为不可信历史数据。`newItems` 比 `previousSum
 摘要生成期间原始前缀或 active head 变化时，本次草稿不会提交，而是刷新权威基线并重新规划。摘要提交失败不会改变旧 head。
 
 原始日志在摘要游标之后继续追加，不会让摘要失效；游标覆盖范围内的消息被编辑、删除或回退时，`sourceRevision` 校验失败，派生摘要被丢弃并回到原始日志。
+
+### ModelRequestObservation
+
+每次实际 provider 请求都在同一个发送边界建立一条版本化观测：
+
+- `purpose` 区分主 Agent loop 与上下文压缩；
+- 请求前估算直接取自本次容量判断使用的同一个 `ContextBudgetReport`；
+- 保存 fixed、durable、run-transient、request-only 分类值和总估算；
+- 保存 estimator identity、版本、增量/整帧计量模式和 context revision；
+- provider 返回后保存原始 `AgentUsage`、标准化输入 token、finish reason 或有界错误；
+- OpenAI cached input 已包含在 input tokens 内，不重复相加；
+- Anthropic 按 input + cache read + cache creation 还原完整输入口径；
+- 不保存请求 messages、tools、网页正文、文件正文、Base64 或 API token。
+
+网络重试可能让一个逻辑请求的 usage 汇总多次计费尝试。观测保留该原始事实和 `billableRequestCount`，但验收报告不会把多次尝试的累计输入与单次发送前估算直接比较。
+
+普通 Agent 请求的观测独立落库；写入诊断失败不会重放已返回的模型响应，避免重复工具副作用。压缩请求的成功观测由压缩提交事务统一写入。
+
+### ContextCompactionReceipt
+
+每次压缩尝试使用稳定 `operationId` 建立一条 receipt，状态机为：
+
+```text
+planned -> preparing -> generating -> committing -> applied
+                                            \-> refreshed
+任一未提交阶段 -> failed / cancelled / interrupted
+```
+
+Receipt 保存计划快照、触发压力、软目标、稳定前缀身份、阶段、模型请求观测 ID、实际替换计量和有界错误，不复制摘要正文。应用启动时遗留的 `in_progress` receipt 会被标记为 `interrupted`。
+
+成功提交的事务边界包含四项事实：
+
+1. `ModelRequestObservation`；
+2. 不可变 `ContextCompactionSummary`；
+3. `conversation_context_compaction_heads`；
+4. `ContextCompactionReceipt(applied)`。
+
+任一写入失败时四项一起回滚，原 active head 保持不变。计划过期属于 `refreshed`，不会伪装成失败或成功。软目标未达到只构成验收警告；只要替换块确实小于原前缀，仍可正常提交。
+
+### 只读验收与误差报告
+
+`agent.getContextCompactionAudit` 按 `conversationId` 查询，可选用 `operationId` 精确过滤。该接口只执行 SELECT，不调用 `get_active_summary` 等可能清理失效派生状态的方法。
+
+每个 operation 返回：
+
+- 完整 receipt 与关联的无正文 observation；
+- 摘要当前为 active、被后续摘要接替、脱离 active 链或已被历史变更清理；
+- 硬一致性检查、软目标警告和总体 `pass | warning | fail | in_progress`；
+- 按模型、API 风格和请求用途分组的估算误差。
+
+误差报告使用 `estimated - normalized actual`，正数表示高估，并提供加权有符号误差、加权绝对误差、绝对百分比误差中位数/P95及高估/低估数量。缺少 usage 或受多次重试影响的请求单独计数，不进入可比较样本。当前阶段只观察，不自动校准 estimator，也不改变压缩阈值。
 
 ## 精确历史按需查询
 
@@ -279,6 +340,7 @@ Runtime 使用 `visible_trace_item_count` 记录当前 run 中主模型已经看
 1. `ContextTokenEstimator` 估算消息、工具定义、图片和协议开销。
 2. `ContextFrame` 缓存每个 item 的估算并增量维护分类汇总。
 3. `ContextCapacityDetector` 生成一个 `ContextBudgetReport`。
+4. 真正发送 provider 请求时，将同一报告投影为无正文 `ModelRequestObservation`。
 
 同一个报告派生：
 
@@ -379,6 +441,12 @@ Runtime Extension 可以注册工具、贡献 request-only 上下文、处理 ru
 | 原始历史查询        | `crates/core/src/storage/conversation_history_repository.rs`           |
 | 历史查询工具        | `crates/core/src/tools/conversation_history.rs`                        |
 | 摘要原子提交        | `crates/core/src/storage/context_compaction_repository.rs`             |
+| 请求计量观测        | `crates/core/src/model_request_observation.rs`                         |
+| 压缩 receipt        | `crates/core/src/context_compaction_receipt.rs`                        |
+| 压缩验收报告        | `crates/core/src/context_compaction_audit.rs`                          |
+| Observation 持久化  | `crates/core/src/storage/model_request_observation_repository.rs`      |
+| Receipt 持久化      | `crates/core/src/storage/context_compaction_receipt_repository.rs`     |
+| 只读验收查询        | `crates/core/src/storage/context_compaction_audit_repository.rs`       |
 | SQLite schema       | `crates/core/src/storage/migrations.rs`                                |
 | 会话状态 LRU 与接线 | `crates/core-server/src/agent.rs`                                      |
 | 前端圆环            | `src/renderer/src/features/chat/components/ContextWindowIndicator.tsx` |

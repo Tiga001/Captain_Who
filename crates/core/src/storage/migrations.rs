@@ -617,6 +617,63 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             )
         );
 
+        CREATE TABLE IF NOT EXISTS model_request_observations (
+            id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            run_id TEXT NOT NULL,
+            conversation_id TEXT,
+            assistant_message_id TEXT,
+            operation_id TEXT,
+            request_index INTEGER NOT NULL CHECK (request_index > 0),
+            purpose TEXT NOT NULL CHECK (purpose IN ('agent_loop', 'context_compaction')),
+            model TEXT NOT NULL CHECK (length(trim(model)) > 0),
+            api_style TEXT NOT NULL CHECK (api_style IN ('open_ai_compatible', 'anthropic_compatible')),
+            status TEXT NOT NULL CHECK (status IN ('completed', 'failed', 'cancelled')),
+            estimated_input_tokens INTEGER,
+            normalized_actual_input_tokens INTEGER,
+            observation_json TEXT NOT NULL CHECK (length(trim(observation_json)) > 0),
+            started_at INTEGER NOT NULL CHECK (started_at >= 0),
+            completed_at INTEGER NOT NULL CHECK (completed_at >= started_at),
+            CHECK (
+                (conversation_id IS NULL AND assistant_message_id IS NULL)
+                OR (conversation_id IS NOT NULL AND assistant_message_id IS NOT NULL)
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS context_compaction_receipts (
+            operation_id TEXT PRIMARY KEY,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            run_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            request_index INTEGER NOT NULL CHECK (request_index > 0),
+            attempt_index INTEGER NOT NULL CHECK (attempt_index > 0),
+            model TEXT NOT NULL CHECK (length(trim(model)) > 0),
+            api_style TEXT NOT NULL CHECK (api_style IN ('open_ai_compatible', 'anthropic_compatible')),
+            status TEXT NOT NULL CHECK (status IN (
+                'in_progress', 'applied', 'refreshed', 'failed', 'cancelled', 'interrupted'
+            )),
+            stage TEXT NOT NULL CHECK (stage IN (
+                'planned', 'preparing', 'generating', 'committing', 'completed'
+            )),
+            generation_observation_id TEXT,
+            summary_id TEXT UNIQUE,
+            receipt_json TEXT NOT NULL CHECK (length(trim(receipt_json)) > 0),
+            started_at INTEGER NOT NULL CHECK (started_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= started_at),
+            completed_at INTEGER CHECK (completed_at IS NULL OR completed_at >= started_at),
+            UNIQUE(run_id, request_index, attempt_index),
+            CHECK (
+                (status = 'in_progress' AND completed_at IS NULL)
+                OR (status != 'in_progress' AND completed_at IS NOT NULL)
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (generation_observation_id) REFERENCES model_request_observations(id)
+        );
+
         CREATE TABLE IF NOT EXISTS conversation_context_compaction_heads (
             conversation_id TEXT PRIMARY KEY,
             summary_id TEXT NOT NULL UNIQUE,
@@ -636,6 +693,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, position);
         CREATE INDEX IF NOT EXISTS idx_conversation_turn_traces_conversation_id ON conversation_turn_traces(conversation_id, completed_at);
         CREATE INDEX IF NOT EXISTS idx_context_compaction_summaries_conversation_id ON context_compaction_summaries(conversation_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_model_request_observations_conversation_id ON model_request_observations(conversation_id, completed_at);
+        CREATE INDEX IF NOT EXISTS idx_model_request_observations_operation_id ON model_request_observations(operation_id);
+        CREATE INDEX IF NOT EXISTS idx_model_request_observations_profile ON model_request_observations(model, api_style, purpose, completed_at);
+        CREATE INDEX IF NOT EXISTS idx_context_compaction_receipts_conversation_id ON context_compaction_receipts(conversation_id, started_at);
+        CREATE INDEX IF NOT EXISTS idx_context_compaction_receipts_run_id ON context_compaction_receipts(run_id, request_index, attempt_index);
+        CREATE INDEX IF NOT EXISTS idx_context_compaction_receipts_status ON context_compaction_receipts(status, updated_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_conversation_id ON attachments(conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_project_id ON attachments(project_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);

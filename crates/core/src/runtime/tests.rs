@@ -451,24 +451,53 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let (body_sender, body_receiver) = tokio::sync::oneshot::channel();
+    let request_bodies = Arc::new(Mutex::new(Vec::new()));
+    let request_bodies_for_server = request_bodies.clone();
     let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let body = read_http_body(&mut stream).await;
-        body_sender.send(body).unwrap();
-        let response_body = serde_json::to_vec(&json!({
-            "choices": [{
-                "message": { "role": "assistant", "content": "done" },
-                "finish_reason": "stop"
-            }]
-        }))
-        .unwrap();
-        let headers = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            response_body.len()
-        );
-        stream.write_all(headers.as_bytes()).await.unwrap();
-        stream.write_all(&response_body).await.unwrap();
+        for request_index in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let body = read_http_body(&mut stream).await;
+            request_bodies_for_server.lock().unwrap().push(body);
+            let response = if request_index == 0 {
+                json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "todo-after-compaction",
+                                "type": "function",
+                                "function": {
+                                    "name": "todo_update",
+                                    "arguments": serde_json::to_string(&json!({
+                                        "items": [{
+                                            "title": "Verify compacted context",
+                                            "status": "completed"
+                                        }]
+                                    }))
+                                    .unwrap()
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+            } else {
+                json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": "done" },
+                        "finish_reason": "stop"
+                    }]
+                })
+            };
+            let response_body = serde_json::to_vec(&response).unwrap();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(&response_body).await.unwrap();
+        }
     });
 
     let old_user = AgentChatMessage {
@@ -570,12 +599,22 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     })
     .unwrap();
     let compacted_baseline = compacted_state.shared_baseline().unwrap();
+    let mut uncompacted_state = create_conversation_context_state(input.clone()).unwrap();
+    let uncompacted_baseline = uncompacted_state.shared_baseline().unwrap();
     let prepare_count = Arc::new(AtomicUsize::new(0));
     let generate_count = Arc::new(AtomicUsize::new(0));
     let commit_count = Arc::new(AtomicUsize::new(0));
+    let trace_publish_count = Arc::new(AtomicUsize::new(0));
+    let post_compaction_empty_trace_publish_count = Arc::new(AtomicUsize::new(0));
     let prepare_counter = prepare_count.clone();
     let generate_counter = generate_count.clone();
     let commit_counter = commit_count.clone();
+    let commit_count_for_trace = commit_count.clone();
+    let trace_publish_counter = trace_publish_count.clone();
+    let post_compaction_empty_trace_publish_counter =
+        post_compaction_empty_trace_publish_count.clone();
+    let compacted_baseline_for_commit = compacted_baseline.clone();
+    let compacted_baseline_for_trace = compacted_baseline.clone();
     let durable_prefix_for_prepare = durable_prefix.clone();
     let services = AgentContextCompactionServices::new(
         move |request, _| {
@@ -591,6 +630,34 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         move |request, _| {
             generate_counter.fetch_add(1, Ordering::SeqCst);
             async move {
+                let observation =
+                    crate::model_request_observation::ModelRequestObservationBuilder::new(
+                        format!("model-request-{}", request.operation_id),
+                        request.run_id.clone(),
+                        Some(request.conversation_id.clone()),
+                        Some(request.assistant_message_id.clone()),
+                        Some(request.operation_id.clone()),
+                        request.request_index,
+                        crate::ModelRequestPurpose::ContextCompaction,
+                        "test-model",
+                        AgentApiStyle::OpenAiCompatible,
+                        None,
+                        1,
+                    )
+                    .completed(
+                        Some(AgentUsage {
+                            input_tokens: Some(100),
+                            output_tokens: Some(20),
+                            output_thinking_tokens: None,
+                            total_tokens: Some(120),
+                            cached_input_tokens: None,
+                            cache_creation_input_tokens: None,
+                            billable_request_count: Some(1),
+                        }),
+                        Some("stop".to_string()),
+                        2,
+                    )
+                    .unwrap();
                 Ok(AgentContextCompactionGenerationOutput {
                     draft: ContextCompactionSummaryDraft {
                         id: "summary-runtime".to_string(),
@@ -605,20 +672,12 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
                         replacement_input_tokens: 96,
                         created_at: 1,
                     },
-                    usage: Some(AgentUsage {
-                        input_tokens: Some(100),
-                        output_tokens: Some(20),
-                        output_thinking_tokens: None,
-                        total_tokens: Some(120),
-                        cached_input_tokens: None,
-                        cache_creation_input_tokens: None,
-                        billable_request_count: Some(1),
-                    }),
+                    observation,
                 })
             }
         },
         move |request, _| {
-            let baseline = compacted_baseline.clone();
+            let baseline = compacted_baseline_for_commit.clone();
             commit_counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(request.draft.id, "summary-runtime");
             assert_eq!(request.visible_trace_item_count, 0);
@@ -629,11 +688,29 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
                 })
             }
         },
+        |_, _| async { Ok(()) },
     );
     let emitted_events = Arc::new(Mutex::new(Vec::new()));
     let emitted_events_for_callback = emitted_events.clone();
     let emitter: AgentEventEmitter = Arc::new(move |event| {
         emitted_events_for_callback.lock().unwrap().push(event);
+    });
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let observations_for_callback = observations.clone();
+    let model_request_observer: AgentModelRequestObserver = Arc::new(move |observation| {
+        observations_for_callback.lock().unwrap().push(observation);
+    });
+    let trace_observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
+        trace_publish_counter.fetch_add(1, Ordering::SeqCst);
+        if commit_count_for_trace.load(Ordering::SeqCst) > 0 && snapshot.items.is_empty() {
+            post_compaction_empty_trace_publish_counter.fetch_add(1, Ordering::SeqCst);
+        }
+        let baseline = if commit_count_for_trace.load(Ordering::SeqCst) == 0 {
+            uncompacted_baseline.clone()
+        } else {
+            compacted_baseline_for_trace.clone()
+        };
+        Ok(Some(baseline))
     });
 
     let output = AgentRuntime::default()
@@ -642,24 +719,52 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
             Some("run-compaction".to_string()),
             Some(emitter),
             AgentCancellationToken::new(),
-            Some(AgentRuntimeHostServices::new().with_context_compaction(services)),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_context_compaction(services)
+                    .with_trace_observer(trace_observer)
+                    .with_model_request_observer(model_request_observer),
+            ),
         )
         .await
         .unwrap();
     server.await.unwrap();
-    let request_body = String::from_utf8(body_receiver.await.unwrap()).unwrap();
+    let request_bodies = request_bodies
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .map(|body| String::from_utf8(body).unwrap())
+        .collect::<Vec<_>>();
 
     assert_eq!(output.content, "done");
+    assert_eq!(request_bodies.len(), 2);
     assert_eq!(prepare_count.load(Ordering::SeqCst), 1);
     assert_eq!(generate_count.load(Ordering::SeqCst), 1);
     assert_eq!(commit_count.load(Ordering::SeqCst), 1);
+    // One empty trace publication must happen after commit and before the next tool call. Without
+    // it, the first response promotes the stale pre-compaction baseline and the second request
+    // immediately tries to compact the old history again.
+    assert_eq!(
+        post_compaction_empty_trace_publish_count.load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(trace_publish_count.load(Ordering::SeqCst), 5);
     let usage = output.usage.as_ref().unwrap();
     assert_eq!(usage.input_tokens, Some(100));
     assert_eq!(usage.output_tokens, Some(20));
-    assert_eq!(usage.billable_request_count, Some(2));
-    assert!(request_body.contains("COMPACTED_HISTORY_MARKER"));
-    assert!(!request_body.contains("OLD_USER_MARKER"));
-    assert!(!request_body.contains("OLD_ASSISTANT_MARKER"));
+    assert_eq!(usage.billable_request_count, Some(3));
+    let observations = observations.lock().unwrap();
+    assert_eq!(observations.len(), 2);
+    assert!(observations.iter().all(|observation| {
+        observation.purpose == crate::ModelRequestPurpose::AgentLoop
+            && observation.estimate.is_some()
+    }));
+    for request_body in request_bodies {
+        assert!(request_body.contains("COMPACTED_HISTORY_MARKER"));
+        assert!(!request_body.contains("OLD_USER_MARKER"));
+        assert!(!request_body.contains("OLD_ASSISTANT_MARKER"));
+    }
     let events = emitted_events.lock().unwrap();
     let compaction_events = events
         .iter()

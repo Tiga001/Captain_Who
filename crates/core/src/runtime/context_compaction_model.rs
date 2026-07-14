@@ -17,8 +17,12 @@ use crate::llm::{
     complete_chat_allow_empty, complete_chat_streaming_allow_empty, detect_api_style,
     LlmChatRequest, LlmChatResponse, LlmMessageRole,
 };
+use crate::model_request_observation::ModelRequestObservationBuilder;
 use crate::protocol::{AgentApiStyle, AgentChatInput, AgentError, AgentResult, AgentUsage};
-use crate::{ContextCompactionGeneration, ContextCompactionSummaryDraft};
+use crate::{
+    ContextCompactionGeneration, ContextCompactionSummaryDraft, ModelRequestEstimate,
+    ModelRequestObservation, ModelRequestPurpose,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -92,7 +96,9 @@ impl AgentContextCompactionModelGenerator {
         cancellation_token.check()?;
         request.prefix.validate()?;
         request.continuity.validate()?;
-        if request.continuity.covered_through != request.prefix.covered_through {
+        if request.continuity.covered_through != request.prefix.covered_through
+            || request.prefix.conversation_id != request.conversation_id
+        {
             return Err(AgentError::structured(
                 "context_compaction_continuity_mismatch",
                 "上下文连续性骨架与待压缩前缀的覆盖边界不一致。",
@@ -130,7 +136,22 @@ impl AgentContextCompactionModelGenerator {
             self.context_window_tokens,
             maximum_summary_tokens,
         );
+        let estimate = ModelRequestEstimate::from_budget_report(&report);
         capacity_detector.ensure_sendable(report)?;
+
+        let observation_builder = ModelRequestObservationBuilder::new(
+            format!("model-request-{}-context-compaction", request.operation_id),
+            request.run_id.clone(),
+            Some(request.conversation_id.clone()),
+            Some(request.assistant_message_id.clone()),
+            Some(request.operation_id.clone()),
+            request.request_index,
+            ModelRequestPurpose::ContextCompaction,
+            self.model.clone(),
+            self.api_style,
+            Some(estimate),
+            crate::storage::now_ms(),
+        );
 
         let llm_request = LlmChatRequest {
             api_url: self.api_url.clone(),
@@ -143,13 +164,29 @@ impl AgentContextCompactionModelGenerator {
             messages: request_context.into_messages(),
             tools: Vec::new(),
         };
-        let response = if self.stream {
-            complete_chat_streaming_allow_empty(llm_request, cancellation_token, |_| {}).await?
+        let response_result = if self.stream {
+            complete_chat_streaming_allow_empty(llm_request, cancellation_token, |_| {}).await
         } else {
-            complete_chat_allow_empty(llm_request, cancellation_token).await?
+            complete_chat_allow_empty(llm_request, cancellation_token).await
         };
+        let response = match response_result {
+            Ok(response) => response,
+            Err(error) => {
+                let observation = observation_builder.failed(
+                    error.usage().cloned(),
+                    &error,
+                    crate::storage::now_ms(),
+                )?;
+                return Err(error.with_model_request_observation(observation));
+            }
+        };
+        let observation = observation_builder.completed(
+            response.usage.clone(),
+            response.finish_reason.clone(),
+            crate::storage::now_ms(),
+        )?;
 
-        self.finish_generation(request, response, continuity_input_tokens)
+        self.finish_generation(request, response, continuity_input_tokens, observation)
     }
 
     fn finish_generation(
@@ -157,6 +194,24 @@ impl AgentContextCompactionModelGenerator {
         request: AgentContextCompactionGenerationRequest,
         response: LlmChatResponse,
         continuity_input_tokens: u64,
+        observation: ModelRequestObservation,
+    ) -> AgentResult<AgentContextCompactionGenerationOutput> {
+        let observation_for_error = observation.clone();
+        self.finish_generation_with_observation(
+            request,
+            response,
+            continuity_input_tokens,
+            observation,
+        )
+        .map_err(|error| error.with_model_request_observation(observation_for_error))
+    }
+
+    fn finish_generation_with_observation(
+        &self,
+        request: AgentContextCompactionGenerationRequest,
+        response: LlmChatResponse,
+        continuity_input_tokens: u64,
+        observation: ModelRequestObservation,
     ) -> AgentResult<AgentContextCompactionGenerationOutput> {
         let usage = response.usage.clone();
         if !response.tool_calls.is_empty() {
@@ -221,7 +276,7 @@ impl AgentContextCompactionModelGenerator {
         draft
             .validate()
             .map_err(|error| error.with_usage(usage.clone()))?;
-        Ok(AgentContextCompactionGenerationOutput { draft, usage })
+        Ok(AgentContextCompactionGenerationOutput { draft, observation })
     }
 }
 
@@ -480,11 +535,37 @@ mod tests {
         });
         let continuity = crate::ContextContinuitySnapshot::from_prefix(&prefix).unwrap();
         AgentContextCompactionGenerationRequest {
+            operation_id: "operation-1".to_string(),
+            run_id: "run-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-current".to_string(),
+            request_index: 1,
             prefix,
             continuity,
             source_input_tokens: 8_000,
             target_replacement_tokens: 2_000,
         }
+    }
+
+    fn request_observation(
+        request: &AgentContextCompactionGenerationRequest,
+        api_style: AgentApiStyle,
+    ) -> ModelRequestObservation {
+        ModelRequestObservationBuilder::new(
+            format!("model-request-{}", request.operation_id),
+            request.run_id.clone(),
+            Some(request.conversation_id.clone()),
+            Some(request.assistant_message_id.clone()),
+            Some(request.operation_id.clone()),
+            request.request_index,
+            ModelRequestPurpose::ContextCompaction,
+            "summary-model",
+            api_style,
+            None,
+            1,
+        )
+        .completed(None, Some("stop".to_string()), 2)
+        .unwrap()
     }
 
     fn expected_summary_output_tokens(
@@ -674,7 +755,27 @@ mod tests {
         assert!(output.draft.summary_input_tokens > 0);
         assert!(output.draft.summary_input_tokens <= u64::from(expected_max_tokens));
         assert!(output.draft.replacement_input_tokens < output.draft.source_input_tokens);
-        assert_eq!(output.usage.unwrap().billable_request_count, Some(1));
+        assert_eq!(
+            output.observation.purpose,
+            ModelRequestPurpose::ContextCompaction
+        );
+        assert_eq!(
+            output.observation.operation_id.as_deref(),
+            Some("operation-1")
+        );
+        assert!(output.observation.estimate.is_some());
+        assert_eq!(
+            output.observation.normalized_actual_input_tokens(),
+            Some(900)
+        );
+        assert_eq!(
+            output
+                .observation
+                .actual_usage
+                .as_ref()
+                .and_then(|usage| usage.raw.billable_request_count),
+            Some(1)
+        );
     }
 
     #[tokio::test]
@@ -724,7 +825,19 @@ mod tests {
             output.draft.generation.model.as_deref(),
             Some("summary-model")
         );
-        assert_eq!(output.usage.unwrap().input_tokens, Some(850));
+        assert!(output.observation.estimate.is_some());
+        assert_eq!(
+            output.observation.normalized_actual_input_tokens(),
+            Some(850)
+        );
+        assert_eq!(
+            output
+                .observation
+                .actual_usage
+                .as_ref()
+                .and_then(|usage| usage.raw.input_tokens),
+            Some(850)
+        );
     }
 
     #[tokio::test]
@@ -757,6 +870,12 @@ mod tests {
         assert_eq!(
             error.usage().and_then(|usage| usage.output_tokens),
             Some(4_000)
+        );
+        assert_eq!(
+            error
+                .model_request_observation()
+                .and_then(ModelRequestObservation::normalized_actual_input_tokens),
+            Some(900)
         );
         assert!(!error.to_string().contains("模型响应里没有可显示文本"));
     }
@@ -794,6 +913,12 @@ mod tests {
         server.abort();
 
         assert!(error.is_cancelled());
+        assert_eq!(
+            error
+                .model_request_observation()
+                .map(|observation| observation.status),
+            Some(crate::ModelRequestObservationStatus::Cancelled)
+        );
     }
 
     #[test]
@@ -803,6 +928,7 @@ mod tests {
             AgentApiStyle::OpenAiCompatible,
         ));
         let request = generation_request();
+        let observation = request_observation(&request, AgentApiStyle::OpenAiCompatible);
         let continuity_tokens = estimate_assistant_context_tokens(
             "summary-model",
             AgentApiStyle::OpenAiCompatible,
@@ -827,6 +953,7 @@ mod tests {
                     finish_reason: Some("length".to_string()),
                 },
                 continuity_tokens,
+                observation,
             )
             .unwrap_err();
 
@@ -845,6 +972,7 @@ mod tests {
         ));
         let content = "## Objective and constraints\n\n- Update `src/main.rs`.\n\n## Open work and next action\n\n- Run the focused test.";
         let request = generation_request();
+        let observation = request_observation(&request, AgentApiStyle::OpenAiCompatible);
         let continuity_tokens = estimate_assistant_context_tokens(
             "summary-model",
             AgentApiStyle::OpenAiCompatible,
@@ -861,6 +989,7 @@ mod tests {
                     finish_reason: Some("stop".to_string()),
                 },
                 continuity_tokens,
+                observation,
             )
             .unwrap();
 

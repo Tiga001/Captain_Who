@@ -18,7 +18,10 @@ mod state;
 mod trace_renderer;
 
 pub(crate) use assembler::{ContextAssembler, ContextAssemblyInput, ContextAttachments};
-pub(crate) use budget::{ContextBudgetReport, ContextCapacityDetector, ContextCompactionQuery};
+pub(crate) use budget::{
+    ContextBudgetReport, ContextBudgetStatus, ContextCapacityDetector, ContextCompactionQuery,
+    ContextMeasurementMode,
+};
 #[cfg(test)]
 pub(crate) use compaction::{
     ContextCompactionDurablePrefix, ContextCompactionProtectedEstimate, ContextCompactionStep,

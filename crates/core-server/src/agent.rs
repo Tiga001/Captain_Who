@@ -1,8 +1,10 @@
 use crate::agent_support::*;
 pub use crate::agent_support::{
-    AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
-    AgentConversationTurnInput, AgentConversationTurnOutput, AgentFileDraftContentPage,
-    AgentFileWriteDiffPage, PendingActionStatus, PendingAgentActionSnapshot,
+    AgentActionExecutionOutput, AgentContextCompactionAuditInput,
+    AgentContextCompactionAuditOutput, AgentContextWindowSnapshotInput,
+    AgentContextWindowSnapshotOutput, AgentConversationTurnInput, AgentConversationTurnOutput,
+    AgentFileDraftContentPage, AgentFileWriteDiffPage, PendingActionStatus,
+    PendingAgentActionSnapshot,
 };
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -31,11 +33,11 @@ use mycopilot_core::{
     AgentContextCompactionGenerationRequest, AgentContextCompactionModelGenerator,
     AgentContextCompactionPrepareOutcome, AgentContextCompactionServices, AgentContextWindowPhase,
     AgentContextWindowSnapshot, AgentConversationContextState, AgentConversationTraceObserver,
-    AgentError, AgentEvent, AgentEventEmitter, AgentHostActionExecutor, AgentPatchResult,
-    AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus,
-    AgentRuntimeHostServices, AgentSearchConfig, AgentToolCall, AgentToolContinuation,
-    AgentToolResult, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
-    AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
+    AgentError, AgentEvent, AgentEventEmitter, AgentHostActionExecutor, AgentModelRequestObserver,
+    AgentPatchResult, AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext,
+    AgentRunStatus, AgentRuntimeHostServices, AgentSearchConfig, AgentToolCall,
+    AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
+    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
     ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
 };
 use serde_json::Value;
@@ -196,9 +198,15 @@ impl AgentService {
                 pending_agent_input.clone(),
                 notifications.clone(),
             );
+            let model_request_observer = service.model_request_observer(
+                &worker_run_id,
+                &worker_conversation_id,
+                &worker_assistant_message_id,
+            );
             let host_services = AgentRuntimeHostServices::new()
                 .with_host_actions(host_executor, service.storage.clone())
                 .with_trace_observer(trace_observer)
+                .with_model_request_observer(model_request_observer)
                 .with_context_compaction(context_compaction_services);
             let result = send_chat_with_host_services(
                 prepared.agent_input,
@@ -1353,9 +1361,12 @@ impl AgentService {
             record.agent_input.clone(),
             notifications.clone(),
         );
+        let model_request_observer =
+            self.model_request_observer(&run_id, trace_conversation_id, trace_assistant_message_id);
         let host_services = AgentRuntimeHostServices::new()
             .with_host_actions(host_executor, self.storage.clone())
             .with_trace_observer(trace_observer)
+            .with_model_request_observer(model_request_observer)
             .with_context_compaction(context_compaction_services);
         let result = send_chat_with_host_services(
             agent_input,
@@ -1770,6 +1781,40 @@ impl AgentService {
         })
     }
 
+    fn model_request_observer(
+        &self,
+        expected_run_id: &str,
+        expected_conversation_id: &str,
+        expected_assistant_message_id: &str,
+    ) -> AgentModelRequestObserver {
+        let storage = self.storage.clone();
+        let expected_run_id = expected_run_id.to_string();
+        let expected_conversation_id = expected_conversation_id.to_string();
+        let expected_assistant_message_id = expected_assistant_message_id.to_string();
+        Arc::new(move |observation| {
+            let identity_matches = observation.run_id == expected_run_id
+                && observation.conversation_id.as_deref()
+                    == Some(expected_conversation_id.as_str())
+                && observation.assistant_message_id.as_deref()
+                    == Some(expected_assistant_message_id.as_str());
+            if !identity_matches {
+                eprintln!(
+                    "refused model request observation with mismatched run or conversation identity: {}",
+                    observation.id
+                );
+                return;
+            }
+            if let Err(error) = storage.save_model_request_observation(&observation) {
+                // A provider response may already be visible to the user. Diagnostics must never
+                // make the runtime replay that response and duplicate tool side effects.
+                eprintln!(
+                    "failed to persist model request observation {}: {error}",
+                    observation.id
+                );
+            }
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn context_compaction_services(
         &self,
@@ -1801,11 +1846,16 @@ impl AgentService {
         let prepare_notifications = notifications.clone();
 
         let commit_service = self.clone();
-        let commit_run_id = run_id;
-        let commit_conversation_id = conversation_id;
-        let commit_assistant_message_id = assistant_message_id;
+        let commit_run_id = run_id.clone();
+        let commit_conversation_id = conversation_id.clone();
+        let commit_assistant_message_id = assistant_message_id.clone();
         let commit_agent_input = agent_input;
-        let commit_notifications = notifications;
+        let commit_notifications = notifications.clone();
+
+        let receipt_storage = self.storage.clone();
+        let receipt_run_id = run_id;
+        let receipt_conversation_id = conversation_id;
+        let receipt_assistant_message_id = assistant_message_id;
 
         AgentContextCompactionServices::new(
             move |request, cancellation| {
@@ -1883,6 +1933,14 @@ impl AgentService {
                         &conversation_id,
                         &assistant_message_id,
                     )?;
+                    validate_compaction_request_identity(
+                        &request.receipt.run_id,
+                        &request.receipt.conversation_id,
+                        &request.receipt.assistant_message_id,
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                    )?;
                     let active_trace = service
                         .storage
                         .get_conversation_turn_trace(&assistant_message_id)
@@ -1897,31 +1955,61 @@ impl AgentService {
                     )?;
                     let committed = service
                         .storage
-                        .commit_context_compaction_prefix_if_current(
+                        .commit_context_compaction_prefix_with_receipt_if_current(
                             request.prefix.as_ref(),
                             request.draft,
+                            &request.receipt,
+                            &request.observation,
                         )
                         .map_err(AgentError::new)?;
                     service.invalidate_conversation_context_state(&conversation_id);
-                    let baseline = service
-                        .rebuild_running_context_after_compaction(
-                            &agent_input,
-                            &run_id,
-                            &conversation_id,
-                            &assistant_message_id,
-                            request.visible_trace_item_count,
-                            &notifications,
-                        )
-                        .map_err(AgentError::new)?;
-                    match committed {
-                        Some(summary) => Ok(AgentContextCompactionCommitOutcome::Applied {
-                            summary_id: summary.id,
-                            baseline: Box::new(baseline),
-                        }),
-                        None => Ok(AgentContextCompactionCommitOutcome::Refresh(Box::new(
-                            baseline,
-                        ))),
+                    let baseline = service.rebuild_running_context_after_compaction(
+                        &agent_input,
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                        request.visible_trace_item_count,
+                        &notifications,
+                    );
+                    match (committed, baseline) {
+                        (Some(summary), Ok(baseline)) => {
+                            Ok(AgentContextCompactionCommitOutcome::Applied {
+                                summary_id: summary.id,
+                                baseline: Box::new(baseline),
+                            })
+                        }
+                        (Some(summary), Err(error)) => Err(AgentError::structured(
+                            "context_compaction_applied_rebuild_failed",
+                            "上下文摘要已原子提交，但无法重建当前运行的上下文。",
+                            serde_json::json!({
+                                "summaryId": summary.id,
+                                "cause": error,
+                            }),
+                        )),
+                        (None, Ok(baseline)) => Ok(AgentContextCompactionCommitOutcome::Refresh(
+                            Box::new(baseline),
+                        )),
+                        (None, Err(error)) => Err(AgentError::new(error)),
                     }
+                }
+            },
+            move |receipt, observation| {
+                let storage = receipt_storage.clone();
+                let run_id = receipt_run_id.clone();
+                let conversation_id = receipt_conversation_id.clone();
+                let assistant_message_id = receipt_assistant_message_id.clone();
+                async move {
+                    validate_compaction_request_identity(
+                        &receipt.run_id,
+                        &receipt.conversation_id,
+                        &receipt.assistant_message_id,
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                    )?;
+                    storage
+                        .record_context_compaction_receipt(&receipt, observation.as_ref())
+                        .map_err(AgentError::new)
                 }
             },
         )
@@ -2570,6 +2658,31 @@ impl AgentService {
             None => inspect_context_window(agent_input).map_err(|error| error.to_string())?,
         };
         Ok(AgentContextWindowSnapshotOutput { snapshot })
+    }
+
+    pub fn get_context_compaction_audit(
+        &self,
+        input: AgentContextCompactionAuditInput,
+    ) -> Result<AgentContextCompactionAuditOutput, String> {
+        let conversation_id = input.conversation_id.trim();
+        if conversation_id.is_empty() {
+            return Err("conversationId 不能为空。".to_string());
+        }
+        let operation_id = input
+            .operation_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if input.operation_id.is_some() && operation_id.is_none() {
+            return Err("operationId 不能为空字符串。".to_string());
+        }
+        let limit = input.limit.unwrap_or(20);
+        if !(1..=100).contains(&limit) {
+            return Err("limit 必须在 1 到 100 之间。".to_string());
+        }
+        self.storage
+            .get_context_compaction_audit(conversation_id, operation_id, limit)
+            .map(|report| AgentContextCompactionAuditOutput { report })
     }
 
     fn persisted_conversation_context_state(
@@ -3313,6 +3426,26 @@ mod tests {
         Arc::new(|request, cancellation| {
             Box::pin(async move {
                 cancellation.check()?;
+                let observation = mycopilot_core::ModelRequestObservation {
+                    schema_version: mycopilot_core::MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
+                    id: format!("model-request-{}", request.operation_id),
+                    run_id: request.run_id.clone(),
+                    conversation_id: Some(request.conversation_id.clone()),
+                    assistant_message_id: Some(request.assistant_message_id.clone()),
+                    operation_id: Some(request.operation_id.clone()),
+                    request_index: request.request_index,
+                    purpose: mycopilot_core::ModelRequestPurpose::ContextCompaction,
+                    model: "model-1".to_string(),
+                    api_style: mycopilot_core::AgentApiStyle::OpenAiCompatible,
+                    status: mycopilot_core::ModelRequestObservationStatus::Completed,
+                    estimate: None,
+                    actual_usage: None,
+                    finish_reason: Some("stop".to_string()),
+                    error_code: None,
+                    error_message: None,
+                    started_at: 1,
+                    completed_at: 2,
+                };
                 Ok(AgentContextCompactionGenerationOutput {
                     draft: ContextCompactionSummaryDraft {
                         id: format!(
@@ -3329,7 +3462,7 @@ mod tests {
                         replacement_input_tokens: 20,
                         created_at: now_ms(),
                     },
-                    usage: None,
+                    observation,
                 })
             })
         })
@@ -3983,6 +4116,58 @@ mod tests {
             source_input_tokens: 5_000,
             target_replacement_tokens: 750,
         };
+        let receipt_plan = mycopilot_core::ContextCompactionReceiptPlan {
+            context_revision: "0000000000000001".to_string(),
+            persistent_revision: "0000000000000001".to_string(),
+            request_input_tokens: 6_000,
+            available_input_tokens: Some(6_000),
+            request_trigger_input_tokens: Some(5_000),
+            request_target_input_tokens: Some(1_000),
+            request_pressure: true,
+            durable_input_tokens: 5_000,
+            durable_capacity_tokens: Some(6_000),
+            durable_trigger_input_tokens: Some(5_000),
+            durable_target_input_tokens: Some(750),
+            durable_pressure: true,
+            source_input_tokens: 5_000,
+            target_replacement_tokens: 750,
+            expected_reclaimed_tokens: 4_250,
+            planned_reclaimed_tokens: 4_250,
+            projected_request_input_tokens: 1_750,
+            projected_durable_input_tokens: 750,
+            best_effort: false,
+            protected_input_tokens: 0,
+            protected_reasons: std::collections::BTreeMap::new(),
+            atomic_unit_count: 2,
+            previous_summary_id: None,
+            covered_through: prepare_request.covered_through.clone(),
+        };
+        let planned_receipt = mycopilot_core::ContextCompactionReceipt {
+            schema_version: mycopilot_core::CONTEXT_COMPACTION_RECEIPT_SCHEMA_VERSION,
+            operation_id: "operation-compaction-host".to_string(),
+            run_id: prepare_request.run_id.clone(),
+            conversation_id: prepare_request.conversation_id.clone(),
+            assistant_message_id: prepare_request.assistant_message_id.clone(),
+            request_index: 1,
+            attempt_index: 1,
+            model: "model-1".to_string(),
+            api_style: mycopilot_core::AgentApiStyle::OpenAiCompatible,
+            status: mycopilot_core::ContextCompactionReceiptStatus::InProgress,
+            stage: mycopilot_core::ContextCompactionReceiptStage::Planned,
+            plan: receipt_plan.clone(),
+            source_revision: None,
+            generation_observation_id: None,
+            summary_id: None,
+            result: None,
+            error: None,
+            started_at: 1,
+            updated_at: 1,
+            completed_at: None,
+        };
+        services
+            .record_receipt(planned_receipt, None)
+            .await
+            .unwrap();
         let prefix = match services
             .prepare(prepare_request.clone(), cancellation.clone())
             .await
@@ -3996,6 +4181,11 @@ mod tests {
         let generated = services
             .generate(
                 AgentContextCompactionGenerationRequest {
+                    operation_id: "operation-compaction-host".to_string(),
+                    run_id: prepare_request.run_id.clone(),
+                    conversation_id: prepare_request.conversation_id.clone(),
+                    assistant_message_id: prepare_request.assistant_message_id.clone(),
+                    request_index: 1,
                     prefix: prefix.clone(),
                     continuity: mycopilot_core::ContextContinuitySnapshot::from_prefix(&prefix)
                         .unwrap(),
@@ -4007,6 +4197,38 @@ mod tests {
             .await
             .unwrap();
         let expected_summary_id = generated.draft.id.clone();
+        let applied_receipt = mycopilot_core::ContextCompactionReceipt {
+            schema_version: mycopilot_core::CONTEXT_COMPACTION_RECEIPT_SCHEMA_VERSION,
+            operation_id: "operation-compaction-host".to_string(),
+            run_id: prepare_request.run_id.clone(),
+            conversation_id: prepare_request.conversation_id.clone(),
+            assistant_message_id: prepare_request.assistant_message_id.clone(),
+            request_index: 1,
+            attempt_index: 1,
+            model: "model-1".to_string(),
+            api_style: mycopilot_core::AgentApiStyle::OpenAiCompatible,
+            status: mycopilot_core::ContextCompactionReceiptStatus::Applied,
+            stage: mycopilot_core::ContextCompactionReceiptStage::Completed,
+            plan: receipt_plan,
+            source_revision: Some(prefix.source_revision.clone()),
+            generation_observation_id: Some(generated.observation.id.clone()),
+            summary_id: Some(expected_summary_id.clone()),
+            result: Some(mycopilot_core::ContextCompactionReceiptResult {
+                summary_id: expected_summary_id.clone(),
+                source_input_tokens: generated.draft.source_input_tokens,
+                summary_input_tokens: generated.draft.summary_input_tokens,
+                continuity_input_tokens: generated.draft.continuity_input_tokens,
+                replacement_input_tokens: generated.draft.replacement_input_tokens,
+                reclaimed_input_tokens: generated
+                    .draft
+                    .source_input_tokens
+                    .saturating_sub(generated.draft.replacement_input_tokens),
+            }),
+            error: None,
+            started_at: 1,
+            updated_at: now_ms(),
+            completed_at: Some(now_ms()),
+        };
         let committed = services
             .commit(
                 AgentContextCompactionCommitRequest {
@@ -4016,6 +4238,8 @@ mod tests {
                     visible_trace_item_count: prepare_request.visible_trace_item_count,
                     prefix,
                     draft: generated.draft,
+                    receipt: applied_receipt,
+                    observation: generated.observation,
                 },
                 cancellation,
             )
@@ -4039,6 +4263,28 @@ mod tests {
             active.covered_through,
             ContextJournalCursor::message("assistant-old")
         );
+        let audit = service
+            .get_context_compaction_audit(AgentContextCompactionAuditInput {
+                conversation_id: "conversation-compaction-host".to_string(),
+                operation_id: Some("operation-compaction-host".to_string()),
+                limit: Some(1),
+            })
+            .unwrap()
+            .report;
+        assert_eq!(audit.reports.len(), 1);
+        assert_eq!(
+            audit.reports[0].receipt.status,
+            mycopilot_core::ContextCompactionReceiptStatus::Applied
+        );
+        assert_eq!(
+            audit.reports[0]
+                .summary
+                .as_ref()
+                .map(|summary| summary.relation),
+            Some(mycopilot_core::ContextCompactionSummaryRelation::Active)
+        );
+        assert!(audit.reports[0].generation_observation.is_some());
+        assert_eq!(audit.estimation_error_groups.len(), 1);
         assert_eq!(
             storage
                 .load_conversation("conversation-compaction-host")

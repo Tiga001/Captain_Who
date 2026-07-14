@@ -1,9 +1,12 @@
 mod cancellation;
 pub mod command;
 mod context;
+mod context_compaction_audit;
+mod context_compaction_receipt;
 mod conversation_trace;
 pub mod file_write;
 mod llm;
+mod model_request_observation;
 pub mod patch;
 mod prompts;
 pub mod protocol;
@@ -22,6 +25,16 @@ pub use context::{
     ContextContinuitySnapshot, ContextContinuityText, ContextJournalCursor,
     CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION, CONTEXT_CONTINUITY_SCHEMA_VERSION,
 };
+pub use context_compaction_audit::{
+    ContextCompactionAuditBundle, ContextCompactionAuditCheck, ContextCompactionAuditCheckStatus,
+    ContextCompactionAuditReport, ContextCompactionAuditVerdict, ContextCompactionSummaryEvidence,
+    ContextCompactionSummaryRelation, ModelRequestEstimationErrorGroup,
+};
+pub use context_compaction_receipt::{
+    ContextCompactionReceipt, ContextCompactionReceiptError, ContextCompactionReceiptPlan,
+    ContextCompactionReceiptResult, ContextCompactionReceiptStage, ContextCompactionReceiptStatus,
+    CONTEXT_COMPACTION_RECEIPT_SCHEMA_VERSION,
+};
 pub use conversation_trace::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
@@ -29,6 +42,11 @@ pub use conversation_trace::{
     failed_conversation_trace_without_items, ConversationTraceSnapshot,
     ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
     ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+};
+pub use model_request_observation::{
+    ModelRequestActualUsage, ModelRequestCapacityStatus, ModelRequestEstimate,
+    ModelRequestMeasurementMode, ModelRequestObservation, ModelRequestObservationStatus,
+    ModelRequestPurpose, ModelRequestUsageNormalization, MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
 };
 pub use protocol::{
     AgentApiStyle, AgentApprovalDecision, AgentApprovalDecisionStatus, AgentApprovalStatus,
@@ -60,6 +78,6 @@ pub use runtime::{
     AgentContextCompactionGenerationRequest, AgentContextCompactionModelGenerator,
     AgentContextCompactionPrepareOutcome, AgentContextCompactionPrepareRequest,
     AgentContextCompactionServices, AgentConversationTraceObserver, AgentEventEmitter,
-    AgentHostActionExecutor, AgentRuntime, AgentRuntimeHostServices,
+    AgentHostActionExecutor, AgentModelRequestObserver, AgentRuntime, AgentRuntimeHostServices,
 };
 pub use system_paths::expand_system_path;

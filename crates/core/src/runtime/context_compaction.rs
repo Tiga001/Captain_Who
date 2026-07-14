@@ -11,7 +11,8 @@ use crate::context::{
     AgentContextBaseline, ContextCompactionPlan, ContextCompactionPlanStatus,
     ContextCompactionPrefix, ContextCompactionSummaryDraft, ContextJournalCursor,
 };
-use crate::protocol::{AgentError, AgentResult, AgentUsage};
+use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentUsage};
+use crate::{ContextCompactionReceipt, ContextCompactionReceiptStage, ModelRequestObservation};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -41,6 +42,11 @@ pub enum AgentContextCompactionPrepareOutcome {
 
 #[derive(Clone)]
 pub struct AgentContextCompactionGenerationRequest {
+    pub operation_id: String,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub assistant_message_id: String,
+    pub request_index: u64,
     pub prefix: Arc<ContextCompactionPrefix>,
     pub continuity: crate::ContextContinuitySnapshot,
     pub source_input_tokens: u64,
@@ -50,7 +56,7 @@ pub struct AgentContextCompactionGenerationRequest {
 #[derive(Debug, Clone)]
 pub struct AgentContextCompactionGenerationOutput {
     pub draft: ContextCompactionSummaryDraft,
-    pub usage: Option<AgentUsage>,
+    pub observation: ModelRequestObservation,
 }
 
 #[derive(Clone)]
@@ -61,6 +67,8 @@ pub struct AgentContextCompactionCommitRequest {
     pub visible_trace_item_count: usize,
     pub prefix: Arc<ContextCompactionPrefix>,
     pub draft: ContextCompactionSummaryDraft,
+    pub receipt: ContextCompactionReceipt,
+    pub observation: ModelRequestObservation,
 }
 
 pub enum AgentContextCompactionCommitOutcome {
@@ -96,6 +104,11 @@ type CommitCallback = Arc<
         + Send
         + Sync,
 >;
+type ReceiptCallback = Arc<
+    dyn Fn(ContextCompactionReceipt, Option<ModelRequestObservation>) -> CompactionFuture<()>
+        + Send
+        + Sync,
+>;
 
 /// Dependencies required by the runtime-owned executor.
 ///
@@ -106,10 +119,16 @@ pub struct AgentContextCompactionServices {
     prepare: PrepareCallback,
     generate: GenerateCallback,
     commit: CommitCallback,
+    record_receipt: ReceiptCallback,
 }
 
 impl AgentContextCompactionServices {
-    pub fn new<P, PFut, G, GFut, C, CFut>(prepare: P, generate: G, commit: C) -> Self
+    pub fn new<P, PFut, G, GFut, C, CFut, R, RFut>(
+        prepare: P,
+        generate: G,
+        commit: C,
+        record_receipt: R,
+    ) -> Self
     where
         P: Fn(AgentContextCompactionPrepareRequest, AgentCancellationToken) -> PFut
             + Send
@@ -126,6 +145,11 @@ impl AgentContextCompactionServices {
             + Sync
             + 'static,
         CFut: Future<Output = AgentResult<AgentContextCompactionCommitOutcome>> + Send + 'static,
+        R: Fn(ContextCompactionReceipt, Option<ModelRequestObservation>) -> RFut
+            + Send
+            + Sync
+            + 'static,
+        RFut: Future<Output = AgentResult<()>> + Send + 'static,
     {
         Self {
             prepare: Arc::new(move |request, cancellation| {
@@ -135,6 +159,9 @@ impl AgentContextCompactionServices {
                 Box::pin(generate(request, cancellation))
             }),
             commit: Arc::new(move |request, cancellation| Box::pin(commit(request, cancellation))),
+            record_receipt: Arc::new(move |receipt, observation| {
+                Box::pin(record_receipt(receipt, observation))
+            }),
         }
     }
 
@@ -161,11 +188,18 @@ impl AgentContextCompactionServices {
     ) -> AgentResult<AgentContextCompactionCommitOutcome> {
         (self.commit)(request, cancellation).await
     }
+
+    pub async fn record_receipt(
+        &self,
+        receipt: ContextCompactionReceipt,
+        observation: Option<ModelRequestObservation>,
+    ) -> AgentResult<()> {
+        (self.record_receipt)(receipt, observation).await
+    }
 }
 
 #[derive(Debug)]
 pub(super) enum ContextCompactionExecution {
-    NotApplicable,
     Applied {
         baseline: Box<AgentContextBaseline>,
         usage: Option<AgentUsage>,
@@ -174,6 +208,11 @@ pub(super) enum ContextCompactionExecution {
         baseline: Box<AgentContextBaseline>,
         usage: Option<AgentUsage>,
     },
+}
+
+pub(super) struct ContextCompactionAttempt {
+    request: AgentContextCompactionPrepareRequest,
+    receipt: ContextCompactionReceipt,
 }
 
 pub(super) struct ContextCompactionExecutor {
@@ -185,33 +224,22 @@ impl ContextCompactionExecutor {
         Self { services }
     }
 
-    pub(super) fn is_applicable(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn begin(
         &self,
         plan: &ContextCompactionPlan,
+        operation_id: &str,
         run_id: &str,
         conversation_id: Option<&str>,
         assistant_message_id: Option<&str>,
-        visible_trace_item_count: usize,
-    ) -> bool {
-        prepare_request_from_plan(
-            plan,
-            run_id,
-            conversation_id,
-            assistant_message_id,
-            visible_trace_item_count,
-        )
-        .is_some()
-    }
-
-    pub(super) async fn execute(
-        &self,
-        plan: &ContextCompactionPlan,
-        run_id: &str,
-        conversation_id: Option<&str>,
-        assistant_message_id: Option<&str>,
+        request_index: u64,
+        attempt_index: u64,
+        model: &str,
+        api_style: AgentApiStyle,
         visible_trace_item_count: usize,
         cancellation_token: &AgentCancellationToken,
-    ) -> AgentResult<ContextCompactionExecution> {
+    ) -> AgentResult<Option<ContextCompactionAttempt>> {
+        cancellation_token.check()?;
         let Some(request) = prepare_request_from_plan(
             plan,
             run_id,
@@ -219,77 +247,245 @@ impl ContextCompactionExecutor {
             assistant_message_id,
             visible_trace_item_count,
         ) else {
-            return Ok(ContextCompactionExecution::NotApplicable);
+            return Ok(None);
         };
-        cancellation_token.check()?;
+        let receipt = ContextCompactionReceipt::begin(
+            operation_id,
+            run_id,
+            &request.conversation_id,
+            &request.assistant_message_id,
+            request_index,
+            attempt_index,
+            model,
+            api_style,
+            plan,
+            crate::storage::now_ms(),
+        )?;
+        self.services.record_receipt(receipt.clone(), None).await?;
+        Ok(Some(ContextCompactionAttempt { request, receipt }))
+    }
 
-        let prepared = cancellable(
+    pub(super) async fn execute(
+        &self,
+        mut attempt: ContextCompactionAttempt,
+        cancellation_token: &AgentCancellationToken,
+    ) -> AgentResult<ContextCompactionExecution> {
+        if let Err(error) = cancellation_token.check() {
+            self.finalize_error(&mut attempt.receipt, &error, None)
+                .await?;
+            return Err(error);
+        }
+        attempt.receipt.advance_stage(
+            ContextCompactionReceiptStage::Preparing,
+            crate::storage::now_ms(),
+        )?;
+        self.services
+            .record_receipt(attempt.receipt.clone(), None)
+            .await?;
+
+        let prepared = match cancellable(
             cancellation_token,
-            (self.services.prepare)(request.clone(), cancellation_token.clone()),
+            (self.services.prepare)(attempt.request.clone(), cancellation_token.clone()),
         )
-        .await?;
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.finalize_error(&mut attempt.receipt, &error, None)
+                    .await?;
+                return Err(error);
+            }
+        };
         let prefix = match prepared {
             AgentContextCompactionPrepareOutcome::Ready(prefix) => prefix,
             AgentContextCompactionPrepareOutcome::Refresh(baseline) => {
+                attempt
+                    .receipt
+                    .complete_refreshed(None, crate::storage::now_ms())?;
+                self.services.record_receipt(attempt.receipt, None).await?;
                 return Ok(ContextCompactionExecution::Refreshed {
                     baseline,
                     usage: None,
                 });
             }
         };
-        validate_prepared_prefix(&request, &prefix)?;
+        if let Err(error) = validate_prepared_prefix(&attempt.request, &prefix) {
+            self.finalize_error(&mut attempt.receipt, &error, None)
+                .await?;
+            return Err(error);
+        }
+        if let Err(error) = attempt
+            .receipt
+            .attach_prepared_prefix(&prefix, crate::storage::now_ms())
+        {
+            self.finalize_error(&mut attempt.receipt, &error, None)
+                .await?;
+            return Err(error);
+        }
+        self.services
+            .record_receipt(attempt.receipt.clone(), None)
+            .await?;
 
-        let continuity = crate::ContextContinuitySnapshot::from_prefix(&prefix)?;
+        let continuity = match crate::ContextContinuitySnapshot::from_prefix(&prefix) {
+            Ok(continuity) => continuity,
+            Err(error) => {
+                self.finalize_error(&mut attempt.receipt, &error, None)
+                    .await?;
+                return Err(error);
+            }
+        };
         let generation_request = AgentContextCompactionGenerationRequest {
+            operation_id: attempt.receipt.operation_id.clone(),
+            run_id: attempt.request.run_id.clone(),
+            conversation_id: attempt.request.conversation_id.clone(),
+            assistant_message_id: attempt.request.assistant_message_id.clone(),
+            request_index: attempt.receipt.request_index,
             prefix: prefix.clone(),
             continuity: continuity.clone(),
-            source_input_tokens: request.source_input_tokens,
-            target_replacement_tokens: request.target_replacement_tokens,
+            source_input_tokens: attempt.request.source_input_tokens,
+            target_replacement_tokens: attempt.request.target_replacement_tokens,
         };
-        let generated = cancellable(
+        let generated = match cancellable(
             cancellation_token,
             (self.services.generate)(generation_request, cancellation_token.clone()),
         )
-        .await?;
+        .await
+        {
+            Ok(generated) => generated,
+            Err(error) => {
+                let observation = error.model_request_observation().cloned();
+                self.finalize_error(&mut attempt.receipt, &error, observation.as_ref())
+                    .await?;
+                return Err(error);
+            }
+        };
+        let generated_usage = generated
+            .observation
+            .actual_usage
+            .as_ref()
+            .map(|usage| usage.raw.clone());
         let draft = generated.draft;
-        validate_generated_draft(&request, &prefix, &continuity, &draft)?;
+        if let Err(error) = validate_generated_draft(&attempt.request, &prefix, &continuity, &draft)
+        {
+            let error = error
+                .with_usage(generated_usage.clone())
+                .with_model_request_observation(generated.observation.clone());
+            self.finalize_error(&mut attempt.receipt, &error, Some(&generated.observation))
+                .await?;
+            return Err(error);
+        }
+
+        if let Err(error) = attempt.receipt.advance_stage(
+            ContextCompactionReceiptStage::Committing,
+            crate::storage::now_ms(),
+        ) {
+            let error = error
+                .with_usage(generated_usage.clone())
+                .with_model_request_observation(generated.observation.clone());
+            self.finalize_error(&mut attempt.receipt, &error, Some(&generated.observation))
+                .await?;
+            return Err(error);
+        }
+        self.services
+            .record_receipt(attempt.receipt.clone(), None)
+            .await?;
 
         let expected_summary_id = draft.id.clone();
-        let committed = cancellable(
+        let mut applied_receipt = attempt.receipt.clone();
+        if let Err(error) = applied_receipt.complete_applied(
+            &draft,
+            &generated.observation,
+            crate::storage::now_ms(),
+        ) {
+            let error = error
+                .with_usage(generated_usage.clone())
+                .with_model_request_observation(generated.observation.clone());
+            self.finalize_error(&mut attempt.receipt, &error, Some(&generated.observation))
+                .await?;
+            return Err(error);
+        }
+        let committed = match cancellable(
             cancellation_token,
             (self.services.commit)(
                 AgentContextCompactionCommitRequest {
-                    run_id: request.run_id,
-                    conversation_id: request.conversation_id,
-                    assistant_message_id: request.assistant_message_id,
-                    visible_trace_item_count: request.visible_trace_item_count,
+                    run_id: attempt.request.run_id,
+                    conversation_id: attempt.request.conversation_id,
+                    assistant_message_id: attempt.request.assistant_message_id,
+                    visible_trace_item_count: attempt.request.visible_trace_item_count,
                     prefix,
                     draft,
+                    receipt: applied_receipt,
+                    observation: generated.observation.clone(),
                 },
                 cancellation_token.clone(),
             ),
         )
-        .await?;
+        .await
+        {
+            Ok(committed) => committed,
+            Err(error) if error.code() == Some("context_compaction_applied_rebuild_failed") => {
+                return Err(error
+                    .with_usage(generated_usage)
+                    .with_model_request_observation(generated.observation));
+            }
+            Err(error) => {
+                let error = error
+                    .with_usage(generated_usage.clone())
+                    .with_model_request_observation(generated.observation.clone());
+                self.finalize_error(&mut attempt.receipt, &error, Some(&generated.observation))
+                    .await?;
+                return Err(error);
+            }
+        };
         match committed {
             AgentContextCompactionCommitOutcome::Applied {
                 summary_id,
                 baseline,
             } => {
                 if summary_id != expected_summary_id {
-                    return Err(contract_error("宿主返回的摘要 ID 与已提交草稿不一致。"));
+                    return Err(contract_error("宿主返回的摘要 ID 与已提交草稿不一致。")
+                        .with_usage(generated_usage)
+                        .with_model_request_observation(generated.observation));
                 }
                 Ok(ContextCompactionExecution::Applied {
                     baseline,
-                    usage: generated.usage,
+                    usage: generated_usage,
                 })
             }
             AgentContextCompactionCommitOutcome::Refresh(baseline) => {
+                attempt
+                    .receipt
+                    .complete_refreshed(Some(&generated.observation), crate::storage::now_ms())?;
+                self.services
+                    .record_receipt(attempt.receipt, Some(generated.observation.clone()))
+                    .await?;
                 Ok(ContextCompactionExecution::Refreshed {
                     baseline,
-                    usage: generated.usage,
+                    usage: generated_usage,
                 })
             }
         }
+    }
+
+    async fn finalize_error(
+        &self,
+        receipt: &mut ContextCompactionReceipt,
+        error: &AgentError,
+        observation: Option<&ModelRequestObservation>,
+    ) -> AgentResult<()> {
+        let completed_at = crate::storage::now_ms();
+        if let Err(observation_error) = receipt.complete_error(error, observation, completed_at) {
+            if observation.is_none() {
+                return Err(observation_error);
+            }
+            // A malformed provider observation must not prevent the operation itself from
+            // reaching a durable failed terminal state. The unrelated observation is omitted.
+            receipt.complete_error(error, None, completed_at)?;
+            return self.services.record_receipt(receipt.clone(), None).await;
+        }
+        self.services
+            .record_receipt(receipt.clone(), observation.cloned())
+            .await
     }
 }
 
@@ -514,6 +710,49 @@ mod tests {
         state.shared_baseline().unwrap()
     }
 
+    fn generation_observation(
+        request: &AgentContextCompactionGenerationRequest,
+    ) -> ModelRequestObservation {
+        crate::model_request_observation::ModelRequestObservationBuilder::new(
+            format!("model-request-{}", request.operation_id),
+            request.run_id.clone(),
+            Some(request.conversation_id.clone()),
+            Some(request.assistant_message_id.clone()),
+            Some(request.operation_id.clone()),
+            request.request_index,
+            crate::ModelRequestPurpose::ContextCompaction,
+            "test-model",
+            AgentApiStyle::OpenAiCompatible,
+            None,
+            1,
+        )
+        .completed(None, Some("stop".to_string()), 2)
+        .unwrap()
+    }
+
+    async fn begin_attempt(
+        executor: &ContextCompactionExecutor,
+        cancellation: &AgentCancellationToken,
+    ) -> ContextCompactionAttempt {
+        executor
+            .begin(
+                &plan(),
+                "operation-1",
+                "run-1",
+                Some("conversation-1"),
+                Some("assistant-current"),
+                1,
+                1,
+                "test-model",
+                AgentApiStyle::OpenAiCompatible,
+                0,
+                cancellation,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn cancellation_interrupts_a_blocked_summary_generator_before_commit() {
         let services = AgentContextCompactionServices::new(
@@ -527,26 +766,18 @@ mod tests {
                 unreachable!()
             },
             |_, _| async { panic!("cancelled generation must not commit") },
+            |_, _| async { Ok(()) },
         );
         let executor = ContextCompactionExecutor::new(services);
         let cancellation = AgentCancellationToken::new();
+        let attempt = begin_attempt(&executor, &cancellation).await;
         let cancel = cancellation.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;
             cancel.cancel();
         });
 
-        let error = executor
-            .execute(
-                &plan(),
-                "run-1",
-                Some("conversation-1"),
-                Some("assistant-current"),
-                0,
-                &cancellation,
-            )
-            .await
-            .unwrap_err();
+        let error = executor.execute(attempt, &cancellation).await.unwrap_err();
 
         assert!(error.is_cancelled());
     }
@@ -575,19 +806,12 @@ mod tests {
                 committed_for_callback.store(true, Ordering::SeqCst);
                 async { panic!("stale preparation must not commit") }
             },
+            |_, _| async { Ok(()) },
         );
-
-        let execution = ContextCompactionExecutor::new(services)
-            .execute(
-                &plan(),
-                "run-1",
-                Some("conversation-1"),
-                Some("assistant-current"),
-                0,
-                &AgentCancellationToken::new(),
-            )
-            .await
-            .unwrap();
+        let executor = ContextCompactionExecutor::new(services);
+        let cancellation = AgentCancellationToken::new();
+        let attempt = begin_attempt(&executor, &cancellation).await;
+        let execution = executor.execute(attempt, &cancellation).await.unwrap();
 
         assert!(matches!(
             execution,
@@ -608,6 +832,7 @@ mod tests {
                 )))
             },
             |request, _| async move {
+                let observation = generation_observation(&request);
                 Ok(AgentContextCompactionGenerationOutput {
                     draft: ContextCompactionSummaryDraft {
                         id: "summary-too-large".to_string(),
@@ -621,26 +846,19 @@ mod tests {
                         replacement_input_tokens: request.source_input_tokens,
                         created_at: 1,
                     },
-                    usage: None,
+                    observation,
                 })
             },
             move |_, _| {
                 committed_for_callback.store(true, Ordering::SeqCst);
                 async { panic!("oversized summary must not commit") }
             },
+            |_, _| async { Ok(()) },
         );
-
-        let error = ContextCompactionExecutor::new(services)
-            .execute(
-                &plan(),
-                "run-1",
-                Some("conversation-1"),
-                Some("assistant-current"),
-                0,
-                &AgentCancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
+        let executor = ContextCompactionExecutor::new(services);
+        let cancellation = AgentCancellationToken::new();
+        let attempt = begin_attempt(&executor, &cancellation).await;
+        let error = executor.execute(attempt, &cancellation).await.unwrap_err();
 
         assert_eq!(error.code(), Some("context_compaction_replacement_invalid"));
         assert!(!committed.load(Ordering::SeqCst));

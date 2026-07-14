@@ -4,6 +4,8 @@ import type {
   AgentFileWriteDiffPage,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
+  AgentContextCompactionAuditInput,
+  AgentContextCompactionAuditOutput,
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
   AgentActionExecutionOutput,
@@ -28,6 +30,12 @@ export async function getContextWindowSnapshot(
   input: AgentContextWindowSnapshotInput
 ): Promise<AgentContextWindowSnapshotOutput> {
   return hostClient.agent.getContextWindowSnapshot(input)
+}
+
+export async function getContextCompactionAudit(
+  input: AgentContextCompactionAuditInput
+): Promise<AgentContextCompactionAuditOutput> {
+  return hostClient.agent.getContextCompactionAudit(input)
 }
 
 export async function listPendingAgentActions(): Promise<PendingAgentActionSnapshot[]> {

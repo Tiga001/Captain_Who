@@ -20,8 +20,9 @@ use mycopilot_core::{
     AgentInputAttachmentKind, AgentPatchResult, AgentPatchResultStatus, AgentPermissions,
     AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
     AgentProposedAction, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
-    AgentToolCall, AgentToolResult, AgentUsage, AgentWorkspaceContext, ContextJournalCursor,
-    ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
+    AgentToolCall, AgentToolResult, AgentUsage, AgentWorkspaceContext,
+    ContextCompactionAuditBundle, ContextJournalCursor, ConversationTurnTrace,
+    ConversationTurnTraceTerminalStatus,
 };
 use mycopilot_protocol_rs::AGENT_EVENT_NOTIFICATION_METHOD;
 use serde::{Deserialize, Serialize};
@@ -193,6 +194,20 @@ pub struct AgentContextWindowSnapshotInput {
 pub struct AgentContextWindowSnapshotOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<AgentContextWindowSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextCompactionAuditInput {
+    pub conversation_id: String,
+    pub operation_id: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextCompactionAuditOutput {
+    pub report: ContextCompactionAuditBundle,
 }
 
 #[derive(Debug, Clone, Serialize)]
