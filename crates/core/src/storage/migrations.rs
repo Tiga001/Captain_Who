@@ -105,14 +105,32 @@ fn upgrade_conversation_trace_commit_schema(connection: &Connection) -> rusqlite
     connection.execute_batch("PRAGMA foreign_keys = ON;")
 }
 
-fn upgrade_context_compaction_cursor_schema(connection: &Connection) -> rusqlite::Result<()> {
-    if !table_has_column(connection, "context_compaction_summaries", "id")?
-        || table_has_column(
-            connection,
-            "context_compaction_summaries",
-            "covered_through_kind",
-        )?
-    {
+fn reset_incompatible_context_compaction_schema(connection: &Connection) -> rusqlite::Result<()> {
+    if !table_has_column(connection, "context_compaction_summaries", "id")? {
+        return Ok(());
+    }
+    let current_shape = table_has_column(
+        connection,
+        "context_compaction_summaries",
+        "covered_through_kind",
+    )? && table_has_column(
+        connection,
+        "context_compaction_summaries",
+        "continuity_schema_version",
+    )? && table_has_column(
+        connection,
+        "context_compaction_summaries",
+        "continuity_json",
+    )? && table_has_column(
+        connection,
+        "context_compaction_summaries",
+        "continuity_input_tokens",
+    )? && table_has_column(
+        connection,
+        "context_compaction_summaries",
+        "replacement_input_tokens",
+    )?;
+    if current_shape {
         return Ok(());
     }
 
@@ -194,7 +212,7 @@ fn run_one_time_maintenance(connection: &Connection) -> rusqlite::Result<()> {
 }
 
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
-    upgrade_context_compaction_cursor_schema(connection)?;
+    reset_incompatible_context_compaction_schema(connection)?;
     connection.execute_batch(
         "
         PRAGMA foreign_keys = ON;
@@ -570,11 +588,20 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             covered_through_message_id TEXT NOT NULL,
             covered_through_trace_sequence INTEGER CHECK (covered_through_trace_sequence >= 0),
             content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+            continuity_schema_version INTEGER NOT NULL CHECK (continuity_schema_version > 0),
+            continuity_json TEXT NOT NULL CHECK (length(trim(continuity_json)) > 0),
             generation_kind TEXT NOT NULL CHECK (generation_kind IN ('test', 'model')),
             generation_model TEXT,
-            source_input_tokens INTEGER NOT NULL CHECK (source_input_tokens >= 0),
+            source_input_tokens INTEGER NOT NULL CHECK (source_input_tokens > 0),
             summary_input_tokens INTEGER NOT NULL CHECK (
-                summary_input_tokens >= 0 AND summary_input_tokens <= source_input_tokens
+                summary_input_tokens > 0
+            ),
+            continuity_input_tokens INTEGER NOT NULL CHECK (continuity_input_tokens > 0),
+            replacement_input_tokens INTEGER NOT NULL CHECK (
+                replacement_input_tokens > 0
+                AND replacement_input_tokens < source_input_tokens
+                AND summary_input_tokens <= replacement_input_tokens
+                AND continuity_input_tokens <= replacement_input_tokens
             ),
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
@@ -1019,11 +1046,14 @@ mod tests {
                     id, conversation_id, schema_version, source_revision,
                     previous_summary_id, covered_through_kind,
                     covered_through_message_id, covered_through_trace_sequence, content,
+                    continuity_schema_version, continuity_json,
                     generation_kind, generation_model, source_input_tokens,
-                    summary_input_tokens, created_at
+                    summary_input_tokens, continuity_input_tokens,
+                    replacement_input_tokens, created_at
                 ) VALUES (
                     'old-summary', 'conversation-1', ?1, 'old-revision', NULL,
-                    'message', 'assistant-1', NULL, 'old', 'test', NULL, 10, 1, 3
+                    'message', 'assistant-1', NULL, 'old', 1, '{}',
+                    'test', NULL, 10, 1, 1, 2, 3
                 )",
                 [incompatible_version],
             )
@@ -1034,11 +1064,14 @@ mod tests {
                     id, conversation_id, schema_version, source_revision,
                     previous_summary_id, covered_through_kind,
                     covered_through_message_id, covered_through_trace_sequence, content,
+                    continuity_schema_version, continuity_json,
                     generation_kind, generation_model, source_input_tokens,
-                    summary_input_tokens, created_at
+                    summary_input_tokens, continuity_input_tokens,
+                    replacement_input_tokens, created_at
                 ) VALUES (
                     'current-summary', 'conversation-1', ?1, 'current-revision', NULL,
-                    'message', 'assistant-1', NULL, 'current', 'test', NULL, 10, 1, 4
+                    'message', 'assistant-1', NULL, 'current', 1, '{}',
+                    'test', NULL, 10, 1, 1, 2, 4
                 )",
                 [CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION],
             )
@@ -1071,5 +1104,95 @@ mod tests {
             )
             .unwrap();
         assert_eq!(active_heads, 0);
+    }
+
+    #[test]
+    fn replaces_legacy_compaction_tables_without_touching_raw_history() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO conversations (
+                    id, project_id, model_id, title, created_at, updated_at,
+                    pinned_at, archived_at, unread_at
+                 ) VALUES ('conversation-legacy', NULL, NULL, 'title', 1, 2, NULL, NULL, NULL);
+                 INSERT INTO messages (
+                    id, conversation_id, role, content, status, agent_run_json,
+                    ui_state_json, created_at, position
+                 ) VALUES
+                    ('legacy-user', 'conversation-legacy', 'user', 'keep this question', 'sent', NULL, NULL, 1, 0),
+                    ('legacy-assistant', 'conversation-legacy', 'assistant', 'keep this answer', 'sent', NULL, NULL, 2, 1);
+
+                 DROP TRIGGER IF EXISTS invalidate_context_compaction_before_message_delete;
+                 DROP TRIGGER IF EXISTS invalidate_context_compaction_before_message_update;
+                 DROP TRIGGER IF EXISTS invalidate_context_compaction_before_trace_insert;
+                 DROP TRIGGER IF EXISTS invalidate_context_compaction_before_trace_item_update;
+                 DROP TRIGGER IF EXISTS invalidate_context_compaction_before_trace_item_delete;
+                 DROP TRIGGER IF EXISTS invalidate_context_compaction_before_trace_update;
+                 DROP TRIGGER IF EXISTS invalidate_context_compaction_before_trace_delete;
+                 DROP TABLE conversation_context_compaction_heads;
+                 DROP TABLE context_compaction_summaries;
+
+                 CREATE TABLE context_compaction_summaries (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    source_revision TEXT NOT NULL,
+                    previous_summary_id TEXT,
+                    covered_through_kind TEXT NOT NULL,
+                    covered_through_message_id TEXT NOT NULL,
+                    covered_through_trace_sequence INTEGER,
+                    content TEXT NOT NULL,
+                    generation_kind TEXT NOT NULL,
+                    generation_model TEXT,
+                    source_input_tokens INTEGER NOT NULL,
+                    summary_input_tokens INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                 );
+                 CREATE TABLE conversation_context_compaction_heads (
+                    conversation_id TEXT PRIMARY KEY,
+                    summary_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                 );
+                 INSERT INTO context_compaction_summaries VALUES (
+                    'legacy-summary', 'conversation-legacy', 3, 'revision', NULL,
+                    'message', 'legacy-assistant', NULL, 'legacy summary',
+                    'test', NULL, 100, 10, 3
+                 );
+                 INSERT INTO conversation_context_compaction_heads VALUES (
+                    'conversation-legacy', 'legacy-summary', 1, 3
+                 );",
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        let messages = connection
+            .query_row(
+                "SELECT group_concat(content, '|') FROM messages
+                 WHERE conversation_id = 'conversation-legacy'
+                 ORDER BY position",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(messages, "keep this question|keep this answer");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM context_compaction_summaries",
+                    [],
+                    |row| { row.get::<_, i64>(0) }
+                )
+                .unwrap(),
+            0
+        );
+        assert!(table_has_column(
+            &connection,
+            "context_compaction_summaries",
+            "continuity_json"
+        )
+        .unwrap());
     }
 }

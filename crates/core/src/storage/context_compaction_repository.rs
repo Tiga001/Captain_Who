@@ -318,6 +318,7 @@ fn list_journal_entries(
                         entries.push(ContextCompactionSourceItem::TraceItem {
                             cursor: ContextJournalCursor::trace_item(&message_id, item.sequence()),
                             run_id: trace.run_id.clone(),
+                            created_at,
                             item: item.clone(),
                         });
                     }
@@ -392,13 +393,20 @@ fn insert_summary(
         .validate()
         .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
     let (cursor_kind, message_id, trace_sequence) = cursor_columns(&summary.covered_through);
+    let continuity_json = serde_json::to_string(&summary.continuity).map_err(|error| {
+        ContextCompactionRepositoryError::Invalid(format!("无法序列化上下文连续性骨架：{error}"))
+    })?;
     transaction.execute(
         "INSERT INTO context_compaction_summaries (
             id, conversation_id, schema_version, source_revision, previous_summary_id,
             covered_through_kind, covered_through_message_id,
-            covered_through_trace_sequence, content, generation_kind, generation_model,
-            source_input_tokens, summary_input_tokens, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            covered_through_trace_sequence, content, continuity_schema_version,
+            continuity_json, generation_kind, generation_model, source_input_tokens,
+            summary_input_tokens, continuity_input_tokens, replacement_input_tokens, created_at
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+            ?16, ?17, ?18
+         )",
         params![
             &summary.id,
             &summary.conversation_id,
@@ -409,10 +417,14 @@ fn insert_summary(
             message_id,
             trace_sequence,
             &summary.content,
+            summary.continuity.schema_version,
+            continuity_json,
             summary.generation.kind.as_str(),
             &summary.generation.model,
             summary.source_input_tokens,
             summary.summary_input_tokens,
+            summary.continuity_input_tokens,
+            summary.replacement_input_tokens,
             summary.created_at,
         ],
     )?;
@@ -428,8 +440,9 @@ fn load_summary(
             "SELECT
                 id, conversation_id, schema_version, source_revision, previous_summary_id,
                 covered_through_kind, covered_through_message_id,
-                covered_through_trace_sequence, content, generation_kind, generation_model,
-                source_input_tokens, summary_input_tokens, created_at
+                covered_through_trace_sequence, content, continuity_schema_version,
+                continuity_json, generation_kind, generation_model, source_input_tokens,
+                summary_input_tokens, continuity_input_tokens, replacement_input_tokens, created_at
              FROM context_compaction_summaries
              WHERE id = ?1",
             [summary_id],
@@ -444,11 +457,15 @@ fn load_summary(
                     row.get::<_, String>(6)?,
                     row.get::<_, Option<u64>>(7)?,
                     row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, u64>(11)?,
-                    row.get::<_, u64>(12)?,
-                    row.get::<_, i64>(13)?,
+                    row.get::<_, u32>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, u64>(13)?,
+                    row.get::<_, u64>(14)?,
+                    row.get::<_, u64>(15)?,
+                    row.get::<_, u64>(16)?,
+                    row.get::<_, i64>(17)?,
                 ))
             },
         )
@@ -456,9 +473,18 @@ fn load_summary(
         .ok_or_else(|| {
             ContextCompactionRepositoryError::Invalid(format!("找不到摘要版本：{summary_id}"))
         })?;
-    let generation_kind = ContextCompactionGenerationKind::from_str(&row.9).ok_or_else(|| {
-        ContextCompactionRepositoryError::Invalid(format!("摘要包含未知生成方式：{}", row.9))
+    let generation_kind = ContextCompactionGenerationKind::from_str(&row.11).ok_or_else(|| {
+        ContextCompactionRepositoryError::Invalid(format!("摘要包含未知生成方式：{}", row.11))
     })?;
+    let continuity: crate::context::ContextContinuitySnapshot = serde_json::from_str(&row.10)
+        .map_err(|error| {
+            ContextCompactionRepositoryError::Invalid(format!("无法解析上下文连续性骨架：{error}"))
+        })?;
+    if continuity.schema_version != row.9 {
+        return Err(ContextCompactionRepositoryError::Invalid(
+            "上下文连续性骨架 schema 列与 JSON 不一致。".to_string(),
+        ));
+    }
     let summary = ContextCompactionSummary {
         schema_version: row.2,
         id: row.0,
@@ -467,13 +493,16 @@ fn load_summary(
         previous_summary_id: row.4,
         covered_through: cursor_from_columns(&row.5, row.6, row.7)?,
         content: row.8,
+        continuity,
         generation: ContextCompactionGeneration {
             kind: generation_kind,
-            model: row.10,
+            model: row.12,
         },
-        source_input_tokens: row.11,
-        summary_input_tokens: row.12,
-        created_at: row.13,
+        source_input_tokens: row.13,
+        summary_input_tokens: row.14,
+        continuity_input_tokens: row.15,
+        replacement_input_tokens: row.16,
+        created_at: row.17,
     };
     summary
         .validate()
@@ -600,9 +629,12 @@ mod tests {
             id: id.to_string(),
             source_revision: prefix.source_revision.clone(),
             content: format!("summary {id}"),
+            continuity: crate::ContextContinuitySnapshot::from_prefix(prefix).unwrap(),
             generation: ContextCompactionGeneration::test(),
             source_input_tokens: 100,
             summary_input_tokens: 10,
+            continuity_input_tokens: 20,
+            replacement_input_tokens: 30,
             created_at: 10,
         }
     }
@@ -633,6 +665,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(raw_count, 4);
+    }
+
+    #[test]
+    fn rejects_a_structurally_valid_but_tampered_continuity_snapshot() {
+        let mut connection = setup();
+        let cursor = ContextJournalCursor::message("assistant-1");
+        let prefix = prepare_prefix(&connection, "conversation-1", &cursor).unwrap();
+        let mut tampered = draft(&prefix, "summary-tampered");
+        let crate::ContextContinuityEntry::UserMessage { created_at, .. } =
+            &mut tampered.continuity.entries[0]
+        else {
+            panic!("the first deterministic continuity entry should be a user message");
+        };
+        *created_at = "2099-01-01T00:00:00+00:00".to_string();
+        tampered.continuity.validate().unwrap();
+
+        let error = commit_prefix_replacement(&mut connection, &prefix, tampered).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ContextCompactionRepositoryError::Invalid(_)
+        ));
+        assert!(get_active_summary(&connection, "conversation-1")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

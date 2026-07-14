@@ -3,6 +3,7 @@ mod apply_patch_diff;
 pub(crate) mod apply_patch_paths;
 mod attachments;
 mod context;
+mod conversation_history;
 mod document_text;
 mod filesystem;
 mod git_diff;
@@ -29,6 +30,7 @@ use crate::protocol::{
 };
 use apply_patch::ApplyPatchTool;
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
+use conversation_history::ConversationHistoryTool;
 use git_diff::GitDiffTool;
 use read_file::ReadFileTool;
 use read_image::ReadImageTool;
@@ -190,6 +192,12 @@ impl ToolRegistry {
         tool: Box<dyn AgentTool>,
     ) -> AgentResult<()> {
         self.register_boxed(format!("extension:{extension_id}"), tool)
+    }
+
+    pub(crate) fn register_conversation_history(&mut self) {
+        if !self.contains_tool("conversation_history") {
+            self.register(ConversationHistoryTool);
+        }
     }
 
     fn register<T: AgentTool + 'static>(&mut self, tool: T) {

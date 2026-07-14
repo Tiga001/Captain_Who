@@ -15,7 +15,7 @@ use crate::protocol::{AgentToolDefinition, AgentToolSafety};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-const DEFAULT_COMPACTION_TRIGGER_PERCENT: u64 = 95;
+const DEFAULT_COMPACTION_TRIGGER_PERCENT: u64 = 90;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ContextCompactionPolicy {
@@ -27,8 +27,6 @@ pub(crate) struct ContextCompactionPolicy {
     durable_target_percent: u64,
     minimum_reclaim_tokens: u64,
     maximum_reclaim_floor_tokens: u64,
-    minimum_summary_tokens: u64,
-    maximum_summary_tokens: u64,
 }
 
 impl Default for ContextCompactionPolicy {
@@ -42,8 +40,6 @@ impl Default for ContextCompactionPolicy {
             durable_target_percent: 15,
             minimum_reclaim_tokens: 512,
             maximum_reclaim_floor_tokens: 4_096,
-            minimum_summary_tokens: 256,
-            maximum_summary_tokens: 12_000,
         }
     }
 }
@@ -84,7 +80,9 @@ pub(crate) struct ContextCompactionStep {
     pub(crate) ranges: Vec<ContextCompactionItemRange>,
     pub(crate) atomic_unit_count: usize,
     pub(crate) source_input_tokens: u64,
-    pub(crate) maximum_summary_tokens: u64,
+    /// Aspirational size of the complete replacement (semantic summary plus deterministic
+    /// continuity data). It is used only for planning projections and is never an output limit.
+    pub(crate) target_replacement_tokens: u64,
     pub(crate) expected_reclaimed_tokens: u64,
     pub(crate) contains_side_effects: bool,
     pub(crate) contains_errors: bool,
@@ -125,7 +123,6 @@ pub(crate) struct ContextCompactionPlan {
     pub(crate) required_reclaimed_tokens: u64,
     pub(crate) required_durable_reclaimed_tokens: u64,
     pub(crate) planned_reclaimed_tokens: u64,
-    pub(crate) planned_durable_reclaimed_tokens: u64,
     pub(crate) projected_request_input_tokens: u64,
     pub(crate) projected_durable_input_tokens: u64,
     pub(crate) request_target_satisfied: bool,
@@ -257,7 +254,8 @@ impl ContextCompactionPlanner {
         } else {
             durable_input_tokens >= durable_trigger_input_tokens
         };
-        if !request_pressure && !durable_pressure {
+        let compaction_required = request_pressure || durable_pressure;
+        if !compaction_required {
             return empty_plan(
                 ContextCompactionPlanStatus::NotRequired,
                 query,
@@ -279,40 +277,37 @@ impl ContextCompactionPlanner {
         } else {
             0
         };
-        let required_durable_reclaimed_tokens = if durable_pressure {
-            durable_input_tokens.saturating_sub(durable_target_input_tokens)
-        } else {
-            0
-        };
+        // Trigger sources only decide when compaction starts. Once started, every execution aims
+        // at the same durable target so transient request pressure cannot degrade into a series of
+        // tiny summaries.
+        let required_durable_reclaimed_tokens =
+            durable_input_tokens.saturating_sub(durable_target_input_tokens);
         let required_reclaimed_tokens =
             required_request_reclaimed_tokens.max(required_durable_reclaimed_tokens);
 
-        let executable_reclaim_goal =
-            required_request_reclaimed_tokens.max(required_durable_reclaimed_tokens);
         let mut selected = Vec::<CompactionCandidate>::new();
         for candidate in &candidates {
-            if maximum_reclaimable_tokens(&selected, &self.policy) >= executable_reclaim_goal {
+            if maximum_reclaimable_tokens(&selected) >= required_reclaimed_tokens {
                 break;
             }
             selected.push(candidate.clone());
         }
         normalize_stable_durable_prefix(&mut selected, &units, &candidates);
 
-        let steps = build_steps(&selected, executable_reclaim_goal, &self.policy);
+        let steps = build_steps(&selected, required_reclaimed_tokens);
         let planned_reclaimed_tokens = steps
             .iter()
             .map(|step| step.expected_reclaimed_tokens)
             .sum::<u64>();
-        let planned_durable_reclaimed_tokens = planned_reclaimed_tokens;
         let projected_request_input_tokens = query
             .request_input_tokens
             .saturating_sub(planned_reclaimed_tokens);
         let projected_durable_input_tokens =
-            durable_input_tokens.saturating_sub(planned_durable_reclaimed_tokens);
+            durable_input_tokens.saturating_sub(planned_reclaimed_tokens);
         let request_target_satisfied =
             !request_pressure || projected_request_input_tokens <= target_input_tokens;
         let durable_target_satisfied =
-            !durable_pressure || projected_durable_input_tokens <= durable_target_input_tokens;
+            projected_durable_input_tokens <= durable_target_input_tokens;
         let best_effort = !request_target_satisfied || !durable_target_satisfied;
         let status = if planned_reclaimed_tokens > 0 {
             ContextCompactionPlanStatus::Required
@@ -334,7 +329,6 @@ impl ContextCompactionPlanner {
             required_reclaimed_tokens,
             required_durable_reclaimed_tokens,
             planned_reclaimed_tokens,
-            planned_durable_reclaimed_tokens,
             projected_request_input_tokens,
             projected_durable_input_tokens,
             request_target_satisfied,
@@ -512,21 +506,19 @@ fn absolute_protection_reason(
     None
 }
 
-fn maximum_reclaimable_tokens(
-    selected: &[CompactionCandidate],
-    policy: &ContextCompactionPolicy,
-) -> u64 {
-    let source_tokens = selected
+fn maximum_reclaimable_tokens(selected: &[CompactionCandidate]) -> u64 {
+    // The target is deliberately soft. Prefix selection therefore uses the theoretical maximum
+    // reclaim and leaves feasibility to the executor, which knows the exact continuity cost and
+    // validates the generated replacement against the measured source.
+    selected
         .iter()
         .map(|candidate| candidate.unit.tokens)
-        .sum::<u64>();
-    source_tokens.saturating_sub(minimum_summary_budget(source_tokens, policy))
+        .sum::<u64>()
 }
 
 fn build_steps(
     selected: &[CompactionCandidate],
     required_reclaimed_tokens: u64,
-    policy: &ContextCompactionPolicy,
 ) -> Vec<ContextCompactionStep> {
     if selected.is_empty() {
         return Vec::new();
@@ -537,9 +529,8 @@ fn build_steps(
         .iter()
         .map(|candidate| candidate.unit.tokens)
         .sum::<u64>();
-    let maximum_summary_tokens = maximum_summary_budget(source_input_tokens, policy)
-        .min(source_input_tokens.saturating_sub(required_reclaimed_tokens));
-    let expected_reclaimed_tokens = source_input_tokens.saturating_sub(maximum_summary_tokens);
+    let target_replacement_tokens = source_input_tokens.saturating_sub(required_reclaimed_tokens);
+    let expected_reclaimed_tokens = source_input_tokens.saturating_sub(target_replacement_tokens);
     if expected_reclaimed_tokens == 0 {
         return Vec::new();
     }
@@ -547,7 +538,7 @@ fn build_steps(
         ranges: merge_candidate_ranges(&candidates),
         atomic_unit_count: candidates.len(),
         source_input_tokens,
-        maximum_summary_tokens,
+        target_replacement_tokens,
         expected_reclaimed_tokens,
         contains_side_effects: candidates
             .iter()
@@ -664,17 +655,6 @@ fn merge_candidate_ranges(candidates: &[&CompactionCandidate]) -> Vec<ContextCom
     ranges
 }
 
-fn minimum_summary_budget(source_tokens: u64, policy: &ContextCompactionPolicy) -> u64 {
-    if source_tokens == 0 {
-        return 0;
-    }
-    policy.minimum_summary_tokens.min(source_tokens)
-}
-
-fn maximum_summary_budget(source_tokens: u64, policy: &ContextCompactionPolicy) -> u64 {
-    source_tokens.min(policy.maximum_summary_tokens)
-}
-
 fn percent_ceil(value: u64, percent: u64) -> u64 {
     value.saturating_mul(percent).div_ceil(100)
 }
@@ -723,7 +703,6 @@ fn empty_plan(
         required_reclaimed_tokens: 0,
         required_durable_reclaimed_tokens: 0,
         planned_reclaimed_tokens: 0,
-        planned_durable_reclaimed_tokens: 0,
         projected_request_input_tokens: query.request_input_tokens,
         projected_durable_input_tokens: query.breakdown.durable.input_tokens,
         request_target_satisfied: status == ContextCompactionPlanStatus::NotRequired,
@@ -843,12 +822,12 @@ mod tests {
 
         assert_eq!(plan.status, ContextCompactionPlanStatus::NotRequired);
         assert!(plan.steps.is_empty());
-        assert_eq!(plan.soft_trigger_input_tokens, Some(950));
-        assert_eq!(plan.durable_trigger_input_tokens, Some(855));
+        assert_eq!(plan.soft_trigger_input_tokens, Some(900));
+        assert_eq!(plan.durable_trigger_input_tokens, Some(810));
     }
 
     #[test]
-    fn starts_compaction_at_the_ninety_five_percent_request_threshold() {
+    fn starts_compaction_at_the_ninety_percent_request_threshold() {
         let planner = ContextCompactionPlanner::for_tools(&[]);
         let below_items = vec![
             item(
@@ -862,7 +841,7 @@ mod tests {
             item(
                 1,
                 ContextUsageClass::Durable,
-                849,
+                799,
                 LlmMessageRole::Assistant,
                 ContextSource::ConversationHistory,
                 Some(ContextOrigin::conversation_message("assistant-old")),
@@ -873,7 +852,7 @@ mod tests {
             item(
                 1,
                 ContextUsageClass::Durable,
-                850,
+                800,
                 LlmMessageRole::Assistant,
                 ContextSource::ConversationHistory,
                 Some(ContextOrigin::conversation_message("assistant-old")),
@@ -885,7 +864,7 @@ mod tests {
                 ContextBudgetStatus::WithinBudget,
                 Some(1_000),
                 100,
-                849,
+                799,
                 0,
                 0,
             ),
@@ -897,7 +876,7 @@ mod tests {
                 ContextBudgetStatus::WithinBudget,
                 Some(1_000),
                 100,
-                850,
+                800,
                 0,
                 0,
             ),
@@ -907,6 +886,118 @@ mod tests {
 
         assert_eq!(below.status, ContextCompactionPlanStatus::NotRequired);
         assert_eq!(at_threshold.status, ContextCompactionPlanStatus::Required);
+    }
+
+    #[test]
+    fn request_pressure_alone_uses_the_durable_fifteen_percent_target() {
+        let items = vec![
+            item(
+                0,
+                ContextUsageClass::Fixed,
+                1_000,
+                LlmMessageRole::System,
+                ContextSource::BackendSystemPrompt,
+                None,
+            ),
+            item(
+                1,
+                ContextUsageClass::Durable,
+                2_000,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-old-1")),
+            ),
+            item(
+                2,
+                ContextUsageClass::Durable,
+                2_000,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-old-2")),
+            ),
+            item(
+                3,
+                ContextUsageClass::Durable,
+                3_000,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-old-3")),
+            ),
+            item(
+                4,
+                ContextUsageClass::RunTransient,
+                1_000,
+                LlmMessageRole::Tool,
+                ContextSource::ToolResult,
+                None,
+            ),
+        ];
+
+        // Durable usage is only 77.8% of its 9,000-token capacity. The full request reaches the
+        // 90% trigger because of protected run-transient content.
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(
+                ContextBudgetStatus::WithinBudget,
+                Some(10_000),
+                1_000,
+                7_000,
+                1_000,
+                0,
+            ),
+            &items,
+            false,
+        );
+
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+        assert_eq!(plan.durable_trigger_input_tokens, Some(8_100));
+        assert_eq!(plan.durable_target_input_tokens, Some(1_350));
+        assert_eq!(plan.required_durable_reclaimed_tokens, 5_650);
+        assert_eq!(plan.required_reclaimed_tokens, 5_650);
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].source_input_tokens, 7_000);
+        assert_eq!(plan.steps[0].target_replacement_tokens, 1_350);
+        assert_eq!(plan.projected_durable_input_tokens, 1_350);
+        assert!(plan.durable_target_satisfied);
+        assert!(!plan.best_effort);
+    }
+
+    #[test]
+    fn large_prefix_keeps_the_replacement_target_as_a_projection_only() {
+        let items = vec![
+            item(
+                0,
+                ContextUsageClass::Fixed,
+                10_000,
+                LlmMessageRole::System,
+                ContextSource::BackendSystemPrompt,
+                None,
+            ),
+            item(
+                1,
+                ContextUsageClass::Durable,
+                200_000,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-old")),
+            ),
+        ];
+
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(
+                ContextBudgetStatus::OverBudget,
+                Some(210_000),
+                10_000,
+                200_000,
+                0,
+                0,
+            ),
+            &items,
+            false,
+        );
+
+        let step = &plan.steps[0];
+        assert_eq!(step.target_replacement_tokens, 30_000);
+        assert_eq!(step.expected_reclaimed_tokens, 170_000);
     }
 
     #[test]
@@ -1139,6 +1230,8 @@ mod tests {
         assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
         assert!(plan.best_effort);
         assert!(plan.planned_reclaimed_tokens > 0);
+        assert_eq!(plan.steps[0].target_replacement_tokens, 0);
+        assert_eq!(plan.steps[0].expected_reclaimed_tokens, 1_500);
     }
 
     #[test]

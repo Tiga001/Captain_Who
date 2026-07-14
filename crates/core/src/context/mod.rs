@@ -10,6 +10,7 @@ mod assembler;
 mod budget;
 mod compaction;
 mod compaction_summary;
+mod continuity;
 mod frame;
 mod measurement;
 mod message_time;
@@ -30,6 +31,10 @@ pub use compaction_summary::{
     ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionPrefix,
     ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
     ContextJournalCursor, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+};
+pub use continuity::{
+    ContextContinuityEntry, ContextContinuitySnapshot, ContextContinuityText,
+    CONTEXT_CONTINUITY_SCHEMA_VERSION,
 };
 pub(crate) use frame::{
     ContextFrame, ContextGroup, ContextItem, ContextMetadata, ContextOrigin, ContextRetention,

@@ -194,6 +194,16 @@ pub(crate) struct ContextBudgetReport {
 }
 
 impl ContextBudgetReport {
+    /// Maximum output reserve that can coexist with this exact measured input while preserving
+    /// the configured safety margin. This is independent of the reserve used to build the report.
+    pub(crate) fn maximum_output_tokens_for_current_input(&self) -> Option<u64> {
+        self.context_window_tokens.map(|context_window_tokens| {
+            context_window_tokens
+                .saturating_sub(self.safety_margin_tokens)
+                .saturating_sub(self.usage.request_input_tokens())
+        })
+    }
+
     pub(crate) fn persistent_snapshot(
         &self,
         model: &str,
@@ -682,6 +692,24 @@ mod tests {
         assert_eq!(report.status, ContextBudgetStatus::WithinBudget);
         assert_eq!(report.safety_margin_tokens, 6_400);
         assert_eq!(report.available_input_tokens, Some(91_600));
+        assert_eq!(
+            report.maximum_output_tokens_for_current_input(),
+            report.remaining_input_tokens.map(|remaining| {
+                report
+                    .reserved_output_tokens
+                    .saturating_add(u64::try_from(remaining).unwrap())
+            })
+        );
+    }
+
+    #[test]
+    fn unconfigured_window_has_no_derived_output_capacity() {
+        let mut frame = frame(vec![LlmMessage::text(LlmMessageRole::User, "hello")]);
+        let detector = detector(&[]);
+
+        let report = detector.inspect(&mut frame, None, 0);
+
+        assert_eq!(report.maximum_output_tokens_for_current_input(), None);
     }
 
     #[test]

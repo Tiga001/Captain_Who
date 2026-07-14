@@ -963,9 +963,12 @@ pub enum AgentEvent {
     },
     ContextCompactionStarted {
         run_id: String,
+        operation_id: String,
     },
     ContextCompactionFinished {
         run_id: String,
+        operation_id: String,
+        outcome: AgentContextCompactionEventOutcome,
     },
     ApprovalRequired {
         run_id: String,
@@ -1006,6 +1009,15 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         proposed_actions: Vec<AgentProposedAction>,
     },
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentContextCompactionEventOutcome {
+    Applied,
+    Skipped,
+    Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone)]
@@ -1128,5 +1140,26 @@ mod tests {
         assert!(serialized.contains("\"conversationTurnTrace\""));
         assert!(serialized.contains("\"createdAt\":0"));
         assert!(!serialized.contains("conversation_turn_trace"));
+    }
+
+    #[test]
+    fn context_compaction_events_serialize_stable_identity_and_outcome() {
+        let started = serde_json::to_value(AgentEvent::ContextCompactionStarted {
+            run_id: "run-1".to_string(),
+            operation_id: "compaction-1".to_string(),
+        })
+        .unwrap();
+        let finished = serde_json::to_value(AgentEvent::ContextCompactionFinished {
+            run_id: "run-1".to_string(),
+            operation_id: "compaction-1".to_string(),
+            outcome: AgentContextCompactionEventOutcome::Applied,
+        })
+        .unwrap();
+
+        assert_eq!(started["type"], "context_compaction_started");
+        assert_eq!(started["operationId"], "compaction-1");
+        assert_eq!(finished["type"], "context_compaction_finished");
+        assert_eq!(finished["operationId"], started["operationId"]);
+        assert_eq!(finished["outcome"], "applied");
     }
 }

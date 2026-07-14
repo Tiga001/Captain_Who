@@ -679,8 +679,13 @@ export type AgentEvent =
       conversationId?: string
       snapshot: AgentContextWindowSnapshot
     }
-  | { type: 'context_compaction_started'; runId: string }
-  | { type: 'context_compaction_finished'; runId: string }
+  | { type: 'context_compaction_started'; runId: string; operationId: string }
+  | {
+      type: 'context_compaction_finished'
+      runId: string
+      operationId: string
+      outcome: AgentContextCompactionEventOutcome
+    }
   | { type: 'approval_required'; runId: string; action: AgentProposedAction }
   | { type: 'diff'; runId: string; diff: AgentDiffProposal }
   | {
@@ -708,3 +713,5 @@ export type AgentEvent =
       finishReason?: string
       proposedActions?: AgentProposedAction[]
     }
+
+export type AgentContextCompactionEventOutcome = 'applied' | 'skipped' | 'failed' | 'cancelled'

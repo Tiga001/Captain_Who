@@ -346,6 +346,10 @@
   cursor: default;
 }
 
+.agent-activity--status .agent-activity__static-summary:hover {
+  color: var(--mc-color-text-muted);
+}
+
 .agent-activity summary:hover,
 .agent-activity summary:focus-visible,
 .agent-activity__static-summary:hover {

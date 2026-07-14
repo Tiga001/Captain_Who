@@ -120,8 +120,8 @@ export function settleAgentRunToolActivities(
 
   return {
     ...runWithStatus,
-    contextCompactionStartedAt: undefined,
     fileWritePreviews: [],
+    timeline: settlePendingContextCompactions(runWithStatus.timeline, settledActivityStatus),
     webSearchActivities: settlePendingWebSearchActivities(
       runWithStatus,
       settledActivityStatus,
@@ -204,6 +204,52 @@ function appendToolCallToTimeline(run: ChatAgentRunView, callId: string): ChatAg
       type: 'tool_call',
       callId
     }
+  )
+}
+
+function contextCompactionTimelineId(operationId: string) {
+  return `context-compaction-${operationId}`
+}
+
+function startContextCompaction(
+  run: ChatAgentRunView,
+  operationId: string
+): ChatAgentTimelineItem[] {
+  const id = contextCompactionTimelineId(operationId)
+  if (run.timeline.some((item) => item.id === id)) return run.timeline
+
+  return appendTimelineItem(run, {
+    id,
+    type: 'context_compaction',
+    operationId,
+    status: 'running'
+  })
+}
+
+function finishContextCompaction(
+  run: ChatAgentRunView,
+  operationId: string,
+  status: Extract<ChatAgentTimelineItem, { type: 'context_compaction' }>['status']
+): ChatAgentTimelineItem[] {
+  return appendTimelineItem(run, {
+    id: contextCompactionTimelineId(operationId),
+    type: 'context_compaction',
+    operationId,
+    status
+  })
+}
+
+function settlePendingContextCompactions(
+  timeline: ChatAgentTimelineItem[],
+  status: 'completed' | 'failed' | 'cancelled'
+): ChatAgentTimelineItem[] {
+  const compactionStatus =
+    status === 'completed' ? 'applied' : status === 'cancelled' ? 'cancelled' : 'failed'
+
+  return timeline.map((item) =>
+    item.type === 'context_compaction' && item.status === 'running'
+      ? { ...item, status: compactionStatus }
+      : item
   )
 }
 
@@ -726,7 +772,7 @@ export function applyAgentEventToChatMessage(
       agentRun: {
         ...currentRun,
         status: 'running',
-        contextCompactionStartedAt: Date.now()
+        timeline: startContextCompaction(currentRun, agentEvent.operationId)
       }
     }
   }
@@ -736,7 +782,7 @@ export function applyAgentEventToChatMessage(
       ...message,
       agentRun: {
         ...currentRun,
-        contextCompactionStartedAt: undefined
+        timeline: finishContextCompaction(currentRun, agentEvent.operationId, agentEvent.outcome)
       }
     }
   }

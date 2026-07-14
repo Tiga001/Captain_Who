@@ -99,7 +99,7 @@ impl ToolExecutionContext {
     pub(super) fn conversation_id(&self) -> AgentResult<&str> {
         self.conversation_id
             .as_deref()
-            .ok_or_else(|| AgentError::new("当前运行缺少 conversationId，不能创建文件草稿。"))
+            .ok_or_else(|| AgentError::new("当前运行缺少 conversationId，无法访问会话级能力。"))
     }
 
     pub(super) fn project_id(&self) -> Option<&str> {
@@ -115,7 +115,7 @@ impl ToolExecutionContext {
     pub(super) fn storage(&self) -> AgentResult<&Arc<StorageService>> {
         self.storage
             .as_ref()
-            .ok_or_else(|| AgentError::new("当前 host 未提供文件草稿存储服务。"))
+            .ok_or_else(|| AgentError::new("当前 host 未提供会话存储服务。"))
     }
 
     pub(super) fn resolve_existing_path(&self, input_path: &str) -> AgentResult<PathBuf> {

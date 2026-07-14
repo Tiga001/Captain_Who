@@ -18,8 +18,9 @@ pub use cancellation::AgentCancellationToken;
 pub use context::{
     AgentContextBaseline, AgentConversationContextState, ContextCompactionGeneration,
     ContextCompactionGenerationKind, ContextCompactionPrefix, ContextCompactionSourceItem,
-    ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
-    CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+    ContextCompactionSummary, ContextCompactionSummaryDraft, ContextContinuityEntry,
+    ContextContinuitySnapshot, ContextContinuityText, ContextJournalCursor,
+    CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION, CONTEXT_CONTINUITY_SCHEMA_VERSION,
 };
 pub use conversation_trace::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,

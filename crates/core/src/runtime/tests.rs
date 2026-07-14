@@ -374,6 +374,32 @@ fn runtime_shared_baseline_matches_full_context_assembly() {
     assert_eq!(shared.context.to_messages(), full.context.to_messages());
 }
 
+#[test]
+fn conversation_history_tool_is_registered_only_for_persisted_conversation_runs() {
+    let mut input = conversation_context_input(vec![message("user", "Current question")]);
+    input.context = Some(AgentRunContext {
+        conversation_id: Some("conversation-1".to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: Default::default(),
+    });
+    let capabilities =
+        prepare_runtime_capabilities(&input, "history-capability", &[], true).unwrap();
+    assert!(capabilities
+        .tool_definitions
+        .iter()
+        .any(|definition| definition.name == "conversation_history"));
+
+    input.context = None;
+    let capabilities =
+        prepare_runtime_capabilities(&input, "no-history-capability", &[], true).unwrap();
+    assert!(!capabilities
+        .tool_definitions
+        .iter()
+        .any(|definition| definition.name == "conversation_history"));
+}
+
 #[tokio::test]
 async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_context() {
     use crate::context::{ContextCompactionGeneration, ContextCompactionSummary};
@@ -493,6 +519,34 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         context_compaction_summary: None,
         messages: vec![old_user, old_assistant, current_user.clone()],
     };
+    let durable_prefix = Arc::new(ContextCompactionPrefix {
+        conversation_id: "conversation-1".to_string(),
+        source_revision: "source-runtime".to_string(),
+        covered_through: ContextJournalCursor::message("assistant-old"),
+        previous_summary: None,
+        source_items: vec![
+            ContextCompactionSourceItem::Message {
+                cursor: ContextJournalCursor::message("user-old"),
+                role: "user".to_string(),
+                content: "old request".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            },
+            ContextCompactionSourceItem::Message {
+                cursor: ContextJournalCursor::message("assistant-old"),
+                role: "assistant".to_string(),
+                content: "old answer".to_string(),
+                created_at: 2,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            },
+        ],
+    });
+    let compacted_continuity = crate::ContextContinuitySnapshot::from_prefix(&durable_prefix)
+        .expect("test durable prefix should produce continuity records");
     let compacted_summary = ContextCompactionSummary {
         schema_version: crate::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
         id: "summary-runtime".to_string(),
@@ -501,9 +555,12 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         previous_summary_id: None,
         covered_through: ContextJournalCursor::message("assistant-old"),
         content: "COMPACTED_HISTORY_MARKER: the old task was completed.".to_string(),
+        continuity: compacted_continuity,
         generation: ContextCompactionGeneration::test(),
         source_input_tokens: 40_000,
         summary_input_tokens: 32,
+        continuity_input_tokens: 64,
+        replacement_input_tokens: 96,
         created_at: 1,
     };
     let mut compacted_state = create_conversation_context_state(AgentChatInput {
@@ -519,6 +576,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     let prepare_counter = prepare_count.clone();
     let generate_counter = generate_count.clone();
     let commit_counter = commit_count.clone();
+    let durable_prefix_for_prepare = durable_prefix.clone();
     let services = AgentContextCompactionServices::new(
         move |request, _| {
             prepare_counter.fetch_add(1, Ordering::SeqCst);
@@ -527,36 +585,8 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
                 ContextJournalCursor::message("assistant-old")
             );
             assert_eq!(request.visible_trace_item_count, 0);
-            async move {
-                Ok(AgentContextCompactionPrepareOutcome::Ready(Arc::new(
-                    ContextCompactionPrefix {
-                        conversation_id: "conversation-1".to_string(),
-                        source_revision: "source-runtime".to_string(),
-                        covered_through: ContextJournalCursor::message("assistant-old"),
-                        previous_summary: None,
-                        source_items: vec![
-                            ContextCompactionSourceItem::Message {
-                                cursor: ContextJournalCursor::message("user-old"),
-                                role: "user".to_string(),
-                                content: "old request".to_string(),
-                                created_at: 1,
-                                status: Some("sent".to_string()),
-                                terminal_status: None,
-                                terminal_error: None,
-                            },
-                            ContextCompactionSourceItem::Message {
-                                cursor: ContextJournalCursor::message("assistant-old"),
-                                role: "assistant".to_string(),
-                                content: "old answer".to_string(),
-                                created_at: 2,
-                                status: Some("sent".to_string()),
-                                terminal_status: None,
-                                terminal_error: None,
-                            },
-                        ],
-                    },
-                )))
-            }
+            let durable_prefix = durable_prefix_for_prepare.clone();
+            async move { Ok(AgentContextCompactionPrepareOutcome::Ready(durable_prefix)) }
         },
         move |request, _| {
             generate_counter.fetch_add(1, Ordering::SeqCst);
@@ -567,9 +597,12 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
                         source_revision: request.prefix.source_revision.clone(),
                         content: "COMPACTED_HISTORY_MARKER: the old task was completed."
                             .to_string(),
+                        continuity: request.continuity,
                         generation: ContextCompactionGeneration::test(),
                         source_input_tokens: request.source_input_tokens,
                         summary_input_tokens: 32,
+                        continuity_input_tokens: 64,
+                        replacement_input_tokens: 96,
                         created_at: 1,
                     },
                     usage: Some(AgentUsage {
@@ -627,17 +660,31 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     assert!(request_body.contains("COMPACTED_HISTORY_MARKER"));
     assert!(!request_body.contains("OLD_USER_MARKER"));
     assert!(!request_body.contains("OLD_ASSISTANT_MARKER"));
-    let compaction_events = emitted_events
-        .lock()
-        .unwrap()
+    let events = emitted_events.lock().unwrap();
+    let compaction_events = events
         .iter()
-        .filter_map(|event| match event {
-            AgentEvent::ContextCompactionStarted { .. } => Some("started"),
-            AgentEvent::ContextCompactionFinished { .. } => Some("finished"),
-            _ => None,
+        .filter(|event| {
+            matches!(
+                event,
+                AgentEvent::ContextCompactionStarted { .. }
+                    | AgentEvent::ContextCompactionFinished { .. }
+            )
         })
         .collect::<Vec<_>>();
-    assert_eq!(compaction_events, vec!["started", "finished"]);
+    assert_eq!(compaction_events.len(), 2);
+    let AgentEvent::ContextCompactionStarted { operation_id, .. } = compaction_events[0] else {
+        panic!("first compaction event should start the operation");
+    };
+    let AgentEvent::ContextCompactionFinished {
+        operation_id: finished_operation_id,
+        outcome,
+        ..
+    } = compaction_events[1]
+    else {
+        panic!("second compaction event should finish the operation");
+    };
+    assert_eq!(finished_operation_id, operation_id);
+    assert_eq!(*outcome, AgentContextCompactionEventOutcome::Applied);
 }
 
 #[tokio::test]

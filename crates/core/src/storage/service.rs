@@ -13,9 +13,9 @@ use crate::storage::models::{
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
     chat_repository, chat_search_repository, composer_draft_repository, config_repository,
-    context_compaction_repository, conversation_trace_repository, file_draft_repository, now_ms,
-    pending_action_repository, preferences_repository, project_repository, storage_error,
-    usage_repository, StorageState,
+    context_compaction_repository, conversation_history_repository, conversation_trace_repository,
+    file_draft_repository, now_ms, pending_action_repository, preferences_repository,
+    project_repository, storage_error, usage_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
@@ -175,6 +175,36 @@ impl StorageService {
     pub fn search_chats(&self, input: &ChatSearchInput) -> Result<Vec<ChatSearchResult>, String> {
         let connection = self.state.connection()?;
         chat_search_repository::search_chats(&connection, input).map_err(storage_error)
+    }
+
+    pub fn search_conversation_history(
+        &self,
+        conversation_id: &str,
+        query: &str,
+        include_messages: bool,
+        include_trace_items: bool,
+        limit: usize,
+    ) -> Result<Vec<conversation_history_repository::ConversationHistorySearchHit>, String> {
+        let connection = self.state.connection()?;
+        conversation_history_repository::search_records(
+            &connection,
+            conversation_id,
+            query,
+            include_messages,
+            include_trace_items,
+            limit,
+        )
+        .map_err(storage_error)
+    }
+
+    pub fn read_conversation_history_record(
+        &self,
+        conversation_id: &str,
+        reference: &conversation_history_repository::ConversationHistoryRecordRef,
+    ) -> Result<Option<conversation_history_repository::ConversationHistoryRecord>, String> {
+        let connection = self.state.connection()?;
+        conversation_history_repository::read_record(&connection, conversation_id, reference)
+            .map_err(storage_error)
     }
 
     pub fn load_attachment_image(

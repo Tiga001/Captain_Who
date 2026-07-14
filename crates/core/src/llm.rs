@@ -147,9 +147,40 @@ const LLM_MAX_ATTEMPTS: usize = 3;
 const LLM_RETRY_BASE_DELAY_MS: u64 = 350;
 const LLM_RETRY_MAX_DELAY_MS: u64 = 2_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LlmResponseValidation {
+    RequireModelAction,
+    AllowEmpty,
+}
+
 pub(crate) async fn complete_chat(
     request: LlmChatRequest,
     cancellation_token: AgentCancellationToken,
+) -> AgentResult<LlmChatResponse> {
+    complete_chat_with_validation(
+        request,
+        cancellation_token,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .await
+}
+
+pub(crate) async fn complete_chat_allow_empty(
+    request: LlmChatRequest,
+    cancellation_token: AgentCancellationToken,
+) -> AgentResult<LlmChatResponse> {
+    complete_chat_with_validation(
+        request,
+        cancellation_token,
+        LlmResponseValidation::AllowEmpty,
+    )
+    .await
+}
+
+async fn complete_chat_with_validation(
+    request: LlmChatRequest,
+    cancellation_token: AgentCancellationToken,
+    validation: LlmResponseValidation,
 ) -> AgentResult<LlmChatResponse> {
     let mut request = request;
     request.stream = false;
@@ -157,7 +188,7 @@ pub(crate) async fn complete_chat(
     let mut last_error = None;
     let mut total_usage = None;
     for attempt in 1..=LLM_MAX_ATTEMPTS {
-        match complete_chat_once(&request, cancellation_token.clone()).await {
+        match complete_chat_once(&request, cancellation_token.clone(), validation).await {
             Ok(mut response) => {
                 merge_total_usage(&mut total_usage, response.usage.take());
                 response.usage = total_usage;
@@ -188,6 +219,7 @@ pub(crate) async fn complete_chat(
 async fn complete_chat_once(
     request: &LlmChatRequest,
     cancellation_token: AgentCancellationToken,
+    validation: LlmResponseValidation,
 ) -> AgentResult<LlmChatResponse> {
     let api_style = request.api_style;
     validate_request(request)?;
@@ -197,12 +229,47 @@ async fn complete_chat_once(
     let body = response_text(response, cancellation_token.clone(), "读取模型响应失败")
         .await
         .map_err(with_request_usage)?;
-    parse_non_stream_response(&body, api_style)
+    parse_non_stream_response(&body, api_style, validation)
 }
 
 pub(crate) async fn complete_chat_streaming<F>(
     request: LlmChatRequest,
     cancellation_token: AgentCancellationToken,
+    on_event: F,
+) -> AgentResult<LlmChatResponse>
+where
+    F: FnMut(LlmStreamEvent) + Send,
+{
+    complete_chat_streaming_with_validation(
+        request,
+        cancellation_token,
+        LlmResponseValidation::RequireModelAction,
+        on_event,
+    )
+    .await
+}
+
+pub(crate) async fn complete_chat_streaming_allow_empty<F>(
+    request: LlmChatRequest,
+    cancellation_token: AgentCancellationToken,
+    on_event: F,
+) -> AgentResult<LlmChatResponse>
+where
+    F: FnMut(LlmStreamEvent) + Send,
+{
+    complete_chat_streaming_with_validation(
+        request,
+        cancellation_token,
+        LlmResponseValidation::AllowEmpty,
+        on_event,
+    )
+    .await
+}
+
+async fn complete_chat_streaming_with_validation<F>(
+    request: LlmChatRequest,
+    cancellation_token: AgentCancellationToken,
+    validation: LlmResponseValidation,
     mut on_event: F,
 ) -> AgentResult<LlmChatResponse>
 where
@@ -218,9 +285,12 @@ where
             attempt,
             max_attempts: LLM_MAX_ATTEMPTS,
         });
-        let result = complete_chat_streaming_once(&request, cancellation_token.clone(), |event| {
-            on_event(event)
-        })
+        let result = complete_chat_streaming_once(
+            &request,
+            cancellation_token.clone(),
+            validation,
+            &mut on_event,
+        )
         .await;
 
         match result {
@@ -264,6 +334,7 @@ where
 async fn complete_chat_streaming_once<F>(
     request: &LlmChatRequest,
     cancellation_token: AgentCancellationToken,
+    validation: LlmResponseValidation,
     mut on_delta: F,
 ) -> AgentResult<LlmChatResponse>
 where
@@ -278,7 +349,7 @@ where
         let body = response_text(response, cancellation_token.clone(), "读取模型响应失败")
             .await
             .map_err(with_request_usage)?;
-        let parsed = parse_non_stream_response(&body, api_style)?;
+        let parsed = parse_non_stream_response(&body, api_style, validation)?;
         if !parsed.content.is_empty() {
             on_delta(LlmStreamEvent::Delta(parsed.content.clone()));
         }
@@ -291,12 +362,21 @@ where
     streamed.usage = Some(usage_for_request(streamed.usage));
 
     let diagnostic = streaming_response_diagnostic(&streamed);
-    validate_llm_response(&streamed.content, &streamed.tool_calls, &diagnostic)
-        .map_err(|error| error.with_usage(streamed.usage.clone()))?;
+    validate_llm_response(
+        &streamed.content,
+        &streamed.tool_calls,
+        &diagnostic,
+        validation,
+    )
+    .map_err(|error| error.with_usage(streamed.usage.clone()))?;
     Ok(streamed)
 }
 
-fn parse_non_stream_response(body: &str, api_style: AgentApiStyle) -> AgentResult<LlmChatResponse> {
+fn parse_non_stream_response(
+    body: &str,
+    api_style: AgentApiStyle,
+    validation: LlmResponseValidation,
+) -> AgentResult<LlmChatResponse> {
     let value: Value = serde_json::from_str(body).map_err(|error| {
         with_request_usage(AgentError::new(format!(
             "模型响应不是有效 JSON：{error}；原始响应：{}",
@@ -311,7 +391,7 @@ fn parse_non_stream_response(body: &str, api_style: AgentApiStyle) -> AgentResul
     let tool_calls = extract_tool_calls(&value, api_style)
         .map_err(|error| error.with_usage(Some(usage.clone())))?;
     let content = extract_response_text(&value).unwrap_or_default();
-    validate_llm_response(&content, &tool_calls, body)
+    validate_llm_response(&content, &tool_calls, body, validation)
         .map_err(|error| error.with_usage(Some(usage.clone())))?;
 
     Ok(LlmChatResponse {
@@ -404,8 +484,12 @@ fn validate_llm_response(
     content: &str,
     tool_calls: &[LlmToolCall],
     raw_response: &str,
+    validation: LlmResponseValidation,
 ) -> AgentResult<()> {
-    if content.trim().is_empty() && tool_calls.is_empty() {
+    if validation == LlmResponseValidation::RequireModelAction
+        && content.trim().is_empty()
+        && tool_calls.is_empty()
+    {
         return Err(AgentError::new(format!(
             "模型响应里没有可显示文本：{}",
             truncate_for_error(raw_response)
@@ -696,6 +780,33 @@ mod tests {
         assert!(error.to_string().contains("timeout"));
         assert_eq!(error.usage().unwrap().input_tokens, Some(7));
         assert_eq!(error.usage().unwrap().billable_request_count, Some(3));
+    }
+
+    #[test]
+    fn internal_callers_can_defer_empty_response_validation() {
+        let body = json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "" },
+                "finish_reason": "length"
+            }]
+        })
+        .to_string();
+
+        let strict = parse_non_stream_response(
+            &body,
+            AgentApiStyle::OpenAiCompatible,
+            LlmResponseValidation::RequireModelAction,
+        );
+        let deferred = parse_non_stream_response(
+            &body,
+            AgentApiStyle::OpenAiCompatible,
+            LlmResponseValidation::AllowEmpty,
+        )
+        .unwrap();
+
+        assert!(strict.unwrap_err().to_string().contains("没有可显示文本"));
+        assert!(deferred.content.is_empty());
+        assert_eq!(deferred.finish_reason.as_deref(), Some("length"));
     }
 
     #[test]

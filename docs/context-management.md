@@ -15,11 +15,12 @@
 - 主模型看到“系统提示词 + 当前摘要 + 摘要游标后的原始日志 + 本次请求临时内容”。
 - 压缩器读取“上一版摘要 + 游标之后待压缩的原始日志前缀”。
 - 容量保护和上下文圆环读取同一个 `ContextFrame` 分类计量结果。
+- 精确旧记录查询直接读取同一份 SQLite 消息和 trace，不从摘要或前端事件反推。
 - 前端 timeline 使用展示事件，但展示事件不是模型上下文的事实来源。
 
 压缩不会删除原始消息或 Agent 轨迹，只会生成一版摘要并向后移动一个稳定游标。删除消息、回退或删除会话才会改变原始日志。
 
-系统明确不实现第二套 observation 仓库、工具结果索引或 run-overlay 专用压缩路径。
+系统明确不实现第二套 observation 仓库、向量索引或 run-overlay 专用压缩路径。`conversation_history` 只是同一原始日志上的只读查询入口，不复制记录。
 
 ## 总体数据流
 
@@ -29,12 +30,14 @@ SQLite messages + ConversationTurnTrace
                     v
          logical context journal
                     |
-          +---------+---------+
-          |                   |
-          v                   v
-active summary cursor     raw suffix after cursor
-          |                   |
-          +---------+---------+
+          +---------+-------------------+
+          |                             |
+          v                             v
+summary + continuity cursor       conversation_history
+          |                     (search/read raw journal)
+          v
+raw suffix after cursor
+          |
                     v
              ContextAssembler
                     v
@@ -113,7 +116,7 @@ Trace 保存主模型实际使用的文本上下文：
 
 ```text
 后端系统提示词
-+ 当前 ContextCompactionSummary（如果存在）
++ 当前“语义摘要 + 确定性连续性骨架”（如果存在）
 + 摘要游标之后的原始消息和 trace
 + 当前 run 尚未提升到长期基线的内容
 + Todo、文件事务提示等 request-only 内容
@@ -146,7 +149,10 @@ Trace 保存主模型实际使用的文本上下文：
 - 上一版摘要 ID；
 - `coveredThrough` 稳定日志游标；
 - 完整原始前缀的 `sourceRevision`；
-- 摘要正文、生成模型、token 估算和创建时间。
+- 模型生成的语义摘要；
+- 后端确定性生成的 `ContextContinuitySnapshot`；
+- 摘要、骨架和最终替换块各自的 token 诊断值；
+- 生成模型和创建时间。
 
 SQLite 只需要两张摘要表：
 
@@ -163,16 +169,55 @@ SQLite 只需要两张摘要表：
 
 它不会重新读取已经被上一版摘要覆盖的全部原文。原始数据仍保留在 SQLite，供审计、回退和派生状态失效后校验。
 
+### 确定性连续性骨架
+
+语义摘要擅长浓缩意义，但不能可靠保留每个精确时间、message ID、工具 ref、revision、路径或失败状态。因此后端从同一个安全前缀生成 `ContextContinuitySnapshot`，不让模型填写这些字段。
+
+骨架按原始日志顺序保留：
+
+- 消息/trace 的稳定游标和带时区时间；
+- 小型用户消息正文或有界预览、总字符数和内容 revision；
+- 助手最终回复与公开 narration 的有界预览；
+- 闭合工具调用的工具名、call ID、审批状态、成功/失败状态；
+- path、revision、行号、计数等有界结构化元数据；
+- 指向 SQLite 原始记录的 `messageId` 或 `assistantMessageId + sequence`。
+
+文件正文、网页正文、命令完整输出、patch、diff、Base64 和图片不会重复进入骨架。递归压缩复用上一版骨架并只追加新覆盖记录；提交前验证所有 ref 唯一、工具调用与结果成对、末尾 ref 等于 `coveredThrough`。模型生成器只能提供语义摘要，不能替换后端生成的骨架。
+
+摘要和骨架被包装为一个不可拆分的 assistant `ContextItem`。其后未压缩的消息和工具记录更新、权威；发生冲突时后面的原始记录覆盖摘要中的旧状态。
+
+### 摘要模型输入输出契约
+
+摘要生成是一次无工具的普通模型调用，不启动另一套 Agent loop。输入只有两条消息：
+
+1. 后端 system prompt，定义压缩规则和证据等级；
+2. 一个带版本号的 JSON 信封，包含 `previousSummary` 和按日志顺序排列的 `newItems`。
+
+JSON 信封被明确标记为不可信历史数据。`newItems` 比 `previousSummary` 更新；两者冲突时必须用新记录修正旧摘要，而不是同时保留两个版本。摘要器按来源区分信息：用户消息表达要求和决定，助手消息表达计划或主张，工具结果、审批结果和运行终态才是后端观察到的执行证据。没有成功工具结果支持的助手自述不能写成已验证完成，失败、拒绝、冲突或取消也不能写成成功。
+
+模型只返回一段 Markdown 正文，不返回游标、continuity、revision、token 数或其他提交元数据。正文使用以下稳定小节，空小节可以省略：
+
+```text
+## Objective and constraints
+## Confirmed state and decisions
+## Completed work and artifacts
+## Failures, approvals, and cautions
+## Open work and next action
+```
+
+规划器只给出完整替换块的软目标，不携带摘要输出上限。生成器先构造压缩请求，并用统一计量源在 `reserved_output=0` 下测出真实输入；本次 provider `max_tokens` 再动态取“当前 run 输出配置、窗口剩余输出空间、原前缀减去确定性替换骨架后的可缩小空间”三者最小值。该技术边界不会回写为压缩指标，也不会出现在提示词中；提示词只要求尽量接近软目标、不要填充可用预算，并明确以信息完整性优先。模型返回后，后端按“包装文字 + 语义摘要 + 骨架”的未来请求形态重新计量。完整替换块必须严格小于被替换前缀；被长度截断、为空、夹带工具调用或没有实际缩小上下文的结果不会提交。游标、骨架、`sourceRevision` 和 active head 仍由后端绑定和复核，模型无权生成或修改这些字段。
+
 ## 原子压缩流程
 
 ```text
 容量检测
   -> 纯规划器选择一个安全日志前缀
   -> prepare 从 SQLite 读取前缀并计算 sourceRevision
+  -> 后端从该前缀生成确定性 continuity
   -> generate 在事务外调用当前 run 固定模型
   -> commit 在写事务内重新读取同一前缀
   -> 校验 active head、游标和 sourceRevision
-  -> 插入摘要并原子切换 head
+  -> 原子插入摘要、continuity、计量值并切换 head
   -> 从 SQLite 权威日志重建基线
   -> 重新计量、重新规划，再决定是否发送主请求
 ```
@@ -180,6 +225,26 @@ SQLite 只需要两张摘要表：
 摘要生成期间原始前缀或 active head 变化时，本次草稿不会提交，而是刷新权威基线并重新规划。摘要提交失败不会改变旧 head。
 
 原始日志在摘要游标之后继续追加，不会让摘要失效；游标覆盖范围内的消息被编辑、删除或回退时，`sourceRevision` 校验失败，派生摘要被丢弃并回到原始日志。
+
+## 精确历史按需查询
+
+`conversation_history` 是当前会话限定、无审批、只读的核心工具。它解决的是摘要压缩后仍需核对精确旧措辞、旧时间、revision、路径、错误或工具结果的场景，不参与普通续接。
+
+调用规则：
+
+- 连续性骨架已经给出目标 ref 时，直接用 `action=read`；
+- 没有 ref 时，先用 `action=search` 按关键词搜索原始 message content 和 trace JSON，再读取一个返回的 ref；
+- `action=read` 按字符分页返回该原始记录的序列化 JSON 片段，单页最多 50,000 字符；分页片段不保证自身是完整 JSON 文档。
+
+所有 SQL 都强制带当前 `conversation_id`。即使模型提供其他会话的 message ID，也不会返回记录。读取结果明确标记为不可信历史数据，不能覆盖系统规则或被当作新指令执行。
+
+### 前端活动状态
+
+`conversation_history` 仍按普通工具调用持久化。前端把没有模型文字隔开的连续 search/read 调用合并为一条静态活动记录，运行时显示“正在回忆”，结束后显示“回忆了一下”。模型输出文字后再次调用会自然形成新记录。
+
+自动压缩不是工具。Runtime 为每次压缩生成稳定 `operationId`，并通过 started/finished 事件报告 `applied`、`skipped`、`failed` 或 `cancelled` 的真实结果。前端据此持久化一条不可展开的 timeline 记录；顶部耗时栏不再切换成压缩状态。
+
+这些 timeline 状态只用于展示和恢复 UI，不参与上下文组装，也不是压缩或历史查询的事实来源。
 
 ## 模型已见边界与审批恢复
 
@@ -242,13 +307,14 @@ fixed + durable + run_transient + request_only <= available_input
 
 当前规则：
 
-- 完整请求或 durable 使用量到达 95% 时可以触发；
-- 期望把 durable 压到净长期容量的约 15%；
-- 15% 是软目标，无法达到时仍执行有实际收益的 best-effort 压缩；
+- 完整请求或 durable 使用量到达 90% 时都可以触发；触发原因只决定何时开始，不改变后续压缩策略；
+- 任一压力触发后，都统一尝试把 durable 压到净长期容量的约 15%；
+- 15% 是软目标；保护内容导致目标不可达时，仍压缩全部安全可压缩的连续前缀；
+- 规划器的 replacement target 只用于预计回收量和提示模型，不参与 provider 输出截断；压缩没有专用固定上限，本次技术性 `max_tokens` 由统一容量报告、当前 run 输出配置和实际可缩小空间动态确定；
 - fixed、request-only、附件、图片、runtime guard、当前请求首次发送前的用户消息绝对保护；
 - run-transient 内容绝对保护；
 - tool call/result 闭环不可拆；
-- 规划结果只有一个连续 durable 日志前缀，不再区分 durable-history 和 run-overlay 两种执行步骤。
+- 规划结果只有一个面向统一目标的连续 durable 日志前缀，不再因压力来源不同生成多套回收策略。
 
 单个尚未被模型看到的工具结果如果自身超过窗口，系统不会把它偷偷摘要后再假装模型读过，而是返回结构化容量错误。此类问题应在工具契约层通过分页、分块或合理输出上限解决。
 
@@ -285,7 +351,8 @@ Runtime Extension 可以注册工具、贡献 request-only 上下文、处理 ru
 ## 当前限制
 
 - 原始文本日志不会因压缩删除，长会话会增加 SQLite 占用；这是审计完整性与运行简单性的明确取舍。
-- 尚无项目级记忆和语义检索。
+- 连续性骨架为每条已压缩日志保留一条有界索引记录，因此极长会话仍存在一个随事件数量增长的最低上下文成本；大正文不进入骨架，精确详情通过 SQLite 按需读取。
+- 尚无项目级记忆和语义/向量检索。
 - 尚未接入 provider 精确 tokenizer。
 - 单个不可拆、尚未被主模型看到的超大工具结果不能由上下文压缩补救。
 - 会话缓存按数量限制，尚未按内存或 token 总量限制。
@@ -301,6 +368,7 @@ Runtime Extension 可以注册工具、贡献 request-only 上下文、处理 ru
 | 预算与容量检测      | `crates/core/src/context/budget.rs`                                    |
 | 压缩规划器          | `crates/core/src/context/compaction.rs`                                |
 | 摘要与稳定游标契约  | `crates/core/src/context/compaction_summary.rs`                        |
+| 确定性连续性骨架    | `crates/core/src/context/continuity.rs`                                |
 | Agent 原始 trace    | `crates/core/src/conversation_trace.rs`                                |
 | 历史 trace 渲染     | `crates/core/src/context/trace_renderer.rs`                            |
 | Agent tool loop     | `crates/core/src/runtime.rs`                                           |
@@ -308,6 +376,8 @@ Runtime Extension 可以注册工具、贡献 request-only 上下文、处理 ru
 | 真实摘要生成器      | `crates/core/src/runtime/context_compaction_model.rs`                  |
 | 审批检查点          | `crates/core/src/runtime/checkpoint.rs`                                |
 | Trace 持久化        | `crates/core/src/storage/conversation_trace_repository.rs`             |
+| 原始历史查询        | `crates/core/src/storage/conversation_history_repository.rs`           |
+| 历史查询工具        | `crates/core/src/tools/conversation_history.rs`                        |
 | 摘要原子提交        | `crates/core/src/storage/context_compaction_repository.rs`             |
 | SQLite schema       | `crates/core/src/storage/migrations.rs`                                |
 | 会话状态 LRU 与接线 | `crates/core-server/src/agent.rs`                                      |

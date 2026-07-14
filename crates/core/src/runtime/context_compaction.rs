@@ -29,7 +29,7 @@ pub struct AgentContextCompactionPrepareRequest {
     /// in the uncommitted overlay and cannot be promoted by a compaction rebuild.
     pub visible_trace_item_count: usize,
     pub source_input_tokens: u64,
-    pub maximum_summary_tokens: u64,
+    pub target_replacement_tokens: u64,
 }
 
 pub enum AgentContextCompactionPrepareOutcome {
@@ -42,8 +42,9 @@ pub enum AgentContextCompactionPrepareOutcome {
 #[derive(Clone)]
 pub struct AgentContextCompactionGenerationRequest {
     pub prefix: Arc<ContextCompactionPrefix>,
+    pub continuity: crate::ContextContinuitySnapshot,
     pub source_input_tokens: u64,
-    pub maximum_summary_tokens: u64,
+    pub target_replacement_tokens: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -165,7 +166,11 @@ impl AgentContextCompactionServices {
 #[derive(Debug)]
 pub(super) enum ContextCompactionExecution {
     NotApplicable,
-    Rebase {
+    Applied {
+        baseline: Box<AgentContextBaseline>,
+        usage: Option<AgentUsage>,
+    },
+    Refreshed {
         baseline: Box<AgentContextBaseline>,
         usage: Option<AgentUsage>,
     },
@@ -226,7 +231,7 @@ impl ContextCompactionExecutor {
         let prefix = match prepared {
             AgentContextCompactionPrepareOutcome::Ready(prefix) => prefix,
             AgentContextCompactionPrepareOutcome::Refresh(baseline) => {
-                return Ok(ContextCompactionExecution::Rebase {
+                return Ok(ContextCompactionExecution::Refreshed {
                     baseline,
                     usage: None,
                 });
@@ -234,10 +239,12 @@ impl ContextCompactionExecutor {
         };
         validate_prepared_prefix(&request, &prefix)?;
 
+        let continuity = crate::ContextContinuitySnapshot::from_prefix(&prefix)?;
         let generation_request = AgentContextCompactionGenerationRequest {
             prefix: prefix.clone(),
+            continuity: continuity.clone(),
             source_input_tokens: request.source_input_tokens,
-            maximum_summary_tokens: request.maximum_summary_tokens,
+            target_replacement_tokens: request.target_replacement_tokens,
         };
         let generated = cancellable(
             cancellation_token,
@@ -245,7 +252,7 @@ impl ContextCompactionExecutor {
         )
         .await?;
         let draft = generated.draft;
-        validate_generated_draft(&request, &prefix, &draft)?;
+        validate_generated_draft(&request, &prefix, &continuity, &draft)?;
 
         let expected_summary_id = draft.id.clone();
         let committed = cancellable(
@@ -271,13 +278,13 @@ impl ContextCompactionExecutor {
                 if summary_id != expected_summary_id {
                     return Err(contract_error("宿主返回的摘要 ID 与已提交草稿不一致。"));
                 }
-                Ok(ContextCompactionExecution::Rebase {
+                Ok(ContextCompactionExecution::Applied {
                     baseline,
                     usage: generated.usage,
                 })
             }
             AgentContextCompactionCommitOutcome::Refresh(baseline) => {
-                Ok(ContextCompactionExecution::Rebase {
+                Ok(ContextCompactionExecution::Refreshed {
                     baseline,
                     usage: generated.usage,
                 })
@@ -311,7 +318,7 @@ fn prepare_request_from_plan(
         covered_through: prefix.covered_through.clone(),
         visible_trace_item_count,
         source_input_tokens: step.source_input_tokens,
-        maximum_summary_tokens: step.maximum_summary_tokens,
+        target_replacement_tokens: step.target_replacement_tokens,
     })
 }
 
@@ -337,8 +344,20 @@ fn validate_prepared_prefix(
 fn validate_generated_draft(
     request: &AgentContextCompactionPrepareRequest,
     prefix: &ContextCompactionPrefix,
+    expected_continuity: &crate::ContextContinuitySnapshot,
     draft: &ContextCompactionSummaryDraft,
 ) -> AgentResult<()> {
+    if draft.replacement_input_tokens >= draft.source_input_tokens {
+        return Err(AgentError::structured(
+            "context_compaction_replacement_invalid",
+            "上下文压缩替换内容没有实际缩小上下文。",
+            serde_json::json!({
+                "replacementInputTokens": draft.replacement_input_tokens,
+                "sourceInputTokens": draft.source_input_tokens,
+                "targetReplacementTokens": request.target_replacement_tokens,
+            }),
+        ));
+    }
     draft.validate()?;
     if draft.source_revision != prefix.source_revision
         || draft.source_input_tokens != request.source_input_tokens
@@ -347,13 +366,16 @@ fn validate_generated_draft(
             "摘要生成结果没有绑定当前 durable 前缀及其计量。",
         ));
     }
-    if draft.summary_input_tokens > request.maximum_summary_tokens {
+    if draft.continuity != *expected_continuity
+        || draft.continuity.covered_through != prefix.covered_through
+    {
         return Err(AgentError::structured(
-            "context_compaction_summary_too_large",
-            "上下文压缩摘要超过规划器允许的最大 token 预算。",
+            "context_compaction_replacement_invalid",
+            "上下文压缩生成器返回的连续性骨架与后端确定性骨架不一致。",
             serde_json::json!({
-                "summaryInputTokens": draft.summary_input_tokens,
-                "maximumSummaryTokens": request.maximum_summary_tokens,
+                "replacementInputTokens": draft.replacement_input_tokens,
+                "sourceInputTokens": draft.source_input_tokens,
+                "targetReplacementTokens": request.target_replacement_tokens,
             }),
         ));
     }
@@ -398,15 +420,14 @@ mod tests {
             persistent_revision: 1,
             request_input_tokens: 9_000,
             available_input_tokens: Some(10_000),
-            soft_trigger_input_tokens: Some(9_500),
+            soft_trigger_input_tokens: Some(9_000),
             target_input_tokens: Some(7_500),
             durable_capacity_tokens: Some(9_000),
-            durable_trigger_input_tokens: Some(8_550),
+            durable_trigger_input_tokens: Some(8_100),
             durable_target_input_tokens: Some(1_350),
             required_reclaimed_tokens: 7_000,
             required_durable_reclaimed_tokens: 7_000,
             planned_reclaimed_tokens: 744,
-            planned_durable_reclaimed_tokens: 744,
             projected_request_input_tokens: 8_256,
             projected_durable_input_tokens: 8_256,
             request_target_satisfied: false,
@@ -422,7 +443,7 @@ mod tests {
                 ranges: Vec::new(),
                 atomic_unit_count: 2,
                 source_input_tokens: 1_000,
-                maximum_summary_tokens: 256,
+                target_replacement_tokens: 256,
                 expected_reclaimed_tokens: 744,
                 contains_side_effects: false,
                 contains_errors: false,
@@ -570,14 +591,14 @@ mod tests {
 
         assert!(matches!(
             execution,
-            ContextCompactionExecution::Rebase { usage: None, .. }
+            ContextCompactionExecution::Refreshed { usage: None, .. }
         ));
         assert!(!generated.load(Ordering::SeqCst));
         assert!(!committed.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
-    async fn oversized_generated_summary_is_rejected_before_commit() {
+    async fn non_shrinking_generated_replacement_is_rejected_before_commit() {
         let committed = Arc::new(AtomicBool::new(false));
         let committed_for_callback = committed.clone();
         let services = AgentContextCompactionServices::new(
@@ -592,9 +613,12 @@ mod tests {
                         id: "summary-too-large".to_string(),
                         source_revision: request.prefix.source_revision.clone(),
                         content: "oversized summary".to_string(),
+                        continuity: request.continuity,
                         generation: crate::ContextCompactionGeneration::test(),
                         source_input_tokens: request.source_input_tokens,
-                        summary_input_tokens: request.maximum_summary_tokens + 1,
+                        summary_input_tokens: 10,
+                        continuity_input_tokens: 20,
+                        replacement_input_tokens: request.source_input_tokens,
                         created_at: 1,
                     },
                     usage: None,
@@ -618,7 +642,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error.code(), Some("context_compaction_summary_too_large"));
+        assert_eq!(error.code(), Some("context_compaction_replacement_invalid"));
         assert!(!committed.load(Ordering::SeqCst));
     }
 }

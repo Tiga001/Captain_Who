@@ -29,6 +29,11 @@ import { ChatMarkdown } from './ChatMarkdown'
 import { EditSummaryCard } from './EditSummaryCard'
 import { useImagePreview, useImagePreviewNotice } from './ImagePreview'
 import { AgentToolActivity } from './toolActivities/AgentToolActivity'
+import { ContextCompactionActivity } from './toolActivities/ContextCompactionActivity'
+import {
+  ConversationHistoryToolActivity,
+  type ConversationHistoryActivityItem
+} from './toolActivities/ConversationHistoryToolActivity'
 import {
   FileWriteToolActivityGroup,
   type FileWriteToolActivityGroupItem
@@ -114,6 +119,11 @@ type RenderableTimelineItem =
   | {
       id: string
       type: 'write_file_group'
+      callIds: string[]
+    }
+  | {
+      id: string
+      type: 'conversation_history_group'
       callIds: string[]
     }
 
@@ -296,6 +306,10 @@ function isBottomTimelineItemSpecificPendingStatus(
     return !getToolResult(run, item.callId)
   }
 
+  if (item.type === 'context_compaction') {
+    return item.status === 'running'
+  }
+
   return false
 }
 
@@ -336,6 +350,28 @@ function groupTimelineItems(
 
     const call = run.toolCalls.find((candidate) => candidate.id === item.callId)
     if (!call) return [...items, item]
+
+    if (call.tool === 'conversation_history') {
+      const previousItem = items[items.length - 1]
+      if (previousItem?.type === 'conversation_history_group') {
+        return [
+          ...items.slice(0, -1),
+          {
+            ...previousItem,
+            callIds: [...previousItem.callIds, item.callId]
+          }
+        ]
+      }
+
+      return [
+        ...items,
+        {
+          id: `conversation-history-group-${item.callId}`,
+          type: 'conversation_history_group',
+          callIds: [item.callId]
+        }
+      ]
+    }
 
     if (call.tool === 'web_search' || call.tool === 'web_fetch') {
       const kind = call.tool === 'web_fetch' ? 'fetch' : 'search'
@@ -655,6 +691,26 @@ function getApplyPatchGroupItems(
   }, [])
 }
 
+function getConversationHistoryGroupItems(
+  run: ChatAgentRunView,
+  callIds: string[]
+): ConversationHistoryActivityItem[] {
+  return callIds.reduce<ConversationHistoryActivityItem[]>((items, callId) => {
+    const call = run.toolCalls.find((candidate) => candidate.id === callId)
+    if (!call) return items
+    const result = getToolResult(run, call.id)
+
+    return [
+      ...items,
+      {
+        call,
+        result,
+        settledStatus: getSettledToolStatus(run, result)
+      }
+    ]
+  }, [])
+}
+
 function shouldShowAssistantActions(message: ChatMessage) {
   if (message.role !== 'assistant' || message.status !== 'sent') return false
   if (!getAssistantFinalContent(message).trim()) return false
@@ -880,6 +936,16 @@ function AgentTimelineItemView({
     return <FileWriteToolActivityGroup items={items} />
   }
 
+  if (item.type === 'conversation_history_group') {
+    const items = getConversationHistoryGroupItems(run, item.callIds)
+    if (items.length === 0) return null
+    return <ConversationHistoryToolActivity items={items} />
+  }
+
+  if (item.type === 'context_compaction') {
+    return <ContextCompactionActivity status={item.status} />
+  }
+
   if (item.type === 'message') {
     if (!item.content.trim()) return null
     return <ChatMarkdown className="chat-agent-text" content={item.content} />
@@ -957,13 +1023,6 @@ function AgentRunView({
   const headerState = useMemo(() => {
     const hasFirstResponse = Boolean(run?.firstResponseAt)
     const hasVisibleToolStatus = Boolean(run && hasCollapsibleTimelineContent(run, timeline))
-
-    if (run?.contextCompactionStartedAt && !isRunSettled(run)) {
-      return {
-        isThinking: true,
-        label: t('agent.compactingContext')
-      }
-    }
 
     if (run && !hasFirstResponse && !hasVisibleToolStatus && !isRunSettled(run)) {
       return {

@@ -1,5 +1,6 @@
 import type {
   AgentDiffProposal,
+  AgentContextCompactionEventOutcome,
   AgentFileDraftSnapshot,
   AgentFileWritePreview,
   AgentInputAttachment,
@@ -69,6 +70,12 @@ export interface ChatReadActivity {
 export type ChatAgentTimelineItem =
   | { id: string; type: 'message'; content: string; streamId?: string }
   | { id: string; type: 'tool_call'; callId: string }
+  | {
+      id: string
+      type: 'context_compaction'
+      operationId: string
+      status: 'running' | AgentContextCompactionEventOutcome
+    }
   | { id: string; type: 'error'; message: string }
 
 export interface ChatAgentRunView {
@@ -78,7 +85,6 @@ export interface ChatAgentRunView {
   firstResponseAt?: number
   lastResponseAt?: number
   completedAt?: number
-  contextCompactionStartedAt?: number
   toolDefinitions: AgentToolDefinition[]
   todo?: AgentTodoState
   toolCalls: AgentToolCall[]

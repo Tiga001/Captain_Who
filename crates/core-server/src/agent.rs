@@ -3137,10 +3137,11 @@ mod tests {
     };
     use mycopilot_core::{
         AgentCommandRequest, AgentCommandRiskLevel, AgentPermissions, AgentUsageSummaryRange,
-        AgentWorkspaceContext, ContextCompactionGeneration, ContextCompactionSummary,
-        ContextCompactionSummaryDraft, ContextJournalCursor, ConversationTraceToolResultStatus,
-        ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
-        CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        AgentWorkspaceContext, ContextCompactionGeneration, ContextCompactionPrefix,
+        ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
+        ContextJournalCursor, ConversationTraceToolResultStatus, ConversationTurnTraceItem,
+        ConversationTurnTraceTerminalStatus, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+        CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -3188,6 +3189,28 @@ mod tests {
                     truncated: false,
                 },
             ],
+        }
+    }
+
+    fn test_compaction_draft(
+        prefix: &ContextCompactionPrefix,
+        id: &str,
+        content: &str,
+        source_input_tokens: u64,
+        created_at: i64,
+    ) -> ContextCompactionSummaryDraft {
+        assert!(source_input_tokens > 20);
+        ContextCompactionSummaryDraft {
+            id: id.to_string(),
+            source_revision: prefix.source_revision.clone(),
+            content: content.to_string(),
+            continuity: mycopilot_core::ContextContinuitySnapshot::from_prefix(prefix).unwrap(),
+            generation: ContextCompactionGeneration::test(),
+            source_input_tokens,
+            summary_input_tokens: 10,
+            continuity_input_tokens: 10,
+            replacement_input_tokens: 20,
+            created_at,
         }
     }
 
@@ -3290,10 +3313,6 @@ mod tests {
         Arc::new(|request, cancellation| {
             Box::pin(async move {
                 cancellation.check()?;
-                let summary_input_tokens = request
-                    .maximum_summary_tokens
-                    .min(request.source_input_tokens)
-                    .min(32);
                 Ok(AgentContextCompactionGenerationOutput {
                     draft: ContextCompactionSummaryDraft {
                         id: format!(
@@ -3302,9 +3321,12 @@ mod tests {
                         ),
                         source_revision: request.prefix.source_revision.clone(),
                         content: "Test summary of the completed historical turn.".to_string(),
+                        continuity: request.continuity,
                         generation: ContextCompactionGeneration::test(),
                         source_input_tokens: request.source_input_tokens,
-                        summary_input_tokens,
+                        summary_input_tokens: 10,
+                        continuity_input_tokens: 10,
+                        replacement_input_tokens: 20,
                         created_at: now_ms(),
                     },
                     usage: None,
@@ -3483,15 +3505,13 @@ mod tests {
         storage
             .commit_context_compaction_prefix(
                 &prefix,
-                ContextCompactionSummaryDraft {
-                    id: "summary-active".to_string(),
-                    source_revision: prefix.source_revision.clone(),
-                    content: "The old request was completed.".to_string(),
-                    generation: ContextCompactionGeneration::test(),
-                    source_input_tokens: 100,
-                    summary_input_tokens: 10,
-                    created_at: 3,
-                },
+                test_compaction_draft(
+                    &prefix,
+                    "summary-active",
+                    "The old request was completed.",
+                    100,
+                    3,
+                ),
             )
             .unwrap();
 
@@ -3660,17 +3680,47 @@ mod tests {
             archived_at: None,
             unread_at: None,
         };
+        let summary_prefix = ContextCompactionPrefix {
+            conversation_id: conversation.id.clone(),
+            source_revision: "revision-1".to_string(),
+            covered_through: ContextJournalCursor::message("assistant-old"),
+            previous_summary: None,
+            source_items: vec![
+                ContextCompactionSourceItem::Message {
+                    cursor: ContextJournalCursor::message("user-old"),
+                    role: "user".to_string(),
+                    content: "old request".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    terminal_status: None,
+                    terminal_error: None,
+                },
+                ContextCompactionSourceItem::Message {
+                    cursor: ContextJournalCursor::message("assistant-old"),
+                    role: "assistant".to_string(),
+                    content: "old answer".to_string(),
+                    created_at: 2,
+                    status: Some("sent".to_string()),
+                    terminal_status: None,
+                    terminal_error: None,
+                },
+            ],
+        };
         let summary = ContextCompactionSummary {
             schema_version: CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
             id: "summary-1".to_string(),
             conversation_id: conversation.id.clone(),
-            source_revision: "revision-1".to_string(),
+            source_revision: summary_prefix.source_revision.clone(),
             previous_summary_id: None,
-            covered_through: ContextJournalCursor::message("assistant-old"),
+            covered_through: summary_prefix.covered_through.clone(),
             content: "old turn summary".to_string(),
+            continuity: mycopilot_core::ContextContinuitySnapshot::from_prefix(&summary_prefix)
+                .unwrap(),
             generation: ContextCompactionGeneration::test(),
             source_input_tokens: 100,
             summary_input_tokens: 10,
+            continuity_input_tokens: 10,
+            replacement_input_tokens: 20,
             created_at: 4,
         };
 
@@ -3793,15 +3843,13 @@ mod tests {
         storage
             .commit_context_compaction_prefix(
                 &prefix,
-                ContextCompactionSummaryDraft {
-                    id: "summary-capacity".to_string(),
-                    source_revision: prefix.source_revision.clone(),
-                    content: "The prior request was completed.".to_string(),
-                    generation: ContextCompactionGeneration::test(),
-                    source_input_tokens: before.durable_input_tokens,
-                    summary_input_tokens: 16,
-                    created_at: 3,
-                },
+                test_compaction_draft(
+                    &prefix,
+                    "summary-capacity",
+                    "The prior request was completed.",
+                    before.durable_input_tokens,
+                    3,
+                ),
             )
             .unwrap();
         service.invalidate_conversation_context_state("conversation-capacity-summary");
@@ -3933,7 +3981,7 @@ mod tests {
             covered_through: ContextJournalCursor::message("assistant-old"),
             visible_trace_item_count: 0,
             source_input_tokens: 5_000,
-            maximum_summary_tokens: 256,
+            target_replacement_tokens: 750,
         };
         let prefix = match services
             .prepare(prepare_request.clone(), cancellation.clone())
@@ -3949,8 +3997,10 @@ mod tests {
             .generate(
                 AgentContextCompactionGenerationRequest {
                     prefix: prefix.clone(),
+                    continuity: mycopilot_core::ContextContinuitySnapshot::from_prefix(&prefix)
+                        .unwrap(),
                     source_input_tokens: prepare_request.source_input_tokens,
-                    maximum_summary_tokens: prepare_request.maximum_summary_tokens,
+                    target_replacement_tokens: prepare_request.target_replacement_tokens,
                 },
                 cancellation.clone(),
             )

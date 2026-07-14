@@ -22,10 +22,10 @@ use crate::llm::{
 use crate::prompts::build_system_prompt;
 use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
-    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentError, AgentEvent,
-    AgentExtensionSnapshot, AgentPatchPermission, AgentPromptPreferences, AgentProposedAction,
-    AgentResult, AgentRunContext, AgentRunStatus, AgentToolCall, AgentToolDefinition,
-    AgentToolResult,
+    AgentContextCompactionEventOutcome, AgentContextWindowPhase, AgentContextWindowSnapshot,
+    AgentError, AgentEvent, AgentExtensionSnapshot, AgentPatchPermission, AgentPromptPreferences,
+    AgentProposedAction, AgentResult, AgentRunContext, AgentRunStatus, AgentToolCall,
+    AgentToolDefinition, AgentToolResult,
 };
 use crate::revision::content_revision;
 use crate::storage::service::StorageService;
@@ -588,9 +588,15 @@ impl AgentRuntime {
                                         trace_assistant_message_id.as_deref(),
                                         visible_trace_item_count,
                                     ) {
+                                        let operation_id = format!(
+                                            "{run_id}-context-compaction-{}-{}",
+                                            model_request_index + 1,
+                                            compaction_attempts + 1
+                                        );
                                         event_stream.emit_transient(
                                             AgentEvent::ContextCompactionStarted {
                                                 run_id: run_id.clone(),
+                                                operation_id: operation_id.clone(),
                                             },
                                         );
                                         let execution = executor
@@ -603,13 +609,34 @@ impl AgentRuntime {
                                                 &cancellation_token,
                                             )
                                             .await;
+                                        let outcome = match &execution {
+                                            Ok(ContextCompactionExecution::Applied { .. }) => {
+                                                AgentContextCompactionEventOutcome::Applied
+                                            }
+                                            Ok(ContextCompactionExecution::Refreshed {
+                                                ..
+                                            })
+                                            | Ok(ContextCompactionExecution::NotApplicable) => {
+                                                AgentContextCompactionEventOutcome::Skipped
+                                            }
+                                            Err(error) if error.is_cancelled() => {
+                                                AgentContextCompactionEventOutcome::Cancelled
+                                            }
+                                            Err(_) => AgentContextCompactionEventOutcome::Failed,
+                                        };
                                         event_stream.emit_transient(
                                             AgentEvent::ContextCompactionFinished {
                                                 run_id: run_id.clone(),
+                                                operation_id,
+                                                outcome,
                                             },
                                         );
                                         match execution {
-                                            Ok(ContextCompactionExecution::Rebase {
+                                            Ok(ContextCompactionExecution::Applied {
+                                                baseline,
+                                                usage: compaction_usage,
+                                            })
+                                            | Ok(ContextCompactionExecution::Refreshed {
                                                 baseline,
                                                 usage: compaction_usage,
                                             }) => {
@@ -1526,9 +1553,15 @@ fn prepare_runtime_capabilities(
 ) -> AgentResult<PreparedRuntimeCapabilities> {
     let runtime_extensions = RuntimeExtensions::for_run(run_id, extension_snapshots)?;
     let mut tool_registry = ToolRegistry::defaults_with_search(input.search_config.as_ref());
+    let context = input.context.as_ref();
+    if context
+        .and_then(|context| context.conversation_id.as_deref())
+        .is_some_and(|conversation_id| !conversation_id.trim().is_empty())
+    {
+        tool_registry.register_conversation_history();
+    }
     runtime_extensions.register_tools(&mut tool_registry)?;
 
-    let context = input.context.as_ref();
     let command_permission = context
         .map(|context| context.permissions.command)
         .unwrap_or(AgentCommandPermission::RequireApproval);

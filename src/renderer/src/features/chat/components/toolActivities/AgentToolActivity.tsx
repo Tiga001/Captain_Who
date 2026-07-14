@@ -4,6 +4,7 @@ import type { ChatReadActivity, ChatWebSearchActivity } from '../../chatTypes'
 import { isReadActivityTool } from '../../agentReadActivities'
 import { AttachmentListToolActivity } from './AttachmentListToolActivity'
 import { ApplyPatchToolActivity } from './ApplyPatchToolActivity'
+import { ConversationHistoryToolActivity } from './ConversationHistoryToolActivity'
 import { GenericToolActivity } from './GenericToolActivity'
 import { GitDiffToolActivity } from './GitDiffToolActivity'
 import { ReadToolActivity } from './ReadToolActivity'
@@ -134,6 +135,14 @@ export function AgentToolActivity({
         previousResult={previousTodoResult}
         result={result}
         settledStatus={settledStatus}
+      />
+    )
+  }
+
+  if (call.tool === 'conversation_history') {
+    return (
+      <ConversationHistoryToolActivity
+        items={[{ call, result, settledStatus: cancelled ? 'cancelled' : settledStatus }]}
       />
     )
   }

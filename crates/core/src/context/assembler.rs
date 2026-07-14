@@ -49,7 +49,7 @@ impl ContextAssembler {
         if let Some(summary) = input.compaction_summary {
             summary.validate()?;
             items.push(ContextItem::new(
-                LlmMessage::text(LlmMessageRole::Assistant, summary.render_for_context()),
+                LlmMessage::text(LlmMessageRole::Assistant, summary.render_for_context()?),
                 ContextMetadata::new(
                     ContextSource::ConversationSummary,
                     ContextScope::Conversation,
@@ -182,17 +182,36 @@ mod tests {
     use serde_json::json;
 
     fn compaction_summary() -> ContextCompactionSummary {
+        let covered_through = ContextJournalCursor::message("assistant-old");
+        let prefix = crate::ContextCompactionPrefix {
+            conversation_id: "conversation-1".to_string(),
+            source_revision: "source-revision-1".to_string(),
+            covered_through: covered_through.clone(),
+            previous_summary: None,
+            source_items: vec![crate::ContextCompactionSourceItem::Message {
+                cursor: covered_through.clone(),
+                role: "assistant".to_string(),
+                content: "The user requested an old task and the agent completed it.".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            }],
+        };
         ContextCompactionSummary {
             schema_version: crate::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
             id: "summary-1".to_string(),
             conversation_id: "conversation-1".to_string(),
             source_revision: "source-revision-1".to_string(),
             previous_summary_id: None,
-            covered_through: ContextJournalCursor::message("assistant-old"),
+            covered_through,
             content: "The user requested an old task and the agent completed it.".to_string(),
+            continuity: crate::ContextContinuitySnapshot::from_prefix(&prefix).unwrap(),
             generation: crate::ContextCompactionGeneration::test(),
             source_input_tokens: 100,
             summary_input_tokens: 20,
+            continuity_input_tokens: 30,
+            replacement_input_tokens: 50,
             created_at: 1,
         }
     }
@@ -456,6 +475,13 @@ mod tests {
         assert_eq!(messages[0].role, LlmMessageRole::System);
         assert_eq!(messages[1].role, LlmMessageRole::Assistant);
         assert!(messages[1].content.contains("old task"));
+        assert!(messages[1].content.contains("semantic summary is lossy"));
+        assert!(messages[1]
+            .content
+            .contains("follow this block are newer and authoritative"));
+        assert!(messages[1]
+            .content
+            .contains("BEGIN_UNTRUSTED_CONTINUITY_RECORDS_JSON"));
         assert_eq!(messages[2].content, "continue from the summary");
         assert_eq!(
             frame.manifest().entries[1].sources,
