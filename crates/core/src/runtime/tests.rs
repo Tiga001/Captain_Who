@@ -119,7 +119,7 @@ fn read_image_tool_result_is_redacted_but_creates_visual_message() {
     let event_result = redact_tool_result_for_event(&result);
     assert_eq!(
         event_result.result.as_ref().unwrap()["image"]["dataBase64"],
-        "[redacted]"
+        "[binary/base64 omitted]"
     );
 
     let image_message = llm_image_message_from_tool_result(&result).unwrap();
@@ -142,7 +142,7 @@ fn file_write_tail_is_available_to_llm_but_not_persisted_in_events() {
         error: None,
     };
 
-    let llm_result = redact_tool_result_for_llm(&result);
+    let llm_result = canonical_tool_result_for_context(&result);
     let event_result = redact_tool_result_for_event(&result);
 
     assert_eq!(
@@ -378,7 +378,10 @@ fn runtime_shared_baseline_matches_full_context_assembly() {
 async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_context() {
     use crate::context::{ContextCompactionGeneration, ContextCompactionSummary};
     use crate::protocol::AgentApiStyle;
-    use crate::{AgentUsage, ContextCompactionPrefix, ContextCompactionSummaryDraft};
+    use crate::{
+        AgentUsage, ContextCompactionPrefix, ContextCompactionSourceItem,
+        ContextCompactionSummaryDraft, ContextJournalCursor,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -496,8 +499,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         conversation_id: "conversation-1".to_string(),
         source_revision: "source-runtime".to_string(),
         previous_summary_id: None,
-        covered_through_message_id: "assistant-old".to_string(),
-        covered_message_ids: vec!["user-old".to_string(), "assistant-old".to_string()],
+        covered_through: ContextJournalCursor::message("assistant-old"),
         content: "COMPACTED_HISTORY_MARKER: the old task was completed.".to_string(),
         generation: ContextCompactionGeneration::test(),
         source_input_tokens: 40_000,
@@ -521,36 +523,35 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         move |request, _| {
             prepare_counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(
-                request.newly_covered_message_ids,
-                vec!["user-old".to_string(), "assistant-old".to_string()]
+                request.covered_through,
+                ContextJournalCursor::message("assistant-old")
             );
+            assert_eq!(request.visible_trace_item_count, 0);
             async move {
                 Ok(AgentContextCompactionPrepareOutcome::Ready(Arc::new(
                     ContextCompactionPrefix {
                         conversation_id: "conversation-1".to_string(),
                         source_revision: "source-runtime".to_string(),
-                        covered_through_message_id: "assistant-old".to_string(),
-                        covered_message_ids: vec![
-                            "user-old".to_string(),
-                            "assistant-old".to_string(),
-                        ],
+                        covered_through: ContextJournalCursor::message("assistant-old"),
                         previous_summary: None,
-                        source_messages: vec![
-                            crate::ContextCompactionSourceMessage {
-                                message_id: "user-old".to_string(),
+                        source_items: vec![
+                            ContextCompactionSourceItem::Message {
+                                cursor: ContextJournalCursor::message("user-old"),
                                 role: "user".to_string(),
                                 content: "old request".to_string(),
                                 created_at: 1,
                                 status: Some("sent".to_string()),
-                                conversation_turn_trace: None,
+                                terminal_status: None,
+                                terminal_error: None,
                             },
-                            crate::ContextCompactionSourceMessage {
-                                message_id: "assistant-old".to_string(),
+                            ContextCompactionSourceItem::Message {
+                                cursor: ContextJournalCursor::message("assistant-old"),
                                 role: "assistant".to_string(),
                                 content: "old answer".to_string(),
                                 created_at: 2,
                                 status: Some("sent".to_string()),
-                                conversation_turn_trace: None,
+                                terminal_status: None,
+                                terminal_error: None,
                             },
                         ],
                     },
@@ -587,6 +588,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
             let baseline = compacted_baseline.clone();
             commit_counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(request.draft.id, "summary-runtime");
+            assert_eq!(request.visible_trace_item_count, 0);
             async move {
                 Ok(AgentContextCompactionCommitOutcome::Applied {
                     summary_id: "summary-runtime".to_string(),

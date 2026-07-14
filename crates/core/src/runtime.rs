@@ -14,7 +14,7 @@ use crate::context::{
     ContextCompactionPlanner, ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata,
     ContextRetention, ContextScope, ContextSource,
 };
-use crate::conversation_trace::ConversationTraceRecorder;
+use crate::conversation_trace::{canonical_tool_result_for_context, ConversationTraceRecorder};
 use crate::llm::{
     complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessage,
     LlmMessageRole, LlmStreamEvent,
@@ -36,7 +36,8 @@ use crate::{
 };
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
-    create_run_checkpoint, restore_run_checkpoint, RestoredRunCheckpoint, ToolCallBatch,
+    create_run_checkpoint, restore_run_checkpoint, RestoredRunCheckpoint, RunCheckpointState,
+    ToolCallBatch,
 };
 use context_compaction::{ContextCompactionExecution, ContextCompactionExecutor};
 use extensions::{ModelRequestContext, RuntimeEffect, RuntimeExtensionEvent, RuntimeExtensions};
@@ -52,8 +53,8 @@ use tool_flow::{
     execute_host_action_on_blocking_thread, execute_tool_on_blocking_thread,
     extract_reason_from_args, failed_tool_call_result, file_draft_from_tool_result,
     generate_run_id, llm_image_message_from_tool_result, redact_tool_call_for_event,
-    redact_tool_result_for_event, redact_tool_result_for_llm, sanitize_max_tokens,
-    sanitize_temperature, state_event, tool_calls_from_response,
+    redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
+    tool_calls_from_response,
 };
 use tool_input_stream::ToolInputStreamObservers;
 
@@ -97,6 +98,7 @@ struct PreparedLlmRequest {
     next_model_request_index: usize,
     tool_batch: ToolCallBatch,
     conversation_trace: ConversationTraceRecorder,
+    visible_trace_item_count: usize,
 }
 
 struct PreparedRuntimeCapabilities {
@@ -441,6 +443,7 @@ impl AgentRuntime {
             mut next_model_request_index,
             mut tool_batch,
             conversation_trace,
+            mut visible_trace_item_count,
         } = build_llm_request(
             input,
             &tool_definitions,
@@ -457,7 +460,8 @@ impl AgentRuntime {
             )
         })?;
         let conversation_trace = Arc::new(Mutex::new(conversation_trace));
-        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+        let mut pending_trace_baseline =
+            publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
         let tool_context = ToolExecutionContext::from_run_context(context.as_ref())
             .with_cancellation(cancellation_token.clone())
             .with_runtime_services(run_id.clone(), storage);
@@ -563,7 +567,11 @@ impl AgentRuntime {
                                 .expect(
                                     "configured capacity detector must have a compaction planner",
                                 )
-                                .plan(&compaction_query, &request_context.planning_items()?);
+                                .plan(
+                                    &compaction_query,
+                                    &request_context.planning_items()?,
+                                    model_request_index == 0,
+                                );
                             emit_context_budget_if_enabled(
                                 &run_id,
                                 model_request_index + 1,
@@ -578,6 +586,7 @@ impl AgentRuntime {
                                         &run_id,
                                         trace_conversation_id.as_deref(),
                                         trace_assistant_message_id.as_deref(),
+                                        visible_trace_item_count,
                                     ) {
                                         event_stream.emit_transient(
                                             AgentEvent::ContextCompactionStarted {
@@ -590,6 +599,7 @@ impl AgentRuntime {
                                                 &run_id,
                                                 trace_conversation_id.as_deref(),
                                                 trace_assistant_message_id.as_deref(),
+                                                visible_trace_item_count,
                                                 &cancellation_token,
                                             )
                                             .await;
@@ -790,18 +800,35 @@ impl AgentRuntime {
                     merge_total_usage(&mut usage, llm_response.usage);
                     finish_reason = llm_response.finish_reason;
 
+                    // Every persisted trace item present in this successful request has now been
+                    // observed by the main model and may join the compactable durable baseline.
+                    if let Some(baseline) = pending_trace_baseline.take() {
+                        active_context = baseline.promote_committed_trace(active_context);
+                        visible_trace_item_count = conversation_trace
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .committed_item_count();
+                        if let Some(detector) = &context_capacity_detector {
+                            detector.prepare_frame(&mut active_context);
+                        }
+                    }
+
                     let tool_requests = tool_calls_from_response(
                         llm_response.tool_calls,
                         &llm_response.content,
                         &run_id,
                         model_request_index,
                     );
-                    if !tool_requests.is_empty() && llm_request.stream && !user_text_blocked {
+                    if !tool_requests.is_empty()
+                        && !user_text_blocked
+                        && !llm_response.content.trim().is_empty()
+                    {
                         conversation_trace
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())
                             .record_narration(&llm_response.content);
-                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+                        pending_trace_baseline =
+                            publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     }
                     if let Some(stream_id) = committed_message_stream_id.take() {
                         event_stream.emit(AgentEvent::MessageStreamCommitted {
@@ -920,7 +947,8 @@ impl AgentRuntime {
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .record_tool_call(&call);
-                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+                    pending_trace_baseline =
+                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     event_stream.emit(AgentEvent::ToolCall {
                         run_id: run_id.clone(),
                         call: redact_tool_call_for_event(&call),
@@ -943,7 +971,7 @@ impl AgentRuntime {
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
                                     .enrich_tool_call(&action);
-                                publish_trace_snapshot(
+                                pending_trace_baseline = publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                 )?;
@@ -951,21 +979,22 @@ impl AgentRuntime {
                             }
                             Err(error) => {
                                 let result = failed_tool_call_result(&call, error);
+                                let llm_result = canonical_tool_result_for_context(&result);
                                 conversation_trace
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
-                                    .record_tool_result(&call, &result);
-                                publish_trace_snapshot(
+                                    .record_tool_result(&call, &llm_result);
+                                pending_trace_baseline = publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                 )?;
                                 event_stream.emit(AgentEvent::ToolResult {
                                     run_id: run_id.clone(),
-                                    result: result.clone(),
+                                    result: redact_tool_result_for_event(&result),
                                 });
                                 active_context.push(ContextItem::tool_result(
                                     call.id.clone(),
-                                    build_tool_observation_message(&result),
+                                    build_tool_observation_message(&llm_result),
                                     true,
                                     ContextMetadata::new(
                                         ContextSource::ToolResult,
@@ -999,12 +1028,15 @@ impl AgentRuntime {
                                 .unwrap_or_else(|error| error.into_inner());
                             create_run_checkpoint(
                                 &run_id,
-                                &active_context,
-                                next_model_request_index,
-                                &tool_batch,
-                                runtime_extensions.snapshots()?,
-                                &call.id,
-                                &trace,
+                                RunCheckpointState {
+                                    context: &active_context,
+                                    next_model_request_index,
+                                    tool_batch: &tool_batch,
+                                    extension_snapshots: runtime_extensions.snapshots()?,
+                                    model_visible_trace_item_count: visible_trace_item_count,
+                                    pending_tool_call_id: &call.id,
+                                    conversation_trace: &trace,
+                                },
                             )?
                         };
                         event_stream.emit(AgentEvent::ApprovalRequired {
@@ -1051,7 +1083,7 @@ impl AgentRuntime {
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
                                     .enrich_tool_call(&action);
-                                publish_trace_snapshot(
+                                pending_trace_baseline = publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                 )?;
@@ -1096,11 +1128,13 @@ impl AgentRuntime {
                         }
                         Err(error) => return Err(error),
                     };
+                    let llm_result = canonical_tool_result_for_context(&result);
                     conversation_trace
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
-                        .record_tool_result(&call, &result);
-                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+                        .record_tool_result(&call, &llm_result);
+                    pending_trace_baseline =
+                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     if cancellation_token.is_cancelled()
                         || result.error.as_deref() == Some("agent run 已取消。")
                     {
@@ -1114,7 +1148,6 @@ impl AgentRuntime {
                         ));
                     }
                     let event_result = redact_tool_result_for_event(&result);
-                    let llm_result = redact_tool_result_for_llm(&result);
                     event_stream.emit(AgentEvent::ToolResult {
                         run_id: run_id.clone(),
                         result: event_result.clone(),
@@ -1597,45 +1630,52 @@ fn build_llm_request(
     )?;
     let shared_context_baseline = shared_context_baseline
         .filter(|baseline| baseline.matches_configuration(&configuration_revision));
-    let (context, next_model_request_index, tool_batch, conversation_trace) =
-        match restored_checkpoint {
-            Some(restored) => {
-                let context = match shared_context_baseline {
-                    Some(baseline) => baseline.rebase_restored_frame(restored.context),
-                    None => restored.context,
-                };
-                (
-                    context,
-                    restored.next_model_request_index,
-                    restored.tool_batch,
-                    restored.conversation_trace,
-                )
-            }
-            None => {
-                let attachment_context = build_attachment_context(&input.attachments)?;
-                let mut context = match shared_context_baseline {
-                    Some(baseline) => baseline.into_frame(),
-                    None => assemble_initial_context(
-                        input.context_compaction_summary,
-                        input.messages,
-                        AttachmentContext {
-                            text: String::new(),
-                            images: Vec::new(),
-                        },
-                        input.context.as_ref(),
-                        input.prompt_preferences.as_ref(),
-                        tool_definitions,
-                    )?,
-                };
-                append_attachment_context(&mut context, attachment_context);
-                (
-                    context,
-                    0,
-                    ToolCallBatch::default(),
-                    ConversationTraceRecorder::default(),
-                )
-            }
-        };
+    let (
+        context,
+        next_model_request_index,
+        tool_batch,
+        conversation_trace,
+        visible_trace_item_count,
+    ) = match restored_checkpoint {
+        Some(restored) => {
+            let context = match shared_context_baseline {
+                Some(baseline) => baseline.rebase_restored_frame(restored.context),
+                None => restored.context,
+            };
+            (
+                context,
+                restored.next_model_request_index,
+                restored.tool_batch,
+                restored.conversation_trace,
+                restored.visible_trace_item_count,
+            )
+        }
+        None => {
+            let attachment_context = build_attachment_context(&input.attachments)?;
+            let mut context = match shared_context_baseline {
+                Some(baseline) => baseline.into_frame(),
+                None => assemble_initial_context(
+                    input.context_compaction_summary,
+                    input.messages,
+                    AttachmentContext {
+                        text: String::new(),
+                        images: Vec::new(),
+                    },
+                    input.context.as_ref(),
+                    input.prompt_preferences.as_ref(),
+                    tool_definitions,
+                )?,
+            };
+            append_attachment_context(&mut context, attachment_context);
+            (
+                context,
+                0,
+                ToolCallBatch::default(),
+                ConversationTraceRecorder::default(),
+                0,
+            )
+        }
+    };
 
     Ok(PreparedLlmRequest {
         template,
@@ -1643,6 +1683,7 @@ fn build_llm_request(
         next_model_request_index,
         tool_batch,
         conversation_trace,
+        visible_trace_item_count,
     })
 }
 

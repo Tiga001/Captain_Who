@@ -66,6 +66,8 @@ pub struct AgentRunCheckpoint {
     pub next_conversation_trace_sequence: u64,
     #[serde(default)]
     pub conversation_trace_truncated: bool,
+    /// Number of leading trace items already included in a successful main-model request.
+    pub model_visible_trace_item_count: usize,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]

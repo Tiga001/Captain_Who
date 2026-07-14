@@ -5,9 +5,11 @@
 //! belong to the same model response but have not started yet. On resume, the approved/rejected
 //! result closes the pending exchange before queued calls continue.
 
-use super::tool_flow::{build_tool_observation_message, redact_tool_result_for_llm};
+use super::tool_flow::build_tool_observation_message;
 use crate::context::{ContextFrame, ContextGroup};
-use crate::conversation_trace::ConversationTraceRecorder;
+use crate::conversation_trace::{
+    canonical_tool_result_for_context, ConversationTraceRecorder, ConversationTraceSnapshot,
+};
 use crate::llm::LlmToolCall;
 use crate::protocol::{
     AgentContextCheckpointToolCall, AgentError, AgentExtensionSnapshot,
@@ -15,7 +17,7 @@ use crate::protocol::{
 };
 use std::collections::{BTreeSet, VecDeque};
 
-const RUN_CHECKPOINT_VERSION: u32 = 1;
+const RUN_CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub(super) struct QueuedToolCall {
@@ -91,20 +93,45 @@ pub(super) struct RestoredRunCheckpoint {
     pub(super) tool_batch: ToolCallBatch,
     pub(super) extension_snapshots: Vec<AgentExtensionSnapshot>,
     pub(super) conversation_trace: ConversationTraceRecorder,
+    pub(super) visible_trace_item_count: usize,
+}
+
+pub(super) struct RunCheckpointState<'a> {
+    pub(super) context: &'a ContextFrame,
+    pub(super) next_model_request_index: usize,
+    pub(super) tool_batch: &'a ToolCallBatch,
+    pub(super) extension_snapshots: Vec<AgentExtensionSnapshot>,
+    pub(super) model_visible_trace_item_count: usize,
+    pub(super) pending_tool_call_id: &'a str,
+    pub(super) conversation_trace: &'a ConversationTraceRecorder,
 }
 
 pub(super) fn create_run_checkpoint(
     run_id: &str,
-    context: &ContextFrame,
-    next_model_request_index: usize,
-    tool_batch: &ToolCallBatch,
-    extension_snapshots: Vec<AgentExtensionSnapshot>,
-    pending_tool_call_id: &str,
-    conversation_trace: &ConversationTraceRecorder,
+    state: RunCheckpointState<'_>,
 ) -> AgentResult<AgentRunCheckpoint> {
+    let RunCheckpointState {
+        context,
+        next_model_request_index,
+        tool_batch,
+        extension_snapshots,
+        model_visible_trace_item_count,
+        pending_tool_call_id,
+        conversation_trace,
+    } = state;
     context.validate_pending_tool_call(pending_tool_call_id)?;
     let (conversation_trace_items, next_conversation_trace_sequence, conversation_trace_truncated) =
         conversation_trace.checkpoint();
+    let committed_item_count = conversation_trace.committed_item_count();
+    if model_visible_trace_item_count > committed_item_count
+        || model_visible_trace_item_count > 0
+            && !conversation_trace_items[model_visible_trace_item_count - 1]
+                .is_safe_compaction_boundary()
+    {
+        return Err(AgentError::new(
+            "运行检查点的模型可见 trace 游标不是完整日志边界。",
+        ));
+    }
     Ok(AgentRunCheckpoint {
         version: RUN_CHECKPOINT_VERSION,
         run_id: run_id.to_string(),
@@ -121,6 +148,7 @@ pub(super) fn create_run_checkpoint(
         conversation_trace_items,
         next_conversation_trace_sequence,
         conversation_trace_truncated,
+        model_visible_trace_item_count,
     })
 }
 
@@ -153,6 +181,24 @@ pub(super) fn restore_run_checkpoint(
         ));
     }
 
+    let committed_trace_item_count = ConversationTraceSnapshot {
+        items: checkpoint.conversation_trace_items.clone(),
+        next_sequence: checkpoint.next_conversation_trace_sequence,
+        truncated: checkpoint.conversation_trace_truncated,
+    }
+    .committed_prefix()
+    .items
+    .len();
+    if checkpoint.model_visible_trace_item_count > committed_trace_item_count
+        || checkpoint.model_visible_trace_item_count > 0
+            && !checkpoint.conversation_trace_items[checkpoint.model_visible_trace_item_count - 1]
+                .is_safe_compaction_boundary()
+    {
+        return Err(AgentError::new(
+            "无法恢复运行检查点：模型可见 trace 游标不是完整日志边界。",
+        ));
+    }
+    let visible_trace_item_count = checkpoint.model_visible_trace_item_count;
     let mut conversation_trace = ConversationTraceRecorder::from_checkpoint(
         checkpoint.conversation_trace_items,
         checkpoint.next_conversation_trace_sequence,
@@ -164,14 +210,14 @@ pub(super) fn restore_run_checkpoint(
         name: continuation.call.tool.clone(),
         args: continuation.call.args.clone(),
     };
-    let llm_result = redact_tool_result_for_llm(&continuation.result);
+    let llm_result = canonical_tool_result_for_context(&continuation.result);
     context.append_tool_continuation(
         &continuation_call,
         build_tool_observation_message(&llm_result),
         !continuation.result.ok,
     )?;
     conversation_trace.record_tool_call(&continuation.call);
-    conversation_trace.record_tool_result(&continuation.call, &continuation.result);
+    conversation_trace.record_tool_result(&continuation.call, &llm_result);
 
     let queue = restore_queued_tool_calls(
         checkpoint.queued_tool_calls,
@@ -187,6 +233,7 @@ pub(super) fn restore_run_checkpoint(
         },
         extension_snapshots: checkpoint.extension_snapshots,
         conversation_trace,
+        visible_trace_item_count,
     })
 }
 
@@ -299,9 +346,19 @@ mod tests {
             true,
         );
         let trace = ConversationTraceRecorder::default();
-        let checkpoint =
-            create_run_checkpoint("run-1", &context, 1, &batch, Vec::new(), "write-1", &trace)
-                .unwrap();
+        let checkpoint = create_run_checkpoint(
+            "run-1",
+            RunCheckpointState {
+                context: &context,
+                next_model_request_index: 1,
+                tool_batch: &batch,
+                extension_snapshots: Vec::new(),
+                model_visible_trace_item_count: 0,
+                pending_tool_call_id: "write-1",
+                conversation_trace: &trace,
+            },
+        )
+        .unwrap();
         let continuation = AgentToolContinuation {
             call: AgentToolCall {
                 id: "write-1".to_string(),
@@ -404,14 +461,19 @@ mod tests {
         detector.prepare_frame(&mut compacted);
         let compacted_baseline = compacted.share_measured_persistent_baseline().unwrap();
         let active = active.replace_persistent_baseline(compacted_baseline);
+        let tool_batch = ToolCallBatch::default();
+        let conversation_trace = ConversationTraceRecorder::default();
         let checkpoint = create_run_checkpoint(
             "run-compacted",
-            &active,
-            2,
-            &ToolCallBatch::default(),
-            Vec::new(),
-            &pending.id,
-            &ConversationTraceRecorder::default(),
+            RunCheckpointState {
+                context: &active,
+                next_model_request_index: 2,
+                tool_batch: &tool_batch,
+                extension_snapshots: Vec::new(),
+                model_visible_trace_item_count: 0,
+                pending_tool_call_id: &pending.id,
+                conversation_trace: &conversation_trace,
+            },
         )
         .unwrap();
         let continuation = AgentToolContinuation {
@@ -445,5 +507,116 @@ mod tests {
         assert!(combined_content.contains("current request"));
         assert!(combined_content.contains("applied"));
         assert!(!combined_content.contains("RAW_HISTORY_MUST_NOT_RETURN"));
+    }
+
+    #[test]
+    fn approval_resume_preserves_the_actual_model_visible_trace_cursor() {
+        let completed_call = AgentToolCall {
+            id: "read-before-approval".to_string(),
+            tool: "read_file".to_string(),
+            args: json!({ "path": "notes.txt" }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let completed_result = AgentToolResult {
+            call_id: completed_call.id.clone(),
+            tool: completed_call.tool.clone(),
+            ok: true,
+            result: Some(json!({ "content": "unseen result" })),
+            error: None,
+        };
+        let pending_call = AgentToolCall {
+            id: "write-needs-approval".to_string(),
+            tool: "write_file".to_string(),
+            args: json!({ "phase": "finish" }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let first_group = ContextGroup::tool_exchange("first-exchange");
+        let pending_group = ContextGroup::tool_exchange("pending-exchange");
+        let context = ContextFrame::new(vec![
+            ContextItem::text(
+                LlmMessageRole::System,
+                "rules",
+                ContextSource::BackendSystemPrompt,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::assistant(
+                "",
+                vec![LlmToolCall {
+                    id: completed_call.id.clone(),
+                    name: completed_call.tool.clone(),
+                    args: completed_call.args.clone(),
+                }],
+                ContextMetadata::new(
+                    ContextSource::ModelResponse,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                )
+                .with_group(first_group.clone()),
+            ),
+            ContextItem::tool_result(
+                completed_call.id.clone(),
+                build_tool_observation_message(&completed_result),
+                false,
+                ContextMetadata::new(
+                    ContextSource::ToolResult,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                )
+                .with_group(first_group),
+            ),
+            ContextItem::assistant(
+                "",
+                vec![LlmToolCall {
+                    id: pending_call.id.clone(),
+                    name: pending_call.tool.clone(),
+                    args: pending_call.args.clone(),
+                }],
+                ContextMetadata::new(
+                    ContextSource::ModelResponse,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                )
+                .with_group(pending_group),
+            ),
+        ]);
+        let mut trace = ConversationTraceRecorder::default();
+        trace.record_tool_call(&completed_call);
+        trace.record_tool_result(&completed_call, &completed_result);
+        trace.record_tool_call(&pending_call);
+        let tool_batch = ToolCallBatch::default();
+        let checkpoint = create_run_checkpoint(
+            "run-multi-tool",
+            RunCheckpointState {
+                context: &context,
+                next_model_request_index: 1,
+                tool_batch: &tool_batch,
+                extension_snapshots: Vec::new(),
+                model_visible_trace_item_count: 0,
+                pending_tool_call_id: &pending_call.id,
+                conversation_trace: &trace,
+            },
+        )
+        .unwrap();
+        let continuation = AgentToolContinuation {
+            call: AgentToolCall {
+                approval_status: AgentApprovalStatus::Approved,
+                ..pending_call
+            },
+            result: AgentToolResult {
+                call_id: "write-needs-approval".to_string(),
+                tool: "write_file".to_string(),
+                ok: true,
+                result: Some(json!({ "status": "applied" })),
+                error: None,
+            },
+        };
+
+        let restored = restore_run_checkpoint(checkpoint, "run-multi-tool", &continuation).unwrap();
+
+        assert_eq!(restored.visible_trace_item_count, 0);
+        assert_eq!(restored.conversation_trace.committed_item_count(), 4);
     }
 }

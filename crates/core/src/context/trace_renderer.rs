@@ -3,11 +3,11 @@ use super::{
     ContextSource,
 };
 use crate::conversation_trace::{
-    ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
-    ConversationTurnTraceTerminalStatus,
+    render_tool_observation, ConversationTraceToolResultStatus, ConversationTurnTrace,
+    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
 };
 use crate::llm::{LlmMessageRole, LlmToolCall};
-use crate::protocol::{AgentError, AgentResult};
+use crate::protocol::{AgentError, AgentResult, AgentToolResult};
 use serde_json::json;
 
 pub(crate) struct RenderedConversationTrace {
@@ -26,16 +26,18 @@ impl ConversationTraceRenderer {
         let mut activity_items = Vec::with_capacity(trace.items.len());
         let mut pending_exchange: Option<PendingExchange> = None;
 
-        for item in &trace.items {
+        for (index, item) in trace.items.iter().enumerate() {
             match item {
-                ConversationTurnTraceItem::AssistantNarration { content, .. } => {
+                ConversationTurnTraceItem::AssistantNarration {
+                    sequence, content, ..
+                } => {
                     if !content.trim().is_empty() {
                         activity_items.push(ContextItem::new(
                             crate::llm::LlmMessage::text(
                                 LlmMessageRole::Assistant,
                                 content.clone(),
                             ),
-                            trace_metadata(&trace.assistant_message_id),
+                            trace_item_metadata(&trace.assistant_message_id, *sequence),
                         ));
                     }
                 }
@@ -45,6 +47,18 @@ impl ConversationTraceRenderer {
                     operation,
                     ..
                 } => {
+                    let result_sequence = trace
+                        .items
+                        .get(index + 1)
+                        .and_then(|item| match item {
+                            ConversationTurnTraceItem::ToolResult { sequence, .. } => {
+                                Some(*sequence)
+                            }
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            AgentError::new("ConversationTurnTrace 工具调用后缺少紧邻的工具结果。")
+                        })?;
                     let wire_call_id = wire_call_id(&trace.run_id, *sequence);
                     let group =
                         ContextGroup::tool_exchange(wire_group_id(&trace.run_id, *sequence));
@@ -55,7 +69,8 @@ impl ConversationTraceRenderer {
                             name: tool.clone(),
                             args: operation.clone(),
                         }],
-                        trace_metadata(&trace.assistant_message_id).with_group(group.clone()),
+                        trace_item_metadata(&trace.assistant_message_id, result_sequence)
+                            .with_group(group.clone()),
                     ));
                     pending_exchange = Some(PendingExchange {
                         wire_call_id,
@@ -67,25 +82,20 @@ impl ConversationTraceRenderer {
                     status,
                     success,
                     observation,
-                    approval_status,
                     error,
-                    truncated,
                     ..
                 } => {
                     let exchange = pending_exchange.take().ok_or_else(|| {
                         AgentError::new("ConversationTurnTrace 工具结果缺少对应的历史工具调用。")
                     })?;
-                    let content = json!({
-                        "historicalActivity": true,
-                        "tool": tool,
-                        "status": status,
-                        "success": success,
-                        "observation": observation,
-                        "approvalStatus": approval_status,
-                        "error": error,
-                        "truncated": truncated,
-                    })
-                    .to_string();
+                    let result = AgentToolResult {
+                        call_id: exchange.wire_call_id.clone(),
+                        tool: tool.clone(),
+                        ok: *success,
+                        result: success.then(|| observation.clone()),
+                        error: error.clone(),
+                    };
+                    let content = render_tool_observation(&result);
                     activity_items.push(ContextItem::tool_result(
                         exchange.wire_call_id,
                         content,
@@ -95,7 +105,8 @@ impl ConversationTraceRenderer {
                                 | ConversationTraceToolResultStatus::Conflict
                                 | ConversationTraceToolResultStatus::Cancelled
                         ),
-                        trace_metadata(&trace.assistant_message_id).with_group(exchange.group),
+                        trace_item_metadata(&trace.assistant_message_id, item.sequence())
+                            .with_group(exchange.group),
                     ));
                 }
             }
@@ -147,6 +158,13 @@ fn trace_metadata(assistant_message_id: &str) -> ContextMetadata {
         ContextRetention::Retained,
     )
     .with_origin(ContextOrigin::conversation_message(assistant_message_id))
+}
+
+fn trace_item_metadata(assistant_message_id: &str, sequence: u64) -> ContextMetadata {
+    trace_metadata(assistant_message_id).with_origin(ContextOrigin::conversation_trace_item(
+        assistant_message_id,
+        sequence,
+    ))
 }
 
 fn wire_call_id(run_id: &str, sequence: u64) -> String {
@@ -258,7 +276,8 @@ mod tests {
             Some(wire_call_id.as_str())
         );
         assert_eq!(messages[1].tool_calls[0].args["path"], "src/lib.rs");
-        assert!(messages[2].content.contains("\"historicalActivity\":true"));
+        assert!(messages[2].content.contains("\"ok\": true"));
+        assert!(messages[2].content.contains("\"endLine\": 20"));
         assert!(messages[3]
             .content
             .contains("historical_agent_activity_terminal"));
@@ -299,7 +318,7 @@ mod tests {
         let messages = frame.to_messages();
         assert!(messages[2].is_error);
         assert!(messages[2].content.contains("permission denied"));
-        assert!(messages[2].content.contains("\"status\":\"failed\""));
+        assert!(messages[2].content.contains("\"ok\": false"));
         assert!(messages[3]
             .content
             .contains("\"terminalStatus\":\"failed\""));

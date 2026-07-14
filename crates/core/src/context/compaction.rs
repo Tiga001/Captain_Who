@@ -9,6 +9,7 @@ use super::budget::{ContextBudgetStatus, ContextCompactionQuery};
 use super::frame::{
     ContextFramePlanningItem, ContextOrigin, ContextOriginKind, ContextSource, ContextUsageClass,
 };
+use super::ContextJournalCursor;
 use crate::llm::LlmMessageRole;
 use crate::protocol::{AgentToolDefinition, AgentToolSafety};
 use serde::Serialize;
@@ -26,10 +27,6 @@ pub(crate) struct ContextCompactionPolicy {
     maximum_reclaim_floor_tokens: u64,
     minimum_summary_tokens: u64,
     maximum_summary_tokens: u64,
-    recent_durable_units: usize,
-    recent_durable_tokens: u64,
-    recent_run_units: usize,
-    recent_run_tokens: u64,
 }
 
 impl Default for ContextCompactionPolicy {
@@ -45,10 +42,6 @@ impl Default for ContextCompactionPolicy {
             maximum_reclaim_floor_tokens: 4_096,
             minimum_summary_tokens: 256,
             maximum_summary_tokens: 12_000,
-            recent_durable_units: 4,
-            recent_durable_tokens: 4_096,
-            recent_run_units: 2,
-            recent_run_tokens: 2_048,
         }
     }
 }
@@ -63,13 +56,6 @@ pub(crate) enum ContextCompactionPlanStatus {
     InvalidConfiguration,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ContextCompactionScope {
-    RunOverlay,
-    DurableHistory,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ContextCompactionProtectionReason {
@@ -80,6 +66,7 @@ pub(crate) enum ContextCompactionProtectionReason {
     RuntimeGuard,
     VisualInput,
     MixedAtomicGroup,
+    UncommittedRun,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -92,7 +79,6 @@ pub(crate) struct ContextCompactionItemRange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ContextCompactionStep {
-    pub(crate) scope: ContextCompactionScope,
     pub(crate) ranges: Vec<ContextCompactionItemRange>,
     pub(crate) atomic_unit_count: usize,
     pub(crate) source_input_tokens: u64,
@@ -108,8 +94,7 @@ pub(crate) struct ContextCompactionStep {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ContextCompactionDurablePrefix {
     pub(crate) previous_summary_id: Option<String>,
-    pub(crate) covered_message_ids: Vec<String>,
-    pub(crate) covered_through_message_id: String,
+    pub(crate) covered_through: ContextJournalCursor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -165,21 +150,11 @@ impl ContextCompactionPlanner {
         }
     }
 
-    #[cfg(test)]
-    fn with_policy(policy: ContextCompactionPolicy, tools: &[AgentToolDefinition]) -> Self {
-        Self {
-            policy,
-            tool_safety: tools
-                .iter()
-                .map(|tool| (tool.name.clone(), tool.safety))
-                .collect(),
-        }
-    }
-
     pub(crate) fn plan(
         &self,
         query: &ContextCompactionQuery,
         items: &[ContextFramePlanningItem],
+        protect_current_user: bool,
     ) -> ContextCompactionPlan {
         let units = build_atomic_units(items, &self.tool_safety);
         let last_durable_user_index = items
@@ -189,55 +164,28 @@ impl ContextCompactionPlanner {
                 item.usage_class == ContextUsageClass::Durable && item.role == LlmMessageRole::User
             })
             .map(|item| item.index);
-        let recent_durable = recent_unit_starts(
-            &units,
-            ContextUsageClass::Durable,
-            self.policy.recent_durable_units,
-            self.policy.recent_durable_tokens,
-        );
-        let recent_run = recent_unit_starts(
-            &units,
-            ContextUsageClass::RunTransient,
-            self.policy.recent_run_units,
-            self.policy.recent_run_tokens,
-        );
-
         let mut protected_reasons = BTreeMap::<String, u64>::new();
         let mut protected_unit_count = 0_usize;
         let mut candidates = Vec::new();
         for unit in units.iter().cloned() {
-            if let Some(reason) = absolute_protection_reason(&unit, last_durable_user_index) {
+            if let Some(reason) =
+                absolute_protection_reason(&unit, last_durable_user_index, protect_current_user)
+            {
                 protected_unit_count = protected_unit_count.saturating_add(1);
                 merge_reason_tokens(&mut protected_reasons, reason, unit.tokens);
                 continue;
             }
-            let scope = match unit.usage_class {
-                ContextUsageClass::RunTransient => ContextCompactionScope::RunOverlay,
-                ContextUsageClass::Durable => ContextCompactionScope::DurableHistory,
+            match unit.usage_class {
+                ContextUsageClass::Durable => {}
                 ContextUsageClass::Fixed | ContextUsageClass::RequestOnly => {
                     unreachable!("fixed and request-only units are protected above")
                 }
-            };
-            let is_recent = match scope {
-                ContextCompactionScope::RunOverlay => recent_run.contains(&unit.start_index),
-                ContextCompactionScope::DurableHistory => {
-                    recent_durable.contains(&unit.start_index)
+                ContextUsageClass::RunTransient => {
+                    unreachable!("run-transient units are protected above")
                 }
-            };
-            candidates.push(CompactionCandidate {
-                unit,
-                scope,
-                priority: candidate_priority(scope, is_recent),
-            });
+            }
+            candidates.push(CompactionCandidate { unit });
         }
-        candidates.sort_by_key(|candidate| {
-            (
-                candidate.priority
-                    + u8::from(candidate.unit.contains_side_effects) * 2
-                    + u8::from(candidate.unit.contains_errors),
-                candidate.unit.start_index,
-            )
-        });
 
         let compactable_input_tokens = candidates
             .iter()
@@ -337,60 +285,23 @@ impl ContextCompactionPlanner {
         let required_reclaimed_tokens =
             required_request_reclaimed_tokens.max(required_durable_reclaimed_tokens);
 
-        let mut selected = Vec::<CompactionCandidate>::new();
-        let mut selected_starts = BTreeSet::new();
-        if required_durable_reclaimed_tokens > 0 {
-            for candidate in candidates
-                .iter()
-                .filter(|candidate| candidate.scope == ContextCompactionScope::DurableHistory)
-            {
-                selected_starts.insert(candidate.unit.start_index);
-                selected.push(candidate.clone());
-                if maximum_reclaimable_tokens_for_scope(
-                    &selected,
-                    ContextCompactionScope::DurableHistory,
-                    &self.policy,
-                ) >= required_durable_reclaimed_tokens
-                {
-                    break;
-                }
-            }
-        }
-        let achievable_durable_reclaimed_tokens = maximum_reclaimable_tokens_for_scope(
-            &selected,
-            ContextCompactionScope::DurableHistory,
-            &self.policy,
-        );
-        let executable_durable_reclaim_goal =
-            required_durable_reclaimed_tokens.min(achievable_durable_reclaimed_tokens);
         let executable_reclaim_goal =
-            required_request_reclaimed_tokens.max(executable_durable_reclaim_goal);
+            required_request_reclaimed_tokens.max(required_durable_reclaimed_tokens);
+        let mut selected = Vec::<CompactionCandidate>::new();
         for candidate in &candidates {
             if maximum_reclaimable_tokens(&selected, &self.policy) >= executable_reclaim_goal {
                 break;
-            }
-            if !selected_starts.insert(candidate.unit.start_index) {
-                continue;
             }
             selected.push(candidate.clone());
         }
         normalize_stable_durable_prefix(&mut selected, &units, &candidates);
 
-        let steps = build_steps(
-            &selected,
-            executable_reclaim_goal,
-            executable_durable_reclaim_goal,
-            &self.policy,
-        );
+        let steps = build_steps(&selected, executable_reclaim_goal, &self.policy);
         let planned_reclaimed_tokens = steps
             .iter()
             .map(|step| step.expected_reclaimed_tokens)
             .sum::<u64>();
-        let planned_durable_reclaimed_tokens = steps
-            .iter()
-            .filter(|step| step.scope == ContextCompactionScope::DurableHistory)
-            .map(|step| step.expected_reclaimed_tokens)
-            .sum::<u64>();
+        let planned_durable_reclaimed_tokens = planned_reclaimed_tokens;
         let projected_request_input_tokens = query
             .request_input_tokens
             .saturating_sub(planned_reclaimed_tokens);
@@ -473,8 +384,6 @@ struct AtomicContextUnit {
 #[derive(Debug, Clone)]
 struct CompactionCandidate {
     unit: AtomicContextUnit,
-    scope: ContextCompactionScope,
-    priority: u8,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -565,6 +474,7 @@ fn build_atomic_units(
 fn absolute_protection_reason(
     unit: &AtomicContextUnit,
     last_durable_user_index: Option<usize>,
+    protect_current_user: bool,
 ) -> Option<ContextCompactionProtectionReason> {
     if unit.mixed_usage_classes {
         return Some(ContextCompactionProtectionReason::MixedAtomicGroup);
@@ -574,13 +484,18 @@ fn absolute_protection_reason(
         ContextUsageClass::RequestOnly => {
             return Some(ContextCompactionProtectionReason::RequestOnly)
         }
-        ContextUsageClass::Durable | ContextUsageClass::RunTransient => {}
+        ContextUsageClass::RunTransient => {
+            return Some(ContextCompactionProtectionReason::UncommittedRun)
+        }
+        ContextUsageClass::Durable => {}
     }
-    if last_durable_user_index.is_some_and(|index| {
-        unit.usage_class == ContextUsageClass::Durable
-            && unit.start_index <= index
-            && index < unit.end_index_exclusive
-    }) {
+    if protect_current_user
+        && last_durable_user_index.is_some_and(|index| {
+            unit.usage_class == ContextUsageClass::Durable
+                && unit.start_index <= index
+                && index < unit.end_index_exclusive
+        })
+    {
         return Some(ContextCompactionProtectionReason::CurrentUser);
     }
     if unit.sources.contains(&ContextSource::InputAttachment) {
@@ -595,57 +510,12 @@ fn absolute_protection_reason(
     None
 }
 
-fn recent_unit_starts(
-    units: &[AtomicContextUnit],
-    usage_class: ContextUsageClass,
-    minimum_units: usize,
-    minimum_tokens: u64,
-) -> BTreeSet<usize> {
-    let mut selected = BTreeSet::new();
-    let mut tokens = 0_u64;
-    for unit in units
-        .iter()
-        .rev()
-        .filter(|unit| unit.usage_class == usage_class)
-    {
-        if selected.len() >= minimum_units && tokens >= minimum_tokens {
-            break;
-        }
-        selected.insert(unit.start_index);
-        tokens = tokens.saturating_add(unit.tokens);
-    }
-    selected
-}
-
-fn candidate_priority(scope: ContextCompactionScope, is_recent: bool) -> u8 {
-    let scope_priority = match scope {
-        ContextCompactionScope::RunOverlay => 0,
-        ContextCompactionScope::DurableHistory => 1,
-    };
-    scope_priority + if is_recent { 8 } else { 0 }
-}
-
 fn maximum_reclaimable_tokens(
     selected: &[CompactionCandidate],
     policy: &ContextCompactionPolicy,
 ) -> u64 {
-    [
-        ContextCompactionScope::RunOverlay,
-        ContextCompactionScope::DurableHistory,
-    ]
-    .into_iter()
-    .map(|scope| maximum_reclaimable_tokens_for_scope(selected, scope, policy))
-    .sum()
-}
-
-fn maximum_reclaimable_tokens_for_scope(
-    selected: &[CompactionCandidate],
-    scope: ContextCompactionScope,
-    policy: &ContextCompactionPolicy,
-) -> u64 {
     let source_tokens = selected
         .iter()
-        .filter(|candidate| candidate.scope == scope)
         .map(|candidate| candidate.unit.tokens)
         .sum::<u64>();
     source_tokens.saturating_sub(minimum_summary_budget(source_tokens, policy))
@@ -654,106 +524,37 @@ fn maximum_reclaimable_tokens_for_scope(
 fn build_steps(
     selected: &[CompactionCandidate],
     required_reclaimed_tokens: u64,
-    required_durable_reclaimed_tokens: u64,
     policy: &ContextCompactionPolicy,
 ) -> Vec<ContextCompactionStep> {
-    let mut by_scope = BTreeMap::<ContextCompactionScope, Vec<&CompactionCandidate>>::new();
-    for candidate in selected {
-        by_scope.entry(candidate.scope).or_default().push(candidate);
+    if selected.is_empty() {
+        return Vec::new();
     }
-
-    let source_tokens = by_scope
+    let mut candidates = selected.iter().collect::<Vec<_>>();
+    candidates.sort_by_key(|candidate| candidate.unit.start_index);
+    let source_input_tokens = candidates
         .iter()
-        .map(|(scope, candidates)| {
-            (
-                *scope,
-                candidates
-                    .iter()
-                    .map(|candidate| candidate.unit.tokens)
-                    .sum::<u64>(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let maximum_summary_by_scope = source_tokens
-        .iter()
-        .map(|(scope, tokens)| {
-            let required_scope_reclaim = match scope {
-                ContextCompactionScope::RunOverlay => 0,
-                ContextCompactionScope::DurableHistory => required_durable_reclaimed_tokens,
-            };
-            (
-                *scope,
-                maximum_summary_budget(*tokens, policy)
-                    .min(tokens.saturating_sub(required_scope_reclaim)),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let total_source_tokens = source_tokens.values().copied().sum::<u64>();
-    let maximum_total_summary_tokens = total_source_tokens
-        .saturating_sub(required_reclaimed_tokens)
-        .min(maximum_summary_by_scope.values().copied().sum());
-    let mut summary_budgets = source_tokens
-        .iter()
-        .map(|(scope, tokens)| (*scope, minimum_summary_budget(*tokens, policy)))
-        .collect::<BTreeMap<_, _>>();
-    let minimum_total_summary_tokens = summary_budgets.values().copied().sum::<u64>();
-    let mut unallocated_summary_tokens =
-        maximum_total_summary_tokens.saturating_sub(minimum_total_summary_tokens);
-
-    // Preserve durable history with the spare summary budget first. Run-overlay material is
-    // usually available in a richer durable projection after the turn finishes.
-    for scope in [
-        ContextCompactionScope::DurableHistory,
-        ContextCompactionScope::RunOverlay,
-    ] {
-        let Some(source_tokens) = source_tokens.get(&scope).copied() else {
-            continue;
-        };
-        let budget = summary_budgets.entry(scope).or_default();
-        let additional_capacity = maximum_summary_by_scope
-            .get(&scope)
-            .copied()
-            .unwrap_or_else(|| maximum_summary_budget(source_tokens, policy))
-            .saturating_sub(*budget);
-        let additional = additional_capacity.min(unallocated_summary_tokens);
-        *budget = budget.saturating_add(additional);
-        unallocated_summary_tokens = unallocated_summary_tokens.saturating_sub(additional);
+        .map(|candidate| candidate.unit.tokens)
+        .sum::<u64>();
+    let maximum_summary_tokens = maximum_summary_budget(source_input_tokens, policy)
+        .min(source_input_tokens.saturating_sub(required_reclaimed_tokens));
+    let expected_reclaimed_tokens = source_input_tokens.saturating_sub(maximum_summary_tokens);
+    if expected_reclaimed_tokens == 0 {
+        return Vec::new();
     }
-
-    by_scope
-        .into_iter()
-        .filter_map(|(scope, mut candidates)| {
-            candidates.sort_by_key(|candidate| candidate.unit.start_index);
-            let source_input_tokens = candidates
-                .iter()
-                .map(|candidate| candidate.unit.tokens)
-                .sum::<u64>();
-            let maximum_summary_tokens = summary_budgets.get(&scope).copied().unwrap_or_default();
-            let expected_reclaimed_tokens =
-                source_input_tokens.saturating_sub(maximum_summary_tokens);
-            if expected_reclaimed_tokens == 0 {
-                return None;
-            }
-            let ranges = merge_candidate_ranges(&candidates);
-            Some(ContextCompactionStep {
-                scope,
-                ranges,
-                atomic_unit_count: candidates.len(),
-                source_input_tokens,
-                maximum_summary_tokens,
-                expected_reclaimed_tokens,
-                contains_side_effects: candidates
-                    .iter()
-                    .any(|candidate| candidate.unit.contains_side_effects),
-                contains_errors: candidates
-                    .iter()
-                    .any(|candidate| candidate.unit.contains_errors),
-                durable_prefix: (scope == ContextCompactionScope::DurableHistory)
-                    .then(|| durable_prefix_for_candidates(&candidates))
-                    .flatten(),
-            })
-        })
-        .collect()
+    vec![ContextCompactionStep {
+        ranges: merge_candidate_ranges(&candidates),
+        atomic_unit_count: candidates.len(),
+        source_input_tokens,
+        maximum_summary_tokens,
+        expected_reclaimed_tokens,
+        contains_side_effects: candidates
+            .iter()
+            .any(|candidate| candidate.unit.contains_side_effects),
+        contains_errors: candidates
+            .iter()
+            .any(|candidate| candidate.unit.contains_errors),
+        durable_prefix: durable_prefix_for_candidates(&candidates),
+    }]
 }
 
 fn normalize_stable_durable_prefix(
@@ -770,7 +571,6 @@ fn normalize_stable_durable_prefix(
     }
     let Some(furthest_selected_start) = selected
         .iter()
-        .filter(|candidate| candidate.scope == ContextCompactionScope::DurableHistory)
         .map(|candidate| candidate.unit.start_index)
         .max()
     else {
@@ -778,7 +578,6 @@ fn normalize_stable_durable_prefix(
     };
     let candidates_by_start = candidates
         .iter()
-        .filter(|candidate| candidate.scope == ContextCompactionScope::DurableHistory)
         .map(|candidate| (candidate.unit.start_index, candidate))
         .collect::<BTreeMap<_, _>>();
     let mut prefix = Vec::new();
@@ -798,8 +597,7 @@ fn normalize_stable_durable_prefix(
         }
     }
     prefix.truncate(last_valid_prefix_len);
-    selected.retain(|candidate| candidate.scope != ContextCompactionScope::DurableHistory);
-    selected.extend(prefix);
+    *selected = prefix;
 }
 
 fn durable_prefix_for_candidates(
@@ -818,8 +616,7 @@ fn durable_prefix_for_units<'a>(
     units: impl IntoIterator<Item = &'a AtomicContextUnit>,
 ) -> Option<ContextCompactionDurablePrefix> {
     let mut previous_summary_id = None;
-    let mut covered_message_ids = Vec::new();
-    let mut expect_user = true;
+    let mut covered_through = None;
     for (index, unit) in units.into_iter().enumerate() {
         let origin = unit.origin.as_ref()?;
         match origin.kind() {
@@ -837,30 +634,14 @@ fn durable_prefix_for_units<'a>(
                     return None;
                 }
             }
-            ContextOriginKind::ConversationMessage => {
-                let expected_role = if expect_user {
-                    LlmMessageRole::User
-                } else {
-                    LlmMessageRole::Assistant
-                };
-                if unit.first_role != expected_role || unit.last_role != expected_role {
-                    return None;
-                }
-                if covered_message_ids.last().map(String::as_str) != Some(origin.id()) {
-                    covered_message_ids.push(origin.id().to_string());
-                }
-                expect_user = !expect_user;
+            ContextOriginKind::ConversationMessage | ContextOriginKind::ConversationTraceItem => {
+                covered_through = origin.journal_cursor();
             }
         }
     }
-    if !expect_user {
-        return None;
-    }
-    let covered_through_message_id = covered_message_ids.last()?.clone();
     Some(ContextCompactionDurablePrefix {
         previous_summary_id,
-        covered_message_ids,
-        covered_through_message_id,
+        covered_through: covered_through?,
     })
 }
 
@@ -914,6 +695,7 @@ fn protection_reason_name(reason: ContextCompactionProtectionReason) -> String {
         ContextCompactionProtectionReason::RuntimeGuard => "runtime_guard",
         ContextCompactionProtectionReason::VisualInput => "visual_input",
         ContextCompactionProtectionReason::MixedAtomicGroup => "mixed_atomic_group",
+        ContextCompactionProtectionReason::UncommittedRun => "uncommitted_run",
     }
     .to_string()
 }
@@ -955,67 +737,32 @@ fn empty_plan(
 mod tests {
     use super::*;
     use crate::context::budget::{ContextTokenBreakdown, ContextTokenCategoryEstimate};
-    use crate::protocol::AgentToolApprovalMode;
-    use serde_json::json;
 
-    fn planning_item(
+    fn item(
         index: usize,
         usage_class: ContextUsageClass,
-        estimated_tokens: u64,
+        tokens: u64,
         role: LlmMessageRole,
         source: ContextSource,
+        origin: Option<ContextOrigin>,
     ) -> ContextFramePlanningItem {
         ContextFramePlanningItem {
             index,
             usage_class,
-            estimated_tokens,
+            estimated_tokens: tokens,
             role,
             sources: vec![source],
             group_id: None,
             tool_names: Vec::new(),
             image_count: 0,
             is_error: false,
-            origin: None,
-        }
-    }
-
-    fn tool_item(
-        mut item: ContextFramePlanningItem,
-        group_id: &str,
-        tool: Option<&str>,
-    ) -> ContextFramePlanningItem {
-        item.group_id = Some(group_id.to_string());
-        item.tool_names = tool.into_iter().map(ToString::to_string).collect();
-        item
-    }
-
-    fn origin_item(
-        mut item: ContextFramePlanningItem,
-        origin: ContextOrigin,
-    ) -> ContextFramePlanningItem {
-        item.origin = Some(origin);
-        item
-    }
-
-    fn tool(name: &str, safety: AgentToolSafety) -> AgentToolDefinition {
-        AgentToolDefinition {
-            name: name.to_string(),
-            description: name.to_string(),
-            input_schema: json!({ "type": "object" }),
-            safety,
-            requires_workspace: false,
-            requires_approval: safety != AgentToolSafety::ReadOnly,
-            approval_mode: if safety == AgentToolSafety::ReadOnly {
-                AgentToolApprovalMode::Never
-            } else {
-                AgentToolApprovalMode::Always
-            },
+            origin,
         }
     }
 
     fn query(
         status: ContextBudgetStatus,
-        available_input_tokens: Option<u64>,
+        available: Option<u64>,
         fixed: u64,
         durable: u64,
         run_transient: u64,
@@ -1025,19 +772,18 @@ mod tests {
             input_tokens,
             ..ContextTokenCategoryEstimate::default()
         };
-        let total_tokens = fixed
+        let total = fixed
             .saturating_add(durable)
             .saturating_add(run_transient)
             .saturating_add(request_only);
         ContextCompactionQuery {
             status,
-            available_input_tokens,
-            remaining_input_tokens: available_input_tokens.map(|available| {
-                i64::try_from(available).unwrap_or(i64::MAX)
-                    - i64::try_from(total_tokens).unwrap_or(i64::MAX)
+            available_input_tokens: available,
+            remaining_input_tokens: available.map(|limit| {
+                i64::try_from(limit).unwrap_or(i64::MAX) - i64::try_from(total).unwrap_or(i64::MAX)
             }),
-            request_input_tokens: total_tokens,
-            additive_input_tokens: total_tokens,
+            request_input_tokens: total,
+            additive_input_tokens: total,
             persistent_input_tokens: fixed.saturating_add(durable),
             context_revision: 7,
             persistent_revision: 5,
@@ -1046,7 +792,7 @@ mod tests {
                 durable: category(durable),
                 run_transient: category(run_transient),
                 request_only: category(request_only),
-                total: category(total_tokens),
+                total: category(total),
             },
         }
     }
@@ -1054,26 +800,29 @@ mod tests {
     #[test]
     fn stays_inert_below_the_soft_trigger() {
         let items = vec![
-            planning_item(
+            item(
                 0,
                 ContextUsageClass::Fixed,
                 100,
                 LlmMessageRole::System,
                 ContextSource::BackendSystemPrompt,
+                None,
             ),
-            planning_item(
+            item(
                 1,
                 ContextUsageClass::Durable,
                 300,
                 LlmMessageRole::Assistant,
                 ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-old")),
             ),
-            planning_item(
+            item(
                 2,
                 ContextUsageClass::Durable,
                 100,
                 LlmMessageRole::User,
-                ContextSource::ConversationHistory,
+                ContextSource::CurrentTurn,
+                Some(ContextOrigin::conversation_message("user-current")),
             ),
         ];
 
@@ -1087,545 +836,163 @@ mod tests {
                 0,
             ),
             &items,
+            true,
         );
 
         assert_eq!(plan.status, ContextCompactionPlanStatus::NotRequired);
-        assert_eq!(plan.soft_trigger_input_tokens, Some(750));
         assert!(plan.steps.is_empty());
     }
 
     #[test]
-    fn stable_durable_origins_produce_one_complete_message_prefix_boundary() {
+    fn emits_one_stable_log_cursor_for_the_selected_raw_prefix() {
         let items = vec![
-            planning_item(
+            item(
                 0,
                 ContextUsageClass::Fixed,
                 1_000,
                 LlmMessageRole::System,
                 ContextSource::BackendSystemPrompt,
+                None,
             ),
-            origin_item(
-                planning_item(
-                    1,
-                    ContextUsageClass::Durable,
-                    500,
-                    LlmMessageRole::Assistant,
-                    ContextSource::ConversationSummary,
-                ),
-                ContextOrigin::compaction_summary("summary-previous"),
+            item(
+                1,
+                ContextUsageClass::Durable,
+                3_000,
+                LlmMessageRole::User,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("user-old")),
             ),
-            origin_item(
-                planning_item(
-                    2,
-                    ContextUsageClass::Durable,
-                    1_500,
-                    LlmMessageRole::User,
-                    ContextSource::ConversationHistory,
-                ),
-                ContextOrigin::conversation_message("user-1"),
+            item(
+                2,
+                ContextUsageClass::Durable,
+                3_000,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-old")),
             ),
-            origin_item(
-                planning_item(
-                    3,
-                    ContextUsageClass::Durable,
-                    1_000,
-                    LlmMessageRole::Assistant,
-                    ContextSource::ConversationTrace,
-                ),
-                ContextOrigin::conversation_message("assistant-1"),
-            ),
-            origin_item(
-                planning_item(
-                    4,
-                    ContextUsageClass::Durable,
-                    2_000,
-                    LlmMessageRole::Assistant,
-                    ContextSource::ConversationTrace,
-                ),
-                ContextOrigin::conversation_message("assistant-1"),
-            ),
-            origin_item(
-                planning_item(
-                    5,
-                    ContextUsageClass::Durable,
-                    2_000,
-                    LlmMessageRole::Tool,
-                    ContextSource::ConversationTrace,
-                ),
-                ContextOrigin::conversation_message("assistant-1"),
-            ),
-            origin_item(
-                planning_item(
-                    6,
-                    ContextUsageClass::Durable,
-                    1_000,
-                    LlmMessageRole::Assistant,
-                    ContextSource::ConversationHistory,
-                ),
-                ContextOrigin::conversation_message("assistant-1"),
-            ),
-            origin_item(
-                planning_item(
-                    7,
-                    ContextUsageClass::Durable,
-                    500,
-                    LlmMessageRole::User,
-                    ContextSource::CurrentTurn,
-                ),
-                ContextOrigin::conversation_message("user-current"),
+            item(
+                3,
+                ContextUsageClass::Durable,
+                1_000,
+                LlmMessageRole::User,
+                ContextSource::CurrentTurn,
+                Some(ContextOrigin::conversation_message("user-current")),
             ),
         ];
 
         let plan = ContextCompactionPlanner::for_tools(&[]).plan(
             &query(
                 ContextBudgetStatus::WithinBudget,
-                Some(10_000),
+                Some(8_000),
                 1_000,
-                8_500,
+                7_000,
                 0,
                 0,
             ),
             &items,
+            true,
         );
 
-        let step = plan
-            .steps
-            .iter()
-            .find(|step| step.scope == ContextCompactionScope::DurableHistory)
-            .unwrap();
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+        assert_eq!(plan.steps.len(), 1);
         assert_eq!(
-            step.ranges,
-            vec![ContextCompactionItemRange {
-                start_index: 1,
-                end_index_exclusive: 7,
-            }]
-        );
-        assert_eq!(step.atomic_unit_count, 3);
-        assert_eq!(
-            step.durable_prefix,
-            Some(ContextCompactionDurablePrefix {
-                previous_summary_id: Some("summary-previous".to_string()),
-                covered_message_ids: vec!["user-1".to_string(), "assistant-1".to_string()],
-                covered_through_message_id: "assistant-1".to_string(),
-            })
+            plan.steps[0]
+                .durable_prefix
+                .as_ref()
+                .map(|prefix| &prefix.covered_through),
+            Some(&ContextJournalCursor::message("assistant-old"))
         );
     }
 
     #[test]
-    fn durable_selection_extends_past_a_large_user_message_to_close_the_turn() {
-        let mut items = vec![planning_item(
-            0,
-            ContextUsageClass::Fixed,
-            1_000,
-            LlmMessageRole::System,
-            ContextSource::BackendSystemPrompt,
-        )];
-        for (index, tokens, role, source, origin) in [
-            (
+    fn a_tool_call_and_result_are_selected_as_one_atomic_log_entry() {
+        let tool_origin = ContextOrigin::conversation_trace_item("assistant-current", 2);
+        let items = vec![
+            item(
+                0,
+                ContextUsageClass::Fixed,
+                100,
+                LlmMessageRole::System,
+                ContextSource::BackendSystemPrompt,
+                None,
+            ),
+            item(
                 1,
+                ContextUsageClass::Durable,
                 500,
                 LlmMessageRole::Assistant,
-                ContextSource::ConversationSummary,
-                ContextOrigin::compaction_summary("summary-previous"),
+                ContextSource::ConversationTrace,
+                Some(ContextOrigin::conversation_trace_item(
+                    "assistant-current",
+                    0,
+                )),
             ),
-            (
+            item(
                 2,
-                1_000,
-                LlmMessageRole::User,
-                ContextSource::ConversationHistory,
-                ContextOrigin::conversation_message("user-1"),
-            ),
-            (
-                3,
-                1_000,
+                ContextUsageClass::Durable,
+                2_500,
                 LlmMessageRole::Assistant,
-                ContextSource::ConversationHistory,
-                ContextOrigin::conversation_message("assistant-1"),
+                ContextSource::ConversationTrace,
+                Some(tool_origin.clone()),
             ),
-            (
+            item(
+                3,
+                ContextUsageClass::Durable,
+                2_500,
+                LlmMessageRole::Tool,
+                ContextSource::ConversationTrace,
+                Some(tool_origin),
+            ),
+            item(
                 4,
-                5_500,
-                LlmMessageRole::User,
-                ContextSource::ConversationHistory,
-                ContextOrigin::conversation_message("user-2"),
-            ),
-            (
-                5,
-                500,
-                LlmMessageRole::Assistant,
-                ContextSource::ConversationHistory,
-                ContextOrigin::conversation_message("assistant-2"),
-            ),
-            (
-                6,
+                ContextUsageClass::Durable,
                 500,
                 LlmMessageRole::User,
                 ContextSource::CurrentTurn,
-                ContextOrigin::conversation_message("user-current"),
+                Some(ContextOrigin::conversation_message("user-current")),
             ),
-        ] {
-            items.push(origin_item(
-                planning_item(index, ContextUsageClass::Durable, tokens, role, source),
-                origin,
-            ));
-        }
+        ];
 
         let plan = ContextCompactionPlanner::for_tools(&[]).plan(
             &query(
                 ContextBudgetStatus::WithinBudget,
-                Some(10_000),
-                1_000,
-                9_000,
+                Some(7_000),
+                100,
+                6_000,
                 0,
                 0,
             ),
             &items,
+            true,
         );
 
-        let step = plan
-            .steps
-            .iter()
-            .find(|step| step.scope == ContextCompactionScope::DurableHistory)
-            .unwrap();
+        let step = &plan.steps[0];
+        assert_eq!(step.atomic_unit_count, 2);
+        assert_eq!(step.ranges[0].start_index, 1);
+        assert_eq!(step.ranges[0].end_index_exclusive, 4);
         assert_eq!(
-            step.ranges,
-            vec![ContextCompactionItemRange {
-                start_index: 1,
-                end_index_exclusive: 6,
-            }]
-        );
-        assert_eq!(
-            step.durable_prefix,
-            Some(ContextCompactionDurablePrefix {
-                previous_summary_id: Some("summary-previous".to_string()),
-                covered_message_ids: vec![
-                    "user-1".to_string(),
-                    "assistant-1".to_string(),
-                    "user-2".to_string(),
-                    "assistant-2".to_string(),
-                ],
-                covered_through_message_id: "assistant-2".to_string(),
-            })
+            step.durable_prefix
+                .as_ref()
+                .map(|prefix| &prefix.covered_through),
+            Some(&ContextJournalCursor::trace_item("assistant-current", 2))
         );
     }
 
     #[test]
-    fn uses_run_growth_to_choose_a_dynamic_target() {
-        let planner = ContextCompactionPlanner::for_tools(&[]);
-        let quiet = planner.plan(
-            &query(
-                ContextBudgetStatus::WithinBudget,
-                Some(100_000),
-                10_000,
-                10_000,
-                0,
-                60_000,
-            ),
-            &[],
-        );
-        let growing = planner.plan(
-            &query(
-                ContextBudgetStatus::WithinBudget,
-                Some(100_000),
-                10_000,
-                10_000,
-                60_000,
-                0,
-            ),
-            &[],
-        );
-
-        assert_eq!(quiet.target_input_tokens, Some(75_000));
-        assert_eq!(growing.target_input_tokens, Some(70_000));
-        assert!(
-            growing.required_reclaimed_tokens > quiet.required_reclaimed_tokens,
-            "a rapidly growing run should reserve more room for its next tool result"
-        );
-    }
-
-    #[test]
-    fn durable_pressure_targets_fifteen_percent_of_net_capacity() {
-        let items = vec![
-            planning_item(
-                0,
-                ContextUsageClass::Fixed,
-                10_000,
-                LlmMessageRole::System,
-                ContextSource::BackendSystemPrompt,
-            ),
-            planning_item(
-                1,
-                ContextUsageClass::Durable,
-                69_000,
-                LlmMessageRole::Assistant,
-                ContextSource::ConversationHistory,
-            ),
-            planning_item(
-                2,
-                ContextUsageClass::Durable,
-                1_000,
-                LlmMessageRole::User,
-                ContextSource::CurrentTurn,
-            ),
-        ];
+    fn unseen_run_overlay_is_never_a_compaction_candidate() {
+        let items = vec![item(
+            0,
+            ContextUsageClass::RunTransient,
+            9_000,
+            LlmMessageRole::Tool,
+            ContextSource::ToolResult,
+            None,
+        )];
 
         let plan = ContextCompactionPlanner::for_tools(&[]).plan(
-            &query(
-                ContextBudgetStatus::WithinBudget,
-                Some(100_000),
-                10_000,
-                70_000,
-                0,
-                0,
-            ),
+            &query(ContextBudgetStatus::OverBudget, Some(8_000), 0, 0, 9_000, 0),
             &items,
-        );
-
-        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
-        assert_eq!(plan.durable_capacity_tokens, Some(90_000));
-        assert_eq!(plan.durable_trigger_input_tokens, Some(67_500));
-        assert_eq!(plan.durable_target_input_tokens, Some(13_500));
-        assert_eq!(plan.required_durable_reclaimed_tokens, 56_500);
-        assert!(plan.projected_durable_input_tokens <= 13_500);
-        assert!(plan.projected_durable_input_tokens >= 9_000);
-        assert_eq!(plan.protected.reasons["current_user"], 1_000);
-        assert!(plan.request_target_satisfied);
-        assert!(plan.durable_target_satisfied);
-        assert!(!plan.best_effort);
-    }
-
-    #[test]
-    fn unreachable_durable_target_still_produces_a_best_effort_plan() {
-        let items = vec![
-            planning_item(
-                0,
-                ContextUsageClass::Fixed,
-                1_000,
-                LlmMessageRole::System,
-                ContextSource::BackendSystemPrompt,
-            ),
-            planning_item(
-                1,
-                ContextUsageClass::Durable,
-                1_000,
-                LlmMessageRole::Assistant,
-                ContextSource::ConversationHistory,
-            ),
-            planning_item(
-                2,
-                ContextUsageClass::Durable,
-                8_000,
-                LlmMessageRole::User,
-                ContextSource::CurrentTurn,
-            ),
-        ];
-
-        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
-            &query(
-                ContextBudgetStatus::WithinBudget,
-                Some(10_000),
-                1_000,
-                9_000,
-                0,
-                0,
-            ),
-            &items,
-        );
-
-        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
-        assert_eq!(plan.durable_target_input_tokens, Some(1_350));
-        assert_eq!(plan.required_durable_reclaimed_tokens, 7_650);
-        assert_eq!(plan.planned_durable_reclaimed_tokens, 744);
-        assert_eq!(plan.projected_durable_input_tokens, 8_256);
-        assert!(!plan.durable_target_satisfied);
-        assert!(plan.best_effort);
-        assert_eq!(plan.steps.len(), 1);
-        assert_eq!(plan.protected.reasons["current_user"], 8_000);
-    }
-
-    #[test]
-    fn unreachable_durable_target_does_not_block_run_overlay_reclaim() {
-        let items = vec![
-            planning_item(
-                0,
-                ContextUsageClass::Fixed,
-                1_000,
-                LlmMessageRole::System,
-                ContextSource::BackendSystemPrompt,
-            ),
-            planning_item(
-                1,
-                ContextUsageClass::Durable,
-                1_000,
-                LlmMessageRole::Assistant,
-                ContextSource::ConversationHistory,
-            ),
-            planning_item(
-                2,
-                ContextUsageClass::Durable,
-                8_000,
-                LlmMessageRole::User,
-                ContextSource::CurrentTurn,
-            ),
-            planning_item(
-                3,
-                ContextUsageClass::RunTransient,
-                10_000,
-                LlmMessageRole::Assistant,
-                ContextSource::ModelResponse,
-            ),
-        ];
-
-        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
-            &query(
-                ContextBudgetStatus::OverBudget,
-                Some(10_000),
-                1_000,
-                9_000,
-                10_000,
-                0,
-            ),
-            &items,
-        );
-
-        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
-        assert!(plan.best_effort);
-        assert!(plan
-            .steps
-            .iter()
-            .any(|step| step.scope == ContextCompactionScope::DurableHistory));
-        assert!(plan
-            .steps
-            .iter()
-            .any(|step| step.scope == ContextCompactionScope::RunOverlay));
-    }
-
-    #[test]
-    fn selects_a_closed_read_tool_exchange_as_one_atomic_range() {
-        let tools = vec![
-            tool("read_file", AgentToolSafety::ReadOnly),
-            tool("write_file", AgentToolSafety::RequiresApproval),
-        ];
-        let items = vec![
-            planning_item(
-                0,
-                ContextUsageClass::Fixed,
-                500,
-                LlmMessageRole::System,
-                ContextSource::BackendSystemPrompt,
-            ),
-            planning_item(
-                1,
-                ContextUsageClass::Durable,
-                500,
-                LlmMessageRole::User,
-                ContextSource::ConversationHistory,
-            ),
-            tool_item(
-                planning_item(
-                    2,
-                    ContextUsageClass::RunTransient,
-                    1_000,
-                    LlmMessageRole::Assistant,
-                    ContextSource::ModelResponse,
-                ),
-                "read-group",
-                Some("read_file"),
-            ),
-            tool_item(
-                planning_item(
-                    3,
-                    ContextUsageClass::RunTransient,
-                    5_000,
-                    LlmMessageRole::Tool,
-                    ContextSource::ToolResult,
-                ),
-                "read-group",
-                None,
-            ),
-            tool_item(
-                planning_item(
-                    4,
-                    ContextUsageClass::RunTransient,
-                    1_000,
-                    LlmMessageRole::Assistant,
-                    ContextSource::ModelResponse,
-                ),
-                "write-group",
-                Some("write_file"),
-            ),
-            tool_item(
-                planning_item(
-                    5,
-                    ContextUsageClass::RunTransient,
-                    2_000,
-                    LlmMessageRole::Tool,
-                    ContextSource::ToolResult,
-                ),
-                "write-group",
-                None,
-            ),
-        ];
-
-        let plan = ContextCompactionPlanner::for_tools(&tools).plan(
-            &query(
-                ContextBudgetStatus::WithinBudget,
-                Some(10_000),
-                500,
-                500,
-                9_000,
-                0,
-            ),
-            &items,
-        );
-
-        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
-        assert_eq!(plan.steps.len(), 1);
-        assert_eq!(plan.steps[0].scope, ContextCompactionScope::RunOverlay);
-        assert_eq!(plan.steps[0].atomic_unit_count, 1);
-        assert_eq!(plan.steps[0].source_input_tokens, 6_000);
-        assert_eq!(plan.steps[0].maximum_summary_tokens, 2_000);
-        assert_eq!(plan.steps[0].expected_reclaimed_tokens, 4_000);
-        assert_eq!(plan.projected_request_input_tokens, 6_000);
-        assert_eq!(
-            plan.steps[0].ranges,
-            vec![ContextCompactionItemRange {
-                start_index: 2,
-                end_index_exclusive: 4,
-            }]
-        );
-        assert!(!plan.steps[0].contains_side_effects);
-    }
-
-    #[test]
-    fn reports_insufficient_context_when_everything_is_protected() {
-        let items = vec![
-            planning_item(
-                0,
-                ContextUsageClass::Fixed,
-                1_000,
-                LlmMessageRole::System,
-                ContextSource::BackendSystemPrompt,
-            ),
-            planning_item(
-                1,
-                ContextUsageClass::Durable,
-                9_000,
-                LlmMessageRole::User,
-                ContextSource::ConversationHistory,
-            ),
-        ];
-
-        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
-            &query(
-                ContextBudgetStatus::WithinBudget,
-                Some(10_000),
-                1_000,
-                9_000,
-                0,
-                0,
-            ),
-            &items,
+            false,
         );
 
         assert_eq!(
@@ -1633,78 +1000,128 @@ mod tests {
             ContextCompactionPlanStatus::InsufficientCompactableContext
         );
         assert_eq!(plan.compactable_input_tokens, 0);
-        assert_eq!(plan.protected.input_tokens, 10_000);
-        assert_eq!(plan.protected.reasons["current_user"], 9_000);
-        assert!(plan.steps.is_empty());
+        assert_eq!(plan.protected.reasons.get("uncommitted_run"), Some(&9_000));
     }
 
     #[test]
-    fn protects_attachments_and_request_only_context() {
-        let mut attachment = planning_item(
-            1,
-            ContextUsageClass::RunTransient,
-            3_000,
+    fn current_user_becomes_compactable_only_after_a_successful_model_request() {
+        let items = vec![item(
+            0,
+            ContextUsageClass::Durable,
+            9_000,
             LlmMessageRole::User,
-            ContextSource::InputAttachment,
+            ContextSource::CurrentTurn,
+            Some(ContextOrigin::conversation_message("user-current")),
+        )];
+        let pressure = query(ContextBudgetStatus::OverBudget, Some(8_000), 0, 9_000, 0, 0);
+        let planner = ContextCompactionPlanner::for_tools(&[]);
+
+        let before_first_request = planner.plan(&pressure, &items, true);
+        let after_first_request = planner.plan(&pressure, &items, false);
+
+        assert_eq!(
+            before_first_request.status,
+            ContextCompactionPlanStatus::InsufficientCompactableContext
         );
-        attachment.image_count = 1;
+        assert_eq!(
+            after_first_request.status,
+            ContextCompactionPlanStatus::Required
+        );
+        assert_eq!(
+            after_first_request.steps[0]
+                .durable_prefix
+                .as_ref()
+                .map(|prefix| &prefix.covered_through),
+            Some(&ContextJournalCursor::message("user-current"))
+        );
+    }
+
+    #[test]
+    fn an_unreachable_target_still_produces_a_best_effort_plan() {
         let items = vec![
-            planning_item(
+            item(
                 0,
                 ContextUsageClass::Fixed,
-                1_000,
+                8_500,
                 LlmMessageRole::System,
                 ContextSource::BackendSystemPrompt,
+                None,
             ),
-            attachment,
-            planning_item(
-                2,
-                ContextUsageClass::RequestOnly,
-                2_000,
-                LlmMessageRole::System,
-                ContextSource::RuntimeExtension,
+            item(
+                1,
+                ContextUsageClass::Durable,
+                1_500,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-old")),
             ),
         ];
 
         let plan = ContextCompactionPlanner::for_tools(&[]).plan(
             &query(
                 ContextBudgetStatus::OverBudget,
-                Some(5_000),
-                1_000,
+                Some(9_000),
+                8_500,
+                1_500,
                 0,
-                3_000,
-                2_000,
+                0,
             ),
             &items,
+            false,
         );
 
-        assert_eq!(
-            plan.status,
-            ContextCompactionPlanStatus::InsufficientCompactableContext
-        );
-        assert_eq!(plan.protected.reasons["user_attachment"], 3_000);
-        assert_eq!(plan.protected.reasons["request_only"], 2_000);
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+        assert!(plan.best_effort);
+        assert!(plan.planned_reclaimed_tokens > 0);
     }
 
     #[test]
-    fn policy_constructor_supports_future_configuration_without_changing_planner_contract() {
-        let policy = ContextCompactionPolicy {
-            soft_trigger_percent: 80,
-            ..ContextCompactionPolicy::default()
-        };
-        let plan = ContextCompactionPlanner::with_policy(policy, &[]).plan(
+    fn recursive_compaction_carries_the_previous_summary_identity() {
+        let items = vec![
+            item(
+                0,
+                ContextUsageClass::Fixed,
+                500,
+                LlmMessageRole::System,
+                ContextSource::BackendSystemPrompt,
+                None,
+            ),
+            item(
+                1,
+                ContextUsageClass::Durable,
+                2_000,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationSummary,
+                Some(ContextOrigin::compaction_summary("summary-1")),
+            ),
+            item(
+                2,
+                ContextUsageClass::Durable,
+                4_000,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-new")),
+            ),
+        ];
+
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
             &query(
                 ContextBudgetStatus::WithinBudget,
-                Some(10_000),
-                1_000,
-                6_500,
+                Some(7_000),
+                500,
+                6_000,
                 0,
                 0,
             ),
-            &[],
+            &items,
+            false,
         );
+        let prefix = plan.steps[0].durable_prefix.as_ref().unwrap();
 
-        assert_eq!(plan.status, ContextCompactionPlanStatus::NotRequired);
-        assert_eq!(plan.soft_trigger_input_tokens, Some(8_000));
+        assert_eq!(prefix.previous_summary_id.as_deref(), Some("summary-1"));
+        assert_eq!(
+            prefix.covered_through,
+            ContextJournalCursor::message("assistant-new")
+        );
     }
 }

@@ -1,4 +1,5 @@
 use crate::context::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION;
+use crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION;
 use rusqlite::Connection;
 
 const REMOVE_INITIAL_DEMO_PROFILE_TASK: &str = "remove_initial_demo_profile";
@@ -104,6 +105,35 @@ fn upgrade_conversation_trace_commit_schema(connection: &Connection) -> rusqlite
     connection.execute_batch("PRAGMA foreign_keys = ON;")
 }
 
+fn upgrade_context_compaction_cursor_schema(connection: &Connection) -> rusqlite::Result<()> {
+    if !table_has_column(connection, "context_compaction_summaries", "id")?
+        || table_has_column(
+            connection,
+            "context_compaction_summaries",
+            "covered_through_kind",
+        )?
+    {
+        return Ok(());
+    }
+
+    // Development summaries are derived data. Dropping the old message-prefix projection keeps
+    // the raw conversation intact and avoids carrying two incompatible coverage models forward.
+    connection.execute_batch(
+        "
+        DROP TRIGGER IF EXISTS invalidate_context_compaction_before_message_delete;
+        DROP TRIGGER IF EXISTS invalidate_context_compaction_before_message_update;
+        DROP TRIGGER IF EXISTS invalidate_context_compaction_before_trace_insert;
+        DROP TRIGGER IF EXISTS invalidate_context_compaction_before_trace_item_update;
+        DROP TRIGGER IF EXISTS invalidate_context_compaction_before_trace_item_delete;
+        DROP TRIGGER IF EXISTS invalidate_context_compaction_before_trace_update;
+        DROP TRIGGER IF EXISTS invalidate_context_compaction_before_trace_delete;
+        DROP TABLE IF EXISTS conversation_context_compaction_heads;
+        DROP TABLE IF EXISTS context_compaction_summary_sources;
+        DROP TABLE IF EXISTS context_compaction_summaries;
+        ",
+    )
+}
+
 fn run_one_time_maintenance(connection: &Connection) -> rusqlite::Result<()> {
     let transaction = connection.unchecked_transaction()?;
     let already_completed = transaction.query_row(
@@ -164,6 +194,7 @@ fn run_one_time_maintenance(connection: &Connection) -> rusqlite::Result<()> {
 }
 
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
+    upgrade_context_compaction_cursor_schema(connection)?;
     connection.execute_batch(
         "
         PRAGMA foreign_keys = ON;
@@ -535,7 +566,9 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             schema_version INTEGER NOT NULL CHECK (schema_version > 0),
             source_revision TEXT NOT NULL,
             previous_summary_id TEXT,
+            covered_through_kind TEXT NOT NULL CHECK (covered_through_kind IN ('message', 'trace_item')),
             covered_through_message_id TEXT NOT NULL,
+            covered_through_trace_sequence INTEGER CHECK (covered_through_trace_sequence >= 0),
             content TEXT NOT NULL CHECK (length(trim(content)) > 0),
             generation_kind TEXT NOT NULL CHECK (generation_kind IN ('test', 'model')),
             generation_model TEXT,
@@ -548,19 +581,13 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY (previous_summary_id) REFERENCES context_compaction_summaries(id) ON DELETE SET NULL,
             FOREIGN KEY (covered_through_message_id) REFERENCES messages(id) ON DELETE CASCADE,
             CHECK (
+                (covered_through_kind = 'message' AND covered_through_trace_sequence IS NULL)
+                OR (covered_through_kind = 'trace_item' AND covered_through_trace_sequence IS NOT NULL)
+            ),
+            CHECK (
                 (generation_kind = 'test' AND generation_model IS NULL)
                 OR (generation_kind = 'model' AND length(trim(generation_model)) > 0)
             )
-        );
-
-        CREATE TABLE IF NOT EXISTS context_compaction_summary_sources (
-            summary_id TEXT NOT NULL,
-            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-            message_id TEXT NOT NULL,
-            PRIMARY KEY (summary_id, ordinal),
-            UNIQUE (summary_id, message_id),
-            FOREIGN KEY (summary_id) REFERENCES context_compaction_summaries(id) ON DELETE CASCADE,
-            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS conversation_context_compaction_heads (
@@ -582,7 +609,6 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, position);
         CREATE INDEX IF NOT EXISTS idx_conversation_turn_traces_conversation_id ON conversation_turn_traces(conversation_id, completed_at);
         CREATE INDEX IF NOT EXISTS idx_context_compaction_summaries_conversation_id ON context_compaction_summaries(conversation_id, created_at);
-        CREATE INDEX IF NOT EXISTS idx_context_compaction_summary_sources_message_id ON context_compaction_summary_sources(message_id);
         CREATE INDEX IF NOT EXISTS idx_attachments_conversation_id ON attachments(conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_project_id ON attachments(project_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);
@@ -603,88 +629,6 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_file_drafts_expires_at ON agent_file_drafts(expires_at);
         CREATE INDEX IF NOT EXISTS idx_composer_drafts_updated_at ON composer_drafts(updated_at);
 
-        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_message_delete
-        BEFORE DELETE ON messages
-        WHEN EXISTS (
-            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.id
-        )
-        BEGIN
-            DELETE FROM context_compaction_summaries
-            WHERE conversation_id = OLD.conversation_id;
-        END;
-
-        DROP TRIGGER IF EXISTS invalidate_context_compaction_before_message_update;
-        CREATE TRIGGER invalidate_context_compaction_before_message_update
-        BEFORE UPDATE OF role, content, status, created_at, position ON messages
-        WHEN (
-            OLD.role IS NOT NEW.role
-            OR OLD.content IS NOT NEW.content
-            OR OLD.status IS NOT NEW.status
-            OR OLD.created_at IS NOT NEW.created_at
-            OR OLD.position IS NOT NEW.position
-        ) AND EXISTS (
-            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.id
-        )
-        BEGIN
-            DELETE FROM context_compaction_summaries
-            WHERE conversation_id = OLD.conversation_id;
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_trace_insert
-        BEFORE INSERT ON conversation_turn_trace_items
-        WHEN EXISTS (
-            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = NEW.assistant_message_id
-        )
-        BEGIN
-            DELETE FROM context_compaction_summaries
-            WHERE conversation_id = (
-                SELECT conversation_id FROM messages WHERE id = NEW.assistant_message_id
-            );
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_trace_item_update
-        BEFORE UPDATE ON conversation_turn_trace_items
-        WHEN EXISTS (
-            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.assistant_message_id
-        )
-        BEGIN
-            DELETE FROM context_compaction_summaries
-            WHERE conversation_id = (
-                SELECT conversation_id FROM messages WHERE id = OLD.assistant_message_id
-            );
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_trace_item_delete
-        BEFORE DELETE ON conversation_turn_trace_items
-        WHEN EXISTS (
-            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.assistant_message_id
-        )
-        BEGIN
-            DELETE FROM context_compaction_summaries
-            WHERE conversation_id = (
-                SELECT conversation_id FROM messages WHERE id = OLD.assistant_message_id
-            );
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_trace_update
-        BEFORE UPDATE OF terminal_status, terminal_error, truncated ON conversation_turn_traces
-        WHEN EXISTS (
-            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.assistant_message_id
-        )
-        BEGIN
-            DELETE FROM context_compaction_summaries
-            WHERE conversation_id = OLD.conversation_id;
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS invalidate_context_compaction_before_trace_delete
-        BEFORE DELETE ON conversation_turn_traces
-        WHEN EXISTS (
-            SELECT 1 FROM context_compaction_summary_sources WHERE message_id = OLD.assistant_message_id
-        )
-        BEGIN
-            DELETE FROM context_compaction_summaries
-            WHERE conversation_id = OLD.conversation_id;
-        END;
         ",
     )?;
 
@@ -694,6 +638,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     )?;
 
     upgrade_conversation_trace_commit_schema(connection)?;
+    connection.execute(
+        "DELETE FROM conversation_turn_traces WHERE schema_version != ?1",
+        [CONVERSATION_TURN_TRACE_SCHEMA_VERSION],
+    )?;
     connection.execute_batch(
         "
         DROP INDEX IF EXISTS idx_conversation_turn_traces_conversation_id;
@@ -792,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_terminal_only_trace_table_for_append_only_running_commits() {
+    fn replaces_development_trace_schema_with_the_current_append_only_table() {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
@@ -858,28 +806,14 @@ mod tests {
         run_migrations(&connection).unwrap();
 
         assert!(table_has_column(&connection, "conversation_turn_traces", "updated_at").unwrap());
-        let migrated = connection
-            .query_row(
-                "SELECT terminal_status, updated_at, completed_at FROM conversation_turn_traces WHERE assistant_message_id = 'assistant-1'",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(migrated, ("completed".to_string(), 2, Some(2)));
-        let migrated_item_count = connection
+        let old_trace_count = connection
             .query_row(
                 "SELECT COUNT(*) FROM conversation_turn_trace_items WHERE assistant_message_id = 'assistant-1'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
             .unwrap();
-        assert_eq!(migrated_item_count, 1);
+        assert_eq!(old_trace_count, 0);
         connection
             .execute(
                 "INSERT INTO messages VALUES ('assistant-running', 'conversation-1', 'assistant', '', 'pending', NULL, NULL, 3, 1)",
@@ -891,9 +825,9 @@ mod tests {
                 "INSERT INTO conversation_turn_traces (
                     assistant_message_id, conversation_id, run_id, schema_version,
                     terminal_status, terminal_error, truncated, created_at, updated_at, completed_at
-                 ) VALUES ('assistant-running', 'conversation-1', 'run-running', 1,
+                 ) VALUES ('assistant-running', 'conversation-1', 'run-running', ?1,
                     'in_progress', NULL, 0, 3, 3, NULL)",
-                [],
+                [CONVERSATION_TURN_TRACE_SCHEMA_VERSION],
             )
             .unwrap();
         let sql = connection
@@ -1083,12 +1017,13 @@ mod tests {
             .execute(
                 "INSERT INTO context_compaction_summaries (
                     id, conversation_id, schema_version, source_revision,
-                    previous_summary_id, covered_through_message_id, content,
+                    previous_summary_id, covered_through_kind,
+                    covered_through_message_id, covered_through_trace_sequence, content,
                     generation_kind, generation_model, source_input_tokens,
                     summary_input_tokens, created_at
                 ) VALUES (
                     'old-summary', 'conversation-1', ?1, 'old-revision', NULL,
-                    'assistant-1', 'old', 'test', NULL, 10, 1, 3
+                    'message', 'assistant-1', NULL, 'old', 'test', NULL, 10, 1, 3
                 )",
                 [incompatible_version],
             )
@@ -1097,12 +1032,13 @@ mod tests {
             .execute(
                 "INSERT INTO context_compaction_summaries (
                     id, conversation_id, schema_version, source_revision,
-                    previous_summary_id, covered_through_message_id, content,
+                    previous_summary_id, covered_through_kind,
+                    covered_through_message_id, covered_through_trace_sequence, content,
                     generation_kind, generation_model, source_input_tokens,
                     summary_input_tokens, created_at
                 ) VALUES (
                     'current-summary', 'conversation-1', ?1, 'current-revision', NULL,
-                    'assistant-1', 'current', 'test', NULL, 10, 1, 4
+                    'message', 'assistant-1', NULL, 'current', 'test', NULL, 10, 1, 4
                 )",
                 [CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION],
             )
@@ -1110,8 +1046,6 @@ mod tests {
         connection
             .execute_batch(
                 "
-                INSERT INTO context_compaction_summary_sources (summary_id, ordinal, message_id)
-                VALUES ('old-summary', 0, 'user-1');
                 INSERT INTO conversation_context_compaction_heads (
                     conversation_id, summary_id, revision, updated_at
                 ) VALUES ('conversation-1', 'old-summary', 1, 3);

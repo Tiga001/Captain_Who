@@ -173,36 +173,39 @@ fn build_compaction_request_context(
 ) -> AgentResult<ContextFrame> {
     let previous_summary = request.prefix.previous_summary.as_ref().map(|summary| {
         json!({
-            "coveredThroughMessageId": summary.covered_through_message_id,
+            "coveredThrough": summary.covered_through,
             "content": summary.content,
         })
     });
-    let source_messages = request
+    let source_items = request
         .prefix
-        .source_messages
+        .source_items
         .iter()
-        .map(|message| {
-            let mut payload = serde_json::to_value(message)
-                .map_err(|error| AgentError::new(format!("无法序列化上下文压缩源消息：{error}")))?;
+        .map(|item| {
+            let mut payload = serde_json::to_value(item).map_err(|error| {
+                AgentError::new(format!("无法序列化上下文压缩源日志项：{error}"))
+            })?;
             let object = payload
                 .as_object_mut()
-                .ok_or_else(|| AgentError::new("上下文压缩源消息不是 JSON 对象。"))?;
-            object.insert(
-                "createdAt".to_string(),
-                serde_json::Value::String(format_message_created_at(message.created_at)?),
-            );
+                .ok_or_else(|| AgentError::new("上下文压缩源日志项不是 JSON 对象。"))?;
+            if let Some(created_at) = object.get("createdAt").and_then(|value| value.as_i64()) {
+                object.insert(
+                    "createdAt".to_string(),
+                    serde_json::Value::String(format_message_created_at(created_at)?),
+                );
+            }
             Ok(payload)
         })
         .collect::<AgentResult<Vec<_>>>()?;
     let payload = serde_json::to_string(&json!({
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "previousSummary": previous_summary,
-        "newMessages": source_messages,
+        "newItems": source_items,
     }))
     .map_err(|error| AgentError::new(format!("无法序列化上下文压缩源数据：{error}")))?;
     let user_prompt = format!(
-        "Compact the following conversation-history JSON into one replacement summary. Each newMessages.createdAt value is a backend-recorded RFC 3339 timestamp with an explicit UTC offset. The payload contains {} newly covered messages. Keep the replacement within {} estimated input tokens and make it substantially shorter than the source.\n\nHISTORY_PAYLOAD_JSON\n{}",
-        request.prefix.source_messages.len(),
+        "Compact the following conversation-context log JSON into one replacement summary. Each newItems.createdAt value is a backend-recorded RFC 3339 timestamp with an explicit UTC offset. The payload contains {} newly covered log items. Keep the replacement within {} estimated input tokens and make it substantially shorter than the source.\n\nHISTORY_PAYLOAD_JSON\n{}",
+        request.prefix.source_items.len(),
         request.maximum_summary_tokens,
         payload
     );
@@ -266,8 +269,8 @@ mod tests {
     use super::*;
     use crate::protocol::AgentUsage;
     use crate::{
-        ContextCompactionPrefix, ContextCompactionSourceMessage, ContextCompactionSummary,
-        CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+        ContextCompactionPrefix, ContextCompactionSourceItem, ContextCompactionSummary,
+        ContextJournalCursor, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
     };
     use serde_json::Value;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -304,11 +307,7 @@ mod tests {
             conversation_id: "conversation-1".to_string(),
             source_revision: "previous-revision".to_string(),
             previous_summary_id: None,
-            covered_through_message_id: "assistant-previous".to_string(),
-            covered_message_ids: vec![
-                "user-previous".to_string(),
-                "assistant-previous".to_string(),
-            ],
+            covered_through: ContextJournalCursor::message("assistant-previous"),
             content: "PREVIOUS_SUMMARY_MARKER: the project was inspected.".to_string(),
             generation: ContextCompactionGeneration::model("summary-model"),
             source_input_tokens: 4_000,
@@ -319,30 +318,26 @@ mod tests {
             prefix: std::sync::Arc::new(ContextCompactionPrefix {
                 conversation_id: "conversation-1".to_string(),
                 source_revision: "source-revision-current".to_string(),
-                covered_through_message_id: "assistant-current".to_string(),
-                covered_message_ids: vec![
-                    "user-previous".to_string(),
-                    "assistant-previous".to_string(),
-                    "user-current".to_string(),
-                    "assistant-current".to_string(),
-                ],
+                covered_through: ContextJournalCursor::message("assistant-current"),
                 previous_summary: Some(previous),
-                source_messages: vec![
-                    ContextCompactionSourceMessage {
-                        message_id: "user-current".to_string(),
+                source_items: vec![
+                    ContextCompactionSourceItem::Message {
+                        cursor: ContextJournalCursor::message("user-current"),
                         role: "user".to_string(),
                         content: "NEW_USER_MARKER: update src/main.rs".to_string(),
                         created_at: 1_000,
                         status: Some("sent".to_string()),
-                        conversation_turn_trace: None,
+                        terminal_status: None,
+                        terminal_error: None,
                     },
-                    ContextCompactionSourceMessage {
-                        message_id: "assistant-current".to_string(),
+                    ContextCompactionSourceItem::Message {
+                        cursor: ContextJournalCursor::message("assistant-current"),
                         role: "assistant".to_string(),
                         content: "NEW_ASSISTANT_MARKER: src/main.rs was updated".to_string(),
                         created_at: 2_000,
                         status: Some("sent".to_string()),
-                        conversation_turn_trace: None,
+                        terminal_status: None,
+                        terminal_error: None,
                     },
                 ],
             }),

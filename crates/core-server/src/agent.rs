@@ -35,8 +35,8 @@ use mycopilot_core::{
     AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus,
     AgentRuntimeHostServices, AgentSearchConfig, AgentToolCall, AgentToolContinuation,
     AgentToolResult, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
-    AgentUsageSummaryInput, AgentUsageSummaryOutput, ConversationTraceSnapshot,
-    ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
+    AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
+    ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -1825,11 +1825,23 @@ impl AgentService {
                         &conversation_id,
                         &assistant_message_id,
                     )?;
+                    let active_trace = service
+                        .storage
+                        .get_conversation_turn_trace(&assistant_message_id)
+                        .map_err(AgentError::new)?;
+                    validate_compaction_model_visible_boundary(
+                        &request.covered_through,
+                        active_trace.as_ref(),
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                        request.visible_trace_item_count,
+                    )?;
                     let prefix = service
                         .storage
                         .prepare_context_compaction_prefix_if_current(
                             &conversation_id,
-                            &request.covered_through_message_id,
+                            &request.covered_through,
                             request.expected_previous_summary_id.as_deref(),
                         )
                         .map_err(AgentError::new)?;
@@ -1843,6 +1855,7 @@ impl AgentService {
                                 &run_id,
                                 &conversation_id,
                                 &assistant_message_id,
+                                request.visible_trace_item_count,
                                 &notifications,
                             )
                             .map(|baseline| {
@@ -1870,6 +1883,18 @@ impl AgentService {
                         &conversation_id,
                         &assistant_message_id,
                     )?;
+                    let active_trace = service
+                        .storage
+                        .get_conversation_turn_trace(&assistant_message_id)
+                        .map_err(AgentError::new)?;
+                    validate_compaction_model_visible_boundary(
+                        &request.prefix.covered_through,
+                        active_trace.as_ref(),
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                        request.visible_trace_item_count,
+                    )?;
                     let committed = service
                         .storage
                         .commit_context_compaction_prefix_if_current(
@@ -1884,6 +1909,7 @@ impl AgentService {
                             &run_id,
                             &conversation_id,
                             &assistant_message_id,
+                            request.visible_trace_item_count,
                             &notifications,
                         )
                         .map_err(AgentError::new)?;
@@ -1907,6 +1933,7 @@ impl AgentService {
         run_id: &str,
         conversation_id: &str,
         assistant_message_id: &str,
+        visible_trace_item_count: usize,
         notifications: &CoreServerNotificationSender,
     ) -> Result<AgentContextBaseline, String> {
         self.invalidate_conversation_context_state(conversation_id);
@@ -1920,12 +1947,44 @@ impl AgentService {
         let summary = self
             .storage
             .get_active_context_compaction_summary(conversation_id)?;
+        let active_trace = traces
+            .iter()
+            .find(|trace| trace.assistant_message_id == assistant_message_id);
+        if let Some(trace) = active_trace {
+            if trace.run_id != run_id
+                || trace.conversation_id != conversation_id
+                || trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress
+            {
+                return Err("压缩后重建上下文时，运行中 trace 身份或状态不一致。".to_string());
+            }
+            if visible_trace_item_count > trace.items.len() {
+                return Err("压缩后重建上下文时，模型可见 trace 游标超出日志末尾。".to_string());
+            }
+        } else if visible_trace_item_count != 0 {
+            return Err("压缩后重建上下文时，模型可见 trace 游标没有对应日志。".to_string());
+        }
+
+        // Build the runtime baseline at the model-visible cursor. The server cache is extended to
+        // the physical log tail below so the context indicator remains an immediate durable view.
+        let mut visible_traces = traces.clone();
+        if let Some(trace) = visible_traces
+            .iter_mut()
+            .find(|trace| trace.assistant_message_id == assistant_message_id)
+        {
+            trace.items.truncate(visible_trace_item_count);
+            trace.terminal_status = ConversationTurnTraceTerminalStatus::InProgress;
+            trace.terminal_error = None;
+            trace
+                .validate()
+                .map_err(|error| format!("压缩后重建上下文时，模型可见 trace 前缀无效：{error}"))?;
+        }
+
         let mut preview_input = agent_input.clone();
         preview_input.messages = conversation_history_messages_with_compaction(
             &conversation,
-            &traces,
+            &visible_traces,
             summary.as_ref(),
-            &[assistant_message_id],
+            &[],
         );
         preview_input.context_compaction_summary = summary;
         preview_input.attachments.clear();
@@ -1942,24 +2001,13 @@ impl AgentService {
 
         let mut state =
             create_conversation_context_state(preview_input).map_err(|error| error.to_string())?;
-        // Freeze the exact persistent prefix that the runtime should adopt. The active run trace
-        // remains in its richer run overlay and is appended only to the server's durable cache.
+        // Freeze the exact persistent prefix that the runtime may adopt without exposing a tool
+        // result to compaction before the main model has observed it once.
         let runtime_baseline = state.shared_baseline().map_err(|error| error.to_string())?;
-        let active_trace = traces
-            .iter()
-            .find(|trace| trace.assistant_message_id == assistant_message_id);
         let committed_trace_items = match active_trace {
-            Some(trace) => {
-                if trace.run_id != run_id
-                    || trace.conversation_id != conversation_id
-                    || trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress
-                {
-                    return Err("压缩后重建上下文时，运行中 trace 身份或状态不一致。".to_string());
-                }
-                state
-                    .append_trace_items(trace, 0)
-                    .map_err(|error| error.to_string())?
-            }
+            Some(trace) => state
+                .append_trace_items(trace, visible_trace_item_count)
+                .map_err(|error| error.to_string())?,
             None => 0,
         };
         // Measure and freeze the appended trace chunk once for the conversation cache and circle.
@@ -2806,6 +2854,88 @@ fn validate_compaction_request_identity(
     ))
 }
 
+fn validate_compaction_model_visible_boundary(
+    covered_through: &ContextJournalCursor,
+    active_trace: Option<&ConversationTurnTrace>,
+    expected_run_id: &str,
+    expected_conversation_id: &str,
+    expected_assistant_message_id: &str,
+    visible_trace_item_count: usize,
+) -> AgentResult<()> {
+    let Some(trace) = active_trace else {
+        if visible_trace_item_count == 0
+            && !matches!(
+                covered_through,
+                ContextJournalCursor::TraceItem {
+                    assistant_message_id,
+                    ..
+                } if assistant_message_id == expected_assistant_message_id
+            )
+        {
+            return Ok(());
+        }
+        return Err(AgentError::structured(
+            "context_compaction_visibility_mismatch",
+            "上下文压缩请求缺少当前运行的会话轨迹。",
+            serde_json::json!({
+                "assistantMessageId": expected_assistant_message_id,
+                "visibleTraceItemCount": visible_trace_item_count,
+            }),
+        ));
+    };
+    if trace.run_id != expected_run_id
+        || trace.conversation_id != expected_conversation_id
+        || trace.assistant_message_id != expected_assistant_message_id
+        || trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress
+    {
+        return Err(AgentError::structured(
+            "context_compaction_visibility_mismatch",
+            "上下文压缩请求对应的运行中会话轨迹身份无效。",
+            serde_json::json!({
+                "runId": trace.run_id,
+                "conversationId": trace.conversation_id,
+                "assistantMessageId": trace.assistant_message_id,
+                "terminalStatus": trace.terminal_status,
+            }),
+        ));
+    }
+    if visible_trace_item_count > trace.items.len()
+        || visible_trace_item_count > 0
+            && !trace.items[visible_trace_item_count - 1].is_safe_compaction_boundary()
+    {
+        return Err(AgentError::structured(
+            "context_compaction_visibility_mismatch",
+            "上下文压缩请求的模型可见轨迹边界无效。",
+            serde_json::json!({
+                "visibleTraceItemCount": visible_trace_item_count,
+                "persistedTraceItemCount": trace.items.len(),
+            }),
+        ));
+    }
+    if let ContextJournalCursor::TraceItem {
+        assistant_message_id,
+        sequence,
+    } = covered_through
+    {
+        if assistant_message_id == expected_assistant_message_id
+            && !trace.items[..visible_trace_item_count]
+                .iter()
+                .any(|item| item.sequence() == *sequence)
+        {
+            return Err(AgentError::structured(
+                "context_compaction_unseen_trace_item",
+                "上下文压缩不能覆盖主模型尚未看过的工具轨迹。",
+                serde_json::json!({
+                    "assistantMessageId": assistant_message_id,
+                    "sequence": sequence,
+                    "visibleTraceItemCount": visible_trace_item_count,
+                }),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn load_persisted_pending_actions(
     storage: &Arc<StorageService>,
 ) -> HashMap<String, PendingActionRecord> {
@@ -3008,7 +3138,7 @@ mod tests {
     use mycopilot_core::{
         AgentCommandRequest, AgentCommandRiskLevel, AgentPermissions, AgentUsageSummaryRange,
         AgentWorkspaceContext, ContextCompactionGeneration, ContextCompactionSummary,
-        ContextCompactionSummaryDraft, ConversationTraceToolResultStatus,
+        ContextCompactionSummaryDraft, ContextJournalCursor, ConversationTraceToolResultStatus,
         ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
         CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
@@ -3059,6 +3189,81 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn compaction_cannot_cross_the_model_visible_trace_boundary() {
+        let trace = ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-visible-boundary".to_string(),
+            conversation_id: "conversation-visible-boundary".to_string(),
+            assistant_message_id: "assistant-visible-boundary".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            terminal_error: None,
+            truncated: false,
+            items: vec![
+                ConversationTurnTraceItem::AssistantNarration {
+                    sequence: 0,
+                    content: "I will read the file.".to_string(),
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::ToolCall {
+                    sequence: 1,
+                    call_id: "read-visible-boundary".to_string(),
+                    tool: "read_file".to_string(),
+                    operation: json!({ "path": "README.md" }),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    sequence: 2,
+                    call_id: "read-visible-boundary".to_string(),
+                    tool: "read_file".to_string(),
+                    status: ConversationTraceToolResultStatus::Succeeded,
+                    success: true,
+                    observation: json!({ "content": "contents" }),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    error: None,
+                    truncated: false,
+                },
+            ],
+        };
+        let result_cursor = ContextJournalCursor::trace_item("assistant-visible-boundary", 2);
+
+        let unseen = validate_compaction_model_visible_boundary(
+            &result_cursor,
+            Some(&trace),
+            "run-visible-boundary",
+            "conversation-visible-boundary",
+            "assistant-visible-boundary",
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(unseen.code(), Some("context_compaction_unseen_trace_item"));
+
+        let split_exchange = validate_compaction_model_visible_boundary(
+            &ContextJournalCursor::trace_item("assistant-visible-boundary", 0),
+            Some(&trace),
+            "run-visible-boundary",
+            "conversation-visible-boundary",
+            "assistant-visible-boundary",
+            2,
+        )
+        .unwrap_err();
+        assert_eq!(
+            split_exchange.code(),
+            Some("context_compaction_visibility_mismatch")
+        );
+
+        validate_compaction_model_visible_boundary(
+            &result_cursor,
+            Some(&trace),
+            "run-visible-boundary",
+            "conversation-visible-boundary",
+            "assistant-visible-boundary",
+            3,
+        )
+        .unwrap();
     }
 
     fn test_model_settings() -> ModelSettingsRecord {
@@ -3270,7 +3475,10 @@ mod tests {
             })
             .unwrap();
         let prefix = storage
-            .prepare_context_compaction_prefix("conversation-summary", "assistant-old")
+            .prepare_context_compaction_prefix(
+                "conversation-summary",
+                &ContextJournalCursor::message("assistant-old"),
+            )
             .unwrap();
         storage
             .commit_context_compaction_prefix(
@@ -3458,8 +3666,7 @@ mod tests {
             conversation_id: conversation.id.clone(),
             source_revision: "revision-1".to_string(),
             previous_summary_id: None,
-            covered_through_message_id: "assistant-old".to_string(),
-            covered_message_ids: vec!["user-old".to_string(), "assistant-old".to_string()],
+            covered_through: ContextJournalCursor::message("assistant-old"),
             content: "old turn summary".to_string(),
             generation: ContextCompactionGeneration::test(),
             source_input_tokens: 100,
@@ -3578,7 +3785,10 @@ mod tests {
             .unwrap();
 
         let prefix = storage
-            .prepare_context_compaction_prefix("conversation-capacity-summary", "assistant-long")
+            .prepare_context_compaction_prefix(
+                "conversation-capacity-summary",
+                &ContextJournalCursor::message("assistant-long"),
+            )
             .unwrap();
         storage
             .commit_context_compaction_prefix(
@@ -3720,8 +3930,8 @@ mod tests {
             conversation_id: "conversation-compaction-host".to_string(),
             assistant_message_id: "assistant-current".to_string(),
             expected_previous_summary_id: None,
-            newly_covered_message_ids: vec!["user-old".to_string(), "assistant-old".to_string()],
-            covered_through_message_id: "assistant-old".to_string(),
+            covered_through: ContextJournalCursor::message("assistant-old"),
+            visible_trace_item_count: 0,
             source_input_tokens: 5_000,
             maximum_summary_tokens: 256,
         };
@@ -3753,6 +3963,7 @@ mod tests {
                     run_id: prepare_request.run_id,
                     conversation_id: prepare_request.conversation_id,
                     assistant_message_id: prepare_request.assistant_message_id,
+                    visible_trace_item_count: prepare_request.visible_trace_item_count,
                     prefix,
                     draft: generated.draft,
                 },
@@ -3774,7 +3985,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(active.id, expected_summary_id);
-        assert_eq!(active.covered_through_message_id, "assistant-old");
+        assert_eq!(
+            active.covered_through,
+            ContextJournalCursor::message("assistant-old")
+        );
         assert_eq!(
             storage
                 .load_conversation("conversation-compaction-host")
@@ -4238,7 +4452,7 @@ mod tests {
         }))
         .unwrap();
         let run_checkpoint = AgentRunCheckpoint {
-            version: 1,
+            version: 2,
             run_id: "run-checkpoint".to_string(),
             context_items: vec![
                 mycopilot_core::AgentContextCheckpointItem {
@@ -4283,6 +4497,7 @@ mod tests {
             conversation_trace_items: Vec::new(),
             next_conversation_trace_sequence: 0,
             conversation_trace_truncated: false,
+            model_visible_trace_item_count: 0,
         };
         let checkpoint = agent_input_with_run_checkpoint(&base_input, &run_checkpoint);
         let action = AgentProposedAction::ToolCall {
@@ -4379,7 +4594,7 @@ mod tests {
         }))
         .unwrap();
         agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
-            version: 1,
+            version: 2,
             run_id: "run-cancel".to_string(),
             context_items: Vec::new(),
             next_model_request_index: 1,
@@ -4397,6 +4612,7 @@ mod tests {
             }],
             next_conversation_trace_sequence: 1,
             conversation_trace_truncated: false,
+            model_visible_trace_item_count: 0,
         });
         service.store_pending_action(
             "run-cancel",
@@ -4481,7 +4697,7 @@ mod tests {
             },
         );
         let checkpoint = AgentRunCheckpoint {
-            version: 1,
+            version: 2,
             run_id: "run-forced".to_string(),
             context_items: Vec::new(),
             next_model_request_index: 1,
@@ -4517,6 +4733,7 @@ mod tests {
             ],
             next_conversation_trace_sequence: 2,
             conversation_trace_truncated: false,
+            model_visible_trace_item_count: 0,
         };
         service.seed_trace_snapshot_from_checkpoint("run-forced", Some(&checkpoint));
 
@@ -4660,7 +4877,7 @@ mod tests {
         };
         let call = command_tool_call(&command);
         let checkpoint = AgentRunCheckpoint {
-            version: 1,
+            version: 2,
             run_id: "run-command-cancel".to_string(),
             context_items: Vec::new(),
             next_model_request_index: 1,
@@ -4678,6 +4895,7 @@ mod tests {
             }],
             next_conversation_trace_sequence: 1,
             conversation_trace_truncated: false,
+            model_visible_trace_item_count: 0,
         };
         let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
             "apiUrl": "https://should-not-be-called.test/v1/chat/completions",

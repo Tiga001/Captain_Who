@@ -22,7 +22,7 @@ use crate::{
     AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentToolResult, AgentUsageClearInput,
     AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     ContextCompactionPrefix, ContextCompactionSummary, ContextCompactionSummaryDraft,
-    ConversationTurnTrace,
+    ContextJournalCursor, ConversationTurnTrace,
 };
 use base64::Engine;
 
@@ -549,15 +549,11 @@ impl StorageService {
     pub fn prepare_context_compaction_prefix(
         &self,
         conversation_id: &str,
-        covered_through_message_id: &str,
+        covered_through: &ContextJournalCursor,
     ) -> Result<ContextCompactionPrefix, String> {
         let connection = self.state.connection()?;
-        context_compaction_repository::prepare_prefix(
-            &connection,
-            conversation_id,
-            covered_through_message_id,
-        )
-        .map_err(|error| error.to_string())
+        context_compaction_repository::prepare_prefix(&connection, conversation_id, covered_through)
+            .map_err(|error| error.to_string())
     }
 
     /// Returns `None` when the planner's active-summary identity is stale. The caller should
@@ -565,7 +561,7 @@ impl StorageService {
     pub fn prepare_context_compaction_prefix_if_current(
         &self,
         conversation_id: &str,
-        covered_through_message_id: &str,
+        covered_through: &ContextJournalCursor,
         expected_active_summary_id: Option<&str>,
     ) -> Result<Option<ContextCompactionPrefix>, String> {
         let connection = self.state.connection()?;
@@ -581,7 +577,7 @@ impl StorageService {
         match context_compaction_repository::prepare_prefix(
             &connection,
             conversation_id,
-            covered_through_message_id,
+            covered_through,
         ) {
             Ok(prefix) => Ok(Some(prefix)),
             Err(error) if error.is_stale() => Ok(None),

@@ -365,7 +365,7 @@ mod tests {
                 },
             },
             checkpoint: crate::protocol::AgentRunCheckpoint {
-                version: 1,
+                version: 2,
                 run_id: "run-1".to_string(),
                 context_items: Vec::new(),
                 next_model_request_index: 1,
@@ -380,6 +380,7 @@ mod tests {
                 conversation_trace_items: Vec::new(),
                 next_conversation_trace_sequence: 0,
                 conversation_trace_truncated: false,
+                model_visible_trace_item_count: 0,
             },
         };
 

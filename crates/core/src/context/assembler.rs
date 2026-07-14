@@ -178,6 +178,7 @@ mod tests {
         ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
     use crate::protocol::AgentApprovalStatus;
+    use crate::ContextJournalCursor;
     use serde_json::json;
 
     fn compaction_summary() -> ContextCompactionSummary {
@@ -187,8 +188,7 @@ mod tests {
             conversation_id: "conversation-1".to_string(),
             source_revision: "source-revision-1".to_string(),
             previous_summary_id: None,
-            covered_through_message_id: "assistant-old".to_string(),
-            covered_message_ids: vec!["user-old".to_string(), "assistant-old".to_string()],
+            covered_through: ContextJournalCursor::message("assistant-old"),
             content: "The user requested an old task and the agent completed it.".to_string(),
             generation: crate::ContextCompactionGeneration::test(),
             source_input_tokens: 100,

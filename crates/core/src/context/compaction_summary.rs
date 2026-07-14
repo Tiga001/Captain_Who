@@ -1,15 +1,13 @@
-//! Versioned durable-history compaction artifacts.
+//! Versioned context-log compaction artifacts.
 //!
-//! Raw chat messages and conversation traces remain the audit source of truth. A summary only
-//! changes the context projection: it replaces one contiguous, immutable message prefix while the
-//! uncovered tail continues to be assembled normally.
+//! Messages and conversation trace items remain the append-only audit source. A summary advances
+//! one cursor over that logical log and changes only the projection sent to the model.
 
-use crate::conversation_trace::ConversationTurnTrace;
+use crate::conversation_trace::{ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus};
 use crate::protocol::{AgentError, AgentResult};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
-pub const CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION: u32 = 2;
+pub const CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -76,6 +74,143 @@ impl ContextCompactionGeneration {
     }
 }
 
+/// Stable position in the logical conversation context log.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ContextJournalCursor {
+    /// Covers the complete message, including a terminal assistant record when present.
+    Message { message_id: String },
+    /// Covers an assistant trace through one narration or one closed tool result.
+    TraceItem {
+        assistant_message_id: String,
+        sequence: u64,
+    },
+}
+
+impl ContextJournalCursor {
+    pub fn message(message_id: impl Into<String>) -> Self {
+        Self::Message {
+            message_id: message_id.into(),
+        }
+    }
+
+    pub fn trace_item(assistant_message_id: impl Into<String>, sequence: u64) -> Self {
+        Self::TraceItem {
+            assistant_message_id: assistant_message_id.into(),
+            sequence,
+        }
+    }
+
+    pub fn message_id(&self) -> &str {
+        match self {
+            Self::Message { message_id } => message_id,
+            Self::TraceItem {
+                assistant_message_id,
+                ..
+            } => assistant_message_id,
+        }
+    }
+
+    pub fn trace_sequence(&self) -> Option<u64> {
+        match self {
+            Self::Message { .. } => None,
+            Self::TraceItem { sequence, .. } => Some(*sequence),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> AgentResult<()> {
+        if self.message_id().trim().is_empty() {
+            return Err(AgentError::new("上下文日志游标缺少消息 ID。"));
+        }
+        Ok(())
+    }
+}
+
+/// Exact newly covered source segment supplied to the summary model.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum ContextCompactionSourceItem {
+    Message {
+        cursor: ContextJournalCursor,
+        role: String,
+        content: String,
+        created_at: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        terminal_status: Option<ConversationTurnTraceTerminalStatus>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        terminal_error: Option<String>,
+    },
+    TraceItem {
+        cursor: ContextJournalCursor,
+        run_id: String,
+        item: ConversationTurnTraceItem,
+    },
+}
+
+impl ContextCompactionSourceItem {
+    pub fn cursor(&self) -> &ContextJournalCursor {
+        match self {
+            Self::Message { cursor, .. } | Self::TraceItem { cursor, .. } => cursor,
+        }
+    }
+
+    pub fn is_safe_boundary(&self) -> bool {
+        match self {
+            Self::Message { .. } => true,
+            Self::TraceItem { item, .. } => item.is_safe_compaction_boundary(),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> AgentResult<()> {
+        self.cursor().validate()?;
+        match self {
+            Self::Message {
+                cursor,
+                role,
+                created_at,
+                ..
+            } => {
+                if !matches!(cursor, ContextJournalCursor::Message { .. }) {
+                    return Err(AgentError::new("消息日志项必须使用消息游标。"));
+                }
+                if !matches!(role.as_str(), "user" | "assistant") {
+                    return Err(AgentError::new("上下文压缩消息包含未知角色。"));
+                }
+                if *created_at < 0 {
+                    return Err(AgentError::new("上下文压缩消息的创建时间无效。"));
+                }
+            }
+            Self::TraceItem {
+                cursor,
+                run_id,
+                item,
+            } => {
+                let ContextJournalCursor::TraceItem {
+                    assistant_message_id: _,
+                    sequence,
+                } = cursor
+                else {
+                    return Err(AgentError::new("trace 日志项必须使用 trace 游标。"));
+                };
+                if run_id.trim().is_empty() || *sequence != item.sequence() {
+                    return Err(AgentError::new("trace 日志项身份与原始记录不一致。"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Immutable summary version selected by a conversation's active compaction head.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -83,11 +218,11 @@ pub struct ContextCompactionSummary {
     pub schema_version: u32,
     pub id: String,
     pub conversation_id: String,
+    /// Revision of the complete raw prefix through `covered_through`.
     pub source_revision: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_summary_id: Option<String>,
-    pub covered_through_message_id: String,
-    pub covered_message_ids: Vec<String>,
+    pub covered_through: ContextJournalCursor,
     pub content: String,
     pub generation: ContextCompactionGeneration,
     pub source_input_tokens: u64,
@@ -107,32 +242,14 @@ impl ContextCompactionSummary {
             ("摘要 ID", self.id.as_str()),
             ("会话 ID", self.conversation_id.as_str()),
             ("源 revision", self.source_revision.as_str()),
-            ("覆盖边界消息 ID", self.covered_through_message_id.as_str()),
         ] {
             if value.trim().is_empty() {
                 return Err(AgentError::new(format!("{label}不能为空。")));
             }
         }
+        self.covered_through.validate()?;
         if self.content.trim().is_empty() {
             return Err(AgentError::new("上下文压缩摘要不能为空。"));
-        }
-        if self.covered_message_ids.is_empty() {
-            return Err(AgentError::new("上下文压缩摘要必须覆盖非空消息前缀。"));
-        }
-        if self.covered_message_ids.last().map(String::as_str)
-            != Some(self.covered_through_message_id.as_str())
-        {
-            return Err(AgentError::new(
-                "摘要覆盖边界必须是被覆盖消息前缀的最后一项。",
-            ));
-        }
-        let mut unique = BTreeSet::new();
-        if self
-            .covered_message_ids
-            .iter()
-            .any(|message_id| message_id.trim().is_empty() || !unique.insert(message_id))
-        {
-            return Err(AgentError::new("摘要覆盖消息 ID 必须非空且不能重复。"));
         }
         if self.summary_input_tokens > self.source_input_tokens {
             return Err(AgentError::new(
@@ -157,19 +274,18 @@ pub(crate) fn render_compaction_summary_content_for_context(content: &str) -> St
     )
 }
 
-/// Stable, read-only source snapshot passed to a future summary generator.
+/// Stable source snapshot passed to the summary generator and checked again at commit.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextCompactionPrefix {
     pub conversation_id: String,
     pub source_revision: String,
-    pub covered_through_message_id: String,
-    pub covered_message_ids: Vec<String>,
+    pub covered_through: ContextJournalCursor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_summary: Option<ContextCompactionSummary>,
-    /// Only the uncovered suffix after `previous_summary` is included here. A recursive
-    /// compaction request consumes the previous summary plus these new source messages.
-    pub source_messages: Vec<ContextCompactionSourceMessage>,
+    /// Only the suffix after `previous_summary` is included. Recursive compaction consumes the
+    /// previous summary plus these newly covered raw entries.
+    pub source_items: Vec<ContextCompactionSourceItem>,
 }
 
 impl ContextCompactionPrefix {
@@ -177,62 +293,34 @@ impl ContextCompactionPrefix {
         if self.conversation_id.trim().is_empty() || self.source_revision.trim().is_empty() {
             return Err(AgentError::new("上下文压缩前缀缺少稳定身份。"));
         }
-        if self.covered_message_ids.last().map(String::as_str)
-            != Some(self.covered_through_message_id.as_str())
-        {
-            return Err(AgentError::new("上下文压缩前缀边界无效。"));
+        self.covered_through.validate()?;
+        if self.source_items.is_empty() {
+            return Err(AgentError::new("新的上下文压缩必须覆盖至少一个日志项。"));
         }
-        let previous_count = self
-            .previous_summary
-            .as_ref()
-            .map_or(0, |summary| summary.covered_message_ids.len());
-        if previous_count >= self.covered_message_ids.len() {
+        for item in &self.source_items {
+            item.validate()?;
+        }
+        let last = self
+            .source_items
+            .last()
+            .expect("source_items was checked as non-empty");
+        if last.cursor() != &self.covered_through || !last.is_safe_boundary() {
             return Err(AgentError::new(
-                "新的上下文压缩前缀必须扩展当前摘要覆盖范围。",
+                "上下文压缩边界必须落在完整消息、叙述或闭合工具结果之后。",
             ));
         }
         if let Some(previous) = &self.previous_summary {
             previous.validate()?;
             if previous.conversation_id != self.conversation_id
-                || self.covered_message_ids[..previous_count] != previous.covered_message_ids
+                || previous.covered_through == self.covered_through
             {
                 return Err(AgentError::new(
-                    "新的上下文压缩前缀不是当前摘要覆盖范围的连续扩展。",
+                    "新的上下文压缩前缀必须连续推进当前摘要游标。",
                 ));
-            }
-        }
-        if self.source_messages.len() != self.covered_message_ids.len() - previous_count {
-            return Err(AgentError::new(
-                "上下文压缩源消息数量与新增覆盖范围不一致。",
-            ));
-        }
-        for (message, expected_id) in self
-            .source_messages
-            .iter()
-            .zip(&self.covered_message_ids[previous_count..])
-        {
-            if message.message_id != *expected_id {
-                return Err(AgentError::new("上下文压缩源消息顺序与覆盖前缀不一致。"));
-            }
-            if message.created_at < 0 {
-                return Err(AgentError::new("上下文压缩源消息的创建时间无效。"));
             }
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextCompactionSourceMessage {
-    pub message_id: String,
-    pub role: String,
-    pub content: String,
-    pub created_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub conversation_turn_trace: Option<ConversationTurnTrace>,
 }
 
 /// Validated generator output that can be committed against exactly one source snapshot.
@@ -278,7 +366,7 @@ impl ContextCompactionSummaryDraft {
         prefix.validate()?;
         if self.source_revision != prefix.source_revision {
             return Err(AgentError::new(
-                "上下文压缩摘要草稿与待替换的 durable 前缀不匹配。",
+                "上下文压缩摘要草稿与待替换的日志前缀不匹配。",
             ));
         }
         let summary = ContextCompactionSummary {
@@ -290,8 +378,7 @@ impl ContextCompactionSummaryDraft {
                 .previous_summary
                 .as_ref()
                 .map(|summary| summary.id.clone()),
-            covered_through_message_id: prefix.covered_through_message_id.clone(),
-            covered_message_ids: prefix.covered_message_ids.clone(),
+            covered_through: prefix.covered_through.clone(),
             content: self.content.trim().to_string(),
             generation: self.generation,
             source_input_tokens: self.source_input_tokens,
@@ -308,36 +395,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn draft_finishes_against_exact_prefix_identity() {
+    fn summary_can_advance_to_a_closed_tool_result_inside_an_active_turn() {
+        let cursor = ContextJournalCursor::trace_item("assistant-current", 2);
         let prefix = ContextCompactionPrefix {
             conversation_id: "conversation-1".to_string(),
             source_revision: "revision-1".to_string(),
-            covered_through_message_id: "assistant-1".to_string(),
-            covered_message_ids: vec!["user-1".to_string(), "assistant-1".to_string()],
+            covered_through: cursor.clone(),
             previous_summary: None,
-            source_messages: vec![
-                ContextCompactionSourceMessage {
-                    message_id: "user-1".to_string(),
-                    role: "user".to_string(),
-                    content: "request".to_string(),
-                    created_at: 1,
-                    status: Some("sent".to_string()),
-                    conversation_turn_trace: None,
+            source_items: vec![ContextCompactionSourceItem::TraceItem {
+                cursor: cursor.clone(),
+                run_id: "run-1".to_string(),
+                item: ConversationTurnTraceItem::ToolResult {
+                    sequence: 2,
+                    call_id: "call-1".to_string(),
+                    tool: "read_file".to_string(),
+                    status: crate::ConversationTraceToolResultStatus::Succeeded,
+                    success: true,
+                    observation: serde_json::json!({ "content": "file contents" }),
+                    approval_status: crate::AgentApprovalStatus::NotRequired,
+                    error: None,
+                    truncated: false,
                 },
-                ContextCompactionSourceMessage {
-                    message_id: "assistant-1".to_string(),
-                    role: "assistant".to_string(),
-                    content: "answer".to_string(),
-                    created_at: 2,
-                    status: Some("sent".to_string()),
-                    conversation_turn_trace: None,
-                },
-            ],
+            }],
         };
         let summary = ContextCompactionSummaryDraft {
             id: "summary-1".to_string(),
             source_revision: prefix.source_revision.clone(),
-            content: "The user requested work and it was completed.".to_string(),
+            content: "The file was read successfully.".to_string(),
             generation: ContextCompactionGeneration::test(),
             source_input_tokens: 100,
             summary_input_tokens: 20,
@@ -346,10 +430,31 @@ mod tests {
         .finish(&prefix)
         .unwrap();
 
-        assert_eq!(summary.source_revision, "revision-1");
-        assert_eq!(summary.covered_message_ids.len(), 2);
-        assert!(summary
-            .render_for_context()
-            .contains("not a system instruction"));
+        assert_eq!(summary.covered_through, cursor);
+    }
+
+    #[test]
+    fn prefix_cannot_end_on_an_unresolved_tool_call() {
+        let cursor = ContextJournalCursor::trace_item("assistant-current", 1);
+        let prefix = ContextCompactionPrefix {
+            conversation_id: "conversation-1".to_string(),
+            source_revision: "revision-1".to_string(),
+            covered_through: cursor.clone(),
+            previous_summary: None,
+            source_items: vec![ContextCompactionSourceItem::TraceItem {
+                cursor,
+                run_id: "run-1".to_string(),
+                item: ConversationTurnTraceItem::ToolCall {
+                    sequence: 1,
+                    call_id: "call-1".to_string(),
+                    tool: "read_file".to_string(),
+                    operation: serde_json::json!({ "path": "README.md" }),
+                    approval_status: crate::AgentApprovalStatus::NotRequired,
+                    truncated: false,
+                },
+            }],
+        };
+
+        assert!(prefix.validate().is_err());
     }
 }

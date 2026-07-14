@@ -936,7 +936,7 @@ mod tests {
         assert!(openai["messages"][4]["content"]
             .as_str()
             .unwrap()
-            .contains("\"status\":\"succeeded\""));
+            .contains("\"ok\": true"));
         assert_eq!(openai["messages"][5]["content"], "The file is valid.");
         assert!(openai["messages"][6]["content"]
             .as_str()

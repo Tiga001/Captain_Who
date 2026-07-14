@@ -4,6 +4,7 @@ use super::{
     MAX_MAX_TOKENS, RUN_COUNTER,
 };
 use crate::cancellation::AgentCancellationToken;
+use crate::conversation_trace::{canonical_tool_result_for_context, render_tool_observation};
 use crate::llm::{LlmImage, LlmMessage, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
     AgentApprovalStatus, AgentChatOutput, AgentError, AgentEvent, AgentProposedAction, AgentResult,
@@ -108,28 +109,7 @@ fn strip_json_code_fence(content: &str) -> Option<&str> {
 }
 
 pub(super) fn build_tool_observation_message(result: &AgentToolResult) -> String {
-    let payload = if result.ok {
-        json!({
-            "type": "tool_result",
-            "tool": result.tool,
-            "callId": result.call_id,
-            "ok": true,
-            "result": result.result
-        })
-    } else {
-        json!({
-            "type": "tool_result",
-            "tool": result.tool,
-            "callId": result.call_id,
-            "ok": false,
-            "error": result.error
-        })
-    };
-    let payload = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string());
-
-    format!(
-        "Tool result observation. Use this result to continue. Do not repeat the same tool call unless more information is needed.\n```json\n{payload}\n```"
-    )
+    render_tool_observation(result)
 }
 
 pub(super) async fn execute_tool_on_blocking_thread(
@@ -191,17 +171,8 @@ pub(super) fn failed_tool_call_result(call: &AgentToolCall, error: AgentError) -
     }
 }
 
-pub(super) fn redact_tool_result_for_llm(result: &AgentToolResult) -> AgentToolResult {
-    let mut redacted = result.clone();
-    if let Some(value) = redacted.result.as_mut() {
-        redact_base64_fields(value);
-    }
-
-    redacted
-}
-
 pub(super) fn redact_tool_result_for_event(result: &AgentToolResult) -> AgentToolResult {
-    let mut redacted = redact_tool_result_for_llm(result);
+    let mut redacted = canonical_tool_result_for_context(result);
     if redacted.tool == "write_file" {
         if let Some(object) = redacted.result.as_mut().and_then(Value::as_object_mut) {
             object.remove("tail");
@@ -234,26 +205,6 @@ pub(super) fn file_draft_from_tool_result(
     }
     let draft = result.result.as_ref()?.get("draft")?.clone();
     serde_json::from_value(draft).ok()
-}
-
-fn redact_base64_fields(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            for (key, item) in object.iter_mut() {
-                if key == "dataBase64" {
-                    *item = json!("[redacted]");
-                } else {
-                    redact_base64_fields(item);
-                }
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                redact_base64_fields(item);
-            }
-        }
-        _ => {}
-    }
 }
 
 pub(super) fn llm_image_message_from_tool_result(result: &AgentToolResult) -> Option<LlmMessage> {

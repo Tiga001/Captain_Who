@@ -37,6 +37,10 @@ impl AgentContextBaseline {
     pub(crate) fn replace_persistent_context(self, frame: ContextFrame) -> ContextFrame {
         frame.replace_persistent_baseline(self.frame)
     }
+
+    pub(crate) fn promote_committed_trace(self, frame: ContextFrame) -> ContextFrame {
+        frame.promote_committed_trace(self.frame)
+    }
 }
 
 /// Cached durable state for one conversation and one context configuration.

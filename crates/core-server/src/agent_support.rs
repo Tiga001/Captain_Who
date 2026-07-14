@@ -1,6 +1,5 @@
 // Support types and helper functions for core-server agent orchestration.
 use crate::agent::{AGENT_EVENT_NAME, ID_COUNTER, THINKING_PLACEHOLDER};
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,8 +20,8 @@ use mycopilot_core::{
     AgentInputAttachmentKind, AgentPatchResult, AgentPatchResultStatus, AgentPermissions,
     AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
     AgentProposedAction, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
-    AgentToolCall, AgentToolResult, AgentUsage, AgentWorkspaceContext, ConversationTurnTrace,
-    ConversationTurnTraceTerminalStatus,
+    AgentToolCall, AgentToolResult, AgentUsage, AgentWorkspaceContext, ContextJournalCursor,
+    ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
 };
 use mycopilot_protocol_rs::AGENT_EVENT_NOTIFICATION_METHOD;
 use serde::{Deserialize, Serialize};
@@ -435,41 +434,60 @@ pub(super) fn conversation_history_messages_with_compaction(
         .iter()
         .map(|trace| (trace.assistant_message_id.as_str(), trace))
         .collect::<std::collections::HashMap<_, _>>();
-    let covered_message_ids = compaction_summary
-        .map(|summary| {
-            summary
-                .covered_message_ids
-                .iter()
-                .map(String::as_str)
-                .collect::<HashSet<_>>()
-        })
-        .unwrap_or_default();
+    let covered_boundary = compaction_summary.and_then(|summary| {
+        conversation
+            .messages
+            .iter()
+            .position(|message| message.id == summary.covered_through.message_id())
+            .map(|index| (index, &summary.covered_through))
+    });
     conversation
         .messages
         .iter()
-        .filter(|message| !covered_message_ids.contains(message.id.as_str()))
+        .enumerate()
+        .filter_map(|(index, message)| {
+            let trace = traces.get(message.id.as_str()).copied().cloned();
+            let Some((boundary_index, cursor)) = covered_boundary else {
+                return Some((message, trace));
+            };
+            if index < boundary_index {
+                return None;
+            }
+            if index > boundary_index {
+                return Some((message, trace));
+            }
+            match cursor {
+                ContextJournalCursor::Message { .. } => None,
+                ContextJournalCursor::TraceItem { sequence, .. } => {
+                    let mut trace = trace?;
+                    trace.items.retain(|item| item.sequence() > *sequence);
+                    let has_uncovered_completion = trace.terminal_status.is_terminal();
+                    (!trace.items.is_empty() || has_uncovered_completion)
+                        .then_some((message, Some(trace)))
+                }
+            }
+        })
         .filter(|message| {
             !excluded_message_ids
                 .iter()
-                .any(|excluded_id| message.id == *excluded_id)
+                .any(|excluded_id| message.0.id == *excluded_id)
         })
-        .filter(|message| {
+        .filter(|(message, trace)| {
             if message.status.as_deref() != Some("pending") {
                 return true;
             }
-            traces.get(message.id.as_str()).is_some_and(|trace| {
+            trace.as_ref().is_some_and(|trace| {
                 trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
             })
         })
-        .filter(|message| matches!(message.role.as_str(), "user" | "assistant"))
-        .filter_map(|message| {
-            let trace = traces.get(message.id.as_str()).copied();
+        .filter(|(message, _)| matches!(message.role.as_str(), "user" | "assistant"))
+        .filter_map(|(message, trace)| {
             if message.status.as_deref() == Some("error") && trace.is_none() {
                 return None;
             }
-            let content = if trace.is_some_and(|trace| {
+            let content = if trace.as_ref().is_some_and(|trace| {
                 trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
-            }) || (trace.is_some_and(|trace| {
+            }) || (trace.as_ref().is_some_and(|trace| {
                 trace.terminal_status == ConversationTurnTraceTerminalStatus::Cancelled
             }) && message.content.trim() == THINKING_PLACEHOLDER)
             {
@@ -485,7 +503,7 @@ pub(super) fn conversation_history_messages_with_compaction(
                 role: message.role.clone(),
                 content,
                 created_at: Some(message.created_at),
-                conversation_turn_trace: trace.cloned(),
+                conversation_turn_trace: trace,
             })
         })
         .collect()

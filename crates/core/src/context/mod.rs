@@ -24,13 +24,12 @@ pub(crate) use compaction::{
 };
 pub(crate) use compaction::{
     ContextCompactionPlan, ContextCompactionPlanStatus, ContextCompactionPlanner,
-    ContextCompactionScope,
 };
 pub(crate) use compaction_summary::render_compaction_summary_content_for_context;
 pub use compaction_summary::{
     ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionPrefix,
-    ContextCompactionSourceMessage, ContextCompactionSummary, ContextCompactionSummaryDraft,
-    CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+    ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
+    ContextJournalCursor, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
 };
 pub(crate) use frame::{
     ContextFrame, ContextGroup, ContextItem, ContextMetadata, ContextOrigin, ContextRetention,

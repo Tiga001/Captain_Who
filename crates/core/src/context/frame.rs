@@ -2,6 +2,7 @@ use super::measurement::{
     combine_context_revisions, ContextEstimatorIdentity, ContextMessageEstimate,
     ContextRevisionHasher, ContextTokenEstimator,
 };
+use super::ContextJournalCursor;
 use crate::llm::{LlmMessage, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
     AgentContextCheckpointGroup, AgentContextCheckpointImage, AgentContextCheckpointItem,
@@ -165,6 +166,7 @@ pub(crate) struct ContextGroup {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextOriginKind {
     ConversationMessage,
+    ConversationTraceItem,
     CompactionSummary,
 }
 
@@ -172,6 +174,7 @@ impl ContextOriginKind {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::ConversationMessage => "conversation_message",
+            Self::ConversationTraceItem => "conversation_trace_item",
             Self::CompactionSummary => "compaction_summary",
         }
     }
@@ -179,6 +182,7 @@ impl ContextOriginKind {
     fn from_str(value: &str) -> Option<Self> {
         match value {
             "conversation_message" => Some(Self::ConversationMessage),
+            "conversation_trace_item" => Some(Self::ConversationTraceItem),
             "compaction_summary" => Some(Self::CompactionSummary),
             _ => None,
         }
@@ -206,12 +210,34 @@ impl ContextOrigin {
         }
     }
 
+    pub(crate) fn conversation_trace_item(
+        assistant_message_id: impl Into<String>,
+        sequence: u64,
+    ) -> Self {
+        let cursor = ContextJournalCursor::trace_item(assistant_message_id, sequence);
+        Self {
+            kind: ContextOriginKind::ConversationTraceItem,
+            id: serde_json::to_string(&cursor)
+                .expect("ContextJournalCursor serialization cannot fail"),
+        }
+    }
+
     pub(crate) fn kind(&self) -> ContextOriginKind {
         self.kind
     }
 
     pub(crate) fn id(&self) -> &str {
         &self.id
+    }
+
+    pub(crate) fn journal_cursor(&self) -> Option<ContextJournalCursor> {
+        match self.kind {
+            ContextOriginKind::ConversationMessage => {
+                Some(ContextJournalCursor::message(self.id.clone()))
+            }
+            ContextOriginKind::ConversationTraceItem => serde_json::from_str(&self.id).ok(),
+            ContextOriginKind::CompactionSummary => None,
+        }
     }
 }
 
@@ -536,6 +562,32 @@ impl ContextFrame {
             replaced.push(item);
         }
         replaced
+    }
+
+    /// Adopts the latest persisted context log after a successful main-model request. Model/tool
+    /// overlay items are now represented canonically by the baseline and are removed; unrelated
+    /// run state such as attachments and protocol guards remains in place.
+    pub(crate) fn promote_committed_trace(self, baseline: MeasuredContextBaseline) -> Self {
+        let overlay = self
+            .iter_items()
+            .filter(|item| {
+                !item.metadata.usage_class().is_persistent()
+                    && !item.metadata.sources().iter().any(|source| {
+                        matches!(
+                            source,
+                            ContextSource::ModelResponse
+                                | ContextSource::ToolResult
+                                | ContextSource::ToolContinuation
+                        )
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut promoted = Self::from_measured_baseline(baseline);
+        for item in overlay {
+            promoted.push(item);
+        }
+        promoted
     }
 
     /// Freezes all persistent overlay items into a shareable measured baseline. The frame keeps

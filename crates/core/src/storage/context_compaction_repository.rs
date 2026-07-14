@@ -1,9 +1,9 @@
 use crate::content_revision;
 use crate::context::{
     ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionPrefix,
-    ContextCompactionSourceMessage, ContextCompactionSummary, ContextCompactionSummaryDraft,
+    ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
+    ContextJournalCursor,
 };
-use crate::conversation_trace::ConversationTurnTraceTerminalStatus;
 use crate::storage::conversation_trace_repository;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::json;
@@ -63,66 +63,68 @@ pub fn get_active_summary(
             "active head 指向了其他会话的摘要。".to_string(),
         ));
     }
-    validate_summary_against_current_prefix(connection, &summary)?;
+    if !summary_matches_current_raw_prefix(connection, &summary)? {
+        // Raw history remains authoritative. An edit, delete or rollback invalidates only the
+        // derived summaries; later requests immediately fall back to the remaining raw log.
+        connection.execute(
+            "DELETE FROM context_compaction_summaries WHERE conversation_id = ?1",
+            [conversation_id],
+        )?;
+        return Ok(None);
+    }
     Ok(Some(summary))
 }
 
 pub fn prepare_prefix(
     connection: &Connection,
     conversation_id: &str,
-    covered_through_message_id: &str,
+    covered_through: &ContextJournalCursor,
 ) -> Result<ContextCompactionPrefix, ContextCompactionRepositoryError> {
-    let messages = list_source_messages(connection, conversation_id)?;
-    if messages.is_empty() {
+    covered_through
+        .validate()
+        .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
+    let entries = list_journal_entries(connection, conversation_id)?;
+    let boundary_index = cursor_index(&entries, covered_through).ok_or_else(|| {
+        ContextCompactionRepositoryError::Invalid(format!(
+            "覆盖边界不属于当前会话日志：{covered_through:?}"
+        ))
+    })?;
+    if !entries[boundary_index].is_safe_boundary() {
         return Err(ContextCompactionRepositoryError::Invalid(
-            "会话没有可压缩的 durable 消息。".to_string(),
+            "上下文压缩不能停在未闭合的工具调用上。".to_string(),
         ));
     }
-    let boundary_index = messages
-        .iter()
-        .position(|message| message.message_id == covered_through_message_id)
-        .ok_or_else(|| {
-            ContextCompactionRepositoryError::Invalid(format!(
-                "覆盖边界消息不属于会话：{covered_through_message_id}"
-            ))
-        })?;
-    let selected = &messages[..=boundary_index];
-    validate_compactable_prefix(selected)?;
 
     let previous_summary = get_active_summary(connection, conversation_id)?;
-    let previous_count = previous_summary
-        .as_ref()
-        .map_or(0, |summary| summary.covered_message_ids.len());
-    let covered_message_ids = selected
-        .iter()
-        .map(|message| message.message_id.clone())
-        .collect::<Vec<_>>();
-    if previous_count >= covered_message_ids.len() {
-        return Err(ContextCompactionRepositoryError::Invalid(
-            "新的 durable 前缀必须扩展当前摘要的覆盖范围。".to_string(),
-        ));
-    }
-    if let Some(previous) = &previous_summary {
-        if covered_message_ids[..previous_count] != previous.covered_message_ids {
-            return Err(ContextCompactionRepositoryError::Stale(
-                "当前消息前缀已不再匹配 active summary。".to_string(),
-            ));
+    let source_start = match &previous_summary {
+        Some(previous) => {
+            let previous_index =
+                cursor_index(&entries, &previous.covered_through).ok_or_else(|| {
+                    ContextCompactionRepositoryError::Stale(
+                        "active summary 的日志游标已不存在。".to_string(),
+                    )
+                })?;
+            if previous_index >= boundary_index {
+                return Err(ContextCompactionRepositoryError::Invalid(
+                    "新的上下文压缩游标必须向日志尾部推进。".to_string(),
+                ));
+            }
+            previous_index + 1
         }
-    }
-    let source_messages = selected[previous_count..].to_vec();
+        None => 0,
+    };
+    let source_items = entries[source_start..=boundary_index].to_vec();
     let source_revision = source_revision(
         conversation_id,
-        &covered_message_ids,
-        previous_summary.as_ref(),
-        &source_messages,
+        covered_through,
+        &entries[..=boundary_index],
     )?;
     let prefix = ContextCompactionPrefix {
         conversation_id: conversation_id.to_string(),
         source_revision,
-        covered_through_message_id: covered_through_message_id.to_string(),
-        covered_message_ids,
+        covered_through: covered_through.clone(),
         previous_summary,
-        source_messages,
+        source_items,
     };
     prefix
         .validate()
@@ -130,10 +132,10 @@ pub fn prepare_prefix(
     Ok(prefix)
 }
 
-/// Commits an immutable summary and switches the active projection in one transaction.
+/// Commits an immutable summary and advances the active cursor in one transaction.
 ///
-/// The source snapshot is rebuilt inside the transaction. A caller can therefore perform summary
-/// generation outside the write lock without risking replacement of a newer history revision.
+/// Summary generation runs outside the write transaction. The exact raw prefix is reconstructed
+/// again under the transaction before the head can move.
 pub fn commit_prefix_replacement(
     connection: &mut Connection,
     expected_prefix: &ContextCompactionPrefix,
@@ -147,7 +149,7 @@ pub fn commit_prefix_replacement(
         .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
     if draft.source_revision != expected_prefix.source_revision {
         return Err(ContextCompactionRepositoryError::Stale(
-            "摘要草稿不是基于待替换 durable 前缀生成的。".to_string(),
+            "摘要草稿不是基于待替换日志前缀生成的。".to_string(),
         ));
     }
 
@@ -173,21 +175,18 @@ pub fn commit_prefix_replacement(
     let current_prefix = prepare_prefix(
         &transaction,
         &expected_prefix.conversation_id,
-        &expected_prefix.covered_through_message_id,
+        &expected_prefix.covered_through,
     )?;
     if current_prefix.source_revision != expected_prefix.source_revision
-        || current_prefix.covered_message_ids != expected_prefix.covered_message_ids
+        || current_prefix.covered_through != expected_prefix.covered_through
         || current_prefix
             .previous_summary
             .as_ref()
             .map(|summary| summary.id.as_str())
-            != expected_prefix
-                .previous_summary
-                .as_ref()
-                .map(|summary| summary.id.as_str())
+            != expected_summary_id
     {
         return Err(ContextCompactionRepositoryError::Stale(
-            "摘要生成期间 durable 历史或 active head 已发生变化。".to_string(),
+            "摘要生成期间原始上下文日志或 active head 已发生变化。".to_string(),
         ));
     }
 
@@ -217,15 +216,13 @@ pub fn commit_prefix_replacement(
             &summary.conversation_id,
             &summary.id,
             current_head_revision.saturating_add(1),
-            summary.created_at
+            summary.created_at,
         ],
     )?;
     transaction.commit()?;
     Ok(summary)
 }
 
-/// Atomically restores the previous immutable summary version, or the raw history if this was the
-/// first compaction. The expected ID prevents rolling back a head that changed concurrently.
 pub fn rollback_active_summary(
     connection: &mut Connection,
     conversation_id: &str,
@@ -258,10 +255,10 @@ pub fn rollback_active_summary(
                  SET summary_id = ?1, revision = ?2, updated_at = ?3
                  WHERE conversation_id = ?4",
                 params![
-                    summary.id,
+                    &summary.id,
                     current_revision.saturating_add(1),
                     updated_at,
-                    conversation_id
+                    conversation_id,
                 ],
             )?;
         }
@@ -276,10 +273,10 @@ pub fn rollback_active_summary(
     Ok(restored)
 }
 
-fn list_source_messages(
+fn list_journal_entries(
     connection: &Connection,
     conversation_id: &str,
-) -> Result<Vec<ContextCompactionSourceMessage>, ContextCompactionRepositoryError> {
+) -> Result<Vec<ContextCompactionSourceItem>, ContextCompactionRepositoryError> {
     let rows = {
         let mut statement = connection.prepare(
             "SELECT id, role, content, created_at, status
@@ -300,90 +297,89 @@ fn list_source_messages(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
-    rows.into_iter()
-        .map(|(message_id, role, content, created_at, status)| {
-            let conversation_turn_trace = if role == "assistant" {
-                conversation_trace_repository::get_trace_for_message(connection, &message_id)?
-            } else {
-                None
-            };
-            Ok(ContextCompactionSourceMessage {
-                message_id,
+
+    let mut entries = Vec::new();
+    for (message_id, role, mut content, created_at, status) in rows {
+        match role.as_str() {
+            "user" => entries.push(ContextCompactionSourceItem::Message {
+                cursor: ContextJournalCursor::message(&message_id),
                 role,
                 content,
                 created_at,
                 status,
-                conversation_turn_trace,
-            })
-        })
-        .collect()
+                terminal_status: None,
+                terminal_error: None,
+            }),
+            "assistant" => {
+                let trace =
+                    conversation_trace_repository::get_trace_for_message(connection, &message_id)?;
+                if let Some(trace) = &trace {
+                    for item in &trace.items {
+                        entries.push(ContextCompactionSourceItem::TraceItem {
+                            cursor: ContextJournalCursor::trace_item(&message_id, item.sequence()),
+                            run_id: trace.run_id.clone(),
+                            item: item.clone(),
+                        });
+                    }
+                }
+
+                let terminal_status = trace.as_ref().map(|trace| trace.terminal_status);
+                let has_complete_message = trace
+                    .as_ref()
+                    .is_some_and(|trace| trace.terminal_status.is_terminal())
+                    || (trace.is_none() && status.as_deref() != Some("pending"));
+                if !has_complete_message || (trace.is_none() && status.as_deref() == Some("error"))
+                {
+                    continue;
+                }
+                if status.as_deref() == Some("pending") && content.trim() == "正在思考..." {
+                    content.clear();
+                }
+                entries.push(ContextCompactionSourceItem::Message {
+                    cursor: ContextJournalCursor::message(&message_id),
+                    role,
+                    content,
+                    created_at,
+                    status,
+                    terminal_status,
+                    terminal_error: trace.and_then(|trace| trace.terminal_error),
+                });
+            }
+            _ => {
+                return Err(ContextCompactionRepositoryError::Invalid(format!(
+                    "会话包含未知消息角色：{role}"
+                )))
+            }
+        }
+    }
+    for entry in &entries {
+        entry
+            .validate()
+            .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
+    }
+    Ok(entries)
 }
 
-fn validate_compactable_prefix(
-    messages: &[ContextCompactionSourceMessage],
-) -> Result<(), ContextCompactionRepositoryError> {
-    if messages
-        .first()
-        .is_none_or(|message| message.role != "user")
-        || messages
-            .last()
-            .is_none_or(|message| message.role != "assistant")
-    {
-        return Err(ContextCompactionRepositoryError::Invalid(
-            "durable 前缀必须从 user 消息开始并在完整 assistant turn 后结束。".to_string(),
-        ));
-    }
-    for (index, message) in messages.iter().enumerate() {
-        if !matches!(message.role.as_str(), "user" | "assistant") {
-            return Err(ContextCompactionRepositoryError::Invalid(format!(
-                "durable 前缀包含不支持的消息角色：{}",
-                message.role
-            )));
-        }
-        let expected_role = if index % 2 == 0 { "user" } else { "assistant" };
-        if message.role != expected_role {
-            return Err(ContextCompactionRepositoryError::Invalid(format!(
-                "durable 前缀必须由完整的 user/assistant turn 顺序组成，消息 {} 的角色应为 {expected_role}。",
-                message.message_id
-            )));
-        }
-        if message.status.as_deref() == Some("pending") {
-            return Err(ContextCompactionRepositoryError::Invalid(format!(
-                "durable 前缀不能覆盖运行中的消息：{}",
-                message.message_id
-            )));
-        }
-        if message
-            .conversation_turn_trace
-            .as_ref()
-            .is_some_and(|trace| {
-                trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
-            })
-        {
-            return Err(ContextCompactionRepositoryError::Invalid(format!(
-                "durable 前缀不能覆盖运行中的 trace：{}",
-                message.message_id
-            )));
-        }
-    }
-    Ok(())
+fn cursor_index(
+    entries: &[ContextCompactionSourceItem],
+    cursor: &ContextJournalCursor,
+) -> Option<usize> {
+    entries.iter().position(|entry| entry.cursor() == cursor)
 }
 
 fn source_revision(
     conversation_id: &str,
-    covered_message_ids: &[String],
-    previous_summary: Option<&ContextCompactionSummary>,
-    source_messages: &[ContextCompactionSourceMessage],
+    covered_through: &ContextJournalCursor,
+    complete_raw_prefix: &[ContextCompactionSourceItem],
 ) -> Result<String, ContextCompactionRepositoryError> {
     let material = serde_json::to_vec(&json!({
-        "schemaVersion": 3,
+        "schemaVersion": 1,
         "conversationId": conversation_id,
-        "coveredMessageIds": covered_message_ids,
-        "previousSummary": previous_summary,
-        "sourceMessages": source_messages,
+        "coveredThrough": covered_through,
+        "rawPrefix": complete_raw_prefix,
     }))
     .map_err(|error| {
-        ContextCompactionRepositoryError::Invalid(format!("无法序列化 durable 前缀：{error}"))
+        ContextCompactionRepositoryError::Invalid(format!("无法序列化上下文日志前缀：{error}"))
     })?;
     Ok(content_revision(&material))
 }
@@ -395,19 +391,23 @@ fn insert_summary(
     summary
         .validate()
         .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
+    let (cursor_kind, message_id, trace_sequence) = cursor_columns(&summary.covered_through);
     transaction.execute(
         "INSERT INTO context_compaction_summaries (
             id, conversation_id, schema_version, source_revision, previous_summary_id,
-            covered_through_message_id, content, generation_kind, generation_model,
+            covered_through_kind, covered_through_message_id,
+            covered_through_trace_sequence, content, generation_kind, generation_model,
             source_input_tokens, summary_input_tokens, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             &summary.id,
             &summary.conversation_id,
             summary.schema_version,
             &summary.source_revision,
             &summary.previous_summary_id,
-            &summary.covered_through_message_id,
+            cursor_kind,
+            message_id,
+            trace_sequence,
             &summary.content,
             summary.generation.kind.as_str(),
             &summary.generation.model,
@@ -416,13 +416,6 @@ fn insert_summary(
             summary.created_at,
         ],
     )?;
-    for (ordinal, message_id) in summary.covered_message_ids.iter().enumerate() {
-        transaction.execute(
-            "INSERT INTO context_compaction_summary_sources (summary_id, ordinal, message_id)
-             VALUES (?1, ?2, ?3)",
-            params![&summary.id, ordinal as u64, message_id],
-        )?;
-    }
     Ok(())
 }
 
@@ -434,7 +427,8 @@ fn load_summary(
         .query_row(
             "SELECT
                 id, conversation_id, schema_version, source_revision, previous_summary_id,
-                covered_through_message_id, content, generation_kind, generation_model,
+                covered_through_kind, covered_through_message_id,
+                covered_through_trace_sequence, content, generation_kind, generation_model,
                 source_input_tokens, summary_input_tokens, created_at
              FROM context_compaction_summaries
              WHERE id = ?1",
@@ -448,11 +442,13 @@ fn load_summary(
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, u64>(9)?,
-                    row.get::<_, u64>(10)?,
-                    row.get::<_, i64>(11)?,
+                    row.get::<_, Option<u64>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, u64>(11)?,
+                    row.get::<_, u64>(12)?,
+                    row.get::<_, i64>(13)?,
                 ))
             },
         )
@@ -460,20 +456,8 @@ fn load_summary(
         .ok_or_else(|| {
             ContextCompactionRepositoryError::Invalid(format!("找不到摘要版本：{summary_id}"))
         })?;
-    let covered_message_ids = {
-        let mut statement = connection.prepare(
-            "SELECT message_id
-             FROM context_compaction_summary_sources
-             WHERE summary_id = ?1
-             ORDER BY ordinal ASC",
-        )?;
-        let message_ids = statement
-            .query_map([summary_id], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        message_ids
-    };
-    let generation_kind = ContextCompactionGenerationKind::from_str(&row.7).ok_or_else(|| {
-        ContextCompactionRepositoryError::Invalid(format!("摘要包含未知生成方式：{}", row.7))
+    let generation_kind = ContextCompactionGenerationKind::from_str(&row.9).ok_or_else(|| {
+        ContextCompactionRepositoryError::Invalid(format!("摘要包含未知生成方式：{}", row.9))
     })?;
     let summary = ContextCompactionSummary {
         schema_version: row.2,
@@ -481,16 +465,15 @@ fn load_summary(
         conversation_id: row.1,
         source_revision: row.3,
         previous_summary_id: row.4,
-        covered_through_message_id: row.5,
-        covered_message_ids,
-        content: row.6,
+        covered_through: cursor_from_columns(&row.5, row.6, row.7)?,
+        content: row.8,
         generation: ContextCompactionGeneration {
             kind: generation_kind,
-            model: row.8,
+            model: row.10,
         },
-        source_input_tokens: row.9,
-        summary_input_tokens: row.10,
-        created_at: row.11,
+        source_input_tokens: row.11,
+        summary_input_tokens: row.12,
+        created_at: row.13,
     };
     summary
         .validate()
@@ -498,41 +481,56 @@ fn load_summary(
     Ok(summary)
 }
 
-fn validate_summary_against_current_prefix(
+fn summary_matches_current_raw_prefix(
     connection: &Connection,
     summary: &ContextCompactionSummary,
-) -> Result<(), ContextCompactionRepositoryError> {
-    let current_ids = {
-        let mut statement = connection.prepare(
-            "SELECT id
-             FROM messages
-             WHERE conversation_id = ?1
-             ORDER BY position ASC, created_at ASC, id ASC
-             LIMIT ?2",
-        )?;
-        let message_ids = statement
-            .query_map(
-                params![
-                    &summary.conversation_id,
-                    u64::try_from(summary.covered_message_ids.len()).unwrap_or(u64::MAX)
-                ],
-                |row| row.get::<_, String>(0),
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        message_ids
+) -> Result<bool, ContextCompactionRepositoryError> {
+    let entries = list_journal_entries(connection, &summary.conversation_id)?;
+    let Some(index) = cursor_index(&entries, &summary.covered_through) else {
+        return Ok(false);
     };
-    if current_ids != summary.covered_message_ids {
-        return Err(ContextCompactionRepositoryError::Stale(
-            "active summary 不再覆盖当前会话的连续消息前缀。".to_string(),
-        ));
+    Ok(source_revision(
+        &summary.conversation_id,
+        &summary.covered_through,
+        &entries[..=index],
+    )? == summary.source_revision)
+}
+
+fn cursor_columns(cursor: &ContextJournalCursor) -> (&'static str, &str, Option<u64>) {
+    match cursor {
+        ContextJournalCursor::Message { message_id } => ("message", message_id, None),
+        ContextJournalCursor::TraceItem {
+            assistant_message_id,
+            sequence,
+        } => ("trace_item", assistant_message_id, Some(*sequence)),
     }
-    Ok(())
+}
+
+fn cursor_from_columns(
+    kind: &str,
+    message_id: String,
+    trace_sequence: Option<u64>,
+) -> Result<ContextJournalCursor, ContextCompactionRepositoryError> {
+    match (kind, trace_sequence) {
+        ("message", None) => Ok(ContextJournalCursor::message(message_id)),
+        ("trace_item", Some(sequence)) => {
+            Ok(ContextJournalCursor::trace_item(message_id, sequence))
+        }
+        _ => Err(ContextCompactionRepositoryError::Invalid(
+            "摘要日志游标列不一致。".to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::migrations;
+    use crate::{
+        AgentApprovalStatus, ConversationTraceToolResultStatus, ConversationTurnTrace,
+        ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+        CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    };
 
     fn setup() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -546,84 +544,118 @@ mod tests {
                 [],
             )
             .unwrap();
-        for (position, id, role, content) in [
-            (0, "user-1", "user", "first request"),
-            (1, "assistant-1", "assistant", "first answer"),
-            (2, "user-2", "user", "second request"),
-            (3, "assistant-2", "assistant", "second answer"),
-            (4, "user-3", "user", "current request"),
+        for (position, id, role, content, status) in [
+            (0, "user-1", "user", "first request", "sent"),
+            (1, "assistant-1", "assistant", "first answer", "sent"),
+            (2, "user-2", "user", "current request", "sent"),
+            (3, "assistant-2", "assistant", "正在思考...", "pending"),
         ] {
             connection
                 .execute(
                     "INSERT INTO messages (
                         id, conversation_id, role, content, status, agent_run_json,
                         ui_state_json, created_at, position
-                     ) VALUES (?1, 'conversation-1', ?2, ?3, 'sent', NULL, NULL, ?4, ?4)",
-                    params![id, role, content, position],
+                     ) VALUES (?1, 'conversation-1', ?2, ?3, ?4, NULL, NULL, ?5, ?5)",
+                    params![id, role, content, status, position],
                 )
                 .unwrap();
         }
+        let trace = ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-2".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-2".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            terminal_error: None,
+            truncated: false,
+            items: vec![
+                ConversationTurnTraceItem::ToolCall {
+                    sequence: 0,
+                    call_id: "call-1".to_string(),
+                    tool: "web_fetch".to_string(),
+                    operation: json!({ "url": "https://example.com" }),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    sequence: 1,
+                    call_id: "call-1".to_string(),
+                    tool: "web_fetch".to_string(),
+                    status: ConversationTraceToolResultStatus::Succeeded,
+                    success: true,
+                    observation: json!({ "content": "page body" }),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    error: None,
+                    truncated: false,
+                },
+            ],
+        };
+        conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 3, 4)
+            .unwrap();
         connection
     }
 
-    fn draft(
-        prefix: &ContextCompactionPrefix,
-        id: &str,
-        content: &str,
-        created_at: i64,
-    ) -> ContextCompactionSummaryDraft {
+    fn draft(prefix: &ContextCompactionPrefix, id: &str) -> ContextCompactionSummaryDraft {
         ContextCompactionSummaryDraft {
             id: id.to_string(),
             source_revision: prefix.source_revision.clone(),
-            content: content.to_string(),
+            content: format!("summary {id}"),
             generation: ContextCompactionGeneration::test(),
             source_input_tokens: 100,
             summary_input_tokens: 10,
-            created_at,
+            created_at: 10,
         }
     }
 
     #[test]
-    fn commits_recursive_prefix_versions_without_deleting_raw_history() {
+    fn compacts_complete_history_then_advances_inside_current_run() {
         let mut connection = setup();
-        let first_prefix = prepare_prefix(&connection, "conversation-1", "assistant-1").unwrap();
-        assert_eq!(first_prefix.source_messages[0].created_at, 0);
-        assert_eq!(first_prefix.source_messages[1].created_at, 1);
-        let first = commit_prefix_replacement(
-            &mut connection,
-            &first_prefix,
-            draft(&first_prefix, "summary-1", "first turn summary", 10),
-        )
-        .unwrap();
-        assert_eq!(
-            get_active_summary(&connection, "conversation-1").unwrap(),
-            Some(first)
-        );
+        let first_cursor = ContextJournalCursor::message("assistant-1");
+        let first = prepare_prefix(&connection, "conversation-1", &first_cursor).unwrap();
+        commit_prefix_replacement(&mut connection, &first, draft(&first, "summary-1")).unwrap();
 
-        let second_prefix = prepare_prefix(&connection, "conversation-1", "assistant-2").unwrap();
-        assert_eq!(second_prefix.source_messages.len(), 2);
-        assert_eq!(second_prefix.source_messages[0].message_id, "user-2");
-        let second = commit_prefix_replacement(
-            &mut connection,
-            &second_prefix,
-            draft(&second_prefix, "summary-2", "first two turns summary", 20),
-        )
-        .unwrap();
-        assert_eq!(second.previous_summary_id.as_deref(), Some("summary-1"));
-        assert_eq!(second.covered_message_ids.len(), 4);
-        let raw_message_count = connection
+        let run_cursor = ContextJournalCursor::trace_item("assistant-2", 1);
+        let second = prepare_prefix(&connection, "conversation-1", &run_cursor).unwrap();
+        assert!(second.source_items.iter().any(|item| {
+            matches!(item, ContextCompactionSourceItem::TraceItem { cursor, .. } if cursor == &run_cursor)
+        }));
+        let summary =
+            commit_prefix_replacement(&mut connection, &second, draft(&second, "summary-2"))
+                .unwrap();
+        assert_eq!(summary.previous_summary_id.as_deref(), Some("summary-1"));
+        assert_eq!(summary.covered_through, run_cursor);
+
+        let raw_count = connection
             .query_row(
                 "SELECT COUNT(*) FROM messages WHERE conversation_id = 'conversation-1'",
                 [],
                 |row| row.get::<_, u64>(0),
             )
             .unwrap();
-        assert_eq!(raw_message_count, 5);
+        assert_eq!(raw_count, 4);
+    }
 
-        let restored = rollback_active_summary(&mut connection, "conversation-1", "summary-2", 30)
-            .unwrap()
+    #[test]
+    fn appending_after_a_trace_cursor_keeps_the_summary_valid() {
+        let mut connection = setup();
+        let cursor = ContextJournalCursor::trace_item("assistant-2", 1);
+        let prefix = prepare_prefix(&connection, "conversation-1", &cursor).unwrap();
+        commit_prefix_replacement(&mut connection, &prefix, draft(&prefix, "summary-1")).unwrap();
+
+        let mut trace =
+            conversation_trace_repository::get_trace_for_message(&connection, "assistant-2")
+                .unwrap()
+                .unwrap();
+        trace
+            .items
+            .push(ConversationTurnTraceItem::AssistantNarration {
+                sequence: 2,
+                content: "continue".to_string(),
+                truncated: false,
+            });
+        conversation_trace_repository::commit_trace_in_connection(&connection, &trace, 3, 5)
             .unwrap();
-        assert_eq!(restored.id, "summary-1");
+
         assert_eq!(
             get_active_summary(&connection, "conversation-1")
                 .unwrap()
@@ -634,63 +666,11 @@ mod tests {
     }
 
     #[test]
-    fn stale_snapshot_cannot_replace_a_newer_head() {
+    fn mutation_inside_covered_raw_prefix_drops_the_derived_head() {
         let mut connection = setup();
-        let stale = prepare_prefix(&connection, "conversation-1", "assistant-1").unwrap();
-        let fresh = prepare_prefix(&connection, "conversation-1", "assistant-1").unwrap();
-        commit_prefix_replacement(
-            &mut connection,
-            &fresh,
-            draft(&fresh, "summary-1", "fresh summary", 10),
-        )
-        .unwrap();
-
-        let error = commit_prefix_replacement(
-            &mut connection,
-            &stale,
-            draft(&stale, "summary-stale", "stale summary", 11),
-        )
-        .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("stale_context_compaction_prefix"));
-        assert_eq!(
-            get_active_summary(&connection, "conversation-1")
-                .unwrap()
-                .unwrap()
-                .id,
-            "summary-1"
-        );
-    }
-
-    #[test]
-    fn draft_cannot_be_committed_against_a_different_source_revision() {
-        let mut connection = setup();
-        let prefix = prepare_prefix(&connection, "conversation-1", "assistant-1").unwrap();
-        let mut mismatched = draft(&prefix, "summary-wrong-source", "summary", 10);
-        mismatched.source_revision = "another-source-revision".to_string();
-
-        let error = commit_prefix_replacement(&mut connection, &prefix, mismatched).unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("stale_context_compaction_prefix"));
-        assert!(get_active_summary(&connection, "conversation-1")
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn covered_source_mutation_invalidates_all_summary_versions() {
-        let mut connection = setup();
-        let prefix = prepare_prefix(&connection, "conversation-1", "assistant-1").unwrap();
-        commit_prefix_replacement(
-            &mut connection,
-            &prefix,
-            draft(&prefix, "summary-1", "summary", 10),
-        )
-        .unwrap();
-
+        let cursor = ContextJournalCursor::message("assistant-1");
+        let prefix = prepare_prefix(&connection, "conversation-1", &cursor).unwrap();
+        commit_prefix_replacement(&mut connection, &prefix, draft(&prefix, "summary-1")).unwrap();
         connection
             .execute(
                 "UPDATE messages SET content = 'edited request' WHERE id = 'user-1'",
@@ -701,81 +681,5 @@ mod tests {
         assert!(get_active_summary(&connection, "conversation-1")
             .unwrap()
             .is_none());
-        let summary_count = connection
-            .query_row(
-                "SELECT COUNT(*) FROM context_compaction_summaries",
-                [],
-                |row| row.get::<_, u64>(0),
-            )
-            .unwrap();
-        assert_eq!(summary_count, 0);
-    }
-
-    #[test]
-    fn covered_source_timestamp_mutation_invalidates_all_summary_versions() {
-        let mut connection = setup();
-        let prefix = prepare_prefix(&connection, "conversation-1", "assistant-1").unwrap();
-        commit_prefix_replacement(
-            &mut connection,
-            &prefix,
-            draft(&prefix, "summary-1", "summary", 10),
-        )
-        .unwrap();
-
-        connection
-            .execute(
-                "UPDATE messages SET created_at = 100 WHERE id = 'user-1'",
-                [],
-            )
-            .unwrap();
-
-        assert!(get_active_summary(&connection, "conversation-1")
-            .unwrap()
-            .is_none());
-        let summary_count = connection
-            .query_row(
-                "SELECT COUNT(*) FROM context_compaction_summaries",
-                [],
-                |row| row.get::<_, u64>(0),
-            )
-            .unwrap();
-        assert_eq!(summary_count, 0);
-    }
-
-    #[test]
-    fn failed_insert_keeps_previous_head_active() {
-        let mut connection = setup();
-        let first_prefix = prepare_prefix(&connection, "conversation-1", "assistant-1").unwrap();
-        commit_prefix_replacement(
-            &mut connection,
-            &first_prefix,
-            draft(&first_prefix, "summary-1", "first summary", 10),
-        )
-        .unwrap();
-        let second_prefix = prepare_prefix(&connection, "conversation-1", "assistant-2").unwrap();
-        connection
-            .execute_batch(
-                "CREATE TRIGGER reject_test_summary
-                 BEFORE INSERT ON context_compaction_summaries
-                 WHEN NEW.id = 'summary-2'
-                 BEGIN
-                    SELECT RAISE(ABORT, 'injected failure');
-                 END;",
-            )
-            .unwrap();
-
-        assert!(commit_prefix_replacement(
-            &mut connection,
-            &second_prefix,
-            draft(&second_prefix, "summary-2", "second summary", 20),
-        )
-        .is_err());
-        assert_eq!(
-            get_active_summary(&connection, "conversation-1")
-                .unwrap()
-                .unwrap()
-                .id,
-            "summary-1"
-        );
     }
 }

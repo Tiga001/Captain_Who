@@ -9,7 +9,7 @@
 use crate::cancellation::AgentCancellationToken;
 use crate::context::{
     AgentContextBaseline, ContextCompactionPlan, ContextCompactionPlanStatus,
-    ContextCompactionPrefix, ContextCompactionScope, ContextCompactionSummaryDraft,
+    ContextCompactionPrefix, ContextCompactionSummaryDraft, ContextJournalCursor,
 };
 use crate::protocol::{AgentError, AgentResult, AgentUsage};
 use std::future::Future;
@@ -24,16 +24,18 @@ pub struct AgentContextCompactionPrepareRequest {
     pub conversation_id: String,
     pub assistant_message_id: String,
     pub expected_previous_summary_id: Option<String>,
-    pub newly_covered_message_ids: Vec<String>,
-    pub covered_through_message_id: String,
+    pub covered_through: ContextJournalCursor,
+    /// Current-run trace prefix already observed by the main model. Later persisted entries remain
+    /// in the uncommitted overlay and cannot be promoted by a compaction rebuild.
+    pub visible_trace_item_count: usize,
     pub source_input_tokens: u64,
     pub maximum_summary_tokens: u64,
 }
 
 pub enum AgentContextCompactionPrepareOutcome {
     Ready(Arc<ContextCompactionPrefix>),
-    /// The plan was based on an older durable projection. The supplied baseline is authoritative
-    /// and must replace the runtime's persistent context before planning again.
+    /// The plan was based on an older journal head. The supplied baseline is authoritative and
+    /// must replace the runtime's persistent context before planning again.
     Refresh(Box<AgentContextBaseline>),
 }
 
@@ -55,6 +57,7 @@ pub struct AgentContextCompactionCommitRequest {
     pub run_id: String,
     pub conversation_id: String,
     pub assistant_message_id: String,
+    pub visible_trace_item_count: usize,
     pub prefix: Arc<ContextCompactionPrefix>,
     pub draft: ContextCompactionSummaryDraft,
 }
@@ -183,8 +186,16 @@ impl ContextCompactionExecutor {
         run_id: &str,
         conversation_id: Option<&str>,
         assistant_message_id: Option<&str>,
+        visible_trace_item_count: usize,
     ) -> bool {
-        prepare_request_from_plan(plan, run_id, conversation_id, assistant_message_id).is_some()
+        prepare_request_from_plan(
+            plan,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            visible_trace_item_count,
+        )
+        .is_some()
     }
 
     pub(super) async fn execute(
@@ -193,11 +204,16 @@ impl ContextCompactionExecutor {
         run_id: &str,
         conversation_id: Option<&str>,
         assistant_message_id: Option<&str>,
+        visible_trace_item_count: usize,
         cancellation_token: &AgentCancellationToken,
     ) -> AgentResult<ContextCompactionExecution> {
-        let Some(request) =
-            prepare_request_from_plan(plan, run_id, conversation_id, assistant_message_id)
-        else {
+        let Some(request) = prepare_request_from_plan(
+            plan,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            visible_trace_item_count,
+        ) else {
             return Ok(ContextCompactionExecution::NotApplicable);
         };
         cancellation_token.check()?;
@@ -239,6 +255,7 @@ impl ContextCompactionExecutor {
                     run_id: request.run_id,
                     conversation_id: request.conversation_id,
                     assistant_message_id: request.assistant_message_id,
+                    visible_trace_item_count: request.visible_trace_item_count,
                     prefix,
                     draft,
                 },
@@ -274,15 +291,13 @@ fn prepare_request_from_plan(
     run_id: &str,
     conversation_id: Option<&str>,
     assistant_message_id: Option<&str>,
+    visible_trace_item_count: usize,
 ) -> Option<AgentContextCompactionPrepareRequest> {
     if plan.status != ContextCompactionPlanStatus::Required {
         return None;
     }
-    let durable_step = plan
-        .steps
-        .iter()
-        .find(|step| step.scope == ContextCompactionScope::DurableHistory)?;
-    let prefix = durable_step.durable_prefix.as_ref()?;
+    let step = plan.steps.first()?;
+    let prefix = step.durable_prefix.as_ref()?;
     let conversation_id = conversation_id?.trim();
     let assistant_message_id = assistant_message_id?.trim();
     if conversation_id.is_empty() || assistant_message_id.is_empty() {
@@ -293,10 +308,10 @@ fn prepare_request_from_plan(
         conversation_id: conversation_id.to_string(),
         assistant_message_id: assistant_message_id.to_string(),
         expected_previous_summary_id: prefix.previous_summary_id.clone(),
-        newly_covered_message_ids: prefix.covered_message_ids.clone(),
-        covered_through_message_id: prefix.covered_through_message_id.clone(),
-        source_input_tokens: durable_step.source_input_tokens,
-        maximum_summary_tokens: durable_step.maximum_summary_tokens,
+        covered_through: prefix.covered_through.clone(),
+        visible_trace_item_count,
+        source_input_tokens: step.source_input_tokens,
+        maximum_summary_tokens: step.maximum_summary_tokens,
     })
 }
 
@@ -310,19 +325,10 @@ fn validate_prepared_prefix(
         .as_ref()
         .map(|summary| summary.id.as_str());
     if previous_summary_id != request.expected_previous_summary_id.as_deref()
-        || prefix.covered_through_message_id != request.covered_through_message_id
+        || prefix.covered_through != request.covered_through
     {
         return Err(contract_error(
             "宿主准备的 durable 前缀与压缩计划身份不一致。",
-        ));
-    }
-    let previous_count = prefix
-        .previous_summary
-        .as_ref()
-        .map_or(0, |summary| summary.covered_message_ids.len());
-    if prefix.covered_message_ids[previous_count..] != request.newly_covered_message_ids {
-        return Err(contract_error(
-            "宿主准备的 durable 前缀消息范围与压缩计划不一致。",
         ));
     }
     Ok(())
@@ -413,7 +419,6 @@ mod tests {
                 reasons: BTreeMap::new(),
             },
             steps: vec![ContextCompactionStep {
-                scope: ContextCompactionScope::DurableHistory,
                 ranges: Vec::new(),
                 atomic_unit_count: 2,
                 source_input_tokens: 1_000,
@@ -423,8 +428,7 @@ mod tests {
                 contains_errors: false,
                 durable_prefix: Some(ContextCompactionDurablePrefix {
                     previous_summary_id: None,
-                    covered_message_ids: vec!["user-old".to_string(), "assistant-old".to_string()],
-                    covered_through_message_id: "assistant-old".to_string(),
+                    covered_through: ContextJournalCursor::message("assistant-old"),
                 }),
             }],
         }
@@ -434,25 +438,26 @@ mod tests {
         ContextCompactionPrefix {
             conversation_id: "conversation-1".to_string(),
             source_revision: "source-revision-1".to_string(),
-            covered_through_message_id: "assistant-old".to_string(),
-            covered_message_ids: vec!["user-old".to_string(), "assistant-old".to_string()],
+            covered_through: ContextJournalCursor::message("assistant-old"),
             previous_summary: None,
-            source_messages: vec![
-                crate::ContextCompactionSourceMessage {
-                    message_id: "user-old".to_string(),
+            source_items: vec![
+                crate::ContextCompactionSourceItem::Message {
+                    cursor: ContextJournalCursor::message("user-old"),
                     role: "user".to_string(),
                     content: "old request".to_string(),
                     created_at: 1,
                     status: Some("sent".to_string()),
-                    conversation_turn_trace: None,
+                    terminal_status: None,
+                    terminal_error: None,
                 },
-                crate::ContextCompactionSourceMessage {
-                    message_id: "assistant-old".to_string(),
+                crate::ContextCompactionSourceItem::Message {
+                    cursor: ContextJournalCursor::message("assistant-old"),
                     role: "assistant".to_string(),
                     content: "old answer".to_string(),
                     created_at: 2,
                     status: Some("sent".to_string()),
-                    conversation_turn_trace: None,
+                    terminal_status: None,
+                    terminal_error: None,
                 },
             ],
         }
@@ -516,6 +521,7 @@ mod tests {
                 "run-1",
                 Some("conversation-1"),
                 Some("assistant-current"),
+                0,
                 &cancellation,
             )
             .await
@@ -556,6 +562,7 @@ mod tests {
                 "run-1",
                 Some("conversation-1"),
                 Some("assistant-current"),
+                0,
                 &AgentCancellationToken::new(),
             )
             .await
@@ -605,6 +612,7 @@ mod tests {
                 "run-1",
                 Some("conversation-1"),
                 Some("assistant-current"),
+                0,
                 &AgentCancellationToken::new(),
             )
             .await

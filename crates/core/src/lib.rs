@@ -17,18 +17,17 @@ mod usage;
 pub use cancellation::AgentCancellationToken;
 pub use context::{
     AgentContextBaseline, AgentConversationContextState, ContextCompactionGeneration,
-    ContextCompactionGenerationKind, ContextCompactionPrefix, ContextCompactionSourceMessage,
-    ContextCompactionSummary, ContextCompactionSummaryDraft,
+    ContextCompactionGenerationKind, ContextCompactionPrefix, ContextCompactionSourceItem,
+    ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
     CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
 };
 pub use conversation_trace::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
     conversation_trace_snapshot_from_checkpoint_and_continuation,
-    failed_conversation_trace_without_items, ConversationTraceLimits, ConversationTraceSnapshot,
+    failed_conversation_trace_without_items, ConversationTraceSnapshot,
     ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
-    ConversationTurnTraceTerminalStatus, CONVERSATION_TRACE_LIMITS,
-    CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 pub use protocol::{
     AgentApiStyle, AgentApprovalDecision, AgentApprovalDecisionStatus, AgentApprovalStatus,
