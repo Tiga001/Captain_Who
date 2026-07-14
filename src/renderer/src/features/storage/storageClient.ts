@@ -293,6 +293,8 @@ function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
     displayName: model.displayName,
     shortName: model.shortName ?? undefined,
     providerPath: model.providerPath ?? undefined,
+    apiUrlOverride: model.apiUrlOverride ?? undefined,
+    apiTokenOverride: model.apiTokenOverride ?? undefined,
     supportsImage: model.supportsImage,
     contextWindowTokens: model.contextWindowTokens ?? undefined,
     inputPrice: model.inputPrice,
@@ -306,6 +308,8 @@ function mapModelToStorage(model: ModelConfig): StorageModelConfigRecord {
     ...model,
     shortName: model.shortName ?? null,
     providerPath: model.providerPath ?? null,
+    apiUrlOverride: model.apiUrlOverride ?? null,
+    apiTokenOverride: model.apiTokenOverride ?? null,
     contextWindowTokens: model.contextWindowTokens ?? null
   }
 }

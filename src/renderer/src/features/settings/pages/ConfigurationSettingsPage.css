@@ -453,6 +453,97 @@
   justify-self: end;
 }
 
+.model-form-more-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 42px;
+  padding: 6px 22px;
+  transition: border-color 180ms ease;
+}
+
+.model-form-page__fields[data-advanced-open='true'] .model-form-more-row {
+  border-bottom: 1px solid var(--mc-color-border-subtle);
+}
+
+.model-form-more-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 58px;
+  height: 28px;
+  padding: 0 9px;
+  gap: 4px;
+  color: var(--settings-content-muted-color);
+  background: transparent;
+  border: 0;
+  border-radius: var(--mc-radius-control);
+  font: inherit;
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-control);
+  cursor: pointer;
+  transition:
+    color 140ms ease,
+    background-color 140ms ease;
+}
+
+.model-form-more-button:hover {
+  color: var(--settings-content-text-color);
+  background: var(--mc-color-state-hover);
+}
+
+.model-form-more-button[data-invalid='true'] {
+  color: var(--mc-color-text-danger);
+}
+
+.model-form-more-button:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 1px;
+}
+
+.model-form-more-button svg {
+  width: 13px;
+  height: 13px;
+  transition: transform 180ms ease;
+}
+
+.model-form-more-button[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+.model-form-advanced {
+  display: grid;
+  grid-template-rows: 0fr;
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    grid-template-rows 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 160ms ease;
+}
+
+.model-form-advanced[data-open='true'] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.model-form-advanced__inner {
+  min-height: 0;
+  overflow: hidden;
+  transform: translateY(-8px);
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.model-form-advanced[data-open='true'] .model-form-advanced__inner {
+  transform: translateY(0);
+}
+
+.model-form-advanced__inner .settings-list-row:last-child {
+  border-bottom: 0;
+}
+
 .model-form-price-control {
   display: grid;
   gap: 5px;

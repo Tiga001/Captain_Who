@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { useToast } from '../components/toast/ToastContext'
 import { loadModelSettings, saveModelSettings } from '../features/storage/storageClient'
 import { useFrontendConfig } from './FrontendConfigProvider'
-import { INITIAL_MODELS, modelConfig } from './modelConfig'
+import { INITIAL_MODELS, isModelConnectionAvailable, modelConfig } from './modelConfig'
 import type { ModelConfig, SearchMode } from './modelConfig'
 
 interface ModelSettingsContextValue {
@@ -91,7 +91,9 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   }, [apiToken, apiUrl, isHydrated, models, searchMode, showToast, t, tavilyApiKey])
 
   const value = useMemo<ModelSettingsContextValue>(() => {
-    const enabledModels = models.filter((model) => model.enabled)
+    const enabledModels = models.filter(
+      (model) => model.enabled && isModelConnectionAvailable(model, apiUrl, apiToken)
+    )
 
     return {
       apiUrl,

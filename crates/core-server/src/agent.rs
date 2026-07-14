@@ -2667,6 +2667,7 @@ impl AgentService {
         if !model.enabled {
             return Err(format!("模型未启用：{model_id}"));
         }
+        let connection = settings.effective_connection_for(&model)?;
 
         let conversation_id = normalized_optional(input.conversation_id.as_deref());
         let conversation = match conversation_id.as_deref() {
@@ -2713,7 +2714,7 @@ impl AgentService {
             }
         };
         let agent_input = AgentChatInput {
-            api_url: settings.api_url.trim().to_string(),
+            api_url: connection.api_url,
             api_token: String::new(),
             model: model_provider_path(&model),
             api_style: None,
@@ -3254,8 +3255,31 @@ fn restore_agent_input_secrets(
     let Ok(Some(settings)) = storage.load_model_settings() else {
         return agent_input;
     };
-    agent_input.api_url = settings.api_url.trim().to_string();
-    agent_input.api_token = settings.api_token.trim().to_string();
+
+    let conversation_model_id = agent_input
+        .context
+        .as_ref()
+        .and_then(|context| context.conversation_id.as_deref())
+        .and_then(|conversation_id| storage.load_conversation(conversation_id).ok().flatten())
+        .and_then(|conversation| conversation.model_id);
+    let model = conversation_model_id
+        .as_deref()
+        .and_then(|model_id| settings.models.iter().find(|model| model.id == model_id))
+        .or_else(|| {
+            settings.models.iter().find(|model| {
+                model.id == agent_input.model || model_provider_path(model) == agent_input.model
+            })
+        });
+
+    // Pending actions deliberately persist without API tokens. On restoration, resolve the
+    // same model-specific-or-global pair used by a fresh run so approval continuation cannot
+    // silently switch providers after an app restart.
+    if let Some(model) = model {
+        if let Ok(connection) = settings.effective_connection_for(model) {
+            agent_input.api_url = connection.api_url;
+            agent_input.api_token = connection.api_token;
+        }
+    }
     agent_input
 }
 
@@ -3584,6 +3608,8 @@ mod tests {
                 display_name: "Model 1".to_string(),
                 short_name: None,
                 provider_path: None,
+                api_url_override: None,
+                api_token_override: None,
                 supports_image: false,
                 context_window_tokens: Some(128_000),
                 input_price: "0.01".to_string(),
@@ -3591,6 +3617,50 @@ mod tests {
                 enabled: true,
             }],
         }
+    }
+
+    #[test]
+    fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let mut settings = test_model_settings();
+        settings.api_url.clear();
+        settings.api_token.clear();
+        settings.models[0].api_url_override = Some("https://model.example/v1".to_string());
+        settings.models[0].api_token_override = Some("model-token".to_string());
+        storage.save_model_settings(settings).unwrap();
+
+        let prepared = prepare_conversation_turn(
+            &storage,
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-model-override".to_string()),
+                project_id: None,
+                model_id: "model-1".to_string(),
+                context_window_indicator_enabled: true,
+                content: "Hello".to_string(),
+                attachments: Vec::new(),
+                title: None,
+                user_message_id: Some("user-model-override".to_string()),
+                assistant_message_id: Some("assistant-model-override".to_string()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+            },
+            "run-model-override",
+        )
+        .unwrap();
+
+        assert_eq!(prepared.agent_input.api_url, "https://model.example/v1");
+        assert_eq!(prepared.agent_input.api_token, "model-token");
+
+        let mut persisted_input = prepared.agent_input;
+        persisted_input.api_url = "https://stale.example/v1".to_string();
+        persisted_input.api_token.clear();
+        let restored = restore_agent_input_secrets(&storage, persisted_input);
+        assert_eq!(restored.api_url, "https://model.example/v1");
+        assert_eq!(restored.api_token, "model-token");
     }
 
     fn test_context_compaction_generator() -> ContextCompactionSummaryGenerator {
@@ -4053,6 +4123,8 @@ mod tests {
                     display_name: "Model 1".to_string(),
                     short_name: None,
                     provider_path: None,
+                    api_url_override: None,
+                    api_token_override: None,
                     supports_image: false,
                     context_window_tokens: Some(128_000),
                     input_price: "0.01".to_string(),

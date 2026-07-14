@@ -5,6 +5,9 @@ export interface StorageModelConfigRecord {
   displayName: string
   shortName?: string | null
   providerPath?: string | null
+  /** A model-level connection override is valid only when URL and token are both present. */
+  apiUrlOverride?: string | null
+  apiTokenOverride?: string | null
   supportsImage: boolean
   contextWindowTokens?: number | null
   inputPrice: string

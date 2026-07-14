@@ -1,4 +1,4 @@
-import { CircleStop, CircleX, Minimize2, RefreshCw } from 'lucide-react'
+import { CircleStop, CircleX, FoldVertical, RefreshCw } from 'lucide-react'
 import type { AgentContextCompactionEventOutcome } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
@@ -16,7 +16,7 @@ export function ContextCompactionActivity({ status }: ContextCompactionActivityP
         ? CircleStop
         : status === 'skipped'
           ? RefreshCw
-          : Minimize2
+          : FoldVertical
   const label =
     status === 'running'
       ? t('agent.contextCompaction.running')

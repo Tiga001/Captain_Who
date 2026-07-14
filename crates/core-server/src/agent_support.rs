@@ -246,9 +246,6 @@ pub(super) fn prepare_conversation_turn(
     let settings = storage
         .load_model_settings()?
         .ok_or_else(|| "请先配置模型 API。".to_string())?;
-    if settings.api_url.trim().is_empty() || settings.api_token.trim().is_empty() {
-        return Err("请先配置模型 API。".to_string());
-    }
 
     let model = settings
         .models
@@ -259,6 +256,10 @@ pub(super) fn prepare_conversation_turn(
     if !model.enabled {
         return Err(format!("模型未启用：{model_id}"));
     }
+    // Resolve the complete pair once and carry it through the run. Model-level credentials
+    // take priority; otherwise both values come from global settings. This prevents a URL
+    // from one provider from ever being combined with a token from another.
+    let connection = settings.effective_connection_for(&model)?;
     if !model.supports_image
         && input
             .attachments
@@ -370,8 +371,8 @@ pub(super) fn prepare_conversation_turn(
     });
 
     let agent_input = AgentChatInput {
-        api_url: settings.api_url.trim().to_string(),
-        api_token: settings.api_token.trim().to_string(),
+        api_url: connection.api_url,
+        api_token: connection.api_token,
         model: model_provider_path(&model),
         api_style: None,
         context_window_tokens: model.context_window_tokens,

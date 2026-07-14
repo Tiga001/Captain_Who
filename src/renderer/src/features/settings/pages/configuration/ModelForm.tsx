@@ -1,5 +1,8 @@
+import type { ClipboardEvent } from 'react'
 import { useMemo, useState } from 'react'
+import { ChevronDown } from 'lucide-react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
+import { DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS } from '../../../../config/modelConfig'
 import type { ModelConfig, ModelFormValues } from './configurationTypes'
 
 interface ModelFormProps {
@@ -23,10 +26,24 @@ function isValidContextWindowInput(value: string): boolean {
   return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 4_294_967_295
 }
 
+function isValidApiUrl(value: string): boolean {
+  const normalized = value.trim()
+  if (normalized.length === 0) return true
+
+  try {
+    const parsed = new URL(normalized)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 function toFormValues(model?: ModelConfig): ModelFormValues {
   return {
     id: model?.id ?? '',
     displayName: model?.displayName ?? '',
+    apiUrlOverride: model?.apiUrlOverride ?? '',
+    apiTokenOverride: model?.apiTokenOverride ?? '',
     contextWindowTokens: model?.contextWindowTokens?.toString() ?? '',
     inputPrice: model?.inputPrice ?? '0',
     outputPrice: model?.outputPrice ?? '0',
@@ -38,12 +55,27 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
   const { t } = useFrontendConfig()
   const initialValues = useMemo(() => toFormValues(model), [model])
   const [values, setValues] = useState<ModelFormValues>(initialValues)
+  const [isAdvancedOpen, setIsAdvancedOpen] = useState(
+    Boolean(initialValues.apiUrlOverride.trim() || initialValues.apiTokenOverride.trim())
+  )
   const isEditing = Boolean(model)
   const isContextWindowValid = isValidContextWindowInput(values.contextWindowTokens)
   const isInputPriceValid = isValidPriceInput(values.inputPrice)
   const isOutputPriceValid = isValidPriceInput(values.outputPrice)
+  const hasOverrideUrl = values.apiUrlOverride.trim().length > 0
+  const hasOverrideToken = values.apiTokenOverride.trim().length > 0
+  const isConnectionPairComplete = hasOverrideUrl === hasOverrideToken
+  const isOverrideUrlValid = isValidApiUrl(values.apiUrlOverride)
   const canSave =
-    values.id.trim().length > 0 && isContextWindowValid && isInputPriceValid && isOutputPriceValid
+    values.id.trim().length > 0 &&
+    isContextWindowValid &&
+    isInputPriceValid &&
+    isOutputPriceValid &&
+    isConnectionPairComplete &&
+    isOverrideUrlValid
+  const preventClipboard = (event: ClipboardEvent<HTMLInputElement>) => {
+    event.preventDefault()
+  }
 
   return (
     <form
@@ -56,7 +88,11 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
           ...values,
           id: values.id.trim(),
           displayName: values.displayName.trim(),
-          contextWindowTokens: values.contextWindowTokens.trim().replaceAll(',', ''),
+          apiUrlOverride: values.apiUrlOverride.trim(),
+          apiTokenOverride: values.apiTokenOverride.trim(),
+          contextWindowTokens:
+            values.contextWindowTokens.trim().replaceAll(',', '') ||
+            DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS.toString(),
           inputPrice: values.inputPrice.trim() || '0',
           outputPrice: values.outputPrice.trim() || '0'
         })
@@ -66,7 +102,10 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
         {isEditing ? t('configuration.editModel') : t('configuration.newModel')}
       </h1>
 
-      <div className="model-form-page__fields settings-list">
+      <div
+        className="model-form-page__fields settings-list"
+        data-advanced-open={isAdvancedOpen}
+      >
         <label className="configuration-field settings-list-row">
           <span className="settings-list-row__text">
             <span className="settings-list-row__title">{t('configuration.modelId')}</span>
@@ -184,6 +223,88 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
             <span className="settings-switch__thumb" aria-hidden="true" />
             <span className="sr-only">{t('configuration.supportsImageInput')}</span>
           </button>
+        </div>
+
+        <div className="model-form-more-row">
+          <button
+            className="model-form-more-button"
+            type="button"
+            aria-expanded={isAdvancedOpen}
+            aria-controls="model-form-advanced-settings"
+            data-invalid={(!isConnectionPairComplete || !isOverrideUrlValid) || undefined}
+            onClick={() => setIsAdvancedOpen((isOpen) => !isOpen)}
+          >
+            {t('configuration.more')}
+            <ChevronDown aria-hidden="true" />
+          </button>
+        </div>
+
+        <div
+          className="model-form-advanced"
+          id="model-form-advanced-settings"
+          data-open={isAdvancedOpen}
+          aria-hidden={!isAdvancedOpen}
+        >
+          <div className="model-form-advanced__inner">
+            <label className="configuration-field settings-list-row">
+              <span className="settings-list-row__text">
+                <span className="settings-list-row__title">
+                  {t('configuration.modelApiUrl')}
+                </span>
+              </span>
+              <span className="settings-list-row__control model-form-price-control">
+                <input
+                  className="settings-list-control"
+                  type="url"
+                  aria-invalid={!isOverrideUrlValid}
+                  value={values.apiUrlOverride}
+                  placeholder={t('configuration.modelApiUrlPlaceholder')}
+                  tabIndex={isAdvancedOpen ? 0 : -1}
+                  onChange={(event) =>
+                    setValues((current) => ({
+                      ...current,
+                      apiUrlOverride: event.target.value
+                    }))
+                  }
+                />
+                {!isOverrideUrlValid && (
+                  <small className="model-form-field-error">
+                    {t('configuration.invalidApiUrl')}
+                  </small>
+                )}
+              </span>
+            </label>
+
+            <label className="configuration-field settings-list-row">
+              <span className="settings-list-row__text">
+                <span className="settings-list-row__title">
+                  {t('configuration.modelApiToken')}
+                </span>
+              </span>
+              <span className="settings-list-row__control model-form-price-control">
+                <input
+                  className="settings-list-control"
+                  type="password"
+                  value={values.apiTokenOverride}
+                  placeholder={t('configuration.modelApiTokenPlaceholder')}
+                  tabIndex={isAdvancedOpen ? 0 : -1}
+                  onChange={(event) =>
+                    setValues((current) => ({
+                      ...current,
+                      apiTokenOverride: event.target.value
+                    }))
+                  }
+                  onCopy={preventClipboard}
+                  onCut={preventClipboard}
+                />
+                {!isConnectionPairComplete && (
+                  <small className="model-form-field-error">
+                    {t('configuration.modelConnectionPairRequired')}
+                  </small>
+                )}
+              </span>
+            </label>
+          </div>
         </div>
       </div>
 

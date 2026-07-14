@@ -1,5 +1,12 @@
 use crate::protocol::AgentPermissions;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelConnectionConfig {
+    pub api_url: String,
+    pub api_token: String,
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -8,6 +15,10 @@ pub struct ModelConfigRecord {
     pub display_name: String,
     pub short_name: Option<String>,
     pub provider_path: Option<String>,
+    #[serde(default)]
+    pub api_url_override: Option<String>,
+    #[serde(default)]
+    pub api_token_override: Option<String>,
     pub supports_image: bool,
     #[serde(default)]
     pub context_window_tokens: Option<u32>,
@@ -24,6 +35,137 @@ pub struct ModelSettingsRecord {
     pub search_mode: String,
     pub tavily_api_key: String,
     pub models: Vec<ModelConfigRecord>,
+}
+
+fn validated_connection(
+    model_id: &str,
+    source_label: &str,
+    api_url: &str,
+    api_token: &str,
+) -> Result<ModelConnectionConfig, String> {
+    let api_url = api_url.trim();
+    let api_token = api_token.trim();
+    let parsed_url =
+        Url::parse(api_url).map_err(|_| format!("模型 {model_id} 的{source_label} URL 无效。"))?;
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        return Err(format!(
+            "模型 {model_id} 的{source_label} URL 只支持 http 或 https。"
+        ));
+    }
+
+    Ok(ModelConnectionConfig {
+        api_url: api_url.to_string(),
+        api_token: api_token.to_string(),
+    })
+}
+
+impl ModelConfigRecord {
+    pub fn connection_override(&self) -> Result<Option<ModelConnectionConfig>, String> {
+        let api_url = self.api_url_override.as_deref().unwrap_or_default().trim();
+        let api_token = self
+            .api_token_override
+            .as_deref()
+            .unwrap_or_default()
+            .trim();
+
+        // The override is atomic: both values override the global pair, while two blanks
+        // inherit it. A partial pair must never borrow its missing half from global settings.
+        match (api_url.is_empty(), api_token.is_empty()) {
+            (true, true) => Ok(None),
+            (false, false) => validated_connection(&self.id, "专用", api_url, api_token).map(Some),
+            _ => Err(format!(
+                "模型 {} 的专用 URL 和 API Token 必须同时填写或同时留空。",
+                self.id
+            )),
+        }
+    }
+}
+
+impl ModelSettingsRecord {
+    pub fn effective_connection_for(
+        &self,
+        model: &ModelConfigRecord,
+    ) -> Result<ModelConnectionConfig, String> {
+        if let Some(connection) = model.connection_override()? {
+            return Ok(connection);
+        }
+
+        let api_url = self.api_url.trim();
+        let api_token = self.api_token.trim();
+        if api_url.is_empty() || api_token.is_empty() {
+            return Err(format!(
+                "模型 {} 没有专用连接配置，请先完整配置全局 URL 和 API Token。",
+                model.id
+            ));
+        }
+
+        validated_connection(&model.id, "全局", api_url, api_token)
+    }
+}
+
+#[cfg(test)]
+mod model_connection_tests {
+    use super::*;
+
+    fn model(
+        api_url_override: Option<&str>,
+        api_token_override: Option<&str>,
+    ) -> ModelConfigRecord {
+        ModelConfigRecord {
+            id: "model-a".to_string(),
+            display_name: "Model A".to_string(),
+            short_name: None,
+            provider_path: None,
+            api_url_override: api_url_override.map(ToString::to_string),
+            api_token_override: api_token_override.map(ToString::to_string),
+            supports_image: false,
+            context_window_tokens: None,
+            input_price: "0".to_string(),
+            output_price: "0".to_string(),
+            enabled: true,
+        }
+    }
+
+    fn settings(model: ModelConfigRecord) -> ModelSettingsRecord {
+        ModelSettingsRecord {
+            api_url: "https://global.example/v1".to_string(),
+            api_token: "global-token".to_string(),
+            search_mode: "disabled".to_string(),
+            tavily_api_key: String::new(),
+            models: vec![model],
+        }
+    }
+
+    #[test]
+    fn complete_model_connection_overrides_the_global_pair() {
+        let settings = settings(model(Some("https://model.example/v1"), Some("model-token")));
+        let connection = settings
+            .effective_connection_for(&settings.models[0])
+            .unwrap();
+
+        assert_eq!(connection.api_url, "https://model.example/v1");
+        assert_eq!(connection.api_token, "model-token");
+    }
+
+    #[test]
+    fn two_blank_model_values_inherit_the_global_pair() {
+        let settings = settings(model(None, None));
+        let connection = settings
+            .effective_connection_for(&settings.models[0])
+            .unwrap();
+
+        assert_eq!(connection.api_url, "https://global.example/v1");
+        assert_eq!(connection.api_token, "global-token");
+    }
+
+    #[test]
+    fn partial_model_connection_never_mixes_with_global_settings() {
+        let settings = settings(model(Some("https://model.example/v1"), None));
+
+        assert!(settings
+            .effective_connection_for(&settings.models[0])
+            .is_err());
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

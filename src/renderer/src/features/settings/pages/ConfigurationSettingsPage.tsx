@@ -44,6 +44,8 @@ export function ConfigurationSettingsPage() {
       providerPath:
         editingModel && editingModel.id === values.id ? editingModel.providerPath : undefined,
       shortName: editingModel && editingModel.id === values.id ? editingModel.shortName : undefined,
+      apiUrlOverride: values.apiUrlOverride || undefined,
+      apiTokenOverride: values.apiTokenOverride || undefined,
       supportsImage: values.supportsImage,
       contextWindowTokens:
         values.contextWindowTokens.trim().length > 0

@@ -48,6 +48,7 @@ fn validate_model_settings(settings: &ModelSettingsRecord) -> Result<(), String>
         if model.context_window_tokens == Some(0) {
             return Err(format!("模型 {model_id} 的上下文窗口必须大于 0。"));
         }
+        model.connection_override()?;
         if !usage_repository::is_valid_price_per_1k(&model.input_price) {
             return Err(format!(
                 "模型 {model_id} 的输入价格必须是大于或等于 0 的有效数字。"
@@ -1503,6 +1504,8 @@ mod tests {
                 display_name: "Model A".to_string(),
                 short_name: None,
                 provider_path: None,
+                api_url_override: None,
+                api_token_override: None,
                 supports_image: false,
                 context_window_tokens: Some(128_000),
                 input_price: "0.01".to_string(),
@@ -1535,6 +1538,8 @@ mod tests {
                 display_name: "Model A".to_string(),
                 short_name: None,
                 provider_path: None,
+                api_url_override: None,
+                api_token_override: None,
                 supports_image: false,
                 context_window_tokens: Some(128_000),
                 input_price: "0.01".to_string(),
@@ -1550,6 +1555,46 @@ mod tests {
 
         let stored = service.load_model_settings().unwrap().unwrap();
         assert_eq!(stored.models[0].context_window_tokens, Some(128_000));
+    }
+
+    #[test]
+    fn requires_model_connection_overrides_to_be_saved_as_a_complete_pair() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let valid = ModelSettingsRecord {
+            api_url: "https://global.example/v1".to_string(),
+            api_token: "global-token".to_string(),
+            search_mode: "disabled".to_string(),
+            tavily_api_key: String::new(),
+            models: vec![ModelConfigRecord {
+                id: "model-a".to_string(),
+                display_name: "Model A".to_string(),
+                short_name: None,
+                provider_path: None,
+                api_url_override: Some("https://model.example/v1".to_string()),
+                api_token_override: Some("model-token".to_string()),
+                supports_image: false,
+                context_window_tokens: Some(128_000),
+                input_price: "0.01".to_string(),
+                output_price: "0.02".to_string(),
+                enabled: true,
+            }],
+        };
+        service.save_model_settings(valid.clone()).unwrap();
+
+        let mut invalid = valid;
+        invalid.models[0].api_token_override = None;
+        assert!(service.save_model_settings(invalid).is_err());
+
+        let stored = service.load_model_settings().unwrap().unwrap();
+        assert_eq!(
+            stored.models[0].api_url_override.as_deref(),
+            Some("https://model.example/v1")
+        );
+        assert_eq!(
+            stored.models[0].api_token_override.as_deref(),
+            Some("model-token")
+        );
     }
 
     #[test]

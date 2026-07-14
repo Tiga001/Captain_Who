@@ -637,12 +637,20 @@ export const enUSTranslations = {
   'configuration.displayName': 'Display name',
   'configuration.displayNamePlaceholder': 'Leave empty to use model ID',
   'configuration.contextWindowTokens': 'Total context window (tokens)',
-  'configuration.contextWindowTokensPlaceholder': 'Example: 128000; blank disables checks',
+  'configuration.contextWindowTokensPlaceholder': 'Blank uses the default value 128000',
   'configuration.invalidContextWindowTokens': 'Enter an integer greater than 0',
   'configuration.inputPrice': 'Input price / 1k tokens',
   'configuration.outputPrice': 'Output price / 1k tokens',
   'configuration.invalidPrice': 'Enter a valid price greater than or equal to 0',
   'configuration.saveFailed': 'Failed to save model settings',
   'configuration.supportsImageInput': 'Supports image input',
+  'configuration.more': 'More',
+  'configuration.modelApiUrl': 'URL',
+  'configuration.modelApiUrlPlaceholder': 'Blank uses the global URL',
+  'configuration.modelApiToken': 'API Token',
+  'configuration.modelApiTokenPlaceholder': 'Blank uses the global API Token',
+  'configuration.invalidApiUrl': 'Enter a valid http or https URL',
+  'configuration.modelConnectionPairRequired':
+    'URL and API Token must both be filled in or both be blank',
   'configuration.save': 'Save'
 } as const

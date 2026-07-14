@@ -81,6 +81,8 @@ pub fn save_model_settings(
                 display_name,
                 short_name,
                 provider_path,
+                api_url_override,
+                api_token_override,
                 supports_image,
                 context_window_tokens,
                 input_price,
@@ -90,13 +92,15 @@ pub fn save_model_settings(
                 created_at,
                 updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)
             ",
             params![
                 &model.id,
                 &model.display_name,
                 &model.short_name,
                 &model.provider_path,
+                &model.api_url_override,
+                &model.api_token_override,
                 model.supports_image,
                 model.context_window_tokens,
                 &model.input_price,
@@ -119,6 +123,8 @@ fn load_models(connection: &Connection) -> rusqlite::Result<Vec<ModelConfigRecor
             display_name,
             short_name,
             provider_path,
+            api_url_override,
+            api_token_override,
             supports_image,
             context_window_tokens,
             input_price,
@@ -136,11 +142,13 @@ fn load_models(connection: &Connection) -> rusqlite::Result<Vec<ModelConfigRecor
                 display_name: row.get(1)?,
                 short_name: row.get(2)?,
                 provider_path: row.get(3)?,
-                supports_image: row.get(4)?,
-                context_window_tokens: row.get(5)?,
-                input_price: row.get(6)?,
-                output_price: row.get(7)?,
-                enabled: row.get(8)?,
+                api_url_override: row.get(4)?,
+                api_token_override: row.get(5)?,
+                supports_image: row.get(6)?,
+                context_window_tokens: row.get(7)?,
+                input_price: row.get(8)?,
+                output_price: row.get(9)?,
+                enabled: row.get(10)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

@@ -231,6 +231,8 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             display_name TEXT NOT NULL,
             short_name TEXT,
             provider_path TEXT,
+            api_url_override TEXT,
+            api_token_override TEXT,
             supports_image INTEGER NOT NULL,
             context_window_tokens INTEGER,
             input_price TEXT NOT NULL,
@@ -440,6 +442,8 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     add_column_if_missing(connection, "projects", "pinned_at", "INTEGER")?;
     add_column_if_missing(connection, "models", "context_window_tokens", "INTEGER")?;
+    add_column_if_missing(connection, "models", "api_url_override", "TEXT")?;
+    add_column_if_missing(connection, "models", "api_token_override", "TEXT")?;
     add_column_if_missing(connection, "conversations", "pinned_at", "INTEGER")?;
     add_column_if_missing(connection, "conversations", "archived_at", "INTEGER")?;
     add_column_if_missing(connection, "conversations", "unread_at", "INTEGER")?;
@@ -947,14 +951,23 @@ mod tests {
 
         run_migrations(&connection).unwrap();
 
-        let context_window = connection
+        let (context_window, api_url_override, api_token_override) = connection
             .query_row(
-                "SELECT context_window_tokens FROM models WHERE id = 'model-a'",
+                "SELECT context_window_tokens, api_url_override, api_token_override
+                 FROM models WHERE id = 'model-a'",
                 [],
-                |row| row.get::<_, Option<u32>>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<u32>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(context_window, None);
+        assert_eq!(api_url_override, None);
+        assert_eq!(api_token_override, None);
     }
 
     #[test]

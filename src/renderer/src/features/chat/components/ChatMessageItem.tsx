@@ -5,9 +5,9 @@ import {
   Check,
   Copy,
   Database,
-  GitFork,
   LoaderCircle,
-  Pencil
+  Pencil,
+  Split
 } from 'lucide-react'
 import type {
   AgentProposedAction,
@@ -910,7 +910,7 @@ function ChatMessageActions({
           {isContinuing ? (
             <LoaderCircle aria-hidden="true" className="chat-message__action-spinner" />
           ) : (
-            <GitFork aria-hidden="true" />
+            <Split aria-hidden="true" />
           )}
           <span className="chat-message__action-tooltip" role="tooltip">
             {t('chat.continueInNewTask')}

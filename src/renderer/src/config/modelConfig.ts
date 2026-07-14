@@ -3,6 +3,8 @@ export interface ModelConfig {
   displayName: string
   shortName?: string
   providerPath?: string
+  apiUrlOverride?: string
+  apiTokenOverride?: string
   supportsImage: boolean
   contextWindowTokens?: number
   inputPrice: string
@@ -12,13 +14,47 @@ export interface ModelConfig {
 
 export type SearchMode = 'auto' | 'disabled' | 'tavily'
 
+export const DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS = 128_000
+
 export interface ModelFormValues {
   id: string
   displayName: string
+  apiUrlOverride: string
+  apiTokenOverride: string
   contextWindowTokens: string
   inputPrice: string
   outputPrice: string
   supportsImage: boolean
+}
+
+function hasCompleteConnectionPair(apiUrl: string | undefined, apiToken: string | undefined) {
+  const normalizedUrl = apiUrl?.trim() ?? ''
+  if (!normalizedUrl || !apiToken?.trim()) return false
+
+  try {
+    const parsed = new URL(normalizedUrl)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+export function isModelConnectionAvailable(
+  model: ModelConfig,
+  globalApiUrl: string,
+  globalApiToken: string
+): boolean {
+  const overrideUrl = model.apiUrlOverride?.trim() ?? ''
+  const overrideToken = model.apiTokenOverride?.trim() ?? ''
+
+  // A model either supplies a complete override or inherits the complete global pair.
+  // Never mix one model-level value with one global value, because that can target the
+  // wrong provider with the wrong credential.
+  if (overrideUrl.length > 0 || overrideToken.length > 0) {
+    return hasCompleteConnectionPair(overrideUrl, overrideToken)
+  }
+
+  return hasCompleteConnectionPair(globalApiUrl, globalApiToken)
 }
 
 export const modelConfig = {
