@@ -40,6 +40,7 @@ import type {
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
   StorageDeleteChatMessagesRequest,
+  StorageForkConversationRequest,
   StorageInputAttachment,
   StorageLoadInputAttachmentsRequest,
   StorageChatMessageRecord,
@@ -88,6 +89,7 @@ export interface StorageHostApi {
   showProjectInFolder(projectId: string): Promise<void>
   revealProjectFile(input: { projectId?: string | null; filePath: string }): Promise<void>
   loadConversations(): Promise<StorageChatConversationRecord[]>
+  forkConversation(input: StorageForkConversationRequest): Promise<StorageChatConversationRecord>
   saveConversationMeta(
     conversation: StorageChatConversationMetaRecord
   ): Promise<StorageChatConversationMetaRecord>

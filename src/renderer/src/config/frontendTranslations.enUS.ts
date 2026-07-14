@@ -315,6 +315,8 @@ export const enUSTranslations = {
   'chat.copy': 'Copy',
   'chat.copyMessage': 'Copy message',
   'chat.copied': 'Copied',
+  'chat.continueInNewTask': 'Continue in new task',
+  'chat.continueInNewTaskFailed': 'Unable to create a new task from this reply.',
   'chat.edit': 'Edit',
   'chat.editMessage': 'Edit message',
   'chat.editNoConversation': 'There is no conversation available to edit.',

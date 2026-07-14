@@ -3816,6 +3816,7 @@ mod tests {
                     100,
                     3,
                 ),
+                "assistant-old",
             )
             .unwrap();
 
@@ -4154,6 +4155,7 @@ mod tests {
                     before.durable_input_tokens,
                     3,
                 ),
+                "assistant-long",
             )
             .unwrap();
         service.invalidate_conversation_context_state("conversation-capacity-summary");

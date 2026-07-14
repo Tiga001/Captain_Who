@@ -1,5 +1,14 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, ChevronDown, Check, Copy, Database, Pencil } from 'lucide-react'
+import {
+  AlertTriangle,
+  ChevronDown,
+  Check,
+  Copy,
+  Database,
+  GitFork,
+  LoaderCircle,
+  Pencil
+} from 'lucide-react'
 import type {
   AgentProposedAction,
   AgentToolCall,
@@ -81,6 +90,7 @@ interface ChatMessageItemProps {
   ) => void
   onCancel?: (messageId: string, action: AgentProposedAction) => void
   onEditSubmit?: (messageId: string, content: string) => void | Promise<void>
+  onContinueInNewTask?: (messageId: string) => void | Promise<void>
   onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   showTokenUsageDetails: boolean
@@ -814,6 +824,7 @@ function ChatMessageActions({
   canEdit = false,
   content,
   onEdit,
+  onContinueInNewTask,
   showTokenUsageDetails,
   timestamp,
   usage
@@ -821,12 +832,15 @@ function ChatMessageActions({
   canEdit?: boolean
   content: string
   onEdit?: () => void
+  onContinueInNewTask?: () => void | Promise<void>
   showTokenUsageDetails: boolean
   timestamp: number | undefined
   usage?: AgentUsage
 }) {
   const { language, t } = useFrontendConfig()
   const [copied, setCopied] = useState(false)
+  const [isContinuing, setIsContinuing] = useState(false)
+  const isContinuingRef = useRef(false)
   const timeLabel = formatMessageTime(timestamp, language, t)
   const canCopy = Boolean(content.trim())
   const Icon = copied ? Check : Copy
@@ -877,6 +891,32 @@ function ChatMessageActions({
         </button>
       )}
       {showTokenUsageDetails && <UsageAction usage={usage} />}
+      {onContinueInNewTask && (
+        <button
+          aria-label={t('chat.continueInNewTask')}
+          disabled={isContinuing}
+          onClick={() => {
+            if (isContinuingRef.current) return
+            isContinuingRef.current = true
+            setIsContinuing(true)
+            void Promise.resolve(onContinueInNewTask()).finally(() => {
+              isContinuingRef.current = false
+              setIsContinuing(false)
+            })
+          }}
+          title={t('chat.continueInNewTask')}
+          type="button"
+        >
+          {isContinuing ? (
+            <LoaderCircle aria-hidden="true" className="chat-message__action-spinner" />
+          ) : (
+            <GitFork aria-hidden="true" />
+          )}
+          <span className="chat-message__action-tooltip" role="tooltip">
+            {t('chat.continueInNewTask')}
+          </span>
+        </button>
+      )}
     </div>
   )
 }
@@ -1329,6 +1369,7 @@ export function ChatMessageItem({
   onApprove,
   onCancel,
   onEditSubmit,
+  onContinueInNewTask,
   onReject,
   onUiStateChange,
   projectId,
@@ -1398,6 +1439,11 @@ export function ChatMessageItem({
           canEdit={canEdit}
           content={actionContent}
           onEdit={() => setIsEditing(true)}
+          onContinueInNewTask={
+            message.role === 'assistant' && onContinueInNewTask
+              ? () => onContinueInNewTask(message.id)
+              : undefined
+          }
           showTokenUsageDetails={showTokenUsageDetails}
           timestamp={actionTimestamp}
           usage={actionUsage}

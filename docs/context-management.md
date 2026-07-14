@@ -160,12 +160,15 @@ Trace 保存主模型实际使用的文本上下文：
 - 摘要、骨架和最终替换块各自的 token 诊断值；
 - 生成模型和创建时间。
 
-SQLite 只需要两张摘要表：
+SQLite 使用三张职责单一的摘要状态表：
 
 - `context_compaction_summaries`：不可变摘要版本。
+- `context_compaction_summary_lineage`：记录摘要由哪条 assistant 回复引入，以及复制来源。
 - `conversation_context_compaction_heads`：会话当前生效的摘要。
 
 原始日志本身已经表达覆盖范围，因此不再维护 `context_compaction_summary_sources` 之类的消息 ID 镜像表。
+
+摘要的因果归属不是从时间戳猜测出来的。正常压缩提交时，摘要、归属、active head、请求观测和 receipt 在同一事务内提交；删除或回退引入该摘要的 assistant 回复时，归属外键会使这版摘要及其后继 active 状态失效。`source_conversation_id` 和 `source_summary_id` 只记录任务分叉来源，不构成对原任务的生命周期依赖。
 
 多次压缩时，摘要模型读取：
 
@@ -174,6 +177,22 @@ SQLite 只需要两张摘要表：
 ```
 
 它不会重新读取已经被上一版摘要覆盖的全部原文。原始数据仍保留在 SQLite，供审计、回退和派生状态失效后校验。
+
+## 在新任务中继续
+
+“在新任务中继续”创建的是所选 assistant 回复处的独立历史快照，不是指向原任务的视图。分叉操作由后端以幂等 `requestId` 编排；除附件文件的暂存与原子改名外，所有 SQLite 数据在一个事务中提交。
+
+快照包含：
+
+- 从原任务开头到所选 assistant 回复的 user/assistant 消息及原始时间；
+- 这些回复对应的 `ConversationTurnTrace`、终态和文件编辑预览草稿；
+- 消息附件的独立文件副本和新的附件 ID；
+- 截止该回复已经引入的完整摘要祖先链，而不只是当时的 active head；
+- 相同项目、模型和权限选择，并使用全新的消息、run、trace、draft 和 summary ID。
+
+快照不包含原任务在所选回复之后的消息，也不复制 provider usage、`ModelRequestObservation`、压缩 receipt、审批审计或运行中检查点。历史消息里的七项 usage 字段统一归零，因为新任务没有再次产生这些计费事实。摘要的结构化 token 诊断值仍随摘要复制，它们描述摘要本身，不是新任务的模型账单。
+
+分叉后的任务可以继续分叉。每一层都只读取自己的消息、trace 和摘要 lineage；删除原任务后，后代任务的附件、文件预览与摘要链仍然可用。原任务 ID 只作为不可解析的 provenance 文本保留，不能通过外键或运行时查询影响新任务。
 
 ### 确定性连续性骨架
 
@@ -441,6 +460,7 @@ Runtime Extension 可以注册工具、贡献 request-only 上下文、处理 ru
 | 原始历史查询        | `crates/core/src/storage/conversation_history_repository.rs`           |
 | 历史查询工具        | `crates/core/src/tools/conversation_history.rs`                        |
 | 摘要原子提交        | `crates/core/src/storage/context_compaction_repository.rs`             |
+| 任务分叉快照        | `crates/core/src/storage/conversation_fork_repository.rs`              |
 | 请求计量观测        | `crates/core/src/model_request_observation.rs`                         |
 | 压缩 receipt        | `crates/core/src/context_compaction_receipt.rs`                        |
 | 压缩验收报告        | `crates/core/src/context_compaction_audit.rs`                          |

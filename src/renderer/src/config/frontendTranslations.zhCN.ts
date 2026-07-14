@@ -303,6 +303,8 @@ export const zhCNTranslations = {
   'chat.copy': '复制',
   'chat.copyMessage': '复制消息',
   'chat.copied': '已复制',
+  'chat.continueInNewTask': '在新任务中继续',
+  'chat.continueInNewTaskFailed': '无法从这条回复创建新任务。',
   'chat.edit': '编辑',
   'chat.editMessage': '编辑消息',
   'chat.editNoConversation': '当前没有可编辑的对话。',

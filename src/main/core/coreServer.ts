@@ -30,6 +30,7 @@ import type {
   StorageChatConversationMetaRecord,
   StorageChatConversationRecord,
   StorageDeleteChatMessagesRequest,
+  StorageForkConversationRequest,
   StorageInputAttachment,
   StorageLoadInputAttachmentsRequest,
   StorageChatMessageRecord,
@@ -69,6 +70,7 @@ const STORAGE_LOAD_CONVERSATIONS_METHOD = 'storage.loadConversations'
 const STORAGE_SAVE_CONVERSATION_META_METHOD = 'storage.saveConversationMeta'
 const STORAGE_DELETE_CONVERSATION_METHOD = 'storage.deleteConversation'
 const STORAGE_DELETE_CHAT_MESSAGES_METHOD = 'storage.deleteChatMessages'
+const STORAGE_FORK_CONVERSATION_METHOD = 'storage.forkConversation'
 const STORAGE_UPSERT_CHAT_MESSAGES_METHOD = 'storage.upsertChatMessages'
 const STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD = 'storage.saveChatMessageState'
 const STORAGE_LOAD_COMPOSER_DRAFTS_METHOD = 'storage.loadComposerDrafts'
@@ -254,6 +256,13 @@ export class CoreServer {
 
   loadConversations(): Promise<StorageChatConversationRecord[]> {
     return this.rpc.request<StorageChatConversationRecord[]>(STORAGE_LOAD_CONVERSATIONS_METHOD)
+  }
+
+  forkConversation(input: StorageForkConversationRequest): Promise<StorageChatConversationRecord> {
+    return this.rpc.request<StorageChatConversationRecord, StorageForkConversationRequest>(
+      STORAGE_FORK_CONVERSATION_METHOD,
+      input
+    )
   }
 
   saveConversationMeta(

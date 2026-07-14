@@ -617,6 +617,54 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             )
         );
 
+        CREATE TABLE IF NOT EXISTS context_compaction_summary_lineage (
+            summary_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            introduced_by_assistant_message_id TEXT NOT NULL,
+            source_conversation_id TEXT,
+            source_summary_id TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            FOREIGN KEY (summary_id) REFERENCES context_compaction_summaries(id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (introduced_by_assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+
+        CREATE TRIGGER IF NOT EXISTS delete_context_compaction_summary_with_lineage
+        AFTER DELETE ON context_compaction_summary_lineage
+        WHEN EXISTS (
+            SELECT 1 FROM context_compaction_summaries WHERE id = OLD.summary_id
+        )
+        BEGIN
+            DELETE FROM context_compaction_summaries WHERE id = OLD.summary_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_context_compaction_summary_lineage_insert
+        BEFORE INSERT ON context_compaction_summary_lineage
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.introduced_by_assistant_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'assistant'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'compaction summary owner must be an assistant message in the same conversation');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_context_compaction_summary_lineage_update
+        BEFORE UPDATE OF conversation_id, introduced_by_assistant_message_id
+        ON context_compaction_summary_lineage
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.introduced_by_assistant_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'assistant'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'compaction summary owner must be an assistant message in the same conversation');
+        END;
+
         CREATE TABLE IF NOT EXISTS model_request_observations (
             id TEXT PRIMARY KEY,
             schema_version INTEGER NOT NULL CHECK (schema_version > 0),
@@ -683,6 +731,15 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY (summary_id) REFERENCES context_compaction_summaries(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS conversation_forks (
+            request_id TEXT PRIMARY KEY,
+            target_conversation_id TEXT NOT NULL UNIQUE,
+            source_conversation_id TEXT NOT NULL,
+            source_message_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            FOREIGN KEY (target_conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_models_position ON models(position);
         CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at);
         CREATE INDEX IF NOT EXISTS idx_conversations_project_id ON conversations(project_id);
@@ -693,6 +750,8 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, position);
         CREATE INDEX IF NOT EXISTS idx_conversation_turn_traces_conversation_id ON conversation_turn_traces(conversation_id, completed_at);
         CREATE INDEX IF NOT EXISTS idx_context_compaction_summaries_conversation_id ON context_compaction_summaries(conversation_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_context_compaction_summary_lineage_owner ON context_compaction_summary_lineage(conversation_id, introduced_by_assistant_message_id);
+        CREATE INDEX IF NOT EXISTS idx_context_compaction_summary_lineage_source ON context_compaction_summary_lineage(source_conversation_id, source_summary_id);
         CREATE INDEX IF NOT EXISTS idx_model_request_observations_conversation_id ON model_request_observations(conversation_id, completed_at);
         CREATE INDEX IF NOT EXISTS idx_model_request_observations_operation_id ON model_request_observations(operation_id);
         CREATE INDEX IF NOT EXISTS idx_model_request_observations_profile ON model_request_observations(model, api_style, purpose, completed_at);
@@ -725,6 +784,75 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute(
         "DELETE FROM context_compaction_summaries WHERE schema_version != ?1",
         [CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION],
+    )?;
+
+    // Older summaries predate explicit causal ownership. Applied receipts identify the exact
+    // assistant turn. For receipt-less development summaries, use the latest assistant message
+    // that already existed when the summary was committed and is not before its coverage cursor.
+    connection.execute_batch(
+        "
+        WITH inferred_lineage AS (
+            SELECT
+                summary.id AS summary_id,
+                summary.conversation_id,
+                COALESCE(
+                    (
+                        SELECT receipt.assistant_message_id
+                        FROM context_compaction_receipts AS receipt
+                        INNER JOIN messages AS receipt_owner
+                            ON receipt_owner.id = receipt.assistant_message_id
+                           AND receipt_owner.conversation_id = summary.conversation_id
+                           AND receipt_owner.role = 'assistant'
+                        WHERE receipt.summary_id = summary.id AND receipt.status = 'applied'
+                        ORDER BY receipt.completed_at DESC, receipt.operation_id DESC
+                        LIMIT 1
+                    ),
+                    (
+                        SELECT owner.id
+                        FROM messages AS owner
+                        INNER JOIN messages AS covered
+                            ON covered.id = summary.covered_through_message_id
+                           AND covered.conversation_id = summary.conversation_id
+                        WHERE owner.conversation_id = summary.conversation_id
+                          AND owner.role = 'assistant'
+                          AND owner.position >= covered.position
+                          AND owner.created_at <= summary.created_at
+                        ORDER BY owner.position DESC, owner.created_at DESC, owner.id DESC
+                        LIMIT 1
+                    )
+                ) AS introduced_by_assistant_message_id,
+                summary.created_at
+            FROM context_compaction_summaries AS summary
+        )
+        INSERT OR IGNORE INTO context_compaction_summary_lineage (
+            summary_id, conversation_id, introduced_by_assistant_message_id,
+            source_conversation_id, source_summary_id, created_at
+        )
+        SELECT
+            summary_id,
+            conversation_id,
+            introduced_by_assistant_message_id,
+            NULL,
+            NULL,
+            created_at
+        FROM inferred_lineage
+        WHERE introduced_by_assistant_message_id IS NOT NULL;
+
+        DELETE FROM context_compaction_summaries
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM context_compaction_summary_lineage AS lineage
+            WHERE lineage.summary_id = context_compaction_summaries.id
+        );
+
+        DELETE FROM context_compaction_receipts
+        WHERE summary_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM context_compaction_summaries AS summary
+              WHERE summary.id = context_compaction_receipts.summary_id
+          );
+        ",
     )?;
 
     upgrade_conversation_trace_commit_schema(connection)?;

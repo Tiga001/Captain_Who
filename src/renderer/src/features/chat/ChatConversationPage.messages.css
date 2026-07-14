@@ -456,6 +456,16 @@ button.chat-message-attachment:focus-visible {
   stroke-width: var(--mc-icon-stroke-medium);
 }
 
+.chat-message__actions .chat-message__action-spinner {
+  animation: chat-message-action-spin 800ms linear infinite;
+}
+
+@keyframes chat-message-action-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .chat-message__action-tooltip {
   position: absolute;
   bottom: calc(100% + 8px);

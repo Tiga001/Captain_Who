@@ -38,6 +38,7 @@ interface ChatConversationPageProps {
   onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void
   onComposerDraftChange: (draft: ChatComposerDraft) => void
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
+  onContinueInNewTask?: (messageId: string) => void | Promise<void>
   onScrollPositionChange?: (conversationId: string, scrollTop: number) => void
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onStopGenerating?: () => void
@@ -134,6 +135,7 @@ export function ChatConversationPage({
   onCancelAgentAction,
   onComposerDraftChange,
   onEditLastUserMessage,
+  onContinueInNewTask,
   onScrollPositionChange,
   onRejectAgentAction,
   onStopGenerating,
@@ -251,6 +253,9 @@ export function ChatConversationPage({
             editSelectedModelSupportsImage={editSelectedModelSupportsImage}
             onEditSubmit={
               message.id === editableLastUserMessageId ? onEditLastUserMessage : undefined
+            }
+            onContinueInNewTask={
+              isAssistantReplyComplete(message) ? onContinueInNewTask : undefined
             }
             onReject={onRejectAgentAction}
             onUiStateChange={onMessageUiStateChange}

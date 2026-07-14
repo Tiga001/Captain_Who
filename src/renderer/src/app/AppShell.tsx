@@ -41,6 +41,7 @@ import { createAttachmentSummary } from '../features/chat/chatAttachments'
 import {
   defaultUiPreferences,
   deleteChatMessages,
+  forkConversation,
   loadComposerDrafts,
   loadConversations,
   loadInputAttachments,
@@ -1203,6 +1204,50 @@ export function AppShell() {
     [setConversationsWithRef]
   )
 
+  const continueInNewTask = useCallback(
+    async (sourceConversationId: string, throughAssistantMessageId: string) => {
+      try {
+        const newConversation = await forkConversation(
+          sourceConversationId,
+          throughAssistantMessageId,
+          createId('conversation-fork-request')
+        )
+        const sourceDraft =
+          drafts[sourceConversationId] ??
+          createComposerDraft({
+            modelId: newConversation.modelId ?? undefined,
+            projectId: newConversation.projectId
+          })
+        const newDraft = createComposerDraft({
+          modelId: newConversation.modelId ?? sourceDraft.modelId,
+          permissionMode: sourceDraft.permissionMode,
+          projectId: newConversation.projectId
+        })
+
+        setConversationsWithRef((currentConversations) => [
+          newConversation,
+          ...currentConversations.filter((conversation) => conversation.id !== newConversation.id)
+        ])
+        setDrafts((currentDrafts) => ({
+          ...currentDrafts,
+          [newConversation.id]: newDraft
+        }))
+        void saveComposerDraft(newConversation.id, newDraft)
+        conversationScrollPositionsRef.current.delete(newConversation.id)
+        activeConversationIdRef.current = newConversation.id
+        setScrollTargetMessageId(null)
+        setActiveConversationInitialScrollTop(null)
+        setConversationScrollToBottomSignal((signal) => signal + 1)
+        setActiveConversationId(newConversation.id)
+        setView('workspace')
+      } catch (error) {
+        console.error('Failed to continue conversation in a new task', error)
+        showToast(t('chat.continueInNewTaskFailed'))
+      }
+    },
+    [drafts, setConversationsWithRef, showToast, t]
+  )
+
   const rememberConversationScrollPosition = useCallback(
     (conversationId: string, scrollTop: number) => {
       conversationScrollPositionsRef.current.set(conversationId, scrollTop)
@@ -1657,6 +1702,9 @@ export function AppShell() {
               onCancelAgentAction={handleCancelAgentAction}
               onComposerDraftChange={(draft) => updateDraft(activeConversation.id, draft)}
               onEditLastUserMessage={submitEditedLastUserMessage}
+              onContinueInNewTask={(messageId) =>
+                continueInNewTask(activeConversation.id, messageId)
+              }
               onMessageUiStateChange={(messageId, uiState: ChatMessageUiState | undefined) => {
                 const currentMessage = activeConversation.messages.find(
                   (message) => message.id === messageId

@@ -130,6 +130,14 @@ pub struct ChatConversationRecord {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct ForkConversationInput {
+    pub request_id: String,
+    pub source_conversation_id: String,
+    pub through_assistant_message_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatSearchInput {
     pub query: String,
     pub limit: Option<u32>,

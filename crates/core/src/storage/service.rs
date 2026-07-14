@@ -7,16 +7,17 @@ use crate::storage::models::{
     AgentFileDraftRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
     AgentUsageRecordInsert, AttachmentImageRecord, AttachmentRecord, ChatConversationMetaRecord,
     ChatConversationRecord, ChatMessageAttachmentRecord, ChatMessageRecord, ChatMessageStateRecord,
-    ChatSearchInput, ChatSearchResult, ComposerDraftRecord, ModelSettingsRecord, ProjectRecord,
-    UiPreferencesRecord,
+    ChatSearchInput, ChatSearchResult, ComposerDraftRecord, ForkConversationInput,
+    ModelSettingsRecord, ProjectRecord, UiPreferencesRecord,
 };
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
     chat_repository, chat_search_repository, composer_draft_repository, config_repository,
     context_compaction_audit_repository, context_compaction_receipt_repository,
-    context_compaction_repository, conversation_history_repository, conversation_trace_repository,
-    file_draft_repository, model_request_observation_repository, now_ms, pending_action_repository,
-    preferences_repository, project_repository, storage_error, usage_repository, StorageState,
+    context_compaction_repository, conversation_fork_repository, conversation_history_repository,
+    conversation_trace_repository, file_draft_repository, model_request_observation_repository,
+    now_ms, pending_action_repository, preferences_repository, project_repository, storage_error,
+    usage_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
@@ -27,6 +28,7 @@ use crate::{
     ConversationTurnTrace, ModelRequestObservation,
 };
 use base64::Engine;
+use uuid::Uuid;
 
 pub struct StorageService {
     state: StorageState,
@@ -58,6 +60,15 @@ fn validate_model_settings(settings: &ModelSettingsRecord) -> Result<(), String>
         }
     }
     Ok(())
+}
+
+fn cleanup_fork_files(staged: &[(PathBuf, PathBuf)], committed: &[PathBuf]) {
+    for (staging_path, _) in staged {
+        let _ = fs::remove_file(staging_path);
+    }
+    for target_path in committed {
+        let _ = fs::remove_file(target_path);
+    }
 }
 
 impl StorageService {
@@ -179,6 +190,94 @@ impl StorageService {
         if let Some(conversation) = &mut conversation {
             self.attach_message_attachments(&connection, std::slice::from_mut(conversation))?;
         }
+        Ok(conversation)
+    }
+
+    pub fn fork_conversation(
+        &self,
+        input: ForkConversationInput,
+    ) -> Result<ChatConversationRecord, String> {
+        let mut connection = self.state.connection()?;
+        if let Some(existing) =
+            conversation_fork_repository::find_existing_fork(&connection, input.request_id.trim())
+                .map_err(storage_error)?
+        {
+            if existing.source_conversation_id != input.source_conversation_id
+                || existing.source_message_id != input.through_assistant_message_id
+            {
+                return Err("同一个分叉请求 ID 不能用于不同的历史快照。".to_string());
+            }
+            let mut conversation =
+                chat_repository::get_conversation(&connection, &existing.target_conversation_id)
+                    .map_err(storage_error)?
+                    .ok_or_else(|| "分叉记录指向的新任务不存在。".to_string())?;
+            self.attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
+            return Ok(conversation);
+        }
+
+        let mut plan =
+            conversation_fork_repository::build_fork_plan(&connection, &input, now_ms())?;
+        ensure_project_reference_exists(&connection, plan.target.project_id.as_deref())?;
+
+        let mut staged_files = Vec::new();
+        let mut committed_files = Vec::new();
+        let prepare_files = (|| -> Result<(), String> {
+            for attachment in &mut plan.attachments {
+                let source_path = safe_existing_attachment_storage_path(
+                    &self.attachment_root,
+                    &attachment.source.storage_rel_path,
+                )
+                .ok_or_else(|| {
+                    format!("原任务附件文件不存在：{}", attachment.source.original_name)
+                })?;
+                let target_rel_path = attachment_storage_rel_path(
+                    &attachment.target.conversation_id,
+                    &attachment.target.message_id,
+                    &attachment.target.id,
+                    &attachment.target.original_name,
+                );
+                attachment.target.storage_rel_path = slash_path(&target_rel_path);
+                let target_path = self.attachment_root.join(&target_rel_path);
+                let parent = target_path
+                    .parent()
+                    .ok_or_else(|| "新任务附件路径无效。".to_string())?;
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("创建新任务附件目录失败：{error}"))?;
+                let staging_path = parent.join(format!(
+                    ".{}.forking-{}",
+                    safe_path_component(&attachment.target.id, "attachment"),
+                    Uuid::new_v4()
+                ));
+                staged_files.push((staging_path.clone(), target_path));
+                let copied = fs::copy(&source_path, &staging_path)
+                    .map_err(|error| format!("复制附件失败：{error}"))?;
+                if copied != attachment.source.size_bytes {
+                    return Err(format!(
+                        "复制附件时大小不一致：{}",
+                        attachment.source.original_name
+                    ));
+                }
+            }
+            for (staging_path, target_path) in &staged_files {
+                fs::rename(staging_path, target_path)
+                    .map_err(|error| format!("提交新任务附件失败：{error}"))?;
+                committed_files.push(target_path.clone());
+            }
+            Ok(())
+        })();
+        if let Err(error) = prepare_files {
+            cleanup_fork_files(&staged_files, &committed_files);
+            return Err(error);
+        }
+
+        if let Err(error) = conversation_fork_repository::commit_fork_plan(&mut connection, &plan) {
+            cleanup_fork_files(&staged_files, &committed_files);
+            return Err(error);
+        }
+        let mut conversation = chat_repository::get_conversation(&connection, &plan.target.id)
+            .map_err(storage_error)?
+            .ok_or_else(|| "新任务创建后无法重新读取。".to_string())?;
+        self.attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
         Ok(conversation)
     }
 
@@ -664,12 +763,14 @@ impl StorageService {
         &self,
         expected_prefix: &ContextCompactionPrefix,
         draft: ContextCompactionSummaryDraft,
+        introduced_by_assistant_message_id: &str,
     ) -> Result<ContextCompactionSummary, String> {
         let mut connection = self.state.connection()?;
         context_compaction_repository::commit_prefix_replacement(
             &mut connection,
             expected_prefix,
             draft,
+            introduced_by_assistant_message_id,
         )
         .map_err(|error| error.to_string())
     }
@@ -680,12 +781,14 @@ impl StorageService {
         &self,
         expected_prefix: &ContextCompactionPrefix,
         draft: ContextCompactionSummaryDraft,
+        introduced_by_assistant_message_id: &str,
     ) -> Result<Option<ContextCompactionSummary>, String> {
         let mut connection = self.state.connection()?;
         match context_compaction_repository::commit_prefix_replacement(
             &mut connection,
             expected_prefix,
             draft,
+            introduced_by_assistant_message_id,
         ) {
             Ok(summary) => Ok(Some(summary)),
             Err(error) if error.is_stale() => Ok(None),
@@ -1499,6 +1602,98 @@ mod tests {
         assert!(PathBuf::from(library.root_path.unwrap())
             .join(&library.conversation_attachments[0].storage_rel_path)
             .is_file());
+    }
+
+    #[test]
+    fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let mut source = conversation("conversation-source", Some("project-1"), "message-user");
+        source.messages.push(ChatMessageRecord {
+            id: "message-assistant".to_string(),
+            role: "assistant".to_string(),
+            content: "done".to_string(),
+            created_at: 2,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        });
+        source.updated_at = 2;
+        service.save_conversation(source).unwrap();
+        service
+            .save_input_attachments(
+                "conversation-source",
+                "message-user",
+                Some("project-1"),
+                &[input_attachment(
+                    "attachment-source",
+                    AgentInputAttachmentKind::File,
+                    "notes.txt",
+                    Some("text/plain"),
+                    b"independent fork attachment",
+                )],
+                1,
+            )
+            .unwrap();
+
+        let input = ForkConversationInput {
+            request_id: "fork-request-1".to_string(),
+            source_conversation_id: "conversation-source".to_string(),
+            through_assistant_message_id: "message-assistant".to_string(),
+        };
+        let forked = service.fork_conversation(input.clone()).unwrap();
+        assert_eq!(forked.project_id.as_deref(), Some("project-1"));
+        assert_eq!(forked.messages.len(), 2);
+        let forked_attachment = forked.messages[0].attachments.as_slice();
+        assert_eq!(forked_attachment.len(), 1);
+        assert_ne!(forked_attachment[0].id, "attachment-source");
+
+        let retry = service.fork_conversation(input).unwrap();
+        assert_eq!(retry.id, forked.id);
+        assert_eq!(service.load_conversations().unwrap().len(), 2);
+
+        service.delete_conversation("conversation-source").unwrap();
+        let retained = service.load_conversation(&forked.id).unwrap().unwrap();
+        let retained_attachment_id = retained.messages[0].attachments[0].id.clone();
+        let retained_payload = service
+            .load_input_attachments(&[retained_attachment_id])
+            .unwrap();
+        assert_eq!(retained_payload.len(), 1);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&retained_payload[0].data)
+                .unwrap(),
+            b"independent fork attachment"
+        );
+
+        let retained_assistant_id = retained
+            .messages
+            .iter()
+            .find(|message| message.role == "assistant")
+            .unwrap()
+            .id
+            .clone();
+        let recursive = service
+            .fork_conversation(ForkConversationInput {
+                request_id: "fork-request-2".to_string(),
+                source_conversation_id: retained.id.clone(),
+                through_assistant_message_id: retained_assistant_id,
+            })
+            .unwrap();
+        service.delete_conversation(&retained.id).unwrap();
+
+        let recursive = service.load_conversation(&recursive.id).unwrap().unwrap();
+        let recursive_attachment_id = recursive.messages[0].attachments[0].id.clone();
+        let recursive_payload = service
+            .load_input_attachments(&[recursive_attachment_id])
+            .unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&recursive_payload[0].data)
+                .unwrap(),
+            b"independent fork attachment"
+        );
     }
 
     #[test]

@@ -52,6 +52,19 @@ pub(crate) struct MessageDeletionCompactionRewind {
     previous_head_revision: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextCompactionSummaryLineage {
+    pub introduced_by_assistant_message_id: String,
+    pub source_conversation_id: Option<String>,
+    pub source_summary_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContextCompactionSummaryVersion {
+    pub summary: ContextCompactionSummary,
+    pub lineage: ContextCompactionSummaryLineage,
+}
+
 /// Captures the compaction state that must be restored when one or more assistant messages are
 /// removed. A summary is a branch-local derived state even when its covered raw prefix predates
 /// the deleted turn, so source-revision validation alone is not enough for edit-and-resend.
@@ -70,37 +83,38 @@ pub(crate) fn prepare_message_deletion_compaction_rewind(
         )
         .optional()?;
 
-    let mut receipts = Vec::new();
+    let mut previous_by_summary = HashMap::new();
     let mut visited_messages = HashSet::new();
     for message_id in message_ids {
         if !visited_messages.insert(message_id.as_str()) {
             continue;
         }
-        receipts.extend(
-            context_compaction_receipt_repository::list_receipts_for_assistant_message(
-                connection,
-                conversation_id,
-                message_id,
-            )
-            .map_err(map_receipt_error)?,
-        );
-    }
-    receipts.retain(|receipt| receipt.status == ContextCompactionReceiptStatus::Applied);
-
-    let mut previous_by_summary = HashMap::new();
-    for receipt in receipts {
-        let summary_id = receipt.summary_id.ok_or_else(|| {
-            ContextCompactionRepositoryError::Invalid(
-                "applied receipt 缺少用于消息回退的摘要 ID。".to_string(),
-            )
-        })?;
-        if previous_by_summary
-            .insert(summary_id.clone(), receipt.plan.previous_summary_id)
-            .is_some()
-        {
-            return Err(ContextCompactionRepositoryError::Invalid(format!(
-                "多个 applied receipt 绑定了同一个摘要：{summary_id}"
-            )));
+        let rows = {
+            let mut statement = connection.prepare(
+                "SELECT summary.id, summary.previous_summary_id
+                 FROM context_compaction_summaries AS summary
+                 INNER JOIN context_compaction_summary_lineage AS lineage
+                    ON lineage.summary_id = summary.id
+                 WHERE summary.conversation_id = ?1
+                   AND lineage.conversation_id = ?1
+                   AND lineage.introduced_by_assistant_message_id = ?2",
+            )?;
+            let rows = statement
+                .query_map(params![conversation_id, message_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        for (summary_id, previous_summary_id) in rows {
+            if previous_by_summary
+                .insert(summary_id.clone(), previous_summary_id)
+                .is_some()
+            {
+                return Err(ContextCompactionRepositoryError::Invalid(format!(
+                    "同一个摘要存在重复的因果归属：{summary_id}"
+                )));
+            }
         }
     }
 
@@ -120,7 +134,7 @@ pub(crate) fn prepare_message_deletion_compaction_rewind(
                     }
                     let previous = previous_by_summary.get(&current).ok_or_else(|| {
                         ContextCompactionRepositoryError::Invalid(
-                            "active summary 缺少对应的 applied receipt。".to_string(),
+                            "active summary 缺少对应的因果归属。".to_string(),
                         )
                     })?;
                     match previous {
@@ -300,10 +314,16 @@ pub fn commit_prefix_replacement(
     connection: &mut Connection,
     expected_prefix: &ContextCompactionPrefix,
     draft: ContextCompactionSummaryDraft,
+    introduced_by_assistant_message_id: &str,
 ) -> Result<ContextCompactionSummary, ContextCompactionRepositoryError> {
     validate_commit_inputs(expected_prefix, &draft)?;
     let transaction = connection.transaction()?;
-    let summary = commit_prefix_replacement_in_transaction(&transaction, expected_prefix, draft)?;
+    let summary = commit_prefix_replacement_in_transaction(
+        &transaction,
+        expected_prefix,
+        draft,
+        introduced_by_assistant_message_id,
+    )?;
     transaction.commit()?;
     Ok(summary)
 }
@@ -333,7 +353,12 @@ pub fn commit_prefix_replacement_with_receipt(
     }
 
     let transaction = connection.transaction()?;
-    let summary = commit_prefix_replacement_in_transaction(&transaction, expected_prefix, draft)?;
+    let summary = commit_prefix_replacement_in_transaction(
+        &transaction,
+        expected_prefix,
+        draft,
+        &receipt.assistant_message_id,
+    )?;
     context_compaction_receipt_repository::record_receipt_in_connection(
         &transaction,
         receipt,
@@ -366,6 +391,7 @@ fn commit_prefix_replacement_in_transaction(
     transaction: &Transaction<'_>,
     expected_prefix: &ContextCompactionPrefix,
     draft: ContextCompactionSummaryDraft,
+    introduced_by_assistant_message_id: &str,
 ) -> Result<ContextCompactionSummary, ContextCompactionRepositoryError> {
     let active_summary_id = transaction
         .query_row(
@@ -407,6 +433,15 @@ fn commit_prefix_replacement_in_transaction(
         .finish(&current_prefix)
         .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
     insert_summary(transaction, &summary)?;
+    insert_summary_lineage(
+        transaction,
+        &summary,
+        &ContextCompactionSummaryLineage {
+            introduced_by_assistant_message_id: introduced_by_assistant_message_id.to_string(),
+            source_conversation_id: None,
+            source_summary_id: None,
+        },
+    )?;
     let current_head_revision = transaction
         .query_row(
             "SELECT revision
@@ -593,6 +628,22 @@ fn cursor_index(
     entries.iter().position(|entry| entry.cursor() == cursor)
 }
 
+pub(crate) fn source_revision_for_cursor(
+    connection: &Connection,
+    conversation_id: &str,
+    covered_through: &ContextJournalCursor,
+) -> Result<String, ContextCompactionRepositoryError> {
+    let entries = list_journal_entries(connection, conversation_id)?;
+    let boundary_index = cursor_index(&entries, covered_through).ok_or_else(|| {
+        ContextCompactionRepositoryError::Invalid("摘要覆盖游标不属于目标会话日志。".to_string())
+    })?;
+    source_revision(
+        conversation_id,
+        covered_through,
+        &entries[..=boundary_index],
+    )
+}
+
 fn source_revision(
     conversation_id: &str,
     covered_through: &ContextJournalCursor,
@@ -610,8 +661,8 @@ fn source_revision(
     Ok(content_revision(&material))
 }
 
-fn insert_summary(
-    transaction: &Transaction<'_>,
+pub(crate) fn insert_summary(
+    transaction: &Connection,
     summary: &ContextCompactionSummary,
 ) -> Result<(), ContextCompactionRepositoryError> {
     summary
@@ -656,7 +707,114 @@ fn insert_summary(
     Ok(())
 }
 
-fn load_summary(
+pub(crate) fn insert_summary_lineage(
+    connection: &Connection,
+    summary: &ContextCompactionSummary,
+    lineage: &ContextCompactionSummaryLineage,
+) -> Result<(), ContextCompactionRepositoryError> {
+    let role = connection
+        .query_row(
+            "SELECT role FROM messages WHERE id = ?1 AND conversation_id = ?2",
+            params![
+                &lineage.introduced_by_assistant_message_id,
+                &summary.conversation_id
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if role.as_deref() != Some("assistant") {
+        return Err(ContextCompactionRepositoryError::Invalid(
+            "摘要的因果归属必须指向同一会话中的 assistant 消息。".to_string(),
+        ));
+    }
+    connection.execute(
+        "INSERT INTO context_compaction_summary_lineage (
+            summary_id, conversation_id, introduced_by_assistant_message_id,
+            source_conversation_id, source_summary_id, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            &summary.id,
+            &summary.conversation_id,
+            &lineage.introduced_by_assistant_message_id,
+            &lineage.source_conversation_id,
+            &lineage.source_summary_id,
+            summary.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn list_active_summary_chain(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<Vec<ContextCompactionSummaryVersion>, ContextCompactionRepositoryError> {
+    let Some(mut current) = get_active_summary(connection, conversation_id)? else {
+        return Ok(Vec::new());
+    };
+    let mut newest_first = Vec::new();
+    let mut visited = HashSet::new();
+    loop {
+        if !visited.insert(current.id.clone()) {
+            return Err(ContextCompactionRepositoryError::Invalid(
+                "上下文压缩摘要链存在循环。".to_string(),
+            ));
+        }
+        let lineage = load_summary_lineage(connection, &current.id)?;
+        let previous_id = current.previous_summary_id.clone();
+        newest_first.push(ContextCompactionSummaryVersion {
+            summary: current,
+            lineage,
+        });
+        let Some(previous_id) = previous_id else {
+            break;
+        };
+        current = load_summary(connection, &previous_id)?;
+    }
+    newest_first.reverse();
+    Ok(newest_first)
+}
+
+pub(crate) fn set_active_summary_head(
+    connection: &Connection,
+    conversation_id: &str,
+    summary_id: &str,
+    revision: u64,
+    updated_at: i64,
+) -> Result<(), ContextCompactionRepositoryError> {
+    connection.execute(
+        "INSERT INTO conversation_context_compaction_heads (
+            conversation_id, summary_id, revision, updated_at
+         ) VALUES (?1, ?2, ?3, ?4)",
+        params![conversation_id, summary_id, revision.max(1), updated_at],
+    )?;
+    Ok(())
+}
+
+fn load_summary_lineage(
+    connection: &Connection,
+    summary_id: &str,
+) -> Result<ContextCompactionSummaryLineage, ContextCompactionRepositoryError> {
+    connection
+        .query_row(
+            "SELECT introduced_by_assistant_message_id, source_conversation_id, source_summary_id
+             FROM context_compaction_summary_lineage
+             WHERE summary_id = ?1",
+            [summary_id],
+            |row| {
+                Ok(ContextCompactionSummaryLineage {
+                    introduced_by_assistant_message_id: row.get(0)?,
+                    source_conversation_id: row.get(1)?,
+                    source_summary_id: row.get(2)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or_else(|| {
+            ContextCompactionRepositoryError::Invalid(format!("摘要缺少因果归属记录：{summary_id}"))
+        })
+}
+
+pub(crate) fn load_summary(
     connection: &Connection,
     summary_id: &str,
 ) -> Result<ContextCompactionSummary, ContextCompactionRepositoryError> {
@@ -960,16 +1118,26 @@ mod tests {
         let mut connection = setup();
         let first_cursor = ContextJournalCursor::message("assistant-1");
         let first = prepare_prefix(&connection, "conversation-1", &first_cursor).unwrap();
-        commit_prefix_replacement(&mut connection, &first, draft(&first, "summary-1")).unwrap();
+        commit_prefix_replacement(
+            &mut connection,
+            &first,
+            draft(&first, "summary-1"),
+            "assistant-1",
+        )
+        .unwrap();
 
         let run_cursor = ContextJournalCursor::trace_item("assistant-2", 1);
         let second = prepare_prefix(&connection, "conversation-1", &run_cursor).unwrap();
         assert!(second.source_items.iter().any(|item| {
             matches!(item, ContextCompactionSourceItem::TraceItem { cursor, .. } if cursor == &run_cursor)
         }));
-        let summary =
-            commit_prefix_replacement(&mut connection, &second, draft(&second, "summary-2"))
-                .unwrap();
+        let summary = commit_prefix_replacement(
+            &mut connection,
+            &second,
+            draft(&second, "summary-2"),
+            "assistant-2",
+        )
+        .unwrap();
         assert_eq!(summary.previous_summary_id.as_deref(), Some("summary-1"));
         assert_eq!(summary.covered_through, run_cursor);
 
@@ -1135,7 +1303,8 @@ mod tests {
         *created_at = "2099-01-01T00:00:00+00:00".to_string();
         tampered.continuity.validate().unwrap();
 
-        let error = commit_prefix_replacement(&mut connection, &prefix, tampered).unwrap_err();
+        let error = commit_prefix_replacement(&mut connection, &prefix, tampered, "assistant-1")
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -1151,7 +1320,13 @@ mod tests {
         let mut connection = setup();
         let cursor = ContextJournalCursor::trace_item("assistant-2", 1);
         let prefix = prepare_prefix(&connection, "conversation-1", &cursor).unwrap();
-        commit_prefix_replacement(&mut connection, &prefix, draft(&prefix, "summary-1")).unwrap();
+        commit_prefix_replacement(
+            &mut connection,
+            &prefix,
+            draft(&prefix, "summary-1"),
+            "assistant-2",
+        )
+        .unwrap();
 
         let mut trace =
             conversation_trace_repository::get_trace_for_message(&connection, "assistant-2")
@@ -1181,7 +1356,13 @@ mod tests {
         let mut connection = setup();
         let cursor = ContextJournalCursor::message("assistant-1");
         let prefix = prepare_prefix(&connection, "conversation-1", &cursor).unwrap();
-        commit_prefix_replacement(&mut connection, &prefix, draft(&prefix, "summary-1")).unwrap();
+        commit_prefix_replacement(
+            &mut connection,
+            &prefix,
+            draft(&prefix, "summary-1"),
+            "assistant-1",
+        )
+        .unwrap();
         connection
             .execute(
                 "UPDATE messages SET content = 'edited request' WHERE id = 'user-1'",
@@ -1275,6 +1456,7 @@ mod tests {
             &mut connection,
             &previous_prefix,
             draft(&previous_prefix, "summary-before-run"),
+            "assistant-1",
         )
         .unwrap();
 

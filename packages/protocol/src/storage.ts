@@ -90,6 +90,12 @@ export interface StorageChatConversationRecord extends StorageChatConversationMe
   messages: StorageChatMessageRecord[]
 }
 
+export interface StorageForkConversationRequest {
+  requestId: string
+  sourceConversationId: string
+  throughAssistantMessageId: string
+}
+
 export interface StorageComposerDraftRecord {
   scopeId: string
   message: string

@@ -125,6 +125,20 @@ export async function loadConversations(): Promise<ChatConversation[]> {
   return (await hostClient.storage.loadConversations()).map(mapConversationFromStorage)
 }
 
+export async function forkConversation(
+  sourceConversationId: string,
+  throughAssistantMessageId: string,
+  requestId: string
+): Promise<ChatConversation> {
+  return mapConversationFromStorage(
+    await hostClient.storage.forkConversation({
+      requestId,
+      sourceConversationId,
+      throughAssistantMessageId
+    })
+  )
+}
+
 export async function saveConversationMeta(conversation: ChatConversation): Promise<void> {
   await hostClient.storage.saveConversationMeta(mapConversationMetaToStorage(conversation))
 }
