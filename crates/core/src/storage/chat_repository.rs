@@ -1,6 +1,7 @@
 use crate::storage::models::{
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ChatMessageStateRecord,
 };
+use crate::storage::{context_compaction_repository, now_ms};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashSet;
 
@@ -192,14 +193,29 @@ pub fn save_conversation(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         message_ids
     };
-    for message_id in existing_message_ids {
-        if !retained_message_ids.contains(message_id.as_str()) {
-            transaction.execute(
-                "DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2",
-                params![&conversation.id, message_id],
-            )?;
-        }
+    let removed_message_ids = existing_message_ids
+        .into_iter()
+        .filter(|message_id| !retained_message_ids.contains(message_id.as_str()))
+        .collect::<Vec<_>>();
+    let compaction_rewind =
+        context_compaction_repository::prepare_message_deletion_compaction_rewind(
+            &transaction,
+            &conversation.id,
+            &removed_message_ids,
+        )
+        .map_err(context_compaction_error_to_sqlite)?;
+    for message_id in &removed_message_ids {
+        transaction.execute(
+            "DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2",
+            params![&conversation.id, message_id],
+        )?;
     }
+    context_compaction_repository::finish_message_deletion_compaction_rewind(
+        &transaction,
+        compaction_rewind,
+        now_ms(),
+    )
+    .map_err(context_compaction_error_to_sqlite)?;
 
     transaction.commit()
 }
@@ -301,6 +317,13 @@ pub fn delete_messages(
     message_ids: &[String],
 ) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
+    let compaction_rewind =
+        context_compaction_repository::prepare_message_deletion_compaction_rewind(
+            &transaction,
+            conversation_id,
+            message_ids,
+        )
+        .map_err(context_compaction_error_to_sqlite)?;
 
     for message_id in message_ids {
         transaction.execute(
@@ -332,7 +355,26 @@ pub fn delete_messages(
         )?;
     }
 
+    context_compaction_repository::finish_message_deletion_compaction_rewind(
+        &transaction,
+        compaction_rewind,
+        now_ms(),
+    )
+    .map_err(context_compaction_error_to_sqlite)?;
+
     transaction.commit()
+}
+
+fn context_compaction_error_to_sqlite(
+    error: context_compaction_repository::ContextCompactionRepositoryError,
+) -> rusqlite::Error {
+    match error {
+        context_compaction_repository::ContextCompactionRepositoryError::Database(error) => error,
+        error => rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            error.to_string(),
+        ))),
+    }
 }
 
 pub fn delete_conversation(connection: &Connection, conversation_id: &str) -> rusqlite::Result<()> {

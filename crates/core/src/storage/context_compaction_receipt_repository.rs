@@ -152,6 +152,32 @@ pub fn list_receipts(
     rows.into_iter().map(decode_receipt).collect()
 }
 
+pub(crate) fn list_receipts_for_assistant_message(
+    connection: &Connection,
+    conversation_id: &str,
+    assistant_message_id: &str,
+) -> Result<Vec<ContextCompactionReceipt>, ContextCompactionReceiptRepositoryError> {
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT status, stage, receipt_json
+             FROM context_compaction_receipts
+             WHERE conversation_id = ?1 AND assistant_message_id = ?2
+             ORDER BY request_index ASC, attempt_index ASC, started_at ASC, operation_id ASC",
+        )?;
+        let rows = statement
+            .query_map(params![conversation_id, assistant_message_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    rows.into_iter().map(decode_receipt).collect()
+}
+
 pub fn mark_in_progress_receipts_interrupted(
     connection: &mut Connection,
     completed_at: i64,

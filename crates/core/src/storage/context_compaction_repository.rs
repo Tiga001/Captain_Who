@@ -8,6 +8,7 @@ use crate::storage::{context_compaction_receipt_repository, conversation_trace_r
 use crate::{ContextCompactionReceipt, ContextCompactionReceiptStatus, ModelRequestObservation};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
@@ -40,6 +41,164 @@ impl From<rusqlite::Error> for ContextCompactionRepositoryError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Database(error)
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct MessageDeletionCompactionRewind {
+    conversation_id: String,
+    generated_summary_ids: Vec<String>,
+    restore_summary_id: Option<String>,
+    restore_active_head: bool,
+    previous_head_revision: u64,
+}
+
+/// Captures the compaction state that must be restored when one or more assistant messages are
+/// removed. A summary is a branch-local derived state even when its covered raw prefix predates
+/// the deleted turn, so source-revision validation alone is not enough for edit-and-resend.
+pub(crate) fn prepare_message_deletion_compaction_rewind(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids: &[String],
+) -> Result<MessageDeletionCompactionRewind, ContextCompactionRepositoryError> {
+    let active_head = connection
+        .query_row(
+            "SELECT summary_id, revision
+             FROM conversation_context_compaction_heads
+             WHERE conversation_id = ?1",
+            [conversation_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
+        )
+        .optional()?;
+
+    let mut receipts = Vec::new();
+    let mut visited_messages = HashSet::new();
+    for message_id in message_ids {
+        if !visited_messages.insert(message_id.as_str()) {
+            continue;
+        }
+        receipts.extend(
+            context_compaction_receipt_repository::list_receipts_for_assistant_message(
+                connection,
+                conversation_id,
+                message_id,
+            )
+            .map_err(map_receipt_error)?,
+        );
+    }
+    receipts.retain(|receipt| receipt.status == ContextCompactionReceiptStatus::Applied);
+
+    let mut previous_by_summary = HashMap::new();
+    for receipt in receipts {
+        let summary_id = receipt.summary_id.ok_or_else(|| {
+            ContextCompactionRepositoryError::Invalid(
+                "applied receipt 缺少用于消息回退的摘要 ID。".to_string(),
+            )
+        })?;
+        if previous_by_summary
+            .insert(summary_id.clone(), receipt.plan.previous_summary_id)
+            .is_some()
+        {
+            return Err(ContextCompactionRepositoryError::Invalid(format!(
+                "多个 applied receipt 绑定了同一个摘要：{summary_id}"
+            )));
+        }
+    }
+
+    let generated_summary_ids = previous_by_summary.keys().cloned().collect::<Vec<_>>();
+    let (restore_summary_id, restore_active_head, previous_head_revision) =
+        match active_head.as_ref() {
+            Some((active_summary_id, revision))
+                if previous_by_summary.contains_key(active_summary_id) =>
+            {
+                let mut current = active_summary_id.clone();
+                let mut visited = HashSet::new();
+                let restore_summary_id = loop {
+                    if !visited.insert(current.clone()) {
+                        return Err(ContextCompactionRepositoryError::Invalid(
+                            "待删除消息生成的压缩摘要链存在循环。".to_string(),
+                        ));
+                    }
+                    let previous = previous_by_summary.get(&current).ok_or_else(|| {
+                        ContextCompactionRepositoryError::Invalid(
+                            "active summary 缺少对应的 applied receipt。".to_string(),
+                        )
+                    })?;
+                    match previous {
+                        Some(previous) if previous_by_summary.contains_key(previous) => {
+                            current = previous.clone();
+                        }
+                        previous => break previous.clone(),
+                    }
+                };
+                (restore_summary_id, true, *revision)
+            }
+            Some((_, revision)) => (None, false, *revision),
+            None => (None, false, 0),
+        };
+
+    Ok(MessageDeletionCompactionRewind {
+        conversation_id: conversation_id.to_string(),
+        generated_summary_ids,
+        restore_summary_id,
+        restore_active_head,
+        previous_head_revision,
+    })
+}
+
+/// Completes a branch rewind after the selected messages have been deleted in the same
+/// transaction. Generated summaries are removed and the active cursor is restored only when the
+/// pre-run summary still describes the remaining authoritative raw prefix.
+pub(crate) fn finish_message_deletion_compaction_rewind(
+    connection: &Connection,
+    rewind: MessageDeletionCompactionRewind,
+    updated_at: i64,
+) -> Result<(), ContextCompactionRepositoryError> {
+    for summary_id in &rewind.generated_summary_ids {
+        connection.execute(
+            "DELETE FROM context_compaction_summaries
+             WHERE id = ?1 AND conversation_id = ?2",
+            params![summary_id, &rewind.conversation_id],
+        )?;
+    }
+
+    if rewind.restore_active_head {
+        connection.execute(
+            "DELETE FROM conversation_context_compaction_heads WHERE conversation_id = ?1",
+            [&rewind.conversation_id],
+        )?;
+        if let Some(summary_id) = rewind.restore_summary_id {
+            let summary = connection
+                .query_row(
+                    "SELECT id FROM context_compaction_summaries
+                     WHERE id = ?1 AND conversation_id = ?2",
+                    params![&summary_id, &rewind.conversation_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|_| load_summary(connection, &summary_id))
+                .transpose()?;
+            if let Some(summary) = summary {
+                if summary_matches_current_raw_prefix(connection, &summary)? {
+                    connection.execute(
+                        "INSERT INTO conversation_context_compaction_heads (
+                            conversation_id, summary_id, revision, updated_at
+                         ) VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            &rewind.conversation_id,
+                            &summary.id,
+                            rewind.previous_head_revision.saturating_add(1),
+                            updated_at,
+                        ],
+                    )?;
+                }
+            }
+        }
+    } else {
+        // Message deletion may invalidate a summary produced by another turn. Reuse the normal
+        // content-addressed guard for that case instead of restoring an unrelated branch head.
+        let _ = get_active_summary(connection, &rewind.conversation_id)?;
+    }
+    Ok(())
 }
 
 pub fn get_active_summary(
@@ -1033,5 +1192,138 @@ mod tests {
         assert!(get_active_summary(&connection, "conversation-1")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn deleting_a_turn_removes_the_summary_generated_by_that_turn() {
+        let mut connection = setup();
+        let prefix = prepare_prefix(
+            &connection,
+            "conversation-1",
+            &ContextJournalCursor::message("assistant-1"),
+        )
+        .unwrap();
+        let draft = draft(&prefix, "summary-from-discarded-run");
+        let observation = completed_observation();
+        let receipt = planned_receipt();
+        context_compaction_receipt_repository::record_receipt(&mut connection, &receipt, None)
+            .unwrap();
+        let receipt = applied_receipt(receipt, &prefix, &draft, &observation);
+        commit_prefix_replacement_with_receipt(
+            &mut connection,
+            &prefix,
+            draft,
+            &receipt,
+            &observation,
+        )
+        .unwrap();
+
+        // The summary only covers older messages. Raw-prefix validation alone would therefore
+        // leave it active after deleting the turn that actually generated it.
+        crate::storage::chat_repository::delete_messages(
+            &mut connection,
+            "conversation-1",
+            &["user-2".to_string(), "assistant-2".to_string()],
+        )
+        .unwrap();
+
+        assert!(get_active_summary(&connection, "conversation-1")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM context_compaction_summaries",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM context_compaction_receipts",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM model_request_observations",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn deleting_a_turn_restores_the_summary_active_before_that_turn() {
+        let mut connection = setup();
+        let previous_prefix = prepare_prefix(
+            &connection,
+            "conversation-1",
+            &ContextJournalCursor::message("user-1"),
+        )
+        .unwrap();
+        commit_prefix_replacement(
+            &mut connection,
+            &previous_prefix,
+            draft(&previous_prefix, "summary-before-run"),
+        )
+        .unwrap();
+
+        let prefix = prepare_prefix(
+            &connection,
+            "conversation-1",
+            &ContextJournalCursor::message("assistant-1"),
+        )
+        .unwrap();
+        let draft = draft(&prefix, "summary-from-discarded-run");
+        let observation = completed_observation();
+        let mut receipt = planned_receipt();
+        receipt.plan.previous_summary_id = Some("summary-before-run".to_string());
+        context_compaction_receipt_repository::record_receipt(&mut connection, &receipt, None)
+            .unwrap();
+        let receipt = applied_receipt(receipt, &prefix, &draft, &observation);
+        commit_prefix_replacement_with_receipt(
+            &mut connection,
+            &prefix,
+            draft,
+            &receipt,
+            &observation,
+        )
+        .unwrap();
+
+        crate::storage::chat_repository::delete_messages(
+            &mut connection,
+            "conversation-1",
+            &["user-2".to_string(), "assistant-2".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            get_active_summary(&connection, "conversation-1")
+                .unwrap()
+                .unwrap()
+                .id,
+            "summary-before-run"
+        );
+        let summaries = {
+            let mut statement = connection
+                .prepare("SELECT id FROM context_compaction_summaries ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert_eq!(summaries, vec!["summary-before-run"]);
     }
 }

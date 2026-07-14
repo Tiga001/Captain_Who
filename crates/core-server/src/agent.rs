@@ -62,6 +62,80 @@ type ContextCompactionSummaryGenerator = Arc<
 
 pub type CoreServerNotificationSender = UnboundedSender<Value>;
 
+#[derive(Default)]
+struct AgentTerminalEventGate {
+    deferred: Mutex<Vec<AgentEvent>>,
+}
+
+impl AgentTerminalEventGate {
+    fn route(&self, event: AgentEvent) -> Option<AgentEvent> {
+        if should_defer_until_terminal_commit(&event) {
+            self.deferred
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(event);
+            None
+        } else {
+            Some(event)
+        }
+    }
+
+    fn take_after_persistence(&self, output: &AgentChatOutput) -> Vec<AgentEvent> {
+        let mut events = std::mem::take(
+            &mut *self
+                .deferred
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        if !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Done { .. }))
+        {
+            events.push(terminal_done_event(output));
+        }
+        events
+    }
+
+    fn discard(&self) {
+        self.deferred
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+}
+
+fn should_defer_until_terminal_commit(event: &AgentEvent) -> bool {
+    match event {
+        AgentEvent::State { state, .. } => is_terminal_run_status(state.status),
+        AgentEvent::Done { status, .. } => {
+            !matches!(status, Some(AgentRunStatus::WaitingForApproval))
+        }
+        _ => false,
+    }
+}
+
+fn terminal_done_event(output: &AgentChatOutput) -> AgentEvent {
+    AgentEvent::Done {
+        run_id: output.run_id.clone(),
+        success: output.status == AgentRunStatus::Completed,
+        status: Some(output.status),
+        content: (!output.content.is_empty()).then(|| output.content.clone()),
+        usage: output.usage.clone(),
+        finish_reason: output.finish_reason.clone(),
+        proposed_actions: output.proposed_actions.clone(),
+    }
+}
+
+fn emit_terminal_events_after_persistence(
+    notifications: &CoreServerNotificationSender,
+    gate: &AgentTerminalEventGate,
+    output: &AgentChatOutput,
+) {
+    for event in gate.take_after_persistence(output) {
+        let _ = notifications.send(agent_event_notification(event));
+    }
+}
+
 struct ConversationContextStateEntry {
     state: AgentConversationContextState,
     configuration_revision: String,
@@ -157,6 +231,8 @@ impl AgentService {
             let emitter_conversation_id = worker_conversation_id.clone();
             let emitter_assistant_message_id = worker_assistant_message_id.clone();
             let emitter_agent_input = pending_agent_input.clone();
+            let terminal_event_gate = Arc::new(AgentTerminalEventGate::default());
+            let emitter_terminal_event_gate = terminal_event_gate.clone();
             let emitter: AgentEventEmitter = Arc::new(move |event| {
                 if let AgentEvent::ApprovalRequired {
                     run_id,
@@ -174,7 +250,9 @@ impl AgentService {
                         agent_input,
                     );
                 }
-                let _ = emitter_notifications.send(agent_event_notification(event));
+                if let Some(event) = emitter_terminal_event_gate.route(event) {
+                    let _ = emitter_notifications.send(agent_event_notification(event));
+                }
             });
 
             let host_executor = service.host_action_executor(
@@ -255,7 +333,8 @@ impl AgentService {
                                 &agent_output.content
                             },
                         );
-                    } else if let Err(error) = persisted {
+                    } else if let Err(error) = &persisted {
+                        service.discard_usage_context(&worker_run_id);
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(worker_run_id.clone()),
                             message: format!("无法原子持久化 assistant 终态与会话轨迹：{error}"),
@@ -264,8 +343,16 @@ impl AgentService {
                             details: None,
                         }));
                     }
+                    if committed_durable_context {
+                        emit_terminal_events_after_persistence(
+                            &notifications,
+                            &terminal_event_gate,
+                            &agent_output,
+                        );
+                    }
                 }
                 Err(error) => {
+                    terminal_event_gate.discard();
                     let usage = error.usage().cloned();
                     let code = error.code().map(ToString::to_string);
                     let details = error.details().cloned();
@@ -1311,6 +1398,8 @@ impl AgentService {
         let emitter_conversation_id = record.snapshot.conversation_id.clone();
         let emitter_assistant_message_id = record.snapshot.assistant_message_id.clone();
         let emitter_agent_input = record.agent_input.clone();
+        let terminal_event_gate = Arc::new(AgentTerminalEventGate::default());
+        let emitter_terminal_event_gate = terminal_event_gate.clone();
         let emitter: AgentEventEmitter = Arc::new(move |event| {
             if let AgentEvent::ApprovalRequired {
                 run_id,
@@ -1327,7 +1416,9 @@ impl AgentService {
                     agent_input,
                 );
             }
-            let _ = emitter_notifications.send(agent_event_notification(event));
+            if let Some(event) = emitter_terminal_event_gate.route(event) {
+                let _ = emitter_notifications.send(agent_event_notification(event));
+            }
         });
 
         let host_executor = self.host_action_executor(
@@ -1419,7 +1510,8 @@ impl AgentService {
                                 &agent_output.content
                             },
                         );
-                    } else if let Err(error) = persisted {
+                    } else if let Err(error) = &persisted {
+                        self.discard_usage_context(&run_id);
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(run_id.clone()),
                             message: format!("无法原子持久化 assistant 终态与会话轨迹：{error}"),
@@ -1428,10 +1520,18 @@ impl AgentService {
                             details: None,
                         }));
                     }
+                    if committed_durable_context {
+                        emit_terminal_events_after_persistence(
+                            &notifications,
+                            &terminal_event_gate,
+                            &agent_output,
+                        );
+                    }
                 }
                 self.update_pending_status(&record.snapshot.action_id, final_pending_status);
             }
             Err(error) => {
+                terminal_event_gate.discard();
                 let usage = error.usage().cloned();
                 let code = error.code().map(ToString::to_string);
                 let details = error.details().cloned();
@@ -3258,6 +3358,77 @@ mod tests {
     };
     use serde_json::json;
     use tempfile::tempdir;
+
+    fn completed_output_for_terminal_gate() -> AgentChatOutput {
+        AgentChatOutput {
+            content: "finished".to_string(),
+            status: AgentRunStatus::Completed,
+            run_id: "run-terminal-gate".to_string(),
+            events: Vec::new(),
+            tool_definitions: Vec::new(),
+            todo: None,
+            usage: None,
+            finish_reason: Some("stop".to_string()),
+            proposed_actions: Vec::new(),
+            conversation_turn_trace: None,
+        }
+    }
+
+    #[test]
+    fn terminal_event_gate_defers_settled_state_and_done_until_commit() {
+        let gate = AgentTerminalEventGate::default();
+        let message = AgentEvent::Message {
+            run_id: "run-terminal-gate".to_string(),
+            content: "still streaming".to_string(),
+        };
+        assert!(matches!(
+            gate.route(message),
+            Some(AgentEvent::Message { .. })
+        ));
+
+        assert!(gate
+            .route(AgentEvent::State {
+                run_id: "run-terminal-gate".to_string(),
+                state: mycopilot_core::AgentStateSnapshot {
+                    status: AgentRunStatus::Completed,
+                    active_run_id: None,
+                    last_error: None,
+                    updated_at: 1,
+                },
+            })
+            .is_none());
+        assert!(gate
+            .route(terminal_done_event(&completed_output_for_terminal_gate()))
+            .is_none());
+
+        let committed = gate.take_after_persistence(&completed_output_for_terminal_gate());
+        assert!(matches!(committed.as_slice(), [
+            AgentEvent::State { state, .. },
+            AgentEvent::Done { success: true, .. }
+        ] if state.status == AgentRunStatus::Completed));
+    }
+
+    #[test]
+    fn terminal_event_gate_does_not_delay_approval_waiting_done() {
+        let gate = AgentTerminalEventGate::default();
+        let routed = gate.route(AgentEvent::Done {
+            run_id: "run-terminal-gate".to_string(),
+            success: false,
+            status: Some(AgentRunStatus::WaitingForApproval),
+            content: None,
+            usage: None,
+            finish_reason: None,
+            proposed_actions: Vec::new(),
+        });
+
+        assert!(matches!(
+            routed,
+            Some(AgentEvent::Done {
+                status: Some(AgentRunStatus::WaitingForApproval),
+                ..
+            })
+        ));
+    }
 
     fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> ConversationTurnTrace {
         ConversationTurnTrace {
