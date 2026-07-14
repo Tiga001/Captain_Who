@@ -1,4 +1,4 @@
-import { Search } from 'lucide-react'
+import { ChevronDown, Search } from 'lucide-react'
 import type { AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
@@ -41,6 +41,16 @@ const STATUS_LABELS: Record<SearchKind, Record<SearchStatus, TranslationKey>> = 
     failed: 'agent.search.code.failed',
     cancelled: 'agent.search.code.cancelled'
   }
+}
+
+const COMPLETED_LABELS: Record<SearchKind, TranslationKey> = {
+  files: 'agent.search.files.groupCompleted',
+  code: 'agent.search.code.groupCompleted'
+}
+
+const GROUP_COMPLETED_LABELS: Record<SearchKind, TranslationKey> = {
+  files: 'agent.search.files.groupCompletedCount',
+  code: 'agent.search.code.groupCompletedCount'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -102,14 +112,8 @@ function getQuery(call: AgentToolCall, result: AgentToolResult | undefined) {
   return stringValue(call.args.query)
 }
 
-function getScope(call: AgentToolCall) {
-  if (!isRecord(call.args)) return ''
-  return stringValue(call.args.path)
-}
-
-function getStatusLabel(t: Translate, kind: SearchKind, status: SearchStatus, count: number) {
-  const key = STATUS_LABELS[kind][status]
-  return status === 'completed' ? formatTranslation(t, key, { count }) : t(key)
+function getStatusLabel(t: Translate, kind: SearchKind, status: SearchStatus) {
+  return status === 'completed' ? t(COMPLETED_LABELS[kind]) : t(STATUS_LABELS[kind][status])
 }
 
 function SearchResultRow({ kind, match }: { kind: SearchKind; match: SearchMatch }) {
@@ -134,75 +138,70 @@ function getGroupStatus(items: SearchToolActivityGroupItem[]): SearchStatus {
   return 'completed'
 }
 
-function getGroupLabel(t: Translate, kind: SearchKind, status: SearchStatus, matchCount: number) {
-  return getStatusLabel(t, kind, status, matchCount)
+function getGroupLabel(t: Translate, kind: SearchKind, status: SearchStatus, callCount: number) {
+  return status === 'completed'
+    ? formatTranslation(t, GROUP_COMPLETED_LABELS[kind], { count: callCount })
+    : t(STATUS_LABELS[kind][status])
 }
 
-function groupItemsByQueryAndScope(items: SearchToolActivityGroupItem[]) {
-  const groups = new Map<
-    string,
-    { items: SearchToolActivityGroupItem[]; query: string; scope: string }
-  >()
-
-  items.forEach((item) => {
-    const query = getQuery(item.call, item.result) || '__empty__'
-    const scope = getScope(item.call)
-    const key = JSON.stringify([query, scope])
-    const group = groups.get(key)
-    groups.set(key, {
-      items: [...(group?.items ?? []), item],
-      query,
-      scope
-    })
-  })
-
-  return [...groups.entries()].map(([key, group]) => ({ key, ...group }))
+function getQueryLabel(t: Translate, call: AgentToolCall, result: AgentToolResult | undefined) {
+  const query = getQuery(call, result) || t('agent.search.unknownQuery')
+  return formatTranslation(t, 'agent.search.completedQuery', { query })
 }
 
-function SearchQuerySection({
-  items,
+function SearchCallResults({
+  call,
   kind,
-  query,
-  scope,
-  showHeading
+  result
 }: {
-  items: SearchToolActivityGroupItem[]
+  call: AgentToolCall
   kind: SearchKind
-  query: string
-  scope: string
-  showHeading: boolean
+  result?: AgentToolResult
 }) {
   const { t } = useFrontendConfig()
-  const queryLabel = query === '__empty__' ? t('agent.search.unknownQuery') : query
-  const matches = items.flatMap((item) => getMatches(item.result))
-  const errors = items.map((item) => item.result?.error).filter(Boolean)
-  const heading = scope
-    ? formatTranslation(t, 'agent.search.queryScope', { query: queryLabel, scope })
-    : formatTranslation(t, 'agent.search.query', { query: queryLabel })
+  const matches = getMatches(result)
+  const error = result?.error
 
   return (
-    <section className="search-activity__query-group">
-      {showHeading ? <div className="search-activity__query-heading">{heading}</div> : null}
+    <>
+      {error ? <p className="search-activity__error">{error}</p> : null}
+      {!error && matches.length === 0 ? <p>{t('agent.search.empty')}</p> : null}
+      {!error && matches.length > 0 ? (
+        <div className="search-activity__items">
+          {matches.map((match, index) => (
+            <SearchResultRow
+              kind={kind}
+              key={`${call.id}:${match.path}:${match.lineNumber ?? ''}:${index}`}
+              match={match}
+            />
+          ))}
+        </div>
+      ) : null}
+    </>
+  )
+}
+
+function SearchCallDisclosure({
+  call,
+  kind,
+  result
+}: {
+  call: AgentToolCall
+  kind: SearchKind
+  result?: AgentToolResult
+}) {
+  const { t } = useFrontendConfig()
+
+  return (
+    <details className="search-activity__query-group">
+      <summary>
+        <span>{getQueryLabel(t, call, result)}</span>
+        <ChevronDown className="search-activity__query-chevron" aria-hidden="true" />
+      </summary>
       <div className="search-activity__query-details">
-        {errors.map((error, index) => (
-          <p className="search-activity__error" key={`${error}:${index}`}>
-            {error}
-          </p>
-        ))}
-        {matches.length === 0 && errors.length === 0 ? <p>{t('agent.search.empty')}</p> : null}
-        {matches.length > 0 ? (
-          <div className="search-activity__items">
-            {matches.map((match, index) => (
-              <SearchResultRow
-                kind={kind}
-                key={`${match.path}:${match.lineNumber ?? ''}:${index}`}
-                match={match}
-              />
-            ))}
-          </div>
-        ) : null}
+        <SearchCallResults call={call} kind={kind} result={result} />
       </div>
-    </section>
+    </details>
   )
 }
 
@@ -215,9 +214,7 @@ export function SearchToolActivity({
   const { t } = useFrontendConfig()
   const kind = getSearchKind(call)
   const status = getStatus(cancelled, result, settledStatus)
-  const matches = getMatches(result)
   const hasDetails = status !== 'running'
-  const error = result?.error
 
   return (
     <AgentActivityDisclosure
@@ -225,23 +222,12 @@ export function SearchToolActivity({
       hasDetails={hasDetails}
       icon={Search}
       isPending={status === 'running'}
-      label={getStatusLabel(t, kind, status, matches.length)}
+      label={getStatusLabel(t, kind, status)}
     >
       {hasDetails && (
-        <div className="agent-activity__details search-activity__details">
-          {error ? <p className="search-activity__error">{error}</p> : null}
-          {!error && matches.length === 0 ? <p>{t('agent.search.empty')}</p> : null}
-          {!error && matches.length > 0 ? (
-            <div className="search-activity__items">
-              {matches.map((match, index) => (
-                <SearchResultRow
-                  kind={kind}
-                  key={`${match.path}:${match.lineNumber ?? ''}:${index}`}
-                  match={match}
-                />
-              ))}
-            </div>
-          ) : null}
+        <div className="agent-activity__details search-activity__details search-activity__details--single">
+          <div className="search-activity__query-heading">{getQueryLabel(t, call, result)}</div>
+          <SearchCallResults call={call} kind={kind} result={result} />
         </div>
       )}
     </AgentActivityDisclosure>
@@ -266,8 +252,6 @@ export function SearchToolActivityGroup({ items, kind }: SearchToolActivityGroup
 
   const status = getGroupStatus(items)
   const hasDetails = status !== 'running'
-  const queryGroups = groupItemsByQueryAndScope(items)
-  const matchCount = items.reduce((count, item) => count + getMatches(item.result).length, 0)
 
   return (
     <AgentActivityDisclosure
@@ -275,18 +259,16 @@ export function SearchToolActivityGroup({ items, kind }: SearchToolActivityGroup
       hasDetails={hasDetails}
       icon={Search}
       isPending={status === 'running'}
-      label={getGroupLabel(t, kind, status, matchCount)}
+      label={getGroupLabel(t, kind, status, items.length)}
     >
       {hasDetails && (
         <div className="agent-activity__details search-activity__details search-activity__details--group">
-          {queryGroups.map((group) => (
-            <SearchQuerySection
-              items={group.items}
-              key={group.key}
+          {items.map((item) => (
+            <SearchCallDisclosure
+              call={item.call}
+              key={item.call.id}
               kind={kind}
-              query={group.query}
-              scope={group.scope}
-              showHeading={queryGroups.length > 1}
+              result={item.result}
             />
           ))}
         </div>

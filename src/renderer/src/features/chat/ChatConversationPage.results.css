@@ -411,40 +411,82 @@ button.attachment-list-activity__item:focus-visible {
 .search-activity__details--group {
   display: grid;
   max-height: 320px;
-  gap: 12px;
+  gap: 2px;
   overflow: auto;
   padding-right: 2px;
 }
 
 .search-activity__query-group {
-  display: grid;
   min-width: 0;
-  gap: 3px;
 }
 
-.search-activity__query-heading {
+.search-activity__query-group > summary {
   display: inline-flex;
   align-items: center;
   max-width: 100%;
+  min-height: 28px;
+  padding-left: 0;
+  gap: 0;
   color: var(--mc-color-text-muted);
+  list-style: none;
+  cursor: pointer;
+  text-indent: 0;
+  transition: color 120ms ease;
+}
+
+.search-activity__query-group > summary:hover,
+.search-activity__query-group > summary:focus-visible {
+  color: var(--mc-color-text-primary);
+}
+
+.search-activity__query-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.search-activity__query-group > summary span {
   min-width: 0;
   overflow: hidden;
-  font-size: var(--mc-font-size-chat-activity-detail);
+  color: inherit;
+  font-size: var(--mc-font-size-chat-activity);
   font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-relaxed);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-activity__query-chevron {
+  flex: 0 0 auto;
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+  margin-left: 5px;
+  color: currentColor;
+  transform: rotate(-90deg);
+  transition: transform 0.15s ease;
+}
+
+.search-activity__query-group[open] .search-activity__query-chevron {
+  transform: rotate(0deg);
+}
+
+.search-activity__query-heading {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-chat-activity);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-relaxed);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .search-activity__query-details {
   display: grid;
-  padding: 0 0 4px 24px;
+  padding: 3px 0 4px 24px;
   gap: 7px;
 }
 
-.search-activity__details--group
-  > .search-activity__query-group:only-child
-  .search-activity__query-details {
-  padding-left: 0;
+.search-activity__details--single {
+  gap: 7px;
 }
 
 .search-activity__details--group .search-activity__items {
