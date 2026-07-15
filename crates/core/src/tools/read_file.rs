@@ -21,15 +21,11 @@ impl AgentTool for ReadFileTool {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Workspace-relative file path or @attachments/... readPath." },
-                    "filePath": { "type": "string", "description": "Alias for path." },
                     "startLine": { "type": "integer", "minimum": 1, "description": "Optional 1-based first line. Omit to start at the beginning." },
                     "startByte": { "type": "integer", "minimum": 0, "description": "Continuation cursor. Pass nextStartByte from a previous truncated result; do not combine with startLine." },
                     "maxLines": { "type": "integer", "minimum": 1, "description": "Optional soft strategy bound. There is no fixed maximum; the output token budget still applies." }
                 },
-                "anyOf": [
-                    { "required": ["path"] },
-                    { "required": ["filePath"] }
-                ]
+                "required": ["path"]
             }),
             safety: AgentToolSafety::ReadOnly,
             requires_workspace: false,
@@ -585,6 +581,29 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn schema_advertises_path_without_top_level_composition() {
+        let registry = ToolRegistry::defaults_with_search(None);
+        let definition = registry.definition_for("read_file").unwrap();
+
+        assert_eq!(definition.input_schema["type"], "object");
+        assert_eq!(definition.input_schema["required"], json!(["path"]));
+        assert!(definition.input_schema.get("anyOf").is_none());
+        assert!(definition.input_schema["properties"]
+            .get("filePath")
+            .is_none());
+    }
+
+    #[test]
+    fn runtime_still_accepts_the_legacy_file_path_alias() {
+        let fixture = TestWorkspace::new();
+        fixture.write_file("legacy.txt", "legacy alias");
+
+        let value = execute(&fixture.context(), json!({ "filePath": "legacy.txt" }));
+
+        assert_eq!(value["content"], "legacy alias");
+    }
 
     #[test]
     fn explicit_line_bounds_remain_available_without_a_global_maximum() {

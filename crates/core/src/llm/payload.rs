@@ -152,7 +152,7 @@ fn build_openai_tools(tools: &[AgentToolDefinition]) -> Vec<Value> {
                 "function": {
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": normalize_json_schema(&tool.input_schema)
+                    "parameters": tool.input_schema.clone()
                 }
             })
         })
@@ -270,17 +270,10 @@ fn build_anthropic_tools(tools: &[AgentToolDefinition]) -> Vec<Value> {
             json!({
                 "name": tool.name,
                 "description": tool.description,
-                "input_schema": normalize_json_schema(&tool.input_schema)
+                "input_schema": tool.input_schema.clone()
             })
         })
         .collect()
-}
-
-fn normalize_json_schema(schema: &Value) -> Value {
-    match schema {
-        Value::Object(_) => schema.clone(),
-        _ => json!({ "type": "object", "properties": {} }),
-    }
 }
 
 pub(super) fn build_headers(api_style: AgentApiStyle, api_token: &str) -> AgentResult<HeaderMap> {

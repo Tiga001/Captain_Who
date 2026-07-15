@@ -16,6 +16,7 @@ mod read_presentation;
 mod read_spreadsheet;
 mod read_word;
 mod run_command;
+pub(crate) mod schema;
 mod search_code;
 mod search_files;
 mod web_fetch;
@@ -39,6 +40,7 @@ use read_presentation::ReadPresentationTool;
 use read_spreadsheet::ReadSpreadsheetTool;
 use read_word::ReadWordTool;
 use run_command::RunCommandTool;
+use schema::validate_portable_tool_input_schema;
 use search_code::SearchCodeTool;
 use search_files::SearchFilesTool;
 use serde_json::Value;
@@ -202,7 +204,7 @@ impl ToolRegistry {
 
     fn register<T: AgentTool + 'static>(&mut self, tool: T) {
         self.register_boxed("core".to_string(), Box::new(tool))
-            .expect("core tool names must be unique and non-empty");
+            .expect("core tool definitions must have valid names and portable input schemas");
     }
 
     fn register_boxed(&mut self, owner: String, tool: Box<dyn AgentTool>) -> AgentResult<()> {
@@ -219,6 +221,7 @@ impl ToolRegistry {
                 definition.name
             )));
         }
+        validate_portable_tool_input_schema(name, &definition.input_schema)?;
         if let Some(existing_owner) = self.owners.get(name) {
             return Err(AgentError::new(format!(
                 "工具注册冲突：`{name}` 已由 {existing_owner} 注册，{owner} 不能重复注册。"
@@ -306,6 +309,34 @@ mod tests {
 
     static TEST_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+    struct InvalidSchemaTool;
+
+    impl AgentTool for InvalidSchemaTool {
+        fn definition(&self) -> AgentToolDefinition {
+            AgentToolDefinition {
+                name: "invalid_schema".to_string(),
+                description: "test".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    },
+                    "anyOf": [
+                        { "required": ["path"] }
+                    ]
+                }),
+                safety: crate::protocol::AgentToolSafety::ReadOnly,
+                requires_workspace: false,
+                requires_approval: false,
+                approval_mode: crate::protocol::AgentToolApprovalMode::Never,
+            }
+        }
+
+        fn execute(&self, _context: &ToolExecutionContext, _args: Value) -> AgentResult<Value> {
+            Ok(json!({}))
+        }
+    }
+
     #[test]
     fn rejects_paths_outside_workspace() {
         let fixture = TestWorkspace::new();
@@ -329,6 +360,33 @@ mod tests {
 
         assert!(tools.contains(&"web_search".to_string()));
         assert!(tools.contains(&"web_fetch".to_string()));
+    }
+
+    #[test]
+    fn every_builtin_tool_uses_the_portable_root_schema_contract() {
+        let mut registry = ToolRegistry::defaults_with_search(Some(&AgentSearchConfig {
+            mode: AgentSearchMode::Tavily,
+            tavily_api_key: Some("tvly-test".to_string()),
+        }));
+        registry.register_conversation_history();
+
+        for definition in registry.definitions() {
+            validate_portable_tool_input_schema(&definition.name, &definition.input_schema)
+                .unwrap_or_else(|error| panic!("{}: {error}", definition.name));
+        }
+    }
+
+    #[test]
+    fn rejects_incompatible_extension_tool_schema_during_registration() {
+        let mut registry = ToolRegistry::defaults_with_search(None);
+
+        let error = registry
+            .register_extension_tool("test", Box::new(InvalidSchemaTool))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("invalid_schema"));
+        assert!(error.to_string().contains("anyOf"));
+        assert!(!registry.contains_tool("invalid_schema"));
     }
 
     #[test]

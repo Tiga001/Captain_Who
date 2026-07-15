@@ -4,6 +4,7 @@ mod stream;
 
 use crate::cancellation::AgentCancellationToken;
 use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentToolDefinition, AgentUsage};
+use crate::tools::schema::validate_portable_tool_input_schema;
 use crate::usage::{extract_usage, merge_total_usage, usage_for_request};
 use payload::{build_headers, build_payload, is_sse_response};
 use response::{
@@ -476,6 +477,9 @@ fn validate_request(request: &LlmChatRequest) -> AgentResult<()> {
     if request.messages.is_empty() {
         return Err(AgentError::new("没有可发送的对话内容。"));
     }
+    for tool in &request.tools {
+        validate_portable_tool_input_schema(&tool.name, &tool.input_schema)?;
+    }
 
     Ok(())
 }
@@ -759,6 +763,28 @@ mod tests {
         assert!(!is_retryable_llm_error(&AgentError::new(
             "模型接口返回 400：bad request"
         )));
+    }
+
+    #[test]
+    fn rejects_incompatible_tool_schema_before_building_an_http_request() {
+        let mut tool = tool_definition();
+        tool.input_schema["anyOf"] = json!([{ "required": ["path"] }]);
+        let request = LlmChatRequest {
+            api_url: "https://example.test/v1/chat/completions".to_string(),
+            api_token: "token".to_string(),
+            model: "gpt".to_string(),
+            api_style: AgentApiStyle::OpenAiCompatible,
+            max_tokens: 1024,
+            temperature: 0.2,
+            stream: true,
+            messages: vec![message(LlmMessageRole::User, "Read a file")],
+            tools: vec![tool],
+        };
+
+        let error = validate_request(&request).unwrap_err();
+
+        assert!(error.to_string().contains("read_file"));
+        assert!(error.to_string().contains("anyOf"));
     }
 
     #[test]
