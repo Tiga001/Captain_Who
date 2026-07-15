@@ -147,6 +147,8 @@ pub(crate) enum LlmStreamEvent {
 const LLM_MAX_ATTEMPTS: usize = 3;
 const LLM_RETRY_BASE_DELAY_MS: u64 = 350;
 const LLM_RETRY_MAX_DELAY_MS: u64 = 2_000;
+const RETRYABLE_UPSTREAM_CONTENT_TYPE_ERROR: &str =
+    "the provided content type is invalid or not supported for this model";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LlmResponseValidation {
@@ -534,6 +536,12 @@ fn is_retryable_llm_error(error: &AgentError) -> bool {
         return false;
     }
 
+    // Some OpenAI-compatible gateways intermittently fail while routing an otherwise valid
+    // JSON request to Bedrock. Keep this exception exact so other client-side 400s still fail fast.
+    if message.contains("400") && message.contains(RETRYABLE_UPSTREAM_CONTENT_TYPE_ERROR) {
+        return true;
+    }
+
     if message.contains("请先在设置")
         || message.contains("请选择一个可用模型")
         || message.contains("没有可发送的对话内容")
@@ -640,6 +648,8 @@ mod tests {
     };
     use crate::protocol::{AgentApprovalStatus, AgentChatMessage, AgentToolSafety};
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
 
     fn message(role: LlmMessageRole, content: &str) -> LlmMessage {
         LlmMessage::text(role, content)
@@ -671,6 +681,50 @@ mod tests {
             requires_approval: false,
             approval_mode: crate::protocol::AgentToolApprovalMode::Never,
         }
+    }
+
+    async fn read_test_http_request(stream: &mut TcpStream) {
+        let mut request = Vec::new();
+        let mut content_length = None;
+        let mut body_start = None;
+        loop {
+            let mut chunk = [0_u8; 4_096];
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(
+                read > 0,
+                "test HTTP request ended before its body was complete"
+            );
+            request.extend_from_slice(&chunk[..read]);
+
+            if body_start.is_none() {
+                if let Some(index) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let start = index + 4;
+                    let headers = std::str::from_utf8(&request[..index]).unwrap();
+                    content_length = headers.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    });
+                    body_start = Some(start);
+                }
+            }
+
+            if let (Some(start), Some(length)) = (body_start, content_length) {
+                if request.len() >= start + length {
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn write_test_http_response(stream: &mut TcpStream, status: &str, body: Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let headers = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
     }
 
     fn chat_message(role: &str, content: &str) -> AgentChatMessage {
@@ -750,6 +804,9 @@ mod tests {
         assert!(is_retryable_llm_error(&AgentError::new(
             "模型接口返回 503：upstream overloaded"
         )));
+        assert!(is_retryable_llm_error(&AgentError::new(
+            "模型接口返回 400：upstream status 400: Provider API error: The provided Content Type is invalid or not supported for this model"
+        )));
     }
 
     #[test]
@@ -763,6 +820,94 @@ mod tests {
         assert!(!is_retryable_llm_error(&AgentError::new(
             "模型接口返回 400：bad request"
         )));
+        assert!(!is_retryable_llm_error(&AgentError::new(
+            "模型接口返回 400：Invalid schema for function read_file"
+        )));
+    }
+
+    #[tokio::test]
+    async fn streaming_retries_the_known_upstream_content_type_400_and_recovers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for attempt in 1..=2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_test_http_request(&mut stream).await;
+                if attempt == 1 {
+                    write_test_http_response(
+                        &mut stream,
+                        "400 Bad Request",
+                        json!({
+                            "error": {
+                                "message": "upstream status 400: Provider API error: The provided Content Type is invalid or not supported for this model"
+                            }
+                        }),
+                    )
+                    .await;
+                } else {
+                    write_test_http_response(
+                        &mut stream,
+                        "200 OK",
+                        json!({
+                            "choices": [{
+                                "message": { "role": "assistant", "content": "recovered" },
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 1,
+                                "total_tokens": 11
+                            }
+                        }),
+                    )
+                    .await;
+                }
+            }
+        });
+        let request = LlmChatRequest {
+            api_url: format!("http://{address}/v1/chat/completions"),
+            api_token: "token".to_string(),
+            model: "claude-opus-4-7".to_string(),
+            api_style: AgentApiStyle::OpenAiCompatible,
+            max_tokens: 1_024,
+            temperature: 0.2,
+            stream: false,
+            messages: vec![message(LlmMessageRole::User, "Hello")],
+            tools: Vec::new(),
+        };
+
+        let mut attempts_started = 0_usize;
+        let mut attempts_reset = 0_usize;
+        let mut retries = 0_usize;
+        let mut commits = 0_usize;
+        let response =
+            complete_chat_streaming(
+                request,
+                AgentCancellationToken::new(),
+                |event| match event {
+                    LlmStreamEvent::AttemptStarted { .. } => attempts_started += 1,
+                    LlmStreamEvent::AttemptReset { .. } => attempts_reset += 1,
+                    LlmStreamEvent::Retrying { .. } => retries += 1,
+                    LlmStreamEvent::Committed => commits += 1,
+                    _ => {}
+                },
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(response.content, "recovered");
+        assert_eq!(attempts_started, 2);
+        assert_eq!(attempts_reset, 1);
+        assert_eq!(retries, 1);
+        assert_eq!(commits, 1);
+        assert_eq!(
+            response
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.billable_request_count),
+            Some(2)
+        );
     }
 
     #[test]
