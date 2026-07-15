@@ -24,6 +24,14 @@ import type {
   AttachmentSelectInputRequest,
   CorePingRequest,
   CorePingResponse,
+  GitRepositoryInspectInput,
+  GitRepositoryInspection,
+  GitReviewFileDiff,
+  GitReviewFileDiffInput,
+  GitReviewFileMutation,
+  GitReviewFileMutationInput,
+  GitReviewSummary,
+  GitReviewSummaryInput,
   ResourceFaviconRequest,
   ResourceFaviconResponse,
   ChatSearchInput,
@@ -103,6 +111,13 @@ export interface SearchHostApi {
   searchChats(input: ChatSearchInput): Promise<ChatSearchResult[]>
 }
 
+export interface GitHostApi {
+  inspectRepository(input: GitRepositoryInspectInput): Promise<GitRepositoryInspection>
+  getReviewSummary(input: GitReviewSummaryInput): Promise<GitReviewSummary>
+  getReviewFileDiff(input: GitReviewFileDiffInput): Promise<GitReviewFileDiff>
+  mutateReviewFile(input: GitReviewFileMutationInput): Promise<GitReviewFileMutation>
+}
+
 export interface ResourcesHostApi {
   resolveFavicon(input: ResourceFaviconRequest): Promise<ResourceFaviconResponse>
 }
@@ -166,6 +181,7 @@ export interface HostApi {
   attachments: AttachmentsHostApi
   browser: BrowserHostApi
   clipboard: ClipboardHostApi
+  git: GitHostApi
   resources: ResourcesHostApi
   search: SearchHostApi
   storage: StorageHostApi

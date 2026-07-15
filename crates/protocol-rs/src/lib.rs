@@ -17,6 +17,10 @@ pub const AGENT_READ_FILE_DRAFT_METHOD: &str = "agent.readFileDraft";
 pub const AGENT_GET_FILE_WRITE_DIFF_METHOD: &str = "agent.getFileWriteDiff";
 pub const AGENT_EVENT_NOTIFICATION_METHOD: &str = "agent.event";
 pub const SEARCH_SEARCH_CHATS_METHOD: &str = "search.searchChats";
+pub const GIT_INSPECT_REPOSITORY_METHOD: &str = "git.inspectRepository";
+pub const GIT_GET_REVIEW_SUMMARY_METHOD: &str = "git.getReviewSummary";
+pub const GIT_GET_REVIEW_FILE_DIFF_METHOD: &str = "git.getReviewFileDiff";
+pub const GIT_MUTATE_REVIEW_FILE_METHOD: &str = "git.mutateReviewFile";
 pub const STORAGE_LOAD_MODEL_SETTINGS_METHOD: &str = "storage.loadModelSettings";
 pub const STORAGE_SAVE_MODEL_SETTINGS_METHOD: &str = "storage.saveModelSettings";
 pub const STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD: &str = "storage.loadAgentPromptPreferences";
@@ -132,6 +136,34 @@ pub struct AgentActionIdRequest {
 pub struct AgentRejectActionRequest {
     pub action_id: String,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRepositoryInspectRequest {
+    pub project_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReviewSummaryRequest {
+    pub project_id: String,
+    pub scope: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReviewFileDiffRequest {
+    pub snapshot_id: String,
+    pub file_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReviewFileMutationRequest {
+    pub snapshot_id: String,
+    pub file_id: String,
+    pub action: String,
 }
 
 pub fn success<T>(id: JsonRpcId, result: T) -> JsonRpcSuccessResponse<T>

@@ -6,17 +6,18 @@ import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { RightSidebarHome } from '../../features/rightSidebar/RightSidebarHome'
 import { RightSidebarModulePicker } from '../../features/rightSidebar/RightSidebarModulePicker'
 import { RightSidebarPageStack } from '../../features/rightSidebar/RightSidebarPageStack'
-import {
-  RIGHT_SIDEBAR_MODULES,
-  getRightSidebarModule
-} from '../../features/rightSidebar/rightSidebarModules'
-import type { RightSidebarModuleId } from '../../features/rightSidebar/rightSidebarTypes'
+import { RIGHT_SIDEBAR_MODULES } from '../../features/rightSidebar/rightSidebarModules'
+import type {
+  RightSidebarModuleDefinition,
+  RightSidebarModuleId
+} from '../../features/rightSidebar/rightSidebarTypes'
 import { useRightSidebarPlatform } from '../../features/rightSidebar/useRightSidebarPlatform'
 import './RightSidebar.css'
 
 interface RightSidebarProps {
   isMaximized: boolean
   maximizedToolbarControls?: ReactNode
+  modules?: RightSidebarModuleDefinition[]
   onToggleMaximized: () => void
   workspaceKey?: string | null
   workspaceName?: string | null
@@ -44,6 +45,7 @@ function RestoreFromMaximizedIcon(): ReactNode {
 export function RightSidebar({
   isMaximized,
   maximizedToolbarControls,
+  modules = RIGHT_SIDEBAR_MODULES,
   onToggleMaximized,
   workspaceKey,
   workspaceName,
@@ -62,6 +64,7 @@ export function RightSidebar({
     pages,
     updatePage
   } = useRightSidebarPlatform({
+    modules,
     t,
     workspaceKey,
     workspaceName,
@@ -131,7 +134,7 @@ export function RightSidebar({
               aria-label={t('rightSidebar.openTabs')}
             >
               {pages.map((page) => {
-                const module = getRightSidebarModule(page.moduleId)
+                const module = modules.find((candidate) => candidate.id === page.moduleId)
                 const Icon = module?.icon
                 const isActive = page.id === activePageId
                 const iconUrl = page.iconUrl?.trim()
@@ -208,7 +211,7 @@ export function RightSidebar({
                   createPortal(
                     <div ref={moduleMenuRef}>
                       <RightSidebarModulePicker
-                        modules={RIGHT_SIDEBAR_MODULES}
+                        modules={modules}
                         onOpenModule={openModule}
                         style={moduleMenuPosition}
                       />
@@ -241,13 +244,14 @@ export function RightSidebar({
         {hasOpenPages ? (
           <RightSidebarPageStack
             activePageId={activePageId}
+            modules={modules}
             onPageUpdate={updatePage}
             onSurfaceFocus={closeTransientUi}
             pages={pages}
             t={t}
           />
         ) : (
-          <RightSidebarHome modules={RIGHT_SIDEBAR_MODULES} onOpenModule={openModule} />
+          <RightSidebarHome modules={modules} onOpenModule={openModule} />
         )}
       </div>
     </aside>

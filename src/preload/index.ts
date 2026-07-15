@@ -72,6 +72,12 @@ const host: HostApi = {
   clipboard: {
     writeImage: (input) => ipcRenderer.invoke('host:clipboard.writeImage', input)
   },
+  git: {
+    inspectRepository: (input) => ipcRenderer.invoke('host:git.inspectRepository', input),
+    getReviewSummary: (input) => ipcRenderer.invoke('host:git.getReviewSummary', input),
+    getReviewFileDiff: (input) => ipcRenderer.invoke('host:git.getReviewFileDiff', input),
+    mutateReviewFile: (input) => ipcRenderer.invoke('host:git.mutateReviewFile', input)
+  },
   resources: {
     resolveFavicon: (input) => ipcRenderer.invoke('host:resources.resolveFavicon', input)
   },

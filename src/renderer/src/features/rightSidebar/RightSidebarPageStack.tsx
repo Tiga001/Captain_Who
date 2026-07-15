@@ -1,10 +1,14 @@
 import { useCallback } from 'react'
 import type { Translate } from '../../config/translationFormat'
-import { getRightSidebarModule } from './rightSidebarModules'
-import type { RightSidebarPage, RightSidebarPageUpdate } from './rightSidebarTypes'
+import type {
+  RightSidebarModuleDefinition,
+  RightSidebarPage,
+  RightSidebarPageUpdate
+} from './rightSidebarTypes'
 
 interface RightSidebarPageStackProps {
   activePageId: string | null
+  modules: RightSidebarModuleDefinition[]
   onPageUpdate: (pageId: string, update: RightSidebarPageUpdate) => void
   onSurfaceFocus: () => void
   pages: RightSidebarPage[]
@@ -13,6 +17,7 @@ interface RightSidebarPageStackProps {
 
 export function RightSidebarPageStack({
   activePageId,
+  modules,
   onPageUpdate,
   onSurfaceFocus,
   pages,
@@ -24,6 +29,7 @@ export function RightSidebarPageStack({
         <RightSidebarPageFrame
           activePageId={activePageId}
           key={page.id}
+          modules={modules}
           onPageUpdate={onPageUpdate}
           onSurfaceFocus={onSurfaceFocus}
           page={page}
@@ -36,6 +42,7 @@ export function RightSidebarPageStack({
 
 interface RightSidebarPageFrameProps {
   activePageId: string | null
+  modules: RightSidebarModuleDefinition[]
   onPageUpdate: (pageId: string, update: RightSidebarPageUpdate) => void
   onSurfaceFocus: () => void
   page: RightSidebarPage
@@ -44,12 +51,13 @@ interface RightSidebarPageFrameProps {
 
 function RightSidebarPageFrame({
   activePageId,
+  modules,
   onPageUpdate,
   onSurfaceFocus,
   page,
   t
 }: RightSidebarPageFrameProps) {
-  const module = getRightSidebarModule(page.moduleId)
+  const module = modules.find((candidate) => candidate.id === page.moduleId)
   const isActive = page.id === activePageId
   const updatePage = useCallback(
     (update: RightSidebarPageUpdate) => onPageUpdate(page.id, update),

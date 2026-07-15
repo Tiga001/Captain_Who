@@ -912,6 +912,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "image",
+ "libc",
  "pdf-extract",
  "reqwest",
  "roxmltree",

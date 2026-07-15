@@ -23,6 +23,14 @@ import type {
   CorePingRequest,
   CorePingResponse,
   CoreShutdownResponse,
+  GitRepositoryInspectInput,
+  GitRepositoryInspection,
+  GitReviewFileDiff,
+  GitReviewFileDiffInput,
+  GitReviewFileMutation,
+  GitReviewFileMutationInput,
+  GitReviewSummary,
+  GitReviewSummaryInput,
   ChatSearchInput,
   ChatSearchResult,
   StorageAgentPromptPreferencesRecord,
@@ -59,6 +67,10 @@ const AGENT_READ_FILE_DRAFT_METHOD = 'agent.readFileDraft'
 const AGENT_GET_FILE_WRITE_DIFF_METHOD = 'agent.getFileWriteDiff'
 const AGENT_EVENT_NOTIFICATION_METHOD = 'agent.event'
 const SEARCH_SEARCH_CHATS_METHOD = 'search.searchChats'
+const GIT_INSPECT_REPOSITORY_METHOD = 'git.inspectRepository'
+const GIT_GET_REVIEW_SUMMARY_METHOD = 'git.getReviewSummary'
+const GIT_GET_REVIEW_FILE_DIFF_METHOD = 'git.getReviewFileDiff'
+const GIT_MUTATE_REVIEW_FILE_METHOD = 'git.mutateReviewFile'
 const STORAGE_LOAD_MODEL_SETTINGS_METHOD = 'storage.loadModelSettings'
 const STORAGE_SAVE_MODEL_SETTINGS_METHOD = 'storage.saveModelSettings'
 const STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD = 'storage.loadAgentPromptPreferences'
@@ -209,6 +221,34 @@ export class CoreServer {
 
   searchChats(input: ChatSearchInput): Promise<ChatSearchResult[]> {
     return this.rpc.request<ChatSearchResult[], ChatSearchInput>(SEARCH_SEARCH_CHATS_METHOD, input)
+  }
+
+  inspectGitRepository(input: GitRepositoryInspectInput): Promise<GitRepositoryInspection> {
+    return this.rpc.request<GitRepositoryInspection, GitRepositoryInspectInput>(
+      GIT_INSPECT_REPOSITORY_METHOD,
+      input
+    )
+  }
+
+  getGitReviewSummary(input: GitReviewSummaryInput): Promise<GitReviewSummary> {
+    return this.rpc.request<GitReviewSummary, GitReviewSummaryInput>(
+      GIT_GET_REVIEW_SUMMARY_METHOD,
+      input
+    )
+  }
+
+  getGitReviewFileDiff(input: GitReviewFileDiffInput): Promise<GitReviewFileDiff> {
+    return this.rpc.request<GitReviewFileDiff, GitReviewFileDiffInput>(
+      GIT_GET_REVIEW_FILE_DIFF_METHOD,
+      input
+    )
+  }
+
+  mutateGitReviewFile(input: GitReviewFileMutationInput): Promise<GitReviewFileMutation> {
+    return this.rpc.request<GitReviewFileMutation, GitReviewFileMutationInput>(
+      GIT_MUTATE_REVIEW_FILE_METHOD,
+      input
+    )
   }
 
   loadModelSettings(): Promise<StorageModelSettingsRecord | null> {

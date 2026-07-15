@@ -433,6 +433,18 @@ export function registerHostIpc(
     coreServer.getFileWriteDiff(input)
   )
   ipcMain.handle('host:search.searchChats', (_event, input) => coreServer.searchChats(input))
+  ipcMain.handle('host:git.inspectRepository', (_event, input) =>
+    coreServer.inspectGitRepository(input)
+  )
+  ipcMain.handle('host:git.getReviewSummary', (_event, input) =>
+    coreServer.getGitReviewSummary(input)
+  )
+  ipcMain.handle('host:git.getReviewFileDiff', (_event, input) =>
+    coreServer.getGitReviewFileDiff(input)
+  )
+  ipcMain.handle('host:git.mutateReviewFile', (_event, input) =>
+    coreServer.mutateGitReviewFile(input)
+  )
   ipcMain.handle('host:attachments.selectInputAttachments', (event, request) =>
     attachmentDialogBridge.selectInputAttachments(event, request)
   )

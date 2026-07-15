@@ -1,6 +1,5 @@
-import { useCallback, useMemo, useReducer } from 'react'
+import { useCallback, useEffect, useMemo, useReducer } from 'react'
 import type { Translate } from '../../config/translationFormat'
-import { getRightSidebarModule } from './rightSidebarModules'
 import type {
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
@@ -24,6 +23,7 @@ type RightSidebarPlatformAction =
     }
   | { pageId: string; type: 'activate' }
   | { pageId: string; type: 'close' }
+  | { moduleIds: Set<RightSidebarModuleId>; type: 'reconcile-modules' }
   | { pageId: string; type: 'update'; update: RightSidebarPageUpdate }
 
 interface UseRightSidebarPlatformOptions {
@@ -31,6 +31,7 @@ interface UseRightSidebarPlatformOptions {
   workspaceKey?: string | null
   workspaceName?: string | null
   workspacePath?: string
+  modules: RightSidebarModuleDefinition[]
 }
 
 const INITIAL_PLATFORM_STATE: RightSidebarPlatformState = {
@@ -39,6 +40,7 @@ const INITIAL_PLATFORM_STATE: RightSidebarPlatformState = {
 }
 
 export function useRightSidebarPlatform({
+  modules,
   t,
   workspaceKey,
   workspaceName,
@@ -52,7 +54,7 @@ export function useRightSidebarPlatform({
 
   const openModule = useCallback(
     (moduleId: RightSidebarModuleId) => {
-      const module = getRightSidebarModule(moduleId)
+      const module = modules.find((candidate) => candidate.id === moduleId)
       if (!module) return
 
       dispatch({
@@ -63,8 +65,15 @@ export function useRightSidebarPlatform({
         workspace
       })
     },
-    [t, workspace]
+    [modules, t, workspace]
   )
+
+  useEffect(() => {
+    dispatch({
+      moduleIds: new Set(modules.map((module) => module.id)),
+      type: 'reconcile-modules'
+    })
+  }, [modules])
 
   const activatePage = useCallback((pageId: string) => {
     dispatch({ pageId, type: 'activate' })
@@ -94,6 +103,14 @@ function reduceRightSidebarPlatform(
 ): RightSidebarPlatformState {
   switch (action.type) {
     case 'open': {
+      if (action.module.instancePolicy === 'single-per-workspace') {
+        const existingPage = state.pages.find(
+          (page) => page.moduleId === action.module.id && page.workspaceKey === action.workspace.key
+        )
+        if (existingPage) {
+          return { ...state, activePageId: existingPage.id }
+        }
+      }
       const page = action.module.createPage({
         existingPages: state.pages,
         pageId: action.pageId,
@@ -125,6 +142,16 @@ function reduceRightSidebarPlatform(
 
       return {
         activePageId: pages[Math.min(pageIndex, pages.length - 1)]?.id ?? null,
+        pages
+      }
+    }
+    case 'reconcile-modules': {
+      const pages = state.pages.filter((page) => action.moduleIds.has(page.moduleId))
+      if (pages.length === state.pages.length) return state
+      return {
+        activePageId: pages.some((page) => page.id === state.activePageId)
+          ? state.activePageId
+          : (pages[0]?.id ?? null),
         pages
       }
     }

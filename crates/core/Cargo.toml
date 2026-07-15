@@ -12,6 +12,7 @@ base64 = "0.22"
 dirs = "6"
 futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 pdf-extract = "0.12"
 roxmltree = "0.21"

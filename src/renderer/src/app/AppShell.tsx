@@ -15,6 +15,8 @@ import { useProjectSettings } from '../config/ProjectSettingsProvider'
 import { useFrontendConfig } from '../config/FrontendConfigProvider'
 import { featureFlags } from '../config/featureFlags'
 import { hostClient } from '../host/hostClient'
+import { inspectGitRepository } from '../features/gitReview/gitReviewClient'
+import { getRightSidebarModules } from '../features/rightSidebar/rightSidebarModules'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
 import { NewConversationPage } from '../features/chat/NewConversationPage'
 import type { SettingsPageId } from '../features/settings/SettingsPage'
@@ -250,15 +252,57 @@ export function AppShell() {
   const hasUnreadConversations = conversations.some(
     (conversation) => !conversation.archivedAt && Boolean(conversation.unreadAt)
   )
-  const rightSidebarTerminalProjectId = activeConversation
+  const rightSidebarWorkspaceProjectId = activeConversation
     ? activeConversation.projectId
     : activeDraft.projectId
-  const rightSidebarTerminalProject = useMemo(() => {
-    if (!rightSidebarTerminalProjectId) return null
+  const rightSidebarWorkspaceProject = useMemo(() => {
+    if (!rightSidebarWorkspaceProjectId) return null
 
-    return projects.find((project) => project.id === rightSidebarTerminalProjectId) ?? null
-  }, [rightSidebarTerminalProjectId, projects])
-  const rightSidebarTerminalPath = rightSidebarTerminalProject?.path?.trim() || undefined
+    return projects.find((project) => project.id === rightSidebarWorkspaceProjectId) ?? null
+  }, [rightSidebarWorkspaceProjectId, projects])
+  const rightSidebarWorkspacePath = rightSidebarWorkspaceProject?.path?.trim() || undefined
+  const [gitReviewAvailability, setGitReviewAvailability] = useState<{
+    available: boolean
+    projectId: string
+  } | null>(null)
+
+  useEffect(() => {
+    const projectId = rightSidebarWorkspaceProject?.id
+    if (!projectId || !rightSidebarWorkspacePath) {
+      setGitReviewAvailability(null)
+      return undefined
+    }
+
+    let cancelled = false
+    setGitReviewAvailability({ available: false, projectId })
+    void inspectGitRepository(projectId)
+      .then((inspection) => {
+        if (cancelled) return
+        setGitReviewAvailability({
+          available: inspection.state === 'ready',
+          projectId
+        })
+      })
+      .catch((error) => {
+        if (cancelled) return
+        console.warn('Failed to inspect Git repository capability', error)
+        setGitReviewAvailability({ available: false, projectId })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [rightSidebarWorkspacePath, rightSidebarWorkspaceProject?.id])
+
+  const rightSidebarModules = useMemo(
+    () =>
+      getRightSidebarModules({
+        gitReview:
+          gitReviewAvailability?.projectId === rightSidebarWorkspaceProject?.id &&
+          gitReviewAvailability?.available === true
+      }),
+    [gitReviewAvailability, rightSidebarWorkspaceProject?.id]
+  )
 
   // Agent tool events arrive faster than React state commits. Keep the ref and state in one
   // update path so an older render snapshot cannot overwrite newer tool-call results.
@@ -1753,9 +1797,10 @@ export function AppShell() {
       <aside className="side-panel side-panel--right">
         <RightSidebar
           isMaximized={rightMaximized}
-          workspaceKey={rightSidebarTerminalProject?.id}
-          workspaceName={rightSidebarTerminalProject?.name}
-          workspacePath={rightSidebarTerminalPath}
+          modules={rightSidebarModules}
+          workspaceKey={rightSidebarWorkspaceProject?.id}
+          workspaceName={rightSidebarWorkspaceProject?.name}
+          workspacePath={rightSidebarWorkspacePath}
           onToggleMaximized={toggleRightSidebarMaximized}
           maximizedToolbarControls={
             rightMaximized ? (

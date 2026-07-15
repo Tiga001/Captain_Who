@@ -1,9 +1,8 @@
 import { lazy, Suspense } from 'react'
-import { Globe2, TerminalSquare } from 'lucide-react'
+import { FileDiff, Globe2, TerminalSquare } from 'lucide-react'
 import type {
   RightSidebarModuleCreateContext,
   RightSidebarModuleDefinition,
-  RightSidebarModuleId,
   RightSidebarModuleRenderProps,
   RightSidebarPage
 } from './rightSidebarTypes'
@@ -16,6 +15,11 @@ const TerminalPanel = lazy(async () => {
 const BrowserPanel = lazy(async () => {
   const module = await import('../browser/BrowserPanel')
   return { default: module.BrowserPanel }
+})
+
+const GitReviewPanel = lazy(async () => {
+  const module = await import('../gitReview/GitReviewPanel')
+  return { default: module.GitReviewPanel }
 })
 
 function createTerminalPage({
@@ -55,6 +59,20 @@ function createBrowserPage({
   }
 }
 
+function createGitReviewPage({
+  pageId,
+  t,
+  workspace
+}: RightSidebarModuleCreateContext): RightSidebarPage {
+  return {
+    id: pageId,
+    moduleId: 'git-review',
+    title: t('rightSidebar.review'),
+    workspaceKey: workspace.key,
+    workspacePath: workspace.path
+  }
+}
+
 function renderTerminalModule({ isActive, page, t }: RightSidebarModuleRenderProps) {
   return (
     <Suspense
@@ -89,11 +107,22 @@ function renderBrowserModule({
   )
 }
 
+function renderGitReviewModule({ isActive, page, t }: RightSidebarModuleRenderProps) {
+  return (
+    <Suspense
+      fallback={<div className="right-sidebar__panel-loading">{t('gitReview.loading')}</div>}
+    >
+      <GitReviewPanel isActive={isActive} projectId={page.workspaceKey ?? ''} />
+    </Suspense>
+  )
+}
+
 export const RIGHT_SIDEBAR_MODULES: RightSidebarModuleDefinition[] = [
   {
     createPage: createTerminalPage,
     id: 'terminal',
     icon: TerminalSquare,
+    instancePolicy: 'multiple',
     render: renderTerminalModule,
     retention: 'keep-alive',
     surfaceKind: 'react',
@@ -103,13 +132,24 @@ export const RIGHT_SIDEBAR_MODULES: RightSidebarModuleDefinition[] = [
     createPage: createBrowserPage,
     id: 'browser',
     icon: Globe2,
+    instancePolicy: 'multiple',
     render: renderBrowserModule,
     retention: 'keep-alive',
     surfaceKind: 'webview',
     titleKey: 'rightSidebar.browser'
+  },
+  {
+    createPage: createGitReviewPage,
+    id: 'git-review',
+    icon: FileDiff,
+    instancePolicy: 'single-per-workspace',
+    render: renderGitReviewModule,
+    retention: 'keep-alive',
+    surfaceKind: 'react',
+    titleKey: 'rightSidebar.review'
   }
 ]
 
-export function getRightSidebarModule(moduleId: RightSidebarModuleId) {
-  return RIGHT_SIDEBAR_MODULES.find((module) => module.id === moduleId) ?? null
+export function getRightSidebarModules(options: { gitReview: boolean }) {
+  return RIGHT_SIDEBAR_MODULES.filter((module) => module.id !== 'git-review' || options.gitReview)
 }

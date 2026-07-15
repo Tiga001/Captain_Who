@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent::{AgentConversationTurnInput, AgentService};
+use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatMessageRecord,
     ChatMessageStateRecord, ChatSearchInput, ComposerDraftRecord, ForkConversationInput,
@@ -16,12 +17,15 @@ use mycopilot_core::{AgentUsageClearInput, AgentUsageSummaryInput};
 use mycopilot_protocol_rs::{
     error, success, AgentActionIdRequest, AgentCancelRunRequest, AgentCancelRunResponse,
     AgentFileDraftReadRequest, AgentRejectActionRequest, CorePingRequest, CorePingResponse,
-    CoreShutdownResponse, JsonRpcId, JsonRpcRequest, AGENT_APPROVE_ACTION_METHOD,
-    AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD, AGENT_CLEAR_USAGE_RECORDS_METHOD,
-    AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD, AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
-    AGENT_GET_FILE_WRITE_DIFF_METHOD, AGENT_GET_USAGE_SUMMARY_METHOD,
-    AGENT_LIST_PENDING_ACTIONS_METHOD, AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD,
-    AGENT_START_CONVERSATION_TURN_METHOD, CORE_PING_METHOD, CORE_SHUTDOWN_METHOD,
+    CoreShutdownResponse, GitRepositoryInspectRequest, GitReviewFileDiffRequest,
+    GitReviewFileMutationRequest, GitReviewSummaryRequest, JsonRpcId, JsonRpcRequest,
+    AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD,
+    AGENT_CLEAR_USAGE_RECORDS_METHOD, AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD,
+    AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD, AGENT_GET_FILE_WRITE_DIFF_METHOD,
+    AGENT_GET_USAGE_SUMMARY_METHOD, AGENT_LIST_PENDING_ACTIONS_METHOD,
+    AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
+    CORE_PING_METHOD, CORE_SHUTDOWN_METHOD, GIT_GET_REVIEW_FILE_DIFF_METHOD,
+    GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD, GIT_MUTATE_REVIEW_FILE_METHOD,
     SEARCH_SEARCH_CHATS_METHOD, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
     STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
     STORAGE_FORK_CONVERSATION_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
@@ -46,6 +50,7 @@ async fn main() -> io::Result<()> {
             .map_err(|error| io::Error::other(format!("failed to initialize storage: {error}")))?,
     );
     let agent_service = AgentService::new(storage.clone());
+    let git_review_service = GitReviewService::new();
     let stdin = BufReader::new(io::stdin());
     let mut lines = stdin.lines();
     let mut stdout = io::stdout();
@@ -93,6 +98,7 @@ async fn main() -> io::Result<()> {
                 let response = handle_request(
                     &storage,
                     &agent_service,
+                    &git_review_service,
                     notification_tx.clone(),
                     request,
                 );
@@ -120,6 +126,7 @@ async fn write_json_line(stdout: &mut io::Stdout, message: Value) -> io::Result<
 fn handle_request(
     storage: &StorageService,
     agent_service: &AgentService,
+    git_review_service: &GitReviewService,
     notification_tx: agent::CoreServerNotificationSender,
     request: JsonRpcRequest,
 ) -> Value {
@@ -196,6 +203,63 @@ fn handle_request(
             match agent_service.get_file_write_diff(&input.draft_id, input.offset, input.max_chars)
             {
                 Ok(output) => response_success(request.id, output),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        GIT_INSPECT_REPOSITORY_METHOD => {
+            let input = match parse_params::<GitRepositoryInspectRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            let project_path = match resolve_project_path(storage, &input.project_id) {
+                Ok(path) => path,
+                Err(message) => return response_error(Some(request.id), -32000, message),
+            };
+            response_success(
+                request.id,
+                git_review_service.inspect_repository(&input.project_id, &project_path),
+            )
+        }
+        GIT_GET_REVIEW_SUMMARY_METHOD => {
+            let input = match parse_params::<GitReviewSummaryRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            let scope = match GitReviewScope::parse(&input.scope) {
+                Ok(scope) => scope,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            let project_path = match resolve_project_path(storage, &input.project_id) {
+                Ok(path) => path,
+                Err(message) => return response_error(Some(request.id), -32000, message),
+            };
+            match git_review_service.review_summary(&project_path, scope) {
+                Ok(summary) => response_success(request.id, summary),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        GIT_GET_REVIEW_FILE_DIFF_METHOD => {
+            let input = match parse_params::<GitReviewFileDiffRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match git_review_service.review_file_diff(&input.snapshot_id, &input.file_id) {
+                Ok(diff) => response_success(request.id, diff),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        GIT_MUTATE_REVIEW_FILE_METHOD => {
+            let input = match parse_params::<GitReviewFileMutationRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            let action = match GitReviewFileMutationAction::parse(&input.action) {
+                Ok(action) => action,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match git_review_service.mutate_review_file(&input.snapshot_id, &input.file_id, action)
+            {
+                Ok(mutation) => response_success(request.id, mutation),
                 Err(message) => response_error(Some(request.id), -32000, message),
             }
         }
@@ -363,6 +427,19 @@ fn handle_request(
         }
         _ => response_error(Some(request.id), -32601, "Method not found"),
     }
+}
+
+fn resolve_project_path(storage: &StorageService, project_id: &str) -> Result<PathBuf, String> {
+    let project = storage
+        .load_projects()?
+        .into_iter()
+        .find(|project| project.id == project_id)
+        .ok_or_else(|| "The selected project no longer exists.".to_string())?;
+    let path = project
+        .path
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| "The selected project does not have a local directory.".to_string())?;
+    Ok(PathBuf::from(path))
 }
 
 fn handle_core_ping(id: JsonRpcId, params: Option<Value>) -> Value {

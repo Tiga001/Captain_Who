@@ -3,11 +3,13 @@ import type { ReactNode } from 'react'
 import type { TranslationKey } from '../../config/frontendTranslations'
 import type { Translate } from '../../config/translationFormat'
 
-export type RightSidebarModuleId = 'terminal' | 'browser'
+export type RightSidebarModuleId = 'terminal' | 'browser' | 'git-review'
 
 export type RightSidebarSurfaceKind = 'react' | 'webview'
 
 export type RightSidebarRetentionPolicy = 'keep-alive' | 'unmount-when-inactive'
+
+export type RightSidebarInstancePolicy = 'multiple' | 'single-per-workspace'
 
 export interface RightSidebarWorkspaceContext {
   key: string
@@ -39,6 +41,7 @@ export interface RightSidebarModuleDefinition {
   createPage: (context: RightSidebarModuleCreateContext) => RightSidebarPage
   id: RightSidebarModuleId
   icon: LucideIcon
+  instancePolicy: RightSidebarInstancePolicy
   render: (props: RightSidebarModuleRenderProps) => ReactNode
   retention: RightSidebarRetentionPolicy
   surfaceKind: RightSidebarSurfaceKind
