@@ -917,14 +917,14 @@ mod tests {
     fn assembled_context_preserves_order_across_provider_payloads() {
         let mut timestamped_history = chat_message("user", "Earlier question");
         timestamped_history.created_at = Some(0);
+        let mut timestamped_answer = chat_message("assistant", "Earlier answer");
+        timestamped_answer.created_at = Some(1_000);
+        let mut timestamped_current = chat_message("user", "Continue the edit");
+        timestamped_current.created_at = Some(2_000);
         let mut context = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "System rules".to_string(),
             compaction_summary: None,
-            messages: vec![
-                timestamped_history,
-                chat_message("assistant", "Earlier answer"),
-                chat_message("user", "Continue the edit"),
-            ],
+            messages: vec![timestamped_history, timestamped_answer, timestamped_current],
             attachments: ContextAttachments::default(),
         })
         .unwrap();
@@ -970,14 +970,23 @@ mod tests {
         let openai = build_payload(&request(AgentApiStyle::OpenAiCompatible));
         assert_eq!(openai["messages"][0]["role"], "system");
         let expected_timestamped_history = format!(
-            "[Message created at: {}]\nEarlier question",
+            "<backend_conversation_timing>\nuser_message_created_at: {}\n</backend_conversation_timing>\nEarlier question",
             format_message_created_at(0).unwrap()
+        );
+        let expected_timestamped_current = format!(
+            "<backend_conversation_timing>\nprevious_assistant_message_created_at: {}\nuser_message_created_at: {}\n</backend_conversation_timing>\nContinue the edit",
+            format_message_created_at(1_000).unwrap(),
+            format_message_created_at(2_000).unwrap()
         );
         assert_eq!(
             openai["messages"][1]["content"],
             expected_timestamped_history
         );
-        assert_eq!(openai["messages"][3]["content"], "Continue the edit");
+        assert_eq!(openai["messages"][2]["content"], "Earlier answer");
+        assert_eq!(
+            openai["messages"][3]["content"],
+            expected_timestamped_current
+        );
         assert_eq!(
             openai["messages"][4]["tool_calls"][0]["id"],
             "call-context-1"
@@ -991,8 +1000,12 @@ mod tests {
             expected_timestamped_history
         );
         assert_eq!(
+            anthropic["messages"][1]["content"][0]["text"],
+            "Earlier answer"
+        );
+        assert_eq!(
             anthropic["messages"][2]["content"][0]["text"],
-            "Continue the edit"
+            expected_timestamped_current
         );
         assert_eq!(
             anthropic["messages"][3]["content"][0]["id"],

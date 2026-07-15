@@ -1,6 +1,7 @@
 import { ayuDarkTheme, ayuLightTheme, ayuMirageTheme } from './ayu'
 import { catppuccinLatteTheme, catppuccinMochaTheme } from './catppuccin'
 import { classicDarkTheme, classicLightTheme } from './classic'
+import { crabLightTheme } from './crab'
 import { alucardLightTheme, draculaDarkTheme } from './dracula'
 import { everforestDarkTheme, everforestLightTheme } from './everforest'
 import { githubDarkTheme, githubLightTheme } from './github'
@@ -117,6 +118,12 @@ export const frontendThemes = {
     labelKey: 'appearance.themeVariant.zju',
     order: 90,
     tokens: zjuLightTheme
+  },
+  'crab-light': {
+    colorScheme: 'light',
+    labelKey: 'appearance.themeVariant.crab',
+    order: 100,
+    tokens: crabLightTheme
   }
 } as const satisfies Record<string, FrontendThemeDefinition>
 

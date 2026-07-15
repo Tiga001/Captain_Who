@@ -218,6 +218,7 @@ export const enUSTranslations = {
   'appearance.themeVariant.gruvbox': 'Gruvbox',
   'appearance.themeVariant.one': 'One',
   'appearance.themeVariant.zju': 'ZJU',
+  'appearance.themeVariant.crab': 'Crab',
   'appearance.nativeFontSmoothing': 'macOS font smoothing',
   'appearance.nativeFontSmoothingDescription':
     'Use macOS/WebKit font antialiasing for smoother text edges.',

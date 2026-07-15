@@ -706,6 +706,7 @@ mod tests {
             1_000,
             detector,
             frame,
+            crate::context::ConversationTimingTracker::default(),
         );
         state.shared_baseline().unwrap()
     }

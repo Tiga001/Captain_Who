@@ -356,6 +356,9 @@ function groupTimelineItems(
   timeline: ChatAgentTimelineItem[]
 ): RenderableTimelineItem[] {
   return timeline.reduce<RenderableTimelineItem[]>((items, item) => {
+    // Whitespace-only stream messages are invisible in the timeline, so they must not split
+    // otherwise adjacent tool activity groups across model turns.
+    if (item.type === 'message' && !item.content.trim()) return items
     if (item.type !== 'tool_call') return [...items, item]
 
     const call = run.toolCalls.find((candidate) => candidate.id === item.callId)

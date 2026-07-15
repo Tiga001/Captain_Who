@@ -1,6 +1,6 @@
 use super::{
-    format_message_created_at, ContextCompactionSummary, ContextFrame, ContextItem,
-    ContextMetadata, ContextOrigin, ContextRetention, ContextScope, ContextSource,
+    ContextCompactionSummary, ContextFrame, ContextItem, ContextMetadata, ContextOrigin,
+    ContextRetention, ContextScope, ContextSource, ConversationTimingTracker,
     ConversationTraceRenderer,
 };
 use crate::llm::{LlmImage, LlmMessage, LlmMessageRole};
@@ -21,8 +21,19 @@ pub(crate) struct ContextAssemblyInput {
 
 pub(crate) struct ContextAssembler;
 
+pub(crate) struct AssembledContext {
+    pub(crate) frame: ContextFrame,
+    pub(crate) timing: ConversationTimingTracker,
+}
+
 impl ContextAssembler {
     pub(crate) fn assemble(input: ContextAssemblyInput) -> AgentResult<ContextFrame> {
+        Ok(Self::assemble_with_timing(input)?.frame)
+    }
+
+    pub(crate) fn assemble_with_timing(
+        input: ContextAssemblyInput,
+    ) -> AgentResult<AssembledContext> {
         let has_compaction_summary = input.compaction_summary.is_some();
         let normalized = normalize_messages(input.messages)?;
         let current_turn_index = normalized
@@ -60,6 +71,7 @@ impl ContextAssembler {
         }
 
         let mut attachment_images = Some(input.attachments.images);
+        let mut timing = ConversationTimingTracker::default();
         for (index, message) in normalized.into_iter().enumerate() {
             let role = role_from_str(&message.role)?;
             let is_current_turn = current_turn_index == Some(index);
@@ -73,7 +85,16 @@ impl ContextAssembler {
                 items.extend(trace.activity_items.iter().cloned());
             }
 
-            let llm_message = LlmMessage::text(role, render_message_content(&message)?);
+            let content = match message.role.as_str() {
+                "user" => timing.render_user_message(&message.content, message.created_at)?,
+                "assistant" => {
+                    timing.observe_assistant(message.created_at)?;
+                    message.content.clone()
+                }
+                "system" => message.content.clone(),
+                _ => unreachable!("message roles were normalized before assembly"),
+            };
+            let llm_message = LlmMessage::text(role, content);
             let mut metadata = ContextMetadata::new(
                 if is_current_turn {
                     ContextSource::CurrentTurn
@@ -112,7 +133,7 @@ impl ContextAssembler {
 
         let frame = ContextFrame::new(items);
         frame.validate_complete_tool_protocol()?;
-        Ok(frame)
+        Ok(AssembledContext { frame, timing })
     }
 }
 
@@ -123,20 +144,6 @@ fn role_from_str(role: &str) -> AgentResult<LlmMessageRole> {
         "assistant" => Ok(LlmMessageRole::Assistant),
         _ => Err(AgentError::new(format!("不支持的消息角色：{role}"))),
     }
-}
-
-fn render_message_content(message: &AgentChatMessage) -> AgentResult<String> {
-    let Some(created_at) = message.created_at else {
-        return Ok(message.content.clone());
-    };
-    if message.content.trim().is_empty() {
-        return Ok(String::new());
-    }
-    let timestamp = format_message_created_at(created_at)?;
-    Ok(format!(
-        "[Message created at: {timestamp}]\n{}",
-        message.content
-    ))
 }
 
 fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentChatMessage>> {
@@ -323,22 +330,40 @@ mod tests {
     }
 
     #[test]
-    fn renders_message_creation_time_with_explicit_local_offset() {
-        let mut timestamped = message("user", "historical question");
-        timestamped.created_at = Some(0);
+    fn renders_timing_on_user_messages_without_decorating_assistant_history() {
+        let mut first_user = message("user", "historical question");
+        first_user.created_at = Some(0);
+        let mut historical_assistant = message("assistant", "historical answer");
+        historical_assistant.created_at = Some(1_000);
+        let mut current_user = message("user", "follow up");
+        current_user.created_at = Some(2_000);
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
-            messages: vec![timestamped],
+            messages: vec![first_user, historical_assistant, current_user],
             attachments: ContextAttachments::default(),
         })
         .unwrap();
 
-        let expected = format!(
-            "[Message created at: {}]\nhistorical question",
-            format_message_created_at(0).unwrap()
-        );
-        assert_eq!(frame.to_messages()[1].content, expected);
+        let messages = frame.to_messages();
+        assert!(messages[1].content.contains(&format!(
+            "user_message_created_at: {}",
+            crate::context::format_message_created_at(0).unwrap()
+        )));
+        assert!(messages[1].content.ends_with("historical question"));
+        assert_eq!(messages[2].content, "historical answer");
+        assert!(!messages[2]
+            .content
+            .contains("<backend_conversation_timing>"));
+        assert!(messages[3].content.contains(&format!(
+            "previous_assistant_message_created_at: {}",
+            crate::context::format_message_created_at(1_000).unwrap()
+        )));
+        assert!(messages[3].content.contains(&format!(
+            "user_message_created_at: {}",
+            crate::context::format_message_created_at(2_000).unwrap()
+        )));
+        assert!(messages[3].content.ends_with("follow up"));
     }
 
     #[test]

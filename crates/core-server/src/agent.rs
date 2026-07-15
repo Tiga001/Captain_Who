@@ -223,6 +223,7 @@ impl AgentService {
         let worker_run_id = run_id.clone();
         let worker_conversation_id = output.conversation_id.clone();
         let worker_assistant_message_id = output.assistant_message_id.clone();
+        let worker_assistant_created_at = output.assistant_message.created_at;
         let pending_agent_input = prepared.agent_input.clone();
 
         tokio::spawn(async move {
@@ -265,7 +266,7 @@ impl AgentService {
                 &worker_run_id,
                 &worker_conversation_id,
                 &worker_assistant_message_id,
-                prepared.usage_context.started_at,
+                worker_assistant_created_at,
                 pending_agent_input.clone(),
                 notifications.clone(),
             );
@@ -2292,17 +2293,26 @@ impl AgentService {
                             .rev()
                             .find(|message| message.role == "user")
                             .map(|message| {
-                                (message.message_id.as_deref(), message.content.as_str())
+                                (
+                                    message.message_id.as_deref(),
+                                    message.content.as_str(),
+                                    message.created_at,
+                                )
                             })
-                            .unwrap_or((None, ""));
-                        entry
-                            .state
-                            .append_user_message(current_user.0, current_user.1);
-                        entry.active_run_id = Some(run_id.to_string());
-                        entry.active_assistant_message_id = Some(assistant_message_id.to_string());
-                        entry.committed_trace_items = 0;
-                        entry.terminal = false;
-                        entry.state.append_trace_items(trace, 0)
+                            .unwrap_or((None, "", None));
+                        (|| {
+                            entry.state.append_user_message(
+                                current_user.0,
+                                current_user.1,
+                                current_user.2,
+                            )?;
+                            entry.active_run_id = Some(run_id.to_string());
+                            entry.active_assistant_message_id =
+                                Some(assistant_message_id.to_string());
+                            entry.committed_trace_items = 0;
+                            entry.terminal = false;
+                            entry.state.append_trace_items(trace, 0)
+                        })()
                     } else {
                         Err(AgentError::new("会话上下文状态与当前运行身份不一致。"))
                     };
@@ -2897,6 +2907,10 @@ impl AgentService {
             .storage
             .get_conversation_turn_trace(assistant_message_id)?
             .ok_or_else(|| format!("assistant 终态缺少会话轨迹：{assistant_message_id}"))?;
+        let assistant_created_at = self
+            .storage
+            .get_assistant_message_created_at(conversation_id, assistant_message_id)?
+            .ok_or_else(|| format!("assistant 终态缺少消息创建时间：{assistant_message_id}"))?;
         let configuration_revision = conversation_context_configuration_revision(agent_input)
             .map_err(|error| error.to_string())?;
         let access = self.next_conversation_context_state_access();
@@ -2916,6 +2930,7 @@ impl AgentService {
                             &trace,
                             entry.committed_trace_items,
                             assistant_content,
+                            Some(assistant_created_at),
                         ) {
                             Ok(committed_trace_items) => {
                                 entry.committed_trace_items = committed_trace_items;

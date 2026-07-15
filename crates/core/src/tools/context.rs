@@ -1,6 +1,7 @@
 // Tool execution context and path resolution helpers.
 use super::{clean_relative_path, relative_display};
 use crate::cancellation::AgentCancellationToken;
+use crate::context::ContextTextBudget;
 use crate::protocol::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentError, AgentPermissions,
     AgentReadPermission, AgentResult, AgentRunContext,
@@ -20,6 +21,7 @@ pub struct ToolExecutionContext {
     project_id: Option<String>,
     run_id: Option<String>,
     storage: Option<Arc<StorageService>>,
+    text_output_budget: ContextTextBudget,
 }
 
 impl ToolExecutionContext {
@@ -44,6 +46,7 @@ impl ToolExecutionContext {
             project_id,
             run_id: None,
             storage: None,
+            text_output_budget: ContextTextBudget::heuristic_default(),
         }
     }
 
@@ -62,8 +65,17 @@ impl ToolExecutionContext {
         self
     }
 
+    pub(crate) fn with_text_output_budget(mut self, budget: ContextTextBudget) -> Self {
+        self.text_output_budget = budget;
+        self
+    }
+
     pub(super) fn cancellation_token(&self) -> AgentCancellationToken {
         self.cancellation_token.clone()
+    }
+
+    pub(super) fn text_output_budget(&self) -> &ContextTextBudget {
+        &self.text_output_budget
     }
 
     pub(super) fn check_cancelled(&self) -> AgentResult<()> {

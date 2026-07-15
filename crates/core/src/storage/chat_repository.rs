@@ -62,6 +62,24 @@ pub fn get_conversation(
     Ok(conversation)
 }
 
+pub fn get_assistant_message_created_at(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+) -> rusqlite::Result<Option<i64>> {
+    connection
+        .query_row(
+            "
+            SELECT created_at
+            FROM messages
+            WHERE conversation_id = ?1 AND id = ?2 AND role = 'assistant'
+            ",
+            params![conversation_id, message_id],
+            |row| row.get(0),
+        )
+        .optional()
+}
+
 fn conversation_from_row(row: &Row<'_>) -> rusqlite::Result<ChatConversationRecord> {
     Ok(ChatConversationRecord {
         id: row.get(0)?,

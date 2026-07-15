@@ -271,7 +271,7 @@ pub fn create_conversation_context_state(
     input: AgentChatInput,
 ) -> AgentResult<AgentConversationContextState> {
     let prepared = prepare_conversation_context(&input)?;
-    let frame = assemble_context_preview(
+    let assembled = assemble_context_preview(
         input.context_compaction_summary.clone(),
         input.messages,
         input.context.as_ref(),
@@ -289,7 +289,8 @@ pub fn create_conversation_context_state(
         input.context_window_tokens,
         sanitize_max_tokens(input.max_tokens),
         detector,
-        frame,
+        assembled.frame,
+        assembled.timing,
     ))
 }
 
@@ -482,9 +483,17 @@ impl AgentRuntime {
         let conversation_trace = Arc::new(Mutex::new(conversation_trace));
         let mut pending_trace_baseline =
             publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+        let capacity_detector = ContextCapacityDetector::for_model(
+            &llm_request.model,
+            llm_request.api_style,
+            &llm_request.tools,
+        );
+        let tool_output_budget = capacity_detector
+            .tool_output_text_budget(llm_request.context_window_tokens, llm_request.max_tokens);
         let tool_context = ToolExecutionContext::from_run_context(context.as_ref())
             .with_cancellation(cancellation_token.clone())
-            .with_runtime_services(run_id.clone(), storage);
+            .with_runtime_services(run_id.clone(), storage)
+            .with_text_output_budget(tool_output_budget);
         event_stream.emit(state_event(
             &run_id,
             AgentRunStatus::Running,
@@ -494,13 +503,7 @@ impl AgentRuntime {
         let mut usage = None;
         let mut finish_reason = None;
         let mut response_fence_corrections = 0_usize;
-        let context_capacity_detector = context_window_configured.then(|| {
-            ContextCapacityDetector::for_model(
-                &llm_request.model,
-                llm_request.api_style,
-                &llm_request.tools,
-            )
-        });
+        let context_capacity_detector = context_window_configured.then_some(capacity_detector);
         let context_compaction_planner = context_window_configured
             .then(|| ContextCompactionPlanner::for_tools(&llm_request.tools));
         let context_compaction_executor = context_compaction_services
@@ -1673,14 +1676,14 @@ fn assemble_context_preview(
     context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
     tool_definitions: &[AgentToolDefinition],
-) -> AgentResult<ContextFrame> {
+) -> AgentResult<crate::context::AssembledContext> {
     if compaction_summary.is_some()
         || messages.iter().any(|message| {
             matches!(message.role.trim(), "user" | "assistant")
                 && !message.content.trim().is_empty()
         })
     {
-        return ContextAssembler::assemble(ContextAssemblyInput {
+        return ContextAssembler::assemble_with_timing(ContextAssemblyInput {
             system_prompt: build_system_prompt(context, prompt_preferences, tool_definitions),
             compaction_summary,
             messages,
@@ -1688,13 +1691,16 @@ fn assemble_context_preview(
         });
     }
 
-    Ok(ContextFrame::new(vec![ContextItem::text(
-        LlmMessageRole::System,
-        build_system_prompt(context, prompt_preferences, tool_definitions),
-        ContextSource::BackendSystemPrompt,
-        ContextScope::Run,
-        ContextRetention::Retained,
-    )]))
+    Ok(crate::context::AssembledContext {
+        frame: ContextFrame::new(vec![ContextItem::text(
+            LlmMessageRole::System,
+            build_system_prompt(context, prompt_preferences, tool_definitions),
+            ContextSource::BackendSystemPrompt,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        )]),
+        timing: crate::context::ConversationTimingTracker::default(),
+    })
 }
 
 fn build_llm_request(

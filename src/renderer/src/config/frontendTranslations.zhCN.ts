@@ -211,6 +211,7 @@ export const zhCNTranslations = {
   'appearance.themeVariant.gruvbox': 'Gruvbox',
   'appearance.themeVariant.one': 'One',
   'appearance.themeVariant.zju': 'ZJU',
+  'appearance.themeVariant.crab': 'Crab',
   'appearance.nativeFontSmoothing': 'macOS 字体平滑',
   'appearance.nativeFontSmoothingDescription': '使用 macOS/WebKit 字体抗锯齿，让文字边缘更平滑。',
   'appearance.translucentSidebar': '半透明侧边栏',

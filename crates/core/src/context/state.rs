@@ -6,8 +6,8 @@
 
 use super::{
     ContextCapacityDetector, ContextFrame, ContextItem, ContextMetadata, ContextOrigin,
-    ContextRetention, ContextScope, ContextSource, ConversationTraceRenderer,
-    MeasuredContextBaseline,
+    ContextRetention, ContextScope, ContextSource, ConversationTimingTracker,
+    ConversationTraceRenderer, MeasuredContextBaseline,
 };
 use crate::llm::LlmMessageRole;
 use crate::protocol::{
@@ -51,6 +51,7 @@ pub struct AgentConversationContextState {
     reserved_output_tokens: u32,
     detector: ContextCapacityDetector,
     frame: ContextFrame,
+    timing: ConversationTimingTracker,
 }
 
 impl AgentConversationContextState {
@@ -61,6 +62,7 @@ impl AgentConversationContextState {
         reserved_output_tokens: u32,
         detector: ContextCapacityDetector,
         mut frame: ContextFrame,
+        timing: ConversationTimingTracker,
     ) -> Self {
         // Durable storage has no notion of an active "current turn". Normalizing the source once
         // avoids rewriting frozen history when a later user message is appended.
@@ -73,6 +75,7 @@ impl AgentConversationContextState {
             reserved_output_tokens,
             detector,
             frame,
+            timing,
         }
     }
 
@@ -80,11 +83,18 @@ impl AgentConversationContextState {
         &self.configuration_revision
     }
 
-    pub fn append_user_message(&mut self, message_id: Option<&str>, content: &str) {
+    pub fn append_user_message(
+        &mut self,
+        message_id: Option<&str>,
+        content: &str,
+        created_at: Option<i64>,
+    ) -> AgentResult<()> {
         let content = content.trim();
         if content.is_empty() {
-            return;
+            return Ok(());
         }
+        let mut timing = self.timing.clone();
+        let content = timing.render_user_message(content, created_at)?;
         let mut metadata = ContextMetadata::new(
             ContextSource::ConversationHistory,
             ContextScope::Conversation,
@@ -97,6 +107,8 @@ impl AgentConversationContextState {
             crate::llm::LlmMessage::text(LlmMessageRole::User, content),
             metadata,
         ));
+        self.timing = timing;
+        Ok(())
     }
 
     pub fn append_trace_items(
@@ -134,10 +146,13 @@ impl AgentConversationContextState {
         trace: &ConversationTurnTrace,
         committed_item_count: usize,
         assistant_content: &str,
+        assistant_created_at: Option<i64>,
     ) -> AgentResult<usize> {
         if !trace.terminal_status.is_terminal() {
             return Err(AgentError::new("运行中的会话轨迹不能作为上下文终态提交。"));
         }
+        let mut timing = self.timing.clone();
+        timing.observe_assistant(assistant_created_at)?;
         let committed_item_count = self.append_trace_items(trace, committed_item_count)?;
         let assistant_content = assistant_content.trim();
         if !assistant_content.is_empty() {
@@ -162,6 +177,7 @@ impl AgentConversationContextState {
         {
             self.frame.push(terminal_item);
         }
+        self.timing = timing;
         Ok(committed_item_count)
     }
 

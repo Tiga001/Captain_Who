@@ -109,6 +109,20 @@ impl ContextMessageEstimate {
 pub(crate) trait ContextTokenEstimator: Debug + Send + Sync {
     fn identity(&self) -> ContextEstimatorIdentity;
 
+    /// Estimates standalone text with the same tokenizer family used for request accounting.
+    ///
+    /// Tool output budgets use this hook so a future provider tokenizer can replace the current
+    /// heuristic without introducing a second, inconsistent measurement path.
+    fn estimate_text(&self, value: &str) -> u64 {
+        estimate_text_tokens(value)
+    }
+
+    /// Selects a UTF-8 prefix that fits a standalone text allowance. Tokenizers whose prefix
+    /// counts are not monotonic can override this with a native incremental implementation.
+    fn fitting_text_prefix_len(&self, value: &str, max_tokens: u64) -> usize {
+        fitting_prefix_len_by_estimate(value, max_tokens, |prefix| self.estimate_text(prefix))
+    }
+
     /// Fast per-message measurement used by the incremental frame cache.
     fn estimate_message(&self, message: &LlmMessage) -> ContextMessageEstimate;
 
@@ -133,6 +147,81 @@ pub(crate) trait ContextTokenEstimator: Debug + Send + Sync {
     fn full_recount_threshold_percent(&self) -> Option<u8>;
 }
 
+/// An immutable text allowance derived from the request's context capacity policy.
+///
+/// This value deliberately carries the estimator as well as the numeric limit. Consumers can
+/// therefore test and trim text with the exact same measurement family that protects the model
+/// request, while remaining unaware of model-window policy.
+#[derive(Debug, Clone)]
+pub(crate) struct ContextTextBudget {
+    estimator: Arc<dyn ContextTokenEstimator>,
+    max_tokens: u64,
+}
+
+impl ContextTextBudget {
+    pub(crate) const DEFAULT_MAX_TOKENS: u64 = 24_000;
+
+    pub(crate) fn new(estimator: Arc<dyn ContextTokenEstimator>, max_tokens: u64) -> Self {
+        Self {
+            estimator,
+            max_tokens: max_tokens.max(1),
+        }
+    }
+
+    pub(crate) fn heuristic(max_tokens: u64) -> Self {
+        Self::new(Arc::new(HeuristicTokenEstimator), max_tokens)
+    }
+
+    pub(crate) fn heuristic_default() -> Self {
+        Self::heuristic(Self::DEFAULT_MAX_TOKENS)
+    }
+
+    pub(crate) fn max_tokens(&self) -> u64 {
+        self.max_tokens
+    }
+
+    pub(crate) fn estimate(&self, value: &str) -> u64 {
+        self.estimator.estimate_text(value)
+    }
+
+    pub(crate) fn fits(&self, value: &str) -> bool {
+        self.estimate(value) <= self.max_tokens
+    }
+
+    /// Returns the largest UTF-8 prefix that fits the allowance.
+    pub(crate) fn fitting_prefix_len(&self, value: &str) -> usize {
+        self.estimator
+            .fitting_text_prefix_len(value, self.max_tokens)
+    }
+}
+
+fn fitting_prefix_len_by_estimate(
+    value: &str,
+    max_tokens: u64,
+    estimate: impl Fn(&str) -> u64,
+) -> usize {
+    if value.is_empty() || estimate(value) <= max_tokens {
+        return value.len();
+    }
+
+    let mut boundaries = Vec::with_capacity(value.chars().count().saturating_add(1));
+    boundaries.push(0);
+    boundaries.extend(value.char_indices().skip(1).map(|(index, _)| index));
+    boundaries.push(value.len());
+
+    let mut fitting = 0_usize;
+    let mut rejected = boundaries.len().saturating_sub(1);
+    while fitting.saturating_add(1) < rejected {
+        let candidate = fitting + (rejected - fitting) / 2;
+        if estimate(&value[..boundaries[candidate]]) <= max_tokens {
+            fitting = candidate;
+        } else {
+            rejected = candidate;
+        }
+    }
+    boundaries[fitting]
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct HeuristicTokenEstimator;
 
@@ -146,18 +235,18 @@ impl ContextTokenEstimator for HeuristicTokenEstimator {
     }
 
     fn estimate_message(&self, message: &LlmMessage) -> ContextMessageEstimate {
-        let message_content_tokens = estimate_text_tokens(&message.content);
+        let message_content_tokens = self.estimate_text(&message.content);
         let mut message_structure_tokens =
-            MESSAGE_STRUCTURE_TOKENS.saturating_add(estimate_text_tokens(message.role.as_str()));
+            MESSAGE_STRUCTURE_TOKENS.saturating_add(self.estimate_text(message.role.as_str()));
         if let Some(tool_call_id) = &message.tool_call_id {
             message_structure_tokens =
-                message_structure_tokens.saturating_add(estimate_text_tokens(tool_call_id));
+                message_structure_tokens.saturating_add(self.estimate_text(tool_call_id));
         }
         let tool_call_tokens = message.tool_calls.iter().fold(0_u64, |total, call| {
             total
                 .saturating_add(TOOL_CALL_STRUCTURE_TOKENS)
-                .saturating_add(estimate_text_tokens(&call.id))
-                .saturating_add(estimate_text_tokens(&call.name))
+                .saturating_add(self.estimate_text(&call.id))
+                .saturating_add(self.estimate_text(&call.name))
                 .saturating_add(estimate_json_tokens(&call.args))
         });
         let image_count = message.images.len();
@@ -179,7 +268,7 @@ impl ContextTokenEstimator for HeuristicTokenEstimator {
             total.saturating_add(
                 serde_json::to_string(tool)
                     .ok()
-                    .map_or(0, |value| estimate_text_tokens(&value)),
+                    .map_or(0, |value| self.estimate_text(&value)),
             )
         })
     }
@@ -215,4 +304,21 @@ fn estimate_json_tokens(value: &serde_json::Value) -> u64 {
     serde_json::to_string(value)
         .ok()
         .map_or(0, |serialized| estimate_text_tokens(&serialized))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_budget_returns_a_valid_utf8_prefix() {
+        let budget = ContextTextBudget::heuristic(4);
+        let value = "abc甲乙丙";
+
+        let prefix = &value[..budget.fitting_prefix_len(value)];
+
+        assert_eq!(prefix, "abc甲");
+        assert!(budget.fits(prefix));
+        assert!(!budget.fits(value));
+    }
 }

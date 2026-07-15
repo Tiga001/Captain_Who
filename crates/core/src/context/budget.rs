@@ -6,7 +6,7 @@
 
 use super::frame::{ContextFrame, ContextFrameEstimateBucket, ContextFrameMeasurement};
 use super::measurement::{
-    combine_context_revisions, ContextMessageEstimate, ContextRevisionHasher,
+    combine_context_revisions, ContextMessageEstimate, ContextRevisionHasher, ContextTextBudget,
     ContextTokenEstimator, HeuristicTokenEstimator,
 };
 use crate::protocol::{
@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 const SAFETY_MARGIN_PERCENT: u64 = 5;
 const MINIMUM_SAFETY_MARGIN_TOKENS: u64 = 1_024;
+const TOOL_TEXT_OUTPUT_BUDGET_PERCENT: u64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -360,6 +361,28 @@ impl ContextCapacityDetector {
         frame.measure_incrementally(self.estimator.clone());
     }
 
+    /// Derives a bounded tool-text allowance from the same estimator and reserve policy used by
+    /// request capacity checks. The allowance is intentionally a soft content budget: tools may
+    /// expose a continuation cursor rather than rejecting a large source.
+    pub(crate) fn tool_output_text_budget(
+        &self,
+        context_window_tokens: Option<u32>,
+        reserved_output_tokens: u32,
+    ) -> ContextTextBudget {
+        let max_tokens = context_window_tokens
+            .map(u64::from)
+            .map(|context_window_tokens| {
+                context_window_tokens
+                    .saturating_sub(u64::from(reserved_output_tokens))
+                    .saturating_sub(safety_margin(context_window_tokens))
+                    .saturating_mul(TOOL_TEXT_OUTPUT_BUDGET_PERCENT)
+                    / 100
+            })
+            .unwrap_or(ContextTextBudget::DEFAULT_MAX_TOKENS)
+            .clamp(1, ContextTextBudget::DEFAULT_MAX_TOKENS);
+        ContextTextBudget::new(self.estimator.clone(), max_tokens)
+    }
+
     pub(crate) fn inspect(
         &self,
         frame: &mut ContextFrame,
@@ -700,6 +723,19 @@ mod tests {
                     .saturating_add(u64::try_from(remaining).unwrap())
             })
         );
+    }
+
+    #[test]
+    fn tool_text_budget_uses_effective_input_capacity_and_a_twenty_four_k_cap() {
+        let detector = detector(&[]);
+
+        let compact_window = detector.tool_output_text_budget(Some(128_000), 30_000);
+        let large_window = detector.tool_output_text_budget(Some(256_000), 30_000);
+        let unconfigured = detector.tool_output_text_budget(None, 30_000);
+
+        assert_eq!(compact_window.max_tokens(), 13_740);
+        assert_eq!(large_window.max_tokens(), 24_000);
+        assert_eq!(unconfigured.max_tokens(), 24_000);
     }
 
     #[test]

@@ -85,7 +85,9 @@ terminal record
 
 下一条用户消息排在这些记录之后。
 
-消息时间使用 SQLite `messages.created_at` 的 Unix 毫秒值。组装请求时按本机时区渲染为带 UTC 偏移的 RFC 3339 前缀；数据库正文不被改写，时间前缀参与统一 token 计量。
+消息时间使用 SQLite `messages.created_at` 的 Unix 毫秒值。组装请求时按本机时区渲染为带 UTC 偏移的 RFC 3339 时间，但不修改数据库正文，也不装饰 assistant 历史正文。每条 user 消息开头由后端加入 `<backend_conversation_timing>` 元数据块：保存该 user 消息时间，并在存在时同时保存紧邻上一条 assistant 消息时间。这样模型仍能判断对话时序，同时不会从 assistant 历史样本中学到并复述内部标记。
+
+完整上下文重建与会话级增量缓存共用同一个时间状态机。元数据是确定性的 retained 内容，参与统一 token 计量；压缩、删除或回退导致完整重建时也遵循同一渲染规则。
 
 ## ConversationTurnTrace
 
@@ -371,6 +373,30 @@ Runtime 使用 `visible_trace_item_count` 记录当前 run 中主模型已经看
 
 当前 estimator 是启发式实现，并已预留 estimator identity 和整帧复核接口，未来可以替换为模型专用 tokenizer。
 
+### 工具文本输出预算
+
+容量保护还会从同一个 `ContextCapacityDetector` 派生不可变的 `ContextTextBudget`，随运行时上下文注入工具。它不是第二套 token 计算：额度和文本估算都持有本次请求选中的同一个 `ContextTokenEstimator`。
+
+当前软额度为：
+
+```text
+effective_input = context_window - reserved_output - safety_margin
+tool_text_budget = min(24000, effective_input * 15%)
+```
+
+模型没有配置窗口时使用 24K token 的保守默认值。工具不能仅因源内容超过额度而拒绝整个操作，而应返回有界内容和可续读位置。
+
+`read_file` 是首个消费者：
+
+- 不再按文件类型设置 400 行默认值或 2,000 行硬上限；
+- 不再因文件超过 512 KiB 直接失败；
+- 未指定范围时尽量返回完整 UTF-8 文件；
+- 超过额度时在完整行边界优先截断，单个超长行则在 UTF-8 字符边界截断；
+- 返回 `nextStartByte`、`nextStartLine` 和 `nextStartColumn`，下一次读取可无损续接；
+- 文件扫描和 revision 计算使用固定大小缓冲区，revision 仍与文件写入及 patch 模块使用的 `v1` 算法一致。
+
+`maxLines` 仍作为模型主动选择读取范围的策略参数，但不再承担系统容量保护职责。真正的上限只来自统一文本预算，因此同样适用于 Python、Markdown、普通文本以及未来接入的模型专用 tokenizer。
+
 ## 容量保护与规划
 
 ```text
@@ -459,6 +485,7 @@ Runtime Extension 可以注册工具、贡献 request-only 上下文、处理 ru
 | Trace 持久化        | `crates/core/src/storage/conversation_trace_repository.rs`             |
 | 原始历史查询        | `crates/core/src/storage/conversation_history_repository.rs`           |
 | 历史查询工具        | `crates/core/src/tools/conversation_history.rs`                        |
+| 文本文件分页读取    | `crates/core/src/tools/read_file.rs`                                   |
 | 摘要原子提交        | `crates/core/src/storage/context_compaction_repository.rs`             |
 | 任务分叉快照        | `crates/core/src/storage/conversation_fork_repository.rs`              |
 | 请求计量观测        | `crates/core/src/model_request_observation.rs`                         |

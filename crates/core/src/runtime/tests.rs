@@ -256,7 +256,7 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
         message_id: Some(trace.assistant_message_id.clone()),
         role: "assistant".to_string(),
         content: content.to_string(),
-        created_at: None,
+        created_at: Some(2_000),
         conversation_turn_trace: Some(trace),
     }
 }
@@ -271,7 +271,8 @@ fn full_conversation_context_snapshot(
 
 #[test]
 fn conversation_context_state_incremental_updates_match_full_rebuilds() {
-    let first_user = message("user", "Inspect the project and update src/lib.rs");
+    let mut first_user = message("user", "Inspect the project and update src/lib.rs");
+    first_user.created_at = Some(1_000);
     let mut state =
         create_conversation_context_state(conversation_context_input(vec![first_user.clone()]))
             .unwrap();
@@ -334,7 +335,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
     };
     let final_content = "I updated the implementation and verified the tests.";
     state
-        .finalize_conversation_turn(&completed_trace, cursor, final_content)
+        .finalize_conversation_turn(&completed_trace, cursor, final_content, Some(2_000))
         .unwrap();
     assert_eq!(
         state.snapshot(AgentContextWindowPhase::DurableCommit),
@@ -345,13 +346,17 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
     );
 
     let follow_up = "Now explain the change.";
-    state.append_user_message(None, follow_up);
+    state
+        .append_user_message(None, follow_up, Some(3_000))
+        .unwrap();
+    let mut follow_up_message = message("user", follow_up);
+    follow_up_message.created_at = Some(3_000);
     assert_eq!(
         state.snapshot(AgentContextWindowPhase::DurableCommit),
         full_conversation_context_snapshot(vec![
             first_user,
             traced_assistant_message(final_content, completed_trace),
-            message("user", follow_up),
+            follow_up_message,
         ])
     );
 }
@@ -848,7 +853,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
 }
 
 #[tokio::test]
-async fn context_capacity_guard_rechecks_after_tool_results_before_network_io() {
+async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_request() {
     use crate::protocol::{
         AgentCommandPermission, AgentPatchPermission, AgentPermissions, AgentReadPermission,
         AgentWritePermission,
@@ -938,11 +943,22 @@ async fn context_capacity_guard_rechecks_after_tool_results_before_network_io() 
         )
         .await;
 
-        if let Ok(Ok((_stream, _address))) =
-            tokio::time::timeout(Duration::from_millis(500), listener.accept()).await
-        {
-            second_request_seen_by_server.store(true, Ordering::SeqCst);
-        }
+        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("budgeted read_file result should permit a second model request")
+            .unwrap();
+        second_request_seen_by_server.store(true, Ordering::SeqCst);
+        read_http_request(&mut stream).await;
+        write_json_response(
+            &mut stream,
+            json!({
+                "choices": [{
+                    "message": { "role": "assistant", "content": "summarized" },
+                    "finish_reason": "stop"
+                }]
+            }),
+        )
+        .await;
     });
     let input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
@@ -981,11 +997,11 @@ async fn context_capacity_guard_rechecks_after_tool_results_before_network_io() 
         messages: vec![message("user", "Read large.txt and summarize it")],
     };
 
-    let error = AgentRuntime::default().send_chat(input).await.unwrap_err();
+    let output = AgentRuntime::default().send_chat(input).await.unwrap();
     server.await.unwrap();
 
-    assert_eq!(error.code(), Some("context_capacity_exceeded"));
-    assert!(!second_request_seen.load(Ordering::SeqCst));
+    assert_eq!(output.content, "summarized");
+    assert!(second_request_seen.load(Ordering::SeqCst));
 }
 
 #[tokio::test]

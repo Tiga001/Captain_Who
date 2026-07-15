@@ -17,7 +17,9 @@ mod message_time;
 mod state;
 mod trace_renderer;
 
-pub(crate) use assembler::{ContextAssembler, ContextAssemblyInput, ContextAttachments};
+pub(crate) use assembler::{
+    AssembledContext, ContextAssembler, ContextAssemblyInput, ContextAttachments,
+};
 pub(crate) use budget::{
     ContextBudgetReport, ContextBudgetStatus, ContextCapacityDetector, ContextCompactionQuery,
     ContextMeasurementMode,
@@ -43,6 +45,7 @@ pub(crate) use frame::{
     ContextFrame, ContextGroup, ContextItem, ContextMetadata, ContextOrigin, ContextRetention,
     ContextScope, ContextSource, MeasuredContextBaseline,
 };
-pub(crate) use message_time::format_message_created_at;
+pub(crate) use measurement::ContextTextBudget;
+pub(crate) use message_time::{format_message_created_at, ConversationTimingTracker};
 pub use state::{AgentContextBaseline, AgentConversationContextState};
 pub(crate) use trace_renderer::ConversationTraceRenderer;

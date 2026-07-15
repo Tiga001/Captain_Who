@@ -1,7 +1,4 @@
-pub(super) const MAX_READ_FILE_BYTES: u64 = 512 * 1024;
 pub(super) const MAX_SEARCH_FILE_BYTES: u64 = 512 * 1024;
-pub(super) const DEFAULT_READ_MAX_LINES: usize = 400;
-pub(super) const MAX_READ_LINES: usize = 2_000;
 pub(super) const DEFAULT_SEARCH_LIMIT: usize = 40;
 pub(super) const MAX_SEARCH_LIMIT: usize = 200;
 pub(super) const MAX_WALK_ENTRIES: usize = 20_000;

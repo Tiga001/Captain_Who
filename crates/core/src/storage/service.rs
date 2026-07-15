@@ -585,6 +585,16 @@ impl StorageService {
         Ok(messages)
     }
 
+    pub fn get_assistant_message_created_at(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<Option<i64>, String> {
+        let connection = self.state.connection()?;
+        chat_repository::get_assistant_message_created_at(&connection, conversation_id, message_id)
+            .map_err(storage_error)
+    }
+
     pub fn replace_conversation_turn_trace(
         &self,
         trace: &ConversationTurnTrace,
