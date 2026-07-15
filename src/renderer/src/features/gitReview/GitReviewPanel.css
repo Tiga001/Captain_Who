@@ -198,8 +198,9 @@
 
 .git-review__tooltip {
   position: absolute;
+  top: calc(100% + 8px);
   right: auto;
-  bottom: calc(100% + 8px);
+  bottom: auto;
   left: 50%;
   z-index: 40;
   max-width: 220px;
@@ -214,7 +215,7 @@
   font-size: var(--mc-font-size-sm);
   font-weight: var(--mc-font-weight-medium);
   opacity: 0;
-  transform: translate(-50%, 3px);
+  transform: translate(-50%, -3px);
   transition:
     opacity 100ms ease 350ms,
     transform 100ms ease 350ms;
@@ -226,6 +227,24 @@
   opacity: 1;
   transform: translate(-50%, 0);
   visibility: visible;
+}
+
+.git-review__toolbar-actions
+  > .git-review__toolbar-button-wrap:nth-last-child(-n + 2)
+  .git-review__tooltip {
+  right: 0;
+  left: auto;
+  transform: translateY(-3px);
+}
+
+.git-review__toolbar-actions
+  > .git-review__toolbar-button-wrap:nth-last-child(-n + 2):hover
+  .git-review__tooltip,
+.git-review__toolbar-actions
+  > .git-review__toolbar-button-wrap:nth-last-child(-n + 2)
+  .git-review__toolbar-button:focus-visible
+  + .git-review__tooltip {
+  transform: translateY(0);
 }
 
 .git-review__scope-button:focus-visible,
@@ -635,6 +654,10 @@
   transition: opacity 90ms ease;
 }
 
+.git-review__file-actions > .git-review__file-action-wrap:last-child {
+  grid-column: 4;
+}
+
 .git-review__diff-card-header:hover .git-review__file-actions,
 .git-review__diff-card-header:focus-within .git-review__file-actions {
   opacity: 1;
@@ -692,7 +715,7 @@
   max-width: 220px;
   padding: 6px 9px;
   color: var(--mc-color-text-primary);
-  background: var(--mc-color-surface-elevated);
+  background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-md);
   box-shadow: var(--mc-shadow-composer);
@@ -706,6 +729,13 @@
     opacity 90ms ease,
     transform 90ms ease;
   white-space: normal;
+}
+
+/* The first two rows do not leave enough room above before the scroll viewport clips at the toolbar. */
+.git-review__diff-list > :nth-child(-n + 2) .git-review__file-action-tooltip {
+  top: calc(100% + 8px);
+  bottom: auto;
+  transform: translateY(-2px);
 }
 
 .git-review__file-action-wrap:hover .git-review__file-action-tooltip,

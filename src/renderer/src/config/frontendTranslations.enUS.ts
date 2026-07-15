@@ -113,7 +113,6 @@ export const enUSTranslations = {
   'gitReview.file.actions': 'File actions',
   'gitReview.file.openSoon': 'Open file in a tab (coming soon)',
   'gitReview.file.restore': 'Restore file',
-  'gitReview.file.restoreRequiresUnstage': 'Unstage the file before restoring it',
   'gitReview.file.stage': 'Stage file',
   'gitReview.file.unstage': 'Unstage file',
   'gitReview.status.modified': 'Modified',

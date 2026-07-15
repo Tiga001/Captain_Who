@@ -96,17 +96,15 @@ export function GitDiffCard({
           >
             <ExternalLink aria-hidden="true" />
           </FileActionButton>
-          <FileActionButton
-            disabled={mutationLocked || scope === 'staged'}
-            label={
-              scope === 'staged'
-                ? t('gitReview.file.restoreRequiresUnstage')
-                : t('gitReview.file.restore')
-            }
-            onClick={() => onRestore(file)}
-          >
-            <Undo2 aria-hidden="true" />
-          </FileActionButton>
+          {scope === 'unstaged' && (
+            <FileActionButton
+              disabled={mutationLocked}
+              label={t('gitReview.file.restore')}
+              onClick={() => onRestore(file)}
+            >
+              <Undo2 aria-hidden="true" />
+            </FileActionButton>
+          )}
           <FileActionButton
             disabled={mutationLocked}
             label={scope === 'unstaged' ? t('gitReview.file.stage') : t('gitReview.file.unstage')}

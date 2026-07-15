@@ -113,7 +113,6 @@ export const zhCNTranslations = {
   'gitReview.file.actions': '文件操作',
   'gitReview.file.openSoon': '在标签页中打开文件（即将支持）',
   'gitReview.file.restore': '还原文件',
-  'gitReview.file.restoreRequiresUnstage': '请先取消暂存后还原',
   'gitReview.file.stage': '暂存文件',
   'gitReview.file.unstage': '取消暂存文件',
   'gitReview.status.modified': '已修改',
