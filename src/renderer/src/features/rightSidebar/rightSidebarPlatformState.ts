@@ -5,6 +5,7 @@ import type {
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
   RightSidebarPage,
+  RightSidebarPageOpenRequest,
   RightSidebarPageUpdate,
   RightSidebarWorkspaceContext
 } from './rightSidebarTypes'
@@ -24,6 +25,12 @@ export type RightSidebarPlatformAction =
     }
   | { pageId: string; type: 'activate' }
   | { pageId: string; type: 'close' }
+  | {
+      pageId: string
+      request: RightSidebarPageOpenRequest
+      sourcePageId: string
+      type: 'open-related-page'
+    }
   | {
       availability: RightSidebarModuleAvailabilityMap
       modules: RightSidebarModuleDefinition[]
@@ -69,6 +76,8 @@ export function reduceRightSidebarPlatform(
         : state
     case 'close':
       return closePage(state, action.pageId)
+    case 'open-related-page':
+      return openRelatedPage(state, action.sourcePageId, action.pageId, action.request)
     case 'synchronize-context':
       return synchronizeContext(state, action.modules, action.availability, action.workspace)
     case 'update': {
@@ -85,6 +94,46 @@ export function reduceRightSidebarPlatform(
       })
       return changed ? { ...state, pages } : state
     }
+  }
+}
+
+function openRelatedPage(
+  state: RightSidebarPlatformState,
+  sourcePageId: string,
+  pageId: string,
+  request: RightSidebarPageOpenRequest
+): RightSidebarPlatformState {
+  const sourcePage = state.pages.find((page) => page.id === sourcePageId)
+  if (!sourcePage) return state
+
+  const resourceKey = request.resourceKey?.trim() || undefined
+  if (resourceKey) {
+    const existingPage = state.pages.find(
+      (page) =>
+        page.moduleId === sourcePage.moduleId &&
+        page.resourceKey === resourceKey &&
+        page.workspaceSessionKey === sourcePage.workspaceSessionKey
+    )
+    if (existingPage) {
+      return state.activePageId === existingPage.id
+        ? state
+        : { ...state, activePageId: existingPage.id }
+    }
+  }
+
+  const title = request.title.trim() || sourcePage.title
+  const page: RightSidebarPage = {
+    ...sourcePage,
+    iconUrl: request.iconUrl === undefined ? sourcePage.iconUrl : request.iconUrl,
+    id: pageId,
+    moduleState: request.moduleState,
+    resourceKey,
+    title
+  }
+
+  return {
+    activePageId: page.id,
+    pages: [...state.pages, page]
   }
 }
 
@@ -124,6 +173,7 @@ function rebindPageToWorkspace(
 ): RightSidebarPage {
   if (
     page.workspaceKey === workspace.key &&
+    page.workspaceName === workspace.name &&
     page.workspacePath === workspace.path &&
     page.workspaceSessionKey === workspace.sessionKey
   ) {
@@ -132,6 +182,7 @@ function rebindPageToWorkspace(
   return {
     ...page,
     workspaceKey: workspace.key,
+    workspaceName: workspace.name,
     workspacePath: workspace.path,
     workspaceSessionKey: workspace.sessionKey
   }

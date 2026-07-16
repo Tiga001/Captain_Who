@@ -1,4 +1,11 @@
-import { BrowserWindow, dialog, ipcMain as electronIpcMain, nativeTheme, shell } from 'electron'
+import {
+  BrowserWindow,
+  clipboard,
+  dialog,
+  ipcMain as electronIpcMain,
+  nativeTheme,
+  shell
+} from 'electron'
 import type { IpcMainInvokeEvent, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
 import { homedir } from 'os'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
@@ -13,6 +20,7 @@ import { clearManagedWebviewData } from './webviews/managedWebviewSecurity'
 import { TerminalBridge } from './terminal/TerminalBridge'
 import { AttachmentDialogBridge } from './attachments/AttachmentDialogBridge'
 import { FaviconResourceCache } from './resources/FaviconResourceCache'
+import { WorkspaceFilesService } from './workspaceFiles/WorkspaceFilesService'
 
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   '.avif': 'image/avif',
@@ -249,6 +257,9 @@ export function registerHostIpc(
   isTrustedRenderer: (event: IpcMainInvokeEvent) => boolean
 ): void {
   const attachmentDialogBridge = new AttachmentDialogBridge()
+  const workspaceFilesService = new WorkspaceFilesService((projectId) =>
+    getProjectPath(coreServer, projectId)
+  )
   type InvokeHandler = Parameters<typeof electronIpcMain.handle>[1]
   const ipcMain = {
     handle(channel: string, handler: InvokeHandler): void {
@@ -385,6 +396,24 @@ export function registerHostIpc(
     coreServer.loadInputAttachments(input)
   )
   ipcMain.handle('host:storage.loadImageFile', (_event, input) => loadImageFile(coreServer, input))
+  ipcMain.handle('host:workspaceFiles.copyPath', async (_event, input) => {
+    clipboard.writeText(await workspaceFilesService.resolvePathForReveal(input))
+  })
+  ipcMain.handle('host:workspaceFiles.listDirectory', (_event, input) =>
+    workspaceFilesService.listDirectory(input)
+  )
+  ipcMain.handle('host:workspaceFiles.readFileMetadata', (_event, input) =>
+    workspaceFilesService.readFileMetadata(input)
+  )
+  ipcMain.handle('host:workspaceFiles.readTextFile', (_event, input) =>
+    workspaceFilesService.readTextFile(input)
+  )
+  ipcMain.handle('host:workspaceFiles.readImageFile', (_event, input) =>
+    workspaceFilesService.readImageFile(input)
+  )
+  ipcMain.handle('host:workspaceFiles.revealInFolder', async (_event, input) => {
+    shell.showItemInFolder(await workspaceFilesService.resolvePathForReveal(input))
+  })
   ipcMain.handle('host:terminal.createSession', (_event, request) =>
     terminalBridge.createSession(request)
   )

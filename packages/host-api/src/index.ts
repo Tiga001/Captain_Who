@@ -56,7 +56,13 @@ import type {
   TerminalCreateSessionRequest,
   TerminalExitEvent,
   TerminalOutputEvent,
-  TerminalSessionSnapshot
+  TerminalSessionSnapshot,
+  WorkspaceDirectoryListing,
+  WorkspaceFileMetadata,
+  WorkspaceFileRequest,
+  WorkspaceImageFileContent,
+  WorkspaceListDirectoryInput,
+  WorkspaceTextFileContent
 } from '@mycopilot/protocol'
 
 export interface AttachmentsHostApi {
@@ -134,6 +140,15 @@ export interface TerminalHostApi {
   onExit(handler: (event: TerminalExitEvent) => void): () => void
 }
 
+export interface WorkspaceFilesHostApi {
+  copyPath(input: WorkspaceFileRequest): Promise<void>
+  listDirectory(input: WorkspaceListDirectoryInput): Promise<WorkspaceDirectoryListing>
+  readFileMetadata(input: WorkspaceFileRequest): Promise<WorkspaceFileMetadata>
+  readTextFile(input: WorkspaceFileRequest): Promise<WorkspaceTextFileContent>
+  readImageFile(input: WorkspaceFileRequest): Promise<WorkspaceImageFileContent>
+  revealInFolder(input: WorkspaceFileRequest): Promise<void>
+}
+
 export interface AgentHostApi {
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput>
   getContextWindowSnapshot(
@@ -179,6 +194,7 @@ export interface HostApi {
   search: SearchHostApi
   storage: StorageHostApi
   terminal: TerminalHostApi
+  workspaceFiles: WorkspaceFilesHostApi
 }
 
 export interface MyCopilotGlobal {

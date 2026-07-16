@@ -17,6 +17,9 @@ files:
   - '!node_modules/@electron-toolkit/utils/dist/*.d.*'
 asarUnpack:
   - resources/**
+extraResources:
+  - from: THIRD_PARTY_NOTICES.txt
+    to: THIRD_PARTY_NOTICES.txt
 win:
   executableName: mycopilot
   extraResources:

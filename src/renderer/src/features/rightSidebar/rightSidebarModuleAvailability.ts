@@ -11,6 +11,7 @@ export function resolveRightSidebarModuleAvailability(
   capabilities: RightSidebarCapabilities,
   workspace: RightSidebarWorkspaceContext
 ): RightSidebarModuleAvailability {
+  if (module.requiresWorkspace && !workspace.hasWorkspace) return 'unavailable'
   if (!module.requiredCapability) return 'available'
   if (!workspace.hasWorkspace) return 'unavailable'
 

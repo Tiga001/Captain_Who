@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import type { TranslationKey } from '../../config/frontendTranslations'
 import type { Translate } from '../../config/translationFormat'
 
-export type RightSidebarModuleId = 'terminal' | 'browser' | 'git-review'
+export type RightSidebarModuleId = 'terminal' | 'browser' | 'files' | 'git-review'
 
 export type RightSidebarSurfaceKind = 'react' | 'webview'
 
@@ -56,9 +56,22 @@ export interface RightSidebarPageUpdate {
   title?: string
 }
 
+export type RightSidebarModulePageState = {
+  kind: 'workspace-file'
+  path: string
+}
+
+export interface RightSidebarPageOpenRequest {
+  iconUrl?: string | null
+  moduleState?: RightSidebarModulePageState
+  resourceKey?: string
+  title: string
+}
+
 export interface RightSidebarModuleRenderProps {
   availability: RightSidebarModuleAvailability
   isActive: boolean
+  onOpenPage: (request: RightSidebarPageOpenRequest) => void
   onPageUpdate: (update: RightSidebarPageUpdate) => void
   onSurfaceFocus: () => void
   page: RightSidebarPage
@@ -73,6 +86,7 @@ export interface RightSidebarModuleDefinition {
   instancePolicy: RightSidebarInstancePolicy
   render: (props: RightSidebarModuleRenderProps) => ReactNode
   requiredCapability?: RightSidebarCapabilityId
+  requiresWorkspace?: boolean
   retention: RightSidebarRetentionPolicy
   surfaceKind: RightSidebarSurfaceKind
   titleKey: TranslationKey
@@ -82,9 +96,12 @@ export interface RightSidebarModuleDefinition {
 export interface RightSidebarPage {
   iconUrl?: string | null
   id: string
+  moduleState?: RightSidebarModulePageState
   moduleId: RightSidebarModuleId
+  resourceKey?: string
   title: string
   workspaceKey?: string | null
+  workspaceName?: string | null
   workspacePath?: string
   workspaceSessionKey?: string | null
 }

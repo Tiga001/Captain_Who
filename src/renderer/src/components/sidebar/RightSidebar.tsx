@@ -66,6 +66,7 @@ export function RightSidebar({
     closePage,
     moduleAvailability,
     openModule: openPlatformModule,
+    openRelatedPage,
     pages,
     updatePage
   } = useRightSidebarPlatform({
@@ -252,6 +253,7 @@ export function RightSidebar({
             activePageId={activePageId}
             availability={moduleAvailability}
             modules={modules}
+            onOpenPage={openRelatedPage}
             onPageUpdate={updatePage}
             onSurfaceFocus={closeTransientUi}
             pages={pages}

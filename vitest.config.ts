@@ -5,16 +5,19 @@ import { defineConfig } from 'vitest/config'
 
 const gitReviewTests = 'src/renderer/src/features/gitReview/__tests__'
 const rightSidebarTests = 'src/renderer/src/features/rightSidebar/__tests__'
+const filesTests = 'src/renderer/src/features/files/__tests__'
+const workspaceFilesTests = 'src/main/workspaceFiles'
 
 export default defineConfig({
   optimizeDeps: {
-    // Keep Worker language chunks lazy in browser tests. Auto-discovery would
-    // eagerly optimize every literal @shikijs/langs import and reload the test
-    // page while an assertion is running.
+    // Browser tests import Worker language chunks through many deep entrypoints.
+    // Pre-bundle them before the run so Vite never reloads an active test page.
     noDiscovery: true,
-    exclude: ['@shikijs/langs'],
     include: [
+      '@shikijs/langs/*',
       'lucide-react',
+      '@pierre/trees',
+      '@pierre/trees/react',
       'react',
       'react-dom',
       'react-dom/client',
@@ -34,7 +37,11 @@ export default defineConfig({
       {
         test: {
           environment: 'node',
-          include: [`${gitReviewTests}/**/*.test.ts`, `${rightSidebarTests}/**/*.test.ts`],
+          include: [
+            `${gitReviewTests}/**/*.test.ts`,
+            `${rightSidebarTests}/**/*.test.ts`,
+            `${workspaceFilesTests}/**/*.test.ts`
+          ],
           name: 'unit'
         }
       },
@@ -48,7 +55,8 @@ export default defineConfig({
           },
           include: [
             `${gitReviewTests}/**/*.browser.test.tsx`,
-            `${rightSidebarTests}/**/*.browser.test.tsx`
+            `${rightSidebarTests}/**/*.browser.test.tsx`,
+            `${filesTests}/**/*.browser.test.tsx`
           ],
           name: 'browser'
         }

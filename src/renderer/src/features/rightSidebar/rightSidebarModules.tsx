@@ -1,5 +1,6 @@
 import { lazy, Suspense } from 'react'
-import { FileDiff, Globe2, TerminalSquare } from 'lucide-react'
+import { FileDiff, FolderOpen, Globe2, TerminalSquare } from 'lucide-react'
+import { getFileTypeIconSource } from '../../components/files/FileTypeIcon'
 import type {
   RightSidebarModuleCreateContext,
   RightSidebarModuleDefinition,
@@ -22,6 +23,11 @@ const GitReviewPanel = lazy(async () => {
   return { default: module.GitReviewPanel }
 })
 
+const FilesPanel = lazy(async () => {
+  const module = await import('../files/FilesPanel')
+  return { default: module.FilesPanel }
+})
+
 function createTerminalPage({
   existingPages,
   pageId,
@@ -38,6 +44,7 @@ function createTerminalPage({
     moduleId: 'terminal',
     title: existingCount === 0 ? baseTitle : `${baseTitle} (${existingCount})`,
     workspaceKey: workspace.key,
+    workspaceName: workspace.name,
     workspacePath: workspace.path
   }
 }
@@ -69,6 +76,22 @@ function createGitReviewPage({
     moduleId: 'git-review',
     title: t('rightSidebar.review'),
     workspaceKey: workspace.key,
+    workspaceName: workspace.name,
+    workspacePath: workspace.path
+  }
+}
+
+function createFilesPage({
+  pageId,
+  t,
+  workspace
+}: RightSidebarModuleCreateContext): RightSidebarPage {
+  return {
+    id: pageId,
+    moduleId: 'files',
+    title: t('files.openFile'),
+    workspaceKey: workspace.key,
+    workspaceName: workspace.name,
     workspacePath: workspace.path
   }
 }
@@ -122,6 +145,38 @@ function renderGitReviewModule({ availability, isActive, page, t }: RightSidebar
   )
 }
 
+function renderFilesModule({
+  availability,
+  isActive,
+  onOpenPage,
+  onSurfaceFocus,
+  page,
+  t
+}: RightSidebarModuleRenderProps) {
+  if (availability === 'unavailable' || !page.workspaceKey) return null
+  const filePath = page.moduleState?.kind === 'workspace-file' ? page.moduleState.path : null
+
+  return (
+    <Suspense fallback={<div className="right-sidebar__panel-loading">{t('files.loading')}</div>}>
+      <FilesPanel
+        filePath={filePath}
+        isActive={isActive}
+        onOpenFile={(path) => {
+          onOpenPage({
+            iconUrl: getFileTypeIconSource(path),
+            moduleState: { kind: 'workspace-file', path },
+            resourceKey: `workspace-file:${path}`,
+            title: path.split('/').at(-1) ?? path
+          })
+        }}
+        onSurfaceFocus={onSurfaceFocus}
+        projectId={page.workspaceKey}
+        projectName={page.workspaceName || t('rightSidebar.files')}
+      />
+    </Suspense>
+  )
+}
+
 export const RIGHT_SIDEBAR_MODULES: RightSidebarModuleDefinition[] = [
   {
     contextBinding: 'pinned-to-creation-workspace',
@@ -146,6 +201,19 @@ export const RIGHT_SIDEBAR_MODULES: RightSidebarModuleDefinition[] = [
     surfaceKind: 'webview',
     titleKey: 'rightSidebar.browser',
     unavailablePagePolicy: 'retain-page'
+  },
+  {
+    contextBinding: 'follow-workspace',
+    createPage: createFilesPage,
+    id: 'files',
+    icon: FolderOpen,
+    instancePolicy: 'multiple',
+    render: renderFilesModule,
+    requiresWorkspace: true,
+    retention: 'keep-alive',
+    surfaceKind: 'react',
+    titleKey: 'rightSidebar.files',
+    unavailablePagePolicy: 'close-page'
   },
   {
     contextBinding: 'follow-workspace',

@@ -16,6 +16,17 @@ export default defineConfig({
   },
   preload: {},
   renderer: {
+    optimizeDeps: {
+      // Worker language modules use deep entrypoints. Pre-bundle them before the
+      // dev renderer starts so first-time file previews never trigger a reload.
+      include: [
+        '@pierre/trees',
+        '@pierre/trees/react',
+        '@shikijs/langs/*',
+        'shiki/core',
+        'shiki/engine/javascript'
+      ]
+    },
     resolve: {
       alias: {
         '@renderer': resolve('src/renderer/src')

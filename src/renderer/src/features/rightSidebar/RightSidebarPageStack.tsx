@@ -5,6 +5,7 @@ import type {
   RightSidebarModuleAvailabilityMap,
   RightSidebarModuleDefinition,
   RightSidebarPage,
+  RightSidebarPageOpenRequest,
   RightSidebarPageUpdate
 } from './rightSidebarTypes'
 
@@ -13,6 +14,7 @@ interface RightSidebarPageStackProps {
   availability: RightSidebarModuleAvailabilityMap
   modules: RightSidebarModuleDefinition[]
   onPageUpdate: (pageId: string, update: RightSidebarPageUpdate) => void
+  onOpenPage: (sourcePageId: string, request: RightSidebarPageOpenRequest) => void
   onSurfaceFocus: () => void
   pages: RightSidebarPage[]
   t: Translate
@@ -22,6 +24,7 @@ export function RightSidebarPageStack({
   activePageId,
   availability,
   modules,
+  onOpenPage,
   onPageUpdate,
   onSurfaceFocus,
   pages,
@@ -35,6 +38,7 @@ export function RightSidebarPageStack({
           availability={availability}
           key={`${page.id}:${page.workspaceSessionKey ?? 'global'}`}
           modules={modules}
+          onOpenPage={onOpenPage}
           onPageUpdate={onPageUpdate}
           onSurfaceFocus={onSurfaceFocus}
           page={page}
@@ -49,6 +53,7 @@ interface RightSidebarPageFrameProps {
   activePageId: string | null
   availability: RightSidebarModuleAvailabilityMap
   modules: RightSidebarModuleDefinition[]
+  onOpenPage: (sourcePageId: string, request: RightSidebarPageOpenRequest) => void
   onPageUpdate: (pageId: string, update: RightSidebarPageUpdate) => void
   onSurfaceFocus: () => void
   page: RightSidebarPage
@@ -59,6 +64,7 @@ function RightSidebarPageFrame({
   activePageId,
   availability,
   modules,
+  onOpenPage,
   onPageUpdate,
   onSurfaceFocus,
   page,
@@ -69,6 +75,10 @@ function RightSidebarPageFrame({
   const updatePage = useCallback(
     (update: RightSidebarPageUpdate) => onPageUpdate(page.id, update),
     [onPageUpdate, page.id]
+  )
+  const openPage = useCallback(
+    (request: RightSidebarPageOpenRequest) => onOpenPage(page.id, request),
+    [onOpenPage, page.id]
   )
 
   if (!module) return null
@@ -87,6 +97,7 @@ function RightSidebarPageFrame({
         module.render({
           availability: moduleAvailability,
           isActive,
+          onOpenPage: openPage,
           onPageUpdate: updatePage,
           onSurfaceFocus,
           page,

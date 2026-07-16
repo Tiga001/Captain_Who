@@ -123,6 +123,14 @@ const host: HostApi = {
     killSession: (sessionId) => ipcRenderer.invoke('host:terminal.killSession', sessionId),
     onOutput: onTerminalOutput,
     onExit: onTerminalExit
+  },
+  workspaceFiles: {
+    copyPath: (input) => ipcRenderer.invoke('host:workspaceFiles.copyPath', input),
+    listDirectory: (input) => ipcRenderer.invoke('host:workspaceFiles.listDirectory', input),
+    readFileMetadata: (input) => ipcRenderer.invoke('host:workspaceFiles.readFileMetadata', input),
+    readTextFile: (input) => ipcRenderer.invoke('host:workspaceFiles.readTextFile', input),
+    readImageFile: (input) => ipcRenderer.invoke('host:workspaceFiles.readImageFile', input),
+    revealInFolder: (input) => ipcRenderer.invoke('host:workspaceFiles.revealInFolder', input)
   }
 }
 

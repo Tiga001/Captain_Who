@@ -12,6 +12,7 @@ import type {
   RightSidebarCapabilities,
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
+  RightSidebarPageOpenRequest,
   RightSidebarPageUpdate
 } from './rightSidebarTypes'
 import { createRightSidebarWorkspaceContext } from './rightSidebarWorkspace'
@@ -93,6 +94,18 @@ export function useRightSidebarPlatform({
     dispatch({ pageId, type: 'close' })
   }, [])
 
+  const openRelatedPage = useCallback(
+    (sourcePageId: string, request: RightSidebarPageOpenRequest) => {
+      dispatch({
+        pageId: createPageId('page'),
+        request,
+        sourcePageId,
+        type: 'open-related-page'
+      })
+    },
+    []
+  )
+
   const updatePage = useCallback((pageId: string, update: RightSidebarPageUpdate) => {
     dispatch({ pageId, type: 'update', update })
   }, [])
@@ -104,11 +117,12 @@ export function useRightSidebarPlatform({
     closePage,
     moduleAvailability,
     openModule,
+    openRelatedPage,
     pages: state.pages,
     updatePage
   }
 }
 
-function createPageId(moduleId: RightSidebarModuleId): string {
+function createPageId(moduleId: RightSidebarModuleId | 'page'): string {
   return `${moduleId}-${crypto.randomUUID()}`
 }

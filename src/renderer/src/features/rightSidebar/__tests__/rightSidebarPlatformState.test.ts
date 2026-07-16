@@ -22,6 +22,7 @@ const TestIcon = (() => null) as unknown as RightSidebarModuleDefinition['icon']
 const MODULES: RightSidebarModuleDefinition[] = [
   createModule('terminal', 'pinned-to-creation-workspace', 'multiple', 'retain-page'),
   createModule('browser', 'global', 'multiple', 'retain-page'),
+  createModule('files', 'follow-workspace', 'multiple', 'close-page'),
   {
     ...createModule('git-review', 'follow-workspace', 'single', 'close-page'),
     requiredCapability: 'git-repository'
@@ -33,6 +34,46 @@ const WORKSPACE_B = createRightSidebarWorkspaceContext('project-b', 'Project B',
 const HOME = createRightSidebarWorkspaceContext(null, null, undefined)
 
 describe('right sidebar platform context lifecycle', () => {
+  it('opens related resources as independent pages and reuses an existing resource page', () => {
+    const initial = openPages(WORKSPACE_A, ['files'])
+    const opened = reduceRightSidebarPlatform(initial, {
+      pageId: 'workspace-file-page',
+      request: {
+        iconUrl: 'file:///python.svg',
+        moduleState: { kind: 'workspace-file', path: 'src/index.py' },
+        resourceKey: 'workspace-file:src/index.py',
+        title: 'index.py'
+      },
+      sourcePageId: 'files-page',
+      type: 'open-related-page'
+    })
+
+    expect(opened.activePageId).toBe('workspace-file-page')
+    expect(opened.pages).toHaveLength(2)
+    expect(opened.pages[1]).toMatchObject({
+      iconUrl: 'file:///python.svg',
+      moduleId: 'files',
+      moduleState: { kind: 'workspace-file', path: 'src/index.py' },
+      resourceKey: 'workspace-file:src/index.py',
+      title: 'index.py',
+      workspaceKey: WORKSPACE_A.key,
+      workspaceSessionKey: WORKSPACE_A.sessionKey
+    })
+
+    const reopened = reduceRightSidebarPlatform(opened, {
+      pageId: 'duplicate-file-page',
+      request: {
+        moduleState: { kind: 'workspace-file', path: 'src/index.py' },
+        resourceKey: 'workspace-file:src/index.py',
+        title: 'index.py'
+      },
+      sourcePageId: 'files-page',
+      type: 'open-related-page'
+    })
+
+    expect(reopened).toBe(opened)
+  })
+
   it('rebinds only follow-workspace pages while preserving tab identity and pinned surfaces', () => {
     const initial = openPages(WORKSPACE_A, ['terminal', 'git-review', 'browser'])
     const active = reduceRightSidebarPlatform(initial, {
@@ -152,6 +193,16 @@ describe('right sidebar module availability', () => {
     expect(resolveRightSidebarModuleAvailability(getModule('terminal'), {}, WORKSPACE_B)).toBe(
       'available'
     )
+  })
+
+  it('hides workspace-only modules when no project is selected', () => {
+    const filesModule = {
+      ...createModule('files', 'follow-workspace', 'multiple', 'close-page'),
+      requiresWorkspace: true
+    }
+
+    expect(resolveRightSidebarModuleAvailability(filesModule, {}, HOME)).toBe('unavailable')
+    expect(resolveRightSidebarModuleAvailability(filesModule, {}, WORKSPACE_A)).toBe('available')
   })
 })
 
