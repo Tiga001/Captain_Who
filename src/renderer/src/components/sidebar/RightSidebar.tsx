@@ -8,6 +8,7 @@ import { RightSidebarModulePicker } from '../../features/rightSidebar/RightSideb
 import { RightSidebarPageStack } from '../../features/rightSidebar/RightSidebarPageStack'
 import { RIGHT_SIDEBAR_MODULES } from '../../features/rightSidebar/rightSidebarModules'
 import type {
+  RightSidebarCapabilities,
   RightSidebarModuleDefinition,
   RightSidebarModuleId
 } from '../../features/rightSidebar/rightSidebarTypes'
@@ -15,6 +16,7 @@ import { useRightSidebarPlatform } from '../../features/rightSidebar/useRightSid
 import './RightSidebar.css'
 
 interface RightSidebarProps {
+  capabilities?: RightSidebarCapabilities
   isMaximized: boolean
   maximizedToolbarControls?: ReactNode
   modules?: RightSidebarModuleDefinition[]
@@ -43,6 +45,7 @@ function RestoreFromMaximizedIcon(): ReactNode {
 }
 
 export function RightSidebar({
+  capabilities,
   isMaximized,
   maximizedToolbarControls,
   modules = RIGHT_SIDEBAR_MODULES,
@@ -59,11 +62,14 @@ export function RightSidebar({
   const {
     activatePage,
     activePageId,
+    availableModules,
     closePage,
+    moduleAvailability,
     openModule: openPlatformModule,
     pages,
     updatePage
   } = useRightSidebarPlatform({
+    capabilities,
     modules,
     t,
     workspaceKey,
@@ -211,7 +217,7 @@ export function RightSidebar({
                   createPortal(
                     <div ref={moduleMenuRef}>
                       <RightSidebarModulePicker
-                        modules={modules}
+                        modules={availableModules}
                         onOpenModule={openModule}
                         style={moduleMenuPosition}
                       />
@@ -244,6 +250,7 @@ export function RightSidebar({
         {hasOpenPages ? (
           <RightSidebarPageStack
             activePageId={activePageId}
+            availability={moduleAvailability}
             modules={modules}
             onPageUpdate={updatePage}
             onSurfaceFocus={closeTransientUi}
@@ -251,7 +258,7 @@ export function RightSidebar({
             t={t}
           />
         ) : (
-          <RightSidebarHome modules={modules} onOpenModule={openModule} />
+          <RightSidebarHome modules={availableModules} onOpenModule={openModule} />
         )}
       </div>
     </aside>

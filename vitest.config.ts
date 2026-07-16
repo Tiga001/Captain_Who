@@ -4,6 +4,7 @@ import { playwright } from '@vitest/browser-playwright'
 import { defineConfig } from 'vitest/config'
 
 const gitReviewTests = 'src/renderer/src/features/gitReview/__tests__'
+const rightSidebarTests = 'src/renderer/src/features/rightSidebar/__tests__'
 
 export default defineConfig({
   optimizeDeps: {
@@ -33,7 +34,7 @@ export default defineConfig({
       {
         test: {
           environment: 'node',
-          include: [`${gitReviewTests}/**/*.test.ts`],
+          include: [`${gitReviewTests}/**/*.test.ts`, `${rightSidebarTests}/**/*.test.ts`],
           name: 'unit'
         }
       },
@@ -45,7 +46,10 @@ export default defineConfig({
             instances: [{ browser: 'chromium' }],
             provider: playwright()
           },
-          include: [`${gitReviewTests}/**/*.browser.test.tsx`],
+          include: [
+            `${gitReviewTests}/**/*.browser.test.tsx`,
+            `${rightSidebarTests}/**/*.browser.test.tsx`
+          ],
           name: 'browser'
         }
       }

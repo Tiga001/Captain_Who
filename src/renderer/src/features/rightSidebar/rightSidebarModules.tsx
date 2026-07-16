@@ -107,7 +107,12 @@ function renderBrowserModule({
   )
 }
 
-function renderGitReviewModule({ isActive, page, t }: RightSidebarModuleRenderProps) {
+function renderGitReviewModule({ availability, isActive, page, t }: RightSidebarModuleRenderProps) {
+  if (availability === 'checking') {
+    return <div className="right-sidebar__panel-loading">{t('gitReview.loading')}</div>
+  }
+  if (availability === 'unavailable') return null
+
   return (
     <Suspense
       fallback={<div className="right-sidebar__panel-loading">{t('gitReview.loading')}</div>}
@@ -119,6 +124,7 @@ function renderGitReviewModule({ isActive, page, t }: RightSidebarModuleRenderPr
 
 export const RIGHT_SIDEBAR_MODULES: RightSidebarModuleDefinition[] = [
   {
+    contextBinding: 'pinned-to-creation-workspace',
     createPage: createTerminalPage,
     id: 'terminal',
     icon: TerminalSquare,
@@ -126,9 +132,11 @@ export const RIGHT_SIDEBAR_MODULES: RightSidebarModuleDefinition[] = [
     render: renderTerminalModule,
     retention: 'keep-alive',
     surfaceKind: 'react',
-    titleKey: 'rightSidebar.terminal'
+    titleKey: 'rightSidebar.terminal',
+    unavailablePagePolicy: 'retain-page'
   },
   {
+    contextBinding: 'global',
     createPage: createBrowserPage,
     id: 'browser',
     icon: Globe2,
@@ -136,20 +144,20 @@ export const RIGHT_SIDEBAR_MODULES: RightSidebarModuleDefinition[] = [
     render: renderBrowserModule,
     retention: 'keep-alive',
     surfaceKind: 'webview',
-    titleKey: 'rightSidebar.browser'
+    titleKey: 'rightSidebar.browser',
+    unavailablePagePolicy: 'retain-page'
   },
   {
+    contextBinding: 'follow-workspace',
     createPage: createGitReviewPage,
     id: 'git-review',
     icon: FileDiff,
-    instancePolicy: 'single-per-workspace',
+    instancePolicy: 'single',
     render: renderGitReviewModule,
+    requiredCapability: 'git-repository',
     retention: 'keep-alive',
     surfaceKind: 'react',
-    titleKey: 'rightSidebar.review'
+    titleKey: 'rightSidebar.review',
+    unavailablePagePolicy: 'close-page'
   }
 ]
-
-export function getRightSidebarModules(options: { gitReview: boolean }) {
-  return RIGHT_SIDEBAR_MODULES.filter((module) => module.id !== 'git-review' || options.gitReview)
-}

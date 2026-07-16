@@ -1,6 +1,8 @@
 import { useCallback } from 'react'
 import type { Translate } from '../../config/translationFormat'
+import { getRightSidebarModuleAvailability } from './rightSidebarModuleAvailability'
 import type {
+  RightSidebarModuleAvailabilityMap,
   RightSidebarModuleDefinition,
   RightSidebarPage,
   RightSidebarPageUpdate
@@ -8,6 +10,7 @@ import type {
 
 interface RightSidebarPageStackProps {
   activePageId: string | null
+  availability: RightSidebarModuleAvailabilityMap
   modules: RightSidebarModuleDefinition[]
   onPageUpdate: (pageId: string, update: RightSidebarPageUpdate) => void
   onSurfaceFocus: () => void
@@ -17,6 +20,7 @@ interface RightSidebarPageStackProps {
 
 export function RightSidebarPageStack({
   activePageId,
+  availability,
   modules,
   onPageUpdate,
   onSurfaceFocus,
@@ -28,7 +32,8 @@ export function RightSidebarPageStack({
       {pages.map((page) => (
         <RightSidebarPageFrame
           activePageId={activePageId}
-          key={page.id}
+          availability={availability}
+          key={`${page.id}:${page.workspaceSessionKey ?? 'global'}`}
           modules={modules}
           onPageUpdate={onPageUpdate}
           onSurfaceFocus={onSurfaceFocus}
@@ -42,6 +47,7 @@ export function RightSidebarPageStack({
 
 interface RightSidebarPageFrameProps {
   activePageId: string | null
+  availability: RightSidebarModuleAvailabilityMap
   modules: RightSidebarModuleDefinition[]
   onPageUpdate: (pageId: string, update: RightSidebarPageUpdate) => void
   onSurfaceFocus: () => void
@@ -51,6 +57,7 @@ interface RightSidebarPageFrameProps {
 
 function RightSidebarPageFrame({
   activePageId,
+  availability,
   modules,
   onPageUpdate,
   onSurfaceFocus,
@@ -67,6 +74,7 @@ function RightSidebarPageFrame({
   if (!module) return null
 
   const shouldMount = isActive || module.retention === 'keep-alive'
+  const moduleAvailability = getRightSidebarModuleAvailability(availability, module.id)
 
   return (
     <section
@@ -77,6 +85,7 @@ function RightSidebarPageFrame({
     >
       {shouldMount &&
         module.render({
+          availability: moduleAvailability,
           isActive,
           onPageUpdate: updatePage,
           onSurfaceFocus,

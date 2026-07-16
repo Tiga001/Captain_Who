@@ -15,8 +15,8 @@ import { useProjectSettings } from '../config/ProjectSettingsProvider'
 import { useFrontendConfig } from '../config/FrontendConfigProvider'
 import { featureFlags } from '../config/featureFlags'
 import { hostClient } from '../host/hostClient'
-import { inspectGitRepository } from '../features/gitReview/gitReviewClient'
-import { getRightSidebarModules } from '../features/rightSidebar/rightSidebarModules'
+import { useGitRepositoryCapability } from '../features/gitReview/useGitRepositoryCapability'
+import type { RightSidebarCapabilities } from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
 import { NewConversationPage } from '../features/chat/NewConversationPage'
 import type { SettingsPageId } from '../features/settings/SettingsPage'
@@ -261,47 +261,14 @@ export function AppShell() {
     return projects.find((project) => project.id === rightSidebarWorkspaceProjectId) ?? null
   }, [rightSidebarWorkspaceProjectId, projects])
   const rightSidebarWorkspacePath = rightSidebarWorkspaceProject?.path?.trim() || undefined
-  const [gitReviewAvailability, setGitReviewAvailability] = useState<{
-    available: boolean
-    projectId: string
-  } | null>(null)
+  const gitRepositoryCapability = useGitRepositoryCapability(
+    rightSidebarWorkspaceProject?.id,
+    rightSidebarWorkspacePath
+  )
 
-  useEffect(() => {
-    const projectId = rightSidebarWorkspaceProject?.id
-    if (!projectId || !rightSidebarWorkspacePath) {
-      setGitReviewAvailability(null)
-      return undefined
-    }
-
-    let cancelled = false
-    setGitReviewAvailability({ available: false, projectId })
-    void inspectGitRepository(projectId)
-      .then((inspection) => {
-        if (cancelled) return
-        setGitReviewAvailability({
-          available: inspection.state === 'ready',
-          projectId
-        })
-      })
-      .catch((error) => {
-        if (cancelled) return
-        console.warn('Failed to inspect Git repository capability', error)
-        setGitReviewAvailability({ available: false, projectId })
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [rightSidebarWorkspacePath, rightSidebarWorkspaceProject?.id])
-
-  const rightSidebarModules = useMemo(
-    () =>
-      getRightSidebarModules({
-        gitReview:
-          gitReviewAvailability?.projectId === rightSidebarWorkspaceProject?.id &&
-          gitReviewAvailability?.available === true
-      }),
-    [gitReviewAvailability, rightSidebarWorkspaceProject?.id]
+  const rightSidebarCapabilities = useMemo<RightSidebarCapabilities>(
+    () => ({ 'git-repository': gitRepositoryCapability }),
+    [gitRepositoryCapability]
   )
 
   // Agent tool events arrive faster than React state commits. Keep the ref and state in one
@@ -1796,8 +1763,8 @@ export function AppShell() {
 
       <aside className="side-panel side-panel--right">
         <RightSidebar
+          capabilities={rightSidebarCapabilities}
           isMaximized={rightMaximized}
-          modules={rightSidebarModules}
           workspaceKey={rightSidebarWorkspaceProject?.id}
           workspaceName={rightSidebarWorkspaceProject?.name}
           workspacePath={rightSidebarWorkspacePath}
