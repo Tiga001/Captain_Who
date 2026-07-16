@@ -12,3 +12,5 @@ coverage
 !.env.example
 
 .vitest-attachments/
+
+.pnpm-store/
