@@ -848,6 +848,11 @@
   white-space: pre-wrap;
 }
 
+/* Syntax highlighting is foreground-only; diff surfaces, metrics and gutters stay authoritative. */
+.git-review__diff-content[data-syntax-highlighted='true'] {
+  color: var(--git-review-syntax-foreground);
+}
+
 .git-review__diff-line--addition {
   color: var(--mc-color-diff-addition-text);
   background: var(--git-review-added-surface);

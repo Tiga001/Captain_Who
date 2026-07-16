@@ -1,4 +1,4 @@
-import type { GitReviewFileContent, GitReviewFileStatus } from '@mycopilot/protocol'
+import type { GitReviewFile, GitReviewFileContent } from '@mycopilot/protocol'
 import { useMemo, useRef, type ReactNode, type RefObject, type UIEventHandler } from 'react'
 import { AlertCircle, LoaderCircle, RefreshCw } from 'lucide-react'
 import type { Translate } from '../../config/translationFormat'
@@ -25,6 +25,11 @@ import { getGitReviewFileShape, resolveGitReviewDiffLayout } from './gitReviewDi
 import type { GitReviewViewMode } from './gitReviewViewMode'
 import { useLinkedDiffScroll } from './useLinkedDiffScroll'
 import type { GitReviewDiffState, GitReviewFileContentState } from './useGitReview'
+import {
+  GitReviewSyntaxCode,
+  GitReviewSyntaxHighlightProvider,
+  type GitReviewSyntaxSide
+} from './syntaxHighlighting/GitReviewSyntaxHighlightProvider'
 
 export type GitReviewDiffExpandHandler = (
   action: GitDiffExpansionAction,
@@ -34,11 +39,11 @@ export type GitReviewDiffExpandHandler = (
 interface GitReviewDiffRendererProps {
   diffState?: GitReviewDiffState
   expansionState?: GitDiffExpansionState
+  file: GitReviewFile
   fileContentState?: GitReviewFileContentState
-  fileId: string
-  fileStatus: GitReviewFileStatus
   onExpand?: GitReviewDiffExpandHandler
   onRequestDiff: (fileId: string) => void
+  syntaxHighlightingEnabled?: boolean
   t: Translate
   viewMode: GitReviewViewMode
   wrapLines: boolean
@@ -48,11 +53,11 @@ interface GitReviewDiffRendererProps {
 export function GitReviewDiffRenderer({
   diffState,
   expansionState,
+  file,
   fileContentState,
-  fileId,
-  fileStatus,
   onExpand,
   onRequestDiff,
+  syntaxHighlightingEnabled = true,
   t,
   viewMode,
   wrapLines
@@ -71,7 +76,7 @@ export function GitReviewDiffRenderer({
       <div className="git-review__diff-message git-review__diff-message--error" role="alert">
         <AlertCircle aria-hidden="true" />
         <span>{diffState.error}</span>
-        <button type="button" onClick={() => onRequestDiff(fileId)}>
+        <button type="button" onClick={() => onRequestDiff(file.id)}>
           <RefreshCw aria-hidden="true" />
           {t('gitReview.retry')}
         </button>
@@ -90,11 +95,13 @@ export function GitReviewDiffRenderer({
     <GitPatchRenderer
       emptyState={t('gitReview.diff.noHunks')}
       expansionState={expansionState}
+      file={file}
       fileContent={fileContentState?.status === 'ready' ? fileContentState.value : undefined}
-      fileStatus={fileStatus}
       invalidState={t('gitReview.diff.invalid')}
       onExpand={onExpand}
       patch={diffState.value.patch ?? ''}
+      snapshotId={diffState.value.snapshotId}
+      syntaxHighlightingEnabled={syntaxHighlightingEnabled}
       t={t}
       viewMode={viewMode}
       wrapLines={wrapLines}
@@ -105,11 +112,13 @@ export function GitReviewDiffRenderer({
 interface GitPatchRendererProps {
   emptyState: ReactNode
   expansionState?: GitDiffExpansionState
+  file: GitReviewFile
   fileContent?: GitReviewFileContent
-  fileStatus: GitReviewFileStatus
   invalidState: ReactNode
   onExpand?: GitReviewDiffExpandHandler
   patch: string
+  snapshotId: string
+  syntaxHighlightingEnabled?: boolean
   t: Translate
   viewMode: GitReviewViewMode
   wrapLines: boolean
@@ -119,35 +128,38 @@ interface GitPatchRendererProps {
 export function GitPatchRenderer({
   emptyState,
   expansionState = EMPTY_EXPANSION_STATE,
+  file,
   fileContent,
-  fileStatus,
   invalidState,
   onExpand,
   patch,
+  snapshotId,
+  syntaxHighlightingEnabled = true,
   t,
   viewMode,
   wrapLines
 }: GitPatchRendererProps): ReactNode {
-  const documentResult = useMemo(() => {
+  const renderModel = useMemo(() => {
     const parsed = parseGitPatch(patch)
-    if (!parsed.ok) return parsed
+    if (!parsed.ok) return { documentResult: parsed }
     const compact = buildGitDiffDocument(parsed.value)
-    if (!compact.ok) return compact
-    if (
-      fileContent?.status !== 'ready' ||
-      fileContent.beforeText === null ||
-      fileContent.afterText === null
-    ) {
-      return compact
+    if (!compact.ok) return { documentResult: compact }
+    if (fileContent?.status !== 'ready') return { documentResult: compact }
+    if (fileContent.beforeText === null || fileContent.afterText === null) {
+      // Added/deleted files only have one side; paint-time equality still guards that snapshot.
+      return { documentResult: compact, syntaxFileContent: fileContent }
     }
     const hydrated = hydrateGitDiffDocument(compact.value, {
       newText: fileContent.afterText,
       oldText: fileContent.beforeText
     })
     // A stale or inconsistent full-content response must never corrupt the compact diff.
-    return hydrated.ok ? hydrated : compact
+    return hydrated.ok
+      ? { documentResult: hydrated, syntaxFileContent: fileContent }
+      : { documentResult: compact }
   }, [fileContent, patch])
-  const layout = resolveGitReviewDiffLayout(viewMode, getGitReviewFileShape(fileStatus))
+  const { documentResult } = renderModel
+  const layout = resolveGitReviewDiffLayout(viewMode, getGitReviewFileShape(file.status))
 
   if (!documentResult.ok) {
     return <div className="git-review__diff-message">{invalidState}</div>
@@ -163,11 +175,27 @@ export function GitPatchRenderer({
     t,
     wrapLines
   }
-  if (layout === 'unified') return <UnifiedDiff {...sharedProps} />
-  if (layout === 'single-old' || layout === 'single-new') {
-    return <SingleSidedDiff {...sharedProps} side={layout === 'single-old' ? 'old' : 'new'} />
-  }
-  return <SplitDiff {...sharedProps} />
+  const diff =
+    layout === 'unified' ? (
+      <UnifiedDiff {...sharedProps} />
+    ) : layout === 'single-old' || layout === 'single-new' ? (
+      <SingleSidedDiff {...sharedProps} side={layout === 'single-old' ? 'old' : 'new'} />
+    ) : (
+      <SplitDiff {...sharedProps} />
+    )
+
+  return (
+    <GitReviewSyntaxHighlightProvider
+      cacheKey={`${snapshotId}:${file.id}`}
+      document={documentResult.value}
+      enabled={syntaxHighlightingEnabled}
+      fileContent={renderModel.syntaxFileContent}
+      newPath={file.path}
+      oldPath={file.previousPath ?? file.path}
+    >
+      {diff}
+    </GitReviewSyntaxHighlightProvider>
+  )
 }
 
 const EMPTY_EXPANSION_STATE: GitDiffExpansionState = new Map()
@@ -321,7 +349,7 @@ function UnifiedDiffLine({ line }: { line: GitDiffLine }): ReactNode {
     <div className={`git-review__unified-line git-review__diff-line--${line.kind}`}>
       <span className="git-review__line-number">{line.oldLineNumber ?? ''}</span>
       <span className="git-review__line-number">{line.newLineNumber ?? ''}</span>
-      <DiffCode line={line} />
+      <DiffCode line={line} side={line.kind === 'deletion' ? 'old' : 'new'} />
     </div>
   )
 }
@@ -593,7 +621,7 @@ function SplitDiffSide({ line, side }: SplitDiffSideProps): ReactNode {
   return (
     <div className={`git-review__split-side git-review__diff-line--${line.kind}`} data-side={side}>
       <span className="git-review__line-number">{lineNumber ?? ''}</span>
-      <DiffCode line={line} />
+      <DiffCode line={line} side={side === 'left' ? 'old' : 'new'} />
     </div>
   )
 }
@@ -603,7 +631,7 @@ function SplitPaneLine({ line, side }: SplitDiffSideProps): ReactNode {
   return (
     <div className={`git-review__split-pane-line git-review__diff-line--${line.kind}`}>
       <span className="git-review__line-number">{lineNumber ?? ''}</span>
-      <DiffCode line={line} />
+      <DiffCode line={line} side={side === 'left' ? 'old' : 'new'} />
     </div>
   )
 }
@@ -691,12 +719,12 @@ function SingleDiffLine({ line, side }: { line: GitDiffLine; side: SingleDiffSid
   return (
     <div className={`git-review__single-line git-review__diff-line--${line.kind}`}>
       <span className="git-review__line-number">{lineNumber ?? ''}</span>
-      <DiffCode line={line} />
+      <DiffCode line={line} side={side} />
     </div>
   )
 }
 
-function DiffCode({ line }: { line: GitDiffLine }): ReactNode {
+function DiffCode({ line, side }: { line: GitDiffLine; side: GitReviewSyntaxSide }): ReactNode {
   const prefix =
     line.kind === 'addition'
       ? '+'
@@ -710,7 +738,11 @@ function DiffCode({ line }: { line: GitDiffLine }): ReactNode {
       <span className="git-review__diff-prefix" aria-hidden="true">
         {prefix}
       </span>
-      <span className="git-review__diff-content">{line.content || ' '}</span>
+      <GitReviewSyntaxCode
+        content={line.content}
+        lineNumber={side === 'old' ? line.oldLineNumber : line.newLineNumber}
+        side={side}
+      />
     </span>
   )
 }

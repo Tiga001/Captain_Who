@@ -7,7 +7,20 @@ const gitReviewTests = 'src/renderer/src/features/gitReview/__tests__'
 
 export default defineConfig({
   optimizeDeps: {
-    include: ['lucide-react', 'react', 'react-dom', 'react-dom/client', 'react/jsx-dev-runtime']
+    // Keep Worker language chunks lazy in browser tests. Auto-discovery would
+    // eagerly optimize every literal @shikijs/langs import and reload the test
+    // page while an assertion is running.
+    noDiscovery: true,
+    exclude: ['@shikijs/langs'],
+    include: [
+      'lucide-react',
+      'react',
+      'react-dom',
+      'react-dom/client',
+      'react/jsx-dev-runtime',
+      'shiki/core',
+      'shiki/engine/javascript'
+    ]
   },
   plugins: [react()],
   resolve: {

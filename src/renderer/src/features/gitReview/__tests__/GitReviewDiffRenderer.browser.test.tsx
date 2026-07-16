@@ -1,17 +1,24 @@
-import type { GitReviewFileStatus } from '@mycopilot/protocol'
+import type { GitReviewFile, GitReviewFileStatus } from '@mycopilot/protocol'
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import { describe, expect, it } from 'vitest'
 import { render } from 'vitest-browser-react'
+import type { FrontendThemeId } from '../../../config/frontendTheme'
 import type { Translate } from '../../../config/translationFormat'
 import '../../../styles/global.css'
 import { GitReviewDiffRenderer } from '../GitReviewDiffRenderer'
 import { reduceGitDiffExpansion, type GitDiffExpansionState } from '../diff'
 import '../GitReviewPanel.css'
 import type { GitReviewViewMode } from '../gitReviewViewMode'
+import { getGitReviewSyntaxThemeStyle } from '../syntaxHighlighting/gitReviewSyntaxThemes'
 import type { GitReviewDiffState, GitReviewFileContentState } from '../useGitReview'
 
 const LONG_OLD_LINE = `old-${'veryLongIdentifier'.repeat(30)}`
 const LONG_NEW_LINE = `new-${'replacementIdentifier'.repeat(30)}`
+const FIXTURE_FILE: GitReviewFile = {
+  id: 'fixture.ts',
+  path: 'src/fixture.ts',
+  status: 'modified'
+}
 const PATCH_REPLACEMENT_LONG = [
   'diff --git a/src/long.ts b/src/long.ts',
   '--- a/src/long.ts',
@@ -54,6 +61,12 @@ const PATCH_MODIFIED_DELETION_ONLY = [
   `-${LONG_OLD_LINE}`
 ].join('\n')
 const PATCH_REPLACEMENT_SHORT = ['@@ -1,1 +1,1 @@', '-short old line', '+short new line'].join('\n')
+const PATCH_SYNTAX_HIGHLIGHT = [
+  '@@ -1,2 +1,2 @@',
+  '-const answer: number = 41',
+  '+const answer: number = 42',
+  ' console.log("ready")'
+].join('\n')
 const PATCH_ASYMMETRIC_WRAP = [
   '@@ -1,2 +1,2 @@',
   '-short old line',
@@ -198,13 +211,13 @@ function InteractiveDiffFixture({
         <GitReviewDiffRenderer
           diffState={createReadyDiffState(PATCH_WITH_OMITTED_RANGES)}
           expansionState={expansionState}
+          file={FIXTURE_FILE}
           fileContentState={fullContentState}
-          fileId="fixture.ts"
-          fileStatus="modified"
           onExpand={(action) =>
             setExpansionState((current) => reduceGitDiffExpansion(current, action))
           }
           onRequestDiff={() => undefined}
+          syntaxHighlightingEnabled={false}
           t={translate}
           viewMode={viewMode}
           wrapLines={wrapLines}
@@ -218,6 +231,8 @@ interface DiffFixtureProps {
   fileContentState?: GitReviewFileContentState
   fileStatus?: GitReviewFileStatus
   patch?: string
+  syntaxHighlightingEnabled?: boolean
+  syntaxThemeId?: FrontendThemeId
   viewMode?: GitReviewViewMode
   width?: number
   wrapLines?: boolean
@@ -228,12 +243,15 @@ function DiffFixture({
   fileContentState,
   fileStatus = 'modified',
   patch = PATCH_REPLACEMENT_LONG,
+  syntaxHighlightingEnabled = false,
+  syntaxThemeId = 'classic-dark',
   viewMode = 'split',
   width = 420,
   wrapLines = false,
   zoom = 1
 }: DiffFixtureProps): ReactNode {
   const style = {
+    ...getGitReviewSyntaxThemeStyle(syntaxThemeId),
     '--mc-font-size-sm': '12px',
     '--mc-color-border-hairline': 'rgb(72 78 84)',
     '--mc-color-diff-addition-text': 'rgb(156 204 106)',
@@ -252,10 +270,10 @@ function DiffFixture({
       <div className="git-review__diff-card-body" data-testid="diff-viewport">
         <GitReviewDiffRenderer
           diffState={createReadyDiffState(patch)}
+          file={{ ...FIXTURE_FILE, status: fileStatus }}
           fileContentState={fileContentState}
-          fileId="fixture.ts"
-          fileStatus={fileStatus}
           onRequestDiff={() => undefined}
+          syntaxHighlightingEnabled={syntaxHighlightingEnabled}
           t={translate}
           viewMode={viewMode}
           wrapLines={wrapLines}
@@ -732,5 +750,71 @@ describe('GitReviewDiffRenderer line wrapping', () => {
     expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 1)
     expectWidthCloseTo(root.getBoundingClientRect().width, viewport.getBoundingClientRect().width)
     expect(wrappedLine.getBoundingClientRect().height).toBeGreaterThan(unwrappedHeight)
+  })
+})
+
+describe('GitReviewDiffRenderer syntax highlighting', () => {
+  it('adds foreground-only tokens without changing the source text', async () => {
+    const screen = await render(<DiffFixture patch={PATCH_SYNTAX_HIGHLIGHT} viewMode="unified" />)
+    const plainAddedLine = Array.from(
+      screen.container.querySelectorAll<HTMLElement>('.git-review__diff-line--addition')
+    ).find(
+      (line) =>
+        line.querySelector('.git-review__diff-content')?.textContent === 'const answer: number = 42'
+    )
+    if (!plainAddedLine) throw new Error('Expected the plain addition line')
+    const plainRect = plainAddedLine.getBoundingClientRect()
+
+    await screen.rerender(
+      <DiffFixture patch={PATCH_SYNTAX_HIGHLIGHT} syntaxHighlightingEnabled viewMode="unified" />
+    )
+
+    await expect
+      .poll(() => screen.container.querySelectorAll('[data-syntax-highlighted="true"]').length, {
+        timeout: 5_000
+      })
+      .toBeGreaterThan(0)
+
+    const addedLine = Array.from(
+      screen.container.querySelectorAll<HTMLElement>('.git-review__diff-line--addition')
+    ).find(
+      (line) =>
+        line.querySelector('.git-review__diff-content')?.textContent === 'const answer: number = 42'
+    )
+    if (!addedLine) throw new Error('Expected the highlighted addition line')
+    const content = addedLine.querySelector<HTMLElement>('.git-review__diff-content')
+    const tokens = Array.from(addedLine.querySelectorAll<HTMLElement>('[data-syntax-token="true"]'))
+    if (!content) throw new Error('Expected highlighted content')
+
+    expect(content.textContent).toBe('const answer: number = 42')
+    expect(tokens.length).toBeGreaterThan(1)
+    expectWidthCloseTo(addedLine.getBoundingClientRect().width, plainRect.width, 0.1)
+    expectWidthCloseTo(addedLine.getBoundingClientRect().height, plainRect.height, 0.1)
+    expect(new Set(tokens.map((token) => getComputedStyle(token).color)).size).toBeGreaterThan(1)
+    for (const token of tokens) {
+      const style = getComputedStyle(token)
+      expect(style.backgroundColor).toBe('rgba(0, 0, 0, 0)')
+      expect(style.fontStyle).toBe('normal')
+      expect(style.textDecorationLine).toBe('none')
+    }
+
+    const keywordBefore = tokens.find((token) => token.textContent === 'const')
+    if (!keywordBefore) throw new Error('Expected a highlighted keyword token')
+    const colorBefore = getComputedStyle(keywordBefore).color
+
+    await screen.rerender(
+      <DiffFixture
+        patch={PATCH_SYNTAX_HIGHLIGHT}
+        syntaxHighlightingEnabled
+        syntaxThemeId="classic-light"
+        viewMode="unified"
+      />
+    )
+    const keywordAfter = Array.from(
+      screen.container.querySelectorAll<HTMLElement>('[data-syntax-token="true"]')
+    ).find((token) => token.textContent === 'const')
+
+    expect(keywordAfter?.textContent).toBe(keywordBefore.textContent)
+    expect(keywordAfter && getComputedStyle(keywordAfter).color).not.toBe(colorBefore)
   })
 })

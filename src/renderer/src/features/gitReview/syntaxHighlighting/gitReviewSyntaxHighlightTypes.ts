@@ -47,6 +47,7 @@ export type GitReviewHighlightFallbackReason =
 export interface GitReviewHighlightResult {
   cacheKey: string
   language: string
+  /** Complete source coverage for highlighted mode; intentionally empty for plain fallbacks. */
   lines: readonly GitReviewHighlightLine[]
   mode: 'highlighted' | 'plain'
   /** Present when all or part of the document deliberately used plain text. */
@@ -119,8 +120,7 @@ export interface GitReviewHighlightWorkerErrorMessage {
 }
 
 export type GitReviewHighlightWorkerResponse =
-  | GitReviewHighlightWorkerResultMessage
-  | GitReviewHighlightWorkerErrorMessage
+  GitReviewHighlightWorkerResultMessage | GitReviewHighlightWorkerErrorMessage
 
 export interface GitReviewHighlightBudgetAssessment {
   hasOverlongLine: boolean
@@ -191,19 +191,7 @@ export function createPlainGitReviewHighlightResult(
   return {
     cacheKey: input.cacheKey,
     language,
-    lines: input.code.split('\n').map((content, line) => ({
-      line,
-      tokens:
-        content.length === 0
-          ? []
-          : [
-              {
-                content,
-                end: content.length,
-                start: 0
-              }
-            ]
-    })),
+    lines: [],
     mode: 'plain',
     reason
   }
@@ -211,37 +199,60 @@ export function createPlainGitReviewHighlightResult(
 
 /** Defends the renderer boundary even though the worker is packaged with the application. */
 export function isValidGitReviewHighlightResult(
-  result: GitReviewHighlightResult,
+  result: unknown,
   input: GitReviewHighlightInput
-): boolean {
+): result is GitReviewHighlightResult {
+  if (!result || typeof result !== 'object') return false
+  const candidate = result as Partial<GitReviewHighlightResult> & Record<string, unknown>
   if (
-    result.cacheKey !== input.cacheKey ||
-    result.language !== normalizeGitReviewLanguage(input.language) ||
-    (result.mode !== 'highlighted' && result.mode !== 'plain')
+    candidate.cacheKey !== input.cacheKey ||
+    candidate.language !== normalizeGitReviewLanguage(input.language) ||
+    (candidate.mode !== 'highlighted' && candidate.mode !== 'plain') ||
+    !Array.isArray(candidate.lines) ||
+    (candidate.reason !== undefined && !isGitReviewHighlightFallbackReason(candidate.reason)) ||
+    ('html' in candidate && candidate.html !== undefined)
   ) {
     return false
   }
 
-  const sourceLines = input.code.split('\n')
-  if (result.lines.length !== sourceLines.length) return false
+  if (candidate.mode === 'plain') return candidate.lines.length === 0
 
-  return result.lines.every((line, lineIndex) => {
+  const sourceLines = input.code.split('\n')
+  if (candidate.lines.length !== sourceLines.length) return false
+
+  return candidate.lines.every((line: unknown, lineIndex: number) => {
+    if (!line || typeof line !== 'object') return false
+    const candidateLine = line as Partial<GitReviewHighlightLine> & Record<string, unknown>
     const source = sourceLines[lineIndex]
-    if (source === undefined || line.line !== lineIndex) return false
-    if (source.length === 0) return line.tokens.length === 0
+    if (
+      source === undefined ||
+      candidateLine.line !== lineIndex ||
+      !Array.isArray(candidateLine.tokens) ||
+      ('html' in candidateLine && candidateLine.html !== undefined)
+    ) {
+      return false
+    }
+    if (source.length === 0) return candidateLine.tokens.length === 0
 
     let nextColumn = 0
-    for (const token of line.tokens) {
+    for (const token of candidateLine.tokens) {
+      if (!token || typeof token !== 'object') return false
+      const candidateToken = token as Partial<GitReviewHighlightToken> & Record<string, unknown>
       if (
-        token.start !== nextColumn ||
-        token.end !== token.start + token.content.length ||
-        token.end > source.length ||
-        source.slice(token.start, token.end) !== token.content ||
-        (token.color !== undefined && !isGitReviewSyntaxColor(token.color))
+        typeof candidateToken.content !== 'string' ||
+        candidateToken.start !== nextColumn ||
+        typeof candidateToken.end !== 'number' ||
+        candidateToken.end !== candidateToken.start + candidateToken.content.length ||
+        candidateToken.end > source.length ||
+        source.slice(candidateToken.start, candidateToken.end) !== candidateToken.content ||
+        (candidateToken.color !== undefined &&
+          (typeof candidateToken.color !== 'string' ||
+            !isGitReviewSyntaxColor(candidateToken.color))) ||
+        ('html' in candidateToken && candidateToken.html !== undefined)
       ) {
         return false
       }
-      nextColumn = token.end
+      nextColumn = candidateToken.end
     }
     return nextColumn === source.length
   })
@@ -249,6 +260,20 @@ export function isValidGitReviewHighlightResult(
 
 export function isGitReviewSyntaxColor(color: string): color is GitReviewSyntaxColor {
   return TRUSTED_SYNTAX_COLORS.has(color)
+}
+
+function isGitReviewHighlightFallbackReason(
+  reason: unknown
+): reason is GitReviewHighlightFallbackReason {
+  return (
+    reason === 'empty' ||
+    reason === 'plain-language' ||
+    reason === 'unsupported-language' ||
+    reason === 'content-budget' ||
+    reason === 'line-count-budget' ||
+    reason === 'line-length-budget' ||
+    reason === 'worker-error'
+  )
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {

@@ -19,6 +19,7 @@ interface GitReviewHighlightWorkerScope {
 
 const workerScope = self as unknown as GitReviewHighlightWorkerScope
 const cancelledRequests = new Set<string>()
+const knownRequests = new Set<string>()
 let disposed = false
 let queue: Promise<void> = Promise.resolve()
 
@@ -26,7 +27,9 @@ workerScope.addEventListener('message', (event) => {
   const message = event.data
 
   if (message.type === 'cancel') {
-    cancelledRequests.add(requestKey(message.generation, message.requestId))
+    const key = requestKey(message.generation, message.requestId)
+    // Ignore a cancellation that arrives after its request has already posted a result.
+    if (knownRequests.has(key)) cancelledRequests.add(key)
     return
   }
 
@@ -41,6 +44,7 @@ workerScope.addEventListener('message', (event) => {
 
   // A single queue keeps Shiki's mutable grammar registry deterministic while cancellation
   // messages remain immediately observable during asynchronous grammar loading.
+  knownRequests.add(requestKey(message.generation, message.requestId))
   queue = queue.then(
     () => processHighlightRequest(message),
     () => processHighlightRequest(message)
@@ -51,14 +55,13 @@ async function processHighlightRequest(
   message: Extract<GitReviewHighlightWorkerMessage, { type: 'highlight' }>
 ): Promise<void> {
   const key = requestKey(message.generation, message.requestId)
-  if (disposed || cancelledRequests.delete(key)) return
-
   try {
+    if (disposed || cancelledRequests.has(key)) return
     const result = await highlightGitReviewCodeInWorker({
       ...message.input,
       budget: normalizeGitReviewHighlightBudget(message.input.budget)
     })
-    if (disposed || cancelledRequests.delete(key)) return
+    if (disposed || cancelledRequests.has(key)) return
     workerScope.postMessage({
       generation: message.generation,
       requestId: message.requestId,
@@ -66,12 +69,15 @@ async function processHighlightRequest(
       type: 'result'
     })
   } catch {
-    if (disposed || cancelledRequests.delete(key)) return
+    if (disposed || cancelledRequests.has(key)) return
     workerScope.postMessage({
       generation: message.generation,
       requestId: message.requestId,
       type: 'error'
     })
+  } finally {
+    knownRequests.delete(key)
+    cancelledRequests.delete(key)
   }
 }
 

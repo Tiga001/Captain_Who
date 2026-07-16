@@ -1,11 +1,5 @@
-import {
-  createHighlighterCore,
-  type HighlighterCore,
-  type LanguageInput,
-  type ThemeRegistration
-} from 'shiki/core'
+import { createHighlighterCore, type HighlighterCore, type ThemeRegistration } from 'shiki/core'
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript'
-import { bundledLanguages, bundledLanguagesAlias } from 'shiki/langs'
 import {
   assessGitReviewHighlightBudget,
   createPlainGitReviewHighlightResult,
@@ -16,6 +10,7 @@ import {
   type GitReviewHighlightToken,
   type GitReviewHighlightWorkerInput
 } from './gitReviewSyntaxHighlightTypes'
+import { getGitReviewSyntaxLanguageLoader } from './gitReviewSyntaxLanguageLoaders'
 
 const WORKER_THEME_NAME = 'mycopilot-git-review'
 
@@ -40,12 +35,7 @@ const WORKER_THEME: ThemeRegistration = {
       settings: { fontStyle: '', foreground: 'var(--git-review-syntax-comment)' }
     },
     {
-      scope: [
-        'string',
-        'string.quoted',
-        'string.template',
-        'punctuation.definition.string'
-      ],
+      scope: ['string', 'string.quoted', 'string.template', 'punctuation.definition.string'],
       settings: { fontStyle: '', foreground: 'var(--git-review-syntax-string)' }
     },
     {
@@ -112,8 +102,6 @@ const WORKER_THEME: ThemeRegistration = {
 }
 
 const PLAIN_LANGUAGES = new Set(['plain', 'plaintext', 'text', 'txt'])
-const canonicalLanguageLoaders = bundledLanguages as Record<string, LanguageInput>
-const aliasLanguageLoaders = bundledLanguagesAlias as Record<string, LanguageInput>
 
 let highlighterPromise: Promise<HighlighterCore> | undefined
 const loadedLanguageRequests = new Set<string>()
@@ -136,7 +124,7 @@ export async function highlightGitReviewCodeInWorker(
     return createPlainGitReviewHighlightResult(normalizedInput, 'plain-language')
   }
 
-  const languageLoader = canonicalLanguageLoaders[language] ?? aliasLanguageLoaders[language]
+  const languageLoader = getGitReviewSyntaxLanguageLoader(language)
   if (!languageLoader) {
     return createPlainGitReviewHighlightResult(normalizedInput, 'unsupported-language')
   }

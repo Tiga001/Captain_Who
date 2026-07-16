@@ -21,6 +21,10 @@ export default defineConfig({
         '@renderer': resolve('src/renderer/src')
       }
     },
-    plugins: [react()]
+    plugins: [react()],
+    worker: {
+      // Shiki grammars are loaded as split ESM chunks inside the syntax-highlighting worker.
+      format: 'es'
+    }
   }
 })

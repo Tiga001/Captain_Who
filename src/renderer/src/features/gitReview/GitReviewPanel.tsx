@@ -25,6 +25,7 @@ import { GitReviewFileIcon } from './GitReviewFileIcon'
 import { loadGitReviewPreferences, saveGitReviewPreferences } from './gitReviewPreferences'
 import { getTargetGitReviewViewMode } from './gitReviewViewMode'
 import type { GitReviewViewMode } from './gitReviewViewMode'
+import { getGitReviewSyntaxThemeStyle } from './syntaxHighlighting/gitReviewSyntaxThemes'
 import { useGitReview } from './useGitReview'
 import './GitReviewPanel.css'
 
@@ -41,7 +42,7 @@ interface PendingFileAlignment {
 }
 
 export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): ReactNode {
-  const { t } = useFrontendConfig()
+  const { resolvedThemeId, t } = useFrontendConfig()
   const {
     diffStates,
     dismissMutationError,
@@ -301,7 +302,7 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
     targetViewMode === 'split' ? t('gitReview.view.switchSplit') : t('gitReview.view.switchUnified')
 
   return (
-    <div className="git-review">
+    <div className="git-review" style={getGitReviewSyntaxThemeStyle(resolvedThemeId)}>
       <header className="git-review__toolbar">
         <div className="git-review__toolbar-summary">
           <div className="git-review__scope-control">

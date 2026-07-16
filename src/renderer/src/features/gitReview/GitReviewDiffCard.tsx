@@ -99,6 +99,11 @@ export function GitReviewDiffCard({
     diffState?.status === 'ready' &&
     diffState.value.status === 'ready' &&
     (!fileContentState || fileContentState.status === 'idle')
+  const syntaxSourceReady =
+    !loadFullFiles ||
+    !isFullContentEligible(file.status) ||
+    fileContentState?.status === 'ready' ||
+    fileContentState?.status === 'error'
 
   useEffect(() => {
     if (canLoadFullContent && isElementVisibleWithinRoot(cardRef.current, scrollRootRef.current)) {
@@ -206,11 +211,11 @@ export function GitReviewDiffCard({
           <GitReviewDiffRenderer
             diffState={diffState}
             expansionState={expansionState}
+            file={file}
             fileContentState={loadFullFiles ? fileContentState : undefined}
-            fileId={file.id}
-            fileStatus={file.status}
             onRequestDiff={onRequestDiff}
             onExpand={handleExpand}
+            syntaxHighlightingEnabled={isReviewActive && isVisible && syntaxSourceReady}
             t={t}
             viewMode={viewMode}
             wrapLines={wrapLines}

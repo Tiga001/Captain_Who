@@ -6,7 +6,10 @@ import '../GitReviewPanel.css'
 const { loadFileContentSpy } = vi.hoisted(() => ({ loadFileContentSpy: vi.fn() }))
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({ t: (key: string) => key })
+  useFrontendConfig: () => ({
+    resolvedThemeId: 'classic-light',
+    t: (key: string) => key
+  })
 }))
 
 vi.mock('../useGitReview', async () => {
