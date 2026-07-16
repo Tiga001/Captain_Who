@@ -1,0 +1,6 @@
+export * from './buildGitDiffDocument'
+export * from './buildSplitDiffBlocks'
+export * from './gitDiffExpansion'
+export * from './gitDiffTypes'
+export * from './hydrateGitDiffDocument'
+export * from './parseGitPatch'

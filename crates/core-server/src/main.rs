@@ -17,14 +17,15 @@ use mycopilot_core::{AgentUsageClearInput, AgentUsageSummaryInput};
 use mycopilot_protocol_rs::{
     error, success, AgentActionIdRequest, AgentCancelRunRequest, AgentCancelRunResponse,
     AgentFileDraftReadRequest, AgentRejectActionRequest, CorePingRequest, CorePingResponse,
-    CoreShutdownResponse, GitRepositoryInspectRequest, GitReviewFileDiffRequest,
-    GitReviewFileMutationRequest, GitReviewSummaryRequest, JsonRpcId, JsonRpcRequest,
-    AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD,
-    AGENT_CLEAR_USAGE_RECORDS_METHOD, AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD,
-    AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD, AGENT_GET_FILE_WRITE_DIFF_METHOD,
-    AGENT_GET_USAGE_SUMMARY_METHOD, AGENT_LIST_PENDING_ACTIONS_METHOD,
-    AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
-    CORE_PING_METHOD, CORE_SHUTDOWN_METHOD, GIT_GET_REVIEW_FILE_DIFF_METHOD,
+    CoreShutdownResponse, GitRepositoryInspectRequest, GitReviewFileContentRequest,
+    GitReviewFileDiffRequest, GitReviewFileMutationRequest, GitReviewSummaryRequest, JsonRpcId,
+    JsonRpcRequest, AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_ACTION_METHOD,
+    AGENT_CANCEL_RUN_METHOD, AGENT_CLEAR_USAGE_RECORDS_METHOD,
+    AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD, AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
+    AGENT_GET_FILE_WRITE_DIFF_METHOD, AGENT_GET_USAGE_SUMMARY_METHOD,
+    AGENT_LIST_PENDING_ACTIONS_METHOD, AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD,
+    AGENT_START_CONVERSATION_TURN_METHOD, CORE_PING_METHOD, CORE_SHUTDOWN_METHOD,
+    GIT_GET_REVIEW_FILE_CONTENT_METHOD, GIT_GET_REVIEW_FILE_DIFF_METHOD,
     GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD, GIT_MUTATE_REVIEW_FILE_METHOD,
     SEARCH_SEARCH_CHATS_METHOD, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
     STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
@@ -245,6 +246,16 @@ fn handle_request(
             };
             match git_review_service.review_file_diff(&input.snapshot_id, &input.file_id) {
                 Ok(diff) => response_success(request.id, diff),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        GIT_GET_REVIEW_FILE_CONTENT_METHOD => {
+            let input = match parse_params::<GitReviewFileContentRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match git_review_service.review_file_content(&input.snapshot_id, &input.file_id) {
+                Ok(content) => response_success(request.id, content),
                 Err(message) => response_error(Some(request.id), -32000, message),
             }
         }

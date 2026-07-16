@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { GitReviewFile, GitReviewScope } from '@mycopilot/protocol'
 import {
@@ -7,6 +7,7 @@ import {
   ChevronDown,
   Ellipsis,
   FileSearch,
+  FileText,
   FolderOpen,
   ListCollapse,
   LoaderCircle,
@@ -18,9 +19,12 @@ import {
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../config/translationFormat'
 import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
-import { GitDiffCard } from './GitDiffView'
-import type { GitReviewViewMode } from './GitDiffView'
+import { dismissActiveTooltip, Tooltip } from '../../components/overlay/Tooltip'
+import { GitReviewDiffCard } from './GitReviewDiffCard'
 import { GitReviewFileIcon } from './GitReviewFileIcon'
+import { loadGitReviewPreferences, saveGitReviewPreferences } from './gitReviewPreferences'
+import { getTargetGitReviewViewMode } from './gitReviewViewMode'
+import type { GitReviewViewMode } from './gitReviewViewMode'
 import { useGitReview } from './useGitReview'
 import './GitReviewPanel.css'
 
@@ -31,12 +35,19 @@ interface GitReviewPanelProps {
 
 type OpenMenu = 'scope' | 'options' | null
 
+interface PendingFileAlignment {
+  fileId: string
+  token: number
+}
+
 export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): ReactNode {
   const { t } = useFrontendConfig()
   const {
     diffStates,
     dismissMutationError,
+    fileContentStates,
     loadFileDiff,
+    loadFileContent,
     mutateFile,
     mutationError,
     pendingFileId,
@@ -49,24 +60,43 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<GitReviewViewMode>('unified')
   const [wrapLines, setWrapLines] = useState(false)
+  const [reviewPreferences, setReviewPreferences] = useState(loadGitReviewPreferences)
   const [showFileList, setShowFileList] = useState(false)
   const [showSearch, setShowSearch] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null)
   const [restoreCandidate, setRestoreCandidate] = useState<GitReviewFile | null>(null)
-  const panelRef = useRef<HTMLDivElement>(null)
+  const [visibleFileIds, setVisibleFileIds] = useState<Set<string>>(() => new Set())
+  const contentRef = useRef<HTMLDivElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const fileElementsRef = useRef(new Map<string, HTMLElement>())
+  const diffStatesRef = useRef(diffStates)
   const initializedQueryRef = useRef<string | null>(null)
+  const pendingFileAlignmentRef = useRef<PendingFileAlignment | null>(null)
+  const fileAlignmentSequenceRef = useRef(0)
   const files = useMemo(() => summaryState.value?.files ?? [], [summaryState.value])
 
+  const cancelPendingFileAlignment = useCallback(() => {
+    pendingFileAlignmentRef.current = null
+    contentRef.current?.scrollBy({ behavior: 'auto', left: 0, top: 0 })
+  }, [])
+
   useEffect(() => {
-    if (!isActive) setOpenMenu(null)
-  }, [isActive])
+    diffStatesRef.current = diffStates
+  }, [diffStates])
+
+  useEffect(() => {
+    if (!isActive) {
+      setOpenMenu(null)
+      dismissActiveTooltip()
+      cancelPendingFileAlignment()
+    }
+  }, [cancelPendingFileAlignment, isActive])
 
   useEffect(() => {
     setRestoreCandidate(null)
-  }, [projectId, scope])
+    cancelPendingFileAlignment()
+  }, [cancelPendingFileAlignment, projectId, scope])
 
   useEffect(() => {
     if (!openMenu) return
@@ -116,38 +146,125 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
     )
   }, [files, normalizedQuery])
 
+  useEffect(() => {
+    setVisibleFileIds(new Set())
+    if (!isActive) return undefined
+    const root = contentRef.current
+    if (!root) return undefined
+
+    if (typeof IntersectionObserver === 'undefined') {
+      setVisibleFileIds(new Set(filteredFiles.map((file) => file.id)))
+      return undefined
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        setVisibleFileIds((current) => {
+          const next = new Set(current)
+          let changed = false
+          for (const entry of entries) {
+            const fileId = (entry.target as HTMLElement).dataset.reviewFileId
+            if (!fileId) continue
+            const hasVisibleArea =
+              entry.isIntersecting &&
+              entry.intersectionRect.width > 0 &&
+              entry.intersectionRect.height > 0
+            if (hasVisibleArea && !next.has(fileId)) {
+              next.add(fileId)
+              changed = true
+            } else if (!entry.isIntersecting && next.delete(fileId)) {
+              changed = true
+            }
+          }
+          return changed ? next : current
+        })
+      },
+      { root, rootMargin: '0px', threshold: [0, 0.001] }
+    )
+    for (const file of filteredFiles) {
+      const element = fileElementsRef.current.get(file.id)
+      if (element) observer.observe(element)
+    }
+    return () => observer.disconnect()
+  }, [filteredFiles, isActive])
+
   const allExpanded = files.length > 0 && files.every((file) => expandedFileIds.has(file.id))
 
-  const toggleFile = useCallback((fileId: string) => {
-    setExpandedFileIds((current) => {
-      const next = new Set(current)
-      if (next.has(fileId)) next.delete(fileId)
-      else next.add(fileId)
-      return next
-    })
-    setSelectedFileId(fileId)
-  }, [])
+  const toggleFile = useCallback(
+    (fileId: string) => {
+      cancelPendingFileAlignment()
+      setExpandedFileIds((current) => {
+        const next = new Set(current)
+        if (next.has(fileId)) next.delete(fileId)
+        else next.add(fileId)
+        return next
+      })
+      setSelectedFileId(fileId)
+    },
+    [cancelPendingFileAlignment]
+  )
 
   const toggleAllFiles = useCallback(() => {
+    cancelPendingFileAlignment()
     setExpandedFileIds((current) =>
       files.length > 0 && files.every((file) => current.has(file.id))
         ? new Set()
         : new Set(files.map((file) => file.id))
     )
-  }, [files])
+  }, [cancelPendingFileAlignment, files])
 
-  const selectFile = useCallback((fileId: string) => {
-    setSelectedFileId(fileId)
-    setExpandedFileIds((current) => {
-      if (current.has(fileId)) return current
-      const next = new Set(current)
-      next.add(fileId)
-      return next
+  const alignFileHeader = useCallback((fileId: string, behavior: ScrollBehavior): boolean => {
+    const content = contentRef.current
+    const target = fileElementsRef.current.get(fileId)
+    if (!content || !target) return false
+    const contentRect = content.getBoundingClientRect()
+    const targetRect = target.getBoundingClientRect()
+    content.scrollTo({
+      behavior,
+      top: content.scrollTop + targetRect.top - contentRect.top
     })
-    requestAnimationFrame(() => {
-      fileElementsRef.current.get(fileId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    })
+    return true
   }, [])
+
+  const selectFile = useCallback(
+    (fileId: string) => {
+      const token = fileAlignmentSequenceRef.current + 1
+      fileAlignmentSequenceRef.current = token
+      pendingFileAlignmentRef.current = { fileId, token }
+      setSelectedFileId(fileId)
+      setExpandedFileIds((current) => {
+        if (current.has(fileId)) return current
+        const next = new Set(current)
+        next.add(fileId)
+        return next
+      })
+      requestAnimationFrame(() => {
+        const pending = pendingFileAlignmentRef.current
+        if (!pending || pending.token !== token) return
+        alignFileHeader(fileId, 'smooth')
+        const state = diffStatesRef.current[fileId]
+        if (state?.status === 'ready' || state?.status === 'error') {
+          pendingFileAlignmentRef.current = null
+        }
+      })
+    },
+    [alignFileHeader]
+  )
+
+  useEffect(() => {
+    const pending = pendingFileAlignmentRef.current
+    if (!pending) return undefined
+    const state = diffStates[pending.fileId]
+    if (state?.status !== 'ready' && state?.status !== 'error') return undefined
+
+    const animationFrame = requestAnimationFrame(() => {
+      const current = pendingFileAlignmentRef.current
+      if (!current || current.token !== pending.token) return
+      alignFileHeader(current.fileId, 'auto')
+      pendingFileAlignmentRef.current = null
+    })
+    return () => cancelAnimationFrame(animationFrame)
+  }, [alignFileHeader, diffStates])
 
   const handleScopeChange = useCallback(
     (nextScope: GitReviewScope) => {
@@ -179,11 +296,12 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
         }
       )
     : null
+  const targetViewMode = getTargetGitReviewViewMode(viewMode)
   const nextViewLabel =
-    viewMode === 'unified' ? t('gitReview.view.switchSplit') : t('gitReview.view.switchUnified')
+    targetViewMode === 'split' ? t('gitReview.view.switchSplit') : t('gitReview.view.switchUnified')
 
   return (
-    <div className="git-review" ref={panelRef}>
+    <div className="git-review">
       <header className="git-review__toolbar">
         <div className="git-review__toolbar-summary">
           <div className="git-review__scope-control">
@@ -260,6 +378,24 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
                   {t('gitReview.wrapLines')}
                   {wrapLines && <Check className="git-review__menu-check" aria-hidden="true" />}
                 </button>
+                <div className="git-review__menu-separator" role="separator" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setReviewPreferences((current) => {
+                      const next = { ...current, loadFullFiles: !current.loadFullFiles }
+                      saveGitReviewPreferences(next)
+                      return next
+                    })
+                    setOpenMenu(null)
+                  }}
+                >
+                  <FileText aria-hidden="true" />
+                  {reviewPreferences.loadFullFiles
+                    ? t('gitReview.dontLoadFullFiles')
+                    : t('gitReview.loadFullFiles')}
+                </button>
               </div>
             )}
           </div>
@@ -276,11 +412,10 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
             <FileSearch aria-hidden="true" />
           </ToolbarButton>
           <ToolbarButton
-            emphasized
             label={nextViewLabel}
-            onClick={() => setViewMode((current) => (current === 'unified' ? 'split' : 'unified'))}
+            onClick={() => setViewMode((current) => getTargetGitReviewViewMode(current))}
           >
-            <DiffLayoutIcon mode={viewMode} />
+            <DiffLayoutIcon targetMode={targetViewMode} />
           </ToolbarButton>
           <ToolbarButton
             active={showFileList}
@@ -360,22 +495,37 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
           />
         )}
 
-        <div className="git-review__content">
+        <div
+          className="git-review__content"
+          ref={contentRef}
+          onKeyDownCapture={(event) => {
+            if (isManualScrollKey(event.key)) cancelPendingFileAlignment()
+          }}
+          onPointerDownCapture={cancelPendingFileAlignment}
+          onTouchStartCapture={cancelPendingFileAlignment}
+          onWheelCapture={cancelPendingFileAlignment}
+        >
           <GitReviewContent
             diffStates={diffStates}
             expandedFileIds={expandedFileIds}
             fileElementsRef={fileElementsRef}
+            fileContentStates={fileContentStates}
             filteredFiles={filteredFiles}
             hasSearchQuery={Boolean(normalizedQuery)}
+            isActive={isActive}
+            loadFileContent={loadFileContent}
             loadFileDiff={loadFileDiff}
+            loadFullFiles={reviewPreferences.loadFullFiles}
             mutateFile={mutateFile}
             pendingFileId={pendingFileId}
             onRestore={setRestoreCandidate}
             scope={scope}
+            scrollRootRef={contentRef}
             summaryState={summaryState}
             t={t}
             toggleFile={toggleFile}
             viewMode={viewMode}
+            visibleFileIds={visibleFileIds}
             wrapLines={wrapLines}
             onRefresh={refresh}
           />
@@ -412,44 +562,35 @@ interface ToolbarButtonProps {
   active?: boolean
   children: ReactNode
   disabled?: boolean
-  emphasized?: boolean
   label: string
   onClick: () => void
 }
 
-function ToolbarButton({
-  active,
-  children,
-  disabled,
-  emphasized,
-  label,
-  onClick
-}: ToolbarButtonProps) {
-  const tooltipId = useId()
+function ToolbarButton({ active, children, disabled, label, onClick }: ToolbarButtonProps) {
   return (
-    <span className="git-review__toolbar-button-wrap">
+    <Tooltip
+      anchorClassName="git-review__toolbar-button-wrap"
+      content={label}
+      preferredPlacement="bottom"
+    >
       <button
         className="git-review__toolbar-button"
         type="button"
-        aria-describedby={tooltipId}
         aria-label={label}
         aria-pressed={active === undefined ? undefined : active}
-        data-active={active || emphasized ? 'true' : undefined}
+        data-active={active ? 'true' : undefined}
         disabled={disabled}
         onClick={onClick}
       >
         {children}
       </button>
-      <span className="git-review__tooltip" id={tooltipId} role="tooltip">
-        {label}
-      </span>
-    </span>
+    </Tooltip>
   )
 }
 
-function DiffLayoutIcon({ mode }: { mode: GitReviewViewMode }): ReactNode {
+function DiffLayoutIcon({ targetMode }: { targetMode: GitReviewViewMode }): ReactNode {
   return (
-    <span className="git-review__layout-icon" data-mode={mode} aria-hidden="true">
+    <span className="git-review__layout-icon" data-mode={targetMode} aria-hidden="true">
       <span />
       <span />
     </span>
@@ -520,18 +661,24 @@ interface GitReviewContentProps {
   diffStates: ReviewHook['diffStates']
   expandedFileIds: Set<string>
   fileElementsRef: React.MutableRefObject<Map<string, HTMLElement>>
+  fileContentStates: ReviewHook['fileContentStates']
   filteredFiles: GitReviewFile[]
   hasSearchQuery: boolean
+  isActive: boolean
+  loadFileContent: ReviewHook['loadFileContent']
   loadFileDiff: ReviewHook['loadFileDiff']
+  loadFullFiles: boolean
   mutateFile: ReviewHook['mutateFile']
   onRestore: (file: GitReviewFile) => void
   onRefresh: ReviewHook['refresh']
   pendingFileId: string | null
   scope: GitReviewScope
+  scrollRootRef: React.RefObject<HTMLDivElement | null>
   summaryState: ReviewHook['summaryState']
   t: ReturnType<typeof useFrontendConfig>['t']
   toggleFile: (fileId: string) => void
   viewMode: GitReviewViewMode
+  visibleFileIds: Set<string>
   wrapLines: boolean
 }
 
@@ -539,18 +686,24 @@ function GitReviewContent({
   diffStates,
   expandedFileIds,
   fileElementsRef,
+  fileContentStates,
   filteredFiles,
   hasSearchQuery,
+  isActive,
+  loadFileContent,
   loadFileDiff,
+  loadFullFiles,
   mutateFile,
   onRestore,
   onRefresh,
   pendingFileId,
   scope,
+  scrollRootRef,
   summaryState,
   t,
   toggleFile,
   viewMode,
+  visibleFileIds,
   wrapLines
 }: GitReviewContentProps): ReactNode {
   if (
@@ -607,25 +760,32 @@ function GitReviewContent({
     <div className="git-review__diff-list">
       {filteredFiles.map((file) => (
         <div
+          data-review-file-id={file.id}
           key={file.id}
           ref={(element) => {
             if (element) fileElementsRef.current.set(file.id, element)
             else fileElementsRef.current.delete(file.id)
           }}
         >
-          <GitDiffCard
+          <GitReviewDiffCard
             diffState={diffStates[file.id]}
             file={file}
+            fileContentState={fileContentStates[file.id]}
             isExpanded={expandedFileIds.has(file.id)}
+            isReviewActive={isActive}
+            isVisible={visibleFileIds.has(file.id)}
+            loadFullFiles={loadFullFiles}
             mutationLocked={pendingFileId !== null}
             mutationPending={pendingFileId === file.id}
             onMutate={(fileId, action) => {
               void mutateFile(fileId, action).catch(() => undefined)
             }}
             onRequestDiff={loadFileDiff}
+            onRequestFileContent={loadFileContent}
             onRestore={onRestore}
             onToggle={toggleFile}
             scope={scope}
+            scrollRootRef={scrollRootRef}
             t={t}
             viewMode={viewMode}
             wrapLines={wrapLines}
@@ -639,4 +799,16 @@ function GitReviewContent({
 function setsEqual(left: Set<string>, right: Set<string>): boolean {
   if (left.size !== right.size) return false
   return [...left].every((value) => right.has(value))
+}
+
+function isManualScrollKey(key: string): boolean {
+  return (
+    key === ' ' ||
+    key === 'ArrowDown' ||
+    key === 'ArrowUp' ||
+    key === 'End' ||
+    key === 'Home' ||
+    key === 'PageDown' ||
+    key === 'PageUp'
+  )
 }

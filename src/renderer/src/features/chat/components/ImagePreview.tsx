@@ -10,10 +10,9 @@ import {
   type ReactNode,
   type WheelEvent as ReactWheelEvent
 } from 'react'
-import { Copy, Download, Minus, Plus, X } from 'lucide-react'
+import { Download, Minus, Plus, X } from 'lucide-react'
 import { useToast } from '../../../components/toast/ToastContext'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
-import { hostClient } from '../../../host/hostClient'
 import './ImagePreview.css'
 
 interface ImagePreviewInput {
@@ -26,17 +25,10 @@ interface ImagePreviewContextValue {
   openImagePreview: (input: ImagePreviewInput) => void
 }
 
-type CopyState = 'idle' | 'copying' | 'copied' | 'failed'
-
-interface ContextMenuState {
-  x: number
-  y: number
-}
-
 const MIN_ZOOM = 0.25
 const MAX_ZOOM = 4
 const ZOOM_STEP = 0.25
-const MAX_CLIPBOARD_IMAGE_BYTES = 16 * 1024 * 1024
+const MAX_DOWNLOAD_IMAGE_BYTES = 16 * 1024 * 1024
 
 const ImagePreviewContext = createContext<ImagePreviewContextValue | null>(null)
 
@@ -90,35 +82,14 @@ async function fetchImageBlob(src: string) {
     throw new Error(`Image request failed with status ${response.status}`)
   }
   const contentLength = Number(response.headers.get('content-length') ?? '')
-  if (Number.isFinite(contentLength) && contentLength > MAX_CLIPBOARD_IMAGE_BYTES) {
+  if (Number.isFinite(contentLength) && contentLength > MAX_DOWNLOAD_IMAGE_BYTES) {
     throw new Error('Image is too large')
   }
   const blob = await response.blob()
-  if (blob.size === 0 || blob.size > MAX_CLIPBOARD_IMAGE_BYTES) {
+  if (blob.size === 0 || blob.size > MAX_DOWNLOAD_IMAGE_BYTES) {
     throw new Error('Image is empty or too large')
   }
   return blob
-}
-
-function blobToDataUrl(blob: Blob) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        resolve(reader.result)
-      } else {
-        reject(new Error('Unable to read image data'))
-      }
-    }
-    reader.onerror = () => reject(reader.error ?? new Error('Unable to read image data'))
-    reader.readAsDataURL(blob)
-  })
-}
-
-async function copyImageWithHostClipboard(src: string) {
-  const blob = await fetchImageBlob(src)
-  const dataUrl = await blobToDataUrl(blob)
-  await hostClient.clipboard.writeImage({ dataUrl })
 }
 
 export function ImagePreviewProvider({ children }: { children: ReactNode }) {
@@ -127,26 +98,19 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const [preview, setPreview] = useState<ImagePreviewInput | null>(null)
   const [zoom, setZoom] = useState(1)
-  const [copyState, setCopyState] = useState<CopyState>('idle')
-  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
 
   const openImagePreview = useCallback((input: ImagePreviewInput) => {
     if (!input.src) return
     setPreview(input)
     setZoom(1)
-    setCopyState('idle')
-    setContextMenu(null)
   }, [])
 
   const closeImagePreview = useCallback(() => {
     setPreview(null)
-    setCopyState('idle')
-    setContextMenu(null)
   }, [])
 
   const showImagePreviewNotice = useCallback(
     (message: string) => {
-      setCopyState('idle')
       showToast(message)
     },
     [showToast]
@@ -192,33 +156,6 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
     }
   }, [preview])
 
-  const copyImageToClipboard = useCallback(
-    async (src: string) => {
-      if (!src || copyState === 'copying') return false
-      setCopyState('copying')
-      setContextMenu(null)
-      showToast(t('imagePreview.copying'), { durationMs: 1000 })
-
-      try {
-        await copyImageWithHostClipboard(src)
-        setCopyState('copied')
-        showToast(t('imagePreview.copied'))
-        return true
-      } catch (error) {
-        console.error('Failed to copy image', error)
-        setCopyState('failed')
-        showToast(t('imagePreview.copyFailed'))
-        return false
-      }
-    },
-    [copyState, showToast, t]
-  )
-
-  const copyImage = useCallback(async () => {
-    if (!preview) return
-    await copyImageToClipboard(preview.src)
-  }, [copyImageToClipboard, preview])
-
   const value = useMemo(() => ({ openImagePreview }), [openImagePreview])
 
   useEffect(() => {
@@ -230,11 +167,6 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
     if (!preview) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
-        event.preventDefault()
-        void copyImageToClipboard(preview.src)
-        return
-      }
       if (event.key === 'Escape') {
         event.preventDefault()
         closeImagePreview()
@@ -258,40 +190,21 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [closeImagePreview, copyImageToClipboard, preview, resetZoom, zoomIn, zoomOut])
-
-  useEffect(() => {
-    if (copyState !== 'copied' && copyState !== 'failed') return
-    const timeoutId = window.setTimeout(() => setCopyState('idle'), 1600)
-    return () => window.clearTimeout(timeoutId)
-  }, [copyState])
+  }, [closeImagePreview, preview, resetZoom, zoomIn, zoomOut])
 
   const handleBackdropMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
-    setContextMenu(null)
     if (event.currentTarget === event.target) {
       closeImagePreview()
     }
   }
 
-  const handleImageContextMenu = (event: ReactMouseEvent<HTMLImageElement>) => {
-    event.preventDefault()
-    const menuWidth = 170
-    const menuHeight = 56
-    setContextMenu({
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8))
-    })
-  }
-
   const handlePreviewImageError = () => {
     setPreview(null)
-    setContextMenu(null)
     showImagePreviewNotice(t('imagePreview.originalMissing'))
   }
 
   const handleWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
     event.preventDefault()
-    setContextMenu(null)
     setZoom((currentZoom) => clampZoom(currentZoom + (event.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP)))
   }
 
@@ -338,7 +251,6 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
               alt={preview.alt || ''}
               className="image-preview__image"
               draggable={false}
-              onContextMenu={handleImageContextMenu}
               onError={handlePreviewImageError}
               src={preview.src}
               style={{ transform: `scale(${zoom})` }}
@@ -371,18 +283,6 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
             </button>
           </div>
 
-          {contextMenu && (
-            <div
-              className="image-preview__context-menu"
-              onMouseDown={(event) => event.stopPropagation()}
-              style={{ left: contextMenu.x, top: contextMenu.y }}
-            >
-              <button onClick={copyImage} type="button">
-                <Copy aria-hidden="true" />
-                <span>{t('imagePreview.copy')}</span>
-              </button>
-            </div>
-          )}
         </div>
       )}
     </ImagePreviewContext.Provider>

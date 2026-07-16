@@ -25,6 +25,8 @@ import type {
   CoreShutdownResponse,
   GitRepositoryInspectInput,
   GitRepositoryInspection,
+  GitReviewFileContent,
+  GitReviewFileContentInput,
   GitReviewFileDiff,
   GitReviewFileDiffInput,
   GitReviewFileMutation,
@@ -70,6 +72,7 @@ const SEARCH_SEARCH_CHATS_METHOD = 'search.searchChats'
 const GIT_INSPECT_REPOSITORY_METHOD = 'git.inspectRepository'
 const GIT_GET_REVIEW_SUMMARY_METHOD = 'git.getReviewSummary'
 const GIT_GET_REVIEW_FILE_DIFF_METHOD = 'git.getReviewFileDiff'
+const GIT_GET_REVIEW_FILE_CONTENT_METHOD = 'git.getReviewFileContent'
 const GIT_MUTATE_REVIEW_FILE_METHOD = 'git.mutateReviewFile'
 const STORAGE_LOAD_MODEL_SETTINGS_METHOD = 'storage.loadModelSettings'
 const STORAGE_SAVE_MODEL_SETTINGS_METHOD = 'storage.saveModelSettings'
@@ -240,6 +243,13 @@ export class CoreServer {
   getGitReviewFileDiff(input: GitReviewFileDiffInput): Promise<GitReviewFileDiff> {
     return this.rpc.request<GitReviewFileDiff, GitReviewFileDiffInput>(
       GIT_GET_REVIEW_FILE_DIFF_METHOD,
+      input
+    )
+  }
+
+  getGitReviewFileContent(input: GitReviewFileContentInput): Promise<GitReviewFileContent> {
+    return this.rpc.request<GitReviewFileContent, GitReviewFileContentInput>(
+      GIT_GET_REVIEW_FILE_CONTENT_METHOD,
       input
     )
   }

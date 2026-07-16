@@ -26,6 +26,8 @@ import type {
   CorePingResponse,
   GitRepositoryInspectInput,
   GitRepositoryInspection,
+  GitReviewFileContent,
+  GitReviewFileContentInput,
   GitReviewFileDiff,
   GitReviewFileDiffInput,
   GitReviewFileMutation,
@@ -115,6 +117,7 @@ export interface GitHostApi {
   inspectRepository(input: GitRepositoryInspectInput): Promise<GitRepositoryInspection>
   getReviewSummary(input: GitReviewSummaryInput): Promise<GitReviewSummary>
   getReviewFileDiff(input: GitReviewFileDiffInput): Promise<GitReviewFileDiff>
+  getReviewFileContent(input: GitReviewFileContentInput): Promise<GitReviewFileContent>
   mutateReviewFile(input: GitReviewFileMutationInput): Promise<GitReviewFileMutation>
 }
 
@@ -151,15 +154,6 @@ export interface AgentHostApi {
   onEvent(handler: (event: AgentEvent) => void): () => void
 }
 
-export interface ClipboardHostApi {
-  writeImage(input: { dataUrl: string }): Promise<{
-    formats: string[]
-    width: number
-    height: number
-    method: string
-  }>
-}
-
 export type NativeThemeSource = 'system' | 'light' | 'dark'
 
 export interface AppWindowState {
@@ -180,7 +174,6 @@ export interface HostApi {
   agent: AgentHostApi
   attachments: AttachmentsHostApi
   browser: BrowserHostApi
-  clipboard: ClipboardHostApi
   git: GitHostApi
   resources: ResourcesHostApi
   search: SearchHostApi

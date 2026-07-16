@@ -69,13 +69,11 @@ const host: HostApi = {
   browser: {
     clearBrowsingData: () => ipcRenderer.invoke('host:browser.clearBrowsingData')
   },
-  clipboard: {
-    writeImage: (input) => ipcRenderer.invoke('host:clipboard.writeImage', input)
-  },
   git: {
     inspectRepository: (input) => ipcRenderer.invoke('host:git.inspectRepository', input),
     getReviewSummary: (input) => ipcRenderer.invoke('host:git.getReviewSummary', input),
     getReviewFileDiff: (input) => ipcRenderer.invoke('host:git.getReviewFileDiff', input),
+    getReviewFileContent: (input) => ipcRenderer.invoke('host:git.getReviewFileContent', input),
     mutateReviewFile: (input) => ipcRenderer.invoke('host:git.mutateReviewFile', input)
   },
   resources: {

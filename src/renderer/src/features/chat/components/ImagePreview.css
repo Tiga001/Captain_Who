@@ -39,15 +39,13 @@
 
 .image-preview__icon-button:hover,
 .image-preview__zoom-button:hover,
-.image-preview__zoom-value:hover,
-.image-preview__context-menu button:hover {
+.image-preview__zoom-value:hover {
   background: var(--mc-color-media-viewer-control-hover);
 }
 
 .image-preview__icon-button:focus-visible,
 .image-preview__zoom-button:focus-visible,
-.image-preview__zoom-value:focus-visible,
-.image-preview__context-menu button:focus-visible {
+.image-preview__zoom-value:focus-visible {
   outline: 2px solid var(--mc-color-media-viewer-focus-ring);
   outline-offset: 2px;
 }
@@ -114,40 +112,6 @@
   font-size: 18px;
   font-weight: var(--mc-font-weight-strong);
   line-height: 1;
-}
-
-.image-preview__context-menu {
-  position: fixed;
-  z-index: 4;
-  min-width: 150px;
-  padding: 6px;
-  background: var(--mc-color-media-viewer-menu-background);
-  border: 1px solid var(--mc-color-media-viewer-menu-border);
-  border-radius: var(--mc-radius-lg);
-  box-shadow: var(--mc-shadow-media-viewer-menu);
-}
-
-.image-preview__context-menu button {
-  display: flex;
-  width: 100%;
-  min-height: 36px;
-  align-items: center;
-  padding: 0 10px;
-  gap: 9px;
-  color: var(--mc-color-media-viewer-foreground);
-  text-align: left;
-  background: transparent;
-  border: 0;
-  border-radius: var(--mc-radius-sm);
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--mc-font-size-sm);
-}
-
-.image-preview__context-menu svg {
-  width: 17px;
-  height: 17px;
-  flex: 0 0 auto;
 }
 
 @media (max-width: 720px) {

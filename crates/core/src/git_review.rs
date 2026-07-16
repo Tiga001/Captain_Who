@@ -18,6 +18,9 @@ const MAX_STATUS_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NUMSTAT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_UNTRACKED_STATS_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DIFF_BYTES: usize = 512 * 1024;
+const MAX_FULL_CONTENT_SIDE_BYTES: usize = 1024 * 1024;
+const MAX_FULL_CONTENT_SIDE_LINES: usize = 100_000;
+const MAX_FULL_CONTENT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 const MAX_REVIEW_FILES: usize = 500;
 
@@ -133,6 +136,26 @@ pub struct GitReviewFileDiff {
     pub status: GitReviewFileDiffStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub patch: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitReviewFileContentStatus {
+    Ready,
+    Binary,
+    TooLarge,
+    Unsupported,
+    SnapshotExpired,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReviewFileContent {
+    pub snapshot_id: String,
+    pub file_id: String,
+    pub status: GitReviewFileContentStatus,
+    pub before_text: Option<String>,
+    pub after_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -390,6 +413,35 @@ impl GitReviewService {
             status: GitReviewFileDiffStatus::Ready,
             patch: Some(patch),
         })
+    }
+
+    pub fn review_file_content(
+        &self,
+        snapshot_id: &str,
+        file_id: &str,
+    ) -> Result<GitReviewFileContent, String> {
+        let snapshot = self
+            .snapshots
+            .lock()
+            .map_err(|_| "Git review snapshot cache is unavailable.".to_string())?
+            .get(snapshot_id);
+        let Some(snapshot) = snapshot else {
+            return Ok(expired_content(snapshot_id, file_id));
+        };
+        let Some(file) = snapshot.files.get(file_id).cloned() else {
+            return Ok(expired_content(snapshot_id, file_id));
+        };
+
+        if !snapshot_file_is_current(&snapshot, &file)? {
+            return Ok(expired_content(snapshot_id, file_id));
+        }
+
+        let loaded = load_review_file_content(&snapshot, &file)?;
+        if !snapshot_file_is_current(&snapshot, &file)? {
+            return Ok(expired_content(snapshot_id, file_id));
+        }
+
+        Ok(content_response(snapshot_id, file_id, loaded))
     }
 
     pub fn mutate_review_file(
@@ -984,6 +1036,519 @@ fn snapshot_file_is_current(snapshot: &Snapshot, file: &SnapshotFile) -> Result<
                 && previous_path_is_current)))
 }
 
+#[derive(Debug)]
+enum LoadedReviewContent {
+    Ready {
+        before_text: Option<String>,
+        after_text: Option<String>,
+    },
+    Binary,
+    TooLarge,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SideRequirement {
+    Absent,
+    Optional,
+    Required,
+}
+
+#[derive(Debug)]
+enum SideContent {
+    Missing,
+    Bytes(Vec<u8>),
+    TooLarge,
+    Unsupported,
+}
+
+#[derive(Debug)]
+enum RepositoryEntry {
+    Blob(String),
+    Gitlink,
+    Unsupported,
+}
+
+fn load_review_file_content(
+    snapshot: &Snapshot,
+    file: &SnapshotFile,
+) -> Result<LoadedReviewContent, String> {
+    if file.status == GitReviewFileStatus::Conflicted {
+        return Ok(LoadedReviewContent::Unsupported);
+    }
+
+    let before_path = if matches!(
+        file.status,
+        GitReviewFileStatus::Renamed | GitReviewFileStatus::Copied
+    ) {
+        file.previous_path.as_deref().unwrap_or(&file.path)
+    } else {
+        &file.path
+    };
+    let before_requirement = match (snapshot.scope, file.status) {
+        (_, GitReviewFileStatus::Untracked)
+        | (GitReviewScope::Staged, GitReviewFileStatus::Added) => SideRequirement::Absent,
+        (GitReviewScope::Unstaged, GitReviewFileStatus::Added) => SideRequirement::Optional,
+        _ => SideRequirement::Required,
+    };
+    let after_requirement = if file.status == GitReviewFileStatus::Deleted {
+        SideRequirement::Absent
+    } else {
+        SideRequirement::Required
+    };
+
+    // Git's review boundary is HEAD -> index for staged changes and index -> worktree for
+    // unstaged changes. Object sides are read by validated OID; the worktree side is read without
+    // following repository-controlled symlinks.
+    let before = match (snapshot.scope, before_requirement) {
+        (_, SideRequirement::Absent) => SideContent::Missing,
+        (GitReviewScope::Staged, requirement) => {
+            let entry = if snapshot.head_oid.is_empty() {
+                None
+            } else {
+                head_entry(&snapshot.repository, &snapshot.head_oid, before_path)?
+            };
+            load_repository_entry(&snapshot.repository, entry, requirement)?
+        }
+        (GitReviewScope::Unstaged, requirement) => {
+            let entry = index_entry(&snapshot.repository, before_path)?;
+            load_repository_entry(&snapshot.repository, entry, requirement)?
+        }
+    };
+    let after = match (snapshot.scope, after_requirement) {
+        (_, SideRequirement::Absent) => SideContent::Missing,
+        (GitReviewScope::Staged, requirement) => {
+            let entry = index_entry(&snapshot.repository, &file.path)?;
+            load_repository_entry(&snapshot.repository, entry, requirement)?
+        }
+        (GitReviewScope::Unstaged, _) => read_worktree_content(&snapshot.repository, &file.path),
+    };
+
+    Ok(normalize_review_content(before, after))
+}
+
+fn load_repository_entry(
+    repository: &RepositoryContext,
+    entry: Option<RepositoryEntry>,
+    requirement: SideRequirement,
+) -> Result<SideContent, String> {
+    match entry {
+        Some(RepositoryEntry::Blob(oid)) => read_blob_content(repository, &oid),
+        Some(RepositoryEntry::Gitlink | RepositoryEntry::Unsupported) => {
+            Ok(SideContent::Unsupported)
+        }
+        None if matches!(requirement, SideRequirement::Optional) => Ok(SideContent::Missing),
+        None => Ok(SideContent::Unsupported),
+    }
+}
+
+fn head_entry(
+    repository: &RepositoryContext,
+    head_oid: &str,
+    path: &str,
+) -> Result<Option<RepositoryEntry>, String> {
+    let args = vec![
+        "ls-tree".to_string(),
+        "-z".to_string(),
+        "--full-tree".to_string(),
+        head_oid.to_string(),
+        "--".to_string(),
+        literal_pathspec(path),
+    ];
+    let output = run_git(&repository.root, &args, 128 * 1024)?;
+    if !output.status.success() {
+        return Err(git_failure("Unable to read the Git tree.", &output));
+    }
+    if output.stdout_truncated {
+        return Err("The Git tree entry is too large to read safely.".to_string());
+    }
+    parse_tree_entry(&output.stdout, path)
+}
+
+fn parse_tree_entry(output: &[u8], expected_path: &str) -> Result<Option<RepositoryEntry>, String> {
+    let mut matched = None;
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            return Err("Git returned an invalid tree entry.".to_string());
+        };
+        if &record[tab + 1..] != expected_path.as_bytes() {
+            continue;
+        }
+        if matched.is_some() {
+            return Ok(Some(RepositoryEntry::Unsupported));
+        }
+        let metadata = std::str::from_utf8(&record[..tab])
+            .map_err(|_| "Git returned an invalid tree entry.".to_string())?;
+        let fields = metadata.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3 {
+            return Err("Git returned an invalid tree entry.".to_string());
+        }
+        matched = Some(classify_repository_entry(
+            fields[0],
+            Some(fields[1]),
+            fields[2],
+        ));
+    }
+    Ok(matched)
+}
+
+fn index_entry(
+    repository: &RepositoryContext,
+    path: &str,
+) -> Result<Option<RepositoryEntry>, String> {
+    let args = vec![
+        "ls-files".to_string(),
+        "--stage".to_string(),
+        "-z".to_string(),
+        "--".to_string(),
+        literal_pathspec(path),
+    ];
+    let output = run_git(&repository.root, &args, 128 * 1024)?;
+    if !output.status.success() {
+        return Err(git_failure("Unable to read the Git index.", &output));
+    }
+    if output.stdout_truncated {
+        return Err("The Git index entry is too large to read safely.".to_string());
+    }
+    parse_index_entry(&output.stdout, path)
+}
+
+fn parse_index_entry(
+    output: &[u8],
+    expected_path: &str,
+) -> Result<Option<RepositoryEntry>, String> {
+    let mut matched = None;
+    let mut saw_nonzero_stage = false;
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            return Err("Git returned an invalid index entry.".to_string());
+        };
+        if &record[tab + 1..] != expected_path.as_bytes() {
+            continue;
+        }
+        let metadata = std::str::from_utf8(&record[..tab])
+            .map_err(|_| "Git returned an invalid index entry.".to_string())?;
+        let fields = metadata.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3 {
+            return Err("Git returned an invalid index entry.".to_string());
+        }
+        if fields[2] != "0" {
+            saw_nonzero_stage = true;
+            continue;
+        }
+        if matched.is_some() {
+            return Ok(Some(RepositoryEntry::Unsupported));
+        }
+        matched = Some(classify_repository_entry(fields[0], None, fields[1]));
+    }
+    if matched.is_none() && saw_nonzero_stage {
+        return Ok(Some(RepositoryEntry::Unsupported));
+    }
+    Ok(matched)
+}
+
+fn classify_repository_entry(mode: &str, kind: Option<&str>, oid: &str) -> RepositoryEntry {
+    if mode == "160000" {
+        return RepositoryEntry::Gitlink;
+    }
+    if !matches!(mode, "100644" | "100755" | "120000")
+        || kind.is_some_and(|value| value != "blob")
+        || !is_full_object_id(oid)
+    {
+        return RepositoryEntry::Unsupported;
+    }
+    RepositoryEntry::Blob(oid.to_string())
+}
+
+fn is_full_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn read_blob_content(repository: &RepositoryContext, oid: &str) -> Result<SideContent, String> {
+    let output = run_git(
+        &repository.root,
+        &["cat-file".to_string(), "blob".to_string(), oid.to_string()],
+        MAX_FULL_CONTENT_SIDE_BYTES,
+    )?;
+    if !output.status.success() {
+        return Err(git_failure("Unable to read a Git file object.", &output));
+    }
+    if output.stdout_truncated {
+        return Ok(SideContent::TooLarge);
+    }
+    Ok(SideContent::Bytes(output.stdout))
+}
+
+fn read_worktree_content(repository: &RepositoryContext, path: &str) -> SideContent {
+    if !is_safe_repository_path(path) {
+        return SideContent::Unsupported;
+    }
+    read_worktree_content_platform(&repository.root, path).unwrap_or(SideContent::Unsupported)
+}
+
+#[cfg(unix)]
+fn read_worktree_content_platform(
+    repository_root: &Path,
+    path: &str,
+) -> std::io::Result<SideContent> {
+    use std::ffi::{CString, OsStr};
+    use std::mem::MaybeUninit;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fn component_name(component: &OsStr) -> std::io::Result<CString> {
+        CString::new(component.as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    }
+
+    fn open_directory_at(parent: &File, name: &CString) -> std::io::Result<File> {
+        // SAFETY: `parent` owns a live directory descriptor and `name` is NUL-free for this call.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: a successful `openat` returns a new descriptor whose ownership transfers here.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    let components = Path::new(path)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name),
+            Component::CurDir => None,
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some((file_name, parent_components)) = components.split_last() else {
+        return Ok(SideContent::Unsupported);
+    };
+
+    let mut directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(repository_root)?;
+    for component in parent_components {
+        directory = open_directory_at(&directory, &component_name(component)?)?;
+    }
+    let file_name = component_name(file_name)?;
+    let mut metadata = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the descriptor and CString are live, and `metadata` points to writable storage.
+    let metadata_result = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            file_name.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if metadata_result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fstatat` succeeded and initialized the entire `stat` value.
+    let metadata = unsafe { metadata.assume_init() };
+    let file_type = metadata.st_mode & libc::S_IFMT;
+
+    if file_type == libc::S_IFLNK {
+        let mut bytes = Vec::<u8>::with_capacity(MAX_FULL_CONTENT_SIDE_BYTES + 1);
+        // SAFETY: the buffer has the advertised capacity and `readlinkat` writes at most that many
+        // bytes without adding a terminator.
+        let read = unsafe {
+            libc::readlinkat(
+                directory.as_raw_fd(),
+                file_name.as_ptr(),
+                bytes.as_mut_ptr().cast(),
+                bytes.capacity(),
+            )
+        };
+        if read < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `readlinkat` reported exactly how many bytes it initialized in the buffer.
+        unsafe { bytes.set_len(read as usize) };
+        return if bytes.len() > MAX_FULL_CONTENT_SIDE_BYTES {
+            Ok(SideContent::TooLarge)
+        } else {
+            Ok(SideContent::Bytes(bytes))
+        };
+    }
+    if file_type != libc::S_IFREG {
+        return Ok(SideContent::Unsupported);
+    }
+
+    // SAFETY: the directory descriptor and NUL-free CString remain valid for this call.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            file_name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a successful `openat` returns a new descriptor whose ownership transfers here.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let mut bytes = Vec::new();
+    file.take((MAX_FULL_CONTENT_SIDE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_FULL_CONTENT_SIDE_BYTES {
+        Ok(SideContent::TooLarge)
+    } else {
+        Ok(SideContent::Bytes(bytes))
+    }
+}
+
+#[cfg(not(unix))]
+fn read_worktree_content_platform(
+    repository_root: &Path,
+    path: &str,
+) -> std::io::Result<SideContent> {
+    let target = repository_root.join(path);
+    let parent = target
+        .parent()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?
+        .canonicalize()?;
+    if !parent.starts_with(repository_root) {
+        return Ok(SideContent::Unsupported);
+    }
+    let metadata = fs::symlink_metadata(&target)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(match fs::read_link(&target)?.to_str() {
+            Some(value) if value.len() <= MAX_FULL_CONTENT_SIDE_BYTES => {
+                SideContent::Bytes(value.as_bytes().to_vec())
+            }
+            Some(_) => SideContent::TooLarge,
+            None => SideContent::Unsupported,
+        });
+    }
+    if !metadata.is_file() {
+        return Ok(SideContent::Unsupported);
+    }
+    let resolved = target.canonicalize()?;
+    if !resolved.starts_with(repository_root) {
+        return Ok(SideContent::Unsupported);
+    }
+    let mut bytes = Vec::new();
+    OpenOptions::new()
+        .read(true)
+        .open(resolved)?
+        .take((MAX_FULL_CONTENT_SIDE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_FULL_CONTENT_SIDE_BYTES {
+        Ok(SideContent::TooLarge)
+    } else {
+        Ok(SideContent::Bytes(bytes))
+    }
+}
+
+fn normalize_review_content(before: SideContent, after: SideContent) -> LoadedReviewContent {
+    if matches!(before, SideContent::TooLarge) || matches!(after, SideContent::TooLarge) {
+        return LoadedReviewContent::TooLarge;
+    }
+    if matches!(before, SideContent::Unsupported) || matches!(after, SideContent::Unsupported) {
+        return LoadedReviewContent::Unsupported;
+    }
+
+    let before = match before {
+        SideContent::Missing => None,
+        SideContent::Bytes(bytes) => Some(bytes),
+        SideContent::TooLarge | SideContent::Unsupported => unreachable!(),
+    };
+    let after = match after {
+        SideContent::Missing => None,
+        SideContent::Bytes(bytes) => Some(bytes),
+        SideContent::TooLarge | SideContent::Unsupported => unreachable!(),
+    };
+    let total_bytes = before.as_ref().map_or(0, Vec::len) + after.as_ref().map_or(0, Vec::len);
+    if total_bytes > MAX_FULL_CONTENT_TOTAL_BYTES {
+        return LoadedReviewContent::TooLarge;
+    }
+    if before
+        .iter()
+        .chain(after.iter())
+        .any(|bytes| bytes.contains(&0))
+    {
+        return LoadedReviewContent::Binary;
+    }
+    if before
+        .iter()
+        .chain(after.iter())
+        .any(|bytes| review_line_count(bytes) > MAX_FULL_CONTENT_SIDE_LINES)
+    {
+        return LoadedReviewContent::TooLarge;
+    }
+
+    let before_text = match before {
+        Some(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => Some(text),
+            Err(_) => return LoadedReviewContent::Unsupported,
+        },
+        None => None,
+    };
+    let after_text = match after {
+        Some(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => Some(text),
+            Err(_) => return LoadedReviewContent::Unsupported,
+        },
+        None => None,
+    };
+    LoadedReviewContent::Ready {
+        before_text,
+        after_text,
+    }
+}
+
+fn review_line_count(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|byte| **byte == b'\n').count()
+        + usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"))
+}
+
+fn content_response(
+    snapshot_id: &str,
+    file_id: &str,
+    loaded: LoadedReviewContent,
+) -> GitReviewFileContent {
+    let (status, before_text, after_text) = match loaded {
+        LoadedReviewContent::Ready {
+            before_text,
+            after_text,
+        } => (GitReviewFileContentStatus::Ready, before_text, after_text),
+        LoadedReviewContent::Binary => (GitReviewFileContentStatus::Binary, None, None),
+        LoadedReviewContent::TooLarge => (GitReviewFileContentStatus::TooLarge, None, None),
+        LoadedReviewContent::Unsupported => (GitReviewFileContentStatus::Unsupported, None, None),
+    };
+    GitReviewFileContent {
+        snapshot_id: snapshot_id.to_string(),
+        file_id: file_id.to_string(),
+        status,
+        before_text,
+        after_text,
+    }
+}
+
+fn expired_content(snapshot_id: &str, file_id: &str) -> GitReviewFileContent {
+    GitReviewFileContent {
+        snapshot_id: snapshot_id.to_string(),
+        file_id: file_id.to_string(),
+        status: GitReviewFileContentStatus::SnapshotExpired,
+        before_text: None,
+        after_text: None,
+    }
+}
+
 fn expired_diff(snapshot_id: &str, file_id: &str) -> GitReviewFileDiff {
     GitReviewFileDiff {
         snapshot_id: snapshot_id.to_string(),
@@ -1222,6 +1787,8 @@ fn run_git(cwd: &Path, args: &[String], stdout_limit: usize) -> Result<GitOutput
         .env("LANG", "C")
         .env("LANGUAGE", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
+        // A repository-controlled replacement ref must not redirect a validated object ID.
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .env("GIT_PAGER", "cat")
         .env("PAGER", "cat")
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -1418,6 +1985,17 @@ mod tests {
     }
 
     #[test]
+    fn full_content_response_serializes_nullable_sides_and_camel_case_status() {
+        let value = serde_json::to_value(expired_content("snapshot", "file")).unwrap();
+
+        assert_eq!(value["snapshotId"], "snapshot");
+        assert_eq!(value["fileId"], "file");
+        assert_eq!(value["status"], "snapshotExpired");
+        assert!(value["beforeText"].is_null());
+        assert!(value["afterText"].is_null());
+    }
+
+    #[test]
     fn staged_and_untracked_diffs_are_loaded_from_snapshots() {
         let Some(repo) = test_repository() else {
             return;
@@ -1471,6 +2049,247 @@ mod tests {
             .unwrap();
         assert_eq!(untracked_diff.status, GitReviewFileDiffStatus::Ready);
         assert!(untracked_diff.patch.unwrap().contains("+untracked"));
+    }
+
+    #[test]
+    fn full_content_uses_head_index_and_worktree_for_the_selected_scope() {
+        let Some(repo) = test_repository() else {
+            return;
+        };
+        fs::write(repo.path().join("tracked.txt"), "head\nshared\n").unwrap();
+        git(repo.path(), &["add", "tracked.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "base"]);
+        fs::write(repo.path().join("tracked.txt"), "index\nshared\n").unwrap();
+        git(repo.path(), &["add", "tracked.txt"]);
+        fs::write(repo.path().join("tracked.txt"), "worktree\nshared\n").unwrap();
+        let service = GitReviewService::new();
+
+        let staged = service
+            .review_summary(repo.path(), GitReviewScope::Staged)
+            .unwrap();
+        let staged_content = service
+            .review_file_content(&staged.snapshot_id, &staged.files[0].id)
+            .unwrap();
+        assert_eq!(staged_content.status, GitReviewFileContentStatus::Ready);
+        assert_eq!(
+            staged_content.before_text.as_deref(),
+            Some("head\nshared\n")
+        );
+        assert_eq!(
+            staged_content.after_text.as_deref(),
+            Some("index\nshared\n")
+        );
+
+        let unstaged = service
+            .review_summary(repo.path(), GitReviewScope::Unstaged)
+            .unwrap();
+        let unstaged_content = service
+            .review_file_content(&unstaged.snapshot_id, &unstaged.files[0].id)
+            .unwrap();
+        assert_eq!(unstaged_content.status, GitReviewFileContentStatus::Ready);
+        assert_eq!(
+            unstaged_content.before_text.as_deref(),
+            Some("index\nshared\n")
+        );
+        assert_eq!(
+            unstaged_content.after_text.as_deref(),
+            Some("worktree\nshared\n")
+        );
+    }
+
+    #[test]
+    fn full_content_represents_staged_additions_and_deletions_with_a_missing_side() {
+        let Some(repo) = test_repository() else {
+            return;
+        };
+        fs::write(repo.path().join("deleted.txt"), "deleted content\n").unwrap();
+        git(repo.path(), &["add", "deleted.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "base"]);
+        fs::remove_file(repo.path().join("deleted.txt")).unwrap();
+        fs::write(repo.path().join("added.txt"), "added content\n").unwrap();
+        git(repo.path(), &["add", "--all"]);
+        let service = GitReviewService::new();
+        let summary = service
+            .review_summary(repo.path(), GitReviewScope::Staged)
+            .unwrap();
+
+        let added = summary
+            .files
+            .iter()
+            .find(|file| file.path == "added.txt")
+            .unwrap();
+        let added_content = service
+            .review_file_content(&summary.snapshot_id, &added.id)
+            .unwrap();
+        assert_eq!(added_content.status, GitReviewFileContentStatus::Ready);
+        assert_eq!(added_content.before_text, None);
+        assert_eq!(added_content.after_text.as_deref(), Some("added content\n"));
+
+        let deleted = summary
+            .files
+            .iter()
+            .find(|file| file.path == "deleted.txt")
+            .unwrap();
+        let deleted_content = service
+            .review_file_content(&summary.snapshot_id, &deleted.id)
+            .unwrap();
+        assert_eq!(deleted_content.status, GitReviewFileContentStatus::Ready);
+        assert_eq!(
+            deleted_content.before_text.as_deref(),
+            Some("deleted content\n")
+        );
+        assert_eq!(deleted_content.after_text, None);
+    }
+
+    #[test]
+    fn full_content_follows_staged_rename_paths_without_guessing_from_the_worktree() {
+        let Some(repo) = test_repository() else {
+            return;
+        };
+        fs::write(repo.path().join("before.txt"), "before\nshared\n").unwrap();
+        git(repo.path(), &["add", "before.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "base"]);
+        git(repo.path(), &["mv", "before.txt", "after.txt"]);
+        fs::write(repo.path().join("after.txt"), "after\nshared\n").unwrap();
+        git(repo.path(), &["add", "after.txt"]);
+        let service = GitReviewService::new();
+        let summary = service
+            .review_summary(repo.path(), GitReviewScope::Staged)
+            .unwrap();
+        let renamed = summary
+            .files
+            .iter()
+            .find(|file| file.path == "after.txt")
+            .unwrap();
+
+        assert_eq!(renamed.previous_path.as_deref(), Some("before.txt"));
+        let content = service
+            .review_file_content(&summary.snapshot_id, &renamed.id)
+            .unwrap();
+        assert_eq!(content.status, GitReviewFileContentStatus::Ready);
+        assert_eq!(content.before_text.as_deref(), Some("before\nshared\n"));
+        assert_eq!(content.after_text.as_deref(), Some("after\nshared\n"));
+    }
+
+    #[test]
+    fn full_content_rejects_gitlinks() {
+        let Some(repo) = test_repository() else {
+            return;
+        };
+        fs::write(repo.path().join("base.txt"), "base\n").unwrap();
+        git(repo.path(), &["add", "base.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "base"]);
+        let head = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+        git(
+            repo.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{head},module"),
+            ],
+        );
+        let service = GitReviewService::new();
+        let summary = service
+            .review_summary(repo.path(), GitReviewScope::Staged)
+            .unwrap();
+        let gitlink = summary
+            .files
+            .iter()
+            .find(|file| file.path == "module")
+            .unwrap();
+
+        let content = service
+            .review_file_content(&summary.snapshot_id, &gitlink.id)
+            .unwrap();
+        assert_eq!(content.status, GitReviewFileContentStatus::Unsupported);
+        assert_eq!(content.before_text, None);
+        assert_eq!(content.after_text, None);
+    }
+
+    #[test]
+    fn full_content_safely_classifies_binary_non_utf8_and_oversized_files() {
+        let Some(repo) = test_repository() else {
+            return;
+        };
+        fs::write(repo.path().join("tracked.bin"), "base\n").unwrap();
+        git(repo.path(), &["add", "tracked.bin"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "base"]);
+
+        fs::write(repo.path().join("tracked.bin"), b"binary\0content").unwrap();
+        let service = GitReviewService::new();
+        let summary = service
+            .review_summary(repo.path(), GitReviewScope::Unstaged)
+            .unwrap();
+        let content = service
+            .review_file_content(&summary.snapshot_id, &summary.files[0].id)
+            .unwrap();
+        assert_eq!(content.status, GitReviewFileContentStatus::Binary);
+        assert_eq!(content.before_text, None);
+        assert_eq!(content.after_text, None);
+
+        fs::write(repo.path().join("tracked.bin"), [0xff, 0xfe]).unwrap();
+        let summary = service
+            .review_summary(repo.path(), GitReviewScope::Unstaged)
+            .unwrap();
+        let content = service
+            .review_file_content(&summary.snapshot_id, &summary.files[0].id)
+            .unwrap();
+        assert_eq!(content.status, GitReviewFileContentStatus::Unsupported);
+
+        fs::write(
+            repo.path().join("tracked.bin"),
+            vec![b'\n'; MAX_FULL_CONTENT_SIDE_LINES + 1],
+        )
+        .unwrap();
+        let summary = service
+            .review_summary(repo.path(), GitReviewScope::Unstaged)
+            .unwrap();
+        let content = service
+            .review_file_content(&summary.snapshot_id, &summary.files[0].id)
+            .unwrap();
+        assert_eq!(content.status, GitReviewFileContentStatus::TooLarge);
+
+        fs::write(
+            repo.path().join("tracked.bin"),
+            vec![b'x'; MAX_FULL_CONTENT_SIDE_BYTES + 1],
+        )
+        .unwrap();
+        let summary = service
+            .review_summary(repo.path(), GitReviewScope::Unstaged)
+            .unwrap();
+        let content = service
+            .review_file_content(&summary.snapshot_id, &summary.files[0].id)
+            .unwrap();
+        assert_eq!(content.status, GitReviewFileContentStatus::TooLarge);
+    }
+
+    #[test]
+    fn changing_a_file_expires_a_full_content_request() {
+        let Some(repo) = test_repository() else {
+            return;
+        };
+        fs::write(repo.path().join("tracked.txt"), "base\n").unwrap();
+        git(repo.path(), &["add", "tracked.txt"]);
+        git(repo.path(), &["commit", "--quiet", "-m", "base"]);
+        fs::write(repo.path().join("tracked.txt"), "first change\n").unwrap();
+        let service = GitReviewService::new();
+        let summary = service
+            .review_summary(repo.path(), GitReviewScope::Unstaged)
+            .unwrap();
+
+        thread::sleep(Duration::from_millis(5));
+        fs::write(
+            repo.path().join("tracked.txt"),
+            "second change with a different size\n",
+        )
+        .unwrap();
+        let content = service
+            .review_file_content(&summary.snapshot_id, &summary.files[0].id)
+            .unwrap();
+        assert_eq!(content.status, GitReviewFileContentStatus::SnapshotExpired);
+        assert_eq!(content.before_text, None);
+        assert_eq!(content.after_text, None);
     }
 
     #[test]
@@ -1597,6 +2416,33 @@ mod tests {
 
         assert!(patch.contains("secret.txt"));
         assert!(!patch.contains("must-not-be-read"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_content_reads_an_untracked_symlink_itself_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let Some(repo) = test_repository() else {
+            return;
+        };
+        symlink("missing-secret-target", repo.path().join("link.txt")).unwrap();
+        let service = GitReviewService::new();
+        let summary = service
+            .review_summary(repo.path(), GitReviewScope::Unstaged)
+            .unwrap();
+        let link = summary
+            .files
+            .iter()
+            .find(|file| file.path == "link.txt")
+            .unwrap();
+
+        let content = service
+            .review_file_content(&summary.snapshot_id, &link.id)
+            .unwrap();
+        assert_eq!(content.status, GitReviewFileContentStatus::Ready);
+        assert_eq!(content.before_text, None);
+        assert_eq!(content.after_text.as_deref(), Some("missing-secret-target"));
     }
 
     #[cfg(unix)]
@@ -1869,5 +2715,16 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+
+    fn git_stdout(cwd: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 }

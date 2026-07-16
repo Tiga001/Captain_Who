@@ -1,66 +1,145 @@
-import { useEffect, useId, useMemo } from 'react'
-import type { ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject
+} from 'react'
 import type {
   GitReviewFile,
   GitReviewFileMutationAction,
   GitReviewScope
 } from '@mycopilot/protocol'
 import {
-  AlertCircle,
   ChevronDown,
   ChevronRight,
   ExternalLink,
   LoaderCircle,
   Minus,
   Plus,
-  RefreshCw,
   Undo2
 } from 'lucide-react'
+import { Tooltip } from '../../components/overlay/Tooltip'
 import type { Translate } from '../../config/translationFormat'
+import { GitReviewDiffRenderer } from './GitReviewDiffRenderer'
+import type { GitReviewDiffExpandHandler } from './GitReviewDiffRenderer'
+import { reduceGitDiffExpansion, type GitDiffExpansionState } from './diff'
 import { GitReviewFileIcon } from './GitReviewFileIcon'
-import { buildSplitDiffRows, parseGitPatch } from './gitPatchParser'
-import type { GitDiffLine, GitSplitDiffRow } from './gitPatchParser'
-import type { GitReviewDiffState } from './useGitReview'
+import type { GitReviewViewMode } from './gitReviewViewMode'
+import type { GitReviewDiffState, GitReviewFileContentState } from './useGitReview'
 
-export type GitReviewViewMode = 'unified' | 'split'
+const EMPTY_EXPANSION_STATE: GitDiffExpansionState = new Map()
 
-interface GitDiffCardProps {
+interface GitReviewDiffCardProps {
   diffState?: GitReviewDiffState
   file: GitReviewFile
+  fileContentState?: GitReviewFileContentState
   isExpanded: boolean
+  isReviewActive: boolean
+  isVisible: boolean
+  loadFullFiles: boolean
   mutationLocked: boolean
   mutationPending: boolean
   onMutate: (fileId: string, action: GitReviewFileMutationAction) => void
   onRequestDiff: (fileId: string) => void
+  onRequestFileContent: (fileId: string) => void
   onRestore: (file: GitReviewFile) => void
   onToggle: (fileId: string) => void
   scope: GitReviewScope
+  scrollRootRef: RefObject<HTMLDivElement | null>
   t: Translate
   viewMode: GitReviewViewMode
   wrapLines: boolean
 }
 
-export function GitDiffCard({
+/** Owns file-level review UX; patch parsing and line rendering live behind a separate boundary. */
+export function GitReviewDiffCard({
   diffState,
   file,
+  fileContentState,
   isExpanded,
+  isReviewActive,
+  isVisible,
+  loadFullFiles,
   mutationLocked,
   mutationPending,
   onMutate,
   onRequestDiff,
+  onRequestFileContent,
   onRestore,
   onToggle,
   scope,
+  scrollRootRef,
   t,
   viewMode,
   wrapLines
-}: GitDiffCardProps): ReactNode {
+}: GitReviewDiffCardProps): ReactNode {
+  const cardRef = useRef<HTMLElement>(null)
+  const pendingScrollAnchorRef = useRef<{ anchorId: string; beforeTop: number } | null>(null)
+  const activeDiff = diffState?.status === 'ready' ? diffState.value : null
+  const [expansionController, setExpansionController] = useState<{
+    diff: typeof activeDiff
+    state: GitDiffExpansionState
+  }>(() => ({ diff: activeDiff, state: EMPTY_EXPANSION_STATE }))
+  const expansionState =
+    expansionController.diff === activeDiff ? expansionController.state : EMPTY_EXPANSION_STATE
+
   useEffect(() => {
     if (isExpanded) onRequestDiff(file.id)
   }, [file.id, isExpanded, onRequestDiff])
 
-  const patch = diffState?.status === 'ready' ? diffState.value.patch : undefined
-  const parsedPatch = useMemo(() => parseGitPatch(patch ?? ''), [patch])
+  const canLoadFullContent =
+    isReviewActive &&
+    isExpanded &&
+    isVisible &&
+    loadFullFiles &&
+    isFullContentEligible(file.status) &&
+    diffState?.status === 'ready' &&
+    diffState.value.status === 'ready' &&
+    (!fileContentState || fileContentState.status === 'idle')
+
+  useEffect(() => {
+    if (canLoadFullContent && isElementVisibleWithinRoot(cardRef.current, scrollRootRef.current)) {
+      onRequestFileContent(file.id)
+    }
+  }, [canLoadFullContent, file.id, onRequestFileContent, scrollRootRef])
+
+  const handleExpand = useCallback<GitReviewDiffExpandHandler>(
+    (action, scrollAnchorId) => {
+      if (!activeDiff || action.type !== 'expand') return
+      if (scrollAnchorId) {
+        const anchor = findPrimaryDiffAnchor(cardRef.current, scrollAnchorId)
+        if (anchor) {
+          pendingScrollAnchorRef.current = {
+            anchorId: scrollAnchorId,
+            beforeTop: anchor.getBoundingClientRect().top
+          }
+        }
+      }
+      setExpansionController((current) => ({
+        diff: activeDiff,
+        state: reduceGitDiffExpansion(
+          current.diff === activeDiff ? current.state : EMPTY_EXPANSION_STATE,
+          action
+        )
+      }))
+    },
+    [activeDiff]
+  )
+
+  useLayoutEffect(() => {
+    const pending = pendingScrollAnchorRef.current
+    if (!pending) return
+    pendingScrollAnchorRef.current = null
+    const scrollRoot = scrollRootRef.current
+    const anchor = findPrimaryDiffAnchor(cardRef.current, pending.anchorId)
+    if (!scrollRoot || !anchor) return
+    const offset = anchor.getBoundingClientRect().top - pending.beforeTop
+    if (Math.abs(offset) > 0.5) scrollRoot.scrollTop += offset
+  }, [expansionState, scrollRootRef])
+
   const pathTitle = file.previousPath ? `${file.previousPath} → ${file.path}` : file.path
   const actionLabel = isExpanded ? t('gitReview.file.collapse') : t('gitReview.file.expand')
   const statusLabel = t(`gitReview.status.${file.status}`)
@@ -71,6 +150,7 @@ export function GitDiffCard({
       className="git-review__diff-card"
       data-expanded={isExpanded ? 'true' : undefined}
       data-file-id={file.id}
+      ref={cardRef}
     >
       <div className="git-review__diff-card-header">
         <button
@@ -123,11 +203,14 @@ export function GitDiffCard({
 
       {isExpanded && (
         <div className="git-review__diff-card-body">
-          <GitDiffStateContent
+          <GitReviewDiffRenderer
             diffState={diffState}
+            expansionState={expansionState}
+            fileContentState={loadFullFiles ? fileContentState : undefined}
             fileId={file.id}
-            hunks={parsedPatch.hunks}
+            fileStatus={file.status}
             onRequestDiff={onRequestDiff}
+            onExpand={handleExpand}
             t={t}
             viewMode={viewMode}
             wrapLines={wrapLines}
@@ -135,6 +218,36 @@ export function GitDiffCard({
         </div>
       )}
     </section>
+  )
+}
+
+function isFullContentEligible(status: GitReviewFile['status']): boolean {
+  return status === 'modified' || status === 'renamed' || status === 'copied'
+}
+
+function findPrimaryDiffAnchor(root: HTMLElement | null, anchorId: string): HTMLElement | null {
+  if (!root) return null
+  return (
+    Array.from(root.querySelectorAll<HTMLElement>('[data-primary-anchor="true"]')).find(
+      (candidate) => candidate.dataset.diffAnchorId === anchorId
+    ) ?? null
+  )
+}
+
+function isElementVisibleWithinRoot(
+  element: HTMLElement | null,
+  root: HTMLElement | null
+): boolean {
+  if (!element || !root) return false
+  const elementRect = element.getBoundingClientRect()
+  const rootRect = root.getBoundingClientRect()
+  return (
+    elementRect.width > 0 &&
+    elementRect.height > 0 &&
+    elementRect.right > rootRect.left &&
+    elementRect.left < rootRect.right &&
+    elementRect.bottom > rootRect.top &&
+    elementRect.top < rootRect.bottom
   )
 }
 
@@ -171,13 +284,11 @@ function FileActionButton({
   label,
   onClick
 }: FileActionButtonProps): ReactNode {
-  const tooltipId = useId()
   return (
-    <span className="git-review__file-action-wrap">
+    <Tooltip anchorClassName="git-review__file-action-wrap" content={label}>
       <button
         className="git-review__file-action-button"
         type="button"
-        aria-describedby={tooltipId}
         aria-disabled={ariaDisabled || undefined}
         aria-label={label}
         disabled={disabled}
@@ -188,10 +299,7 @@ function FileActionButton({
       >
         {children}
       </button>
-      <span className="git-review__file-action-tooltip" id={tooltipId} role="tooltip">
-        {label}
-      </span>
-    </span>
+    </Tooltip>
   )
 }
 
@@ -201,144 +309,6 @@ function GitReviewFileStats({ file }: { file: GitReviewFile }): ReactNode {
     <span className="git-review__file-stats">
       <span className="git-review__file-additions">+{file.stats.additions}</span>
       <span className="git-review__file-deletions">-{file.stats.deletions}</span>
-    </span>
-  )
-}
-
-interface GitDiffStateContentProps {
-  diffState?: GitReviewDiffState
-  fileId: string
-  hunks: ReturnType<typeof parseGitPatch>['hunks']
-  onRequestDiff: (fileId: string) => void
-  t: Translate
-  viewMode: GitReviewViewMode
-  wrapLines: boolean
-}
-
-function GitDiffStateContent({
-  diffState,
-  fileId,
-  hunks,
-  onRequestDiff,
-  t,
-  viewMode,
-  wrapLines
-}: GitDiffStateContentProps): ReactNode {
-  if (!diffState || diffState.status === 'idle' || diffState.status === 'loading') {
-    return (
-      <div className="git-review__diff-message">
-        <LoaderCircle className="git-review__spinner" aria-hidden="true" />
-        <span>{t('gitReview.diff.loading')}</span>
-      </div>
-    )
-  }
-
-  if (diffState.status === 'error') {
-    return (
-      <div className="git-review__diff-message git-review__diff-message--error" role="alert">
-        <AlertCircle aria-hidden="true" />
-        <span>{diffState.error}</span>
-        <button type="button" onClick={() => onRequestDiff(fileId)}>
-          <RefreshCw aria-hidden="true" />
-          {t('gitReview.retry')}
-        </button>
-      </div>
-    )
-  }
-
-  if (diffState.value.status === 'binary') {
-    return <div className="git-review__diff-message">{t('gitReview.diff.binary')}</div>
-  }
-  if (diffState.value.status === 'tooLarge') {
-    return <div className="git-review__diff-message">{t('gitReview.diff.tooLarge')}</div>
-  }
-  if (hunks.length === 0) {
-    return <div className="git-review__diff-message">{t('gitReview.diff.noHunks')}</div>
-  }
-
-  return viewMode === 'unified' ? (
-    <UnifiedDiff hunks={hunks} wrapLines={wrapLines} />
-  ) : (
-    <SplitDiff hunks={hunks} wrapLines={wrapLines} />
-  )
-}
-
-interface ParsedDiffProps {
-  hunks: ReturnType<typeof parseGitPatch>['hunks']
-  wrapLines: boolean
-}
-
-function UnifiedDiff({ hunks, wrapLines }: ParsedDiffProps): ReactNode {
-  return (
-    <div className="git-review__unified-diff" data-wrap={wrapLines ? 'true' : undefined}>
-      {hunks.map((hunk, hunkIndex) => (
-        <div className="git-review__hunk" key={`${hunk.header}-${hunkIndex}`}>
-          <div className="git-review__hunk-header">{hunk.header}</div>
-          {hunk.lines.map((line, lineIndex) => (
-            <div
-              className={`git-review__unified-line git-review__diff-line--${line.kind}`}
-              key={`${hunkIndex}-${lineIndex}`}
-            >
-              <span className="git-review__line-number">{line.oldLineNumber ?? ''}</span>
-              <span className="git-review__line-number">{line.newLineNumber ?? ''}</span>
-              <DiffCode line={line} />
-            </div>
-          ))}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function SplitDiff({ hunks, wrapLines }: ParsedDiffProps): ReactNode {
-  return (
-    <div className="git-review__split-diff" data-wrap={wrapLines ? 'true' : undefined}>
-      {hunks.map((hunk, hunkIndex) => (
-        <div className="git-review__hunk" key={`${hunk.header}-${hunkIndex}`}>
-          <div className="git-review__hunk-header">{hunk.header}</div>
-          {buildSplitDiffRows(hunk).map((row, rowIndex) => (
-            <SplitDiffRow key={`${hunkIndex}-${rowIndex}`} row={row} />
-          ))}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function SplitDiffRow({ row }: { row: GitSplitDiffRow }): ReactNode {
-  return (
-    <div className="git-review__split-row">
-      <SplitDiffSide line={row.left} side="left" />
-      <SplitDiffSide line={row.right} side="right" />
-    </div>
-  )
-}
-
-function SplitDiffSide({ line, side }: { line?: GitDiffLine; side: 'left' | 'right' }): ReactNode {
-  const lineNumber = side === 'left' ? line?.oldLineNumber : line?.newLineNumber
-  return (
-    <div className={`git-review__split-side${line ? ` git-review__diff-line--${line.kind}` : ''}`}>
-      <span className="git-review__line-number">{lineNumber ?? ''}</span>
-      {line ? <DiffCode line={line} /> : <span className="git-review__diff-code" />}
-    </div>
-  )
-}
-
-function DiffCode({ line }: { line: GitDiffLine }): ReactNode {
-  const prefix =
-    line.kind === 'addition'
-      ? '+'
-      : line.kind === 'deletion'
-        ? '-'
-        : line.kind === 'meta'
-          ? ''
-          : ' '
-  return (
-    <span className="git-review__diff-code">
-      <span className="git-review__diff-prefix" aria-hidden="true">
-        {prefix}
-      </span>
-      {line.content || ' '}
     </span>
   )
 }

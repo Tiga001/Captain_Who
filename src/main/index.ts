@@ -1,4 +1,4 @@
-import { app, BrowserWindow, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, Menu, type IpcMainInvokeEvent } from 'electron'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -47,6 +47,29 @@ function sendAppWindowState(window: BrowserWindow): void {
     return
   }
   window.webContents.send(APP_WINDOW_STATE_CHANNEL, getAppWindowState(window))
+}
+
+function installNativeImageContextMenu(window: BrowserWindow): void {
+  const contents = window.webContents
+  const copyImageLabel = app.getLocale().toLowerCase().startsWith('zh') ? '复制图片' : 'Copy Image'
+
+  contents.on('context-menu', (_event, params) => {
+    if (params.mediaType !== 'image') return
+
+    // Match Codex's Electron-native path: Chromium already knows which rendered image
+    // was hit, so copy it directly instead of downloading and decoding its src again.
+    const menu = Menu.buildFromTemplate([
+      {
+        label: copyImageLabel,
+        click: () => {
+          if (!contents.isDestroyed()) {
+            contents.copyImageAt(params.x, params.y)
+          }
+        }
+      }
+    ])
+    menu.popup({ window })
+  })
 }
 
 function isAllowedRendererUrl(candidateValue: string, entryValue: string): boolean {
@@ -100,6 +123,7 @@ function createWindow(): void {
   const rendererWebContentsId = rendererWebContents.id
   trustedRendererEntries.set(rendererWebContentsId, rendererEntryUrl)
   configureManagedWebviewHost(rendererWebContents)
+  installNativeImageContextMenu(mainWindow)
   const handleWindowStateChange = (): void => sendAppWindowState(mainWindow)
 
   rendererWebContents.once('destroyed', () => {

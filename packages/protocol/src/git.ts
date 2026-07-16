@@ -64,6 +64,22 @@ export interface GitReviewFileDiff {
   patch?: string
 }
 
+export interface GitReviewFileContentInput {
+  snapshotId: string
+  fileId: string
+}
+
+export type GitReviewFileContentStatus =
+  'ready' | 'binary' | 'tooLarge' | 'unsupported' | 'snapshotExpired'
+
+export interface GitReviewFileContent {
+  snapshotId: string
+  fileId: string
+  status: GitReviewFileContentStatus
+  beforeText: string | null
+  afterText: string | null
+}
+
 export type GitReviewFileMutationAction = 'stage' | 'unstage' | 'restore'
 
 export interface GitReviewFileMutationInput {

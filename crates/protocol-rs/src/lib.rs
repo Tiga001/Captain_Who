@@ -20,6 +20,7 @@ pub const SEARCH_SEARCH_CHATS_METHOD: &str = "search.searchChats";
 pub const GIT_INSPECT_REPOSITORY_METHOD: &str = "git.inspectRepository";
 pub const GIT_GET_REVIEW_SUMMARY_METHOD: &str = "git.getReviewSummary";
 pub const GIT_GET_REVIEW_FILE_DIFF_METHOD: &str = "git.getReviewFileDiff";
+pub const GIT_GET_REVIEW_FILE_CONTENT_METHOD: &str = "git.getReviewFileContent";
 pub const GIT_MUTATE_REVIEW_FILE_METHOD: &str = "git.mutateReviewFile";
 pub const STORAGE_LOAD_MODEL_SETTINGS_METHOD: &str = "storage.loadModelSettings";
 pub const STORAGE_SAVE_MODEL_SETTINGS_METHOD: &str = "storage.saveModelSettings";
@@ -154,6 +155,13 @@ pub struct GitReviewSummaryRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitReviewFileDiffRequest {
+    pub snapshot_id: String,
+    pub file_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitReviewFileContentRequest {
     pub snapshot_id: String,
     pub file_id: String,
 }

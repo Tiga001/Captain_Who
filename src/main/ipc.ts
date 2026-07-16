@@ -1,23 +1,8 @@
-import {
-  BrowserWindow,
-  clipboard,
-  dialog,
-  ipcMain as electronIpcMain,
-  nativeImage,
-  nativeTheme,
-  shell
-} from 'electron'
-import type {
-  IpcMainInvokeEvent,
-  NativeImage,
-  OpenDialogOptions,
-  OpenDialogReturnValue
-} from 'electron'
-import { execFile } from 'child_process'
-import { homedir, tmpdir } from 'os'
-import { promisify } from 'util'
+import { BrowserWindow, dialog, ipcMain as electronIpcMain, nativeTheme, shell } from 'electron'
+import type { IpcMainInvokeEvent, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
+import { homedir } from 'os'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
-import { mkdtemp, readFile, rm, writeFile } from 'fs/promises'
+import { readFile } from 'fs/promises'
 import type { StorageImageFileRecord } from '@mycopilot/protocol'
 import type { StorageProjectRecord } from '@mycopilot/protocol'
 import type { AppWindowState } from '@mycopilot/host-api'
@@ -41,10 +26,6 @@ const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   '.tiff': 'image/tiff',
   '.webp': 'image/webp'
 }
-
-const execFileAsync = promisify(execFile)
-const CLIPBOARD_IMAGE_MAX_BYTES = 16 * 1024 * 1024
-const CLIPBOARD_IMAGE_MAX_DATA_URL_CHARS = Math.ceil((CLIPBOARD_IMAGE_MAX_BYTES * 4) / 3) + 1024
 
 type NativeThemeSource = 'system' | 'light' | 'dark'
 
@@ -135,119 +116,6 @@ async function selectProfileAvatar(event: IpcMainInvokeEvent): Promise<string | 
   const mimeType = IMAGE_MIME_BY_EXTENSION[extname(filePath).toLowerCase()] ?? 'image/png'
   const data = await readFile(filePath)
   return `data:${mimeType};base64,${data.toString('base64')}`
-}
-
-async function writeImageToClipboard(input: {
-  dataUrl: string
-}): Promise<{ formats: string[]; width: number; height: number; method: string }> {
-  const imageBuffer = imageBufferFromClipboardInput(input)
-  const image = nativeImage.createFromBuffer(imageBuffer)
-  if (image.isEmpty()) {
-    throw new Error('Image data is invalid')
-  }
-  const pngBuffer = image.toPNG()
-  if (pngBuffer.length === 0) {
-    throw new Error('Image PNG data is invalid')
-  }
-
-  if (process.platform === 'darwin') {
-    return writeMacImageToClipboard(image, pngBuffer)
-  }
-
-  return writeElectronImageToClipboard(image)
-}
-
-function imageBufferFromClipboardInput(input: { dataUrl: string }): Buffer {
-  if (!input || typeof input.dataUrl !== 'string') {
-    throw new Error('Image data URL is required')
-  }
-  const dataUrl = input.dataUrl.trim()
-  if (!dataUrl.startsWith('data:image/') || dataUrl.length > CLIPBOARD_IMAGE_MAX_DATA_URL_CHARS) {
-    throw new Error('Image data URL is invalid or too large')
-  }
-  return bufferFromDataUrl(dataUrl)
-}
-
-async function writeMacImageToClipboard(
-  image: NativeImage,
-  pngBuffer: Buffer
-): Promise<{ formats: string[]; width: number; height: number; method: string }> {
-  clipboard.clear()
-  clipboard.writeBuffer('public.png', pngBuffer)
-  let method = 'public.png'
-
-  if (clipboard.readBuffer('public.png').length === 0) {
-    await writePngToMacPasteboard(pngBuffer)
-    method = 'osascript-pngf'
-  }
-
-  const formats = clipboard.availableFormats()
-  const hasPng = clipboard.readBuffer('public.png').length > 0 || formats.includes('image/png')
-  if (!hasPng) {
-    throw new Error(`Image clipboard write failed: ${clipboard.availableFormats().join(', ')}`)
-  }
-
-  const size = image.getSize()
-  return {
-    formats,
-    width: size.width,
-    height: size.height,
-    method
-  }
-}
-
-function writeElectronImageToClipboard(image: NativeImage): {
-  formats: string[]
-  width: number
-  height: number
-  method: string
-} {
-  clipboard.clear()
-  clipboard.writeImage(image)
-
-  const clipboardImage = clipboard.readImage()
-  if (clipboardImage.isEmpty()) {
-    throw new Error(`Image clipboard write failed: ${clipboard.availableFormats().join(', ')}`)
-  }
-
-  const size = clipboardImage.getSize()
-  return {
-    formats: clipboard.availableFormats(),
-    width: size.width,
-    height: size.height,
-    method: 'electron-write-image'
-  }
-}
-
-function bufferFromDataUrl(dataUrl: string): Buffer {
-  const match = /^data:image\/[-+.\w]+(?:;[-\w=.+]+)*;base64,([a-z0-9+/]*={0,2})$/is.exec(dataUrl)
-  if (!match) {
-    throw new Error('Base64 image data URL is required')
-  }
-  const buffer = Buffer.from(match[1], 'base64')
-  if (buffer.length === 0 || buffer.length > CLIPBOARD_IMAGE_MAX_BYTES) {
-    throw new Error('Image data is empty or too large')
-  }
-  return buffer
-}
-
-function escapeAppleScriptString(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-}
-
-async function writePngToMacPasteboard(pngBuffer: Buffer): Promise<void> {
-  const directory = await mkdtemp(join(tmpdir(), 'mycopilot-clipboard-'))
-  const filePath = join(directory, 'image.png')
-
-  try {
-    await writeFile(filePath, pngBuffer)
-    await execFileAsync('/usr/bin/osascript', [
-      '-e',
-      `set imageFile to POSIX file "${escapeAppleScriptString(filePath)}"\nset the clipboard to (read imageFile as «class PNGf»)`
-    ])
-  } finally {
-    await rm(directory, { recursive: true, force: true }).catch(() => undefined)
-  }
 }
 
 async function getProjectPath(coreServer: CoreServer, projectId: string): Promise<string | null> {
@@ -442,6 +310,9 @@ export function registerHostIpc(
   ipcMain.handle('host:git.getReviewFileDiff', (_event, input) =>
     coreServer.getGitReviewFileDiff(input)
   )
+  ipcMain.handle('host:git.getReviewFileContent', (_event, input) =>
+    coreServer.getGitReviewFileContent(input)
+  )
   ipcMain.handle('host:git.mutateReviewFile', (_event, input) =>
     coreServer.mutateGitReviewFile(input)
   )
@@ -454,7 +325,6 @@ export function registerHostIpc(
       faviconResourceCache.clear()
     ])
   })
-  ipcMain.handle('host:clipboard.writeImage', (_event, input) => writeImageToClipboard(input))
   ipcMain.handle('host:resources.resolveFavicon', (_event, input) =>
     faviconResourceCache.resolveFavicon(input)
   )

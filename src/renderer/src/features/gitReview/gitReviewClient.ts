@@ -1,5 +1,7 @@
 import type {
   GitRepositoryInspection,
+  GitReviewFileContent,
+  GitReviewFileContentInput,
   GitReviewFileDiff,
   GitReviewFileDiffInput,
   GitReviewFileMutation,
@@ -19,6 +21,12 @@ export function getGitReviewSummary(input: GitReviewSummaryInput): Promise<GitRe
 
 export function getGitReviewFileDiff(input: GitReviewFileDiffInput): Promise<GitReviewFileDiff> {
   return hostClient.git.getReviewFileDiff(input)
+}
+
+export function getGitReviewFileContent(
+  input: GitReviewFileContentInput
+): Promise<GitReviewFileContent> {
+  return hostClient.git.getReviewFileContent(input)
 }
 
 export function mutateGitReviewFile(
