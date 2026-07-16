@@ -16,6 +16,7 @@ import {
   normalizeTranslucentSidebarTransparency
 } from '../../storage/storageClient'
 import { AppearanceThemeSelect } from './AppearanceThemeSelect'
+import { AppearanceDiffPreview } from './AppearanceDiffPreview'
 import './AppearanceSettingsPage.css'
 
 const COLOR_SCHEME_OPTIONS: Array<{
@@ -94,6 +95,7 @@ export function AppearanceSettingsPage({
 }: AppearanceSettingsPageProps) {
   const {
     colorSchemePreference,
+    resolvedThemeId,
     setColorSchemePreference,
     setThemeForColorScheme,
     t,
@@ -145,6 +147,8 @@ export function AppearanceSettingsPage({
             </button>
           ))}
         </div>
+
+        <AppearanceDiffPreview label={t('appearance.diffPreview')} themeId={resolvedThemeId} />
 
         <div className="settings-list appearance-theme-variant-list">
           {visibleThemeVariants.map((colorScheme) => {

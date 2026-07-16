@@ -1,6 +1,34 @@
 import { createPaletteTheme } from './paletteTheme'
 import type { PaletteThemeRecipe } from './paletteTheme'
 
+const everforestLightGitReviewSyntax = {
+  attribute: '#8DA101',
+  comment: '#939F91',
+  foreground: '#5C6A72',
+  function: '#8DA101',
+  keyword: '#F85552',
+  number: '#DF69BA',
+  regexp: '#DFA000',
+  string: '#DFA000',
+  tag: '#F57D26',
+  type: '#35A77C',
+  variable: '#5C6A72'
+} as const
+
+const everforestDarkGitReviewSyntax = {
+  attribute: '#A7C080',
+  comment: '#859289',
+  foreground: '#D3C6AA',
+  function: '#A7C080',
+  keyword: '#E67E80',
+  number: '#D699B6',
+  regexp: '#DBBC7F',
+  string: '#DBBC7F',
+  tag: '#E69875',
+  type: '#83C092',
+  variable: '#D3C6AA'
+} as const
+
 const everforestLightRecipe = {
   colorScheme: 'light',
   text: {
@@ -51,6 +79,9 @@ const everforestLightRecipe = {
     outputThinking: '#A94F91',
     sourceBadgeBackground: '#2F789E',
     sourceBadgeText: '#FFFFFF'
+  },
+  gitReview: {
+    syntax: everforestLightGitReviewSyntax
   },
   terminal: {
     background: '#FDF6E3',
@@ -127,6 +158,9 @@ const everforestDarkRecipe = {
     outputThinking: '#D699B6',
     sourceBadgeBackground: '#7FBBB3',
     sourceBadgeText: '#232A2E'
+  },
+  gitReview: {
+    syntax: everforestDarkGitReviewSyntax
   },
   terminal: {
     background: '#2D353B',

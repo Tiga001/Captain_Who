@@ -1,6 +1,48 @@
 import { createPaletteTheme } from './paletteTheme'
 import type { PaletteThemeRecipe } from './paletteTheme'
 
+const ayuLightGitReviewSyntax = {
+  attribute: '#EBA400',
+  comment: '#ADAEB1',
+  foreground: '#5C6166',
+  function: '#EBA400',
+  keyword: '#FA8532',
+  number: '#A37ACC',
+  regexp: '#4CBF99',
+  string: '#86B300',
+  tag: '#55B4D4',
+  type: '#22A4E6',
+  variable: '#5C6166'
+} as const
+
+const ayuMirageGitReviewSyntax = {
+  attribute: '#FFCD66',
+  comment: '#6E7C8F',
+  foreground: '#CCCAC2',
+  function: '#FFCD66',
+  keyword: '#FFA659',
+  number: '#DFBFFF',
+  regexp: '#95E6CB',
+  string: '#D5FF80',
+  tag: '#5CCFE6',
+  type: '#73D0FF',
+  variable: '#CCCAC2'
+} as const
+
+const ayuDarkGitReviewSyntax = {
+  attribute: '#FFB454',
+  comment: '#5A6673',
+  foreground: '#BFBDB6',
+  function: '#FFB454',
+  keyword: '#FF8F40',
+  number: '#D2A6FF',
+  regexp: '#95E6CB',
+  string: '#AAD94C',
+  tag: '#39BAE6',
+  type: '#59C2FF',
+  variable: '#BFBDB6'
+} as const
+
 const ayuLightRecipe = {
   colorScheme: 'light',
   text: {
@@ -48,6 +90,9 @@ const ayuLightRecipe = {
     outputThinking: '#B55280',
     sourceBadgeBackground: '#006F9E',
     sourceBadgeText: '#FFFFFF'
+  },
+  gitReview: {
+    syntax: ayuLightGitReviewSyntax
   },
   terminal: {
     background: '#FCFCFC',
@@ -122,6 +167,9 @@ const ayuMirageRecipe = {
     sourceBadgeBackground: '#73D0FF',
     sourceBadgeText: '#1F2430'
   },
+  gitReview: {
+    syntax: ayuMirageGitReviewSyntax
+  },
   terminal: {
     background: '#242936',
     foreground: '#CCCAC2',
@@ -194,6 +242,9 @@ const ayuDarkRecipe = {
     outputThinking: '#F29668',
     sourceBadgeBackground: '#59C2FF',
     sourceBadgeText: '#0D1017'
+  },
+  gitReview: {
+    syntax: ayuDarkGitReviewSyntax
   },
   terminal: {
     background: '#10141C',

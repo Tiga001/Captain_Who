@@ -1,4 +1,35 @@
 import type { FrontendTheme } from './types'
+import { createGitReviewColors } from './gitReviewTheme'
+
+const classicLightGitReviewSyntax = {
+  attribute: '#751ED9',
+  comment: '#666666',
+  constant: '#BD5800',
+  foreground: '#0D0D0D',
+  function: '#751ED9',
+  keyword: '#D53538',
+  number: '#0071EA',
+  regexp: '#001BCB',
+  string: '#008809',
+  tag: '#D53538',
+  type: '#751ED9',
+  variable: '#BD5800'
+} as const
+
+const classicDarkGitReviewSyntax = {
+  attribute: '#B06DFF',
+  comment: '#999999',
+  constant: '#FA994C',
+  foreground: '#FCFCFC',
+  function: '#B06DFF',
+  keyword: '#F67576',
+  number: '#6DCBF4',
+  regexp: '#3D8DFF',
+  string: '#85DF7B',
+  tag: '#F67576',
+  type: '#B06DFF',
+  variable: '#FA994C'
+} as const
 
 const classicStatusColors = {
   successText: '#37c86a',
@@ -123,6 +154,27 @@ export const classicLightTheme = {
       additionText: '#16a34a',
       deletionText: '#b42318'
     },
+    gitReview: createGitReviewColors({
+      colorScheme: 'light',
+      surface: {
+        panel: '#FFFFFF',
+        muted: '#f3f4f5'
+      },
+      text: {
+        primary: '#3F3F46',
+        secondary: '#4f5660',
+        muted: '#8b95a1'
+      },
+      border: {
+        hairline: 'rgba(24, 24, 27, 0.08)',
+        subtle: 'rgba(31, 35, 41, 0.08)',
+        default: '#d4dde8'
+      },
+      stateHover: 'rgba(31, 35, 41, 0.055)',
+      additionText: '#16a34a',
+      deletionText: '#b42318',
+      syntax: classicLightGitReviewSyntax
+    }),
     dataViz: classicDataVizColors,
     sourceBadge: classicSourceBadgeColors,
     effect: classicEffectColors,
@@ -257,6 +309,27 @@ export const classicDarkTheme = {
       additionText: '#16a34a',
       deletionText: '#FF6B5F'
     },
+    gitReview: createGitReviewColors({
+      colorScheme: 'dark',
+      surface: {
+        panel: '#141414',
+        muted: '#1F1F20'
+      },
+      text: {
+        primary: '#FCFCFC',
+        secondary: '#E0E0E0',
+        muted: '#969BA3'
+      },
+      border: {
+        hairline: 'rgba(255, 255, 255, 0.09)',
+        subtle: 'rgba(255, 255, 255, 0.09)',
+        default: '#34363A'
+      },
+      stateHover: 'rgba(255, 255, 255, 0.075)',
+      additionText: '#16a34a',
+      deletionText: '#FF6B5F',
+      syntax: classicDarkGitReviewSyntax
+    }),
     dataViz: classicDataVizColors,
     sourceBadge: classicSourceBadgeColors,
     effect: classicEffectColors,

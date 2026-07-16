@@ -1,6 +1,34 @@
 import { createPaletteTheme } from './paletteTheme'
 import type { PaletteThemeRecipe } from './paletteTheme'
 
+const githubLightGitReviewSyntax = {
+  attribute: '#0550AE',
+  comment: '#6E7781',
+  foreground: '#1F2328',
+  function: '#8250DF',
+  keyword: '#CF222E',
+  number: '#0550AE',
+  regexp: '#0A3069',
+  string: '#0A3069',
+  tag: '#116329',
+  type: '#953800',
+  variable: '#0550AE'
+} as const
+
+const githubDarkGitReviewSyntax = {
+  attribute: '#79C0FF',
+  comment: '#8B949E',
+  foreground: '#E6EDF3',
+  function: '#D2A8FF',
+  keyword: '#FF7B72',
+  number: '#79C0FF',
+  regexp: '#A5D6FF',
+  string: '#A5D6FF',
+  tag: '#7EE787',
+  type: '#FFA657',
+  variable: '#79C0FF'
+} as const
+
 const githubLightRecipe = {
   colorScheme: 'light',
   text: {
@@ -51,6 +79,9 @@ const githubLightRecipe = {
     outputThinking: '#BF3989',
     sourceBadgeBackground: '#0969DA',
     sourceBadgeText: '#FFFFFF'
+  },
+  gitReview: {
+    syntax: githubLightGitReviewSyntax
   },
   terminal: {
     background: '#FFFFFF',
@@ -127,6 +158,9 @@ const githubDarkRecipe = {
     outputThinking: '#DB61A2',
     sourceBadgeBackground: '#1F6FEB',
     sourceBadgeText: '#FFFFFF'
+  },
+  gitReview: {
+    syntax: githubDarkGitReviewSyntax
   },
   terminal: {
     background: '#0D1117',

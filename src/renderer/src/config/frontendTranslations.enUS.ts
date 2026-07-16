@@ -256,6 +256,7 @@ export const enUSTranslations = {
   'personalization.loadFailed': 'Failed to load personalization settings',
 
   'appearance.theme': 'Theme',
+  'appearance.diffPreview': 'Diff theme preview',
   'appearance.preferences': 'Preferences',
   'appearance.theme.system': 'System',
   'appearance.theme.light': 'Light',

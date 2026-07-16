@@ -1,6 +1,21 @@
 import { createPaletteTheme } from './paletteTheme'
 import type { PaletteThemeRecipe } from './paletteTheme'
 
+const zjuGitReviewSyntax = {
+  attribute: '#005AA7',
+  comment: '#7D90A2',
+  constant: '#8A5B00',
+  foreground: '#263B50',
+  function: '#743B68',
+  keyword: '#B01F24',
+  number: '#005AA7',
+  regexp: '#006B80',
+  string: '#176B64',
+  tag: '#B01F24',
+  type: '#003F88',
+  variable: '#8A5B00'
+} as const
+
 const zjuBrandColors = {
   qushiBlue: '#003F88',
   innovationRed: '#B01F24'
@@ -57,6 +72,9 @@ const zjuLightRecipe = {
     outputThinking: '#743B68',
     sourceBadgeBackground: zjuBrandColors.qushiBlue,
     sourceBadgeText: '#FFFFFF'
+  },
+  gitReview: {
+    syntax: zjuGitReviewSyntax
   },
   terminal: {
     background: '#FFFFFF',

@@ -2,14 +2,14 @@ import type { GitReviewFile, GitReviewFileStatus } from '@mycopilot/protocol'
 import { useState, type CSSProperties, type ReactNode } from 'react'
 import { describe, expect, it } from 'vitest'
 import { render } from 'vitest-browser-react'
-import type { FrontendThemeId } from '../../../config/frontendTheme'
+import { getFrontendTheme, type FrontendThemeId } from '../../../config/frontendTheme'
+import { getGitReviewCssVariables } from '../../../config/themes/gitReviewTheme'
 import type { Translate } from '../../../config/translationFormat'
 import '../../../styles/global.css'
 import { GitReviewDiffRenderer } from '../GitReviewDiffRenderer'
 import { reduceGitDiffExpansion, type GitDiffExpansionState } from '../diff'
 import '../GitReviewPanel.css'
 import type { GitReviewViewMode } from '../gitReviewViewMode'
-import { getGitReviewSyntaxThemeStyle } from '../syntaxHighlighting/gitReviewSyntaxThemes'
 import type { GitReviewDiffState, GitReviewFileContentState } from '../useGitReview'
 
 const LONG_OLD_LINE = `old-${'veryLongIdentifier'.repeat(30)}`
@@ -251,7 +251,7 @@ function DiffFixture({
   zoom = 1
 }: DiffFixtureProps): ReactNode {
   const style = {
-    ...getGitReviewSyntaxThemeStyle(syntaxThemeId),
+    ...getGitReviewCssVariables(getFrontendTheme(syntaxThemeId).tokens.colors.gitReview),
     '--mc-font-size-sm': '12px',
     '--mc-color-border-hairline': 'rgb(72 78 84)',
     '--mc-color-diff-addition-text': 'rgb(156 204 106)',

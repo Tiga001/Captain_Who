@@ -1,6 +1,35 @@
 import { createPaletteTheme } from './paletteTheme'
 import type { PaletteThemeRecipe } from './paletteTheme'
 
+const alucardGitReviewSyntax = {
+  attribute: '#036A96',
+  comment: '#6C664B',
+  constant: '#846E15',
+  foreground: '#1F1F1F',
+  function: '#644AC9',
+  keyword: '#CB3A2A',
+  number: '#036A96',
+  regexp: '#036A96',
+  string: '#14710A',
+  tag: '#CB3A2A',
+  type: '#644AC9',
+  variable: '#846E15'
+} as const
+
+const draculaGitReviewSyntax = {
+  attribute: '#50FA7B',
+  comment: '#6272A4',
+  foreground: '#F8F8F2',
+  function: '#50FA7B',
+  keyword: '#FF79C6',
+  number: '#BD93F9',
+  regexp: '#FF5555',
+  string: '#F1FA8C',
+  tag: '#FF79C6',
+  type: '#8BE9FD',
+  variable: '#F8F8F2'
+} as const
+
 const alucardUiPalette = {
   background: '#FFFBEB',
   floating: '#EFEDDC',
@@ -62,6 +91,9 @@ const alucardRecipe = {
     outputThinking: '#A3144D',
     sourceBadgeBackground: '#036A96',
     sourceBadgeText: alucardUiPalette.background
+  },
+  gitReview: {
+    syntax: alucardGitReviewSyntax
   },
   terminal: {
     background: alucardUiPalette.background,
@@ -135,6 +167,9 @@ const draculaRecipe = {
     outputThinking: '#FF79C6',
     sourceBadgeBackground: '#8BE9FD',
     sourceBadgeText: '#191A21'
+  },
+  gitReview: {
+    syntax: draculaGitReviewSyntax
   },
   terminal: {
     background: '#282A36',

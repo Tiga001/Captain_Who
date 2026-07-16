@@ -1,4 +1,6 @@
 import type { ColorScheme, FrontendTheme } from './types'
+import { createGitReviewColors } from './gitReviewTheme'
+import type { GitReviewSyntaxPaletteSeed } from './gitReviewTheme'
 
 interface PaletteThemeSurface {
   readonly leftPanel: string
@@ -54,6 +56,9 @@ export interface PaletteThemeRecipe {
     readonly sourceBadgeBackground: string
     readonly sourceBadgeText: string
   }
+  readonly gitReview: {
+    readonly syntax: GitReviewSyntaxPaletteSeed
+  }
   readonly terminal: FrontendTheme['colors']['terminal']
   readonly shadow: string
 }
@@ -74,6 +79,30 @@ export function createPaletteTheme(recipe: PaletteThemeRecipe): FrontendTheme {
   const { accent, border, button, semantic, shadow, surface, text, visual } = recipe
   const secondaryButtonBg = isDark ? surface.muted : surface.input
   const secondaryButtonHover = isDark ? surface.selected : surface.muted
+  const borderHairline = withAlpha(text.primary, isDark ? 0.1 : 0.08)
+  const borderSubtle = withAlpha(border.default, 0.76)
+  const stateHover = withAlpha(text.primary, isDark ? 0.08 : 0.055)
+  const gitReview = createGitReviewColors({
+    colorScheme: recipe.colorScheme,
+    surface: {
+      panel: surface.rightPanel,
+      muted: surface.muted
+    },
+    text: {
+      primary: text.primary,
+      secondary: text.secondary,
+      muted: text.muted
+    },
+    border: {
+      hairline: borderHairline,
+      subtle: borderSubtle,
+      default: border.default
+    },
+    stateHover,
+    additionText: semantic.success,
+    deletionText: semantic.danger,
+    syntax: recipe.gitReview.syntax
+  })
 
   return {
     colors: {
@@ -115,8 +144,8 @@ export function createPaletteTheme(recipe: PaletteThemeRecipe): FrontendTheme {
         glassInput: isDark ? withAlpha(text.primary, 0.08) : withAlpha(surface.input, 0.82)
       },
       border: {
-        hairline: withAlpha(text.primary, isDark ? 0.1 : 0.08),
-        subtle: withAlpha(border.default, 0.76),
+        hairline: borderHairline,
+        subtle: borderSubtle,
         default: border.default,
         strong: border.strong,
         error: withAlpha(semantic.danger, isDark ? 0.28 : 0.22),
@@ -151,7 +180,7 @@ export function createPaletteTheme(recipe: PaletteThemeRecipe): FrontendTheme {
         contentMuted: text.muted
       },
       state: {
-        hover: withAlpha(text.primary, isDark ? 0.08 : 0.055),
+        hover: stateHover,
         active: withAlpha(accent, isDark ? 0.17 : 0.11),
         focusRing: withAlpha(accent, isDark ? 0.82 : 0.52),
         resizeHandle: withAlpha(accent, isDark ? 0.86 : 0.58),
@@ -166,6 +195,7 @@ export function createPaletteTheme(recipe: PaletteThemeRecipe): FrontendTheme {
         additionText: semantic.success,
         deletionText: semantic.danger
       },
+      gitReview,
       dataViz: {
         input: visual.input,
         output: visual.output,

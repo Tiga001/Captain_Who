@@ -143,6 +143,142 @@
   line-height: var(--mc-line-height-control);
 }
 
+.appearance-diff-preview {
+  width: 100%;
+  margin-top: 26px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  color: var(--mc-color-git-review-text-primary);
+  background: var(--mc-color-git-review-panel-surface);
+  border: 1px solid var(--mc-color-git-review-border-subtle);
+  border-radius: var(--mc-radius-lg);
+  scrollbar-color: var(--mc-color-git-review-border-default) transparent;
+}
+
+.appearance-diff-preview__canvas {
+  display: grid;
+  min-width: 720px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.appearance-diff-preview__pane {
+  min-width: 0;
+  background: var(--git-review-syntax-background);
+}
+
+.appearance-diff-preview__pane + .appearance-diff-preview__pane {
+  border-left: 1px solid var(--mc-color-git-review-border-default);
+}
+
+.appearance-diff-preview__line {
+  position: relative;
+  display: grid;
+  height: 30px;
+  min-width: 0;
+  align-items: center;
+  grid-template-columns: 44px minmax(0, 1fr);
+  box-shadow: inset 0 1px var(--mc-color-git-review-row-divider);
+}
+
+.appearance-diff-preview__line:first-child {
+  box-shadow: none;
+}
+
+.appearance-diff-preview__line[data-kind='addition'] {
+  color: var(--mc-color-git-review-addition-text);
+  background: var(--mc-color-git-review-addition-surface);
+}
+
+.appearance-diff-preview__line[data-kind='deletion'] {
+  color: var(--mc-color-git-review-deletion-text);
+  background: var(--mc-color-git-review-deletion-surface);
+}
+
+.appearance-diff-preview__line[data-kind='addition']::before,
+.appearance-diff-preview__line[data-kind='deletion']::before {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  content: '';
+}
+
+.appearance-diff-preview__line[data-kind='addition']::before {
+  background: var(--mc-color-git-review-addition-text);
+}
+
+.appearance-diff-preview__line[data-kind='deletion']::before {
+  background: var(--mc-color-git-review-deletion-text);
+}
+
+.appearance-diff-preview__line-number {
+  display: grid;
+  height: 100%;
+  padding-right: 10px;
+  place-items: center end;
+  color: var(--mc-color-git-review-line-number-text);
+  background: var(--mc-color-git-review-gutter-surface);
+  border-right: 1px solid var(--mc-color-git-review-row-divider);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.appearance-diff-preview__line[data-kind='addition'] > .appearance-diff-preview__line-number {
+  color: var(--mc-color-git-review-addition-text);
+  background: var(--mc-color-git-review-addition-gutter-surface);
+}
+
+.appearance-diff-preview__line[data-kind='deletion'] > .appearance-diff-preview__line-number {
+  color: var(--mc-color-git-review-deletion-text);
+  background: var(--mc-color-git-review-deletion-gutter-surface);
+}
+
+.appearance-diff-preview code,
+.appearance-diff-preview__line-number {
+  font-family: var(--mc-mono-font-family);
+  font-size: var(--mc-font-size-code);
+  line-height: 1;
+}
+
+.appearance-diff-preview code {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 14px;
+  color: var(--git-review-syntax-foreground);
+  text-overflow: clip;
+  white-space: pre;
+}
+
+.appearance-diff-preview__syntax-keyword {
+  color: var(--git-review-syntax-keyword);
+}
+
+.appearance-diff-preview__syntax-variable {
+  color: var(--git-review-syntax-variable);
+}
+
+.appearance-diff-preview__syntax-type {
+  color: var(--git-review-syntax-type);
+}
+
+.appearance-diff-preview__syntax-attribute {
+  color: var(--git-review-syntax-attribute);
+}
+
+.appearance-diff-preview__syntax-string {
+  color: var(--git-review-syntax-string);
+}
+
+.appearance-diff-preview__syntax-number {
+  color: var(--git-review-syntax-number);
+}
+
+.appearance-diff-preview__syntax-operator {
+  color: var(--git-review-syntax-foreground);
+}
+
 .settings-list.appearance-theme-variant-list {
   position: relative;
   overflow: visible;

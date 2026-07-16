@@ -3,6 +3,59 @@ import type { TranslationKey } from '../frontendTranslations'
 export type ColorScheme = 'light' | 'dark'
 export type ColorSchemePreference = 'system' | ColorScheme
 
+export interface GitReviewSyntaxColors {
+  readonly attribute: string
+  readonly background: string
+  readonly comment: string
+  readonly constant: string
+  readonly foreground: string
+  readonly function: string
+  readonly invalid: string
+  readonly keyword: string
+  readonly number: string
+  readonly regexp: string
+  readonly string: string
+  readonly tag: string
+  readonly type: string
+  readonly variable: string
+}
+
+export interface GitReviewColors {
+  readonly surface: {
+    readonly panel: string
+    readonly fileList: string
+    readonly card: string
+    readonly header: string
+    readonly headerHover: string
+    readonly headerExpanded: string
+    readonly gutter: string
+    readonly bufferGutter: string
+    readonly addition: string
+    readonly deletion: string
+    readonly additionGutter: string
+    readonly deletionGutter: string
+    readonly gap: string
+    readonly gapGutter: string
+    readonly buffer: string
+  }
+  readonly text: {
+    readonly primary: string
+    readonly secondary: string
+    readonly muted: string
+    readonly lineNumber: string
+    readonly meta: string
+    readonly addition: string
+    readonly deletion: string
+  }
+  readonly border: {
+    readonly default: string
+    readonly subtle: string
+    readonly rowDivider: string
+  }
+  readonly bufferStripe: string
+  readonly syntax: GitReviewSyntaxColors
+}
+
 export interface FrontendTheme {
   readonly colors: {
     readonly text: {
@@ -99,6 +152,7 @@ export interface FrontendTheme {
       readonly additionText: string
       readonly deletionText: string
     }
+    readonly gitReview: GitReviewColors
     readonly dataViz: {
       readonly input: string
       readonly output: string

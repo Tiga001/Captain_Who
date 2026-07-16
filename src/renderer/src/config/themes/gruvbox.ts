@@ -1,6 +1,34 @@
 import { createPaletteTheme } from './paletteTheme'
 import type { PaletteThemeRecipe } from './paletteTheme'
 
+const gruvboxLightGitReviewSyntax = {
+  attribute: '#B57614',
+  comment: '#928374',
+  foreground: '#3C3836',
+  function: '#B57614',
+  keyword: '#9D0006',
+  number: '#8F3F71',
+  regexp: '#AF3A03',
+  string: '#79740E',
+  tag: '#427B58',
+  type: '#B57614',
+  variable: '#076678'
+} as const
+
+const gruvboxDarkGitReviewSyntax = {
+  attribute: '#FABD2F',
+  comment: '#928374',
+  foreground: '#EBDBB2',
+  function: '#FABD2F',
+  keyword: '#FB4934',
+  number: '#D3869B',
+  regexp: '#FE8019',
+  string: '#B8BB26',
+  tag: '#8EC07C',
+  type: '#FABD2F',
+  variable: '#83A598'
+} as const
+
 const gruvboxLightRecipe = {
   colorScheme: 'light',
   text: {
@@ -48,6 +76,9 @@ const gruvboxLightRecipe = {
     outputThinking: '#AF3A03',
     sourceBadgeBackground: '#076678',
     sourceBadgeText: '#FFFFFF'
+  },
+  gitReview: {
+    syntax: gruvboxLightGitReviewSyntax
   },
   terminal: {
     background: '#FBF1C7',
@@ -121,6 +152,9 @@ const gruvboxDarkRecipe = {
     outputThinking: '#FE8019',
     sourceBadgeBackground: '#FABD2F',
     sourceBadgeText: '#282828'
+  },
+  gitReview: {
+    syntax: gruvboxDarkGitReviewSyntax
   },
   terminal: {
     background: '#282828',

@@ -247,6 +247,7 @@ export const zhCNTranslations = {
   'personalization.loadFailed': '加载个性化设置失败',
 
   'appearance.theme': '主题',
+  'appearance.diffPreview': 'Diff 主题预览',
   'appearance.preferences': '偏好设置',
   'appearance.theme.system': '系统',
   'appearance.theme.light': '浅色',

@@ -1,6 +1,21 @@
 import { createPaletteTheme } from './paletteTheme'
 import type { PaletteThemeRecipe } from './paletteTheme'
 
+const crabGitReviewSyntax = {
+  attribute: '#2B7071',
+  comment: '#898278',
+  constant: '#8A6500',
+  foreground: '#1D1B16',
+  function: '#8B4E66',
+  keyword: '#B93D24',
+  number: '#45656C',
+  regexp: '#2B7071',
+  string: '#007A35',
+  tag: '#B93D24',
+  type: '#45656C',
+  variable: '#8A6500'
+} as const
+
 const crabPalette = {
   accent: '#DA7756',
   accentStrong: '#A64B31',
@@ -60,6 +75,9 @@ const crabLightRecipe = {
     outputThinking: '#8B5E55',
     sourceBadgeBackground: crabPalette.accentStrong,
     sourceBadgeText: '#FFFFFF'
+  },
+  gitReview: {
+    syntax: crabGitReviewSyntax
   },
   terminal: {
     background: crabPalette.paper,

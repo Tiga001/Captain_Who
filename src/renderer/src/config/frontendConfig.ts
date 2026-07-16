@@ -2,6 +2,7 @@ import { defaultThemeIdsByColorScheme, lightTheme } from './frontendTheme'
 import { DEFAULT_APP_LANGUAGE } from './languageRegistry'
 import type { ColorSchemePreference, FrontendTheme } from './frontendTheme'
 import type { AppLanguage } from './frontendTranslations'
+import { getGitReviewCssVariables } from './themes/gitReviewTheme'
 
 export const FRONTEND_CONFIG_STORAGE_KEY = 'mycopilot.frontend-config'
 
@@ -273,6 +274,7 @@ export function getFrontendCssVariables(
     '--mc-color-status-success-surface': theme.colors.status.successSurface,
     '--mc-color-diff-addition-text': theme.colors.diff.additionText,
     '--mc-color-diff-deletion-text': theme.colors.diff.deletionText,
+    ...getGitReviewCssVariables(theme.colors.gitReview),
     '--mc-color-data-viz-input': theme.colors.dataViz.input,
     '--mc-color-data-viz-output': theme.colors.dataViz.output,
     '--mc-color-data-viz-output-thinking': theme.colors.dataViz.outputThinking,

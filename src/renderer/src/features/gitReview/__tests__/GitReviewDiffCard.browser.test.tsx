@@ -3,6 +3,8 @@ import { useRef, type CSSProperties, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { Tooltip } from '../../../components/overlay/Tooltip'
+import { getFrontendTheme } from '../../../config/frontendTheme'
+import { getGitReviewCssVariables } from '../../../config/themes/gitReviewTheme'
 import type { Translate } from '../../../config/translationFormat'
 import '../../../styles/global.css'
 import { GitReviewDiffCard } from '../GitReviewDiffCard'
@@ -12,6 +14,7 @@ import type { GitReviewDiffState, GitReviewFileContentState } from '../useGitRev
 const translate: Translate = (key) => key
 const noop = (): void => undefined
 const themeVariables = {
+  ...getGitReviewCssVariables(getFrontendTheme('classic-dark').tokens.colors.gitReview),
   '--mc-color-border-default': 'rgb(75, 78, 84)',
   '--mc-color-border-hairline': 'rgb(66, 69, 74)',
   '--mc-color-border-subtle': 'rgb(61, 64, 69)',

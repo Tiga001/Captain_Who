@@ -2,32 +2,6 @@
   --git-review-toolbar-height: 48px;
   --git-review-line-number-width: 46px;
   --git-review-diff-row-height: 17px;
-  --git-review-gutter-surface: color-mix(
-    in srgb,
-    var(--mc-color-surface-muted) 45%,
-    var(--mc-color-surface-right-panel)
-  );
-  --git-review-buffer-gutter-surface: color-mix(
-    in srgb,
-    var(--mc-color-surface-muted) 58%,
-    var(--mc-color-surface-right-panel)
-  );
-  --git-review-added-surface: light-dark(
-    color-mix(in lab, var(--mc-color-surface-right-panel) 88%, var(--mc-color-diff-addition-text)),
-    color-mix(in lab, var(--mc-color-surface-right-panel) 80%, var(--mc-color-diff-addition-text))
-  );
-  --git-review-deleted-surface: light-dark(
-    color-mix(in lab, var(--mc-color-surface-right-panel) 88%, var(--mc-color-diff-deletion-text)),
-    color-mix(in lab, var(--mc-color-surface-right-panel) 80%, var(--mc-color-diff-deletion-text))
-  );
-  --git-review-added-gutter-surface: light-dark(
-    color-mix(in lab, white 91%, var(--mc-color-diff-addition-text)),
-    color-mix(in lab, black 85%, var(--mc-color-diff-addition-text))
-  );
-  --git-review-deleted-gutter-surface: light-dark(
-    color-mix(in lab, white 91%, var(--mc-color-diff-deletion-text)),
-    color-mix(in lab, black 85%, var(--mc-color-diff-deletion-text))
-  );
 
   container-name: git-review;
   container-type: inline-size;
@@ -37,8 +11,8 @@
   height: 100%;
   min-width: 0;
   min-height: 0;
-  color: var(--mc-color-text-primary);
-  background: var(--mc-color-surface-right-panel);
+  color: var(--mc-color-git-review-text-primary);
+  background: var(--mc-color-git-review-panel-surface);
 }
 
 .git-review__toolbar {
@@ -53,7 +27,7 @@
   justify-content: space-between;
   gap: 8px;
   padding: 4px 10px;
-  border-bottom: 1px solid var(--mc-color-border-subtle);
+  border-bottom: 1px solid var(--mc-color-git-review-border-subtle);
 }
 
 .git-review__scope-control,
@@ -128,11 +102,11 @@
 }
 
 .git-review__line-stats-addition {
-  color: var(--mc-color-diff-addition-text);
+  color: var(--mc-color-git-review-addition-text);
 }
 
 .git-review__line-stats-deletion {
-  color: var(--mc-color-diff-deletion-text);
+  color: var(--mc-color-git-review-deletion-text);
 }
 
 .git-review__toolbar-actions {
@@ -204,12 +178,12 @@
 }
 
 .git-review__layout-icon > span:first-child {
-  background: var(--mc-color-diff-addition-text);
+  background: var(--mc-color-git-review-addition-text);
   border-radius: 1px;
 }
 
 .git-review__layout-icon > span:last-child {
-  background: var(--mc-color-diff-deletion-text);
+  background: var(--mc-color-git-review-deletion-text);
   border-radius: 1px;
 }
 
@@ -412,12 +386,8 @@
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
-  border-right: 1px solid var(--mc-color-border-subtle);
-  background: color-mix(
-    in srgb,
-    var(--mc-color-surface-right-panel) 88%,
-    var(--mc-color-surface-muted)
-  );
+  border-right: 1px solid var(--mc-color-git-review-border-subtle);
+  background: var(--mc-color-git-review-file-list-surface);
 }
 
 .git-review__file-list-heading {
@@ -427,8 +397,8 @@
   justify-content: space-between;
   gap: 8px;
   padding: 0 11px;
-  color: var(--mc-color-text-muted);
-  border-bottom: 1px solid var(--mc-color-border-subtle);
+  color: var(--mc-color-git-review-text-muted);
+  border-bottom: 1px solid var(--mc-color-git-review-border-subtle);
   font-size: var(--mc-font-size-sm);
   font-weight: var(--mc-font-weight-strong);
 }
@@ -568,9 +538,9 @@
 
 .git-review__diff-card {
   min-width: 0;
-  background: transparent;
+  background: var(--mc-color-git-review-card-surface);
   border: 0;
-  border-bottom: 1px solid var(--mc-color-border-subtle);
+  border-bottom: 1px solid var(--mc-color-git-review-border-subtle);
   border-radius: 0;
 }
 
@@ -584,22 +554,17 @@
   min-height: 34px;
   align-items: center;
   gap: 0;
-  color: var(--mc-color-text-secondary);
-  background-color: var(--mc-color-surface-right-panel);
+  color: var(--mc-color-git-review-text-secondary);
+  background: var(--mc-color-git-review-header-surface);
 }
 
 .git-review__diff-card-header:hover {
-  background-color: var(--mc-color-surface-right-panel);
-  background-image: linear-gradient(var(--mc-color-state-hover), var(--mc-color-state-hover));
+  background: var(--mc-color-git-review-header-hover-surface);
 }
 
 .git-review__diff-card[data-expanded='true'] > .git-review__diff-card-header {
-  color: var(--mc-color-text-primary);
-  background-color: var(--mc-color-surface-right-panel);
-  background-image: linear-gradient(
-    color-mix(in srgb, var(--mc-color-state-hover) 62%, transparent),
-    color-mix(in srgb, var(--mc-color-state-hover) 62%, transparent)
-  );
+  color: var(--mc-color-git-review-text-primary);
+  background: var(--mc-color-git-review-header-expanded-surface);
 }
 
 .git-review__diff-card-main {
@@ -719,11 +684,11 @@
 }
 
 .git-review__file-directory {
-  color: var(--mc-color-text-muted);
+  color: var(--mc-color-git-review-text-muted);
 }
 
 .git-review__file-name {
-  color: var(--mc-color-text-primary);
+  color: var(--mc-color-git-review-text-primary);
 }
 
 .git-review__file-stats {
@@ -738,18 +703,18 @@
 }
 
 .git-review__file-additions {
-  color: var(--mc-color-diff-addition-text);
+  color: var(--mc-color-git-review-addition-text);
 }
 
 .git-review__file-deletions {
-  color: var(--mc-color-diff-deletion-text);
+  color: var(--mc-color-git-review-deletion-text);
 }
 
 .git-review__diff-card-body {
   min-width: 0;
   overflow: auto;
-  border-top: 1px solid var(--mc-color-border-subtle);
-  scrollbar-color: var(--mc-color-border-default) transparent;
+  border-top: 1px solid var(--mc-color-git-review-border-subtle);
+  scrollbar-color: var(--mc-color-git-review-border-default) transparent;
 }
 
 .git-review__diff-message {
@@ -759,7 +724,7 @@
   justify-content: center;
   gap: 8px;
   padding: 18px;
-  color: var(--mc-color-text-muted);
+  color: var(--mc-color-git-review-text-muted);
   text-align: center;
   font-size: var(--mc-font-size-sm);
 }
@@ -782,7 +747,7 @@
 .git-review__unified-diff,
 .git-review__split-diff,
 .git-review__single-diff {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--mc-mono-font-family);
   font-size: 11px;
   line-height: var(--git-review-diff-row-height);
 }
@@ -811,10 +776,10 @@
 .git-review__line-number {
   position: relative;
   padding: 0 8px;
-  color: var(--mc-color-text-muted);
+  color: var(--mc-color-git-review-line-number-text);
   text-align: right;
-  background: var(--git-review-gutter-surface);
-  border-right: 1px solid var(--mc-color-border-hairline);
+  background: var(--mc-color-git-review-gutter-surface);
+  border-right: 1px solid var(--mc-color-git-review-row-divider);
   user-select: none;
 }
 
@@ -854,17 +819,17 @@
 }
 
 .git-review__diff-line--addition {
-  color: var(--mc-color-diff-addition-text);
-  background: var(--git-review-added-surface);
+  color: var(--mc-color-git-review-addition-text);
+  background: var(--mc-color-git-review-addition-surface);
 }
 
 .git-review__diff-line--deletion {
-  color: var(--mc-color-diff-deletion-text);
-  background: var(--git-review-deleted-surface);
+  color: var(--mc-color-git-review-deletion-text);
+  background: var(--mc-color-git-review-deletion-surface);
 }
 
 .git-review__diff-line--meta {
-  color: var(--mc-color-text-muted);
+  color: var(--mc-color-git-review-meta-text);
   font-style: italic;
 }
 
@@ -880,13 +845,9 @@
   max-height: 32px;
   grid-template-columns: var(--git-review-line-number-width) minmax(0, 1fr);
   align-items: stretch;
-  color: var(--mc-color-text-muted);
-  background: color-mix(
-    in srgb,
-    var(--mc-color-surface-muted) 78%,
-    var(--mc-color-surface-right-panel)
-  );
-  border-block: 1px solid var(--mc-color-border-subtle);
+  color: var(--mc-color-git-review-text-muted);
+  background: var(--mc-color-git-review-gap-surface);
+  border-block: 1px solid var(--mc-color-git-review-border-subtle);
   box-sizing: border-box;
 }
 
@@ -903,8 +864,8 @@
   flex-direction: column;
   align-items: stretch;
   justify-content: center;
-  background: color-mix(in srgb, var(--mc-color-surface-muted) 88%, transparent);
-  border-right: 1px solid var(--mc-color-border-hairline);
+  background: var(--mc-color-git-review-gap-gutter-surface);
+  border-right: 1px solid var(--mc-color-git-review-row-divider);
 }
 
 .git-review__gap-gutter button,
@@ -976,8 +937,8 @@
 }
 
 .git-review__split-buffer-gutter {
-  background: var(--git-review-buffer-gutter-surface);
-  border-right: 1px solid var(--mc-color-border-hairline);
+  background: var(--mc-color-git-review-buffer-gutter-surface);
+  border-right: 1px solid var(--mc-color-git-review-row-divider);
 }
 
 .git-review__split-pane .git-review__split-buffer-gutter {
@@ -987,17 +948,13 @@
 }
 
 .git-review__split-buffer-content {
-  background-color: color-mix(
-    in srgb,
-    var(--mc-color-surface-muted) 32%,
-    var(--mc-color-surface-right-panel)
-  );
+  background-color: var(--mc-color-git-review-buffer-surface);
   background-image: repeating-linear-gradient(
     -45deg,
     transparent,
     transparent 4.242px,
-    var(--mc-color-diff-buffer-stripe, rgb(127 127 127 / 28%)) 4.242px,
-    var(--mc-color-diff-buffer-stripe, rgb(127 127 127 / 28%)) 5.656px
+    var(--mc-color-git-review-buffer-stripe) 4.242px,
+    var(--mc-color-git-review-buffer-stripe) 5.656px
   );
   background-origin: border-box;
   background-position: 5px 0;
@@ -1027,7 +984,7 @@
 }
 
 .git-review__split-pane + .git-review__split-pane {
-  border-left: 1px solid var(--mc-color-border-default);
+  border-left: 1px solid var(--mc-color-git-review-border-default);
 }
 
 .git-review__split-pane-canvas {
@@ -1066,7 +1023,7 @@
 }
 
 .git-review__split-pane-line + .git-review__split-pane-line {
-  box-shadow: inset 0 1px color-mix(in srgb, var(--mc-color-border-hairline) 55%, transparent);
+  box-shadow: inset 0 1px var(--mc-color-git-review-row-divider);
 }
 
 .git-review__split-pane-line > .git-review__line-number,
@@ -1074,17 +1031,17 @@
   position: sticky;
   left: 0;
   z-index: 1;
-  background: var(--git-review-gutter-surface);
+  background: var(--mc-color-git-review-gutter-surface);
 }
 
 .git-review__diff-line--addition > .git-review__line-number {
-  color: var(--mc-color-diff-addition-text);
-  background: var(--git-review-added-gutter-surface);
+  color: var(--mc-color-git-review-addition-text);
+  background: var(--mc-color-git-review-addition-gutter-surface);
 }
 
 .git-review__diff-line--deletion > .git-review__line-number {
-  color: var(--mc-color-diff-deletion-text);
-  background: var(--git-review-deleted-gutter-surface);
+  color: var(--mc-color-git-review-deletion-text);
+  background: var(--mc-color-git-review-deletion-gutter-surface);
 }
 
 .git-review__diff-line--addition > .git-review__line-number:first-child::before,
@@ -1099,15 +1056,15 @@
 }
 
 .git-review__diff-line--addition > .git-review__line-number:first-child::before {
-  background-color: var(--mc-color-diff-addition-text);
+  background-color: var(--mc-color-git-review-addition-text);
 }
 
 .git-review__diff-line--deletion > .git-review__line-number:first-child::before {
-  background-color: var(--git-review-deleted-surface);
+  background-color: var(--mc-color-git-review-deletion-surface);
   background-image: linear-gradient(
     0deg,
-    var(--git-review-deleted-surface) 50%,
-    var(--mc-color-diff-deletion-text) 50%
+    var(--mc-color-git-review-deletion-surface) 50%,
+    var(--mc-color-git-review-deletion-text) 50%
   );
   background-repeat: repeat;
   background-size: 2px 2px;
@@ -1126,7 +1083,7 @@
 }
 
 .git-review__split-row + .git-review__split-row {
-  box-shadow: inset 0 1px color-mix(in srgb, var(--mc-color-border-hairline) 55%, transparent);
+  box-shadow: inset 0 1px var(--mc-color-git-review-row-divider);
 }
 
 .git-review__split-side {
@@ -1137,7 +1094,7 @@
 }
 
 .git-review__split-side + .git-review__split-side {
-  border-left: 1px solid var(--mc-color-border-default);
+  border-left: 1px solid var(--mc-color-git-review-border-default);
 }
 
 .git-review__split-one-sided-block {
@@ -1149,7 +1106,7 @@
 }
 
 .git-review__split-one-sided-block > :nth-child(2) {
-  border-left: 1px solid var(--mc-color-border-default);
+  border-left: 1px solid var(--mc-color-git-review-border-default);
 }
 
 .git-review__split-block-lines {
@@ -1162,7 +1119,7 @@
 
 .git-review__split-block-lines .git-review__split-side + .git-review__split-side {
   border-left: 0;
-  box-shadow: inset 0 1px color-mix(in srgb, var(--mc-color-border-hairline) 55%, transparent);
+  box-shadow: inset 0 1px var(--mc-color-git-review-row-divider);
 }
 
 .git-review__single-diff {
@@ -1185,7 +1142,7 @@
 }
 
 .git-review__single-line + .git-review__single-line {
-  box-shadow: inset 0 1px color-mix(in srgb, var(--mc-color-border-hairline) 55%, transparent);
+  box-shadow: inset 0 1px var(--mc-color-git-review-row-divider);
 }
 
 .git-review__single-diff[data-wrap='true'] {

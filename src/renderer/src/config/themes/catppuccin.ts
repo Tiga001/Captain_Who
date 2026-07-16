@@ -1,6 +1,34 @@
 import { createPaletteTheme } from './paletteTheme'
 import type { PaletteThemeRecipe } from './paletteTheme'
 
+const catppuccinLatteGitReviewSyntax = {
+  attribute: '#DF8E1D',
+  comment: '#7C7F93',
+  foreground: '#4C4F69',
+  function: '#1E66F5',
+  keyword: '#8839EF',
+  number: '#FE640B',
+  regexp: '#EA76CB',
+  string: '#40A02B',
+  tag: '#1E66F5',
+  type: '#DF8E1D',
+  variable: '#4C4F69'
+} as const
+
+const catppuccinMochaGitReviewSyntax = {
+  attribute: '#F9E2AF',
+  comment: '#9399B2',
+  foreground: '#CDD6F4',
+  function: '#89B4FA',
+  keyword: '#CBA6F7',
+  number: '#FAB387',
+  regexp: '#F5C2E7',
+  string: '#A6E3A1',
+  tag: '#89B4FA',
+  type: '#F9E2AF',
+  variable: '#CDD6F4'
+} as const
+
 const catppuccinLatteRecipe = {
   colorScheme: 'light',
   text: {
@@ -48,6 +76,9 @@ const catppuccinLatteRecipe = {
     outputThinking: '#A3146D',
     sourceBadgeBackground: '#1E66F5',
     sourceBadgeText: '#FFFFFF'
+  },
+  gitReview: {
+    syntax: catppuccinLatteGitReviewSyntax
   },
   terminal: {
     background: '#EFF1F5',
@@ -121,6 +152,9 @@ const catppuccinMochaRecipe = {
     outputThinking: '#F5C2E7',
     sourceBadgeBackground: '#74C7EC',
     sourceBadgeText: '#11111B'
+  },
+  gitReview: {
+    syntax: catppuccinMochaGitReviewSyntax
   },
   terminal: {
     background: '#1E1E2E',
