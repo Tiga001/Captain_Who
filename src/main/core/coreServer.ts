@@ -35,6 +35,8 @@ import type {
   GitReviewSummaryInput,
   ChatSearchInput,
   ChatSearchResult,
+  SkillsListInput,
+  SkillsListOutput,
   StorageAgentPromptPreferencesRecord,
   StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
@@ -69,6 +71,7 @@ const AGENT_READ_FILE_DRAFT_METHOD = 'agent.readFileDraft'
 const AGENT_GET_FILE_WRITE_DIFF_METHOD = 'agent.getFileWriteDiff'
 const AGENT_EVENT_NOTIFICATION_METHOD = 'agent.event'
 const SEARCH_SEARCH_CHATS_METHOD = 'search.searchChats'
+const SKILLS_LIST_METHOD = 'skills.list'
 const GIT_INSPECT_REPOSITORY_METHOD = 'git.inspectRepository'
 const GIT_GET_REVIEW_SUMMARY_METHOD = 'git.getReviewSummary'
 const GIT_GET_REVIEW_FILE_DIFF_METHOD = 'git.getReviewFileDiff'
@@ -224,6 +227,10 @@ export class CoreServer {
 
   searchChats(input: ChatSearchInput): Promise<ChatSearchResult[]> {
     return this.rpc.request<ChatSearchResult[], ChatSearchInput>(SEARCH_SEARCH_CHATS_METHOD, input)
+  }
+
+  listSkills(input: SkillsListInput): Promise<SkillsListOutput> {
+    return this.rpc.request<SkillsListOutput, SkillsListInput>(SKILLS_LIST_METHOD, input)
   }
 
   inspectGitRepository(input: GitRepositoryInspectInput): Promise<GitRepositoryInspection> {

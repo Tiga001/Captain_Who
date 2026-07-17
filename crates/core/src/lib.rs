@@ -13,6 +13,7 @@ mod prompts;
 pub mod protocol;
 mod revision;
 mod runtime;
+pub mod skills;
 pub mod storage;
 mod system_paths;
 mod tools;

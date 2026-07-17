@@ -327,6 +327,7 @@ export function registerHostIpc(
     coreServer.getFileWriteDiff(input)
   )
   ipcMain.handle('host:search.searchChats', (_event, input) => coreServer.searchChats(input))
+  ipcMain.handle('host:skills.list', (_event, input) => coreServer.listSkills(input))
   ipcMain.handle('host:git.inspectRepository', (_event, input) =>
     coreServer.inspectGitRepository(input)
   )

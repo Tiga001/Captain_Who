@@ -17,6 +17,7 @@ pub const AGENT_READ_FILE_DRAFT_METHOD: &str = "agent.readFileDraft";
 pub const AGENT_GET_FILE_WRITE_DIFF_METHOD: &str = "agent.getFileWriteDiff";
 pub const AGENT_EVENT_NOTIFICATION_METHOD: &str = "agent.event";
 pub const SEARCH_SEARCH_CHATS_METHOD: &str = "search.searchChats";
+pub const SKILLS_LIST_METHOD: &str = "skills.list";
 pub const GIT_INSPECT_REPOSITORY_METHOD: &str = "git.inspectRepository";
 pub const GIT_GET_REVIEW_SUMMARY_METHOD: &str = "git.getReviewSummary";
 pub const GIT_GET_REVIEW_FILE_DIFF_METHOD: &str = "git.getReviewFileDiff";
@@ -142,6 +143,12 @@ pub struct AgentRejectActionRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitRepositoryInspectRequest {
+    pub project_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsListRequest {
     pub project_id: String,
 }
 

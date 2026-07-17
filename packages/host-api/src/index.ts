@@ -38,6 +38,8 @@ import type {
   ResourceFaviconResponse,
   ChatSearchInput,
   ChatSearchResult,
+  SkillsListInput,
+  SkillsListOutput,
   StorageAgentPromptPreferencesRecord,
   StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
@@ -117,6 +119,10 @@ export interface SearchHostApi {
   searchChats(input: ChatSearchInput): Promise<ChatSearchResult[]>
 }
 
+export interface SkillsHostApi {
+  list(input: SkillsListInput): Promise<SkillsListOutput>
+}
+
 export interface GitHostApi {
   inspectRepository(input: GitRepositoryInspectInput): Promise<GitRepositoryInspection>
   getReviewSummary(input: GitReviewSummaryInput): Promise<GitReviewSummary>
@@ -193,6 +199,7 @@ export interface HostApi {
   git: GitHostApi
   resources: ResourcesHostApi
   search: SearchHostApi
+  skills: SkillsHostApi
   storage: StorageHostApi
   terminal: TerminalHostApi
   workspaceFiles: WorkspaceFilesHostApi

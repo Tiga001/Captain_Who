@@ -1,6 +1,7 @@
 mod agent;
 mod agent_support;
 mod git_dispatcher;
+mod skills_dispatcher;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use agent::{AgentConversationTurnInput, AgentService};
 use git_dispatcher::{GitDispatcher, GitJobPriority};
 use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
+use mycopilot_core::skills::SkillsService;
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatMessageRecord,
     ChatMessageStateRecord, ChatSearchInput, ComposerDraftRecord, ForkConversationInput,
@@ -21,7 +23,7 @@ use mycopilot_protocol_rs::{
     AgentFileDraftReadRequest, AgentRejectActionRequest, CorePingRequest, CorePingResponse,
     CoreShutdownResponse, GitRepositoryInspectRequest, GitReviewFileContentRequest,
     GitReviewFileDiffRequest, GitReviewFileMutationRequest, GitReviewSummaryRequest, JsonRpcId,
-    JsonRpcRequest, AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_ACTION_METHOD,
+    JsonRpcRequest, SkillsListRequest, AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_ACTION_METHOD,
     AGENT_CANCEL_RUN_METHOD, AGENT_CLEAR_USAGE_RECORDS_METHOD,
     AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD, AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
     AGENT_GET_FILE_WRITE_DIFF_METHOD, AGENT_GET_USAGE_SUMMARY_METHOD,
@@ -29,7 +31,7 @@ use mycopilot_protocol_rs::{
     AGENT_START_CONVERSATION_TURN_METHOD, CORE_PING_METHOD, CORE_SHUTDOWN_METHOD,
     GIT_GET_REVIEW_FILE_CONTENT_METHOD, GIT_GET_REVIEW_FILE_DIFF_METHOD,
     GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD, GIT_MUTATE_REVIEW_FILE_METHOD,
-    SEARCH_SEARCH_CHATS_METHOD, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
+    SEARCH_SEARCH_CHATS_METHOD, SKILLS_LIST_METHOD, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
     STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
     STORAGE_FORK_CONVERSATION_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
     STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD, STORAGE_LOAD_COMPOSER_DRAFTS_METHOD,
@@ -43,6 +45,7 @@ use mycopilot_protocol_rs::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use skills_dispatcher::SkillsDispatcher;
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -54,6 +57,7 @@ async fn main() -> io::Result<()> {
     );
     let agent_service = AgentService::new(storage.clone());
     let git_review_service = Arc::new(GitReviewService::new());
+    let skills_service = Arc::new(SkillsService::new());
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
     let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
     let writer = tokio::spawn(run_outbound_writer(
@@ -62,22 +66,29 @@ async fn main() -> io::Result<()> {
         finish_outbound_rx,
     ));
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
+    let skill_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let request_dispatchers = RequestDispatchers {
+        git: &git_dispatcher,
+        skills: &skill_dispatcher,
+    };
 
     let input_result = run_request_loop(
         BufReader::new(io::stdin()),
         storage,
         &agent_service,
+        skills_service,
         git_review_service,
-        &git_dispatcher,
+        &request_dispatchers,
         &outbound_tx,
     )
     .await;
 
-    // Admission has stopped. Settle accepted Git jobs while active agents are cancelled in
-    // parallel; queued Git jobs receive cancellation errors and running jobs finish safely. The
-    // outbound writer remains live for every final response and notification.
-    let (dispatcher_result, (cancelled_runs, timed_out)) = tokio::join!(
+    // Admission has stopped. Settle accepted filesystem jobs while active agents are cancelled in
+    // parallel; queued jobs receive cancellation errors and running jobs get a bounded grace
+    // period. The outbound writer remains live for every final response and notification.
+    let (git_dispatcher_result, skill_dispatcher_result, (cancelled_runs, timed_out)) = tokio::join!(
         git_dispatcher.shutdown(),
+        skill_dispatcher.shutdown(),
         agent_service.shutdown_active_runs(Duration::from_secs(2))
     );
 
@@ -106,19 +117,26 @@ async fn main() -> io::Result<()> {
         .await
         .map_err(|error| io::Error::other(format!("outbound writer stopped: {error}")))?;
     input_result?;
-    dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
+    git_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
+    skill_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
     if let Some(error) = outbound_error {
         return Err(error);
     }
     writer_result
 }
 
+struct RequestDispatchers<'a> {
+    git: &'a GitDispatcher,
+    skills: &'a SkillsDispatcher,
+}
+
 async fn run_request_loop<R>(
     input: R,
     storage: Arc<StorageService>,
     agent_service: &AgentService,
+    skills_service: Arc<SkillsService>,
     git_review_service: Arc<GitReviewService>,
-    git_dispatcher: &GitDispatcher,
+    dispatchers: &RequestDispatchers<'_>,
     outbound: &mpsc::UnboundedSender<Value>,
 ) -> io::Result<Option<JsonRpcId>>
 where
@@ -156,10 +174,26 @@ where
                 let request_storage = Arc::clone(&storage);
                 let request_service = Arc::clone(&git_review_service);
                 if let Err(error) =
-                    git_dispatcher.try_submit(priority, request_id.clone(), move || {
-                        handle_git_request(&request_storage, &request_service, request)
-                    })
+                    dispatchers
+                        .git
+                        .try_submit(priority, request_id.clone(), move || {
+                            handle_git_request(&request_storage, &request_service, request)
+                        })
                 {
+                    enqueue_outbound(
+                        outbound,
+                        response_error(Some(request_id), error.code(), error.message()),
+                    )?;
+                }
+                continue;
+            }
+            if request.method == SKILLS_LIST_METHOD {
+                let request_id = request.id.clone();
+                let request_storage = Arc::clone(&storage);
+                let request_service = Arc::clone(&skills_service);
+                if let Err(error) = dispatchers.skills.try_submit(request_id.clone(), move || {
+                    handle_skills_request(&request_storage, &request_service, request)
+                }) {
                     enqueue_outbound(
                         outbound,
                         response_error(Some(request_id), error.code(), error.message()),
@@ -478,6 +512,33 @@ fn handle_request(
             storage_response(request.id, storage.save_ui_preferences(preferences))
         }
         _ => response_error(Some(request.id), -32601, "Method not found"),
+    }
+}
+
+fn handle_skills_request(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    request: JsonRpcRequest,
+) -> Value {
+    if request.jsonrpc != "2.0" {
+        return response_error(Some(request.id), -32600, "Invalid JSON-RPC version");
+    }
+    if request.method != SKILLS_LIST_METHOD {
+        return response_error(Some(request.id), -32601, "Method not found");
+    }
+
+    let input = match parse_params::<SkillsListRequest>(request.params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(request.id), -32602, message),
+    };
+    let result = resolve_project_path(storage, &input.project_id).and_then(|workspace| {
+        skills_service
+            .list_workspace(&input.project_id, &workspace)
+            .map_err(|error| error.to_string())
+    });
+    match result {
+        Ok(catalog) => response_success(request.id, catalog),
+        Err(message) => response_error(Some(request.id), -32000, message),
     }
 }
 
@@ -828,8 +889,188 @@ fn home_dir() -> PathBuf {
 #[cfg(test)]
 mod server_tests {
     use super::*;
+    use std::fs;
     use std::sync::mpsc as std_mpsc;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn skills_list_resolves_the_project_and_returns_camel_case_catalog() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let skill_directory = workspace
+            .join(".agents")
+            .join("skills")
+            .join("repository-evidence-auditor");
+        fs::create_dir_all(&skill_directory).unwrap();
+        fs::write(
+            skill_directory.join("SKILL.md"),
+            concat!(
+                "---\n",
+                "name: repository-evidence-auditor\n",
+                "description: Inspect a repository using source evidence.\n",
+                "---\n",
+                "# Instructions\n"
+            ),
+        )
+        .unwrap();
+        let broken_skill_directory = workspace.join(".agents").join("skills").join("broken");
+        fs::create_dir(&broken_skill_directory).unwrap();
+        fs::write(
+            broken_skill_directory.join("SKILL.md"),
+            "missing frontmatter",
+        )
+        .unwrap();
+        let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_project(ProjectRecord {
+                id: "project-1".to_string(),
+                name: "Workspace".to_string(),
+                path: Some(workspace.to_string_lossy().into_owned()),
+                created_at: 1,
+                pinned_at: None,
+            })
+            .unwrap();
+        let skills_service = SkillsService::new();
+        let request = serde_json::from_value::<JsonRpcRequest>(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": SKILLS_LIST_METHOD,
+            "params": { "projectId": "project-1" }
+        }))
+        .unwrap();
+
+        let response = handle_skills_request(&storage, &skills_service, request);
+
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["result"]["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            response["result"]["skills"][0]["id"],
+            "workspace:project-1:repository-evidence-auditor"
+        );
+        assert_eq!(response["result"]["skills"][0]["scope"], "workspace");
+        assert_eq!(
+            response["result"]["skills"][0]["description"],
+            "Inspect a repository using source evidence."
+        );
+        assert_eq!(
+            PathBuf::from(response["result"]["skills"][0]["path"].as_str().unwrap()),
+            skill_directory.join("SKILL.md").canonicalize().unwrap()
+        );
+        assert_eq!(
+            response["result"]["skills"][0]["relativePath"],
+            ".agents/skills/repository-evidence-auditor/SKILL.md"
+        );
+        assert!(response["result"]["skills"][0]["revision"].is_string());
+        assert!(response["result"]["catalogRevision"].is_string());
+        assert_eq!(response["result"]["truncated"], false);
+        assert_eq!(
+            response["result"]["diagnostics"][0]["code"],
+            "missingFrontmatter"
+        );
+        assert_eq!(response["result"]["diagnostics"][0]["severity"], "error");
+        assert!(response["result"]["diagnostics"][0]["message"].is_string());
+        assert!(response["result"]["diagnostics"][0]["path"].is_string());
+    }
+
+    #[test]
+    fn skills_list_rejects_missing_project_id_as_invalid_params() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+        let skills_service = SkillsService::new();
+        let request = serde_json::from_value::<JsonRpcRequest>(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": SKILLS_LIST_METHOD,
+            "params": {}
+        }))
+        .unwrap();
+
+        let response = handle_skills_request(&storage, &skills_service, request);
+
+        assert_eq!(response["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn skills_list_rejects_an_unknown_project_with_a_server_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&temp.path().join("storage.sqlite")).unwrap();
+        let request = serde_json::from_value::<JsonRpcRequest>(json!({
+            "jsonrpc": "2.0",
+            "id": "skills-request",
+            "method": SKILLS_LIST_METHOD,
+            "params": { "projectId": "missing" }
+        }))
+        .unwrap();
+
+        let response = handle_skills_request(&storage, &SkillsService::new(), request);
+
+        assert_eq!(response["id"], "skills-request");
+        assert_eq!(response["error"]["code"], -32000);
+        assert_eq!(
+            response["error"]["message"],
+            "The selected project no longer exists."
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_loop_routes_skills_list_through_the_bounded_dispatcher() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let skill_directory = workspace.join(".agents").join("skills").join("auditor");
+        fs::create_dir_all(&skill_directory).unwrap();
+        fs::write(
+            skill_directory.join("SKILL.md"),
+            "---\nname: auditor\ndescription: Audit a repository.\n---\n",
+        )
+        .unwrap();
+        let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_project(ProjectRecord {
+                id: "project-1".to_string(),
+                name: "Workspace".to_string(),
+                path: Some(workspace.to_string_lossy().into_owned()),
+                created_at: 1,
+                pinned_at: None,
+            })
+            .unwrap();
+        let agent_service = AgentService::new(Arc::clone(&storage));
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
+        let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+        let dispatchers = RequestDispatchers {
+            git: &git_dispatcher,
+            skills: &skills_dispatcher,
+        };
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"skills.list\",",
+            "\"params\":{\"projectId\":\"project-1\"}}\n"
+        );
+
+        let shutdown_id = run_request_loop(
+            BufReader::new(input.as_bytes()),
+            storage,
+            &agent_service,
+            Arc::new(SkillsService::new()),
+            Arc::new(GitReviewService::new()),
+            &dispatchers,
+            &outbound_tx,
+        )
+        .await
+        .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .expect("skills.list must complete")
+            .expect("skills.list must produce a response");
+
+        assert!(shutdown_id.is_none());
+        assert_eq!(response["id"], 7);
+        assert_eq!(
+            response["result"]["skills"][0]["id"],
+            "workspace:project-1:auditor"
+        );
+        git_dispatcher.shutdown().await.unwrap();
+        skills_dispatcher.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn outbound_writer_finishes_after_draining_with_a_lingering_sender() {
@@ -863,13 +1104,19 @@ mod server_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn request_loop_remains_responsive_while_all_git_workers_are_blocked() {
+    async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() {
         let temp = tempfile::tempdir().unwrap();
         let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
         let agent_service = AgentService::new(Arc::clone(&storage));
+        let skills_service = Arc::new(SkillsService::new());
         let git_review_service = Arc::new(GitReviewService::new());
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
         let dispatcher = GitDispatcher::new(outbound_tx.clone());
+        let skill_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+        let request_dispatchers = RequestDispatchers {
+            git: &dispatcher,
+            skills: &skill_dispatcher,
+        };
         let (started_tx, started_rx) = std_mpsc::channel();
         let mut release_senders = Vec::new();
 
@@ -892,6 +1139,18 @@ mod server_tests {
         for _ in 0..3 {
             started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         }
+        let (skill_started_tx, skill_started_rx) = std_mpsc::channel();
+        let (skill_release_tx, skill_release_rx) = std_mpsc::channel();
+        skill_dispatcher
+            .try_submit(JsonRpcId::Number(4), move || {
+                skill_started_tx.send(()).unwrap();
+                skill_release_rx.recv().unwrap();
+                serde_json::json!({ "id": 4 })
+            })
+            .unwrap();
+        skill_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
 
         let input = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"core.ping\",",
@@ -902,8 +1161,9 @@ mod server_tests {
             BufReader::new(input.as_bytes()),
             storage,
             &agent_service,
+            skills_service,
             git_review_service,
-            &dispatcher,
+            &request_dispatchers,
             &outbound_tx,
         )
         .await
@@ -917,6 +1177,8 @@ mod server_tests {
         for release in release_senders {
             release.send(()).unwrap();
         }
+        skill_release_tx.send(()).unwrap();
         dispatcher.shutdown().await.unwrap();
+        skill_dispatcher.shutdown().await.unwrap();
     }
 }

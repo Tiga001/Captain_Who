@@ -92,6 +92,9 @@ const host: HostApi = {
   search: {
     searchChats: (input) => ipcRenderer.invoke('host:search.searchChats', input)
   },
+  skills: {
+    list: (input) => ipcRenderer.invoke('host:skills.list', input)
+  },
   storage: {
     loadModelSettings: () => ipcRenderer.invoke('host:storage.loadModelSettings'),
     saveModelSettings: (settings) => ipcRenderer.invoke('host:storage.saveModelSettings', settings),
