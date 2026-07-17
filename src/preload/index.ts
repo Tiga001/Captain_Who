@@ -137,9 +137,7 @@ const host: HostApi = {
   workspaceFiles: {
     copyPath: (input) => ipcRenderer.invoke('host:workspaceFiles.copyPath', input),
     listDirectory: (input) => ipcRenderer.invoke('host:workspaceFiles.listDirectory', input),
-    readFileMetadata: (input) => ipcRenderer.invoke('host:workspaceFiles.readFileMetadata', input),
-    readTextFile: (input) => ipcRenderer.invoke('host:workspaceFiles.readTextFile', input),
-    readImageFile: (input) => ipcRenderer.invoke('host:workspaceFiles.readImageFile', input),
+    readPreview: (input) => ipcRenderer.invoke('host:workspaceFiles.readPreview', input),
     revealInFolder: (input) => ipcRenderer.invoke('host:workspaceFiles.revealInFolder', input)
   }
 }

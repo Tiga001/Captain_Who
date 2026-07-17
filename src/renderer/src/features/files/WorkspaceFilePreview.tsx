@@ -2,23 +2,14 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode, RefObject } from 'react'
-import type {
-  WorkspaceFileMetadata,
-  WorkspaceImageFileContent,
-  WorkspaceTextFileContent
-} from '@mycopilot/protocol'
+import type { WorkspaceFilePreviewResult, WorkspaceTextFileContent } from '@mycopilot/protocol'
 import { AlertCircle, FileQuestion, FileWarning, FolderOpen, LoaderCircle } from 'lucide-react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../config/translationFormat'
 import { resolveGitReviewFileLanguageDescriptor } from '../gitReview/syntax/fileLanguageRegistry'
 import { useGitReviewSyntaxHighlight } from '../gitReview/syntaxHighlighting/useGitReviewSyntaxHighlight'
 import type { GitReviewSyntaxHighlightState } from '../gitReview/syntaxHighlighting/useGitReviewSyntaxHighlight'
-import {
-  openWorkspaceExternalLink,
-  readWorkspaceFileMetadata,
-  readWorkspaceImageFile,
-  readWorkspaceTextFile
-} from './filesClient'
+import { openWorkspaceExternalLink, readWorkspaceFilePreview } from './filesClient'
 import {
   getWorkspaceOfficeDocumentType,
   isWorkspaceMarkdownFile
@@ -32,10 +23,8 @@ type PreviewState =
   | { status: 'loading' }
   | { status: 'error' }
   | {
-      image?: WorkspaceImageFileContent
-      metadata: WorkspaceFileMetadata
+      preview: WorkspaceFilePreviewResult
       status: 'ready'
-      text?: WorkspaceTextFileContent
     }
 
 interface WorkspaceFilePreviewProps {
@@ -77,13 +66,9 @@ export function WorkspaceFilePreview({
     void (async () => {
       try {
         const request = { path, projectId }
-        const metadata = await readWorkspaceFileMetadata(request)
-        let text: WorkspaceTextFileContent | undefined
-        let image: WorkspaceImageFileContent | undefined
-        if (metadata.previewKind === 'text') text = await readWorkspaceTextFile(request)
-        if (metadata.previewKind === 'image') image = await readWorkspaceImageFile(request)
+        const preview = await readWorkspaceFilePreview(request)
         if (requestSequenceRef.current !== requestId) return
-        setState({ image, metadata, status: 'ready', text })
+        setState({ preview, status: 'ready' })
       } catch {
         if (requestSequenceRef.current === requestId) setState({ status: 'error' })
       }
@@ -147,13 +132,13 @@ export function WorkspaceFilePreview({
     )
   }
 
-  if (state.text) {
+  if (state.preview.text) {
     if (isMarkdown && markdownView === 'preview') {
-      return <MarkdownFilePreview content={state.text} path={path} scrollRef={scrollRef} />
+      return <MarkdownFilePreview content={state.preview.text} path={path} scrollRef={scrollRef} />
     }
     return (
       <TextFilePreview
-        content={state.text}
+        content={state.preview.text}
         path={path}
         projectId={projectId}
         scrollRef={scrollRef}
@@ -162,25 +147,25 @@ export function WorkspaceFilePreview({
     )
   }
 
-  if (state.image) {
+  if (state.preview.image) {
     return (
       <div className="files-panel__preview-scroll files-panel__image-preview" ref={scrollRef}>
         <img
           alt={path.split('/').at(-1) ?? path}
-          src={`data:${state.image.mimeType};base64,${state.image.data}`}
+          src={`data:${state.preview.image.mimeType};base64,${state.preview.image.data}`}
         />
       </div>
     )
   }
 
   const message =
-    state.metadata.previewKind === 'too-large'
+    state.preview.metadata.previewKind === 'too-large'
       ? t('files.preview.tooLarge')
-      : state.metadata.previewKind === 'binary'
+      : state.preview.metadata.previewKind === 'binary'
         ? t('files.preview.binary')
         : t('files.preview.unsupported')
   const icon =
-    state.metadata.previewKind === 'too-large' ? (
+    state.preview.metadata.previewKind === 'too-large' ? (
       <FileWarning aria-hidden="true" />
     ) : (
       <FileQuestion aria-hidden="true" />

@@ -48,3 +48,9 @@ export interface WorkspaceImageFileContent {
   path: string
   sizeBytes: number
 }
+
+export interface WorkspaceFilePreviewResult {
+  image?: WorkspaceImageFileContent
+  metadata: WorkspaceFileMetadata
+  text?: WorkspaceTextFileContent
+}

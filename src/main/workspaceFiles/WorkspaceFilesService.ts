@@ -6,14 +6,12 @@ import type {
   WorkspaceDirectoryEntryKind,
   WorkspaceDirectoryListing,
   WorkspaceFileMetadata,
+  WorkspaceFilePreviewResult,
   WorkspaceFileRequest,
-  WorkspaceImageFileContent,
-  WorkspaceListDirectoryInput,
-  WorkspaceTextFileContent
+  WorkspaceListDirectoryInput
 } from '@mycopilot/protocol'
 
 const DIRECTORY_ENTRY_LIMIT = 20_000
-const FILE_SAMPLE_BYTES = 8 * 1024
 const IMAGE_PREVIEW_LIMIT_BYTES = 12 * 1024 * 1024
 const TEXT_PREVIEW_LIMIT_BYTES = 1024 * 1024
 
@@ -81,75 +79,62 @@ export class WorkspaceFilesService {
     }
   }
 
-  async readFileMetadata(input: WorkspaceFileRequest): Promise<WorkspaceFileMetadata> {
+  async readPreview(input: WorkspaceFileRequest): Promise<WorkspaceFilePreviewResult> {
     const request = normalizeFileRequest(input)
     const entry = await this.resolveEntry(request.projectId, request.path)
 
     if (entry.kind === 'symlink' || !entry.realPath) {
-      return metadataFromEntry(entry, request.path, 'unsupported', null)
+      return { metadata: metadataFromEntry(entry, request.path, 'unsupported', null) }
     }
 
     const fileStat = await lstat(entry.realPath)
+    const currentEntry: ResolvedWorkspaceEntry = {
+      ...entry,
+      modifiedAtMs: fileStat.mtimeMs,
+      sizeBytes: fileStat.size
+    }
     if (!fileStat.isFile()) {
-      return metadataFromEntry(entry, request.path, 'unsupported', null)
+      return { metadata: metadataFromEntry(currentEntry, request.path, 'unsupported', null) }
     }
 
     const mimeType = IMAGE_MIME_BY_EXTENSION[extname(request.path).toLowerCase()] ?? null
     if (mimeType) {
-      return metadataFromEntry(
-        entry,
-        request.path,
-        entry.sizeBytes > IMAGE_PREVIEW_LIMIT_BYTES ? 'too-large' : 'image',
-        mimeType
-      )
+      if (currentEntry.sizeBytes > IMAGE_PREVIEW_LIMIT_BYTES) {
+        return {
+          metadata: metadataFromEntry(currentEntry, request.path, 'too-large', mimeType)
+        }
+      }
+      const data = await readBoundedFile(entry.realPath, IMAGE_PREVIEW_LIMIT_BYTES)
+      return {
+        image: {
+          data: data.toString('base64'),
+          mimeType,
+          modifiedAtMs: currentEntry.modifiedAtMs,
+          path: request.path,
+          sizeBytes: data.byteLength
+        },
+        metadata: metadataFromEntry(currentEntry, request.path, 'image', mimeType)
+      }
     }
 
-    const sample = await readPrefix(entry.realPath, FILE_SAMPLE_BYTES)
-    const isText = isLikelyUtf8Text(sample)
-    return metadataFromEntry(
-      entry,
-      request.path,
-      isText ? (entry.sizeBytes > TEXT_PREVIEW_LIMIT_BYTES ? 'too-large' : 'text') : 'binary',
-      isText ? 'text/plain; charset=utf-8' : null
-    )
-  }
-
-  async readTextFile(input: WorkspaceFileRequest): Promise<WorkspaceTextFileContent> {
-    const request = normalizeFileRequest(input)
-    const metadata = await this.readFileMetadata(request)
-    if (metadata.previewKind !== 'text') {
-      throw new Error('The requested workspace file is not previewable text')
+    if (currentEntry.sizeBytes > TEXT_PREVIEW_LIMIT_BYTES) {
+      return { metadata: metadataFromEntry(currentEntry, request.path, 'too-large', null) }
     }
 
-    const entry = await this.resolveReadableFile(request)
     const data = await readBoundedFile(entry.realPath, TEXT_PREVIEW_LIMIT_BYTES)
-    if (!isLikelyUtf8Text(data)) {
-      throw new Error('The workspace file is not valid UTF-8 text')
+    const decodedText = decodeWorkspaceText(data)
+    if (!decodedText) {
+      return { metadata: metadataFromEntry(currentEntry, request.path, 'binary', null) }
     }
 
     return {
-      content: data.toString('utf8'),
-      modifiedAtMs: entry.modifiedAtMs,
-      path: request.path,
-      sizeBytes: data.byteLength
-    }
-  }
-
-  async readImageFile(input: WorkspaceFileRequest): Promise<WorkspaceImageFileContent> {
-    const request = normalizeFileRequest(input)
-    const metadata = await this.readFileMetadata(request)
-    if (metadata.previewKind !== 'image' || !metadata.mimeType) {
-      throw new Error('The requested workspace file is not a previewable image')
-    }
-
-    const entry = await this.resolveReadableFile(request)
-    const data = await readBoundedFile(entry.realPath, IMAGE_PREVIEW_LIMIT_BYTES)
-    return {
-      data: data.toString('base64'),
-      mimeType: metadata.mimeType,
-      modifiedAtMs: entry.modifiedAtMs,
-      path: request.path,
-      sizeBytes: data.byteLength
+      metadata: metadataFromEntry(currentEntry, request.path, 'text', decodedText.mimeType),
+      text: {
+        content: decodedText.content,
+        modifiedAtMs: currentEntry.modifiedAtMs,
+        path: request.path,
+        sizeBytes: data.byteLength
+      }
     }
   }
 
@@ -160,19 +145,6 @@ export class WorkspaceFilesService {
       throw new Error('Symbolic links cannot be revealed from the file browser')
     }
     return entry.realPath
-  }
-
-  private async resolveReadableFile(request: WorkspaceFileRequest): Promise<{
-    modifiedAtMs: number
-    realPath: string
-  }> {
-    const entry = await this.resolveEntry(request.projectId, request.path)
-    if (entry.kind === 'symlink' || !entry.realPath) {
-      throw new Error('Symbolic links cannot be read from the file browser')
-    }
-    const fileStat = await lstat(entry.realPath)
-    if (!fileStat.isFile()) throw new Error('The requested workspace path is not a file')
-    return { modifiedAtMs: entry.modifiedAtMs, realPath: entry.realPath }
   }
 
   private async resolveEntry(
@@ -281,27 +253,50 @@ function metadataFromEntry(
   }
 }
 
-function isLikelyUtf8Text(data: Uint8Array): boolean {
-  if (!isUtf8(data)) return false
-  if (data.includes(0)) return false
-  if (data.byteLength === 0) return true
-
-  let controlBytes = 0
-  for (const byte of data) {
-    if (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13) controlBytes += 1
-  }
-  return controlBytes / data.byteLength < 0.08
+interface DecodedWorkspaceText {
+  content: string
+  mimeType: string
 }
 
-async function readPrefix(filePath: string, limit: number): Promise<Buffer> {
-  const file = await open(filePath, 'r')
+function decodeWorkspaceText(data: Buffer): DecodedWorkspaceText | null {
+  let content: string
+  let mimeType: string
+
   try {
-    const buffer = Buffer.allocUnsafe(limit)
-    const { bytesRead } = await file.read(buffer, 0, limit, 0)
-    return buffer.subarray(0, bytesRead)
-  } finally {
-    await file.close()
+    if (data[0] === 0xff && data[1] === 0xfe) {
+      content = new TextDecoder('utf-16le', { fatal: true }).decode(data)
+      mimeType = 'text/plain; charset=utf-16le'
+    } else if (data[0] === 0xfe && data[1] === 0xff) {
+      content = new TextDecoder('utf-16be', { fatal: true }).decode(data)
+      mimeType = 'text/plain; charset=utf-16be'
+    } else {
+      if (!isUtf8(data)) return null
+      content = data.toString('utf8')
+      mimeType = 'text/plain; charset=utf-8'
+    }
+  } catch {
+    return null
   }
+
+  if (content.startsWith('\uFEFF')) content = content.slice(1)
+  return isLikelyTextContent(content) ? { content, mimeType } : null
+}
+
+function isLikelyTextContent(content: string): boolean {
+  if (content.includes('\0')) return false
+  if (content.length === 0) return true
+
+  let controlCharacters = 0
+  let totalCharacters = 0
+  for (const character of content) {
+    totalCharacters += 1
+    const codePoint = character.codePointAt(0) ?? 0
+    const isAllowedWhitespace = codePoint === 9 || codePoint === 10 || codePoint === 13
+    if (!isAllowedWhitespace && (codePoint < 32 || (codePoint >= 127 && codePoint <= 159))) {
+      controlCharacters += 1
+    }
+  }
+  return controlCharacters / totalCharacters < 0.08
 }
 
 async function readBoundedFile(filePath: string, limit: number): Promise<Buffer> {

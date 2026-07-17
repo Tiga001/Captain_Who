@@ -5,15 +5,12 @@ import { render } from 'vitest-browser-react'
 import '../../../styles/global.css'
 import '../FilesPanel.css'
 
-const { copyPathSpy, listDirectorySpy, openFileSpy, readMetadataSpy, readTextSpy } = vi.hoisted(
-  () => ({
-    copyPathSpy: vi.fn(),
-    listDirectorySpy: vi.fn(),
-    openFileSpy: vi.fn(),
-    readMetadataSpy: vi.fn(),
-    readTextSpy: vi.fn()
-  })
-)
+const { copyPathSpy, listDirectorySpy, openFileSpy, readPreviewSpy } = vi.hoisted(() => ({
+  copyPathSpy: vi.fn(),
+  listDirectorySpy: vi.fn(),
+  openFileSpy: vi.fn(),
+  readPreviewSpy: vi.fn()
+}))
 
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({ t: (key: string) => key })
@@ -23,9 +20,7 @@ vi.mock('../filesClient', () => ({
   copyWorkspaceFilePath: copyPathSpy,
   listWorkspaceDirectory: listDirectorySpy,
   openWorkspaceExternalLink: vi.fn(),
-  readWorkspaceFileMetadata: readMetadataSpy,
-  readWorkspaceImageFile: vi.fn(),
-  readWorkspaceTextFile: readTextSpy,
+  readWorkspaceFilePreview: readPreviewSpy,
   revealWorkspaceFile: vi.fn()
 }))
 
@@ -67,8 +62,7 @@ beforeEach(() => {
   copyPathSpy.mockResolvedValue(undefined)
   listDirectorySpy.mockReset()
   openFileSpy.mockReset()
-  readMetadataSpy.mockReset()
-  readTextSpy.mockReset()
+  readPreviewSpy.mockReset()
 
   listDirectorySpy.mockImplementation(async ({ directoryPath = '' }: { directoryPath?: string }) =>
     directoryPath === 'src'
@@ -86,19 +80,21 @@ beforeEach(() => {
           truncated: false
         }
   )
-  readMetadataSpy.mockResolvedValue({
-    kind: 'file',
-    mimeType: 'text/plain; charset=utf-8',
-    modifiedAtMs: 1,
-    path: 'README.md',
-    previewKind: 'text',
-    sizeBytes: 16
-  })
-  readTextSpy.mockResolvedValue({
-    content: '# Workspace\nHello',
-    modifiedAtMs: 1,
-    path: 'README.md',
-    sizeBytes: 16
+  readPreviewSpy.mockResolvedValue({
+    metadata: {
+      kind: 'file',
+      mimeType: 'text/plain; charset=utf-8',
+      modifiedAtMs: 1,
+      path: 'README.md',
+      previewKind: 'text',
+      sizeBytes: 16
+    },
+    text: {
+      content: '# Workspace\nHello',
+      modifiedAtMs: 1,
+      path: 'README.md',
+      sizeBytes: 16
+    }
   })
 })
 
@@ -124,16 +120,25 @@ describe('FilesPanel', () => {
     expect(message?.textContent).toContain('files.preview.officeDescription')
     expect(message?.querySelector('.files-panel__center-icon')).toBeNull()
     await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
-    expect(readMetadataSpy).not.toHaveBeenCalled()
-    expect(readTextSpy).not.toHaveBeenCalled()
+    expect(readPreviewSpy).not.toHaveBeenCalled()
   })
 
   it('switches Markdown files between source and rendered preview modes', async () => {
-    readTextSpy.mockResolvedValue({
-      content: '# Workspace\n\n| Item | State |\n| --- | --- |\n| Preview | Ready |',
-      modifiedAtMs: 1,
-      path: 'README.md',
-      sizeBytes: 64
+    readPreviewSpy.mockResolvedValue({
+      metadata: {
+        kind: 'file',
+        mimeType: 'text/plain; charset=utf-8',
+        modifiedAtMs: 1,
+        path: 'README.md',
+        previewKind: 'text',
+        sizeBytes: 64
+      },
+      text: {
+        content: '# Workspace\n\n| Item | State |\n| --- | --- |\n| Preview | Ready |',
+        modifiedAtMs: 1,
+        path: 'README.md',
+        sizeBytes: 64
+      }
     })
 
     const screen = await render(
@@ -174,7 +179,7 @@ describe('FilesPanel', () => {
       .poll(() => screen.container.querySelector('.files-panel__code')?.textContent)
       .toContain('# Workspace')
     expect(screen.container.querySelector('.files-panel__markdown')).toBeNull()
-    expect(readTextSpy).toHaveBeenCalledTimes(1)
+    expect(readPreviewSpy).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the current preview stable while opening tree selections as new pages', async () => {
@@ -235,8 +240,7 @@ describe('FilesPanel', () => {
       )
       .toBe(true)
 
-    await expect.poll(() => readMetadataSpy.mock.calls.length).toBe(1)
-    await expect.poll(() => readTextSpy.mock.calls.length).toBe(1)
+    await expect.poll(() => readPreviewSpy.mock.calls.length).toBe(1)
     await expect
       .poll(() => screen.container.querySelector('.files-panel__code')?.textContent)
       .toContain('# Workspace')
@@ -337,19 +341,21 @@ describe('FilesPanel', () => {
         }
       }
     )
-    readMetadataSpy.mockImplementation(async ({ path }: { path: string }) => ({
-      kind: 'file',
-      mimeType: 'text/plain; charset=utf-8',
-      modifiedAtMs: 1,
-      path,
-      previewKind: 'text',
-      sizeBytes: 16
-    }))
-    readTextSpy.mockImplementation(async ({ path }: { path: string }) => ({
-      content: path,
-      modifiedAtMs: 1,
-      path,
-      sizeBytes: 16
+    readPreviewSpy.mockImplementation(async ({ path }: { path: string }) => ({
+      metadata: {
+        kind: 'file',
+        mimeType: 'text/plain; charset=utf-8',
+        modifiedAtMs: 1,
+        path,
+        previewKind: 'text',
+        sizeBytes: 16
+      },
+      text: {
+        content: path,
+        modifiedAtMs: 1,
+        path,
+        sizeBytes: 16
+      }
     }))
 
     const screen = await render(

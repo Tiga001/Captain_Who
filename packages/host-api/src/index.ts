@@ -58,11 +58,9 @@ import type {
   TerminalOutputEvent,
   TerminalSessionSnapshot,
   WorkspaceDirectoryListing,
-  WorkspaceFileMetadata,
+  WorkspaceFilePreviewResult,
   WorkspaceFileRequest,
-  WorkspaceImageFileContent,
-  WorkspaceListDirectoryInput,
-  WorkspaceTextFileContent
+  WorkspaceListDirectoryInput
 } from '@mycopilot/protocol'
 
 export interface AttachmentsHostApi {
@@ -148,9 +146,7 @@ export interface TerminalSessionEventHandlers {
 export interface WorkspaceFilesHostApi {
   copyPath(input: WorkspaceFileRequest): Promise<void>
   listDirectory(input: WorkspaceListDirectoryInput): Promise<WorkspaceDirectoryListing>
-  readFileMetadata(input: WorkspaceFileRequest): Promise<WorkspaceFileMetadata>
-  readTextFile(input: WorkspaceFileRequest): Promise<WorkspaceTextFileContent>
-  readImageFile(input: WorkspaceFileRequest): Promise<WorkspaceImageFileContent>
+  readPreview(input: WorkspaceFileRequest): Promise<WorkspaceFilePreviewResult>
   revealInFolder(input: WorkspaceFileRequest): Promise<void>
 }
 

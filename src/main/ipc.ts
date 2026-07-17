@@ -417,14 +417,8 @@ export function registerHostIpc(
   ipcMain.handle('host:workspaceFiles.listDirectory', (_event, input) =>
     workspaceFilesService.listDirectory(input)
   )
-  ipcMain.handle('host:workspaceFiles.readFileMetadata', (_event, input) =>
-    workspaceFilesService.readFileMetadata(input)
-  )
-  ipcMain.handle('host:workspaceFiles.readTextFile', (_event, input) =>
-    workspaceFilesService.readTextFile(input)
-  )
-  ipcMain.handle('host:workspaceFiles.readImageFile', (_event, input) =>
-    workspaceFilesService.readImageFile(input)
+  ipcMain.handle('host:workspaceFiles.readPreview', (_event, input) =>
+    workspaceFilesService.readPreview(input)
   )
   ipcMain.handle('host:workspaceFiles.revealInFolder', async (_event, input) => {
     shell.showItemInFolder(await workspaceFilesService.resolvePathForReveal(input))

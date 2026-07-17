@@ -40,21 +40,80 @@ describe('WorkspaceFilesService', () => {
     await writeFile(join(root, 'pixel.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
     await writeFile(join(root, 'archive.bin'), Buffer.from([0, 1, 2, 3]))
 
+    const textPreview = await service.readPreview({ path: 'main.ts', projectId: 'project-1' })
+    expect(textPreview.metadata).toMatchObject({ path: 'main.ts', previewKind: 'text' })
+    expect(textPreview.text).toMatchObject({
+      content: 'export const answer = 42\n',
+      path: 'main.ts'
+    })
+
+    const imagePreview = await service.readPreview({ path: 'pixel.png', projectId: 'project-1' })
+    expect(imagePreview.metadata).toMatchObject({ mimeType: 'image/png', previewKind: 'image' })
+    expect(imagePreview.image).toMatchObject({ data: 'iVBORw==', mimeType: 'image/png' })
+
+    const binaryPreview = await service.readPreview({
+      path: 'archive.bin',
+      projectId: 'project-1'
+    })
+    expect(binaryPreview).toMatchObject({ metadata: { previewKind: 'binary' } })
+    expect(binaryPreview.text).toBeUndefined()
+  })
+
+  it('validates the complete file when a UTF-8 character crosses the old sample boundary', async () => {
+    const content = `${'a'.repeat(8_191)}中文内容\n`
+    await writeFile(join(root, 'boundary.md'), content)
+
+    const preview = await service.readPreview({ path: 'boundary.md', projectId: 'project-1' })
+
+    expect(preview.metadata).toMatchObject({
+      mimeType: 'text/plain; charset=utf-8',
+      previewKind: 'text'
+    })
+    expect(preview.text?.content).toBe(content)
+  })
+
+  it('decodes BOM-marked UTF-16 text without weakening binary detection', async () => {
+    const content = '标题\n完整内容'
+    const utf16Le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(content, 'utf16le')])
+    const utf16BeBody = Buffer.from(Buffer.from(content, 'utf16le')).swap16()
+    const utf16Be = Buffer.concat([Buffer.from([0xfe, 0xff]), utf16BeBody])
+    await writeFile(join(root, 'utf16-le.txt'), utf16Le)
+    await writeFile(join(root, 'utf16-be.txt'), utf16Be)
+
+    const littleEndianPreview = await service.readPreview({
+      path: 'utf16-le.txt',
+      projectId: 'project-1'
+    })
+    const bigEndianPreview = await service.readPreview({
+      path: 'utf16-be.txt',
+      projectId: 'project-1'
+    })
+
+    expect(littleEndianPreview.metadata).toMatchObject({
+      mimeType: 'text/plain; charset=utf-16le',
+      previewKind: 'text'
+    })
+    expect(littleEndianPreview.text?.content).toBe(content)
+    expect(bigEndianPreview.metadata).toMatchObject({
+      mimeType: 'text/plain; charset=utf-16be',
+      previewKind: 'text'
+    })
+    expect(bigEndianPreview.text?.content).toBe(content)
+  })
+
+  it('keeps malformed UTF-8 and NUL-containing content classified as binary', async () => {
+    await writeFile(
+      join(root, 'malformed.txt'),
+      Buffer.concat([Buffer.from('valid prefix\n'), Buffer.from([0xc3, 0x28])])
+    )
+    await writeFile(join(root, 'nul.txt'), Buffer.from('valid\0content'))
+
     await expect(
-      service.readFileMetadata({ path: 'main.ts', projectId: 'project-1' })
-    ).resolves.toMatchObject({ path: 'main.ts', previewKind: 'text' })
+      service.readPreview({ path: 'malformed.txt', projectId: 'project-1' })
+    ).resolves.toMatchObject({ metadata: { previewKind: 'binary' } })
     await expect(
-      service.readTextFile({ path: 'main.ts', projectId: 'project-1' })
-    ).resolves.toMatchObject({ content: 'export const answer = 42\n', path: 'main.ts' })
-    await expect(
-      service.readFileMetadata({ path: 'pixel.png', projectId: 'project-1' })
-    ).resolves.toMatchObject({ mimeType: 'image/png', previewKind: 'image' })
-    await expect(
-      service.readImageFile({ path: 'pixel.png', projectId: 'project-1' })
-    ).resolves.toMatchObject({ data: 'iVBORw==', mimeType: 'image/png' })
-    await expect(
-      service.readFileMetadata({ path: 'archive.bin', projectId: 'project-1' })
-    ).resolves.toMatchObject({ previewKind: 'binary' })
+      service.readPreview({ path: 'nul.txt', projectId: 'project-1' })
+    ).resolves.toMatchObject({ metadata: { previewKind: 'binary' } })
   })
 
   it('preserves exact workspace filenames and can omit hidden entries', async () => {
@@ -62,8 +121,11 @@ describe('WorkspaceFilesService', () => {
     await writeFile(join(root, '.hidden'), 'hidden')
 
     await expect(
-      service.readTextFile({ path: ' spaced name .txt', projectId: 'project-1' })
-    ).resolves.toMatchObject({ content: 'kept exactly', path: ' spaced name .txt' })
+      service.readPreview({ path: ' spaced name .txt', projectId: 'project-1' })
+    ).resolves.toMatchObject({
+      metadata: { previewKind: 'text' },
+      text: { content: 'kept exactly', path: ' spaced name .txt' }
+    })
     await expect(
       service.listDirectory({ includeHidden: false, projectId: 'project-1' })
     ).resolves.toMatchObject({ entries: [{ name: ' spaced name .txt' }] })
@@ -75,11 +137,8 @@ describe('WorkspaceFilesService', () => {
     expect(() => normalizeWorkspacePath('../outside.txt')).toThrow('invalid segment')
     expect(() => normalizeWorkspacePath('/outside.txt')).toThrow('relative')
     await expect(
-      service.readFileMetadata({ path: 'large.txt', projectId: 'project-1' })
-    ).resolves.toMatchObject({ previewKind: 'too-large' })
-    await expect(
-      service.readTextFile({ path: 'large.txt', projectId: 'project-1' })
-    ).rejects.toThrow('not previewable text')
+      service.readPreview({ path: 'large.txt', projectId: 'project-1' })
+    ).resolves.toMatchObject({ metadata: { previewKind: 'too-large' } })
   })
 
   it.skipIf(process.platform === 'win32')(
@@ -91,11 +150,10 @@ describe('WorkspaceFilesService', () => {
         await symlink(join(outside, 'secret.txt'), join(root, 'linked.txt'))
 
         await expect(
-          service.readFileMetadata({ path: 'linked.txt', projectId: 'project-1' })
-        ).resolves.toMatchObject({ kind: 'symlink', previewKind: 'unsupported' })
-        await expect(
-          service.readTextFile({ path: 'linked.txt', projectId: 'project-1' })
-        ).rejects.toThrow('not previewable text')
+          service.readPreview({ path: 'linked.txt', projectId: 'project-1' })
+        ).resolves.toMatchObject({
+          metadata: { kind: 'symlink', previewKind: 'unsupported' }
+        })
       } finally {
         await rm(outside, { force: true, recursive: true })
       }

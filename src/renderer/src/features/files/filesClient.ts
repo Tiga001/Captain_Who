@@ -1,10 +1,8 @@
 import type {
   WorkspaceDirectoryListing,
-  WorkspaceFileMetadata,
+  WorkspaceFilePreviewResult,
   WorkspaceFileRequest,
-  WorkspaceImageFileContent,
-  WorkspaceListDirectoryInput,
-  WorkspaceTextFileContent
+  WorkspaceListDirectoryInput
 } from '@mycopilot/protocol'
 import { hostClient } from '../../host/hostClient'
 
@@ -22,22 +20,10 @@ export function openWorkspaceExternalLink(url: string): Promise<void> {
   return hostClient.app.openExternal(url)
 }
 
-export function readWorkspaceFileMetadata(
+export function readWorkspaceFilePreview(
   input: WorkspaceFileRequest
-): Promise<WorkspaceFileMetadata> {
-  return hostClient.workspaceFiles.readFileMetadata(input)
-}
-
-export function readWorkspaceTextFile(
-  input: WorkspaceFileRequest
-): Promise<WorkspaceTextFileContent> {
-  return hostClient.workspaceFiles.readTextFile(input)
-}
-
-export function readWorkspaceImageFile(
-  input: WorkspaceFileRequest
-): Promise<WorkspaceImageFileContent> {
-  return hostClient.workspaceFiles.readImageFile(input)
+): Promise<WorkspaceFilePreviewResult> {
+  return hostClient.workspaceFiles.readPreview(input)
 }
 
 export function revealWorkspaceFile(input: WorkspaceFileRequest): Promise<void> {
