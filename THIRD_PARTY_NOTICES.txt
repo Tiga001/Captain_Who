@@ -239,6 +239,494 @@ SOFTWARE.
 
 ---
 
+SUPPLEMENTAL THIRD-PARTY ATTRIBUTIONS
+
+Audit snapshot: 2026-07-17
+
+This section records principal third-party runtime components, visual assets,
+and adapted color palettes used by MyCopilot. It supplements the component
+notices elsewhere in this file. The licenses below apply only to the identified
+third-party materials; they do not change the license of MyCopilot as a whole.
+
+Electron embeds Chromium and other third-party software. The authoritative,
+complete notices supplied with the Electron runtime are distributed alongside
+this file as:
+
+  LICENSE.electron.txt
+  LICENSES.chromium.html
+
+VISUAL ASSETS AND ICONS
+
+Material Icon Theme (5.36.1)
+
+MyCopilot bundles a selected set of SVG file, language, and tool icons from
+Material Icon Theme for file-type identification, including the icons shown in
+the Git review diff UI.
+
+Source: https://github.com/material-extensions/vscode-material-icon-theme
+License: MIT (license text below)
+Copyright (c) 2025 Material Extensions
+
+Lucide React (1.23.0)
+
+MyCopilot uses Lucide icons throughout the desktop UI, including the Git review,
+browser, and terminal surfaces.
+
+Source: https://github.com/lucide-icons/lucide
+
+ISC License
+
+Copyright (c) 2026 Lucide Icons and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+The following Lucide icons are derived from the Feather project:
+
+airplay, alert-circle, alert-octagon, alert-triangle, aperture,
+arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down,
+arrow-left-circle, arrow-left, arrow-right-circle, arrow-right,
+arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar,
+cast, check, chevron-down, chevron-left, chevron-right, chevron-up,
+chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard,
+clock, code, columns, command, compass, corner-down-left, corner-down-right,
+corner-left-down, corner-left-up, corner-right-down, corner-right-up,
+corner-up-left, corner-up-right, crosshair, database, divide-circle,
+divide-square, dollar-sign, download, external-link, feather, frown, hash,
+headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link,
+loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2,
+minus-circle, minus-square, minus, monitor, moon, more-horizontal,
+more-vertical, move, music, navigation-2, navigation, octagon, pause-circle,
+percent, plus-circle, plus-square, plus, power, radio, rss, search, server,
+share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet,
+target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle,
+x-octagon, x-square, x, zoom-in, zoom-out
+
+The Feather-derived icons are licensed under the MIT License stated below.
+Copyright (c) 2013-present Cole Bemis
+
+SYNTAX HIGHLIGHTING
+
+The Git review syntax highlighter uses the following Shiki runtime components:
+
+  shiki (4.3.1)
+  @shikijs/core (4.3.1)
+  @shikijs/engine-javascript (4.3.1)
+  @shikijs/langs (4.3.1)
+  @shikijs/primitive (4.3.1)
+  @shikijs/types (4.3.1)
+  @shikijs/vscode-textmate (10.0.2)
+  oniguruma-to-es (4.3.6)
+  oniguruma-parser (0.12.2)
+  regex (6.1.0)
+  regex-recursion (6.0.2)
+  regex-utilities (2.3.0)
+
+Sources:
+  https://github.com/shikijs/shiki
+  https://github.com/shikijs/vscode-textmate
+  https://github.com/slevithan/oniguruma-to-es
+  https://github.com/slevithan/oniguruma-parser
+  https://github.com/slevithan/regex
+  https://github.com/slevithan/regex-recursion
+  https://github.com/slevithan/regex-utilities
+
+Licenses: MIT (license text below)
+
+Shiki family:
+  Copyright (c) 2021 Pine Wu
+  Copyright (c) 2023 Anthony Fu <https://github.com/antfu>
+
+@shikijs/vscode-textmate:
+  Copyright (c) Microsoft Corporation
+
+oniguruma-to-es:
+  Copyright (c) 2024-2026 Steven Levithan
+
+oniguruma-parser:
+  Copyright (c) 2025-2026 Steven Levithan
+
+regex and regex-recursion:
+  Copyright (c) 2025 Steven Levithan
+
+regex-utilities:
+  Copyright (c) 2024 Steven Levithan
+
+The language definitions loaded through @shikijs/langs are generated from
+third-party TextMate grammars. The complete upstream NOTICE blocks reachable
+from MyCopilot's current language loaders are distributed alongside this file
+in a filtered, immutable snapshot:
+
+  THIRD_PARTY_GRAMMAR_NOTICES.txt
+  https://github.com/shikijs/textmate-grammars-themes/blob/022eed00a8dd29481123f08e1cccf5a5bfee23f9/packages/tm-grammars/NOTICE
+
+MyCopilot uses a bounded set of those language definitions and a project-defined
+worker theme mapping; it does not load an arbitrary Shiki theme at runtime.
+
+ADAPTED THEME PALETTES
+
+Some MyCopilot UI and Git review syntax palettes are adaptations of, or sample
+color values from, the following MIT-licensed themes. MyCopilot's theme
+implementations are independent adaptations; the upstream editor extensions
+are not bundled as extensions.
+
+The syntax values were sampled during development from @shikijs/themes 4.3.1
+registrations. The original theme sources and their notices are indexed at:
+
+  https://github.com/shikijs/textmate-grammars-themes/tree/022eed00a8dd29481123f08e1cccf5a5bfee23f9/packages/tm-themes
+
+  Ayu Light, Mirage, and Dark
+    Source: https://github.com/ayu-theme/vscode-ayu
+    Copyright (c) 2016 Ike Kurghinyan
+
+  Catppuccin Latte and Mocha
+    Source: https://github.com/catppuccin/vscode
+    Copyright (c) 2021 Catppuccin
+
+  Dracula and Alucard
+    Sources:
+      https://github.com/dracula/visual-studio-code
+      https://github.com/dracula/dracula-theme
+      https://draculatheme.com/spec
+    Copyright (c) 2016 Dracula Theme
+    Copyright (c) 2023 Dracula Theme
+
+  Everforest Light and Dark
+    Source: https://github.com/sainnhe/everforest-vscode
+    Copyright (c) 2020 sainnhe
+
+  GitHub Light Default and GitHub Dark Default
+    Source: https://github.com/primer/github-vscode-theme
+    Copyright (c) 2020 Primer
+
+  Gruvbox Light Medium and Gruvbox Dark Medium
+    Sources:
+      https://github.com/jdinhify/vscode-theme-gruvbox
+      https://github.com/morhetz/gruvbox
+    Copyright © 2017 JD
+    Copyright (c) 2017 Pavel Pertsev
+
+  One Dark Pro
+    Source: https://github.com/Binaryify/OneDark-Pro
+    Copyright (c) 2013-2022 Binaryify
+
+  One Light
+    Sources:
+      https://github.com/akamud/vscode-theme-onelight
+      https://github.com/atom/one-light-syntax
+    Copyright (c) 2015 Mahmoud Ali
+    Copyright (c) 2016 GitHub Inc.
+
+Licenses for the adapted palettes above: MIT (license text below).
+
+The Classic, Crab, and ZJU palettes are not represented here as third-party
+open-source themes. Their presence in MyCopilot's theme registry must not be
+read as an attribution to any of the upstream projects listed above.
+
+DESKTOP AND RENDERER RUNTIME COMPONENTS
+
+The following principal runtime components are licensed under the MIT License
+stated below, except where another license is expressly identified:
+
+  PDF.js / pdfjs-dist (5.4.296)
+    Source: https://github.com/mozilla/pdf.js
+    License: Apache-2.0 (license text reproduced earlier in this file)
+    Copyright 2024 Mozilla Foundation
+
+  Electron (39.8.10)
+    Source: https://github.com/electron/electron
+    Copyright (c) Electron contributors
+    Copyright (c) 2013-2020 GitHub Inc.
+    See LICENSE.electron.txt and LICENSES.chromium.html for the runtime's
+    authoritative license and embedded third-party notices.
+
+  @electron-toolkit/utils (4.0.0)
+    Source: https://github.com/alex8088/electron-toolkit
+    Copyright (c) 2022-present, Alex.Wei
+
+  node-pty (1.1.0)
+    Source: https://github.com/microsoft/node-pty
+    Copyright (c) 2012-2015, Christopher Jeffrey (https://github.com/chjj/)
+    Copyright (c) 2016, Daniel Imms (http://www.growingwiththeweb.com)
+    Copyright (c) 2018 - present Microsoft Corporation
+    All rights reserved.
+
+  winpty (included by node-pty on applicable Windows builds)
+    Source: https://github.com/rprichard/winpty
+    Copyright (c) 2011-2016 Ryan Prichard
+
+  @xterm/xterm (6.0.0)
+    Source: https://github.com/xtermjs/xterm.js
+    Copyright (c) 2017-2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+    Copyright (c) 2014-2016, SourceLair Private Company (https://www.sourcelair.com)
+    Copyright (c) 2012-2013, Christopher Jeffrey (https://github.com/chjj/)
+
+  @xterm/addon-fit (0.11.0)
+    Source: https://github.com/xtermjs/xterm.js
+    Copyright (c) 2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+
+  React and React DOM (19.2.7)
+    Source: https://github.com/facebook/react
+    Copyright (c) Meta Platforms, Inc. and affiliates.
+
+  react-markdown (10.1.0)
+    Source: https://github.com/remarkjs/react-markdown
+    Copyright (c) Espen Hovlandsdal
+
+  remark-breaks (4.0.0)
+    Source: https://github.com/remarkjs/remark-breaks
+    Copyright (c) 2017 Titus Wormer <tituswormer@gmail.com>
+
+  remark-gfm (4.0.1)
+    Source: https://github.com/remarkjs/remark-gfm
+    Copyright (c) Titus Wormer <tituswormer@gmail.com>
+
+  remark-math (6.0.0) and rehype-katex (7.0.1)
+    Source: https://github.com/remarkjs/remark-math
+    Copyright (c) Junyoung Choi
+
+  mdast-util-from-markdown (2.0.3)
+    Source: https://github.com/syntax-tree/mdast-util-from-markdown
+    Copyright (c) Titus Wormer <tituswormer@gmail.com>
+
+  KaTeX (0.17.0)
+    Source: https://github.com/KaTeX/KaTeX
+    Copyright (c) 2013-2020 Khan Academy and other contributors
+
+Portions of the KaTeX font software and SVG glyph data are licensed under the
+SIL Open Font License, Version 1.1, reproduced below.
+
+KaTeX SVG glyph data:
+  Copyright (c) 2009-2010, Design Science, Inc. (<www.mathjax.org>)
+  Copyright (c) 2014-2017 Khan Academy (<www.khanacademy.org>)
+
+KaTeX Space font:
+  Copyright (c) 2009-2010, Design Science, Inc. (<www.mathjax.org>)
+  Copyright (c) 2014-2018 Khan Academy (<www.khanacademy.org>),
+  with Reserved Font Name *NAME*.
+
+xbbold font source:
+  Copyright 1995, 2009 American Mathematical Society.
+
+RUST CORE-SERVER DIRECT DEPENDENCY INDEX
+
+The separately built core-server binary includes Rust dependencies. The list
+below is an index of its locked direct runtime dependencies, not a replacement
+for the license metadata of their transitive dependency closure.
+
+MIT OR Apache-2.0:
+
+  base64 0.22.1
+  dirs 6.0.0
+  futures-util 0.3.32
+  image 0.25.10
+  libc 0.2.186
+  reqwest 0.12.28
+  roxmltree 0.21.1
+  serde 1.0.228
+  serde_json 1.0.150
+  tempfile 3.27.0
+  time 0.3.53
+  uuid 1.23.4
+
+MIT:
+
+  pdf-extract 0.12.0
+  rusqlite 0.32.1
+  tokio 1.52.3
+  zip 2.4.2
+
+Apache-2.0:
+
+  similar 2.7.0
+
+Applicable direct-crate MIT copyright notices supplied by the locked crate
+packages include:
+
+base64:
+  Copyright (c) 2015 Alice Maz
+
+dirs:
+  Copyright (c) 2018-2019 dirs-rs contributors
+
+futures-util:
+  Copyright (c) 2016 Alex Crichton
+  Copyright (c) 2017 The Tokio Authors
+
+libc:
+  Copyright (c) The Rust Project Developers
+
+reqwest:
+  Copyright (c) 2016-2025 Sean McArthur
+
+roxmltree:
+  Copyright (c) 2018 Yevhenii Reizner
+
+tempfile:
+  Copyright (c) 2015 Steven Allen
+
+time:
+  Copyright (c) Jacob Pratt et al.
+
+uuid:
+  Copyright (c) 2014 The Rust Project Developers
+  Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
+
+rusqlite:
+  Copyright (c) 2014-2021 The rusqlite developers
+
+tokio:
+  Copyright (c) Tokio Contributors
+
+zip:
+  Copyright (c) 2014 Mathijs van de Nes
+
+Crate sources and package-specific metadata are available from:
+
+  https://crates.io/
+
+The Apache License, Version 2.0 is reproduced earlier in this file. The MIT
+License is reproduced below.
+
+rusqlite is built with its bundled SQLite feature and includes:
+
+  libsqlite3-sys 0.30.1
+    License: MIT
+    Source: https://github.com/rusqlite/rusqlite
+    Copyright (c) 2014-2021 The rusqlite developers
+
+  SQLite 3.46.0
+    Public domain
+    Source and public-domain statement: https://sqlite.org/copyright.html
+
+MIT LICENSE
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+SIL OPEN FONT LICENSE
+
+Version 1.1 - 26 February 2007
+
+PREAMBLE
+
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and open
+framework in which fonts may be shared and improved in partnership with
+others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The fonts,
+including any derivative works, can be bundled, embedded, redistributed and/or
+sold with any software provided that any reserved names are not used by
+derivative works. The fonts and derivatives, however, cannot be released under
+any other type of license. The requirement for fonts to remain under this
+license does not apply to any document created using the fonts or their
+derivatives.
+
+DEFINITIONS
+
+"Font Software" refers to the set of files released by the Copyright Holder(s)
+under this license and clearly marked as such. This may include source files,
+build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the copyright
+statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting, or
+substituting -- in part or in whole -- any of the components of the Original
+Version, by changing formats or by porting the Font Software to a new
+environment.
+
+"Author" refers to any designer, engineer, programmer, technical writer or
+other person who contributed to the Font Software.
+
+PERMISSION & CONDITIONS
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of the Font Software, to use, study, copy, merge, embed, modify, redistribute,
+and sell modified and unmodified copies of the Font Software, subject to the
+following conditions:
+
+1) Neither the Font Software nor any of its individual components, in Original
+or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy contains
+the above copyright notice and this license. These can be included either as
+stand-alone text files, human-readable headers or in the appropriate
+machine-readable metadata fields within text or binary files as long as those
+fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font Name(s)
+unless explicit written permission is granted by the corresponding Copyright
+Holder. This restriction only applies to the primary font name as presented to
+the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font Software
+shall not be used to promote, endorse or advertise any Modified Version,
+except to acknowledge the contribution(s) of the Copyright Holder(s) and the
+Author(s) or with their explicit written permission.
+
+5) The Font Software, modified or unmodified, in part or in whole, must be
+distributed entirely under this license, and must not be distributed under any
+other license. The requirement for fonts to remain under this license does not
+apply to any document created using the Font Software.
+
+TERMINATION
+
+This license becomes null and void if any of the above conditions are not met.
+
+DISCLAIMER
+
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR
+ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL,
+INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE
+THE FONT SOFTWARE OR FROM OTHER DEALINGS IN THE FONT SOFTWARE.
+
+TRADEMARK NOTICE
+
+Third-party names, logos, product marks, and file-type symbols remain the
+property of their respective owners. They are used only to identify compatible
+file types, languages, tools, or the origin of a theme. Their inclusion does
+not imply affiliation with, sponsorship by, or endorsement of MyCopilot. The
+open-source licenses above do not grant trademark rights except as expressly
+stated in those licenses.
+
+---
+
 The following software may be included in this product:
 
   preact (11.0.0-beta.0)

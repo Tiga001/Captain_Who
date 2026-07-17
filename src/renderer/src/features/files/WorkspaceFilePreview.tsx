@@ -10,6 +10,7 @@ import { resolveGitReviewFileLanguageDescriptor } from '../gitReview/syntax/file
 import { useGitReviewSyntaxHighlight } from '../gitReview/syntaxHighlighting/useGitReviewSyntaxHighlight'
 import type { GitReviewSyntaxHighlightState } from '../gitReview/syntaxHighlighting/useGitReviewSyntaxHighlight'
 import { openWorkspaceExternalLink, readWorkspaceFilePreview } from './filesClient'
+import { WorkspacePdfPreview } from './WorkspacePdfPreview'
 import {
   getWorkspaceOfficeDocumentType,
   isWorkspaceMarkdownFile
@@ -30,7 +31,9 @@ type PreviewState =
 interface WorkspaceFilePreviewProps {
   isActive: boolean
   markdownView: WorkspaceMarkdownView
+  onPdfPageChange: (page: number) => void
   path: string | null
+  pdfPage: number
   projectId: string
   wrapLines: boolean
 }
@@ -38,7 +41,9 @@ interface WorkspaceFilePreviewProps {
 export function WorkspaceFilePreview({
   isActive,
   markdownView,
+  onPdfPageChange,
   path,
+  pdfPage,
   projectId,
   wrapLines
 }: WorkspaceFilePreviewProps): ReactNode {
@@ -155,6 +160,19 @@ export function WorkspaceFilePreview({
           src={`data:${state.preview.image.mimeType};base64,${state.preview.image.data}`}
         />
       </div>
+    )
+  }
+
+  if (state.preview.pdf) {
+    return (
+      <WorkspacePdfPreview
+        content={state.preview.pdf}
+        initialPage={pdfPage}
+        key={`${state.preview.pdf.path}:${state.preview.pdf.modifiedAtMs}`}
+        onPageChange={onPdfPageChange}
+        onRetry={() => setRetryToken((token) => token + 1)}
+        path={path}
+      />
     )
   }
 

@@ -20,6 +20,12 @@ asarUnpack:
 extraResources:
   - from: THIRD_PARTY_NOTICES.txt
     to: THIRD_PARTY_NOTICES.txt
+  - from: THIRD_PARTY_GRAMMAR_NOTICES.txt
+    to: THIRD_PARTY_GRAMMAR_NOTICES.txt
+  - from: node_modules/electron/dist/LICENSE
+    to: LICENSE.electron.txt
+  - from: node_modules/electron/dist/LICENSES.chromium.html
+    to: LICENSES.chromium.html
 win:
   executableName: mycopilot
   extraResources:

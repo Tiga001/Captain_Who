@@ -184,7 +184,7 @@ describe('right sidebar platform context lifecycle', () => {
     const moduleState = {
       kind: 'workspace-file' as const,
       path: 'README.md',
-      preview: { markdownView: 'preview' as const, wrapLines: true }
+      preview: { markdownView: 'preview' as const, pdfPage: 7, wrapLines: true }
     }
     const updated = reduceRightSidebarPlatform(opened, {
       pageId: 'file-README.md',

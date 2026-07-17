@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
   Archive,
@@ -253,14 +253,21 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const { t } = useFrontendConfig()
   const [activePage, setActivePage] = useState<SettingsPageId>(initialPage)
+  const pageRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setActivePage(initialPage)
   }, [initialPage])
 
+  useEffect(() => {
+    pageRef.current?.focus({ preventScroll: true })
+  }, [])
+
   return (
     <div
       className="settings-page"
+      ref={pageRef}
+      tabIndex={-1}
       data-native-font-smoothing={
         SUPPORTS_NATIVE_FONT_SMOOTHING && uiPreferences.nativeFontSmoothing ? 'true' : undefined
       }

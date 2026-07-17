@@ -5,10 +5,29 @@ import { render } from 'vitest-browser-react'
 import '../../../styles/global.css'
 import '../FilesPanel.css'
 
-const { copyPathSpy, listDirectorySpy, openFileSpy, readPreviewSpy } = vi.hoisted(() => ({
+const {
+  copyPathSpy,
+  createPdfLoadingTaskSpy,
+  getPdfPageSpy,
+  listDirectorySpy,
+  openFileSpy,
+  pdfDocumentDestroySpy,
+  pdfLoadingTaskDestroySpy,
+  pdfPageChangeSpy,
+  pdfPageCleanupSpy,
+  pdfRenderCancelSpy,
+  readPreviewSpy
+} = vi.hoisted(() => ({
   copyPathSpy: vi.fn(),
+  createPdfLoadingTaskSpy: vi.fn(),
+  getPdfPageSpy: vi.fn(),
   listDirectorySpy: vi.fn(),
   openFileSpy: vi.fn(),
+  pdfDocumentDestroySpy: vi.fn(),
+  pdfLoadingTaskDestroySpy: vi.fn(),
+  pdfPageChangeSpy: vi.fn(),
+  pdfPageCleanupSpy: vi.fn(),
+  pdfRenderCancelSpy: vi.fn(),
   readPreviewSpy: vi.fn()
 }))
 
@@ -22,6 +41,10 @@ vi.mock('../filesClient', () => ({
   openWorkspaceExternalLink: vi.fn(),
   readWorkspaceFilePreview: readPreviewSpy,
   revealWorkspaceFile: vi.fn()
+}))
+
+vi.mock('../workspacePdfRuntime', () => ({
+  createWorkspacePdfLoadingTask: createPdfLoadingTaskSpy
 }))
 
 vi.mock('../../gitReview/syntaxHighlighting/useGitReviewSyntaxHighlight', () => ({
@@ -38,11 +61,17 @@ const [{ FilesPanel }, { WorkspaceFileTreeSessionsProvider }] = await Promise.al
 
 type TestFilesPanelProps = Omit<
   ComponentProps<typeof FilesPanel>,
-  'markdownView' | 'onMarkdownViewChange' | 'onWrapLinesChange' | 'wrapLines'
+  | 'markdownView'
+  | 'onMarkdownViewChange'
+  | 'onPdfPageChange'
+  | 'onWrapLinesChange'
+  | 'pdfPage'
+  | 'wrapLines'
 >
 
 function TestFilesPanel(props: TestFilesPanelProps) {
   const [markdownView, setMarkdownView] = useState<'preview' | 'source'>('source')
+  const [pdfPage, setPdfPage] = useState(1)
   const [wrapLines, setWrapLines] = useState(false)
   return (
     <WorkspaceFileTreeSessionsProvider projectIds={[props.projectId]}>
@@ -50,7 +79,12 @@ function TestFilesPanel(props: TestFilesPanelProps) {
         {...props}
         markdownView={markdownView}
         onMarkdownViewChange={setMarkdownView}
+        onPdfPageChange={(page) => {
+          pdfPageChangeSpy(page)
+          setPdfPage(page)
+        }}
         onWrapLinesChange={setWrapLines}
+        pdfPage={pdfPage}
         wrapLines={wrapLines}
       />
     </WorkspaceFileTreeSessionsProvider>
@@ -62,7 +96,39 @@ beforeEach(() => {
   copyPathSpy.mockResolvedValue(undefined)
   listDirectorySpy.mockReset()
   openFileSpy.mockReset()
+  createPdfLoadingTaskSpy.mockReset()
+  getPdfPageSpy.mockReset()
+  pdfDocumentDestroySpy.mockReset()
+  pdfDocumentDestroySpy.mockResolvedValue(undefined)
+  pdfLoadingTaskDestroySpy.mockReset()
+  pdfLoadingTaskDestroySpy.mockResolvedValue(undefined)
+  pdfPageChangeSpy.mockReset()
+  pdfPageCleanupSpy.mockReset()
+  pdfRenderCancelSpy.mockReset()
   readPreviewSpy.mockReset()
+
+  getPdfPageSpy.mockImplementation(async (pageNumber: number) => ({
+    cleanup: pdfPageCleanupSpy,
+    getViewport: ({ scale }: { scale: number }) => ({
+      height: 600 * scale,
+      width: 400 * scale
+    }),
+    render: ({ canvas }: { canvas: HTMLCanvasElement }) => {
+      const context = canvas.getContext('2d')
+      if (!context) throw new Error('Canvas is unavailable in the browser test')
+      context.fillStyle = pageNumber === 1 ? '#ff0000' : '#00ff00'
+      context.fillRect(0, 0, canvas.width, canvas.height)
+      return { cancel: pdfRenderCancelSpy, promise: Promise.resolve() }
+    }
+  }))
+  createPdfLoadingTaskSpy.mockImplementation(async () => ({
+    destroy: pdfLoadingTaskDestroySpy,
+    promise: Promise.resolve({
+      destroy: pdfDocumentDestroySpy,
+      getPage: getPdfPageSpy,
+      numPages: 3
+    })
+  }))
 
   listDirectorySpy.mockImplementation(async ({ directoryPath = '' }: { directoryPath?: string }) =>
     directoryPath === 'src'
@@ -180,6 +246,72 @@ describe('FilesPanel', () => {
       .toContain('# Workspace')
     expect(screen.container.querySelector('.files-panel__markdown')).toBeNull()
     expect(readPreviewSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders one PDF page at a time and persists pager changes without reloading the document', async () => {
+    const pdfData = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])
+    readPreviewSpy.mockResolvedValue({
+      metadata: {
+        kind: 'file',
+        mimeType: 'application/pdf',
+        modifiedAtMs: 1,
+        path: 'paper.pdf',
+        previewKind: 'pdf',
+        sizeBytes: pdfData.byteLength
+      },
+      pdf: {
+        data: pdfData,
+        mimeType: 'application/pdf',
+        modifiedAtMs: 1,
+        path: 'paper.pdf',
+        sizeBytes: pdfData.byteLength
+      }
+    })
+
+    const screen = await render(
+      <div style={{ height: 620, width: 620 }}>
+        <TestFilesPanel
+          filePath="paper.pdf"
+          isActive
+          onOpenFile={openFileSpy}
+          onSurfaceFocus={() => undefined}
+          projectId="project-1"
+          projectName="Workspace"
+        />
+      </div>
+    )
+
+    await expect
+      .poll(
+        () => screen.container.querySelector<HTMLCanvasElement>('.files-panel__pdf-page')?.width
+      )
+      .toBeGreaterThan(0)
+    expect(createPdfLoadingTaskSpy).toHaveBeenCalledTimes(1)
+    expect(createPdfLoadingTaskSpy).toHaveBeenCalledWith(pdfData)
+    expect(getPdfPageSpy).toHaveBeenCalledWith(1)
+
+    const canvas = screen.container.querySelector<HTMLCanvasElement>('.files-panel__pdf-page')
+    const firstPixel = canvas?.getContext('2d')?.getImageData(0, 0, 1, 1).data
+    expect(Array.from(firstPixel ?? [])).toEqual([255, 0, 0, 255])
+
+    const previousPage = screen.getByRole('button', { name: 'files.pdf.previousPage' })
+    const nextPage = screen.getByRole('button', { name: 'files.pdf.nextPage' })
+    await expect.element(previousPage).toBeDisabled()
+    await expect.element(nextPage).toBeEnabled()
+    expect(screen.container.querySelector('.files-panel__pdf-pager')?.textContent).toContain('1/3')
+
+    await nextPage.click()
+    await expect.poll(() => pdfPageChangeSpy).toHaveBeenCalledWith(2)
+    await expect.poll(() => getPdfPageSpy).toHaveBeenCalledWith(2)
+    await expect
+      .poll(() => screen.container.querySelector('.files-panel__pdf-pager')?.textContent)
+      .toContain('2/3')
+    const secondPixel = canvas?.getContext('2d')?.getImageData(0, 0, 1, 1).data
+    expect(Array.from(secondPixel ?? [])).toEqual([0, 255, 0, 255])
+    expect(createPdfLoadingTaskSpy).toHaveBeenCalledTimes(1)
+
+    screen.unmount()
+    await expect.poll(() => pdfDocumentDestroySpy).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the current preview stable while opening tree selections as new pages', async () => {
@@ -436,8 +568,10 @@ describe('FilesPanel', () => {
               markdownView="source"
               onMarkdownViewChange={() => undefined}
               onOpenFile={openFileSpy}
+              onPdfPageChange={() => undefined}
               onSurfaceFocus={() => undefined}
               onWrapLinesChange={setWrapLines}
+              pdfPage={1}
               projectId="project-1"
               projectName="Workspace"
               wrapLines={wrapLines}

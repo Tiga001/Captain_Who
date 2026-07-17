@@ -10,6 +10,7 @@ const workspaceFilesTests = 'src/main/workspaceFiles'
 const terminalMainTests = 'src/main/terminal'
 const terminalPreloadTests = 'src/preload'
 const terminalRendererTests = 'src/renderer/src/features/terminal/__tests__'
+const appTests = 'src/renderer/src/app/__tests__'
 
 export default defineConfig({
   optimizeDeps: {
@@ -62,6 +63,7 @@ export default defineConfig({
             provider: playwright()
           },
           include: [
+            `${appTests}/**/*.browser.test.tsx`,
             `${gitReviewTests}/**/*.browser.test.tsx`,
             `${rightSidebarTests}/**/*.browser.test.tsx`,
             `${filesTests}/**/*.browser.test.tsx`

@@ -71,6 +71,11 @@ button {
   transition: grid-template-columns 180ms ease;
 }
 
+.app-shell[data-settings-open='true'] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .app-shell[data-translucent-sidebar='true'] {
   background: transparent;
 }

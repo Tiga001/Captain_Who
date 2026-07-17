@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react'
+import { createPortal } from 'react-dom'
 import type { AppWindowState } from '@mycopilot/host-api'
 import type {
   AgentContextWindowSnapshot,
@@ -76,6 +77,7 @@ import {
 } from './chatMessageFactory'
 import { useShellLayout } from './useShellLayout'
 import { AppShellSettingsView } from './AppShellSettingsView'
+import { AppShellWorkspace } from './AppShellWorkspace'
 import {
   DEFAULT_AGENT_MAX_TOKENS,
   getAppShellPanelStyle,
@@ -172,7 +174,8 @@ export function AppShell() {
     toggleRightSidebar,
     toggleRightSidebarMaximized
   } = useShellLayout()
-  const [view, setView] = useState<'workspace' | 'settings'>('workspace')
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const workspaceFocusBeforeSettingsRef = useRef<HTMLElement | null>(null)
   const [appWindowState, setAppWindowState] = useState<AppWindowState>(DEFAULT_APP_WINDOW_STATE)
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPageId>('general')
   const [uiPreferences, setUiPreferences] = useState<UiPreferencesSnapshot>(() =>
@@ -1273,7 +1276,7 @@ export function AppShell() {
         setActiveConversationInitialScrollTop(null)
         setConversationScrollToBottomSignal((signal) => signal + 1)
         setActiveConversationId(newConversation.id)
-        setView('workspace')
+        setSettingsOpen(false)
       } catch (error) {
         console.error('Failed to continue conversation in a new task', error)
         showToast(t('chat.continueInNewTaskFailed'))
@@ -1609,30 +1612,33 @@ export function AppShell() {
     [activeConversationId, updateAssistantMessage]
   )
 
-  const openSettings = useCallback((initialPage: SettingsPageId = 'general') => {
-    setSettingsInitialPage(initialPage)
-    setView('settings')
+  const openSettings = useCallback(
+    (initialPage: SettingsPageId = 'general') => {
+      const activeElement = document.activeElement
+      workspaceFocusBeforeSettingsRef.current =
+        activeElement instanceof HTMLElement && shellRef.current?.contains(activeElement)
+          ? activeElement
+          : null
+      setSettingsInitialPage(initialPage)
+      setSettingsOpen(true)
+    },
+    [shellRef]
+  )
+  const closeSettings = useCallback(() => {
+    const previousWorkspaceFocus = workspaceFocusBeforeSettingsRef.current
+    workspaceFocusBeforeSettingsRef.current = null
+    setSettingsOpen(false)
+
+    window.requestAnimationFrame(() => {
+      if (previousWorkspaceFocus?.isConnected) {
+        previousWorkspaceFocus.focus({ preventScroll: true })
+      }
+    })
   }, [])
   const appWindowMaximized = appWindowState.isFullScreen || appWindowState.isMaximized
 
-  if (view === 'settings') {
-    return (
-      <AppShellSettingsView
-        conversations={conversations}
-        initialPage={settingsInitialPage}
-        onBack={() => setView('workspace')}
-        onConversationPatch={patchConversation}
-        onConversationsChange={setConversationsWithRef}
-        onRemoveProject={removeProject}
-        onUiPreferencesChange={updateUiPreferences}
-        projects={projects}
-        uiPreferences={uiPreferences}
-      />
-    )
-  }
-
   return (
-    <div
+    <AppShellWorkspace
       ref={shellRef}
       className="app-shell"
       data-left-open={leftOpen ? 'true' : 'false'}
@@ -1643,6 +1649,7 @@ export function AppShell() {
       data-right-open={rightOpen ? 'true' : 'false'}
       data-translucent-sidebar={uiPreferences.translucentSidebar ? 'true' : undefined}
       data-window-maximized={appWindowMaximized ? 'true' : undefined}
+      settingsOpen={settingsOpen}
       style={getAppShellPanelStyle(leftOpen, leftWidth, rightOpen, rightWidth, uiPreferences)}
     >
       <header className="window-toolbar" data-drag-region />
@@ -1789,6 +1796,7 @@ export function AppShell() {
           capabilities={rightSidebarCapabilities}
           isMaximized={rightMaximized}
           isOpen={rightOpen}
+          isWorkspaceVisible={!settingsOpen}
           workspaceKey={rightSidebarWorkspaceProject?.id}
           workspaceKeys={rightSidebarWorkspaceKeys}
           workspaceName={rightSidebarWorkspaceProject?.name}
@@ -1797,6 +1805,21 @@ export function AppShell() {
           maximizedToolbarControls={rightSidebarMaximizedToolbarControls}
         />
       </aside>
-    </div>
+      {settingsOpen &&
+        createPortal(
+          <AppShellSettingsView
+            conversations={conversations}
+            initialPage={settingsInitialPage}
+            onBack={closeSettings}
+            onConversationPatch={patchConversation}
+            onConversationsChange={setConversationsWithRef}
+            onRemoveProject={removeProject}
+            onUiPreferencesChange={updateUiPreferences}
+            projects={projects}
+            uiPreferences={uiPreferences}
+          />,
+          document.body
+        )}
+    </AppShellWorkspace>
   )
 }

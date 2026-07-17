@@ -1,8 +1,12 @@
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, symlink, truncate, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { normalizeWorkspacePath, WorkspaceFilesService } from './WorkspaceFilesService'
+import {
+  normalizeWorkspacePath,
+  PDF_PREVIEW_LIMIT_BYTES,
+  WorkspaceFilesService
+} from './WorkspaceFilesService'
 
 describe('WorkspaceFilesService', () => {
   let root = ''
@@ -70,6 +74,45 @@ describe('WorkspaceFilesService', () => {
       previewKind: 'text'
     })
     expect(preview.text?.content).toBe(content)
+  })
+
+  it('returns validated PDF bytes without exposing an absolute file path', async () => {
+    const data = Buffer.from('%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n')
+    await writeFile(join(root, 'paper.PDF'), data)
+
+    const preview = await service.readPreview({ path: 'paper.PDF', projectId: 'project-1' })
+
+    expect(preview.metadata).toMatchObject({
+      mimeType: 'application/pdf',
+      path: 'paper.PDF',
+      previewKind: 'pdf',
+      sizeBytes: data.byteLength
+    })
+    expect(preview.pdf).toMatchObject({
+      mimeType: 'application/pdf',
+      path: 'paper.PDF',
+      sizeBytes: data.byteLength
+    })
+    expect(preview.pdf?.data).toBeInstanceOf(Uint8Array)
+    expect(Buffer.from(preview.pdf?.data ?? [])).toEqual(data)
+    expect(JSON.stringify(preview)).not.toContain(root)
+  })
+
+  it('rejects false PDF extensions and reports oversized PDFs before reading them', async () => {
+    await writeFile(join(root, 'fake.pdf'), 'This is plain text, not a PDF document.')
+    await writeFile(join(root, 'large.pdf'), '%PDF-1.7\n')
+    await truncate(join(root, 'large.pdf'), PDF_PREVIEW_LIMIT_BYTES + 1)
+
+    await expect(
+      service.readPreview({ path: 'fake.pdf', projectId: 'project-1' })
+    ).resolves.toMatchObject({
+      metadata: { mimeType: 'application/pdf', previewKind: 'unsupported' }
+    })
+    await expect(
+      service.readPreview({ path: 'large.pdf', projectId: 'project-1' })
+    ).resolves.toMatchObject({
+      metadata: { mimeType: 'application/pdf', previewKind: 'too-large' }
+    })
   })
 
   it('decodes BOM-marked UTF-16 text without weakening binary detection', async () => {

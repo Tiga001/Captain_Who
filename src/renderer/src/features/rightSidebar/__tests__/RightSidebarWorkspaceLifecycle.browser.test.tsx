@@ -392,6 +392,54 @@ describe('RightSidebar workspace lifecycle', () => {
     expect(renderCount('browser')).toBe(rendersBefore.get('browser'))
     expect(renderCount('files')).toBe(rendersBefore.get('files'))
   })
+
+  it('keeps module surfaces mounted while the workspace is covered by settings', async () => {
+    const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
+    const renderSidebar = (isWorkspaceVisible: boolean) => (
+      <RightSidebar
+        {...workspace}
+        isMaximized={false}
+        isOpen
+        isWorkspaceVisible={isWorkspaceVisible}
+        modules={MODULES}
+        onToggleMaximized={NOOP}
+      />
+    )
+    const screen = await render(renderSidebar(true))
+
+    await openHomeModule(screen, 'rightSidebar.terminal')
+    await openAdditionalModule(screen, 'rightSidebar.browser')
+    await expect.poll(() => lifecycleCount('mount', 'terminal')).toBe(1)
+    await expect.poll(() => lifecycleCount('mount', 'browser')).toBe(1)
+
+    await screen.rerender(renderSidebar(false))
+
+    await expect
+      .poll(() => getSurface(screen.container, 'terminal').dataset.activity)
+      .toBe('dormant')
+    await expect
+      .poll(() => getSurface(screen.container, 'browser').dataset.activity)
+      .toBe('dormant')
+    expect(lifecycleCount('unmount', 'terminal')).toBe(0)
+    expect(lifecycleCount('unmount', 'browser')).toBe(0)
+    expect(getTabLabels(screen.container)).toEqual([
+      'rightSidebar.terminal',
+      'rightSidebar.browser'
+    ])
+
+    await screen.rerender(renderSidebar(true))
+
+    await expect
+      .poll(() => getSurface(screen.container, 'terminal').dataset.activity)
+      .toBe('background')
+    await expect
+      .poll(() => getSurface(screen.container, 'browser').dataset.activity)
+      .toBe('foreground')
+    expect(lifecycleCount('mount', 'terminal')).toBe(1)
+    expect(lifecycleCount('unmount', 'terminal')).toBe(0)
+    expect(lifecycleCount('mount', 'browser')).toBe(1)
+    expect(lifecycleCount('unmount', 'browser')).toBe(0)
+  })
 })
 
 function createTestModule(

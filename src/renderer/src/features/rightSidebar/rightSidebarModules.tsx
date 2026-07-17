@@ -192,6 +192,7 @@ function renderFilesModule({
   const fileState = page.moduleState?.kind === 'workspace-file' ? page.moduleState : null
   const filePath = fileState?.path ?? null
   const markdownView = fileState?.preview?.markdownView ?? 'source'
+  const pdfPage = fileState?.preview?.pdfPage ?? 1
   const wrapLines = fileState?.preview?.wrapLines ?? false
 
   return (
@@ -219,6 +220,16 @@ function renderFilesModule({
             title: path.split('/').at(-1) ?? path
           })
         }}
+        onPdfPageChange={(nextPdfPage) => {
+          if (!filePath) return
+          onPageUpdate({
+            moduleState: {
+              kind: 'workspace-file',
+              path: filePath,
+              preview: { ...fileState?.preview, pdfPage: nextPdfPage }
+            }
+          })
+        }}
         onWrapLinesChange={(nextWrapLines) => {
           if (!filePath) return
           onPageUpdate({
@@ -230,6 +241,7 @@ function renderFilesModule({
           })
         }}
         onSurfaceFocus={onSurfaceFocus}
+        pdfPage={pdfPage}
         projectId={page.workspaceKey}
         projectName={page.workspaceName || t('rightSidebar.files')}
         wrapLines={wrapLines}

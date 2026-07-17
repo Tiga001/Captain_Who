@@ -6,7 +6,8 @@
   --mc-sidebar-translucent-opacity: 46%;
   position: fixed;
   inset: 0;
-  z-index: 100;
+  /* Cover workspace portals while remaining below global toasts and confirmation dialogs. */
+  z-index: 4000;
   display: grid;
   grid-template-columns: minmax(220px, var(--mc-layout-settings-nav-width)) minmax(0, 1fr);
   color: var(--settings-content-text-color);
@@ -16,6 +17,10 @@
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
+}
+
+.settings-page:focus {
+  outline: none;
 }
 
 .settings-page[data-translucent-sidebar='true'] {

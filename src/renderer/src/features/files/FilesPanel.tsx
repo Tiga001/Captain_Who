@@ -31,8 +31,10 @@ interface FilesPanelProps {
   markdownView: WorkspaceMarkdownView
   onMarkdownViewChange: (view: WorkspaceMarkdownView) => void
   onOpenFile: (path: string) => void
+  onPdfPageChange: (page: number) => void
   onWrapLinesChange: (wrapLines: boolean) => void
   onSurfaceFocus: () => void
+  pdfPage: number
   projectId: string
   projectName: string
   wrapLines: boolean
@@ -60,8 +62,10 @@ export function FilesPanel({
   markdownView,
   onMarkdownViewChange,
   onOpenFile,
+  onPdfPageChange,
   onWrapLinesChange,
   onSurfaceFocus,
+  pdfPage,
   projectId,
   projectName,
   wrapLines
@@ -334,7 +338,9 @@ export function FilesPanel({
           <WorkspaceFilePreview
             isActive={isActive}
             markdownView={markdownView}
+            onPdfPageChange={onPdfPageChange}
             path={filePath}
+            pdfPage={pdfPage}
             projectId={projectId}
             wrapLines={wrapLines}
           />

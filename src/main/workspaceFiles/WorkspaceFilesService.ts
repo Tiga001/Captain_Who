@@ -13,7 +13,10 @@ import type {
 
 const DIRECTORY_ENTRY_LIMIT = 20_000
 const IMAGE_PREVIEW_LIMIT_BYTES = 12 * 1024 * 1024
+export const PDF_PREVIEW_LIMIT_BYTES = 32 * 1024 * 1024
 const TEXT_PREVIEW_LIMIT_BYTES = 1024 * 1024
+const PDF_HEADER = Buffer.from('%PDF-')
+const PDF_HEADER_SEARCH_BYTES = 1024
 
 const IMAGE_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   '.avif': 'image/avif',
@@ -97,14 +100,50 @@ export class WorkspaceFilesService {
       return { metadata: metadataFromEntry(currentEntry, request.path, 'unsupported', null) }
     }
 
-    const mimeType = IMAGE_MIME_BY_EXTENSION[extname(request.path).toLowerCase()] ?? null
+    const extension = extname(request.path).toLowerCase()
+    if (extension === '.pdf') {
+      const mimeType = 'application/pdf' as const
+      if (currentEntry.sizeBytes > PDF_PREVIEW_LIMIT_BYTES) {
+        return {
+          metadata: metadataFromEntry(currentEntry, request.path, 'too-large', mimeType)
+        }
+      }
+
+      const data = await readBoundedFile(
+        entry.realPath,
+        PDF_PREVIEW_LIMIT_BYTES,
+        currentEntry.sizeBytes
+      )
+      if (!hasPdfHeader(data)) {
+        return {
+          metadata: metadataFromEntry(currentEntry, request.path, 'unsupported', mimeType)
+        }
+      }
+
+      return {
+        metadata: metadataFromEntry(currentEntry, request.path, 'pdf', mimeType),
+        pdf: {
+          data,
+          mimeType,
+          modifiedAtMs: currentEntry.modifiedAtMs,
+          path: request.path,
+          sizeBytes: data.byteLength
+        }
+      }
+    }
+
+    const mimeType = IMAGE_MIME_BY_EXTENSION[extension] ?? null
     if (mimeType) {
       if (currentEntry.sizeBytes > IMAGE_PREVIEW_LIMIT_BYTES) {
         return {
           metadata: metadataFromEntry(currentEntry, request.path, 'too-large', mimeType)
         }
       }
-      const data = await readBoundedFile(entry.realPath, IMAGE_PREVIEW_LIMIT_BYTES)
+      const data = await readBoundedFile(
+        entry.realPath,
+        IMAGE_PREVIEW_LIMIT_BYTES,
+        currentEntry.sizeBytes
+      )
       return {
         image: {
           data: data.toString('base64'),
@@ -121,7 +160,11 @@ export class WorkspaceFilesService {
       return { metadata: metadataFromEntry(currentEntry, request.path, 'too-large', null) }
     }
 
-    const data = await readBoundedFile(entry.realPath, TEXT_PREVIEW_LIMIT_BYTES)
+    const data = await readBoundedFile(
+      entry.realPath,
+      TEXT_PREVIEW_LIMIT_BYTES,
+      currentEntry.sizeBytes
+    )
     const decodedText = decodeWorkspaceText(data)
     if (!decodedText) {
       return { metadata: metadataFromEntry(currentEntry, request.path, 'binary', null) }
@@ -299,12 +342,33 @@ function isLikelyTextContent(content: string): boolean {
   return controlCharacters / totalCharacters < 0.08
 }
 
-async function readBoundedFile(filePath: string, limit: number): Promise<Buffer> {
+function hasPdfHeader(data: Buffer): boolean {
+  return data.subarray(0, PDF_HEADER_SEARCH_BYTES).indexOf(PDF_HEADER) >= 0
+}
+
+async function readBoundedFile(
+  filePath: string,
+  limit: number,
+  expectedSize: number
+): Promise<Buffer> {
   const file = await open(filePath, 'r')
   try {
-    const buffer = Buffer.allocUnsafe(limit + 1)
+    let buffer = Buffer.allocUnsafe(Math.min(limit + 1, Math.max(1, expectedSize + 1)))
     let offset = 0
-    while (offset < buffer.byteLength) {
+    while (true) {
+      if (offset === buffer.byteLength) {
+        if (offset > limit) throw new Error('Workspace file exceeds the preview size limit')
+        const nextCapacity = Math.min(
+          limit + 1,
+          Math.max(buffer.byteLength * 2, offset + 64 * 1024)
+        )
+        if (nextCapacity <= buffer.byteLength) {
+          throw new Error('Workspace file exceeds the preview size limit')
+        }
+        const expanded = Buffer.allocUnsafe(nextCapacity)
+        buffer.copy(expanded, 0, 0, offset)
+        buffer = expanded
+      }
       const { bytesRead } = await file.read(buffer, offset, buffer.byteLength - offset, offset)
       if (bytesRead === 0) break
       offset += bytesRead

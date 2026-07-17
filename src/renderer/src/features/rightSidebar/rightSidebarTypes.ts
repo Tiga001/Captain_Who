@@ -66,6 +66,7 @@ export type RightSidebarModulePageState = {
   path: string
   preview?: {
     markdownView?: 'preview' | 'source'
+    pdfPage?: number
     wrapLines?: boolean
   }
 }

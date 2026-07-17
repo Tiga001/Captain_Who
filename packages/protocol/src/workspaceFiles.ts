@@ -18,7 +18,8 @@ export interface WorkspaceDirectoryListing {
   truncated: boolean
 }
 
-export type WorkspaceFilePreviewKind = 'binary' | 'image' | 'text' | 'too-large' | 'unsupported'
+export type WorkspaceFilePreviewKind =
+  'binary' | 'image' | 'pdf' | 'text' | 'too-large' | 'unsupported'
 
 export interface WorkspaceFileRequest {
   path: string
@@ -49,8 +50,17 @@ export interface WorkspaceImageFileContent {
   sizeBytes: number
 }
 
+export interface WorkspacePdfFileContent {
+  data: Uint8Array
+  mimeType: 'application/pdf'
+  modifiedAtMs: number
+  path: string
+  sizeBytes: number
+}
+
 export interface WorkspaceFilePreviewResult {
   image?: WorkspaceImageFileContent
   metadata: WorkspaceFileMetadata
+  pdf?: WorkspacePdfFileContent
   text?: WorkspaceTextFileContent
 }

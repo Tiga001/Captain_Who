@@ -21,6 +21,7 @@ interface RightSidebarProps {
   capabilities?: RightSidebarCapabilities
   isMaximized: boolean
   isOpen: boolean
+  isWorkspaceVisible?: boolean
   maximizedToolbarControls?: ReactNode
   modules?: RightSidebarModuleDefinition[]
   onToggleMaximized: () => void
@@ -52,6 +53,7 @@ export const RightSidebar = memo(function RightSidebar({
   capabilities,
   isMaximized,
   isOpen,
+  isWorkspaceVisible = true,
   maximizedToolbarControls,
   modules = RIGHT_SIDEBAR_MODULES,
   onToggleMaximized,
@@ -98,12 +100,16 @@ export const RightSidebar = memo(function RightSidebar({
   )
   // `data-right-open=false` is the layout's final visibility authority, including while the
   // maximize preference remains set for a later reopen.
-  const sidebarVisible = isOpen
+  const sidebarVisible = isOpen && isWorkspaceVisible
   const maximizeLabel = isMaximized ? t('rightSidebar.restore') : t('rightSidebar.maximize')
 
   const closeTransientUi = useCallback(() => {
     setIsModuleMenuOpen(false)
   }, [])
+
+  useEffect(() => {
+    if (!sidebarVisible) closeTransientUi()
+  }, [closeTransientUi, sidebarVisible])
 
   useEffect(() => {
     if (!isModuleMenuOpen) return

@@ -64,6 +64,7 @@
     "lucide-react": "^1.23.0",
     "material-icon-theme": "^5.36.1",
     "mdast-util-from-markdown": "^2.0.3",
+    "pdfjs-dist": "5.4.296",
     "playwright": "^1.61.1",
     "prettier": "^3.7.4",
     "react": "^19.2.1",
