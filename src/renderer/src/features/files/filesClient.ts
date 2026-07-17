@@ -18,6 +18,10 @@ export function listWorkspaceDirectory(
   return hostClient.workspaceFiles.listDirectory(input)
 }
 
+export function openWorkspaceExternalLink(url: string): Promise<void> {
+  return hostClient.app.openExternal(url)
+}
+
 export function readWorkspaceFileMetadata(
   input: WorkspaceFileRequest
 ): Promise<WorkspaceFileMetadata> {

@@ -22,7 +22,13 @@ const TestIcon = (() => null) as unknown as RightSidebarModuleDefinition['icon']
 const MODULES: RightSidebarModuleDefinition[] = [
   createModule('terminal', 'pinned-to-creation-workspace', 'multiple', 'retain-page'),
   createModule('browser', 'global', 'multiple', 'retain-page'),
-  createModule('files', 'follow-workspace', 'multiple', 'close-page'),
+  {
+    ...createModule('files', 'pinned-to-creation-workspace', 'multiple', 'close-page'),
+    maxRelatedPagesPerWorkspace: 2,
+    orphanedWorkspacePolicy: 'close-page',
+    requiresWorkspace: true,
+    retention: 'unmount-when-inactive'
+  },
   {
     ...createModule('git-review', 'follow-workspace', 'single', 'close-page'),
     requiredCapability: 'git-repository'
@@ -34,9 +40,55 @@ const WORKSPACE_B = createRightSidebarWorkspaceContext('project-b', 'Project B',
 const HOME = createRightSidebarWorkspaceContext(null, null, undefined)
 
 describe('right sidebar platform context lifecycle', () => {
+  it('reuses an empty file source page once, then opens independent previews', () => {
+    const initial = openPages(WORKSPACE_A, ['files'])
+    const firstPreview = reduceRightSidebarPlatform(initial, {
+      module: getModule('files'),
+      pageId: 'unused-file-page',
+      request: {
+        disposition: 'reuse-source-if-empty',
+        iconUrl: 'file:///markdown.svg',
+        moduleState: { kind: 'workspace-file', path: 'README.md' },
+        resourceKey: 'workspace-file:README.md',
+        title: 'README.md'
+      },
+      sourcePageId: 'files-page',
+      type: 'open-related-page'
+    })
+
+    expect(firstPreview.activePageId).toBe('files-page')
+    expect(firstPreview.pages).toHaveLength(1)
+    expect(firstPreview.pages[0]).toMatchObject({
+      iconUrl: 'file:///markdown.svg',
+      id: 'files-page',
+      moduleState: { kind: 'workspace-file', path: 'README.md' },
+      resourceKey: 'workspace-file:README.md',
+      title: 'README.md',
+      workspaceKey: WORKSPACE_A.key,
+      workspaceSessionKey: WORKSPACE_A.sessionKey
+    })
+
+    const secondPreview = reduceRightSidebarPlatform(firstPreview, {
+      module: getModule('files'),
+      pageId: 'second-file-page',
+      request: {
+        disposition: 'new-page',
+        moduleState: { kind: 'workspace-file', path: 'src/index.ts' },
+        resourceKey: 'workspace-file:src/index.ts',
+        title: 'index.ts'
+      },
+      sourcePageId: 'files-page',
+      type: 'open-related-page'
+    })
+
+    expect(secondPreview.activePageId).toBe('second-file-page')
+    expect(secondPreview.pages.map((page) => page.id)).toEqual(['files-page', 'second-file-page'])
+  })
+
   it('opens related resources as independent pages and reuses an existing resource page', () => {
     const initial = openPages(WORKSPACE_A, ['files'])
     const opened = reduceRightSidebarPlatform(initial, {
+      module: getModule('files'),
       pageId: 'workspace-file-page',
       request: {
         iconUrl: 'file:///python.svg',
@@ -61,6 +113,7 @@ describe('right sidebar platform context lifecycle', () => {
     })
 
     const reopened = reduceRightSidebarPlatform(opened, {
+      module: getModule('files'),
       pageId: 'duplicate-file-page',
       request: {
         moduleState: { kind: 'workspace-file', path: 'src/index.py' },
@@ -72,6 +125,74 @@ describe('right sidebar platform context lifecycle', () => {
     })
 
     expect(reopened).toBe(opened)
+  })
+
+  it('keeps files pinned to their creation workspace while review follows the conversation', () => {
+    const initial = openPages(WORKSPACE_A, ['files', 'terminal', 'browser', 'git-review'])
+    const [filesBefore, terminalBefore, browserBefore, reviewBefore] = initial.pages
+
+    const next = synchronize(initial, WORKSPACE_B, 'available', [WORKSPACE_A.key, WORKSPACE_B.key])
+
+    expect(next.pages[0]).toBe(filesBefore)
+    expect(next.pages[1]).toBe(terminalBefore)
+    expect(next.pages[2]).toBe(browserBefore)
+    expect(next.pages[3]).not.toBe(reviewBefore)
+    expect(next.pages[0]).toMatchObject({
+      workspaceKey: WORKSPACE_A.key,
+      workspacePath: WORKSPACE_A.path,
+      workspaceSessionKey: WORKSPACE_A.sessionKey
+    })
+    expect(next.pages[3]).toMatchObject({
+      workspaceKey: WORKSPACE_B.key,
+      workspacePath: WORKSPACE_B.path,
+      workspaceSessionKey: WORKSPACE_B.sessionKey
+    })
+  })
+
+  it('keeps pinned files outside a conversation until their project is deleted', () => {
+    const initial = openPages(WORKSPACE_A, ['files', 'terminal', 'browser'])
+    const filesBefore = initial.pages[0]
+
+    const withoutConversation = synchronize(initial, HOME, 'unavailable', [WORKSPACE_A.key])
+    expect(withoutConversation.pages[0]).toBe(filesBefore)
+
+    const afterProjectDeletion = synchronize(withoutConversation, HOME, 'unavailable', [])
+    expect(afterProjectDeletion.pages.map((page) => page.moduleId)).toEqual(['terminal', 'browser'])
+    expect(afterProjectDeletion.pages[0]).toBe(initial.pages[1])
+    expect(afterProjectDeletion.pages[1]).toBe(initial.pages[2])
+  })
+
+  it('evicts only the oldest inactive preview after the explicit workspace limit', () => {
+    let state = openPages(WORKSPACE_A, ['files', 'terminal'])
+    state = openFilePage(state, 'a.ts')
+    state = reduceRightSidebarPlatform(state, { pageId: 'files-page', type: 'activate' })
+    state = openFilePage(state, 'b.ts')
+    state = reduceRightSidebarPlatform(state, { pageId: 'files-page', type: 'activate' })
+    state = openFilePage(state, 'c.ts')
+
+    expect(state.activePageId).toBe('file-c.ts')
+    expect(state.pages.map((page) => page.id)).toEqual([
+      'files-page',
+      'terminal-page',
+      'file-b.ts',
+      'file-c.ts'
+    ])
+  })
+
+  it('stores preview state on the lightweight file page descriptor', () => {
+    const opened = openFilePage(openPages(WORKSPACE_A, ['files']), 'README.md')
+    const moduleState = {
+      kind: 'workspace-file' as const,
+      path: 'README.md',
+      preview: { markdownView: 'preview' as const, wrapLines: true }
+    }
+    const updated = reduceRightSidebarPlatform(opened, {
+      pageId: 'file-README.md',
+      type: 'update',
+      update: { moduleState }
+    })
+
+    expect(updated.pages.at(-1)?.moduleState).toBe(moduleState)
   })
 
   it('rebinds only follow-workspace pages while preserving tab identity and pinned surfaces', () => {
@@ -258,7 +379,8 @@ function openPages(
 function synchronize(
   state: RightSidebarPlatformState,
   workspace: RightSidebarWorkspaceContext,
-  reviewStatus: 'checking' | 'available' | 'unavailable'
+  reviewStatus: 'checking' | 'available' | 'unavailable',
+  workspaceKeys?: readonly string[]
 ): RightSidebarPlatformState {
   const availability = resolveRightSidebarModuleAvailabilityMap(
     MODULES,
@@ -275,6 +397,21 @@ function synchronize(
     availability,
     modules: MODULES,
     type: 'synchronize-context',
-    workspace
+    workspace,
+    workspaceKeys
+  })
+}
+
+function openFilePage(state: RightSidebarPlatformState, path: string): RightSidebarPlatformState {
+  return reduceRightSidebarPlatform(state, {
+    module: getModule('files'),
+    pageId: `file-${path}`,
+    request: {
+      moduleState: { kind: 'workspace-file', path },
+      resourceKey: `workspace-file:${path}`,
+      title: path
+    },
+    sourcePageId: 'files-page',
+    type: 'open-related-page'
   })
 }

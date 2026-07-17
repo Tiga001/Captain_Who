@@ -1,5 +1,8 @@
 import type { Translate } from '../../config/translationFormat'
-import { getRightSidebarModuleAvailability } from './rightSidebarModuleAvailability'
+import {
+  getRightSidebarModuleAvailability,
+  resolveRightSidebarPageAvailability
+} from './rightSidebarModuleAvailability'
 import type {
   RightSidebarModuleAvailabilityMap,
   RightSidebarModuleDefinition,
@@ -26,6 +29,7 @@ export type RightSidebarPlatformAction =
   | { pageId: string; type: 'activate' }
   | { pageId: string; type: 'close' }
   | {
+      module: RightSidebarModuleDefinition
       pageId: string
       request: RightSidebarPageOpenRequest
       sourcePageId: string
@@ -36,6 +40,7 @@ export type RightSidebarPlatformAction =
       modules: RightSidebarModuleDefinition[]
       type: 'synchronize-context'
       workspace: RightSidebarWorkspaceContext
+      workspaceKeys?: readonly string[]
     }
   | { pageId: string; type: 'update'; update: RightSidebarPageUpdate }
 
@@ -77,9 +82,21 @@ export function reduceRightSidebarPlatform(
     case 'close':
       return closePage(state, action.pageId)
     case 'open-related-page':
-      return openRelatedPage(state, action.sourcePageId, action.pageId, action.request)
+      return openRelatedPage(
+        state,
+        action.module,
+        action.sourcePageId,
+        action.pageId,
+        action.request
+      )
     case 'synchronize-context':
-      return synchronizeContext(state, action.modules, action.availability, action.workspace)
+      return synchronizeContext(
+        state,
+        action.modules,
+        action.availability,
+        action.workspace,
+        action.workspaceKeys
+      )
     case 'update': {
       let changed = false
       const pages = state.pages.map((page) => {
@@ -87,10 +104,14 @@ export function reduceRightSidebarPlatform(
 
         const title = action.update.title?.trim() || page.title
         const iconUrl = action.update.iconUrl === undefined ? page.iconUrl : action.update.iconUrl
-        if (title === page.title && iconUrl === page.iconUrl) return page
+        const moduleState =
+          action.update.moduleState === undefined ? page.moduleState : action.update.moduleState
+        if (title === page.title && iconUrl === page.iconUrl && moduleState === page.moduleState) {
+          return page
+        }
 
         changed = true
-        return { ...page, iconUrl, title }
+        return { ...page, iconUrl, moduleState, title }
       })
       return changed ? { ...state, pages } : state
     }
@@ -99,12 +120,13 @@ export function reduceRightSidebarPlatform(
 
 function openRelatedPage(
   state: RightSidebarPlatformState,
+  module: RightSidebarModuleDefinition,
   sourcePageId: string,
   pageId: string,
   request: RightSidebarPageOpenRequest
 ): RightSidebarPlatformState {
   const sourcePage = state.pages.find((page) => page.id === sourcePageId)
-  if (!sourcePage) return state
+  if (!sourcePage || sourcePage.moduleId !== module.id) return state
 
   const resourceKey = request.resourceKey?.trim() || undefined
   if (resourceKey) {
@@ -130,11 +152,48 @@ function openRelatedPage(
     resourceKey,
     title
   }
+  const pages = evictRelatedPageAtLimit(state, module, sourcePage)
+  if (
+    request.disposition === 'reuse-source-if-empty' &&
+    sourcePage.moduleState === undefined &&
+    sourcePage.resourceKey === undefined
+  ) {
+    return {
+      activePageId: sourcePage.id,
+      pages: pages.map((currentPage) =>
+        currentPage.id === sourcePage.id ? { ...page, id: sourcePage.id } : currentPage
+      )
+    }
+  }
 
   return {
     activePageId: page.id,
-    pages: [...state.pages, page]
+    pages: [...pages, page]
   }
+}
+
+function evictRelatedPageAtLimit(
+  state: RightSidebarPlatformState,
+  module: RightSidebarModuleDefinition,
+  sourcePage: RightSidebarPage
+): RightSidebarPage[] {
+  const limit = module.maxRelatedPagesPerWorkspace
+  if (!limit || limit < 1) return state.pages
+
+  const relatedPages = state.pages.filter(
+    (page) =>
+      page.moduleId === module.id &&
+      page.workspaceSessionKey === sourcePage.workspaceSessionKey &&
+      Boolean(page.resourceKey)
+  )
+  if (relatedPages.length < limit) return state.pages
+
+  const pageToEvict =
+    relatedPages.find((page) => page.id !== sourcePage.id && page.id !== state.activePageId) ??
+    relatedPages.find((page) => page.id !== sourcePage.id) ??
+    relatedPages[0]
+  if (!pageToEvict) return state.pages
+  return state.pages.filter((page) => page.id !== pageToEvict.id)
 }
 
 function findExistingPage(
@@ -192,9 +251,11 @@ function synchronizeContext(
   state: RightSidebarPlatformState,
   modules: RightSidebarModuleDefinition[],
   availability: RightSidebarModuleAvailabilityMap,
-  workspace: RightSidebarWorkspaceContext
+  workspace: RightSidebarWorkspaceContext,
+  workspaceKeys?: readonly string[]
 ): RightSidebarPlatformState {
   const modulesById = new Map(modules.map((module) => [module.id, module]))
+  const knownWorkspaceKeys = workspaceKeys ? new Set(workspaceKeys) : null
   const seenSingleModules = new Set<RightSidebarModuleId>()
   let changed = false
   const pages: RightSidebarPage[] = []
@@ -206,7 +267,21 @@ function synchronizeContext(
       continue
     }
 
-    const moduleAvailability = getRightSidebarModuleAvailability(availability, module.id)
+    if (
+      knownWorkspaceKeys &&
+      module.orphanedWorkspacePolicy === 'close-page' &&
+      currentPage.workspaceKey &&
+      !knownWorkspaceKeys.has(currentPage.workspaceKey)
+    ) {
+      changed = true
+      continue
+    }
+
+    const moduleAvailability = resolveRightSidebarPageAvailability(
+      module,
+      getRightSidebarModuleAvailability(availability, module.id),
+      currentPage
+    )
     if (moduleAvailability === 'unavailable' && module.unavailablePagePolicy === 'close-page') {
       changed = true
       continue

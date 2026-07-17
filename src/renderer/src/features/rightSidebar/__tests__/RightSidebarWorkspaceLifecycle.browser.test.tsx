@@ -31,8 +31,10 @@ const MODULES: RightSidebarModuleDefinition[] = [
   createTestModule('terminal', 'pinned-to-creation-workspace', 'multiple', 'retain-page'),
   createTestModule('browser', 'global', 'multiple', 'retain-page'),
   {
-    ...createTestModule('files', 'follow-workspace', 'multiple', 'close-page'),
-    requiresWorkspace: true
+    ...createTestModule('files', 'pinned-to-creation-workspace', 'multiple', 'close-page'),
+    orphanedWorkspacePolicy: 'close-page',
+    requiresWorkspace: true,
+    retention: 'unmount-when-inactive'
   },
   {
     ...createTestModule('git-review', 'follow-workspace', 'single', 'close-page'),
@@ -184,7 +186,77 @@ describe('RightSidebar workspace lifecycle', () => {
     expect(lifecycleCount('unmount', 'git-review')).toBe(0)
   })
 
-  it('separates selection from work activity without unmounting keep-alive pages', async () => {
+  it('keeps files pinned across conversations without disturbing retained modules', async () => {
+    const workspaceA = workspaceProps('project-a', 'Project A', '/repo/a')
+    const workspaceB = workspaceProps('project-b', 'Project B', '/repo/b')
+    const renderSidebar = (workspace: typeof workspaceA) => (
+      <RightSidebar
+        {...workspace}
+        capabilities={gitCapability(workspace, 'available')}
+        isMaximized={false}
+        isOpen
+        modules={MODULES}
+        onToggleMaximized={NOOP}
+        workspaceKeys={['project-a', 'project-b']}
+      />
+    )
+    const screen = await render(renderSidebar(workspaceA))
+
+    await openHomeModule(screen, 'rightSidebar.terminal')
+    await openAdditionalModule(screen, 'rightSidebar.browser')
+    await openAdditionalModule(screen, 'rightSidebar.review')
+    await openAdditionalModule(screen, 'rightSidebar.files')
+    await expect.poll(() => lifecycleCount('mount', 'files')).toBe(1)
+    const terminalMountCount = lifecycleCount('mount', 'terminal')
+    const browserMountCount = lifecycleCount('mount', 'browser')
+
+    await screen.rerender(renderSidebar(workspaceB))
+
+    await expect
+      .poll(() => getSurface(screen.container, 'files').dataset.workspaceKey)
+      .toBe('project-a')
+    expect(getSurface(screen.container, 'terminal').dataset.workspaceKey).toBe('project-a')
+    expect(getSurface(screen.container, 'git-review').dataset.workspaceKey).toBe('project-b')
+    expect(lifecycleCount('mount', 'files')).toBe(1)
+    expect(lifecycleCount('unmount', 'files')).toBe(0)
+    expect(lifecycleCount('mount', 'terminal')).toBe(terminalMountCount)
+    expect(lifecycleCount('unmount', 'terminal')).toBe(0)
+    expect(lifecycleCount('mount', 'browser')).toBe(browserMountCount)
+    expect(lifecycleCount('unmount', 'browser')).toBe(0)
+  })
+
+  it('removes only file pages whose project was deleted', async () => {
+    const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
+    const renderSidebar = (workspaceKeys: readonly string[]) => (
+      <RightSidebar
+        {...workspace}
+        capabilities={gitCapability(workspace, 'available')}
+        isMaximized={false}
+        isOpen
+        modules={MODULES}
+        onToggleMaximized={NOOP}
+        workspaceKeys={workspaceKeys}
+      />
+    )
+    const screen = await render(renderSidebar(['project-a']))
+
+    await openHomeModule(screen, 'rightSidebar.terminal')
+    await openAdditionalModule(screen, 'rightSidebar.browser')
+    await openAdditionalModule(screen, 'rightSidebar.files')
+    await expect.poll(() => lifecycleCount('mount', 'files')).toBe(1)
+
+    await screen.rerender(renderSidebar([]))
+
+    await expect
+      .poll(() => getTabLabels(screen.container))
+      .toEqual(['rightSidebar.terminal', 'rightSidebar.browser'])
+    expect(screen.container.querySelector('[data-testid="files-surface"]')).toBeNull()
+    expect(lifecycleCount('unmount', 'files')).toBe(1)
+    expect(lifecycleCount('unmount', 'terminal')).toBe(0)
+    expect(lifecycleCount('unmount', 'browser')).toBe(0)
+  })
+
+  it('unmounts only inactive file UI while preserving keep-alive pages', async () => {
     const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
     const capabilities = gitCapability(workspace, 'available')
     const screen = await render(
@@ -215,11 +287,16 @@ describe('RightSidebar workspace lifecycle', () => {
     await expect
       .poll(() => getSurface(screen.container, 'browser').dataset.activity)
       .toBe('foreground')
-    expect(getSurface(screen.container, 'files').dataset.activity).toBe('background')
+    expect(screen.container.querySelector('[data-testid="files-surface"]')).toBeNull()
+    expect(lifecycleCount('unmount', 'files')).toBe(1)
     expect(getSurface(screen.container, 'terminal').dataset.activity).toBe('background')
     expect(renderCount('terminal')).toBe(terminalRenderCount)
     expect(lifecycleCount('mount', 'terminal')).toBe(terminalMountCount)
     expect(lifecycleCount('unmount', 'terminal')).toBe(0)
+
+    await screen.getByRole('tab', { name: 'rightSidebar.files' }).click()
+    await expect.poll(() => lifecycleCount('mount', 'files')).toBe(2)
+    expect(getSurface(screen.container, 'files').dataset.workspaceKey).toBe('project-a')
   })
 
   it('marks every retained page dormant when the sidebar or document is hidden', async () => {

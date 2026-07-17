@@ -1,3 +1,5 @@
+import { useState } from 'react'
+import type { ComponentProps } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import '../../../styles/global.css'
@@ -20,6 +22,7 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 vi.mock('../filesClient', () => ({
   copyWorkspaceFilePath: copyPathSpy,
   listWorkspaceDirectory: listDirectorySpy,
+  openWorkspaceExternalLink: vi.fn(),
   readWorkspaceFileMetadata: readMetadataSpy,
   readWorkspaceImageFile: vi.fn(),
   readWorkspaceTextFile: readTextSpy,
@@ -33,7 +36,31 @@ vi.mock('../../gitReview/syntaxHighlighting/useGitReviewSyntaxHighlight', () => 
   })
 }))
 
-const { FilesPanel } = await import('../FilesPanel')
+const [{ FilesPanel }, { WorkspaceFileTreeSessionsProvider }] = await Promise.all([
+  import('../FilesPanel'),
+  import('../WorkspaceFileTreeSessions')
+])
+
+type TestFilesPanelProps = Omit<
+  ComponentProps<typeof FilesPanel>,
+  'markdownView' | 'onMarkdownViewChange' | 'onWrapLinesChange' | 'wrapLines'
+>
+
+function TestFilesPanel(props: TestFilesPanelProps) {
+  const [markdownView, setMarkdownView] = useState<'preview' | 'source'>('source')
+  const [wrapLines, setWrapLines] = useState(false)
+  return (
+    <WorkspaceFileTreeSessionsProvider projectIds={[props.projectId]}>
+      <FilesPanel
+        {...props}
+        markdownView={markdownView}
+        onMarkdownViewChange={setMarkdownView}
+        onWrapLinesChange={setWrapLines}
+        wrapLines={wrapLines}
+      />
+    </WorkspaceFileTreeSessionsProvider>
+  )
+}
 
 beforeEach(() => {
   copyPathSpy.mockReset()
@@ -76,10 +103,84 @@ beforeEach(() => {
 })
 
 describe('FilesPanel', () => {
+  it('renders Office files as a dedicated unsupported preview without reading file contents', async () => {
+    const screen = await render(
+      <div style={{ height: 620, width: 620 }}>
+        <TestFilesPanel
+          filePath="reports/quarterly.docx"
+          isActive
+          onOpenFile={openFileSpy}
+          onSurfaceFocus={() => undefined}
+          projectId="project-1"
+          projectName="Workspace"
+        />
+      </div>
+    )
+
+    const message = screen.container.querySelector<HTMLElement>(
+      '.files-panel__center-state[data-variant="unsupported"]'
+    )
+    expect(message?.textContent).toContain('files.preview.officeTitle')
+    expect(message?.textContent).toContain('files.preview.officeDescription')
+    expect(message?.querySelector('.files-panel__center-icon')).toBeNull()
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+    expect(readMetadataSpy).not.toHaveBeenCalled()
+    expect(readTextSpy).not.toHaveBeenCalled()
+  })
+
+  it('switches Markdown files between source and rendered preview modes', async () => {
+    readTextSpy.mockResolvedValue({
+      content: '# Workspace\n\n| Item | State |\n| --- | --- |\n| Preview | Ready |',
+      modifiedAtMs: 1,
+      path: 'README.md',
+      sizeBytes: 64
+    })
+
+    const screen = await render(
+      <div style={{ height: 620, width: 620 }}>
+        <TestFilesPanel
+          filePath="README.md"
+          isActive
+          onOpenFile={openFileSpy}
+          onSurfaceFocus={() => undefined}
+          projectId="project-1"
+          projectName="Workspace"
+        />
+      </div>
+    )
+
+    await expect
+      .poll(() => screen.container.querySelector('.files-panel__code')?.textContent)
+      .toContain('# Workspace')
+
+    await screen.getByRole('button', { name: 'files.options' }).click()
+    const sourceOption = screen.getByRole('menuitemradio', { name: 'files.markdown.source' })
+    const previewOption = screen.getByRole('menuitemradio', { name: 'files.markdown.preview' })
+    await expect.element(sourceOption).toHaveAttribute('aria-checked', 'true')
+    await expect.element(previewOption).toHaveAttribute('aria-checked', 'false')
+    await previewOption.click()
+
+    await expect
+      .poll(() => screen.container.querySelector('.files-panel__markdown h1')?.textContent)
+      .toBe('Workspace')
+    expect(screen.container.querySelector('.files-panel__markdown table')?.textContent).toContain(
+      'Preview'
+    )
+    expect(screen.container.querySelector('.files-panel__code')).toBeNull()
+
+    await screen.getByRole('button', { name: 'files.options' }).click()
+    await screen.getByRole('menuitemradio', { name: 'files.markdown.source' }).click()
+    await expect
+      .poll(() => screen.container.querySelector('.files-panel__code')?.textContent)
+      .toContain('# Workspace')
+    expect(screen.container.querySelector('.files-panel__markdown')).toBeNull()
+    expect(readTextSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps the current preview stable while opening tree selections as new pages', async () => {
     const screen = await render(
       <div style={{ height: 620, width: 620 }}>
-        <FilesPanel
+        <TestFilesPanel
           filePath="README.md"
           isActive
           onOpenFile={openFileSpy}
@@ -253,7 +354,7 @@ describe('FilesPanel', () => {
 
     const screen = await render(
       <div style={{ height: 360, width: 620 }}>
-        <FilesPanel
+        <TestFilesPanel
           filePath="alpha/branch/leaf/file-20.ts"
           isActive
           onOpenFile={openFileSpy}
@@ -309,5 +410,77 @@ describe('FilesPanel', () => {
     scrollElement.dispatchEvent(new Event('scroll'))
 
     await expect.poll(stickyPaths).toEqual(['omega/'])
+  })
+
+  it('shares one tree model and directory cache across file-page remounts', async () => {
+    function SharedTreeHarness() {
+      const [filePath, setFilePath] = useState('README.md')
+      const [wrapLines, setWrapLines] = useState(false)
+
+      return (
+        <WorkspaceFileTreeSessionsProvider projectIds={['project-1']}>
+          <button type="button" onClick={() => setFilePath('src/index.ts')}>
+            switch file
+          </button>
+          <div style={{ height: 620, width: 620 }}>
+            <FilesPanel
+              filePath={filePath}
+              isActive
+              key={filePath}
+              markdownView="source"
+              onMarkdownViewChange={() => undefined}
+              onOpenFile={openFileSpy}
+              onSurfaceFocus={() => undefined}
+              onWrapLinesChange={setWrapLines}
+              projectId="project-1"
+              projectName="Workspace"
+              wrapLines={wrapLines}
+            />
+          </div>
+        </WorkspaceFileTreeSessionsProvider>
+      )
+    }
+
+    const screen = await render(<SharedTreeHarness />)
+    await expect
+      .poll(() => screen.container.querySelector<HTMLElement>('file-tree-container'))
+      .not.toBeNull()
+    const firstHost = screen.container.querySelector<HTMLElement>('file-tree-container')
+    if (!firstHost?.shadowRoot) throw new Error('Pierre tree did not attach an open shadow root')
+
+    await expect
+      .poll(() => firstHost.shadowRoot?.querySelector<HTMLButtonElement>('[data-item-path="src/"]'))
+      .not.toBeNull()
+    firstHost.shadowRoot.querySelector<HTMLButtonElement>('[data-item-path="src/"]')?.click()
+    await expect
+      .poll(() => firstHost.shadowRoot?.querySelector('[data-item-path="src/index.ts"]'))
+      .not.toBeNull()
+    await screen.getByRole('textbox', { name: 'files.filter' }).fill('index')
+
+    await screen.getByRole('button', { name: 'switch file' }).click()
+
+    await expect.poll(() => firstHost.isConnected).toBe(false)
+    await expect
+      .poll(() => screen.container.querySelector<HTMLElement>('file-tree-container'))
+      .not.toBeNull()
+    const remountedHost = screen.container.querySelector<HTMLElement>('file-tree-container')
+    if (!remountedHost?.shadowRoot) {
+      throw new Error('Shared Pierre tree did not attach to the replacement host')
+    }
+    await expect
+      .poll(() => remountedHost.shadowRoot?.querySelector('[data-item-path="src/index.ts"]'))
+      .not.toBeNull()
+    await expect
+      .poll(
+        () =>
+          screen.container.querySelector<HTMLInputElement>('.files-panel__tree-search input')?.value
+      )
+      .toBe('index')
+    expect(listDirectorySpy.mock.calls.filter(([input]) => input.directoryPath === '').length).toBe(
+      1
+    )
+    expect(
+      listDirectorySpy.mock.calls.filter(([input]) => input.directoryPath === 'src').length
+    ).toBe(1)
   })
 })

@@ -1,8 +1,9 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Maximize, Plus, X } from 'lucide-react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { WorkspaceFileTreeSessionsProvider } from '../../features/files/WorkspaceFileTreeSessions'
 import { RightSidebarHome } from '../../features/rightSidebar/RightSidebarHome'
 import { RightSidebarModulePicker } from '../../features/rightSidebar/RightSidebarModulePicker'
 import { RightSidebarPageStack } from '../../features/rightSidebar/RightSidebarPageStack'
@@ -24,6 +25,7 @@ interface RightSidebarProps {
   modules?: RightSidebarModuleDefinition[]
   onToggleMaximized: () => void
   workspaceKey?: string | null
+  workspaceKeys?: readonly string[]
   workspaceName?: string | null
   workspacePath?: string
 }
@@ -54,6 +56,7 @@ export const RightSidebar = memo(function RightSidebar({
   modules = RIGHT_SIDEBAR_MODULES,
   onToggleMaximized,
   workspaceKey,
+  workspaceKeys,
   workspaceName,
   workspacePath
 }: RightSidebarProps): ReactNode {
@@ -78,10 +81,21 @@ export const RightSidebar = memo(function RightSidebar({
     modules,
     t,
     workspaceKey,
+    workspaceKeys,
     workspaceName,
     workspacePath
   })
   const hasOpenPages = pages.length > 0
+  const fileTreeProjectIds = useMemo(
+    () => [
+      ...new Set(
+        pages.flatMap((page) =>
+          page.moduleId === 'files' && page.workspaceKey ? [page.workspaceKey] : []
+        )
+      )
+    ],
+    [pages]
+  )
   // `data-right-open=false` is the layout's final visibility authority, including while the
   // maximize preference remains set for a later reopen.
   const sidebarVisible = isOpen
@@ -254,24 +268,26 @@ export const RightSidebar = memo(function RightSidebar({
         </div>
       </header>
 
-      <div className="right-sidebar__content">
-        {hasOpenPages ? (
-          <RightSidebarPageStack
-            activePageId={activePageId}
-            availability={moduleAvailability}
-            documentVisible={documentVisible}
-            modules={modules}
-            onOpenPage={openRelatedPage}
-            onPageUpdate={updatePage}
-            onSurfaceFocus={closeTransientUi}
-            pages={pages}
-            sidebarVisible={sidebarVisible}
-            t={t}
-          />
-        ) : (
-          <RightSidebarHome modules={availableModules} onOpenModule={openModule} />
-        )}
-      </div>
+      <WorkspaceFileTreeSessionsProvider projectIds={fileTreeProjectIds}>
+        <div className="right-sidebar__content">
+          {hasOpenPages ? (
+            <RightSidebarPageStack
+              activePageId={activePageId}
+              availability={moduleAvailability}
+              documentVisible={documentVisible}
+              modules={modules}
+              onOpenPage={openRelatedPage}
+              onPageUpdate={updatePage}
+              onSurfaceFocus={closeTransientUi}
+              pages={pages}
+              sidebarVisible={sidebarVisible}
+              t={t}
+            />
+          ) : (
+            <RightSidebarHome modules={availableModules} onOpenModule={openModule} />
+          )}
+        </div>
+      </WorkspaceFileTreeSessionsProvider>
     </aside>
   )
 })

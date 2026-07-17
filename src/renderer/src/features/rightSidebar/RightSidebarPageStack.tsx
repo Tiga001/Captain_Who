@@ -1,7 +1,10 @@
 import { memo, useCallback } from 'react'
 import type { Translate } from '../../config/translationFormat'
 import { resolveRightSidebarActivity } from './rightSidebarActivity'
-import { getRightSidebarModuleAvailability } from './rightSidebarModuleAvailability'
+import {
+  getRightSidebarModuleAvailability,
+  resolveRightSidebarPageAvailability
+} from './rightSidebarModuleAvailability'
 import type {
   RightSidebarActivity,
   RightSidebarModuleAvailability,
@@ -18,7 +21,11 @@ interface RightSidebarPageStackProps {
   documentVisible: boolean
   modules: RightSidebarModuleDefinition[]
   onPageUpdate: (pageId: string, update: RightSidebarPageUpdate) => void
-  onOpenPage: (sourcePageId: string, request: RightSidebarPageOpenRequest) => void
+  onOpenPage: (
+    sourcePageId: string,
+    module: RightSidebarModuleDefinition,
+    request: RightSidebarPageOpenRequest
+  ) => void
   onSurfaceFocus: () => void
   pages: RightSidebarPage[]
   sidebarVisible: boolean
@@ -49,11 +56,16 @@ export const RightSidebarPageStack = memo(function RightSidebarPageStack({
           isSelected,
           sidebarVisible
         })
+        const pageAvailability = resolveRightSidebarPageAvailability(
+          module,
+          getRightSidebarModuleAvailability(availability, module.id),
+          page
+        )
 
         return (
           <RightSidebarPageFrame
             activity={activity}
-            availability={getRightSidebarModuleAvailability(availability, module.id)}
+            availability={pageAvailability}
             isSelected={isSelected}
             key={`${page.id}:${page.workspaceSessionKey ?? 'global'}`}
             module={module}
@@ -74,7 +86,11 @@ interface RightSidebarPageFrameProps {
   availability: RightSidebarModuleAvailability
   isSelected: boolean
   module: RightSidebarModuleDefinition
-  onOpenPage: (sourcePageId: string, request: RightSidebarPageOpenRequest) => void
+  onOpenPage: (
+    sourcePageId: string,
+    module: RightSidebarModuleDefinition,
+    request: RightSidebarPageOpenRequest
+  ) => void
   onPageUpdate: (pageId: string, update: RightSidebarPageUpdate) => void
   onSurfaceFocus: () => void
   page: RightSidebarPage
@@ -97,8 +113,8 @@ const RightSidebarPageFrame = memo(function RightSidebarPageFrame({
     [onPageUpdate, page.id]
   )
   const openPage = useCallback(
-    (request: RightSidebarPageOpenRequest) => onOpenPage(page.id, request),
-    [onOpenPage, page.id]
+    (request: RightSidebarPageOpenRequest) => onOpenPage(page.id, module, request),
+    [module, onOpenPage, page.id]
   )
 
   const shouldMount = isSelected || module.retention === 'keep-alive'

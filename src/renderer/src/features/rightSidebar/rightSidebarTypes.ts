@@ -36,6 +36,8 @@ export type RightSidebarModuleAvailabilityMap = Partial<
 
 export type RightSidebarUnavailablePagePolicy = 'close-page' | 'retain-page'
 
+export type RightSidebarOrphanedWorkspacePolicy = 'close-page' | 'retain-page'
+
 export type RightSidebarActivity = 'foreground' | 'background' | 'dormant'
 
 export interface RightSidebarWorkspaceContext {
@@ -55,15 +57,21 @@ export interface RightSidebarModuleCreateContext {
 
 export interface RightSidebarPageUpdate {
   iconUrl?: string | null
+  moduleState?: RightSidebarModulePageState
   title?: string
 }
 
 export type RightSidebarModulePageState = {
   kind: 'workspace-file'
   path: string
+  preview?: {
+    markdownView?: 'preview' | 'source'
+    wrapLines?: boolean
+  }
 }
 
 export interface RightSidebarPageOpenRequest {
+  disposition?: 'new-page' | 'reuse-source-if-empty'
   iconUrl?: string | null
   moduleState?: RightSidebarModulePageState
   resourceKey?: string
@@ -87,6 +95,8 @@ export interface RightSidebarModuleDefinition {
   id: RightSidebarModuleId
   icon: LucideIcon
   instancePolicy: RightSidebarInstancePolicy
+  maxRelatedPagesPerWorkspace?: number
+  orphanedWorkspacePolicy?: RightSidebarOrphanedWorkspacePolicy
   render: (props: RightSidebarModuleRenderProps) => ReactNode
   requiredCapability?: RightSidebarCapabilityId
   requiresWorkspace?: boolean

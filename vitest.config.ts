@@ -24,7 +24,9 @@ export default defineConfig({
       'react',
       'react-dom',
       'react-dom/client',
+      'react-markdown',
       'react/jsx-dev-runtime',
+      'remark-gfm',
       'shiki/core',
       'shiki/engine/javascript'
     ]

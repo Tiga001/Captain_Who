@@ -4,8 +4,10 @@ import type { CSSProperties, FocusEvent, KeyboardEvent, ReactNode } from 'react'
 import {
   Check,
   ChevronRight,
+  Code2,
   Copy,
   Ellipsis,
+  Eye,
   FolderOpen,
   PanelRight,
   RefreshCw,
@@ -19,15 +21,21 @@ import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePoint
 import { copyWorkspaceFilePath, revealWorkspaceFile } from './filesClient'
 import { useWorkspaceFileTree } from './useWorkspaceFileTree'
 import { WorkspaceFilePreview } from './WorkspaceFilePreview'
+import { isWorkspaceMarkdownFile } from './workspaceFilePreviewTypes'
+import type { WorkspaceMarkdownView } from './workspaceFilePreviewTypes'
 import './FilesPanel.css'
 
 interface FilesPanelProps {
   filePath: string | null
   isActive: boolean
+  markdownView: WorkspaceMarkdownView
+  onMarkdownViewChange: (view: WorkspaceMarkdownView) => void
   onOpenFile: (path: string) => void
+  onWrapLinesChange: (wrapLines: boolean) => void
   onSurfaceFocus: () => void
   projectId: string
   projectName: string
+  wrapLines: boolean
 }
 
 const TREE_STYLE = {
@@ -49,21 +57,23 @@ const TREE_STYLE = {
 export function FilesPanel({
   filePath,
   isActive,
+  markdownView,
+  onMarkdownViewChange,
   onOpenFile,
+  onWrapLinesChange,
   onSurfaceFocus,
   projectId,
-  projectName
+  projectName,
+  wrapLines
 }: FilesPanelProps): ReactNode {
   const { t } = useFrontendConfig()
-  const [isTreeVisible, setIsTreeVisible] = useState(true)
   const [isOptionsMenuOpen, setIsOptionsMenuOpen] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [wrapLines, setWrapLines] = useState(false)
   const optionsControlRef = useRef<HTMLDivElement>(null)
   const optionsTriggerRef = useRef<HTMLButtonElement>(null)
   const optionItemRefs = useRef<Array<HTMLButtonElement | null>>([])
   const optionsMenuId = useId()
   const closeOptionsMenu = useCallback(() => setIsOptionsMenuOpen(false), [])
+  const isMarkdown = isWorkspaceMarkdownFile(filePath)
 
   useDismissOnOutsidePointer(optionsControlRef, isOptionsMenuOpen, closeOptionsMenu)
 
@@ -73,17 +83,22 @@ export function FilesPanel({
     },
     [onOpenFile]
   )
-  const { failedDirectoryCount, hasTruncatedDirectory, model, refresh, rootState } =
-    useWorkspaceFileTree({
-      isActive,
-      onFileSelect: handleFileSelect,
-      projectId,
-      selectedPath: filePath
-    })
-
-  useEffect(() => {
-    model.setSearch(searchQuery.trim() || null)
-  }, [model, searchQuery])
+  const {
+    failedDirectoryCount,
+    hasTruncatedDirectory,
+    isTreeVisible,
+    model,
+    refresh,
+    rootState,
+    searchQuery,
+    setSearchQuery,
+    setTreeVisible
+  } = useWorkspaceFileTree({
+    isActive,
+    onFileSelect: handleFileSelect,
+    projectId,
+    selectedPath: filePath
+  })
 
   useEffect(() => {
     if (!isActive) closeOptionsMenu()
@@ -100,7 +115,7 @@ export function FilesPanel({
   const fullPathLabel = filePath ? `${projectName}/${filePath}` : projectName
 
   const focusOptionItem = (index: number): void => {
-    const items = optionItemRefs.current
+    const items = optionItemRefs.current.filter((item): item is HTMLButtonElement => item !== null)
     if (items.length === 0) return
     items[(index + items.length) % items.length]?.focus()
   }
@@ -125,7 +140,7 @@ export function FilesPanel({
       openOptionsMenu(0)
     } else if (event.key === 'ArrowUp') {
       event.preventDefault()
-      openOptionsMenu(optionItemRefs.current.length - 1)
+      openOptionsMenu(-1)
     } else if (event.key === 'Escape' && isOptionsMenuOpen) {
       event.preventDefault()
       closeOptionsMenu()
@@ -159,6 +174,9 @@ export function FilesPanel({
     closeOptionsMenuAndRestoreFocus()
     void copyWorkspaceFilePath({ path: filePath, projectId }).catch(() => undefined)
   }
+
+  const wrapLinesOptionIndex = isMarkdown ? 2 : 0
+  const copyPathOptionIndex = isMarkdown ? 3 : 1
 
   return (
     <div className="files-panel" onPointerDown={onSurfaceFocus}>
@@ -207,17 +225,60 @@ export function FilesPanel({
             </Tooltip>
             {isOptionsMenuOpen && filePath && (
               <div className="files-panel__options-menu" id={optionsMenuId} role="menu">
+                {isMarkdown && (
+                  <>
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={markdownView === 'source'}
+                      onClick={() => {
+                        onMarkdownViewChange('source')
+                        closeOptionsMenuAndRestoreFocus()
+                      }}
+                      onKeyDown={(event) => handleOptionItemKeyDown(event, 0)}
+                      ref={(node) => {
+                        optionItemRefs.current[0] = node
+                      }}
+                    >
+                      <Code2 aria-hidden="true" />
+                      <span>{t('files.markdown.source')}</span>
+                      {markdownView === 'source' && (
+                        <Check className="files-panel__menu-check" aria-hidden="true" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={markdownView === 'preview'}
+                      onClick={() => {
+                        onMarkdownViewChange('preview')
+                        closeOptionsMenuAndRestoreFocus()
+                      }}
+                      onKeyDown={(event) => handleOptionItemKeyDown(event, 1)}
+                      ref={(node) => {
+                        optionItemRefs.current[1] = node
+                      }}
+                    >
+                      <Eye aria-hidden="true" />
+                      <span>{t('files.markdown.preview')}</span>
+                      {markdownView === 'preview' && (
+                        <Check className="files-panel__menu-check" aria-hidden="true" />
+                      )}
+                    </button>
+                    <div className="files-panel__menu-separator" role="separator" />
+                  </>
+                )}
                 <button
                   type="button"
                   role="menuitemcheckbox"
                   aria-checked={wrapLines}
                   onClick={() => {
-                    setWrapLines((value) => !value)
+                    onWrapLinesChange(!wrapLines)
                     closeOptionsMenuAndRestoreFocus()
                   }}
-                  onKeyDown={(event) => handleOptionItemKeyDown(event, 0)}
+                  onKeyDown={(event) => handleOptionItemKeyDown(event, wrapLinesOptionIndex)}
                   ref={(node) => {
-                    optionItemRefs.current[0] = node
+                    optionItemRefs.current[wrapLinesOptionIndex] = node
                   }}
                 >
                   <WrapText aria-hidden="true" />
@@ -228,9 +289,9 @@ export function FilesPanel({
                   type="button"
                   role="menuitem"
                   onClick={copySelectedFilePath}
-                  onKeyDown={(event) => handleOptionItemKeyDown(event, 1)}
+                  onKeyDown={(event) => handleOptionItemKeyDown(event, copyPathOptionIndex)}
                   ref={(node) => {
-                    optionItemRefs.current[1] = node
+                    optionItemRefs.current[copyPathOptionIndex] = node
                   }}
                 >
                   <Copy aria-hidden="true" />
@@ -257,7 +318,7 @@ export function FilesPanel({
               aria-label={isTreeVisible ? t('files.hideTree') : t('files.showTree')}
               aria-pressed={isTreeVisible}
               data-active={isTreeVisible ? 'true' : undefined}
-              onClick={() => setIsTreeVisible((value) => !value)}
+              onClick={() => setTreeVisible(!isTreeVisible)}
             >
               <PanelRight aria-hidden="true" />
             </button>
@@ -272,6 +333,7 @@ export function FilesPanel({
         <main className="files-panel__preview">
           <WorkspaceFilePreview
             isActive={isActive}
+            markdownView={markdownView}
             path={filePath}
             projectId={projectId}
             wrapLines={wrapLines}

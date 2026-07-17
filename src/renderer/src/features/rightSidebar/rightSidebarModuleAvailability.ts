@@ -3,6 +3,7 @@ import type {
   RightSidebarModuleAvailability,
   RightSidebarModuleAvailabilityMap,
   RightSidebarModuleDefinition,
+  RightSidebarPage,
   RightSidebarWorkspaceContext
 } from './rightSidebarTypes'
 
@@ -38,4 +39,22 @@ export function getRightSidebarModuleAvailability(
   moduleId: RightSidebarModuleDefinition['id']
 ): RightSidebarModuleAvailability {
   return availability[moduleId] ?? 'available'
+}
+
+export function resolveRightSidebarPageAvailability(
+  module: RightSidebarModuleDefinition,
+  availability: RightSidebarModuleAvailability,
+  page: RightSidebarPage
+): RightSidebarModuleAvailability {
+  if (
+    availability === 'unavailable' &&
+    module.contextBinding === 'pinned-to-creation-workspace' &&
+    module.requiresWorkspace &&
+    !module.requiredCapability &&
+    Boolean(page.workspaceKey)
+  ) {
+    return 'available'
+  }
+
+  return availability
 }

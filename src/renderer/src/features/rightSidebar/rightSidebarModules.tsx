@@ -29,6 +29,8 @@ const FilesPanel = lazy(async () => {
   return { default: module.FilesPanel }
 })
 
+export const MAX_FILE_PREVIEW_PAGES_PER_WORKSPACE = 20
+
 function createTerminalPage({
   existingPages,
   pageId,
@@ -181,29 +183,56 @@ function renderFilesModule({
   activity,
   availability,
   onOpenPage,
+  onPageUpdate,
   onSurfaceFocus,
   page,
   t
 }: RightSidebarModuleRenderProps) {
   if (availability === 'unavailable' || !page.workspaceKey) return null
-  const filePath = page.moduleState?.kind === 'workspace-file' ? page.moduleState.path : null
+  const fileState = page.moduleState?.kind === 'workspace-file' ? page.moduleState : null
+  const filePath = fileState?.path ?? null
+  const markdownView = fileState?.preview?.markdownView ?? 'source'
+  const wrapLines = fileState?.preview?.wrapLines ?? false
 
   return (
     <Suspense fallback={<div className="right-sidebar__panel-loading">{t('files.loading')}</div>}>
       <FilesPanel
         filePath={filePath}
         isActive={activity === 'foreground'}
+        markdownView={markdownView}
+        onMarkdownViewChange={(nextMarkdownView) => {
+          if (!filePath) return
+          onPageUpdate({
+            moduleState: {
+              kind: 'workspace-file',
+              path: filePath,
+              preview: { ...fileState?.preview, markdownView: nextMarkdownView }
+            }
+          })
+        }}
         onOpenFile={(path) => {
           onOpenPage({
+            disposition: filePath ? 'new-page' : 'reuse-source-if-empty',
             iconUrl: getFileTypeIconSource(path),
             moduleState: { kind: 'workspace-file', path },
             resourceKey: `workspace-file:${path}`,
             title: path.split('/').at(-1) ?? path
           })
         }}
+        onWrapLinesChange={(nextWrapLines) => {
+          if (!filePath) return
+          onPageUpdate({
+            moduleState: {
+              kind: 'workspace-file',
+              path: filePath,
+              preview: { ...fileState?.preview, wrapLines: nextWrapLines }
+            }
+          })
+        }}
         onSurfaceFocus={onSurfaceFocus}
         projectId={page.workspaceKey}
         projectName={page.workspaceName || t('rightSidebar.files')}
+        wrapLines={wrapLines}
       />
     </Suspense>
   )
@@ -235,14 +264,16 @@ export const RIGHT_SIDEBAR_MODULES: RightSidebarModuleDefinition[] = [
     unavailablePagePolicy: 'retain-page'
   },
   {
-    contextBinding: 'follow-workspace',
+    contextBinding: 'pinned-to-creation-workspace',
     createPage: createFilesPage,
     id: 'files',
     icon: FolderOpen,
     instancePolicy: 'multiple',
+    maxRelatedPagesPerWorkspace: MAX_FILE_PREVIEW_PAGES_PER_WORKSPACE,
+    orphanedWorkspacePolicy: 'close-page',
     render: renderFilesModule,
     requiresWorkspace: true,
-    retention: 'keep-alive',
+    retention: 'unmount-when-inactive',
     surfaceKind: 'react',
     titleKey: 'rightSidebar.files',
     unavailablePagePolicy: 'close-page'

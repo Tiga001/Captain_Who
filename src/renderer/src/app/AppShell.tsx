@@ -260,6 +260,7 @@ export function AppShell() {
 
     return projects.find((project) => project.id === rightSidebarWorkspaceProjectId) ?? null
   }, [rightSidebarWorkspaceProjectId, projects])
+  const rightSidebarWorkspaceKeys = useMemo(() => projects.map((project) => project.id), [projects])
   const rightSidebarWorkspacePath = rightSidebarWorkspaceProject?.path?.trim() || undefined
   const gitRepositoryCapability = useGitRepositoryCapability(
     rightSidebarWorkspaceProject?.id,
@@ -1789,6 +1790,7 @@ export function AppShell() {
           isMaximized={rightMaximized}
           isOpen={rightOpen}
           workspaceKey={rightSidebarWorkspaceProject?.id}
+          workspaceKeys={rightSidebarWorkspaceKeys}
           workspaceName={rightSidebarWorkspaceProject?.name}
           workspacePath={rightSidebarWorkspacePath}
           onToggleMaximized={toggleRightSidebarMaximized}

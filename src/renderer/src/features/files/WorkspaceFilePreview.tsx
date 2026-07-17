@@ -1,3 +1,5 @@
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode, RefObject } from 'react'
 import type {
@@ -7,14 +9,21 @@ import type {
 } from '@mycopilot/protocol'
 import { AlertCircle, FileQuestion, FileWarning, FolderOpen, LoaderCircle } from 'lucide-react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { formatTranslation } from '../../config/translationFormat'
 import { resolveGitReviewFileLanguageDescriptor } from '../gitReview/syntax/fileLanguageRegistry'
 import { useGitReviewSyntaxHighlight } from '../gitReview/syntaxHighlighting/useGitReviewSyntaxHighlight'
 import type { GitReviewSyntaxHighlightState } from '../gitReview/syntaxHighlighting/useGitReviewSyntaxHighlight'
 import {
+  openWorkspaceExternalLink,
   readWorkspaceFileMetadata,
   readWorkspaceImageFile,
   readWorkspaceTextFile
 } from './filesClient'
+import {
+  getWorkspaceOfficeDocumentType,
+  isWorkspaceMarkdownFile
+} from './workspaceFilePreviewTypes'
+import type { WorkspaceMarkdownView } from './workspaceFilePreviewTypes'
 
 const MAX_RENDERED_LINES = 5_000
 
@@ -31,6 +40,7 @@ type PreviewState =
 
 interface WorkspaceFilePreviewProps {
   isActive: boolean
+  markdownView: WorkspaceMarkdownView
   path: string | null
   projectId: string
   wrapLines: boolean
@@ -38,6 +48,7 @@ interface WorkspaceFilePreviewProps {
 
 export function WorkspaceFilePreview({
   isActive,
+  markdownView,
   path,
   projectId,
   wrapLines
@@ -47,9 +58,11 @@ export function WorkspaceFilePreview({
   const [state, setState] = useState<PreviewState>({ status: 'idle' })
   const requestSequenceRef = useRef(0)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const officeDocumentType = getWorkspaceOfficeDocumentType(path)
+  const isMarkdown = isWorkspaceMarkdownFile(path)
 
   useEffect(() => {
-    if (!path) {
+    if (!path || officeDocumentType) {
       requestSequenceRef.current += 1
       setState({ status: 'idle' })
       return
@@ -79,14 +92,33 @@ export function WorkspaceFilePreview({
     return () => {
       if (requestSequenceRef.current === requestId) requestSequenceRef.current += 1
     }
-  }, [isActive, path, projectId, retryToken])
+  }, [isActive, officeDocumentType, path, projectId, retryToken])
 
-  if (!path || state.status === 'idle') {
+  if (!path) {
     return (
       <FilePreviewMessage
         description={t('files.empty.description')}
         icon={<FolderOpen aria-hidden="true" />}
         title={t('files.empty.title')}
+      />
+    )
+  }
+
+  if (officeDocumentType) {
+    return (
+      <FilePreviewMessage
+        description={t('files.preview.officeDescription')}
+        title={formatTranslation(t, 'files.preview.officeTitle', { type: officeDocumentType })}
+        variant="unsupported"
+      />
+    )
+  }
+
+  if (state.status === 'idle') {
+    return (
+      <FilePreviewMessage
+        description={t('files.preview.loading')}
+        icon={<LoaderCircle className="files-panel__spinner" aria-hidden="true" />}
       />
     )
   }
@@ -116,6 +148,9 @@ export function WorkspaceFilePreview({
   }
 
   if (state.text) {
+    if (isMarkdown && markdownView === 'preview') {
+      return <MarkdownFilePreview content={state.text} path={path} scrollRef={scrollRef} />
+    }
     return (
       <TextFilePreview
         content={state.text}
@@ -151,6 +186,63 @@ export function WorkspaceFilePreview({
       <FileQuestion aria-hidden="true" />
     )
   return <FilePreviewMessage description={message} icon={icon} title={path.split('/').at(-1)} />
+}
+
+interface MarkdownFilePreviewProps {
+  content: WorkspaceTextFileContent
+  path: string
+  scrollRef: RefObject<HTMLDivElement | null>
+}
+
+function MarkdownFilePreview({ content, path, scrollRef }: MarkdownFilePreviewProps): ReactNode {
+  return (
+    <div className="files-panel__preview-scroll files-panel__markdown-scroll" ref={scrollRef}>
+      <article className="files-panel__markdown" aria-label={path}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            a: ({ children, href, ...props }) => {
+              const externalUrl = normalizeExternalMarkdownUrl(href)
+              return (
+                <a
+                  {...props}
+                  href={href}
+                  onClick={(event) => {
+                    if (externalUrl) {
+                      event.preventDefault()
+                      void openWorkspaceExternalLink(externalUrl).catch(() => undefined)
+                    } else if (href && !href.startsWith('#')) {
+                      event.preventDefault()
+                    }
+                  }}
+                  rel={externalUrl ? 'noreferrer' : undefined}
+                  target={externalUrl ? '_blank' : undefined}
+                >
+                  {children}
+                </a>
+              )
+            },
+            input: ({ type, ...props }) => (
+              <input {...props} disabled={type === 'checkbox'} type={type} />
+            )
+          }}
+        >
+          {content.content}
+        </ReactMarkdown>
+      </article>
+    </div>
+  )
+}
+
+function normalizeExternalMarkdownUrl(href: string | undefined): string | null {
+  if (!href) return null
+  const normalizedHref = href.startsWith('//') ? `https:${href}` : href
+  try {
+    const url = new URL(normalizedHref)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null
+  } catch {
+    return null
+  }
 }
 
 interface TextFilePreviewProps {
@@ -240,19 +332,21 @@ function renderHighlightedLine(
 interface FilePreviewMessageProps {
   action?: ReactNode
   description: string
-  icon: ReactNode
+  icon?: ReactNode
   title?: string
+  variant?: 'default' | 'unsupported'
 }
 
 function FilePreviewMessage({
   action,
   description,
   icon,
-  title
+  title,
+  variant = 'default'
 }: FilePreviewMessageProps): ReactNode {
   return (
-    <div className="files-panel__center-state">
-      <div className="files-panel__center-icon">{icon}</div>
+    <div className="files-panel__center-state" data-variant={variant}>
+      {icon && <div className="files-panel__center-icon">{icon}</div>}
       {title && <h2>{title}</h2>}
       <p>{description}</p>
       {action}

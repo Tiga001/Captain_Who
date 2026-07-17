@@ -21,6 +21,7 @@ interface UseRightSidebarPlatformOptions {
   capabilities?: RightSidebarCapabilities
   t: Translate
   workspaceKey?: string | null
+  workspaceKeys?: readonly string[]
   workspaceName?: string | null
   workspacePath?: string
   modules: RightSidebarModuleDefinition[]
@@ -33,6 +34,7 @@ export function useRightSidebarPlatform({
   modules,
   t,
   workspaceKey,
+  workspaceKeys,
   workspaceName,
   workspacePath
 }: UseRightSidebarPlatformOptions) {
@@ -82,9 +84,10 @@ export function useRightSidebarPlatform({
       availability: moduleAvailability,
       modules,
       type: 'synchronize-context',
-      workspace
+      workspace,
+      workspaceKeys
     })
-  }, [moduleAvailability, modules, workspace])
+  }, [moduleAvailability, modules, workspace, workspaceKeys])
 
   const activatePage = useCallback((pageId: string) => {
     dispatch({ pageId, type: 'activate' })
@@ -95,8 +98,13 @@ export function useRightSidebarPlatform({
   }, [])
 
   const openRelatedPage = useCallback(
-    (sourcePageId: string, request: RightSidebarPageOpenRequest) => {
+    (
+      sourcePageId: string,
+      module: RightSidebarModuleDefinition,
+      request: RightSidebarPageOpenRequest
+    ) => {
       dispatch({
+        module,
         pageId: createPageId('page'),
         request,
         sourcePageId,
