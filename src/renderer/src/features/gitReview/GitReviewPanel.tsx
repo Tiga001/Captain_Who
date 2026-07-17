@@ -22,6 +22,7 @@ import { ConfirmationDialog } from '../../components/dialog/ConfirmationDialog'
 import { dismissActiveTooltip, Tooltip } from '../../components/overlay/Tooltip'
 import { GitReviewDiffCard } from './GitReviewDiffCard'
 import { GitReviewFileIcon } from './GitReviewFileIcon'
+import { canHydrateGitReviewFile } from './gitReviewFileCapabilities'
 import { loadGitReviewPreferences, saveGitReviewPreferences } from './gitReviewPreferences'
 import { getTargetGitReviewViewMode } from './gitReviewViewMode'
 import type { GitReviewViewMode } from './gitReviewViewMode'
@@ -40,9 +41,20 @@ interface PendingFileAlignment {
   token: number
 }
 
+interface GitReviewFileVisibility {
+  near: Set<string>
+  visible: Set<string>
+}
+
+function emptyFileVisibility(): GitReviewFileVisibility {
+  return { near: new Set(), visible: new Set() }
+}
+
 export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): ReactNode {
   const { t } = useFrontendConfig()
   const {
+    cancelQueuedFileContentsExcept,
+    cancelQueuedFileDiffsExcept,
     diffStates,
     dismissMutationError,
     fileContentStates,
@@ -52,7 +64,10 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
     mutationError,
     pendingFileId,
     refresh,
+    retryFileDiff,
     scope,
+    setHotDiffFileIds,
+    setHotFullContentFileIds,
     setScope,
     summaryState
   } = useGitReview(projectId, isActive)
@@ -66,7 +81,8 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
   const [searchQuery, setSearchQuery] = useState('')
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null)
   const [restoreCandidate, setRestoreCandidate] = useState<GitReviewFile | null>(null)
-  const [visibleFileIds, setVisibleFileIds] = useState<Set<string>>(() => new Set())
+  const [fileVisibility, setFileVisibility] = useState<GitReviewFileVisibility>(emptyFileVisibility)
+  const [diffLayoutWidth, setDiffLayoutWidth] = useState(0)
   const contentRef = useRef<HTMLDivElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const fileElementsRef = useRef(new Map<string, HTMLElement>())
@@ -121,6 +137,20 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
   }, [showSearch])
 
   useEffect(() => {
+    const content = contentRef.current
+    if (!content) return undefined
+    const measure = (): void => {
+      const width = Math.max(0, Math.round(content.getBoundingClientRect().width))
+      setDiffLayoutWidth((current) => (current === width ? current : width))
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(measure)
+    observer.observe(content)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
     if (!summaryState.value || summaryState.value.scope !== scope) return
     const fileIds = new Set(files.map((file) => file.id))
     const queryKey = `${projectId}:${scope}`
@@ -147,46 +177,174 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
   }, [files, normalizedQuery])
 
   useEffect(() => {
-    setVisibleFileIds(new Set())
+    setFileVisibility(emptyFileVisibility())
     if (!isActive) return undefined
     const root = contentRef.current
     if (!root) return undefined
 
     if (typeof IntersectionObserver === 'undefined') {
-      setVisibleFileIds(new Set(filteredFiles.map((file) => file.id)))
+      const allFileIds = new Set(filteredFiles.map((file) => file.id))
+      setFileVisibility({ near: allFileIds, visible: new Set(allFileIds) })
       return undefined
     }
 
-    const observer = new IntersectionObserver(
-      (entries) => {
-        setVisibleFileIds((current) => {
-          const next = new Set(current)
-          let changed = false
+    let disposed = false
+    let updateFrame: number | null = null
+    const pendingUpdates: Record<keyof GitReviewFileVisibility, Map<string, boolean>> = {
+      near: new Map(),
+      visible: new Map()
+    }
+    const flushVisibilityUpdates = (): void => {
+      updateFrame = null
+      if (disposed) return
+      const updates = {
+        near: new Map(pendingUpdates.near),
+        visible: new Map(pendingUpdates.visible)
+      }
+      pendingUpdates.near.clear()
+      pendingUpdates.visible.clear()
+      setFileVisibility((current) => {
+        let next: GitReviewFileVisibility | null = null
+        for (const field of ['near', 'visible'] as const) {
+          if (updates[field].size === 0) continue
+          const values = new Set((next ?? current)[field])
+          for (const [fileId, included] of updates[field]) {
+            updateMembership(values, fileId, included)
+          }
+          if (!setsEqual((next ?? current)[field], values)) {
+            next = { ...(next ?? current), [field]: values }
+          }
+        }
+        return next ?? current
+      })
+    }
+    const scheduleVisibilityFlush = (): void => {
+      if (updateFrame === null) updateFrame = requestAnimationFrame(flushVisibilityUpdates)
+    }
+    const createObserver = (
+      field: keyof GitReviewFileVisibility,
+      rootMargin: string
+    ): IntersectionObserver =>
+      new IntersectionObserver(
+        (entries) => {
+          if (disposed) return
           for (const entry of entries) {
             const fileId = (entry.target as HTMLElement).dataset.reviewFileId
             if (!fileId) continue
-            const hasVisibleArea =
+            pendingUpdates[field].set(
+              fileId,
               entry.isIntersecting &&
-              entry.intersectionRect.width > 0 &&
-              entry.intersectionRect.height > 0
-            if (hasVisibleArea && !next.has(fileId)) {
-              next.add(fileId)
-              changed = true
-            } else if (!entry.isIntersecting && next.delete(fileId)) {
-              changed = true
-            }
+                entry.intersectionRect.width > 0 &&
+                entry.intersectionRect.height > 0
+            )
           }
-          return changed ? next : current
-        })
-      },
-      { root, rootMargin: '0px', threshold: [0, 0.001] }
-    )
+          scheduleVisibilityFlush()
+        },
+        { root, rootMargin, threshold: [0, 0.001] }
+      )
+
+    const nearObserver = createObserver('near', '640px 0px')
+    const visibleObserver = createObserver('visible', '0px')
     for (const file of filteredFiles) {
       const element = fileElementsRef.current.get(file.id)
-      if (element) observer.observe(element)
+      if (element) {
+        nearObserver.observe(element)
+        visibleObserver.observe(element)
+      }
     }
-    return () => observer.disconnect()
+    return () => {
+      disposed = true
+      nearObserver.disconnect()
+      visibleObserver.disconnect()
+      if (updateFrame !== null) cancelAnimationFrame(updateFrame)
+      pendingUpdates.near.clear()
+      pendingUpdates.visible.clear()
+    }
   }, [filteredFiles, isActive])
+
+  const demandedDiffFileIds = useMemo(() => {
+    const demanded = new Set<string>()
+    if (!isActive) return demanded
+    for (const file of filteredFiles) {
+      if (
+        expandedFileIds.has(file.id) &&
+        (fileVisibility.near.has(file.id) || selectedFileId === file.id)
+      ) {
+        demanded.add(file.id)
+      }
+    }
+    return demanded
+  }, [expandedFileIds, fileVisibility.near, filteredFiles, isActive, selectedFileId])
+
+  const demandedFullContentFileIds = useMemo(() => {
+    const demanded = new Set<string>()
+    if (!isActive || !reviewPreferences.loadFullFiles) return demanded
+    for (const file of filteredFiles) {
+      const diffState = diffStates[file.id]
+      if (
+        expandedFileIds.has(file.id) &&
+        fileVisibility.visible.has(file.id) &&
+        canHydrateGitReviewFile(file.status) &&
+        diffState?.status === 'ready' &&
+        diffState.value.status === 'ready'
+      ) {
+        demanded.add(file.id)
+      }
+    }
+    return demanded
+  }, [
+    diffStates,
+    expandedFileIds,
+    fileVisibility.visible,
+    filteredFiles,
+    isActive,
+    reviewPreferences.loadFullFiles
+  ])
+
+  useEffect(() => {
+    setHotDiffFileIds(demandedDiffFileIds)
+    cancelQueuedFileDiffsExcept(demandedDiffFileIds)
+    if (!isActive) return
+
+    if (selectedFileId && demandedDiffFileIds.has(selectedFileId)) {
+      loadFileDiff(selectedFileId, 'high')
+    }
+    for (const fileId of demandedDiffFileIds) {
+      if (fileId !== selectedFileId) loadFileDiff(fileId, 'normal')
+    }
+    // Keep the selected ready payload at the hot end of the LRU after batch completions.
+    if (selectedFileId && demandedDiffFileIds.has(selectedFileId)) {
+      loadFileDiff(selectedFileId, 'high')
+    }
+  }, [
+    cancelQueuedFileDiffsExcept,
+    demandedDiffFileIds,
+    diffStates,
+    isActive,
+    loadFileDiff,
+    selectedFileId,
+    setHotDiffFileIds
+  ])
+
+  useEffect(() => {
+    setHotFullContentFileIds(demandedFullContentFileIds)
+    cancelQueuedFileContentsExcept(demandedFullContentFileIds)
+    if (!isActive) return
+    if (selectedFileId && demandedFullContentFileIds.has(selectedFileId)) {
+      loadFileContent(selectedFileId)
+    }
+    for (const fileId of demandedFullContentFileIds) {
+      if (fileId !== selectedFileId) loadFileContent(fileId)
+    }
+  }, [
+    cancelQueuedFileContentsExcept,
+    demandedFullContentFileIds,
+    fileContentStates,
+    isActive,
+    loadFileContent,
+    selectedFileId,
+    setHotFullContentFileIds
+  ])
 
   const allExpanded = files.length > 0 && files.every((file) => expandedFileIds.has(file.id))
 
@@ -249,6 +407,13 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
       })
     },
     [alignFileHeader]
+  )
+
+  const handleMutateFile = useCallback(
+    (fileId: string, action: Parameters<typeof mutateFile>[1]) => {
+      void mutateFile(fileId, action).catch(() => undefined)
+    },
+    [mutateFile]
   )
 
   useEffect(() => {
@@ -507,25 +672,28 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
         >
           <GitReviewContent
             diffStates={diffStates}
+            diffLayoutWidth={diffLayoutWidth}
             expandedFileIds={expandedFileIds}
             fileElementsRef={fileElementsRef}
             fileContentStates={fileContentStates}
             filteredFiles={filteredFiles}
             hasSearchQuery={Boolean(normalizedQuery)}
             isActive={isActive}
-            loadFileContent={loadFileContent}
-            loadFileDiff={loadFileDiff}
             loadFullFiles={reviewPreferences.loadFullFiles}
-            mutateFile={mutateFile}
+            mutateFile={handleMutateFile}
             pendingFileId={pendingFileId}
             onRestore={setRestoreCandidate}
+            nearFileIds={fileVisibility.near}
             scope={scope}
             scrollRootRef={contentRef}
+            selectedFileId={selectedFileId}
+            retryFileDiff={retryFileDiff}
+            reviewSnapshotId={summaryState.value?.snapshotId}
             summaryState={summaryState}
             t={t}
             toggleFile={toggleFile}
             viewMode={viewMode}
-            visibleFileIds={visibleFileIds}
+            visibleFileIds={fileVisibility.visible}
             wrapLines={wrapLines}
             onRefresh={refresh}
           />
@@ -658,6 +826,7 @@ function FileList({ files, onSelect, selectedFileId, t }: FileListProps): ReactN
 type ReviewHook = ReturnType<typeof useGitReview>
 
 interface GitReviewContentProps {
+  diffLayoutWidth: number
   diffStates: ReviewHook['diffStates']
   expandedFileIds: Set<string>
   fileElementsRef: React.MutableRefObject<Map<string, HTMLElement>>
@@ -665,15 +834,17 @@ interface GitReviewContentProps {
   filteredFiles: GitReviewFile[]
   hasSearchQuery: boolean
   isActive: boolean
-  loadFileContent: ReviewHook['loadFileContent']
-  loadFileDiff: ReviewHook['loadFileDiff']
   loadFullFiles: boolean
-  mutateFile: ReviewHook['mutateFile']
+  mutateFile: (fileId: string, action: Parameters<ReviewHook['mutateFile']>[1]) => void
+  nearFileIds: Set<string>
   onRestore: (file: GitReviewFile) => void
   onRefresh: ReviewHook['refresh']
   pendingFileId: string | null
   scope: GitReviewScope
   scrollRootRef: React.RefObject<HTMLDivElement | null>
+  selectedFileId: string | null
+  retryFileDiff: ReviewHook['retryFileDiff']
+  reviewSnapshotId?: string
   summaryState: ReviewHook['summaryState']
   t: ReturnType<typeof useFrontendConfig>['t']
   toggleFile: (fileId: string) => void
@@ -683,6 +854,7 @@ interface GitReviewContentProps {
 }
 
 function GitReviewContent({
+  diffLayoutWidth,
   diffStates,
   expandedFileIds,
   fileElementsRef,
@@ -690,15 +862,17 @@ function GitReviewContent({
   filteredFiles,
   hasSearchQuery,
   isActive,
-  loadFileContent,
-  loadFileDiff,
   loadFullFiles,
   mutateFile,
+  nearFileIds,
   onRestore,
   onRefresh,
   pendingFileId,
   scope,
   scrollRootRef,
+  selectedFileId,
+  retryFileDiff,
+  reviewSnapshotId,
   summaryState,
   t,
   toggleFile,
@@ -772,20 +946,21 @@ function GitReviewContent({
             file={file}
             fileContentState={fileContentStates[file.id]}
             isExpanded={expandedFileIds.has(file.id)}
+            isNearViewport={nearFileIds.has(file.id)}
             isReviewActive={isActive}
+            isSelected={selectedFileId === file.id}
             isVisible={visibleFileIds.has(file.id)}
+            layoutWidth={diffLayoutWidth}
             loadFullFiles={loadFullFiles}
             mutationLocked={pendingFileId !== null}
             mutationPending={pendingFileId === file.id}
-            onMutate={(fileId, action) => {
-              void mutateFile(fileId, action).catch(() => undefined)
-            }}
-            onRequestDiff={loadFileDiff}
-            onRequestFileContent={loadFileContent}
+            onMutate={mutateFile}
+            onRequestDiff={retryFileDiff}
             onRestore={onRestore}
             onToggle={toggleFile}
             scope={scope}
             scrollRootRef={scrollRootRef}
+            reviewSnapshotId={reviewSnapshotId}
             t={t}
             viewMode={viewMode}
             wrapLines={wrapLines}
@@ -799,6 +974,11 @@ function GitReviewContent({
 function setsEqual(left: Set<string>, right: Set<string>): boolean {
   if (left.size !== right.size) return false
   return [...left].every((value) => right.has(value))
+}
+
+function updateMembership(values: Set<string>, value: string, included: boolean): void {
+  if (included) values.add(value)
+  else values.delete(value)
 }
 
 function isManualScrollKey(key: string): boolean {

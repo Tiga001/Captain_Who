@@ -1,13 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
-import type { HostApi } from '@mycopilot/host-api'
-import type { AppWindowState } from '@mycopilot/host-api'
+import type { AppWindowState, HostApi } from '@mycopilot/host-api'
 import type { AgentEvent, TerminalExitEvent, TerminalOutputEvent } from '@mycopilot/protocol'
+import { TerminalEventRouter } from './TerminalEventRouter'
 
 const AGENT_EVENT_CHANNEL = 'host:agent.event'
 const APP_WINDOW_STATE_CHANNEL = 'host:app.windowStateChange'
 const TERMINAL_OUTPUT_CHANNEL = 'host:terminal.output'
 const TERMINAL_EXIT_CHANNEL = 'host:terminal.exit'
+const TERMINAL_INPUT_CHUNK_LENGTH = 64 * 1024
+const terminalEventRouter = new TerminalEventRouter()
 
 function onAgentEvent(handler: (event: AgentEvent) => void): () => void {
   const listener = (_event: IpcRendererEvent, payload: AgentEvent): void => handler(payload)
@@ -21,18 +23,26 @@ function onAppWindowStateChange(handler: (state: AppWindowState) => void): () =>
   return () => ipcRenderer.removeListener(APP_WINDOW_STATE_CHANNEL, listener)
 }
 
-function onTerminalOutput(handler: (event: TerminalOutputEvent) => void): () => void {
-  const listener = (_event: IpcRendererEvent, payload: TerminalOutputEvent): void =>
-    handler(payload)
-  ipcRenderer.on(TERMINAL_OUTPUT_CHANNEL, listener)
-  return () => ipcRenderer.removeListener(TERMINAL_OUTPUT_CHANNEL, listener)
+function sendTerminalInput(sessionId: string, data: string): void {
+  for (let offset = 0; offset < data.length;) {
+    let end = Math.min(data.length, offset + TERMINAL_INPUT_CHUNK_LENGTH)
+    const lastCodeUnit = data.charCodeAt(end - 1)
+    if (end < data.length && lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) end -= 1
+    ipcRenderer.send('host:terminal.writeInput', sessionId, data.slice(offset, end))
+    offset = end
+  }
 }
 
-function onTerminalExit(handler: (event: TerminalExitEvent) => void): () => void {
-  const listener = (_event: IpcRendererEvent, payload: TerminalExitEvent): void => handler(payload)
-  ipcRenderer.on(TERMINAL_EXIT_CHANNEL, listener)
-  return () => ipcRenderer.removeListener(TERMINAL_EXIT_CHANNEL, listener)
-}
+ipcRenderer.on(
+  TERMINAL_OUTPUT_CHANNEL,
+  (_event: IpcRendererEvent, payload: TerminalOutputEvent): void =>
+    terminalEventRouter.dispatchOutput(payload)
+)
+ipcRenderer.on(
+  TERMINAL_EXIT_CHANNEL,
+  (_event: IpcRendererEvent, payload: TerminalExitEvent): void =>
+    terminalEventRouter.dispatchExit(payload)
+)
 
 const host: HostApi = {
   core: {
@@ -115,14 +125,14 @@ const host: HostApi = {
     loadImageFile: (input) => ipcRenderer.invoke('host:storage.loadImageFile', input)
   },
   terminal: {
+    acknowledgeOutput: (sessionId, sequence) =>
+      ipcRenderer.send('host:terminal.acknowledgeOutput', sessionId, sequence),
     createSession: (request) => ipcRenderer.invoke('host:terminal.createSession', request),
-    writeInput: (sessionId, data) =>
-      ipcRenderer.invoke('host:terminal.writeInput', sessionId, data),
+    killSession: (sessionId) => ipcRenderer.invoke('host:terminal.killSession', sessionId),
     resizeSession: (sessionId, cols, rows) =>
       ipcRenderer.invoke('host:terminal.resizeSession', sessionId, cols, rows),
-    killSession: (sessionId) => ipcRenderer.invoke('host:terminal.killSession', sessionId),
-    onOutput: onTerminalOutput,
-    onExit: onTerminalExit
+    subscribeSession: (sessionId, handlers) => terminalEventRouter.subscribe(sessionId, handlers),
+    writeInput: sendTerminalInput
   },
   workspaceFiles: {
     copyPath: (input) => ipcRenderer.invoke('host:workspaceFiles.copyPath', input),

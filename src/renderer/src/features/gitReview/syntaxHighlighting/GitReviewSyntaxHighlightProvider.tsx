@@ -1,7 +1,10 @@
 import { createContext, useContext, useMemo, type CSSProperties, type ReactNode } from 'react'
 import type { GitReviewFileContent } from '@mycopilot/protocol'
 import type { GitDiffDocument } from '../diff'
-import { buildGitReviewSyntaxSources } from '../syntax/buildGitReviewSyntaxSources'
+import {
+  buildGitReviewSyntaxSources,
+  type GitReviewSyntaxSources
+} from '../syntax/buildGitReviewSyntaxSources'
 import { resolveGitReviewFileLanguageDescriptor } from '../syntax/fileLanguageRegistry'
 import {
   useGitReviewSyntaxHighlight,
@@ -38,6 +41,10 @@ const DEFAULT_CONTEXT: GitReviewSyntaxHighlightContextValue = {
   newState: IDLE_HIGHLIGHT_STATE,
   oldState: IDLE_HIGHLIGHT_STATE
 }
+const EMPTY_SYNTAX_SOURCES: GitReviewSyntaxSources = {
+  newSource: { code: '', fidelity: 'patch' },
+  oldSource: { code: '', fidelity: 'patch' }
+}
 
 const GitReviewSyntaxHighlightContext =
   createContext<GitReviewSyntaxHighlightContextValue>(DEFAULT_CONTEXT)
@@ -56,8 +63,8 @@ export function GitReviewSyntaxHighlightProvider({
   oldPath
 }: GitReviewSyntaxHighlightProviderProps): ReactNode {
   const sources = useMemo(
-    () => buildGitReviewSyntaxSources(document, fileContent),
-    [document, fileContent]
+    () => (enabled ? buildGitReviewSyntaxSources(document, fileContent) : EMPTY_SYNTAX_SOURCES),
+    [document, enabled, fileContent]
   )
   const languages = useMemo(
     () => resolveGitReviewFileLanguageDescriptor({ newPath, oldPath }),

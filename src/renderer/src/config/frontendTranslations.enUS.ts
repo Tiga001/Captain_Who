@@ -166,6 +166,7 @@ export const enUSTranslations = {
   'gitReview.diff.tooLarge': 'This file diff is too large to display safely in Review.',
   'gitReview.diff.noHunks': 'This file has no displayable text diff.',
   'gitReview.diff.invalid': 'This file diff is invalid and cannot be displayed safely.',
+  'gitReview.diff.snapshotExpired': 'This review snapshot expired. Refresh to load a current diff.',
   'gitReview.diff.unmodifiedLines': '{count} unmodified lines',
   'gitReview.diff.expandUp': 'Expand {count} lines above',
   'gitReview.diff.expandDown': 'Expand {count} lines below',

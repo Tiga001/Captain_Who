@@ -6,66 +6,23 @@ import type { IDisposable, IPty } from 'node-pty'
 import type {
   TerminalCreateSessionRequest,
   TerminalExitEvent,
-  TerminalOutputEvent,
   TerminalSessionSnapshot
 } from '@mycopilot/protocol'
-
-type TerminalServiceRequest =
-  | {
-      id: number
-      method: 'terminal.createSession'
-      params: TerminalCreateSessionRequest
-    }
-  | {
-      id: number
-      method: 'terminal.writeInput'
-      params: {
-        data: string
-        sessionId: string
-      }
-    }
-  | {
-      id: number
-      method: 'terminal.resizeSession'
-      params: {
-        cols: number
-        rows: number
-        sessionId: string
-      }
-    }
-  | {
-      id: number
-      method: 'terminal.killSession'
-      params: {
-        sessionId: string
-      }
-    }
-  | {
-      id: number
-      method: 'terminal.shutdown'
-    }
-
-type TerminalServiceMessage =
-  | {
-      error?: string
-      id: number
-      result?: unknown
-      success: boolean
-      type: 'response'
-    }
-  | {
-      event: TerminalOutputEvent
-      method: 'terminal.output'
-      type: 'notification'
-    }
-  | {
-      event: TerminalExitEvent
-      method: 'terminal.exit'
-      type: 'notification'
-    }
+import { TerminalExitDrainController } from './TerminalExitDrainController'
+import { TerminalOutputFlowController } from './TerminalOutputFlowController'
+import type {
+  TerminalServiceCommand,
+  TerminalServiceInboundMessage,
+  TerminalServiceNotification,
+  TerminalServiceRequest,
+  TerminalServiceResponse
+} from './terminalTransportProtocol'
 
 type TerminalSessionRecord = {
+  closeSubscription: IDisposable | null
+  exitDrain: TerminalExitDrainController<Pick<TerminalExitEvent, 'exitCode' | 'signal'>>
   exitSubscription: IDisposable
+  outputFlow: TerminalOutputFlowController
   outputSubscription: IDisposable
   ptyProcess: IPty
   snapshot: TerminalSessionSnapshot
@@ -81,7 +38,7 @@ if (!parentPort) {
 const sessions = new Map<string, TerminalSessionRecord>()
 
 parentPort.on('message', (messageEvent) => {
-  handleRequest(messageEvent.data as TerminalServiceRequest)
+  handleMessage(messageEvent.data as TerminalServiceInboundMessage)
 })
 
 process.on('exit', () => {
@@ -98,6 +55,35 @@ process.on('SIGINT', () => {
   process.exit(0)
 })
 
+function handleMessage(message: TerminalServiceInboundMessage): void {
+  if (message.type === 'command') {
+    handleCommand(message)
+    return
+  }
+  handleRequest(message)
+}
+
+function handleCommand(command: TerminalServiceCommand): void {
+  try {
+    switch (command.method) {
+      case 'terminal.writeInput':
+        writeInput(command.params.sessionId, command.params.data)
+        return
+      case 'terminal.acknowledgeOutput':
+        acknowledgeOutput(command.params.sessionId, command.params.sequence)
+        return
+      case 'terminal.disposeSession':
+        killSession(command.params.sessionId, true)
+        return
+    }
+  } catch (error) {
+    console.warn(
+      `Ignored terminal service command ${command.method}`,
+      error instanceof Error ? error.message : String(error)
+    )
+  }
+}
+
 function handleRequest(request: TerminalServiceRequest): void {
   try {
     switch (request.method) {
@@ -108,10 +94,6 @@ function handleRequest(request: TerminalServiceRequest): void {
           success: true,
           type: 'response'
         })
-        return
-      case 'terminal.writeInput':
-        writeInput(request.params.sessionId, request.params.data)
-        sendResponse({ id: request.id, success: true, type: 'response' })
         return
       case 'terminal.resizeSession':
         resizeSession(request.params.sessionId, request.params.cols, request.params.rows)
@@ -168,35 +150,53 @@ function createSession(request: TerminalCreateSessionRequest): TerminalSessionSn
     shell
   }
 
+  const exitDrainState: {
+    controller?: TerminalExitDrainController<Pick<TerminalExitEvent, 'exitCode' | 'signal'>>
+  } = {}
+  const outputFlow = new TerminalOutputFlowController({
+    onBatch: (event) => {
+      sendNotification({ event, method: 'terminal.output', type: 'notification' })
+    },
+    onPause: () => ptyProcess.pause(),
+    onResume: () => {
+      ptyProcess.resume()
+      exitDrainState.controller?.noteOutputResumed()
+    },
+    sessionId
+  })
+
   const outputSubscription = ptyProcess.onData((data) => {
-    sendNotification({
-      event: {
-        data,
-        sessionId
-      },
-      method: 'terminal.output',
-      type: 'notification'
-    })
+    outputFlow.push(data)
+    exitDrainState.controller?.noteData()
   })
 
   const exitSubscription = ptyProcess.onExit(({ exitCode, signal }) => {
-    sessions.delete(sessionId)
-    outputSubscription.dispose()
-    exitSubscription.dispose()
-
-    sendNotification({
-      event: {
-        exitCode,
-        sessionId,
-        signal: typeof signal === 'number' ? String(signal) : null
-      },
-      method: 'terminal.exit',
-      type: 'notification'
+    exitDrainState.controller?.begin({
+      exitCode,
+      signal: typeof signal === 'number' ? String(signal) : null
     })
   })
 
+  // Unix node-pty exposes stream close separately from its waitpid-based exit;
+  // Windows emits onExit from the ConPTY socket close path after its own flush.
+  const closeSubscription =
+    process.platform === 'win32'
+      ? null
+      : subscribeToPtyClose(ptyProcess, () => exitDrainState.controller?.noteStreamClosed())
+  const exitDrain = new TerminalExitDrainController<Pick<TerminalExitEvent, 'exitCode' | 'signal'>>(
+    {
+      isOutputPaused: () => outputFlow.isPaused,
+      onDrainComplete: (result) => finishSession(sessionId, result),
+      waitForStreamClose: closeSubscription !== null
+    }
+  )
+  exitDrainState.controller = exitDrain
+
   sessions.set(sessionId, {
+    closeSubscription,
+    exitDrain,
     exitSubscription,
+    outputFlow,
     outputSubscription,
     ptyProcess,
     snapshot
@@ -206,7 +206,14 @@ function createSession(request: TerminalCreateSessionRequest): TerminalSessionSn
 }
 
 function writeInput(sessionId: string, data: string): void {
-  getSession(sessionId).ptyProcess.write(data)
+  assertValidSessionId(sessionId)
+  if (typeof data !== 'string' || data.length === 0) return
+  sessions.get(sessionId)?.ptyProcess.write(data)
+}
+
+function acknowledgeOutput(sessionId: string, sequence: number): void {
+  assertValidSessionId(sessionId)
+  sessions.get(sessionId)?.outputFlow.acknowledge(sequence)
 }
 
 function resizeSession(sessionId: string, cols: number, rows: number): void {
@@ -223,12 +230,12 @@ function resizeSession(sessionId: string, cols: number, rows: number): void {
 }
 
 function killSession(sessionId: string, notify: boolean): boolean {
+  assertValidSessionId(sessionId)
   const session = sessions.get(sessionId)
   if (!session) return false
 
   sessions.delete(sessionId)
-  session.outputSubscription.dispose()
-  session.exitSubscription.dispose()
+  const finalOutputSequence = disposeSessionRecord(session)
 
   try {
     session.ptyProcess.kill()
@@ -240,6 +247,7 @@ function killSession(sessionId: string, notify: boolean): boolean {
     sendNotification({
       event: {
         exitCode: null,
+        finalOutputSequence,
         sessionId,
         signal: 'killed'
       },
@@ -251,9 +259,70 @@ function killSession(sessionId: string, notify: boolean): boolean {
   return true
 }
 
+function finishSession(
+  sessionId: string,
+  result: Pick<TerminalExitEvent, 'exitCode' | 'signal'>
+): void {
+  const session = sessions.get(sessionId)
+  if (!session) return
+
+  sessions.delete(sessionId)
+  const finalOutputSequence = disposeSessionRecord(session)
+
+  sendNotification({
+    event: {
+      ...result,
+      finalOutputSequence,
+      sessionId
+    },
+    method: 'terminal.exit',
+    type: 'notification'
+  })
+}
+
 function killAllSessions(notify: boolean): void {
   for (const sessionId of [...sessions.keys()]) {
     killSession(sessionId, notify)
+  }
+}
+
+function disposeSessionRecord(session: TerminalSessionRecord): number {
+  session.outputSubscription.dispose()
+  session.exitSubscription.dispose()
+  session.closeSubscription?.dispose()
+  session.exitDrain.dispose()
+  session.outputFlow.flush()
+  const finalOutputSequence = session.outputFlow.finalOutputSequence
+  session.outputFlow.dispose()
+  return finalOutputSequence
+}
+
+function subscribeToPtyClose(ptyProcess: IPty, listener: () => void): IDisposable | null {
+  const eventSource = ptyProcess as IPty & {
+    on?: (eventName: string, handler: () => void) => void
+    removeListener?: (eventName: string, handler: () => void) => void
+  }
+  if (typeof eventSource.on !== 'function' || typeof eventSource.removeListener !== 'function') {
+    return null
+  }
+
+  try {
+    eventSource.on('close', listener)
+  } catch {
+    return null
+  }
+
+  let subscribed = true
+  return {
+    dispose: () => {
+      if (!subscribed) return
+      subscribed = false
+      try {
+        eventSource.removeListener?.('close', listener)
+      } catch {
+        // The native PTY can already be disposed when terminal cleanup runs.
+      }
+    }
   }
 }
 
@@ -309,12 +378,10 @@ function normalizeTerminalSize(value: number | undefined, fallback: number): num
   return Math.max(1, Math.floor(value))
 }
 
-function sendResponse(message: Extract<TerminalServiceMessage, { type: 'response' }>): void {
+function sendResponse(message: TerminalServiceResponse): void {
   parentPort.postMessage(message)
 }
 
-function sendNotification(
-  message: Extract<TerminalServiceMessage, { type: 'notification' }>
-): void {
+function sendNotification(message: TerminalServiceNotification): void {
   parentPort.postMessage(message)
 }

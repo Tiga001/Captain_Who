@@ -4,13 +4,14 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import { lightTheme } from '../../config/frontendTheme'
 import {
+  acknowledgeTerminalOutput,
   createTerminalSession,
   killTerminalSession,
-  listenToTerminalExit,
-  listenToTerminalOutput,
   resizeTerminalSession,
+  subscribeTerminalSession,
   writeTerminalInput
 } from './terminalClient'
+import { TerminalOutputWriter } from './TerminalOutputWriter'
 import type { TerminalExitEvent, TerminalSessionStatus } from './terminalTypes'
 
 interface UseTerminalSessionOptions {
@@ -44,11 +45,6 @@ function createLocalSessionId() {
   return `terminal-${Date.now().toString(36)}-${randomValue}`
 }
 
-function getCssColor(name: string, fallback: string) {
-  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
-  return value || fallback
-}
-
 const TERMINAL_COLOR_VARIABLES = {
   background: '--mc-color-terminal-background',
   foreground: '--mc-color-terminal-foreground',
@@ -72,32 +68,33 @@ const TERMINAL_COLOR_VARIABLES = {
   brightWhite: '--mc-color-terminal-bright-white'
 } as const satisfies Record<keyof typeof lightTheme.colors.terminal, string>
 
-function getTerminalColor<Key extends keyof typeof TERMINAL_COLOR_VARIABLES>(key: Key) {
-  return getCssColor(TERMINAL_COLOR_VARIABLES[key], lightTheme.colors.terminal[key])
-}
-
 function getTerminalTheme() {
+  const computedStyle = getComputedStyle(document.documentElement)
+  const getColor = <Key extends keyof typeof TERMINAL_COLOR_VARIABLES>(key: Key) =>
+    computedStyle.getPropertyValue(TERMINAL_COLOR_VARIABLES[key]).trim() ||
+    lightTheme.colors.terminal[key]
+
   return {
-    background: getTerminalColor('background'),
-    black: getTerminalColor('black'),
-    blue: getTerminalColor('blue'),
-    brightBlack: getTerminalColor('brightBlack'),
-    brightBlue: getTerminalColor('brightBlue'),
-    brightCyan: getTerminalColor('brightCyan'),
-    brightGreen: getTerminalColor('brightGreen'),
-    brightMagenta: getTerminalColor('brightMagenta'),
-    brightRed: getTerminalColor('brightRed'),
-    brightWhite: getTerminalColor('brightWhite'),
-    brightYellow: getTerminalColor('brightYellow'),
-    cursor: getTerminalColor('cursor'),
-    cyan: getTerminalColor('cyan'),
-    foreground: getTerminalColor('foreground'),
-    green: getTerminalColor('green'),
-    magenta: getTerminalColor('magenta'),
-    red: getTerminalColor('red'),
-    selectionBackground: getTerminalColor('selectionBackground'),
-    white: getTerminalColor('white'),
-    yellow: getTerminalColor('yellow')
+    background: getColor('background'),
+    black: getColor('black'),
+    blue: getColor('blue'),
+    brightBlack: getColor('brightBlack'),
+    brightBlue: getColor('brightBlue'),
+    brightCyan: getColor('brightCyan'),
+    brightGreen: getColor('brightGreen'),
+    brightMagenta: getColor('brightMagenta'),
+    brightRed: getColor('brightRed'),
+    brightWhite: getColor('brightWhite'),
+    brightYellow: getColor('brightYellow'),
+    cursor: getColor('cursor'),
+    cyan: getColor('cyan'),
+    foreground: getColor('foreground'),
+    green: getColor('green'),
+    magenta: getColor('magenta'),
+    red: getColor('red'),
+    selectionBackground: getColor('selectionBackground'),
+    white: getColor('white'),
+    yellow: getColor('yellow')
   }
 }
 
@@ -123,8 +120,13 @@ export function useTerminalSession({
   const fitAddonRef = useRef<FitAddon | null>(null)
   const sessionIdRef = useRef<string | null>(null)
   const initialCwdRef = useRef(initialCwd)
+  const isActiveRef = useRef(isActive)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [status, setStatus] = useState<TerminalSessionStatus>('starting')
+
+  useEffect(() => {
+    isActiveRef.current = isActive
+  }, [isActive])
 
   useEffect(() => {
     const terminal = terminalRef.current
@@ -170,6 +172,13 @@ export function useTerminalSession({
   }, [fitTerminal, isActive])
 
   useEffect(() => {
+    const terminal = terminalRef.current
+    if (!terminal) return
+    terminal.options.cursorBlink = isActive
+    if (!isActive) terminal.blur()
+  }, [isActive])
+
+  useEffect(() => {
     const container = containerRef.current
     if (!container) return undefined
 
@@ -179,7 +188,7 @@ export function useTerminalSession({
     const terminal = new Terminal({
       allowProposedApi: false,
       convertEol: false,
-      cursorBlink: true,
+      cursorBlink: isActiveRef.current,
       fontFamily:
         'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
       fontSize: 13,
@@ -195,6 +204,7 @@ export function useTerminalSession({
     fitAddonRef.current = fitAddon
 
     const runQueuedFit = () => {
+      if (!isActiveRef.current) return
       window.cancelAnimationFrame(resizeFrame)
       resizeFrame = window.requestAnimationFrame(fitTerminal)
     }
@@ -210,18 +220,17 @@ export function useTerminalSession({
       const sessionId = sessionIdRef.current
       if (!sessionId) return
 
-      void writeTerminalInput(sessionId, data).catch((error) => {
+      try {
+        writeTerminalInput(sessionId, data)
+      } catch (error) {
         console.error('Failed to write embedded terminal input', error)
-      })
+      }
     })
 
-    let unlistenOutput: (() => void) | null = null
-    let unlistenExit: (() => void) | null = null
+    let outputWriter: TerminalOutputWriter | null = null
+    let unsubscribeSession: (() => void) | null = null
 
-    const startSession = async () => {
-      const requestedSessionId = createLocalSessionId()
-      sessionIdRef.current = requestedSessionId
-
+    const startSession = async (requestedSessionId: string) => {
       try {
         if (canFitTerminal(container)) {
           fitAddon.fit()
@@ -243,9 +252,14 @@ export function useTerminalSession({
 
         sessionIdRef.current = nextSession.sessionId
         setStatus('running')
-        terminal.focus()
+        if (isActiveRef.current) terminal.focus()
         queueFit()
       } catch (error) {
+        if (isDisposed) return
+        unsubscribeSession?.()
+        unsubscribeSession = null
+        outputWriter?.dispose()
+        outputWriter = null
         const message = error instanceof Error ? error.message : String(error)
         sessionIdRef.current = null
         terminal.write(`\r\n[terminal start failed: ${message}]\r\n`)
@@ -255,28 +269,36 @@ export function useTerminalSession({
     }
 
     const initializeTerminalBridge = async () => {
-      const [outputUnlisten, exitUnlisten] = await Promise.all([
-        listenToTerminalOutput((event) => {
-          if (event.sessionId !== sessionIdRef.current) return
-          terminal.write(event.data)
-        }),
-        listenToTerminalExit((event) => {
-          if (event.sessionId !== sessionIdRef.current) return
-          terminal.write(formatExitMessage(event))
+      const requestedSessionId = createLocalSessionId()
+      sessionIdRef.current = requestedSessionId
+      outputWriter = new TerminalOutputWriter({
+        acknowledge: (sequence) => acknowledgeTerminalOutput(requestedSessionId, sequence),
+        onProtocolError: (error) => {
+          if (isDisposed) return
+          setErrorMessage(error.message)
+          setStatus('error')
           sessionIdRef.current = null
-          setStatus('exited')
-        })
-      ])
-
-      if (isDisposed) {
-        outputUnlisten()
-        exitUnlisten()
-        return
-      }
-
-      unlistenOutput = outputUnlisten
-      unlistenExit = exitUnlisten
-      await startSession()
+          void killTerminalSession(requestedSessionId).catch((killError) => {
+            console.error('Failed to stop terminal after an output protocol error', killError)
+          })
+        },
+        sessionId: requestedSessionId,
+        write: (data, callback) => terminal.write(data, callback)
+      })
+      unsubscribeSession = subscribeTerminalSession(requestedSessionId, {
+        onExit: (event) => {
+          outputWriter?.finish(event.finalOutputSequence, () => {
+            if (isDisposed) return
+            terminal.write(formatExitMessage(event), () => {
+              if (isDisposed) return
+              if (sessionIdRef.current === requestedSessionId) sessionIdRef.current = null
+              setStatus('exited')
+            })
+          })
+        },
+        onOutput: (event) => outputWriter?.accept(event)
+      })
+      await startSession(requestedSessionId)
     }
 
     queueFit()
@@ -293,8 +315,8 @@ export function useTerminalSession({
       window.clearTimeout(resizeSettleTimer)
       resizeObserver.disconnect()
       inputSubscription.dispose()
-      unlistenOutput?.()
-      unlistenExit?.()
+      unsubscribeSession?.()
+      outputWriter?.dispose()
 
       const sessionId = sessionIdRef.current
       sessionIdRef.current = null

@@ -3,10 +3,12 @@ import { useMemo, useRef, type ReactNode, type RefObject, type UIEventHandler } 
 import { AlertCircle, LoaderCircle, RefreshCw } from 'lucide-react'
 import type { Translate } from '../../config/translationFormat'
 import {
+  assessGitDiffRenderBudget,
   buildGitDiffDocument,
   buildSplitDiffBlocks,
   getGitDiffExpandedSlices,
   hydrateGitDiffDocument,
+  isGitDiffHydrationTextWithinBudget,
   parseGitPatch,
   type GitDiffDocument,
   type GitDiffExpansionAction,
@@ -75,7 +77,11 @@ export function GitReviewDiffRenderer({
     return (
       <div className="git-review__diff-message git-review__diff-message--error" role="alert">
         <AlertCircle aria-hidden="true" />
-        <span>{diffState.error}</span>
+        <span>
+          {diffState.reason === 'snapshotExpired'
+            ? t('gitReview.diff.snapshotExpired')
+            : diffState.error}
+        </span>
         <button type="button" onClick={() => onRequestDiff(file.id)}>
           <RefreshCw aria-hidden="true" />
           {t('gitReview.retry')}
@@ -103,6 +109,7 @@ export function GitReviewDiffRenderer({
       snapshotId={diffState.value.snapshotId}
       syntaxHighlightingEnabled={syntaxHighlightingEnabled}
       t={t}
+      tooLargeState={t('gitReview.diff.tooLarge')}
       viewMode={viewMode}
       wrapLines={wrapLines}
     />
@@ -120,6 +127,7 @@ interface GitPatchRendererProps {
   snapshotId: string
   syntaxHighlightingEnabled?: boolean
   t: Translate
+  tooLargeState: ReactNode
   viewMode: GitReviewViewMode
   wrapLines: boolean
 }
@@ -136,18 +144,40 @@ export function GitPatchRenderer({
   snapshotId,
   syntaxHighlightingEnabled = true,
   t,
+  tooLargeState,
   viewMode,
   wrapLines
 }: GitPatchRendererProps): ReactNode {
-  const renderModel = useMemo(() => {
+  const compactModel = useMemo(() => {
+    const budget = assessGitDiffRenderBudget(patch)
+    if (!budget.ok) return { status: 'tooLarge' as const }
     const parsed = parseGitPatch(patch)
-    if (!parsed.ok) return { documentResult: parsed }
+    if (!parsed.ok) return { documentResult: parsed, status: 'ready' as const }
     const compact = buildGitDiffDocument(parsed.value)
-    if (!compact.ok) return { documentResult: compact }
-    if (fileContent?.status !== 'ready') return { documentResult: compact }
+    if (!compact.ok) return { documentResult: compact, status: 'ready' as const }
+    return { documentResult: compact, status: 'ready' as const }
+  }, [patch])
+  const renderModel = useMemo(() => {
+    if (compactModel.status === 'tooLarge' || !compactModel.documentResult.ok) {
+      return compactModel
+    }
+    const compact = compactModel.documentResult
+    if (fileContent?.status !== 'ready') {
+      return { documentResult: compact, status: 'ready' as const }
+    }
+    if (
+      !isGitDiffHydrationTextWithinBudget(fileContent.beforeText) ||
+      !isGitDiffHydrationTextWithinBudget(fileContent.afterText)
+    ) {
+      return { documentResult: compact, status: 'ready' as const }
+    }
     if (fileContent.beforeText === null || fileContent.afterText === null) {
       // Added/deleted files only have one side; paint-time equality still guards that snapshot.
-      return { documentResult: compact, syntaxFileContent: fileContent }
+      return {
+        documentResult: compact,
+        status: 'ready' as const,
+        syntaxFileContent: fileContent
+      }
     }
     const hydrated = hydrateGitDiffDocument(compact.value, {
       newText: fileContent.afterText,
@@ -155,9 +185,12 @@ export function GitPatchRenderer({
     })
     // A stale or inconsistent full-content response must never corrupt the compact diff.
     return hydrated.ok
-      ? { documentResult: hydrated, syntaxFileContent: fileContent }
-      : { documentResult: compact }
-  }, [fileContent, patch])
+      ? { documentResult: hydrated, status: 'ready' as const, syntaxFileContent: fileContent }
+      : { documentResult: compact, status: 'ready' as const }
+  }, [compactModel, fileContent])
+  if (renderModel.status === 'tooLarge') {
+    return <div className="git-review__diff-message">{tooLargeState}</div>
+  }
   const { documentResult } = renderModel
   const layout = resolveGitReviewDiffLayout(viewMode, getGitReviewFileShape(file.status))
 
@@ -189,7 +222,7 @@ export function GitPatchRenderer({
       cacheKey={`${snapshotId}:${file.id}`}
       document={documentResult.value}
       enabled={syntaxHighlightingEnabled}
-      fileContent={renderModel.syntaxFileContent}
+      fileContent={'syntaxFileContent' in renderModel ? renderModel.syntaxFileContent : undefined}
       newPath={file.path}
       oldPath={file.previousPath ?? file.path}
     >
@@ -725,19 +758,8 @@ function SingleDiffLine({ line, side }: { line: GitDiffLine; side: SingleDiffSid
 }
 
 function DiffCode({ line, side }: { line: GitDiffLine; side: GitReviewSyntaxSide }): ReactNode {
-  const prefix =
-    line.kind === 'addition'
-      ? '+'
-      : line.kind === 'deletion'
-        ? '-'
-        : line.kind === 'meta'
-          ? ''
-          : ' '
   return (
     <span className="git-review__diff-code">
-      <span className="git-review__diff-prefix" aria-hidden="true">
-        {prefix}
-      </span>
       <GitReviewSyntaxCode
         content={line.content}
         lineNumber={side === 'old' ? line.oldLineNumber : line.newLineNumber}

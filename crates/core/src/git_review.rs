@@ -18,6 +18,9 @@ const MAX_STATUS_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NUMSTAT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_UNTRACKED_STATS_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DIFF_BYTES: usize = 512 * 1024;
+const MAX_DIFF_LINES: usize = 20_000;
+const MAX_DIFF_HUNKS: usize = 2_000;
+const MAX_DIFF_LINE_BYTES: usize = 32 * 1024;
 const MAX_FULL_CONTENT_SIDE_BYTES: usize = 1024 * 1024;
 const MAX_FULL_CONTENT_SIDE_LINES: usize = 100_000;
 const MAX_FULL_CONTENT_TOTAL_BYTES: usize = 2 * 1024 * 1024;
@@ -384,7 +387,7 @@ impl GitReviewService {
         if !snapshot_file_is_current(&snapshot, &file)? {
             return Ok(expired_diff(snapshot_id, file_id));
         }
-        if output.stdout_truncated {
+        if output.stdout_truncated || exceeds_diff_patch_budget(&output.stdout) {
             return Ok(GitReviewFileDiff {
                 snapshot_id: snapshot_id.to_string(),
                 file_id: file_id.to_string(),
@@ -1734,6 +1737,14 @@ fn untracked_file_diff(
         .unified_diff()
         .header("/dev/null", &format!("b/{path}"))
         .to_string();
+    if exceeds_diff_patch_budget(patch.as_bytes()) {
+        return Ok(GitReviewFileDiff {
+            snapshot_id: snapshot_id.to_string(),
+            file_id: file_id.to_string(),
+            status: GitReviewFileDiffStatus::TooLarge,
+            patch: None,
+        });
+    }
 
     Ok(GitReviewFileDiff {
         snapshot_id: snapshot_id.to_string(),
@@ -1741,6 +1752,40 @@ fn untracked_file_diff(
         status: GitReviewFileDiffStatus::Ready,
         patch: Some(patch),
     })
+}
+
+/// Rejects patches that are cheap in bytes but pathological to parse or paint. The line budget
+/// counts every physical patch line (not only changed rows), while hunk headers use Git's ordinary
+/// unified-diff `@@ -...` prefix. A final newline does not create an additional logical line.
+fn exceeds_diff_patch_budget(patch: &[u8]) -> bool {
+    if patch.len() > MAX_DIFF_BYTES {
+        return true;
+    }
+    if patch.is_empty() {
+        return false;
+    }
+
+    let mut line_count = 0usize;
+    let mut hunk_count = 0usize;
+    let mut lines = patch.split(|byte| *byte == b'\n').peekable();
+    while let Some(raw_line) = lines.next() {
+        if raw_line.is_empty() && patch.ends_with(b"\n") && lines.peek().is_none() {
+            // `slice::split` emits one final empty item for a trailing delimiter.
+            continue;
+        }
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        line_count += 1;
+        if line_count > MAX_DIFF_LINES || line.len() > MAX_DIFF_LINE_BYTES {
+            return true;
+        }
+        if line.starts_with(b"@@ -") {
+            hunk_count += 1;
+            if hunk_count > MAX_DIFF_HUNKS {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -1929,6 +1974,53 @@ mod tests {
     use super::*;
     use std::process::Command;
     use tempfile::TempDir;
+
+    #[test]
+    fn diff_patch_budget_rejects_each_dimension_independently() {
+        assert!(!exceeds_diff_patch_budget(b"@@ -1 +1 @@\n-old\n+new\n"));
+
+        let too_many_lines = vec![b'\n'; MAX_DIFF_LINES + 1];
+        assert!(exceeds_diff_patch_budget(&too_many_lines));
+
+        let too_many_hunks = "@@ -1 +1 @@\n".repeat(MAX_DIFF_HUNKS + 1);
+        assert!(exceeds_diff_patch_budget(too_many_hunks.as_bytes()));
+
+        let overlong_line = vec![b'x'; MAX_DIFF_LINE_BYTES + 1];
+        assert!(exceeds_diff_patch_budget(&overlong_line));
+
+        let too_many_bytes = vec![b'x'; MAX_DIFF_BYTES + 1];
+        assert!(exceeds_diff_patch_budget(&too_many_bytes));
+    }
+
+    #[test]
+    fn generated_untracked_patch_is_rechecked_after_prefix_expansion() {
+        let Some(repo) = test_repository() else {
+            return;
+        };
+        // The source stays under 512 KiB and 20k lines. Unified-diff '+' prefixes push the
+        // generated patch over the byte budget, which must be checked after TextDiff renders it.
+        let line = format!("{}\n", "x".repeat(25));
+        let content = line.repeat(19_800);
+        assert!(content.len() < MAX_DIFF_BYTES);
+        assert!(content.lines().count() < MAX_DIFF_LINES);
+        fs::write(repo.path().join("generated.txt"), content).unwrap();
+
+        let service = GitReviewService::new();
+        let summary = service
+            .review_summary(repo.path(), GitReviewScope::Unstaged)
+            .unwrap();
+        let file = summary
+            .files
+            .iter()
+            .find(|file| file.path == "generated.txt")
+            .unwrap();
+        let diff = service
+            .review_file_diff(&summary.snapshot_id, &file.id)
+            .unwrap();
+
+        assert_eq!(diff.status, GitReviewFileDiffStatus::TooLarge);
+        assert!(diff.patch.is_none());
+    }
 
     #[test]
     fn parses_staged_unstaged_and_untracked_entries() {

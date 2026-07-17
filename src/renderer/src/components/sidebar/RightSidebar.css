@@ -320,6 +320,15 @@
   visibility: visible;
 }
 
+.right-sidebar__page[data-activity='background'],
+.right-sidebar__page[data-activity='dormant'] {
+  content-visibility: hidden;
+}
+
+.right-sidebar__page[data-activity='foreground'] {
+  content-visibility: visible;
+}
+
 .right-sidebar__home {
   --right-sidebar-tool-background: color-mix(
     in srgb,

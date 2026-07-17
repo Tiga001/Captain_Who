@@ -1,11 +1,13 @@
 mod agent;
 mod agent_support;
+mod git_dispatcher;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent::{AgentConversationTurnInput, AgentService};
+use git_dispatcher::{GitDispatcher, GitJobPriority};
 use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatMessageRecord,
@@ -41,8 +43,8 @@ use mycopilot_protocol_rs::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::{mpsc, oneshot};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -51,83 +53,189 @@ async fn main() -> io::Result<()> {
             .map_err(|error| io::Error::other(format!("failed to initialize storage: {error}")))?,
     );
     let agent_service = AgentService::new(storage.clone());
-    let git_review_service = GitReviewService::new();
-    let stdin = BufReader::new(io::stdin());
-    let mut lines = stdin.lines();
-    let mut stdout = io::stdout();
-    let (notification_tx, mut notification_rx) = mpsc::unbounded_channel::<Value>();
+    let git_review_service = Arc::new(GitReviewService::new());
+    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
+    let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
+    let writer = tokio::spawn(run_outbound_writer(
+        io::stdout(),
+        outbound_rx,
+        finish_outbound_rx,
+    ));
+    let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
 
+    let input_result = run_request_loop(
+        BufReader::new(io::stdin()),
+        storage,
+        &agent_service,
+        git_review_service,
+        &git_dispatcher,
+        &outbound_tx,
+    )
+    .await;
+
+    // Admission has stopped. Settle accepted Git jobs while active agents are cancelled in
+    // parallel; queued Git jobs receive cancellation errors and running jobs finish safely. The
+    // outbound writer remains live for every final response and notification.
+    let (dispatcher_result, (cancelled_runs, timed_out)) = tokio::join!(
+        git_dispatcher.shutdown(),
+        agent_service.shutdown_active_runs(Duration::from_secs(2))
+    );
+
+    let mut outbound_error = None;
+    if let Ok(Some(shutdown_id)) = &input_result {
+        if let Err(error) = enqueue_outbound(
+            &outbound_tx,
+            response_success(
+                shutdown_id.clone(),
+                CoreShutdownResponse {
+                    cancelled_runs,
+                    timed_out,
+                },
+            ),
+        ) {
+            outbound_error = Some(error);
+        }
+    }
+    drop(outbound_tx);
+    // A timed-out agent may still own an outbound sender. Tell the writer to close its receiver
+    // and drain everything accepted so far instead of waiting for every producer clone to drop.
+    // The shutdown response above is therefore flushed, while late notifications are rejected.
+    let _ = finish_outbound_tx.send(());
+
+    let writer_result = writer
+        .await
+        .map_err(|error| io::Error::other(format!("outbound writer stopped: {error}")))?;
+    input_result?;
+    dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
+    if let Some(error) = outbound_error {
+        return Err(error);
+    }
+    writer_result
+}
+
+async fn run_request_loop<R>(
+    input: R,
+    storage: Arc<StorageService>,
+    agent_service: &AgentService,
+    git_review_service: Arc<GitReviewService>,
+    git_dispatcher: &GitDispatcher,
+    outbound: &mpsc::UnboundedSender<Value>,
+) -> io::Result<Option<JsonRpcId>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut lines = input.lines();
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                enqueue_outbound(
+                    outbound,
+                    serde_json::to_value(mycopilot_protocol_rs::error(
+                        None,
+                        -32700,
+                        format!("Parse error: {error}"),
+                    ))
+                    .expect("JSON-RPC parse error response must serialize"),
+                )?;
+                continue;
+            }
+        };
+
+        if request.jsonrpc == "2.0" && request.method == CORE_SHUTDOWN_METHOD {
+            return Ok(Some(request.id));
+        }
+
+        if request.jsonrpc == "2.0" {
+            if let Some(priority) = git_request_priority(&request.method) {
+                let request_id = request.id.clone();
+                let request_storage = Arc::clone(&storage);
+                let request_service = Arc::clone(&git_review_service);
+                if let Err(error) =
+                    git_dispatcher.try_submit(priority, request_id.clone(), move || {
+                        handle_git_request(&request_storage, &request_service, request)
+                    })
+                {
+                    enqueue_outbound(
+                        outbound,
+                        response_error(Some(request_id), error.code(), error.message()),
+                    )?;
+                }
+                continue;
+            }
+        }
+
+        let response = handle_request(&storage, agent_service, outbound.clone(), request);
+        enqueue_outbound(outbound, response)?;
+    }
+    Ok(None)
+}
+
+async fn run_outbound_writer<W>(
+    mut writer: W,
+    mut outbound: mpsc::UnboundedReceiver<Value>,
+    mut finish: oneshot::Receiver<()>,
+) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     loop {
         tokio::select! {
-            line = lines.next_line() => {
-                let Some(line) = line? else {
-                    break;
-                };
-                if line.trim().is_empty() {
-                    continue;
+            biased;
+            _ = &mut finish => {
+                // Closing preserves already queued messages but prevents lingering agent tasks
+                // from keeping shutdown open or appending notifications after the final response.
+                outbound.close();
+                while let Some(message) = outbound.recv().await {
+                    write_outbound_message(&mut writer, message).await?;
                 }
-
-                let request = match serde_json::from_str::<JsonRpcRequest>(&line) {
-                    Ok(request) => request,
-                    Err(err) => {
-                        let response = serde_json::to_value(error(
-                            None,
-                            -32700,
-                            format!("Parse error: {err}"),
-                        ))
-                        .expect("JSON-RPC parse error response must serialize");
-                        write_json_line(&mut stdout, response).await?;
-                        continue;
-                    }
-                };
-
-                if request.jsonrpc == "2.0" && request.method == CORE_SHUTDOWN_METHOD {
-                    let (cancelled_runs, timed_out) = agent_service
-                        .shutdown_active_runs(Duration::from_secs(2))
-                        .await;
-                    let response = response_success(
-                        request.id,
-                        CoreShutdownResponse {
-                            cancelled_runs,
-                            timed_out,
-                        },
-                    );
-                    write_json_line(&mut stdout, response).await?;
-                    break;
-                }
-
-                let response = handle_request(
-                    &storage,
-                    &agent_service,
-                    &git_review_service,
-                    notification_tx.clone(),
-                    request,
-                );
-
-                write_json_line(&mut stdout, response).await?;
+                return Ok(());
             }
-            notification = notification_rx.recv() => {
-                let Some(notification) = notification else {
-                    break;
+            message = outbound.recv() => {
+                let Some(message) = message else {
+                    return Ok(());
                 };
-                write_json_line(&mut stdout, notification).await?;
+                write_outbound_message(&mut writer, message).await?;
             }
         }
     }
-
-    Ok(())
 }
 
-async fn write_json_line(stdout: &mut io::Stdout, message: Value) -> io::Result<()> {
-    stdout.write_all(message.to_string().as_bytes()).await?;
-    stdout.write_all(b"\n").await?;
-    stdout.flush().await
+async fn write_outbound_message<W>(writer: &mut W, message: Value) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    writer.write_all(message.to_string().as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await
+}
+
+fn enqueue_outbound(outbound: &mpsc::UnboundedSender<Value>, message: Value) -> io::Result<()> {
+    outbound
+        .send(message)
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "outbound writer is unavailable"))
+}
+
+fn git_request_priority(method: &str) -> Option<GitJobPriority> {
+    match method {
+        GIT_MUTATE_REVIEW_FILE_METHOD => Some(GitJobPriority::High),
+        GIT_INSPECT_REPOSITORY_METHOD | GIT_GET_REVIEW_SUMMARY_METHOD => {
+            Some(GitJobPriority::Medium)
+        }
+        GIT_GET_REVIEW_FILE_DIFF_METHOD | GIT_GET_REVIEW_FILE_CONTENT_METHOD => {
+            Some(GitJobPriority::Low)
+        }
+        _ => None,
+    }
 }
 
 fn handle_request(
     storage: &StorageService,
     agent_service: &AgentService,
-    git_review_service: &GitReviewService,
     notification_tx: agent::CoreServerNotificationSender,
     request: JsonRpcRequest,
 ) -> Value {
@@ -204,73 +312,6 @@ fn handle_request(
             match agent_service.get_file_write_diff(&input.draft_id, input.offset, input.max_chars)
             {
                 Ok(output) => response_success(request.id, output),
-                Err(message) => response_error(Some(request.id), -32000, message),
-            }
-        }
-        GIT_INSPECT_REPOSITORY_METHOD => {
-            let input = match parse_params::<GitRepositoryInspectRequest>(request.params) {
-                Ok(input) => input,
-                Err(message) => return response_error(Some(request.id), -32602, message),
-            };
-            let project_path = match resolve_project_path(storage, &input.project_id) {
-                Ok(path) => path,
-                Err(message) => return response_error(Some(request.id), -32000, message),
-            };
-            response_success(
-                request.id,
-                git_review_service.inspect_repository(&input.project_id, &project_path),
-            )
-        }
-        GIT_GET_REVIEW_SUMMARY_METHOD => {
-            let input = match parse_params::<GitReviewSummaryRequest>(request.params) {
-                Ok(input) => input,
-                Err(message) => return response_error(Some(request.id), -32602, message),
-            };
-            let scope = match GitReviewScope::parse(&input.scope) {
-                Ok(scope) => scope,
-                Err(message) => return response_error(Some(request.id), -32602, message),
-            };
-            let project_path = match resolve_project_path(storage, &input.project_id) {
-                Ok(path) => path,
-                Err(message) => return response_error(Some(request.id), -32000, message),
-            };
-            match git_review_service.review_summary(&project_path, scope) {
-                Ok(summary) => response_success(request.id, summary),
-                Err(message) => response_error(Some(request.id), -32000, message),
-            }
-        }
-        GIT_GET_REVIEW_FILE_DIFF_METHOD => {
-            let input = match parse_params::<GitReviewFileDiffRequest>(request.params) {
-                Ok(input) => input,
-                Err(message) => return response_error(Some(request.id), -32602, message),
-            };
-            match git_review_service.review_file_diff(&input.snapshot_id, &input.file_id) {
-                Ok(diff) => response_success(request.id, diff),
-                Err(message) => response_error(Some(request.id), -32000, message),
-            }
-        }
-        GIT_GET_REVIEW_FILE_CONTENT_METHOD => {
-            let input = match parse_params::<GitReviewFileContentRequest>(request.params) {
-                Ok(input) => input,
-                Err(message) => return response_error(Some(request.id), -32602, message),
-            };
-            match git_review_service.review_file_content(&input.snapshot_id, &input.file_id) {
-                Ok(content) => response_success(request.id, content),
-                Err(message) => response_error(Some(request.id), -32000, message),
-            }
-        }
-        GIT_MUTATE_REVIEW_FILE_METHOD => {
-            let input = match parse_params::<GitReviewFileMutationRequest>(request.params) {
-                Ok(input) => input,
-                Err(message) => return response_error(Some(request.id), -32602, message),
-            };
-            let action = match GitReviewFileMutationAction::parse(&input.action) {
-                Ok(action) => action,
-                Err(message) => return response_error(Some(request.id), -32602, message),
-            };
-            match git_review_service.mutate_review_file(&input.snapshot_id, &input.file_id, action)
-            {
-                Ok(mutation) => response_success(request.id, mutation),
                 Err(message) => response_error(Some(request.id), -32000, message),
             }
         }
@@ -435,6 +476,83 @@ fn handle_request(
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
             storage_response(request.id, storage.save_ui_preferences(preferences))
+        }
+        _ => response_error(Some(request.id), -32601, "Method not found"),
+    }
+}
+
+fn handle_git_request(
+    storage: &StorageService,
+    git_review_service: &GitReviewService,
+    request: JsonRpcRequest,
+) -> Value {
+    match request.method.as_str() {
+        GIT_INSPECT_REPOSITORY_METHOD => {
+            let input = match parse_params::<GitRepositoryInspectRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            let project_path = match resolve_project_path(storage, &input.project_id) {
+                Ok(path) => path,
+                Err(message) => return response_error(Some(request.id), -32000, message),
+            };
+            response_success(
+                request.id,
+                git_review_service.inspect_repository(&input.project_id, &project_path),
+            )
+        }
+        GIT_GET_REVIEW_SUMMARY_METHOD => {
+            let input = match parse_params::<GitReviewSummaryRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            let scope = match GitReviewScope::parse(&input.scope) {
+                Ok(scope) => scope,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            let project_path = match resolve_project_path(storage, &input.project_id) {
+                Ok(path) => path,
+                Err(message) => return response_error(Some(request.id), -32000, message),
+            };
+            match git_review_service.review_summary(&project_path, scope) {
+                Ok(summary) => response_success(request.id, summary),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        GIT_GET_REVIEW_FILE_DIFF_METHOD => {
+            let input = match parse_params::<GitReviewFileDiffRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match git_review_service.review_file_diff(&input.snapshot_id, &input.file_id) {
+                Ok(diff) => response_success(request.id, diff),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        GIT_GET_REVIEW_FILE_CONTENT_METHOD => {
+            let input = match parse_params::<GitReviewFileContentRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match git_review_service.review_file_content(&input.snapshot_id, &input.file_id) {
+                Ok(content) => response_success(request.id, content),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        GIT_MUTATE_REVIEW_FILE_METHOD => {
+            let input = match parse_params::<GitReviewFileMutationRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            let action = match GitReviewFileMutationAction::parse(&input.action) {
+                Ok(action) => action,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            match git_review_service.mutate_review_file(&input.snapshot_id, &input.file_id, action)
+            {
+                Ok(mutation) => response_success(request.id, mutation),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
         }
         _ => response_error(Some(request.id), -32601, "Method not found"),
     }
@@ -705,4 +823,100 @@ fn home_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod server_tests {
+    use super::*;
+    use std::sync::mpsc as std_mpsc;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn outbound_writer_finishes_after_draining_with_a_lingering_sender() {
+        let (writer_stream, mut reader_stream) = io::duplex(1024);
+        let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        let lingering_sender = outbound_tx.clone();
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let writer = tokio::spawn(run_outbound_writer(writer_stream, outbound_rx, finish_rx));
+        let first = json!({ "id": 1, "result": "before shutdown" });
+        let final_response = json!({ "id": 2, "result": "shutdown" });
+
+        enqueue_outbound(&outbound_tx, first.clone()).unwrap();
+        enqueue_outbound(&outbound_tx, final_response.clone()).unwrap();
+        finish_tx.send(()).unwrap();
+        drop(outbound_tx);
+
+        tokio::time::timeout(Duration::from_secs(1), writer)
+            .await
+            .expect("writer must not wait for a lingering producer")
+            .expect("writer task must join")
+            .expect("writer must drain successfully");
+        assert!(lingering_sender.send(json!({ "late": true })).is_err());
+
+        let mut output = String::new();
+        reader_stream.read_to_string(&mut output).await.unwrap();
+        let messages = output
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(messages, vec![first, final_response]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_loop_remains_responsive_while_all_git_workers_are_blocked() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+        let agent_service = AgentService::new(Arc::clone(&storage));
+        let git_review_service = Arc::new(GitReviewService::new());
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let dispatcher = GitDispatcher::new(outbound_tx.clone());
+        let (started_tx, started_rx) = std_mpsc::channel();
+        let mut release_senders = Vec::new();
+
+        for request_id in 1..=3 {
+            let (release_tx, release_rx) = std_mpsc::channel();
+            release_senders.push(release_tx);
+            let started_tx = started_tx.clone();
+            dispatcher
+                .try_submit(
+                    GitJobPriority::Low,
+                    JsonRpcId::Number(request_id),
+                    move || {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        serde_json::json!({ "id": request_id })
+                    },
+                )
+                .unwrap();
+        }
+        for _ in 0..3 {
+            started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"core.ping\",",
+            "\"params\":{\"message\":\"responsive\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"core.shutdown\"}\n"
+        );
+        let shutdown_id = run_request_loop(
+            BufReader::new(input.as_bytes()),
+            storage,
+            &agent_service,
+            git_review_service,
+            &dispatcher,
+            &outbound_tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(shutdown_id, Some(JsonRpcId::Number(100))));
+        let ping = outbound_rx.try_recv().unwrap();
+        assert_eq!(ping["id"], 99);
+        assert_eq!(ping["result"]["echo"], "responsive");
+
+        for release in release_senders {
+            release.send(()).unwrap();
+        }
+        dispatcher.shutdown().await.unwrap();
+    }
 }

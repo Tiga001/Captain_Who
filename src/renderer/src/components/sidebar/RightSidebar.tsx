@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Maximize, Plus, X } from 'lucide-react'
@@ -6,6 +6,7 @@ import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { RightSidebarHome } from '../../features/rightSidebar/RightSidebarHome'
 import { RightSidebarModulePicker } from '../../features/rightSidebar/RightSidebarModulePicker'
 import { RightSidebarPageStack } from '../../features/rightSidebar/RightSidebarPageStack'
+import { useRightSidebarDocumentVisibility } from '../../features/rightSidebar/rightSidebarActivity'
 import { RIGHT_SIDEBAR_MODULES } from '../../features/rightSidebar/rightSidebarModules'
 import type {
   RightSidebarCapabilities,
@@ -18,6 +19,7 @@ import './RightSidebar.css'
 interface RightSidebarProps {
   capabilities?: RightSidebarCapabilities
   isMaximized: boolean
+  isOpen: boolean
   maximizedToolbarControls?: ReactNode
   modules?: RightSidebarModuleDefinition[]
   onToggleMaximized: () => void
@@ -44,9 +46,10 @@ function RestoreFromMaximizedIcon(): ReactNode {
   )
 }
 
-export function RightSidebar({
+export const RightSidebar = memo(function RightSidebar({
   capabilities,
   isMaximized,
+  isOpen,
   maximizedToolbarControls,
   modules = RIGHT_SIDEBAR_MODULES,
   onToggleMaximized,
@@ -55,6 +58,7 @@ export function RightSidebar({
   workspacePath
 }: RightSidebarProps): ReactNode {
   const { t } = useFrontendConfig()
+  const documentVisible = useRightSidebarDocumentVisibility()
   const moduleMenuRef = useRef<HTMLDivElement>(null)
   const moduleMenuButtonRef = useRef<HTMLButtonElement>(null)
   const [isModuleMenuOpen, setIsModuleMenuOpen] = useState(false)
@@ -78,6 +82,9 @@ export function RightSidebar({
     workspacePath
   })
   const hasOpenPages = pages.length > 0
+  // `data-right-open=false` is the layout's final visibility authority, including while the
+  // maximize preference remains set for a later reopen.
+  const sidebarVisible = isOpen
   const maximizeLabel = isMaximized ? t('rightSidebar.restore') : t('rightSidebar.maximize')
 
   const closeTransientUi = useCallback(() => {
@@ -143,21 +150,21 @@ export function RightSidebar({
               {pages.map((page) => {
                 const module = modules.find((candidate) => candidate.id === page.moduleId)
                 const Icon = module?.icon
-                const isActive = page.id === activePageId
+                const isSelected = page.id === activePageId
                 const iconUrl = page.iconUrl?.trim()
 
                 return (
                   <div
                     className="right-sidebar__tab-shell"
-                    data-active={isActive ? 'true' : undefined}
+                    data-active={isSelected ? 'true' : undefined}
                     key={page.id}
                   >
                     <button
                       className="right-sidebar__tab"
                       type="button"
                       role="tab"
-                      aria-selected={isActive}
-                      data-active={isActive ? 'true' : undefined}
+                      aria-selected={isSelected}
+                      data-active={isSelected ? 'true' : undefined}
                       onClick={() => activatePage(page.id)}
                     >
                       {iconUrl ? (
@@ -252,11 +259,13 @@ export function RightSidebar({
           <RightSidebarPageStack
             activePageId={activePageId}
             availability={moduleAvailability}
+            documentVisible={documentVisible}
             modules={modules}
             onOpenPage={openRelatedPage}
             onPageUpdate={updatePage}
             onSurfaceFocus={closeTransientUi}
             pages={pages}
+            sidebarVisible={sidebarVisible}
             t={t}
           />
         ) : (
@@ -265,4 +274,4 @@ export function RightSidebar({
       </div>
     </aside>
   )
-}
+})

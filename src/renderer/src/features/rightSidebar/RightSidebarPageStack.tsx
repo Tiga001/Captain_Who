@@ -1,7 +1,10 @@
-import { useCallback } from 'react'
+import { memo, useCallback } from 'react'
 import type { Translate } from '../../config/translationFormat'
+import { resolveRightSidebarActivity } from './rightSidebarActivity'
 import { getRightSidebarModuleAvailability } from './rightSidebarModuleAvailability'
 import type {
+  RightSidebarActivity,
+  RightSidebarModuleAvailability,
   RightSidebarModuleAvailabilityMap,
   RightSidebarModuleDefinition,
   RightSidebarPage,
@@ -12,47 +15,65 @@ import type {
 interface RightSidebarPageStackProps {
   activePageId: string | null
   availability: RightSidebarModuleAvailabilityMap
+  documentVisible: boolean
   modules: RightSidebarModuleDefinition[]
   onPageUpdate: (pageId: string, update: RightSidebarPageUpdate) => void
   onOpenPage: (sourcePageId: string, request: RightSidebarPageOpenRequest) => void
   onSurfaceFocus: () => void
   pages: RightSidebarPage[]
+  sidebarVisible: boolean
   t: Translate
 }
 
-export function RightSidebarPageStack({
+export const RightSidebarPageStack = memo(function RightSidebarPageStack({
   activePageId,
   availability,
+  documentVisible,
   modules,
   onOpenPage,
   onPageUpdate,
   onSurfaceFocus,
   pages,
+  sidebarVisible,
   t
 }: RightSidebarPageStackProps) {
   return (
     <div className="right-sidebar__page-stack">
-      {pages.map((page) => (
-        <RightSidebarPageFrame
-          activePageId={activePageId}
-          availability={availability}
-          key={`${page.id}:${page.workspaceSessionKey ?? 'global'}`}
-          modules={modules}
-          onOpenPage={onOpenPage}
-          onPageUpdate={onPageUpdate}
-          onSurfaceFocus={onSurfaceFocus}
-          page={page}
-          t={t}
-        />
-      ))}
+      {pages.map((page) => {
+        const module = modules.find((candidate) => candidate.id === page.moduleId)
+        if (!module) return null
+
+        const isSelected = page.id === activePageId
+        const activity = resolveRightSidebarActivity({
+          documentVisible,
+          isSelected,
+          sidebarVisible
+        })
+
+        return (
+          <RightSidebarPageFrame
+            activity={activity}
+            availability={getRightSidebarModuleAvailability(availability, module.id)}
+            isSelected={isSelected}
+            key={`${page.id}:${page.workspaceSessionKey ?? 'global'}`}
+            module={module}
+            onOpenPage={onOpenPage}
+            onPageUpdate={onPageUpdate}
+            onSurfaceFocus={onSurfaceFocus}
+            page={page}
+            t={t}
+          />
+        )
+      })}
     </div>
   )
-}
+})
 
 interface RightSidebarPageFrameProps {
-  activePageId: string | null
-  availability: RightSidebarModuleAvailabilityMap
-  modules: RightSidebarModuleDefinition[]
+  activity: RightSidebarActivity
+  availability: RightSidebarModuleAvailability
+  isSelected: boolean
+  module: RightSidebarModuleDefinition
   onOpenPage: (sourcePageId: string, request: RightSidebarPageOpenRequest) => void
   onPageUpdate: (pageId: string, update: RightSidebarPageUpdate) => void
   onSurfaceFocus: () => void
@@ -60,18 +81,17 @@ interface RightSidebarPageFrameProps {
   t: Translate
 }
 
-function RightSidebarPageFrame({
-  activePageId,
+const RightSidebarPageFrame = memo(function RightSidebarPageFrame({
+  activity,
   availability,
-  modules,
+  isSelected,
+  module,
   onOpenPage,
   onPageUpdate,
   onSurfaceFocus,
   page,
   t
 }: RightSidebarPageFrameProps) {
-  const module = modules.find((candidate) => candidate.id === page.moduleId)
-  const isActive = page.id === activePageId
   const updatePage = useCallback(
     (update: RightSidebarPageUpdate) => onPageUpdate(page.id, update),
     [onPageUpdate, page.id]
@@ -81,22 +101,21 @@ function RightSidebarPageFrame({
     [onOpenPage, page.id]
   )
 
-  if (!module) return null
-
-  const shouldMount = isActive || module.retention === 'keep-alive'
-  const moduleAvailability = getRightSidebarModuleAvailability(availability, module.id)
+  const shouldMount = isSelected || module.retention === 'keep-alive'
 
   return (
     <section
       className="right-sidebar__page"
-      data-active={isActive ? 'true' : undefined}
+      data-active={isSelected ? 'true' : undefined}
+      data-activity={activity}
       data-surface-kind={module.surfaceKind}
-      aria-hidden={isActive ? undefined : true}
+      aria-hidden={isSelected ? undefined : true}
     >
       {shouldMount &&
         module.render({
-          availability: moduleAvailability,
-          isActive,
+          activity,
+          availability,
+          isSelected,
           onOpenPage: openPage,
           onPageUpdate: updatePage,
           onSurfaceFocus,
@@ -105,4 +124,4 @@ function RightSidebarPageFrame({
         })}
     </section>
   )
-}
+})

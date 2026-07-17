@@ -35,10 +35,12 @@ vi.mock('../useGitReview', async () => {
   }
   const noop = (): void => undefined
   const noopAsync = async (): Promise<void> => undefined
+  const emptyFileContentStates = {}
 
   return {
     useGitReview: () => {
       const [diffStates, setDiffStates] = useState<Record<string, object>>({})
+      const diffStatesRef = useRef(diffStates)
       const timersRef = useRef<number[]>([])
       useEffect(
         () => () => {
@@ -47,15 +49,21 @@ vi.mock('../useGitReview', async () => {
         []
       )
       const loadFileDiff = useCallback(async (fileId: string): Promise<void> => {
-        setDiffStates((current) => ({ ...current, [fileId]: { status: 'loading' } }))
+        const existing = diffStatesRef.current[fileId] as { status?: string } | undefined
+        if (existing?.status === 'loading' || existing?.status === 'ready') return
+        diffStatesRef.current = {
+          ...diffStatesRef.current,
+          [fileId]: { status: 'loading' }
+        }
+        setDiffStates(diffStatesRef.current)
         const timer = window.setTimeout(() => {
           const lineCount = 48
           const patch = [
             `@@ -1,${lineCount} +1,${lineCount} @@`,
             ...Array.from({ length: lineCount }, (_, index) => ` ${fileId} line ${index + 1}`)
           ].join('\n')
-          setDiffStates((current) => ({
-            ...current,
+          diffStatesRef.current = {
+            ...diffStatesRef.current,
             [fileId]: {
               status: 'ready',
               value: {
@@ -65,21 +73,27 @@ vi.mock('../useGitReview', async () => {
                 status: 'ready'
               }
             }
-          }))
+          }
+          setDiffStates(diffStatesRef.current)
         }, 30)
         timersRef.current.push(timer)
       }, [])
 
       return {
+        cancelQueuedFileContentsExcept: noop,
+        cancelQueuedFileDiffsExcept: noop,
         diffStates,
         dismissMutationError: noop,
-        fileContentStates: {},
+        fileContentStates: emptyFileContentStates,
         loadFileContent: loadFileContentSpy,
         loadFileDiff,
         mutateFile: noopAsync,
         mutationError: null,
         pendingFileId: null,
         refresh: noopAsync,
+        retryFileDiff: loadFileDiff,
+        setHotDiffFileIds: noop,
+        setHotFullContentFileIds: noop,
         scope: 'unstaged',
         setScope: noop,
         summaryState: { status: 'ready', value: summary }

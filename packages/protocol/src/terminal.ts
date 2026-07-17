@@ -16,11 +16,15 @@ export interface TerminalSessionSnapshot {
 
 export interface TerminalOutputEvent {
   data: string
+  /** Monotonically increasing within a terminal session, starting at 1. */
+  sequence: number
   sessionId: string
 }
 
 export interface TerminalExitEvent {
   exitCode?: number | null
+  /** Last output sequence emitted before this terminal exit event. */
+  finalOutputSequence: number
   sessionId: string
   signal?: string | null
 }

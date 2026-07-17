@@ -33,7 +33,7 @@ interface FilesPanelProps {
 const TREE_STYLE = {
   '--trees-accent-override': 'var(--mc-color-text-accent)',
   '--trees-bg-muted-override': 'var(--mc-color-state-hover)',
-  '--trees-bg-override': 'transparent',
+  '--trees-bg-override': 'var(--mc-color-surface-right-panel)',
   '--trees-border-color-override': 'var(--mc-color-border-default)',
   '--trees-fg-muted-override': 'var(--mc-color-icon-muted)',
   '--trees-fg-override': 'var(--mc-color-text-primary)',

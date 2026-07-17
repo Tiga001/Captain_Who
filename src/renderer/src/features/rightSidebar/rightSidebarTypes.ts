@@ -36,6 +36,8 @@ export type RightSidebarModuleAvailabilityMap = Partial<
 
 export type RightSidebarUnavailablePagePolicy = 'close-page' | 'retain-page'
 
+export type RightSidebarActivity = 'foreground' | 'background' | 'dormant'
+
 export interface RightSidebarWorkspaceContext {
   hasWorkspace: boolean
   key: string
@@ -69,8 +71,9 @@ export interface RightSidebarPageOpenRequest {
 }
 
 export interface RightSidebarModuleRenderProps {
+  activity: RightSidebarActivity
   availability: RightSidebarModuleAvailability
-  isActive: boolean
+  isSelected: boolean
   onOpenPage: (request: RightSidebarPageOpenRequest) => void
   onPageUpdate: (update: RightSidebarPageUpdate) => void
   onSurfaceFocus: () => void

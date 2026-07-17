@@ -717,6 +717,12 @@
   scrollbar-color: var(--mc-color-git-review-border-default) transparent;
 }
 
+.git-review__diff-card-body--placeholder {
+  contain: strict;
+  overflow: hidden;
+  pointer-events: none;
+}
+
 .git-review__diff-message {
   display: flex;
   min-height: 86px;
@@ -790,21 +796,8 @@
 }
 
 [data-wrap='true'] .git-review__diff-code {
-  display: grid;
-  grid-template-columns: 1.25ch minmax(0, 1fr);
   overflow-wrap: anywhere;
   white-space: normal;
-}
-
-.git-review__diff-prefix {
-  display: inline-block;
-  width: 1.25ch;
-  color: inherit;
-  user-select: none;
-}
-
-[data-wrap='true'] .git-review__diff-prefix {
-  width: auto;
 }
 
 [data-wrap='true'] .git-review__diff-content {

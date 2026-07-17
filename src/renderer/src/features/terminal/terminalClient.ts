@@ -12,8 +12,12 @@ export function createTerminalSession(
   return hostClient.terminal.createSession(request)
 }
 
-export function writeTerminalInput(sessionId: string, data: string): Promise<void> {
-  return hostClient.terminal.writeInput(sessionId, data)
+export function acknowledgeTerminalOutput(sessionId: string, sequence: number): void {
+  hostClient.terminal.acknowledgeOutput(sessionId, sequence)
+}
+
+export function writeTerminalInput(sessionId: string, data: string): void {
+  hostClient.terminal.writeInput(sessionId, data)
 }
 
 export function resizeTerminalSession(
@@ -28,14 +32,12 @@ export function killTerminalSession(sessionId: string): Promise<boolean> {
   return hostClient.terminal.killSession(sessionId)
 }
 
-export function listenToTerminalOutput(
-  handler: (event: TerminalOutputEvent) => void
-): Promise<() => void> {
-  return Promise.resolve(hostClient.terminal.onOutput(handler))
-}
-
-export function listenToTerminalExit(
-  handler: (event: TerminalExitEvent) => void
-): Promise<() => void> {
-  return Promise.resolve(hostClient.terminal.onExit(handler))
+export function subscribeTerminalSession(
+  sessionId: string,
+  handlers: {
+    onExit: (event: TerminalExitEvent) => void
+    onOutput: (event: TerminalOutputEvent) => void
+  }
+): () => void {
+  return hostClient.terminal.subscribeSession(sessionId, handlers)
 }

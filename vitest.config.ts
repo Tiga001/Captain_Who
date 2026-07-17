@@ -7,6 +7,9 @@ const gitReviewTests = 'src/renderer/src/features/gitReview/__tests__'
 const rightSidebarTests = 'src/renderer/src/features/rightSidebar/__tests__'
 const filesTests = 'src/renderer/src/features/files/__tests__'
 const workspaceFilesTests = 'src/main/workspaceFiles'
+const terminalMainTests = 'src/main/terminal'
+const terminalPreloadTests = 'src/preload'
+const terminalRendererTests = 'src/renderer/src/features/terminal/__tests__'
 
 export default defineConfig({
   optimizeDeps: {
@@ -40,7 +43,10 @@ export default defineConfig({
           include: [
             `${gitReviewTests}/**/*.test.ts`,
             `${rightSidebarTests}/**/*.test.ts`,
-            `${workspaceFilesTests}/**/*.test.ts`
+            `${workspaceFilesTests}/**/*.test.ts`,
+            `${terminalMainTests}/**/*.test.ts`,
+            `${terminalPreloadTests}/**/*.test.ts`,
+            `${terminalRendererTests}/**/*.test.ts`
           ],
           name: 'unit'
         }

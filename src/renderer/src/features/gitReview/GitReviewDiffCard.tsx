@@ -1,7 +1,9 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -27,57 +29,68 @@ import { GitReviewDiffRenderer } from './GitReviewDiffRenderer'
 import type { GitReviewDiffExpandHandler } from './GitReviewDiffRenderer'
 import { reduceGitDiffExpansion, type GitDiffExpansionState } from './diff'
 import { GitReviewFileIcon } from './GitReviewFileIcon'
+import { canHydrateGitReviewFile } from './gitReviewFileCapabilities'
 import type { GitReviewViewMode } from './gitReviewViewMode'
 import type { GitReviewDiffState, GitReviewFileContentState } from './useGitReview'
 
 const EMPTY_EXPANSION_STATE: GitDiffExpansionState = new Map()
+const DEFAULT_DIFF_BODY_HEIGHT = 87
+const DIFF_BODY_UNMOUNT_DELAY_MS = 400
 
 interface GitReviewDiffCardProps {
   diffState?: GitReviewDiffState
   file: GitReviewFile
   fileContentState?: GitReviewFileContentState
   isExpanded: boolean
+  isNearViewport: boolean
   isReviewActive: boolean
+  isSelected: boolean
   isVisible: boolean
+  layoutWidth?: number
   loadFullFiles: boolean
   mutationLocked: boolean
   mutationPending: boolean
   onMutate: (fileId: string, action: GitReviewFileMutationAction) => void
   onRequestDiff: (fileId: string) => void
-  onRequestFileContent: (fileId: string) => void
   onRestore: (file: GitReviewFile) => void
   onToggle: (fileId: string) => void
   scope: GitReviewScope
   scrollRootRef: RefObject<HTMLDivElement | null>
+  reviewSnapshotId?: string
   t: Translate
   viewMode: GitReviewViewMode
   wrapLines: boolean
 }
 
 /** Owns file-level review UX; patch parsing and line rendering live behind a separate boundary. */
-export function GitReviewDiffCard({
+export const GitReviewDiffCard = memo(function GitReviewDiffCard({
   diffState,
   file,
   fileContentState,
   isExpanded,
+  isNearViewport,
   isReviewActive,
+  isSelected,
   isVisible,
+  layoutWidth = 0,
   loadFullFiles,
   mutationLocked,
   mutationPending,
   onMutate,
   onRequestDiff,
-  onRequestFileContent,
   onRestore,
   onToggle,
   scope,
   scrollRootRef,
+  reviewSnapshotId,
   t,
   viewMode,
   wrapLines
 }: GitReviewDiffCardProps): ReactNode {
   const cardRef = useRef<HTMLElement>(null)
+  const bodyRef = useRef<HTMLDivElement>(null)
   const pendingScrollAnchorRef = useRef<{ anchorId: string; beforeTop: number } | null>(null)
+  const [retainNearBody, setRetainNearBody] = useState(isNearViewport)
   const activeDiff = diffState?.status === 'ready' ? diffState.value : null
   const [expansionController, setExpansionController] = useState<{
     diff: typeof activeDiff
@@ -86,30 +99,69 @@ export function GitReviewDiffCard({
   const expansionState =
     expansionController.diff === activeDiff ? expansionController.state : EMPTY_EXPANSION_STATE
 
-  useEffect(() => {
-    if (isExpanded) onRequestDiff(file.id)
-  }, [file.id, isExpanded, onRequestDiff])
-
-  const canLoadFullContent =
-    isReviewActive &&
-    isExpanded &&
-    isVisible &&
-    loadFullFiles &&
-    isFullContentEligible(file.status) &&
-    diffState?.status === 'ready' &&
-    diffState.value.status === 'ready' &&
-    (!fileContentState || fileContentState.status === 'idle')
   const syntaxSourceReady =
     !loadFullFiles ||
-    !isFullContentEligible(file.status) ||
+    !canHydrateGitReviewFile(file.status) ||
     fileContentState?.status === 'ready' ||
     fileContentState?.status === 'error'
 
   useEffect(() => {
-    if (canLoadFullContent && isElementVisibleWithinRoot(cardRef.current, scrollRootRef.current)) {
-      onRequestFileContent(file.id)
+    if (!isReviewActive || !isExpanded) {
+      setRetainNearBody(false)
+      return undefined
     }
-  }, [canLoadFullContent, file.id, onRequestFileContent, scrollRootRef])
+    if (isNearViewport || isSelected) {
+      setRetainNearBody(true)
+      return undefined
+    }
+    const timeout = window.setTimeout(() => setRetainNearBody(false), DIFF_BODY_UNMOUNT_DELAY_MS)
+    return () => window.clearTimeout(timeout)
+  }, [isExpanded, isNearViewport, isReviewActive, isSelected])
+
+  const expansionSignature = useMemo(
+    () =>
+      [...expansionState]
+        .map(([gapId, value]) => `${gapId}:${value.fromStart}:${value.fromEnd}`)
+        .join('|'),
+    [expansionState]
+  )
+  const bodySnapshotKey = `${file.id}:${reviewSnapshotId ?? activeDiff?.snapshotId ?? 'pending'}`
+  const bodyLayoutKey = `${bodySnapshotKey}:${viewMode}:${wrapLines ? 1 : 0}:${Math.round(layoutWidth)}:${expansionSignature}`
+  const [bodyMeasurement, setBodyMeasurement] = useState({
+    height: DEFAULT_DIFF_BODY_HEIGHT,
+    key: bodyLayoutKey,
+    snapshotKey: bodySnapshotKey
+  })
+  const reservedBodyHeight =
+    bodyMeasurement.key === bodyLayoutKey || bodyMeasurement.snapshotKey === bodySnapshotKey
+      ? bodyMeasurement.height
+      : DEFAULT_DIFF_BODY_HEIGHT
+  const shouldRenderBody =
+    isExpanded && isReviewActive && (isNearViewport || isSelected || retainNearBody)
+  const shouldPreserveLoadingHeight =
+    !diffState || diffState.status === 'idle' || diffState.status === 'loading'
+
+  useLayoutEffect(() => {
+    if (!shouldRenderBody) return undefined
+    const body = bodyRef.current
+    if (!body) return undefined
+    const measure = (): void => {
+      const height = Math.max(
+        DEFAULT_DIFF_BODY_HEIGHT,
+        Math.ceil(body.getBoundingClientRect().height)
+      )
+      setBodyMeasurement((current) =>
+        current.key === bodyLayoutKey && Math.abs(current.height - height) <= 1
+          ? current
+          : { height, key: bodyLayoutKey, snapshotKey: bodySnapshotKey }
+      )
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(measure)
+    observer.observe(body)
+    return () => observer.disconnect()
+  }, [bodyLayoutKey, bodySnapshotKey, shouldRenderBody])
 
   const handleExpand = useCallback<GitReviewDiffExpandHandler>(
     (action, scrollAnchorId) => {
@@ -206,8 +258,12 @@ export function GitReviewDiffCard({
         </div>
       </div>
 
-      {isExpanded && (
-        <div className="git-review__diff-card-body">
+      {isExpanded && shouldRenderBody && (
+        <div
+          className="git-review__diff-card-body"
+          ref={bodyRef}
+          style={shouldPreserveLoadingHeight ? { minHeight: reservedBodyHeight } : undefined}
+        >
           <GitReviewDiffRenderer
             diffState={diffState}
             expansionState={expansionState}
@@ -222,13 +278,16 @@ export function GitReviewDiffCard({
           />
         </div>
       )}
+      {isExpanded && !shouldRenderBody && (
+        <div
+          className="git-review__diff-card-body git-review__diff-card-body--placeholder"
+          aria-hidden="true"
+          style={{ height: reservedBodyHeight }}
+        />
+      )}
     </section>
   )
-}
-
-function isFullContentEligible(status: GitReviewFile['status']): boolean {
-  return status === 'modified' || status === 'renamed' || status === 'copied'
-}
+})
 
 function findPrimaryDiffAnchor(root: HTMLElement | null, anchorId: string): HTMLElement | null {
   if (!root) return null
@@ -236,23 +295,6 @@ function findPrimaryDiffAnchor(root: HTMLElement | null, anchorId: string): HTML
     Array.from(root.querySelectorAll<HTMLElement>('[data-primary-anchor="true"]')).find(
       (candidate) => candidate.dataset.diffAnchorId === anchorId
     ) ?? null
-  )
-}
-
-function isElementVisibleWithinRoot(
-  element: HTMLElement | null,
-  root: HTMLElement | null
-): boolean {
-  if (!element || !root) return false
-  const elementRect = element.getBoundingClientRect()
-  const rootRect = root.getBoundingClientRect()
-  return (
-    elementRect.width > 0 &&
-    elementRect.height > 0 &&
-    elementRect.right > rootRect.left &&
-    elementRect.left < rootRect.right &&
-    elementRect.bottom > rootRect.top &&
-    elementRect.top < rootRect.bottom
   )
 }
 

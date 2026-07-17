@@ -20,6 +20,21 @@ export const WORKSPACE_FILE_TREE_UNSAFE_CSS = `
     overscroll-behavior: contain;
   }
 
+  [data-file-tree-sticky-overlay-content="true"] {
+    background-color: var(--trees-bg);
+    box-shadow:
+      0 1px 0 var(--trees-border-color),
+      0 8px 14px -14px color-mix(in srgb, var(--trees-fg) 38%, transparent);
+  }
+
+  [data-type="item"][data-file-tree-sticky-row="true"] {
+    background-color: var(--trees-bg);
+  }
+
+  [data-type="item"][data-file-tree-sticky-row="true"][data-item-focused="true"]::before {
+    outline: 0;
+  }
+
   [data-type="item"] {
     letter-spacing: 0;
   }
@@ -55,7 +70,7 @@ export function useWorkspaceFileTree({
     overscan: 24,
     paths: [],
     search: false,
-    stickyFolders: false,
+    stickyFolders: true,
     unsafeCSS: WORKSPACE_FILE_TREE_UNSAFE_CSS
   })
 

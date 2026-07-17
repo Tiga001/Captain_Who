@@ -99,7 +99,9 @@ function StickyCardsFixture(): ReactNode {
               diffState={createDiffState(fileId)}
               file={createFile(fileId)}
               isExpanded
+              isNearViewport
               isReviewActive
+              isSelected={fileId === 'first'}
               isVisible
               loadFullFiles={false}
               key={fileId}
@@ -107,7 +109,6 @@ function StickyCardsFixture(): ReactNode {
               mutationPending={false}
               onMutate={noop}
               onRequestDiff={noop}
-              onRequestFileContent={noop}
               onRestore={noop}
               onToggle={noop}
               scope="unstaged"
@@ -118,6 +119,49 @@ function StickyCardsFixture(): ReactNode {
             />
           ))}
         </div>
+      </div>
+    </div>
+  )
+}
+
+function WindowedCardFixture({
+  active,
+  layoutWidth = 440,
+  near,
+  viewMode = 'unified'
+}: {
+  active: boolean
+  layoutWidth?: number
+  near: boolean
+  viewMode?: 'split' | 'unified'
+}): ReactNode {
+  const scrollRootRef = useRef<HTMLDivElement>(null)
+  return (
+    <div className="git-review" style={{ display: 'block', height: 420, width: 440 }}>
+      <div className="git-review__content" ref={scrollRootRef} style={{ height: 420 }}>
+        <GitReviewDiffCard
+          diffState={createDiffState('windowed')}
+          file={createFile('windowed')}
+          isExpanded
+          isNearViewport={near}
+          isReviewActive={active}
+          isSelected={false}
+          isVisible={near}
+          layoutWidth={layoutWidth}
+          loadFullFiles={false}
+          mutationLocked={false}
+          mutationPending={false}
+          onMutate={noop}
+          onRequestDiff={noop}
+          onRestore={noop}
+          onToggle={noop}
+          reviewSnapshotId="snapshot-1"
+          scope="unstaged"
+          scrollRootRef={scrollRootRef}
+          t={translate}
+          viewMode={viewMode}
+          wrapLines={false}
+        />
       </div>
     </div>
   )
@@ -171,14 +215,15 @@ function ExpansionAnchorFixture(): ReactNode {
           file={createFile('anchor')}
           fileContentState={fileContentState}
           isExpanded
+          isNearViewport
           isReviewActive
+          isSelected
           isVisible
           loadFullFiles
           mutationLocked={false}
           mutationPending={false}
           onMutate={noop}
           onRequestDiff={noop}
-          onRequestFileContent={noop}
           onRestore={noop}
           onToggle={noop}
           scope="unstaged"
@@ -249,6 +294,41 @@ describe('GitReviewDiffCard browser layout', () => {
     const secondAfterBoundary = headers[1].getBoundingClientRect()
     expect(Math.abs(secondAfterBoundary.top - scrollportTop)).toBeLessThanOrEqual(1)
     expect(firstAfterBoundary.bottom).toBeLessThanOrEqual(scrollportTop + 1)
+  })
+
+  it('releases inactive diff DOM while preserving the measured scroll geometry', async () => {
+    const screen = await render(<WindowedCardFixture active near />)
+    await nextPaint()
+    const liveBody = screen.container.querySelector<HTMLElement>('.git-review__diff-card-body')
+    if (!liveBody) throw new Error('Windowed diff body did not render')
+    const liveHeight = liveBody.getBoundingClientRect().height
+    expect(liveHeight).toBeGreaterThan(300)
+    expect(screen.container.querySelector('.git-review__unified-diff')).not.toBeNull()
+
+    await screen.rerender(<WindowedCardFixture active={false} near={false} />)
+    await nextPaint()
+    const placeholder = screen.container.querySelector<HTMLElement>(
+      '.git-review__diff-card-body--placeholder'
+    )
+    if (!placeholder) throw new Error('Windowed diff placeholder did not render')
+    expect(screen.container.querySelector('.git-review__unified-diff')).toBeNull()
+    expect(Math.abs(placeholder.getBoundingClientRect().height - liveHeight)).toBeLessThanOrEqual(1)
+
+    await screen.rerender(
+      <WindowedCardFixture active={false} layoutWidth={620} near={false} viewMode="split" />
+    )
+    await nextPaint()
+    const resizedPlaceholder = screen.container.querySelector<HTMLElement>(
+      '.git-review__diff-card-body--placeholder'
+    )
+    if (!resizedPlaceholder) throw new Error('Resized diff placeholder did not render')
+    expect(
+      Math.abs(resizedPlaceholder.getBoundingClientRect().height - liveHeight)
+    ).toBeLessThanOrEqual(1)
+
+    await screen.rerender(<WindowedCardFixture active near />)
+    await nextPaint()
+    expect(screen.container.querySelector('.git-review__unified-diff')).not.toBeNull()
   })
 
   it('portals and repositions a tooltip outside an overflow-clipped anchor container', async () => {

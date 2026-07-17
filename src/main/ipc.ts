@@ -6,7 +6,12 @@ import {
   nativeTheme,
   shell
 } from 'electron'
-import type { IpcMainInvokeEvent, OpenDialogOptions, OpenDialogReturnValue } from 'electron'
+import type {
+  IpcMainEvent,
+  IpcMainInvokeEvent,
+  OpenDialogOptions,
+  OpenDialogReturnValue
+} from 'electron'
 import { homedir } from 'os'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
 import { readFile } from 'fs/promises'
@@ -261,6 +266,7 @@ export function registerHostIpc(
     getProjectPath(coreServer, projectId)
   )
   type InvokeHandler = Parameters<typeof electronIpcMain.handle>[1]
+  type OneWayHandler = (event: IpcMainEvent, ...args: unknown[]) => void
   const ipcMain = {
     handle(channel: string, handler: InvokeHandler): void {
       electronIpcMain.handle(channel, (event, ...args) => {
@@ -268,6 +274,15 @@ export function registerHostIpc(
           throw new Error(`Blocked untrusted IPC sender for ${channel}`)
         }
         return handler(event, ...args)
+      })
+    },
+    on(channel: string, handler: OneWayHandler): void {
+      electronIpcMain.on(channel, (event, ...args) => {
+        if (!isTrustedRenderer(event as unknown as IpcMainInvokeEvent)) {
+          console.warn(`Blocked untrusted one-way IPC sender for ${channel}`)
+          return
+        }
+        handler(event, ...args)
       })
     }
   }
@@ -414,16 +429,19 @@ export function registerHostIpc(
   ipcMain.handle('host:workspaceFiles.revealInFolder', async (_event, input) => {
     shell.showItemInFolder(await workspaceFilesService.resolvePathForReveal(input))
   })
-  ipcMain.handle('host:terminal.createSession', (_event, request) =>
-    terminalBridge.createSession(request)
+  ipcMain.handle('host:terminal.createSession', (event, request) =>
+    terminalBridge.createSession(event.sender, request)
   )
-  ipcMain.handle('host:terminal.writeInput', (_event, sessionId, data) =>
-    terminalBridge.writeInput(sessionId, data)
+  ipcMain.on('host:terminal.writeInput', (event, sessionId, data) => {
+    terminalBridge.writeInput(event.sender, String(sessionId), typeof data === 'string' ? data : '')
+  })
+  ipcMain.on('host:terminal.acknowledgeOutput', (event, sessionId, sequence) => {
+    terminalBridge.acknowledgeOutput(event.sender, String(sessionId), Number(sequence))
+  })
+  ipcMain.handle('host:terminal.resizeSession', (event, sessionId, cols, rows) =>
+    terminalBridge.resizeSession(event.sender, sessionId, cols, rows)
   )
-  ipcMain.handle('host:terminal.resizeSession', (_event, sessionId, cols, rows) =>
-    terminalBridge.resizeSession(sessionId, cols, rows)
-  )
-  ipcMain.handle('host:terminal.killSession', (_event, sessionId) =>
-    terminalBridge.killSession(sessionId)
+  ipcMain.handle('host:terminal.killSession', (event, sessionId) =>
+    terminalBridge.killSession(event.sender, sessionId)
   )
 }

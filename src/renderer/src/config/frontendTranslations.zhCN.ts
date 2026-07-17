@@ -166,6 +166,7 @@ export const zhCNTranslations = {
   'gitReview.diff.tooLarge': '这个文件的差异过大，无法在审阅页面中安全显示。',
   'gitReview.diff.noHunks': '这个文件没有可显示的文本差异。',
   'gitReview.diff.invalid': '这个文件的差异格式无效，无法安全显示。',
+  'gitReview.diff.snapshotExpired': '此审阅快照已过期，请刷新以加载当前差异。',
   'gitReview.diff.unmodifiedLines': '{count} 行未修改',
   'gitReview.diff.expandUp': '向上展开 {count} 行',
   'gitReview.diff.expandDown': '向下展开 {count} 行',

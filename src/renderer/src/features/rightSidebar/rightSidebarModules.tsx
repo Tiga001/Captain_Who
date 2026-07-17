@@ -1,6 +1,7 @@
-import { lazy, Suspense } from 'react'
+import { lazy, memo, Suspense, useCallback } from 'react'
 import { FileDiff, FolderOpen, Globe2, TerminalSquare } from 'lucide-react'
 import { getFileTypeIconSource } from '../../components/files/FileTypeIcon'
+import type { BrowserPageMetadata } from '../browser/browserTypes'
 import type {
   RightSidebarModuleCreateContext,
   RightSidebarModuleDefinition,
@@ -96,41 +97,72 @@ function createFilesPage({
   }
 }
 
-function renderTerminalModule({ isActive, page, t }: RightSidebarModuleRenderProps) {
+function renderTerminalModule({ activity, page, t }: RightSidebarModuleRenderProps) {
   return (
     <Suspense
       fallback={<div className="right-sidebar__panel-loading">{t('terminal.status.starting')}</div>}
     >
-      <TerminalPanel initialCwd={page.workspacePath} isActive={isActive} />
+      <TerminalPanel initialCwd={page.workspacePath} isActive={activity === 'foreground'} />
     </Suspense>
   )
 }
 
 function renderBrowserModule({
-  isActive,
+  activity,
   onPageUpdate,
   onSurfaceFocus,
   page,
   t
 }: RightSidebarModuleRenderProps) {
   return (
-    <Suspense fallback={<div className="right-sidebar__panel-loading">{t('browser.title')}</div>}>
-      <BrowserPanel
-        isActive={isActive}
-        onPageMetadataChange={(metadata) => {
-          onPageUpdate({
-            iconUrl: metadata.iconUrl,
-            title: metadata.title?.trim() || page.title
-          })
-        }}
-        onSurfaceFocus={onSurfaceFocus}
-        pageId={page.id}
-      />
-    </Suspense>
+    <BrowserModuleSurface
+      activity={activity}
+      onPageUpdate={onPageUpdate}
+      onSurfaceFocus={onSurfaceFocus}
+      pageId={page.id}
+      t={t}
+    />
   )
 }
 
-function renderGitReviewModule({ availability, isActive, page, t }: RightSidebarModuleRenderProps) {
+type BrowserModuleSurfaceProps = Pick<
+  RightSidebarModuleRenderProps,
+  'activity' | 'onPageUpdate' | 'onSurfaceFocus' | 't'
+> & {
+  pageId: string
+}
+
+const BrowserModuleSurface = memo(function BrowserModuleSurface({
+  activity,
+  onPageUpdate,
+  onSurfaceFocus,
+  pageId,
+  t
+}: BrowserModuleSurfaceProps) {
+  const handlePageMetadataChange = useCallback(
+    (metadata: BrowserPageMetadata) => {
+      const title = metadata.title?.trim()
+      onPageUpdate({
+        iconUrl: metadata.iconUrl,
+        ...(title ? { title } : {})
+      })
+    },
+    [onPageUpdate]
+  )
+
+  return (
+    <Suspense fallback={<div className="right-sidebar__panel-loading">{t('browser.title')}</div>}>
+      <BrowserPanel
+        isActive={activity === 'foreground'}
+        onPageMetadataChange={handlePageMetadataChange}
+        onSurfaceFocus={onSurfaceFocus}
+        pageId={pageId}
+      />
+    </Suspense>
+  )
+})
+
+function renderGitReviewModule({ activity, availability, page, t }: RightSidebarModuleRenderProps) {
   if (availability === 'checking') {
     return <div className="right-sidebar__panel-loading">{t('gitReview.loading')}</div>
   }
@@ -140,14 +172,14 @@ function renderGitReviewModule({ availability, isActive, page, t }: RightSidebar
     <Suspense
       fallback={<div className="right-sidebar__panel-loading">{t('gitReview.loading')}</div>}
     >
-      <GitReviewPanel isActive={isActive} projectId={page.workspaceKey ?? ''} />
+      <GitReviewPanel isActive={activity === 'foreground'} projectId={page.workspaceKey ?? ''} />
     </Suspense>
   )
 }
 
 function renderFilesModule({
+  activity,
   availability,
-  isActive,
   onOpenPage,
   onSurfaceFocus,
   page,
@@ -160,7 +192,7 @@ function renderFilesModule({
     <Suspense fallback={<div className="right-sidebar__panel-loading">{t('files.loading')}</div>}>
       <FilesPanel
         filePath={filePath}
-        isActive={isActive}
+        isActive={activity === 'foreground'}
         onOpenFile={(path) => {
           onOpenPage({
             iconUrl: getFileTypeIconSource(path),

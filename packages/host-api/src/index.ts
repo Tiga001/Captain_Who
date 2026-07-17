@@ -132,12 +132,17 @@ export interface ResourcesHostApi {
 }
 
 export interface TerminalHostApi {
+  acknowledgeOutput(sessionId: string, sequence: number): void
   createSession(request: TerminalCreateSessionRequest): Promise<TerminalSessionSnapshot>
-  writeInput(sessionId: string, data: string): Promise<void>
-  resizeSession(sessionId: string, cols: number, rows: number): Promise<void>
   killSession(sessionId: string): Promise<boolean>
-  onOutput(handler: (event: TerminalOutputEvent) => void): () => void
-  onExit(handler: (event: TerminalExitEvent) => void): () => void
+  resizeSession(sessionId: string, cols: number, rows: number): Promise<void>
+  subscribeSession(sessionId: string, handlers: TerminalSessionEventHandlers): () => void
+  writeInput(sessionId: string, data: string): void
+}
+
+export interface TerminalSessionEventHandlers {
+  onExit(event: TerminalExitEvent): void
+  onOutput(event: TerminalOutputEvent): void
 }
 
 export interface WorkspaceFilesHostApi {

@@ -7,7 +7,11 @@ import { getGitReviewCssVariables } from '../../../config/themes/gitReviewTheme'
 import type { Translate } from '../../../config/translationFormat'
 import '../../../styles/global.css'
 import { GitReviewDiffRenderer } from '../GitReviewDiffRenderer'
-import { reduceGitDiffExpansion, type GitDiffExpansionState } from '../diff'
+import {
+  MAX_GIT_DIFF_RENDER_LINE_CHARACTERS,
+  reduceGitDiffExpansion,
+  type GitDiffExpansionState
+} from '../diff'
 import '../GitReviewPanel.css'
 import type { GitReviewViewMode } from '../gitReviewViewMode'
 import type { GitReviewDiffState, GitReviewFileContentState } from '../useGitReview'
@@ -357,6 +361,45 @@ function clickMiddleGapControl(container: HTMLElement, accessibleName: string): 
 }
 
 describe('GitReviewDiffRenderer split layout', () => {
+  it.each([
+    ['split', false],
+    ['split', true],
+    ['unified', false],
+    ['unified', true]
+  ] as const)('removes the marker column in %s view when wrap=%s', async (viewMode, wrapLines) => {
+    const screen = await render(
+      <DiffFixture patch={PATCH_REPLACEMENT_SHORT} viewMode={viewMode} wrapLines={wrapLines} />
+    )
+    const changedCodes = Array.from(
+      screen.container.querySelectorAll<HTMLElement>(
+        '.git-review__diff-line--addition .git-review__diff-code, ' +
+          '.git-review__diff-line--deletion .git-review__diff-code'
+      )
+    )
+
+    expect(changedCodes).toHaveLength(2)
+    expect(screen.container.querySelector('.git-review__diff-prefix')).toBeNull()
+    for (const code of changedCodes) {
+      const content = code.querySelector<HTMLElement>('.git-review__diff-content')
+      if (!content) throw new Error('Expected changed-line content')
+      const paddingLeft = Number.parseFloat(getComputedStyle(code).paddingLeft)
+      expectWidthCloseTo(
+        content.getBoundingClientRect().left,
+        code.getBoundingClientRect().left + paddingLeft
+      )
+    }
+  })
+
+  it('rejects a pathological patch before parsing or creating diff rows', async () => {
+    const screen = await render(
+      <DiffFixture patch={`@@ -1 +1 @@\n+${'x'.repeat(MAX_GIT_DIFF_RENDER_LINE_CHARACTERS + 1)}`} />
+    )
+
+    await expect.element(screen.getByText('gitReview.diff.tooLarge')).toBeVisible()
+    expect(screen.container.querySelector('.git-review__split-diff--scrollable')).toBeNull()
+    expect(screen.container.querySelector('.git-review__unified-diff')).toBeNull()
+  })
+
   it.each([420, 641])('keeps two fixed half-width scrollports at %ipx', async (width) => {
     const screen = await render(<DiffFixture width={width} />)
     const viewport = screen.getByTestId('diff-viewport').element() as HTMLElement

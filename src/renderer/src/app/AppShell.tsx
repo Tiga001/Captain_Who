@@ -270,6 +270,28 @@ export function AppShell() {
     () => ({ 'git-repository': gitRepositoryCapability }),
     [gitRepositoryCapability]
   )
+  const rightSidebarMaximizedToolbarControls = useMemo(
+    () =>
+      rightMaximized ? (
+        <MaximizedSidebarControls
+          hasUnreadConversations={hasUnreadConversations}
+          leftOpen={leftOpen}
+          onToggleLeftSidebar={toggleLeftSidebar}
+          onToggleRightSidebar={toggleRightSidebar}
+          rightOpen={rightOpen}
+          t={t}
+        />
+      ) : null,
+    [
+      hasUnreadConversations,
+      leftOpen,
+      rightMaximized,
+      rightOpen,
+      t,
+      toggleLeftSidebar,
+      toggleRightSidebar
+    ]
+  )
 
   // Agent tool events arrive faster than React state commits. Keep the ref and state in one
   // update path so an older render snapshot cannot overwrite newer tool-call results.
@@ -1765,22 +1787,12 @@ export function AppShell() {
         <RightSidebar
           capabilities={rightSidebarCapabilities}
           isMaximized={rightMaximized}
+          isOpen={rightOpen}
           workspaceKey={rightSidebarWorkspaceProject?.id}
           workspaceName={rightSidebarWorkspaceProject?.name}
           workspacePath={rightSidebarWorkspacePath}
           onToggleMaximized={toggleRightSidebarMaximized}
-          maximizedToolbarControls={
-            rightMaximized ? (
-              <MaximizedSidebarControls
-                hasUnreadConversations={hasUnreadConversations}
-                leftOpen={leftOpen}
-                onToggleLeftSidebar={toggleLeftSidebar}
-                onToggleRightSidebar={toggleRightSidebar}
-                rightOpen={rightOpen}
-                t={t}
-              />
-            ) : null
-          }
+          maximizedToolbarControls={rightSidebarMaximizedToolbarControls}
         />
       </aside>
     </div>

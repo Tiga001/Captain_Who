@@ -1,8 +1,9 @@
 import { useEffect } from 'react'
 import { PanelTop } from 'lucide-react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type {
+  RightSidebarActivity,
   RightSidebarCapabilities,
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
@@ -10,18 +11,29 @@ import type {
 } from '../rightSidebarTypes'
 import { createRightSidebarWorkspaceSessionKey } from '../rightSidebarWorkspace'
 
+const { translate } = vi.hoisted(() => ({
+  translate: (key: string) => key
+}))
+
 vi.mock('../../../config/FrontendConfigProvider', () => ({
   useFrontendConfig: () => ({
-    t: (key: string) => key
+    t: translate
   })
 }))
 
 const { RightSidebar } = await import('../../../components/sidebar/RightSidebar')
 const surfaceLifecycleSpy = vi.fn()
+const surfaceRenderSpy = vi.fn()
+const NOOP = () => undefined
+let documentVisibilityState: DocumentVisibilityState = 'visible'
 
 const MODULES: RightSidebarModuleDefinition[] = [
   createTestModule('terminal', 'pinned-to-creation-workspace', 'multiple', 'retain-page'),
   createTestModule('browser', 'global', 'multiple', 'retain-page'),
+  {
+    ...createTestModule('files', 'follow-workspace', 'multiple', 'close-page'),
+    requiresWorkspace: true
+  },
   {
     ...createTestModule('git-review', 'follow-workspace', 'single', 'close-page'),
     requiredCapability: 'git-repository'
@@ -30,6 +42,13 @@ const MODULES: RightSidebarModuleDefinition[] = [
 
 beforeEach(() => {
   surfaceLifecycleSpy.mockClear()
+  surfaceRenderSpy.mockClear()
+  documentVisibilityState = 'visible'
+  vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => documentVisibilityState)
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
 })
 
 describe('RightSidebar workspace lifecycle', () => {
@@ -41,8 +60,9 @@ describe('RightSidebar workspace lifecycle', () => {
         {...workspaceA}
         capabilities={gitCapability(workspaceA, 'available')}
         isMaximized={false}
+        isOpen
         modules={MODULES}
-        onToggleMaximized={() => undefined}
+        onToggleMaximized={NOOP}
       />
     )
 
@@ -58,14 +78,17 @@ describe('RightSidebar workspace lifecycle', () => {
       'rightSidebar.browser',
       'rightSidebar.review'
     ])
+    const terminalRendersBeforeWorkspaceSwitch = renderCount('terminal')
+    const browserRendersBeforeWorkspaceSwitch = renderCount('browser')
 
     await screen.rerender(
       <RightSidebar
         {...workspaceB}
         capabilities={gitCapability(workspaceB, 'checking')}
         isMaximized={false}
+        isOpen
         modules={MODULES}
-        onToggleMaximized={() => undefined}
+        onToggleMaximized={NOOP}
       />
     )
 
@@ -78,6 +101,8 @@ describe('RightSidebar workspace lifecycle', () => {
     expect(lifecycleCount('unmount', 'terminal')).toBe(0)
     expect(lifecycleCount('mount', 'browser')).toBe(1)
     expect(lifecycleCount('unmount', 'browser')).toBe(0)
+    expect(renderCount('terminal')).toBe(terminalRendersBeforeWorkspaceSwitch)
+    expect(renderCount('browser')).toBe(browserRendersBeforeWorkspaceSwitch)
     expect(getTabLabels(screen.container)).toEqual([
       'rightSidebar.terminal',
       'rightSidebar.browser',
@@ -89,8 +114,9 @@ describe('RightSidebar workspace lifecycle', () => {
         {...workspaceB}
         capabilities={gitCapability(workspaceB, 'available')}
         isMaximized={false}
+        isOpen
         modules={MODULES}
-        onToggleMaximized={() => undefined}
+        onToggleMaximized={NOOP}
       />
     )
 
@@ -105,14 +131,17 @@ describe('RightSidebar workspace lifecycle', () => {
     expect(lifecycleCount('unmount', 'terminal')).toBe(0)
     expect(lifecycleCount('mount', 'browser')).toBe(1)
     expect(lifecycleCount('unmount', 'browser')).toBe(0)
+    expect(renderCount('terminal')).toBe(terminalRendersBeforeWorkspaceSwitch)
+    expect(renderCount('browser')).toBe(browserRendersBeforeWorkspaceSwitch)
 
     await screen.rerender(
       <RightSidebar
         {...workspaceB}
         capabilities={gitCapability(workspaceB, 'unavailable')}
         isMaximized={false}
+        isOpen
         modules={MODULES}
-        onToggleMaximized={() => undefined}
+        onToggleMaximized={NOOP}
       />
     )
 
@@ -132,8 +161,9 @@ describe('RightSidebar workspace lifecycle', () => {
         {...workspace}
         capabilities={gitCapability(workspace, 'available')}
         isMaximized={false}
+        isOpen
         modules={MODULES}
-        onToggleMaximized={() => undefined}
+        onToggleMaximized={NOOP}
       />
     )
     await openHomeModule(screen, 'rightSidebar.review')
@@ -144,13 +174,146 @@ describe('RightSidebar workspace lifecycle', () => {
         {...workspace}
         capabilities={gitCapability(workspace, 'available')}
         isMaximized={false}
+        isOpen
         modules={MODULES}
-        onToggleMaximized={() => undefined}
+        onToggleMaximized={NOOP}
       />
     )
 
     expect(lifecycleCount('mount', 'git-review')).toBe(1)
     expect(lifecycleCount('unmount', 'git-review')).toBe(0)
+  })
+
+  it('separates selection from work activity without unmounting keep-alive pages', async () => {
+    const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
+    const capabilities = gitCapability(workspace, 'available')
+    const screen = await render(
+      <RightSidebar
+        {...workspace}
+        capabilities={capabilities}
+        isMaximized={false}
+        isOpen
+        modules={MODULES}
+        onToggleMaximized={NOOP}
+      />
+    )
+
+    await openHomeModule(screen, 'rightSidebar.terminal')
+    await openAdditionalModule(screen, 'rightSidebar.browser')
+    await openAdditionalModule(screen, 'rightSidebar.files')
+    await expect
+      .poll(() => getSurface(screen.container, 'files').dataset.activity)
+      .toBe('foreground')
+
+    expect(getSurface(screen.container, 'terminal').dataset.activity).toBe('background')
+    expect(getSurface(screen.container, 'browser').dataset.activity).toBe('background')
+    const terminalRenderCount = renderCount('terminal')
+    const terminalMountCount = lifecycleCount('mount', 'terminal')
+
+    await screen.getByRole('tab', { name: 'rightSidebar.browser' }).click()
+
+    await expect
+      .poll(() => getSurface(screen.container, 'browser').dataset.activity)
+      .toBe('foreground')
+    expect(getSurface(screen.container, 'files').dataset.activity).toBe('background')
+    expect(getSurface(screen.container, 'terminal').dataset.activity).toBe('background')
+    expect(renderCount('terminal')).toBe(terminalRenderCount)
+    expect(lifecycleCount('mount', 'terminal')).toBe(terminalMountCount)
+    expect(lifecycleCount('unmount', 'terminal')).toBe(0)
+  })
+
+  it('marks every retained page dormant when the sidebar or document is hidden', async () => {
+    const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
+    const capabilities = gitCapability(workspace, 'available')
+    const renderSidebar = (isOpen: boolean, isMaximized = false) => (
+      <RightSidebar
+        {...workspace}
+        capabilities={capabilities}
+        isMaximized={isMaximized}
+        isOpen={isOpen}
+        modules={MODULES}
+        onToggleMaximized={NOOP}
+      />
+    )
+    const screen = await render(renderSidebar(true))
+
+    await openHomeModule(screen, 'rightSidebar.terminal')
+    await openAdditionalModule(screen, 'rightSidebar.browser')
+    await expect
+      .poll(() => getSurface(screen.container, 'browser').dataset.activity)
+      .toBe('foreground')
+
+    documentVisibilityState = 'hidden'
+    document.dispatchEvent(new Event('visibilitychange'))
+    await expect
+      .poll(() => getSurface(screen.container, 'browser').dataset.activity)
+      .toBe('dormant')
+    expect(getSurface(screen.container, 'terminal').dataset.activity).toBe('dormant')
+    expect(getComputedStyle(getPageFrame(screen.container, 'browser')).contentVisibility).toBe(
+      'hidden'
+    )
+
+    documentVisibilityState = 'visible'
+    document.dispatchEvent(new Event('visibilitychange'))
+    await expect
+      .poll(() => getSurface(screen.container, 'browser').dataset.activity)
+      .toBe('foreground')
+    expect(getComputedStyle(getPageFrame(screen.container, 'browser')).contentVisibility).toBe(
+      'visible'
+    )
+
+    await screen.rerender(renderSidebar(false))
+    await expect
+      .poll(() => getSurface(screen.container, 'browser').dataset.activity)
+      .toBe('dormant')
+    expect(getSurface(screen.container, 'terminal').dataset.activity).toBe('dormant')
+
+    await screen.rerender(renderSidebar(false, true))
+    expect(getSurface(screen.container, 'browser').dataset.activity).toBe('dormant')
+    expect(getSurface(screen.container, 'terminal').dataset.activity).toBe('dormant')
+
+    await screen.rerender(renderSidebar(true))
+    await expect
+      .poll(() => getSurface(screen.container, 'browser').dataset.activity)
+      .toBe('foreground')
+    expect(getSurface(screen.container, 'terminal').dataset.activity).toBe('background')
+    expect(lifecycleCount('mount', 'terminal')).toBe(1)
+    expect(lifecycleCount('mount', 'browser')).toBe(1)
+    expect(lifecycleCount('unmount', 'terminal')).toBe(0)
+    expect(lifecycleCount('unmount', 'browser')).toBe(0)
+  })
+
+  it('does not render module surfaces for unrelated sidebar parent updates', async () => {
+    const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
+    const capabilities = gitCapability(workspace, 'available')
+    const renderSidebar = (isMaximized: boolean) => (
+      <RightSidebar
+        {...workspace}
+        capabilities={capabilities}
+        isMaximized={isMaximized}
+        isOpen
+        modules={MODULES}
+        onToggleMaximized={NOOP}
+      />
+    )
+    const screen = await render(renderSidebar(false))
+
+    await openHomeModule(screen, 'rightSidebar.terminal')
+    await openAdditionalModule(screen, 'rightSidebar.browser')
+    await openAdditionalModule(screen, 'rightSidebar.files')
+    await expect.poll(() => lifecycleCount('mount', 'files')).toBe(1)
+    const rendersBefore = new Map(
+      (['terminal', 'browser', 'files'] as const).map((moduleId) => [
+        moduleId,
+        renderCount(moduleId)
+      ])
+    )
+
+    await screen.rerender(renderSidebar(true))
+
+    expect(renderCount('terminal')).toBe(rendersBefore.get('terminal'))
+    expect(renderCount('browser')).toBe(rendersBefore.get('browser'))
+    expect(renderCount('files')).toBe(rendersBefore.get('files'))
   })
 })
 
@@ -165,7 +328,9 @@ function createTestModule(
       ? 'rightSidebar.terminal'
       : id === 'browser'
         ? 'rightSidebar.browser'
-        : 'rightSidebar.review'
+        : id === 'files'
+          ? 'rightSidebar.files'
+          : 'rightSidebar.review'
   return {
     contextBinding,
     createPage: ({ pageId, workspace }) => ({
@@ -191,21 +356,40 @@ function renderTestModule(id: RightSidebarModuleId, props: RightSidebarModuleRen
     return <div data-testid="review-loading">checking</div>
   }
   if (props.availability === 'unavailable') return null
-  return <TrackedSurface moduleId={id} workspaceKey={props.page.workspaceKey} />
+  return (
+    <TrackedSurface
+      activity={props.activity}
+      isSelected={props.isSelected}
+      moduleId={id}
+      workspaceKey={props.page.workspaceKey}
+    />
+  )
 }
 
 function TrackedSurface({
+  activity,
+  isSelected,
   moduleId,
   workspaceKey
 }: {
+  activity: RightSidebarActivity
+  isSelected: boolean
   moduleId: RightSidebarModuleId
   workspaceKey?: string | null
 }) {
+  surfaceRenderSpy(moduleId, activity, isSelected)
   useEffect(() => {
     surfaceLifecycleSpy('mount', moduleId)
     return () => surfaceLifecycleSpy('unmount', moduleId)
   }, [moduleId])
-  return <div data-testid={`${moduleId}-surface`} data-workspace-key={workspaceKey ?? 'global'} />
+  return (
+    <div
+      data-activity={activity}
+      data-selected={isSelected ? 'true' : 'false'}
+      data-testid={`${moduleId}-surface`}
+      data-workspace-key={workspaceKey ?? 'global'}
+    />
+  )
 }
 
 function workspaceProps(workspaceKey: string, workspaceName: string, workspacePath: string) {
@@ -249,6 +433,12 @@ function getSurface(container: HTMLElement, moduleId: RightSidebarModuleId): HTM
   return surface
 }
 
+function getPageFrame(container: HTMLElement, moduleId: RightSidebarModuleId): HTMLElement {
+  const page = getSurface(container, moduleId).closest<HTMLElement>('.right-sidebar__page')
+  if (!page) throw new Error(`Missing ${moduleId} page frame`)
+  return page
+}
+
 function getTabLabels(container: HTMLElement): string[] {
   return Array.from(container.querySelectorAll<HTMLElement>('.right-sidebar__tab > span')).map(
     (tab) => tab.textContent ?? ''
@@ -259,4 +449,9 @@ function lifecycleCount(event: 'mount' | 'unmount', moduleId: RightSidebarModule
   return surfaceLifecycleSpy.mock.calls.filter(
     ([recordedEvent, recordedModuleId]) => recordedEvent === event && recordedModuleId === moduleId
   ).length
+}
+
+function renderCount(moduleId: RightSidebarModuleId): number {
+  return surfaceRenderSpy.mock.calls.filter(([recordedModuleId]) => recordedModuleId === moduleId)
+    .length
 }

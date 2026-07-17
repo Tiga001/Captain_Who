@@ -109,7 +109,7 @@ describe('FilesPanel', () => {
     await expect
       .poll(() => host.shadowRoot?.querySelector('[data-item-path="src/index.ts"]'))
       .not.toBeNull()
-    expect(host.shadowRoot.querySelector('[data-file-tree-sticky-overlay="true"]')).toBeNull()
+    expect(host.shadowRoot.querySelector('[data-file-tree-sticky-overlay="true"]')).not.toBeNull()
 
     const workspace = screen.container.querySelector<HTMLElement>('.files-panel__workspace')
     const preview = screen.container.querySelector<HTMLElement>('.files-panel__preview')
@@ -181,5 +181,133 @@ describe('FilesPanel', () => {
         Math.abs(preview.getBoundingClientRect().width - workspace.getBoundingClientRect().width)
       )
       .toBeLessThan(1)
+  })
+
+  it('stacks sticky directory ancestors and replaces only the matching hierarchy level', async () => {
+    const createFiles = (directoryPath: string, count: number) =>
+      Array.from({ length: count }, (_, index) => {
+        const name = `file-${String(index).padStart(2, '0')}.ts`
+        return { kind: 'file' as const, name, path: `${directoryPath}/${name}` }
+      })
+
+    listDirectorySpy.mockImplementation(
+      async ({ directoryPath = '' }: { directoryPath?: string }) => {
+        if (directoryPath === 'alpha/branch/leaf') {
+          return {
+            directoryPath,
+            entries: createFiles(directoryPath, 24),
+            truncated: false
+          }
+        }
+        if (directoryPath === 'alpha/branch') {
+          return {
+            directoryPath,
+            entries: [
+              { kind: 'directory', name: 'leaf', path: 'alpha/branch/leaf/' },
+              ...createFiles(directoryPath, 4)
+            ],
+            truncated: false
+          }
+        }
+        if (directoryPath === 'alpha') {
+          return {
+            directoryPath,
+            entries: [
+              { kind: 'directory', name: 'branch', path: 'alpha/branch/' },
+              ...createFiles(directoryPath, 4)
+            ],
+            truncated: false
+          }
+        }
+        if (directoryPath === 'omega') {
+          return {
+            directoryPath,
+            entries: createFiles(directoryPath, 24),
+            truncated: false
+          }
+        }
+        return {
+          directoryPath: '',
+          entries: [
+            { kind: 'directory', name: 'alpha', path: 'alpha/' },
+            { kind: 'directory', name: 'omega', path: 'omega/' }
+          ],
+          truncated: false
+        }
+      }
+    )
+    readMetadataSpy.mockImplementation(async ({ path }: { path: string }) => ({
+      kind: 'file',
+      mimeType: 'text/plain; charset=utf-8',
+      modifiedAtMs: 1,
+      path,
+      previewKind: 'text',
+      sizeBytes: 16
+    }))
+    readTextSpy.mockImplementation(async ({ path }: { path: string }) => ({
+      content: path,
+      modifiedAtMs: 1,
+      path,
+      sizeBytes: 16
+    }))
+
+    const screen = await render(
+      <div style={{ height: 360, width: 620 }}>
+        <FilesPanel
+          filePath="alpha/branch/leaf/file-20.ts"
+          isActive
+          onOpenFile={openFileSpy}
+          onSurfaceFocus={() => undefined}
+          projectId="project-1"
+          projectName="Workspace"
+        />
+      </div>
+    )
+
+    await expect
+      .poll(() => screen.container.querySelector<HTMLElement>('file-tree-container'))
+      .not.toBeNull()
+    const host = screen.container.querySelector<HTMLElement>('file-tree-container')
+    if (!host?.shadowRoot) throw new Error('Pierre tree did not attach an open shadow root')
+
+    const stickyRows = (): HTMLElement[] =>
+      Array.from(
+        host.shadowRoot?.querySelectorAll<HTMLElement>('[data-file-tree-sticky-row="true"]') ?? []
+      )
+    const stickyPaths = (): string[] =>
+      stickyRows().map((row) => row.dataset.fileTreeStickyPath ?? '')
+
+    await expect.poll(stickyPaths).toEqual(['alpha/', 'alpha/branch/', 'alpha/branch/leaf/'])
+    expect(stickyRows().map((row) => row.style.top)).toEqual(['0px', '28px', '56px'])
+
+    const stickyContent = host.shadowRoot.querySelector<HTMLElement>(
+      '[data-file-tree-sticky-overlay-content="true"]'
+    )
+    expect(stickyContent).not.toBeNull()
+    expect(stickyContent && getComputedStyle(stickyContent).backgroundColor).not.toBe(
+      'rgba(0, 0, 0, 0)'
+    )
+
+    const scrollElement = host.shadowRoot.querySelector<HTMLElement>(
+      '[data-file-tree-virtualized-scroll="true"]'
+    )
+    if (!scrollElement) throw new Error('Pierre tree did not render its scroll container')
+
+    scrollElement.scrollTop = scrollElement.scrollHeight
+    scrollElement.dispatchEvent(new Event('scroll'))
+    await expect
+      .poll(() => host.shadowRoot?.querySelector<HTMLButtonElement>('[data-item-path="omega/"]'))
+      .not.toBeNull()
+    const collapsedTreeHeight = scrollElement.scrollHeight
+    host.shadowRoot.querySelector<HTMLButtonElement>('[data-item-path="omega/"]')?.click()
+
+    await expect
+      .poll(() => listDirectorySpy.mock.calls.some(([input]) => input.directoryPath === 'omega'))
+      .toBe(true)
+    await expect.poll(() => scrollElement.scrollHeight).toBeGreaterThan(collapsedTreeHeight)
+    scrollElement.scrollTop = scrollElement.scrollHeight
+    scrollElement.dispatchEvent(new Event('scroll'))
+
+    await expect.poll(stickyPaths).toEqual(['omega/'])
   })
 })
