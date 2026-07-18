@@ -234,6 +234,22 @@ impl PreparedSkillPackage {
         self.source.as_bytes()
     }
 
+    /// Bytes retained by the immutable package payload while it is staged in
+    /// an in-memory installation session.
+    ///
+    /// This deliberately counts the derived manifest as well as source and
+    /// resource bytes. It is a deterministic admission-control measure, not an
+    /// estimate of allocator or container overhead.
+    pub fn retained_payload_bytes(&self) -> usize {
+        let resources = self.resources.iter().fold(0_usize, |total, resource| {
+            total.saturating_add(resource.bytes.len())
+        });
+        self.source
+            .len()
+            .saturating_add(resources)
+            .saturating_add(self.manifest_bytes.as_deref().map_or(0, <[u8]>::len))
+    }
+
     pub fn instructions(&self) -> &str {
         &self.source[self.instructions_range.clone()]
     }

@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import type {
   SkillInstallationCommitOutput,
   SkillInstallationPreview,
+  SkillAcquisitionSource,
   SkillManagementErrorData,
   SkillPreparationCancellationOutput,
   SkillsCancelPreparationInput,
@@ -56,8 +57,8 @@ interface SkillWorkflowGolden {
     recovery: 'retryLater'
     message: string
     preparationId: string
-    diagnosticCode: string
-    retryAfterMs: number
+    diagnosticCode?: string
+    retryAfterMs?: number
   }
   managementErrors: SkillManagementErrorData[]
 }
@@ -143,6 +144,27 @@ describe('CoreServer Skill installation workflow client', () => {
       rpcRequest.mockResolvedValueOnce(testCase.response)
       await expect(testCase.invoke(server)).rejects.toThrow()
     }
+  })
+
+  it('rejects presentation-pinned GitHub sources before sending an RPC request', () => {
+    const github = golden.inspectCases.find(
+      (testCase) => testCase.request.source.kind === 'githubRepository'
+    )
+    if (!github || github.request.source.kind !== 'githubRepository') {
+      throw new Error('The workflow fixture must contain a GitHub inspection case')
+    }
+    const source = {
+      ...github.request.source,
+      resolvedCommit: '0123456789abcdef0123456789abcdef01234567'
+    } as unknown as SkillAcquisitionSource
+
+    expect(() =>
+      new CoreServer().inspectSkillInstallation({
+        ...github.request,
+        source
+      })
+    ).toThrow('unexpected field resolvedCommit')
+    expect(rpcRequest).not.toHaveBeenCalled()
   })
 
   it('preserves structured RPC errors for the IPC invocation envelope', async () => {

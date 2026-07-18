@@ -40,6 +40,8 @@ import type {
   SkillMutationOutput,
   SkillPreparationCancellationOutput,
   SkillsCancelPreparationInput,
+  SkillsCancelSourceResolutionInput,
+  SkillsCancelSourceResolutionOutput,
   SkillsChangedNotification,
   SkillsCommitInstallationInput,
   SkillsInstallLocalInput,
@@ -73,15 +75,20 @@ import {
   parseSkillInstallationCommitOutput,
   parseSkillInstallationPreview,
   parseSkillInspectionErrorData,
+  parseSkillAcquisitionSource,
   parseSkillManagementErrorData,
   parseSkillMutationOutput,
   parseSkillPreparationCancellationOutput,
   parseSkillSourceResolutionErrorData,
+  parseSkillsCancelSourceResolutionInput,
+  parseSkillsCancelSourceResolutionOutput,
   parseSkillsChangedNotification,
   parseSkillsListManagementOutput,
+  parseSkillsResolveInstallationSourceInput,
   parseSkillsResolveInstallationSourceOutput,
   parseSkillsSetEnabledOutput,
   SKILLS_CANCEL_PREPARATION_METHOD,
+  SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD,
   SKILLS_CHANGED_NOTIFICATION_METHOD,
   SKILLS_COMMIT_INSTALLATION_METHOD,
   SKILLS_INSTALL_LOCAL_METHOD,
@@ -326,20 +333,51 @@ export class CoreServer {
   resolveSkillInstallationSource(
     input: SkillsResolveInstallationSourceInput
   ): Promise<SkillsResolveInstallationSourceOutput> {
+    const request = parseSkillsResolveInstallationSourceInput(input)
     return this.rpc
       .request<unknown, SkillsResolveInstallationSourceInput>(
         SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD,
-        input
+        request
       )
-      .then(parseSkillsResolveInstallationSourceOutput)
+      .then((value) => {
+        const response = parseSkillsResolveInstallationSourceOutput(value)
+        if (response.resolutionId !== request.resolutionId) {
+          throw new Error(
+            'Invalid Skill source resolution response: resolutionId must match request.resolutionId'
+          )
+        }
+        return response
+      })
+      .catch(rethrowValidatedSkillSourceResolutionError)
+  }
+
+  cancelSkillSourceResolution(
+    input: SkillsCancelSourceResolutionInput
+  ): Promise<SkillsCancelSourceResolutionOutput> {
+    const request = parseSkillsCancelSourceResolutionInput(input)
+    return this.rpc
+      .request<unknown, SkillsCancelSourceResolutionInput>(
+        SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD,
+        request
+      )
+      .then((value) => {
+        const response = parseSkillsCancelSourceResolutionOutput(value)
+        if (response.resolutionId !== request.resolutionId) {
+          throw new Error(
+            'Invalid Skill source resolution cancellation response: resolutionId must match request.resolutionId'
+          )
+        }
+        return response
+      })
       .catch(rethrowValidatedSkillSourceResolutionError)
   }
 
   inspectSkillInstallation(
     input: SkillsInspectInstallationInput
   ): Promise<SkillInstallationPreview> {
+    const request = { ...input, source: parseSkillAcquisitionSource(input.source) }
     return this.rpc
-      .request<unknown, SkillsInspectInstallationInput>(SKILLS_INSPECT_INSTALLATION_METHOD, input)
+      .request<unknown, SkillsInspectInstallationInput>(SKILLS_INSPECT_INSTALLATION_METHOD, request)
       .then(parseSkillInstallationPreview)
       .catch(rethrowValidatedSkillInspectionError)
   }

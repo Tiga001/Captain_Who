@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use mycopilot_core::skills::{SkillId, SkillInstallationId, SkillInstallationOperation};
 use mycopilot_protocol_rs::{
-    error, error_with_data, JsonRpcId, SkillInstallationErrorCodeDto, SkillInstallationErrorData,
-    SkillInstallationErrorTypeDto, SkillInstallationOperationDto, SkillInstallationRecoveryDto,
+    error, error_with_data, JsonRpcId, SkillInspectionErrorCodeDto, SkillInspectionErrorData,
+    SkillInspectionErrorTypeDto, SkillInspectionPhaseDto, SkillInspectionRecoveryDto,
+    SkillInstallationErrorCodeDto, SkillInstallationErrorData, SkillInstallationErrorTypeDto,
+    SkillInstallationOperationDto, SkillInstallationRecoveryDto, SKILL_INSPECTION_ERROR_CODE,
     SKILL_INSTALLATION_ERROR_CODE,
 };
 use serde_json::Value;
@@ -36,6 +38,12 @@ const SKILL_MUTATION_UNAVAILABLE_MESSAGE: &str =
     "Skill mutation could not start. Retry the same request.";
 const SKILL_MUTATION_INDETERMINATE_MESSAGE: &str =
     "Skill mutation did not finish before shutdown; its commit state is indeterminate.";
+const SKILL_WORKFLOW_COMMIT_CANCELLED_MESSAGE: &str =
+    "Skill commit was cancelled before it started because the core server is shutting down.";
+const SKILL_WORKFLOW_COMMIT_UNAVAILABLE_MESSAGE: &str =
+    "Skill commit could not start. Retry the same preparation.";
+const SKILL_WORKFLOW_COMMIT_INDETERMINATE_MESSAGE: &str =
+    "Skill commit did not finish; refresh the Skill list because it may have completed.";
 
 type SkillJobTask = Box<dyn FnOnce() -> Value + Send + 'static>;
 type SkillWorkerTask = Box<dyn FnOnce() + Send + 'static>;
@@ -43,6 +51,7 @@ type SkillWorkerTask = Box<dyn FnOnce() + Send + 'static>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SkillJobKind {
     Read,
+    WorkflowCommit { preparation_id: String },
     Mutation(SkillMutationJob),
 }
 
@@ -188,6 +197,25 @@ impl SkillsDispatcher {
         )
     }
 
+    /// Submits a two-phase workflow commit. The preparation identity is enough
+    /// to retry safely, while the concrete install/update target remains
+    /// intentionally encapsulated in the workflow session.
+    pub(crate) fn try_submit_workflow_commit<F>(
+        &self,
+        request_id: JsonRpcId,
+        preparation_id: String,
+        task: F,
+    ) -> Result<(), SkillsDispatchError>
+    where
+        F: FnOnce() -> Value + Send + 'static,
+    {
+        self.try_submit_job(
+            request_id,
+            SkillJobKind::WorkflowCommit { preparation_id },
+            task,
+        )
+    }
+
     fn try_submit_job<F>(
         &self,
         request_id: JsonRpcId,
@@ -307,6 +335,14 @@ fn cancel_queued_jobs(
             SkillJobKind::Read => {
                 worker_failure_response(job.request_id.clone(), SKILL_DISPATCH_CANCELLED_MESSAGE)
             }
+            SkillJobKind::WorkflowCommit { preparation_id } => workflow_commit_error_response(
+                job.request_id.clone(),
+                preparation_id,
+                false,
+                SkillInspectionErrorCodeDto::Cancelled,
+                SkillInspectionRecoveryDto::RetrySamePreparation,
+                SKILL_WORKFLOW_COMMIT_CANCELLED_MESSAGE,
+            ),
             SkillJobKind::Mutation(mutation) => mutation_error_response(
                 job.request_id.clone(),
                 mutation,
@@ -381,6 +417,14 @@ fn worker_start_failure_response(request_id: JsonRpcId, kind: &SkillJobKind) -> 
         SkillJobKind::Read => {
             worker_failure_response(request_id, SKILL_DISPATCH_WORKER_UNAVAILABLE_MESSAGE)
         }
+        SkillJobKind::WorkflowCommit { preparation_id } => workflow_commit_error_response(
+            request_id,
+            preparation_id,
+            false,
+            SkillInspectionErrorCodeDto::Unavailable,
+            SkillInspectionRecoveryDto::RetrySamePreparation,
+            SKILL_WORKFLOW_COMMIT_UNAVAILABLE_MESSAGE,
+        ),
         SkillJobKind::Mutation(mutation) => mutation_error_response(
             request_id,
             mutation,
@@ -394,6 +438,14 @@ fn worker_start_failure_response(request_id: JsonRpcId, kind: &SkillJobKind) -> 
 fn running_timeout_response(request_id: JsonRpcId, kind: &SkillJobKind) -> Value {
     match kind {
         SkillJobKind::Read => worker_failure_response(request_id, SKILL_DISPATCH_TIMED_OUT_MESSAGE),
+        SkillJobKind::WorkflowCommit { preparation_id } => workflow_commit_error_response(
+            request_id,
+            preparation_id,
+            true,
+            SkillInspectionErrorCodeDto::CommitIndeterminate,
+            SkillInspectionRecoveryDto::RefreshManagement,
+            SKILL_WORKFLOW_COMMIT_INDETERMINATE_MESSAGE,
+        ),
         SkillJobKind::Mutation(mutation) => mutation_error_response(
             request_id,
             mutation,
@@ -411,6 +463,14 @@ fn worker_execution_failure_response(
 ) -> Value {
     match kind {
         SkillJobKind::Read => worker_failure_response(request_id, message),
+        SkillJobKind::WorkflowCommit { preparation_id } => workflow_commit_error_response(
+            request_id,
+            preparation_id,
+            true,
+            SkillInspectionErrorCodeDto::CommitIndeterminate,
+            SkillInspectionRecoveryDto::RefreshManagement,
+            SKILL_WORKFLOW_COMMIT_INDETERMINATE_MESSAGE,
+        ),
         // A mutation closure can panic or lose its completion signal after its
         // receipt commit point. Conservatively preserve retry-safe semantics.
         SkillJobKind::Mutation(mutation) => mutation_error_response(
@@ -421,6 +481,37 @@ fn worker_execution_failure_response(
             message,
         ),
     }
+}
+
+fn workflow_commit_error_response(
+    request_id: JsonRpcId,
+    preparation_id: &str,
+    commit_may_have_succeeded: bool,
+    code: SkillInspectionErrorCodeDto,
+    recovery: SkillInspectionRecoveryDto,
+    message: &str,
+) -> Value {
+    let fallback_request_id = request_id.clone();
+    let data = SkillInspectionErrorData {
+        error_type: SkillInspectionErrorTypeDto::SkillInspection,
+        phase: SkillInspectionPhaseDto::Commit,
+        code,
+        recovery,
+        message: message.to_string(),
+        preparation_id: Some(preparation_id.to_string()),
+        diagnostic_code: None,
+        retry_after_ms: None,
+        commit_may_have_succeeded,
+        skill_id: None,
+        intended_installation_revision: None,
+    };
+    serde_json::to_value(error_with_data(
+        Some(request_id),
+        SKILL_INSPECTION_ERROR_CODE,
+        message,
+        serde_json::to_value(data).expect("Skill inspection error data must serialize"),
+    ))
+    .unwrap_or_else(|_| worker_failure_response(fallback_request_id, message))
 }
 
 fn mutation_error_response(
@@ -518,6 +609,15 @@ mod tests {
 
     fn installed_skill_id() -> SkillId {
         SkillId::parse(format!("installed:user:{}", installation_id())).unwrap()
+    }
+
+    fn workflow_preparation_id() -> &'static str {
+        "0190b0f2-7c50-7cc0-8b25-3bb80f08b335"
+    }
+
+    fn inspection_error_data(response: &Value) -> SkillInspectionErrorData {
+        serde_json::from_value(response["error"]["data"].clone())
+            .expect("response must contain valid Skill inspection error data")
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -618,6 +718,43 @@ mod tests {
         assert_eq!(response["error"]["data"]["commitMayHaveSucceeded"], true);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workflow_commit_worker_panic_is_conservatively_commit_indeterminate() {
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 2);
+
+        dispatcher
+            .try_submit_workflow_commit(
+                JsonRpcId::String("workflow-panic".to_string()),
+                workflow_preparation_id().to_string(),
+                || panic!("test workflow commit panic"),
+            )
+            .unwrap();
+        let response = outbound_rx.recv().await.unwrap();
+        dispatcher.shutdown().await.unwrap();
+
+        let data = inspection_error_data(&response);
+        assert_eq!(response["id"], "workflow-panic");
+        assert_eq!(response["error"]["code"], SKILL_INSPECTION_ERROR_CODE);
+        assert_eq!(
+            data.error_type,
+            SkillInspectionErrorTypeDto::SkillInspection
+        );
+        assert_eq!(data.phase, SkillInspectionPhaseDto::Commit);
+        assert_eq!(data.code, SkillInspectionErrorCodeDto::CommitIndeterminate);
+        assert_eq!(data.recovery, SkillInspectionRecoveryDto::RefreshManagement);
+        assert_eq!(
+            data.preparation_id.as_deref(),
+            Some(workflow_preparation_id())
+        );
+        assert!(data.commit_may_have_succeeded);
+        assert_eq!(
+            response["error"]["message"],
+            SKILL_WORKFLOW_COMMIT_INDETERMINATE_MESSAGE
+        );
+        assert!(!response.to_string().contains("test workflow commit panic"));
+    }
+
     #[test]
     fn mutation_worker_start_failure_is_retryable_and_definitely_not_committed() {
         let admission = Arc::new(Semaphore::new(1));
@@ -661,6 +798,106 @@ mod tests {
         );
         assert_eq!(response["error"]["data"]["commitMayHaveSucceeded"], false);
         assert!(!response.to_string().contains("forced worker start failure"));
+    }
+
+    #[test]
+    fn workflow_commit_worker_start_failure_is_retryable_and_definitely_not_committed() {
+        let admission = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&admission).try_acquire_owned().unwrap();
+        let task_ran = Arc::new(AtomicBool::new(false));
+        let task_ran_from_worker = Arc::clone(&task_ran);
+        let job = QueuedSkillJob {
+            permit,
+            request_id: JsonRpcId::String("workflow-start-failure".to_string()),
+            kind: SkillJobKind::WorkflowCommit {
+                preparation_id: workflow_preparation_id().to_string(),
+            },
+            task: Box::new(move || {
+                task_ran_from_worker.store(true, Ordering::Release);
+                label("must-not-run")
+            }),
+        };
+
+        let response = match start_job_with_spawner(job, |_worker| {
+            Err(std::io::Error::other("forced worker start failure"))
+        }) {
+            Ok(_) => panic!("forced worker start failure unexpectedly succeeded"),
+            Err(response) => response,
+        };
+
+        let data = inspection_error_data(&response);
+        assert!(!task_ran.load(Ordering::Acquire));
+        assert_eq!(admission.available_permits(), 1);
+        assert_eq!(response["id"], "workflow-start-failure");
+        assert_eq!(response["error"]["code"], SKILL_INSPECTION_ERROR_CODE);
+        assert_eq!(
+            response["error"]["message"],
+            SKILL_WORKFLOW_COMMIT_UNAVAILABLE_MESSAGE
+        );
+        assert_eq!(
+            data.error_type,
+            SkillInspectionErrorTypeDto::SkillInspection
+        );
+        assert_eq!(data.phase, SkillInspectionPhaseDto::Commit);
+        assert_eq!(data.code, SkillInspectionErrorCodeDto::Unavailable);
+        assert_eq!(
+            data.recovery,
+            SkillInspectionRecoveryDto::RetrySamePreparation
+        );
+        assert_eq!(
+            data.preparation_id.as_deref(),
+            Some(workflow_preparation_id())
+        );
+        assert!(!data.commit_may_have_succeeded);
+        assert!(response["error"]["data"]
+            .get("commitMayHaveSucceeded")
+            .is_none());
+        assert!(!response.to_string().contains("forced worker start failure"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workflow_commit_completion_loss_is_conservatively_commit_indeterminate() {
+        let admission = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&admission).try_acquire_owned().unwrap();
+        let task_ran = Arc::new(AtomicBool::new(false));
+        let task_ran_from_worker = Arc::clone(&task_ran);
+        let job = QueuedSkillJob {
+            permit,
+            request_id: JsonRpcId::String("workflow-completion-loss".to_string()),
+            kind: SkillJobKind::WorkflowCommit {
+                preparation_id: workflow_preparation_id().to_string(),
+            },
+            task: Box::new(move || {
+                task_ran_from_worker.store(true, Ordering::Release);
+                label("must-not-run")
+            }),
+        };
+
+        let started = start_job_with_spawner(job, |_worker| {
+            std::thread::Builder::new()
+                .name("skill-completion-loss-test".to_string())
+                .spawn(|| {})
+        })
+        .expect("test worker must start");
+        let response = finish_started_job(started).await;
+
+        let data = inspection_error_data(&response);
+        assert!(!task_ran.load(Ordering::Acquire));
+        assert_eq!(admission.available_permits(), 1);
+        assert_eq!(response["id"], "workflow-completion-loss");
+        assert_eq!(response["error"]["code"], SKILL_INSPECTION_ERROR_CODE);
+        assert_eq!(data.phase, SkillInspectionPhaseDto::Commit);
+        assert_eq!(data.code, SkillInspectionErrorCodeDto::CommitIndeterminate);
+        assert_eq!(data.recovery, SkillInspectionRecoveryDto::RefreshManagement);
+        assert_eq!(
+            data.preparation_id.as_deref(),
+            Some(workflow_preparation_id())
+        );
+        assert!(data.commit_may_have_succeeded);
+        assert_eq!(
+            response["error"]["message"],
+            SKILL_WORKFLOW_COMMIT_INDETERMINATE_MESSAGE
+        );
     }
 
     #[test]
@@ -786,6 +1023,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_marks_a_queued_workflow_commit_as_not_started() {
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 3);
+        let queued_ran = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+
+        dispatcher
+            .try_submit(id(1), move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                label("running-read")
+            })
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let queued_ran_from_task = Arc::clone(&queued_ran);
+        dispatcher
+            .try_submit_workflow_commit(
+                JsonRpcId::String("queued-workflow".to_string()),
+                workflow_preparation_id().to_string(),
+                move || {
+                    queued_ran_from_task.store(true, Ordering::Release);
+                    label("must-not-run")
+                },
+            )
+            .unwrap();
+
+        let shutdown = tokio::spawn(dispatcher.shutdown());
+        let cancelled = outbound_rx.recv().await.unwrap();
+
+        let data = inspection_error_data(&cancelled);
+        assert_eq!(cancelled["id"], "queued-workflow");
+        assert_eq!(cancelled["error"]["code"], SKILL_INSPECTION_ERROR_CODE);
+        assert_eq!(
+            cancelled["error"]["message"],
+            SKILL_WORKFLOW_COMMIT_CANCELLED_MESSAGE
+        );
+        assert_eq!(
+            data.error_type,
+            SkillInspectionErrorTypeDto::SkillInspection
+        );
+        assert_eq!(data.phase, SkillInspectionPhaseDto::Commit);
+        assert_eq!(data.code, SkillInspectionErrorCodeDto::Cancelled);
+        assert_eq!(
+            data.recovery,
+            SkillInspectionRecoveryDto::RetrySamePreparation
+        );
+        assert_eq!(
+            data.preparation_id.as_deref(),
+            Some(workflow_preparation_id())
+        );
+        assert!(!data.commit_may_have_succeeded);
+        assert!(cancelled["error"]["data"]
+            .get("commitMayHaveSucceeded")
+            .is_none());
+        assert!(!queued_ran.load(Ordering::Acquire));
+        assert!(!shutdown.is_finished());
+
+        release_tx.send(()).unwrap();
+        assert_eq!(outbound_rx.recv().await.unwrap()["label"], "running-read");
+        shutdown.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_has_a_deadline_for_an_unresponsive_filesystem_worker() {
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
         let dispatcher = SkillsDispatcher::with_limit_and_shutdown_grace(
@@ -871,6 +1172,57 @@ mod tests {
             SKILL_MUTATION_INDETERMINATE_MESSAGE
         );
         assert!(response["error"]["data"].get("commitState").is_none());
+        release_tx.send(()).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn running_workflow_commit_shutdown_timeout_reports_an_indeterminate_commit() {
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let dispatcher = SkillsDispatcher::with_limit_and_shutdown_grace(
+            outbound_tx,
+            2,
+            Duration::from_millis(25),
+        );
+        let (started_tx, started_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        dispatcher
+            .try_submit_workflow_commit(
+                JsonRpcId::String("workflow-timeout".to_string()),
+                workflow_preparation_id().to_string(),
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    label("late-workflow")
+                },
+            )
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), dispatcher.shutdown())
+            .await
+            .expect("dispatcher shutdown must respect its deadline")
+            .unwrap();
+        let response = outbound_rx.recv().await.unwrap();
+
+        let data = inspection_error_data(&response);
+        assert_eq!(response["id"], "workflow-timeout");
+        assert_eq!(response["error"]["code"], SKILL_INSPECTION_ERROR_CODE);
+        assert_eq!(
+            response["error"]["message"],
+            SKILL_WORKFLOW_COMMIT_INDETERMINATE_MESSAGE
+        );
+        assert_eq!(
+            data.error_type,
+            SkillInspectionErrorTypeDto::SkillInspection
+        );
+        assert_eq!(data.phase, SkillInspectionPhaseDto::Commit);
+        assert_eq!(data.code, SkillInspectionErrorCodeDto::CommitIndeterminate);
+        assert_eq!(data.recovery, SkillInspectionRecoveryDto::RefreshManagement);
+        assert_eq!(
+            data.preparation_id.as_deref(),
+            Some(workflow_preparation_id())
+        );
+        assert!(data.commit_may_have_succeeded);
         release_tx.send(()).unwrap();
     }
 

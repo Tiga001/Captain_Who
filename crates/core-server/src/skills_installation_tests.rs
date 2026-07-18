@@ -111,6 +111,12 @@ fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
         .as_str()
         .unwrap()
         .to_string();
+    storage
+        .set_skill_enablement_override(&skill_id, false)
+        .unwrap();
+    let disabled_before_replay = storage
+        .load_skill_enablement_states(std::slice::from_ref(&skill_id))
+        .unwrap()[&skill_id];
     let retried_install = call_skill_rpc(
         &storage,
         &catalog,
@@ -120,6 +126,16 @@ fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
         install_params,
     );
     assert_eq!(retried_install["result"]["outcome"], "alreadyInstalled");
+    assert_eq!(
+        storage
+            .load_skill_enablement_states(std::slice::from_ref(&skill_id))
+            .unwrap()[&skill_id],
+        disabled_before_replay,
+        "a delayed install replay must not overwrite a newer user preference"
+    );
+    storage
+        .set_skill_enablement_override(&skill_id, true)
+        .unwrap();
 
     let listed = call_skill_rpc(
         &storage,
@@ -237,6 +253,9 @@ fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
     assert!(second_activation.runtime.unwrap().skills[0]
         .instructions
         .contains("LIFECYCLE_VERSION_TWO"));
+    storage
+        .set_skill_enablement_override(&skill_id, false)
+        .unwrap();
 
     let uninstall_params = json!({
         "skillId": skill_id,
@@ -251,6 +270,11 @@ fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
         uninstall_params.clone(),
     );
     assert_eq!(uninstalled["result"]["outcome"], "uninstalled");
+    let state_after_uninstall = storage
+        .load_skill_enablement_states(std::slice::from_ref(&skill_id))
+        .unwrap()[&skill_id];
+    assert!(state_after_uninstall.enabled);
+    assert_eq!(state_after_uninstall.generation, 0);
     let retried_uninstall = call_skill_rpc(
         &storage,
         &catalog,
@@ -260,6 +284,13 @@ fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
         uninstall_params,
     );
     assert_eq!(retried_uninstall["result"]["outcome"], "alreadyAbsent");
+    assert_eq!(
+        storage
+            .load_skill_enablement_states(std::slice::from_ref(&skill_id))
+            .unwrap()[&skill_id],
+        state_after_uninstall,
+        "an idempotent uninstall retry must not recreate derived state"
+    );
     let after_uninstall = call_skill_rpc(
         &storage,
         &catalog,
@@ -575,10 +606,14 @@ async fn two_phase_rpc_runs_install_update_activation_and_uninstall_end_to_end()
             .unwrap();
         let install = receive_rpc_response(&mut outbound_rx, 8, &mut notifications).await;
         assert_eq!(install["result"]["outcome"], "installed");
-        assert_eq!(
+        assert_ne!(
             install["result"]["installationRevision"],
             install["result"]["packageRevision"]
         );
+        assert!(install["result"]["installationRevision"]
+            .as_str()
+            .unwrap()
+            .starts_with("skill-installation-sha256-v1:"));
 
         write_local_skill(&local_skill, "TWO_PHASE_VERSION_TWO");
         let inspect_update = json!({
@@ -669,12 +704,39 @@ async fn two_phase_rpc_runs_install_update_activation_and_uninstall_end_to_end()
         assert_eq!(management["result"]["skills"].as_array().unwrap().len(), 1);
         assert_eq!(
             management["result"]["skills"][0]["actions"]["canUpdate"],
-            true
+            false
         );
         assert_eq!(
             management["result"]["skills"][0]["installationRevision"],
             update["result"]["installationRevision"]
         );
+
+        let stale_uninstall = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": SKILLS_UNINSTALL_METHOD,
+            "params": {
+                "skillId": update["result"]["skillId"],
+                "expectedRevision": install["result"]["installationRevision"]
+            }
+        });
+        input_writer
+            .write_all(format!("{stale_uninstall}\n").as_bytes())
+            .await
+            .unwrap();
+        let stale = receive_rpc_response(&mut outbound_rx, 9, &mut notifications).await;
+        assert_eq!(stale["error"]["code"], SKILL_INSTALLATION_ERROR_CODE);
+        assert_eq!(stale["error"]["data"]["code"], "revisionConflict");
+        assert_eq!(stale["error"]["data"]["recovery"], "refreshCatalog");
+        assert_eq!(
+            stale["error"]["data"]["expectedRevision"],
+            install["result"]["installationRevision"]
+        );
+        assert_eq!(
+            stale["error"]["data"]["actualRevision"],
+            update["result"]["installationRevision"]
+        );
+        assert_eq!(stale["error"]["data"]["commitMayHaveSucceeded"], false);
 
         let uninstall = json!({
             "jsonrpc": "2.0",

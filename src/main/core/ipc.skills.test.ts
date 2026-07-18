@@ -66,6 +66,7 @@ describe('Skill management IPC registration', () => {
 
   it('preserves structured source resolution errors returned by CoreServer', async () => {
     const input = {
+      resolutionId: '11111111-1111-4111-8111-111111111111',
       locator: {
         kind: 'url',
         url: 'https://github.com/openai/example-skills'
@@ -108,6 +109,26 @@ describe('Skill management IPC registration', () => {
       }
     })
     expect(resolveSkillInstallationSource).toHaveBeenCalledWith(input)
+  })
+
+  it('wraps source resolution cancellation through the Host invocation envelope', async () => {
+    const input = { resolutionId: '11111111-1111-4111-8111-111111111111' }
+    const output = { schemaVersion: 2, resolutionId: input.resolutionId, outcome: 'cancelled' }
+    const cancelSkillSourceResolution = vi.fn().mockResolvedValue(output)
+    const coreServer = {
+      onAgentEvent: vi.fn(),
+      onSkillsChanged: vi.fn(),
+      cancelSkillSourceResolution
+    }
+    registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
+    const registration = ipcMainHandle.mock.calls.find(
+      ([channel]) => channel === 'host:skills.cancelSourceResolution'
+    )
+    const handler = registration?.[1] as
+      ((event: IpcMainInvokeEvent, input: unknown) => Promise<unknown>) | undefined
+
+    await expect(handler?.(event, input)).resolves.toEqual({ ok: true, value: output })
+    expect(cancelSkillSourceResolution).toHaveBeenCalledWith(input)
   })
 
   it('preserves structured uninstall errors returned by CoreServer', async () => {

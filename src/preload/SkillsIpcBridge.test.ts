@@ -3,6 +3,7 @@ import type { HostInvocationResult } from '@mycopilot/host-api'
 import type {
   SkillInstallationPreview,
   SkillMutationOutput,
+  SkillsCancelSourceResolutionInput,
   SkillsChangedNotification,
   SkillsCommitInstallationInput,
   SkillsInspectInstallationInput,
@@ -76,11 +77,15 @@ describe('Skills IPC bridge', () => {
       source: { kind: 'localDirectory', directory: '/tmp/repository-auditor' }
     } satisfies SkillsInspectInstallationInput
     const resolveInput = {
+      resolutionId: '11111111-1111-4111-8111-111111111111',
       locator: {
         kind: 'url',
         url: 'https://github.com/openai/example-skills/tree/main/skills/auditor'
       }
     } satisfies SkillsResolveInstallationSourceInput
+    const cancelResolutionInput = {
+      resolutionId: resolveInput.resolutionId
+    } satisfies SkillsCancelSourceResolutionInput
     const commitInput = {
       preparationId: 'preparation-1',
       previewRevision: 'preview-revision-1',
@@ -104,6 +109,7 @@ describe('Skills IPC bridge', () => {
     const bridge = createSkillsIpcBridge(ipc.renderer)
 
     await expect(bridge.resolveInstallationSource(resolveInput)).resolves.toBe(response)
+    await expect(bridge.cancelSourceResolution(cancelResolutionInput)).resolves.toBe(response)
     await expect(bridge.inspectInstallation(inspectInput)).resolves.toBe(response)
     await bridge.commitInstallation(commitInput)
     await bridge.cancelPreparation({ preparationId: 'preparation-1' })
@@ -112,6 +118,7 @@ describe('Skills IPC bridge', () => {
 
     expect(ipc.invoke.mock.calls).toEqual([
       ['host:skills.resolveInstallationSource', resolveInput],
+      ['host:skills.cancelSourceResolution', cancelResolutionInput],
       ['host:skills.inspectInstallation', inspectInput],
       ['host:skills.commitInstallation', commitInput],
       ['host:skills.cancelPreparation', { preparationId: 'preparation-1' }],

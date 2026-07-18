@@ -6,6 +6,7 @@ import type { SkillsChangedNotification } from '@mycopilot/protocol'
 const SKILLS_LIST_CHANNEL = 'host:skills.list'
 const SKILLS_SELECT_INSTALLATION_DIRECTORY_CHANNEL = 'host:skills.selectInstallationDirectory'
 const SKILLS_RESOLVE_INSTALLATION_SOURCE_CHANNEL = 'host:skills.resolveInstallationSource'
+const SKILLS_CANCEL_SOURCE_RESOLUTION_CHANNEL = 'host:skills.cancelSourceResolution'
 const SKILLS_INSPECT_INSTALLATION_CHANNEL = 'host:skills.inspectInstallation'
 const SKILLS_COMMIT_INSTALLATION_CHANNEL = 'host:skills.commitInstallation'
 const SKILLS_CANCEL_PREPARATION_CHANNEL = 'host:skills.cancelPreparation'
@@ -24,6 +25,8 @@ export function createSkillsIpcBridge(ipcRenderer: SkillsIpcRenderer): SkillsHos
       ipcRenderer.invoke(SKILLS_SELECT_INSTALLATION_DIRECTORY_CHANNEL),
     resolveInstallationSource: (input) =>
       ipcRenderer.invoke(SKILLS_RESOLVE_INSTALLATION_SOURCE_CHANNEL, input),
+    cancelSourceResolution: (input) =>
+      ipcRenderer.invoke(SKILLS_CANCEL_SOURCE_RESOLUTION_CHANNEL, input),
     inspectInstallation: (input) => ipcRenderer.invoke(SKILLS_INSPECT_INSTALLATION_CHANNEL, input),
     commitInstallation: (input) => ipcRenderer.invoke(SKILLS_COMMIT_INSTALLATION_CHANNEL, input),
     cancelPreparation: (input) => ipcRenderer.invoke(SKILLS_CANCEL_PREPARATION_CHANNEL, input),

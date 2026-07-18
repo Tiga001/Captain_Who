@@ -6,15 +6,20 @@
 //! keeps extraction entirely in memory. The only output that crosses the
 //! installation boundary is a fully validated [`PreparedSkillPackage`].
 
+use super::acquisition_provenance::{
+    SkillInstallationAuthority, SkillInstallationProvenance, SkillInstallationProvenanceView,
+    SkillInstallationRefresh, SkillInstallationRefreshView,
+};
 use super::installation_workflow::{
-    SkillAcquisitionAdapter, SkillAcquisitionAdapterError, SkillAcquisitionProvider,
-    SkillAcquisitionSource,
+    InstalledGitHubTrackingReference, InstalledSkillSourcePresentation, SkillAcquisitionAdapter,
+    SkillAcquisitionAdapterError, SkillAcquisitionProvider, SkillAcquisitionSource,
 };
 use super::origin::SkillPackageOrigin;
 use super::package::{
     MAX_SKILL_PACKAGE_BYTES, MAX_SKILL_PACKAGE_FILES, MAX_SKILL_RESOURCE_FILE_BYTES,
 };
 use super::prepared::{PreparedSkillPackage, SkillPackagePreparationError};
+use super::prepared_acquisition::PreparedSkillAcquisition;
 use super::workspace::{MAX_SKILL_FILE_BYTES, SKILL_FILE_NAME};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{ACCEPT, CONTENT_LENGTH};
@@ -29,6 +34,7 @@ use std::time::Duration;
 use zip::{CompressionMethod, ZipArchive};
 
 pub const GITHUB_SKILL_ORIGIN_PROVIDER: &str = "github";
+const GITHUB_PROVENANCE_SCHEMA_VERSION: u32 = 1;
 
 const GITHUB_USER_AGENT: &str = "MyCopilot-Skill-Acquisition/1";
 const GITHUB_API_VERSION: &str = "2022-11-28";
@@ -495,14 +501,7 @@ impl GitHubSkillAcquirer {
             ));
         }
         let files = extract_selected_skill(&archive, location.subdirectory())?;
-        let summary = GitHubAcquisitionSummary {
-            owner: location.repository.owner.clone(),
-            repository: location.repository.name.clone(),
-            requested_reference_kind: location.reference.stable_kind(),
-            requested_reference: location.reference.value().map(str::to_string),
-            resolved_commit: commit.clone(),
-            subdirectory: location.subdirectory.as_str().to_string(),
-        };
+        let summary = GitHubAcquisitionSummary::from_location(&location, commit.clone());
         let origin = summary.origin()?;
         let package = PreparedSkillPackage::from_files(files, origin).map_err(map_package_error)?;
         Ok(AcquiredGitHubSkill { package, summary })
@@ -555,7 +554,7 @@ impl SkillAcquisitionAdapter for GitHubWorkflowAcquisitionAdapter {
     fn acquire(
         &self,
         source: &SkillAcquisitionSource,
-    ) -> Result<PreparedSkillPackage, SkillAcquisitionAdapterError> {
+    ) -> Result<PreparedSkillAcquisition, SkillAcquisitionAdapterError> {
         let request_bytes = source.adapter_request().ok_or_else(|| {
             SkillAcquisitionAdapterError::invalid_request(
                 "github provider received a different acquisition source envelope",
@@ -572,8 +571,46 @@ impl SkillAcquisitionAdapter for GitHubWorkflowAcquisitionAdapter {
             .map_err(map_acquisition_to_workflow_error)?;
         self.acquirer
             .acquire(location)
-            .map(AcquiredGitHubSkill::into_package)
+            .and_then(AcquiredGitHubSkill::into_acquisition)
             .map_err(map_acquisition_to_workflow_error)
+    }
+
+    fn refresh_schema_versions(&self) -> &'static [u32] {
+        &[GITHUB_PROVENANCE_SCHEMA_VERSION]
+    }
+
+    fn reacquire(
+        &self,
+        refresh: SkillInstallationRefreshView<'_>,
+    ) -> Result<PreparedSkillAcquisition, SkillAcquisitionAdapterError> {
+        if refresh.provider() != GITHUB_SKILL_ORIGIN_PROVIDER
+            || refresh.schema_version() != GITHUB_PROVENANCE_SCHEMA_VERSION
+        {
+            return Err(SkillAcquisitionAdapterError::invalid_request(
+                "GitHub refresh metadata has an unsupported provider or schema",
+            ));
+        }
+        let request: GitHubRefreshPayload<'_> =
+            serde_json::from_str(refresh.payload()).map_err(|_| {
+                SkillAcquisitionAdapterError::invalid_request(
+                    "GitHub refresh metadata does not match the strict tracking schema",
+                )
+            })?;
+        let location = request
+            .into_location()
+            .map_err(map_acquisition_to_workflow_error)?;
+        self.acquirer
+            .acquire(location)
+            .and_then(AcquiredGitHubSkill::into_acquisition)
+            .map_err(map_acquisition_to_workflow_error)
+    }
+
+    fn installed_source_presentation(
+        &self,
+        provenance: SkillInstallationProvenanceView<'_>,
+        refresh_capable: bool,
+    ) -> Option<InstalledSkillSourcePresentation> {
+        github_source_presentation(provenance, refresh_capable)
     }
 }
 
@@ -685,6 +722,13 @@ impl AcquiredGitHubSkill {
     pub fn into_package(self) -> PreparedSkillPackage {
         self.package
     }
+
+    pub(crate) fn into_acquisition(
+        self,
+    ) -> Result<PreparedSkillAcquisition, GitHubAcquisitionError> {
+        let provenance = self.summary.provenance()?;
+        Ok(PreparedSkillAcquisition::new(self.package, provenance))
+    }
 }
 
 /// Sanitized, replayable acquisition metadata. It contains no credential,
@@ -700,6 +744,35 @@ pub struct GitHubAcquisitionSummary {
 }
 
 impl GitHubAcquisitionSummary {
+    fn from_location(location: &GitHubSkillLocation, resolved_commit: GitHubCommit) -> Self {
+        Self {
+            owner: location.repository.owner.clone(),
+            repository: location.repository.name.clone(),
+            requested_reference_kind: location.reference.stable_kind(),
+            requested_reference: location.reference.value().map(str::to_string),
+            resolved_commit,
+            subdirectory: location.subdirectory.as_str().to_string(),
+        }
+    }
+
+    /// Builds the canonical provenance for a candidate that source resolution
+    /// has already pinned to an immutable commit.
+    pub(super) fn for_resolved_pin(
+        repository: &GitHubRepository,
+        tracking_reference: &GitHubReference,
+        resolved_commit: &GitHubCommit,
+        subdirectory: &GitHubSubdirectory,
+    ) -> Self {
+        Self {
+            owner: repository.owner.clone(),
+            repository: repository.name.clone(),
+            requested_reference_kind: tracking_reference.stable_kind(),
+            requested_reference: tracking_reference.value().map(str::to_string),
+            resolved_commit: resolved_commit.clone(),
+            subdirectory: subdirectory.as_str().to_string(),
+        }
+    }
+
     pub fn owner(&self) -> &str {
         &self.owner
     }
@@ -724,7 +797,53 @@ impl GitHubAcquisitionSummary {
         &self.subdirectory
     }
 
-    fn origin(&self) -> Result<SkillPackageOrigin, GitHubAcquisitionError> {
+    pub(super) fn provenance(&self) -> Result<SkillInstallationProvenance, GitHubAcquisitionError> {
+        let authority_payload = serde_json::to_string(&GitHubAuthorityPayload {
+            owner: &self.owner,
+            repository: &self.repository,
+            resolved_commit: self.resolved_commit.as_str(),
+            subdirectory: (!self.subdirectory.is_empty()).then_some(self.subdirectory.as_str()),
+        })
+        .map_err(|_| invalid_origin())?;
+        let authority = SkillInstallationAuthority::new(
+            GITHUB_SKILL_ORIGIN_PROVIDER,
+            GITHUB_PROVENANCE_SCHEMA_VERSION,
+            authority_payload,
+        )
+        .map_err(|_| invalid_origin())?;
+        let tracking_reference = match (
+            self.requested_reference_kind,
+            self.requested_reference.as_deref(),
+        ) {
+            ("defaultBranch", None) => Some(GitHubTrackingReference::DefaultBranch),
+            ("named", Some(value)) => Some(GitHubTrackingReference::Named { value }),
+            ("commit", Some(_)) => None,
+            _ => return Err(invalid_origin()),
+        };
+        let refresh = tracking_reference
+            .map(|reference| {
+                serde_json::to_string(&GitHubRefreshPayload {
+                    owner: &self.owner,
+                    repository: &self.repository,
+                    reference,
+                    subdirectory: (!self.subdirectory.is_empty())
+                        .then_some(self.subdirectory.as_str()),
+                })
+                .map_err(|_| invalid_origin())
+                .and_then(|payload| {
+                    SkillInstallationRefresh::new(
+                        GITHUB_SKILL_ORIGIN_PROVIDER,
+                        GITHUB_PROVENANCE_SCHEMA_VERSION,
+                        payload,
+                    )
+                    .map_err(|_| invalid_origin())
+                })
+            })
+            .transpose()?;
+        Ok(SkillInstallationProvenance::new(authority, refresh))
+    }
+
+    pub(super) fn origin(&self) -> Result<SkillPackageOrigin, GitHubAcquisitionError> {
         let requested_reference = match (
             self.requested_reference_kind,
             self.requested_reference.as_deref(),
@@ -760,6 +879,115 @@ impl GitHubAcquisitionSummary {
             )
         })
     }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GitHubAuthorityPayload<'a> {
+    #[serde(borrow)]
+    owner: &'a str,
+    #[serde(borrow)]
+    repository: &'a str,
+    #[serde(borrow)]
+    resolved_commit: &'a str,
+    #[serde(default, borrow, skip_serializing_if = "Option::is_none")]
+    subdirectory: Option<&'a str>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GitHubRefreshPayload<'a> {
+    #[serde(borrow)]
+    owner: &'a str,
+    #[serde(borrow)]
+    repository: &'a str,
+    #[serde(borrow)]
+    reference: GitHubTrackingReference<'a>,
+    #[serde(default, borrow)]
+    subdirectory: Option<&'a str>,
+}
+
+impl GitHubRefreshPayload<'_> {
+    fn into_location(self) -> Result<GitHubSkillLocation, GitHubAcquisitionError> {
+        let reference = match self.reference {
+            GitHubTrackingReference::DefaultBranch => GitHubReference::DefaultBranch,
+            GitHubTrackingReference::Named { value } => GitHubReference::named(value)?,
+        };
+        Ok(GitHubSkillLocation::new(
+            GitHubRepository::parse(self.owner, self.repository)?,
+            reference,
+            GitHubSubdirectory::parse(self.subdirectory.unwrap_or_default())?,
+        ))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+enum GitHubTrackingReference<'a> {
+    DefaultBranch,
+    Named {
+        #[serde(borrow)]
+        value: &'a str,
+    },
+}
+
+fn github_source_presentation(
+    provenance: SkillInstallationProvenanceView<'_>,
+    refresh_capable: bool,
+) -> Option<InstalledSkillSourcePresentation> {
+    let authority = provenance.authority();
+    if authority.provider() != GITHUB_SKILL_ORIGIN_PROVIDER
+        || authority.schema_version() != GITHUB_PROVENANCE_SCHEMA_VERSION
+    {
+        return None;
+    }
+    let authority: GitHubAuthorityPayload<'_> = serde_json::from_str(authority.payload()).ok()?;
+    let repository = GitHubRepository::parse(authority.owner, authority.repository).ok()?;
+    let commit = GitHubCommit::parse(authority.resolved_commit).ok()?;
+    let subdirectory_value = authority.subdirectory.unwrap_or_default();
+    if authority.subdirectory == Some("") {
+        return None;
+    }
+    let subdirectory = GitHubSubdirectory::parse(subdirectory_value).ok()?;
+
+    let (tracking_reference, refreshable) = match provenance.refresh() {
+        None => (InstalledGitHubTrackingReference::Commit, false),
+        Some(refresh)
+            if refresh.provider() == GITHUB_SKILL_ORIGIN_PROVIDER
+                && refresh.schema_version() == GITHUB_PROVENANCE_SCHEMA_VERSION =>
+        {
+            let refresh_payload: GitHubRefreshPayload<'_> =
+                serde_json::from_str(refresh.payload()).ok()?;
+            if refresh_payload.owner != repository.owner()
+                || refresh_payload.repository != repository.name()
+                || refresh_payload.subdirectory.unwrap_or_default() != subdirectory.as_str()
+                || refresh_payload.subdirectory == Some("")
+            {
+                return None;
+            }
+            let tracking = match refresh_payload.reference {
+                GitHubTrackingReference::DefaultBranch => {
+                    InstalledGitHubTrackingReference::DefaultBranch
+                }
+                GitHubTrackingReference::Named { value } => {
+                    let reference = GitHubNamedReference::parse(value).ok()?;
+                    InstalledGitHubTrackingReference::Named(reference.as_str().to_string())
+                }
+            };
+            (tracking, refresh_capable)
+        }
+        Some(_) => return None,
+    };
+
+    Some(InstalledSkillSourcePresentation::GitHub {
+        owner: repository.owner().to_string(),
+        repository: repository.name().to_string(),
+        tracking_reference,
+        resolved_commit: commit.as_str().to_string(),
+        subdirectory: (!subdirectory.as_str().is_empty())
+            .then(|| subdirectory.as_str().to_string()),
+        refreshable,
+    })
 }
 
 #[derive(Serialize)]
@@ -1553,6 +1781,13 @@ fn invalid_workflow_request() -> GitHubAcquisitionError {
     )
 }
 
+fn invalid_origin() -> GitHubAcquisitionError {
+    acquisition_error(
+        GitHubAcquisitionErrorCode::InvalidOrigin,
+        "Cannot construct bounded, credential-free GitHub installation provenance.",
+    )
+}
+
 fn invalid_subdirectory() -> GitHubAcquisitionError {
     acquisition_error(
         GitHubAcquisitionErrorCode::InvalidSubdirectory,
@@ -1594,6 +1829,7 @@ mod tests {
     };
     use super::super::model::SkillInstallationId;
     use super::*;
+    use std::collections::VecDeque;
     use std::io::Write;
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -1652,6 +1888,58 @@ mod tests {
         }
     }
 
+    struct SequencedTransport {
+        state: Mutex<SequencedState>,
+    }
+
+    struct SequencedState {
+        responses: VecDeque<(GitHubCommit, Vec<u8>)>,
+        pending_archive: Option<Vec<u8>>,
+        resolve_count: usize,
+        archive_count: usize,
+    }
+
+    impl SequencedTransport {
+        fn new(responses: Vec<(GitHubCommit, Vec<u8>)>) -> Self {
+            Self {
+                state: Mutex::new(SequencedState {
+                    responses: responses.into(),
+                    pending_archive: None,
+                    resolve_count: 0,
+                    archive_count: 0,
+                }),
+            }
+        }
+    }
+
+    impl GitHubAcquisitionTransport for SequencedTransport {
+        fn resolve_commit(
+            &self,
+            _request: &GitHubResolveRequest,
+        ) -> Result<GitHubCommit, GitHubTransportError> {
+            let mut state = self.state.lock().unwrap();
+            let (commit, archive) = state
+                .responses
+                .pop_front()
+                .ok_or(GitHubTransportError::Unavailable)?;
+            state.resolve_count += 1;
+            state.pending_archive = Some(archive);
+            Ok(commit)
+        }
+
+        fn download_archive(
+            &self,
+            _request: &GitHubArchiveRequest,
+        ) -> Result<Vec<u8>, GitHubTransportError> {
+            let mut state = self.state.lock().unwrap();
+            state.archive_count += 1;
+            state
+                .pending_archive
+                .take()
+                .ok_or(GitHubTransportError::Unavailable)
+        }
+    }
+
     #[test]
     fn acquisition_pins_commit_extracts_only_selected_package_and_sanitizes_origin() {
         let archive = write_zip(
@@ -1690,6 +1978,102 @@ mod tests {
         assert_eq!(state.resolve_requests.len(), 1);
         assert_eq!(state.archive_requests.len(), 1);
         assert_eq!(state.archive_requests[0].commit().as_str(), COMMIT);
+    }
+
+    #[test]
+    fn tracking_refresh_reacquires_new_bytes_and_projects_typed_source_metadata() {
+        let first_archive = write_zip(
+            &[("repo-root/skills/a/SKILL.md", SKILL)],
+            CompressionMethod::Stored,
+        );
+        let second_skill = b"---\nname: github-skill\ndescription: Acquired from GitHub.\n---\n\nUPDATED THROUGH TRACKING REF.\n";
+        let second_archive = write_zip(
+            &[("repo-root/skills/a/SKILL.md", second_skill)],
+            CompressionMethod::Stored,
+        );
+        let transport = Arc::new(SequencedTransport::new(vec![
+            (GitHubCommit::parse(COMMIT).unwrap(), first_archive),
+            (GitHubCommit::parse(OTHER_COMMIT).unwrap(), second_archive),
+        ]));
+        let adapter = GitHubWorkflowAcquisitionAdapter::new(Arc::new(
+            GitHubSkillAcquirer::with_transport(transport.clone()),
+        ));
+        let source = GitHubWorkflowAcquisitionAdapter::source_for(&GitHubSkillLocation::new(
+            GitHubRepository::parse("openai", "skills").unwrap(),
+            GitHubReference::named("main").unwrap(),
+            GitHubSubdirectory::parse("skills/a").unwrap(),
+        ))
+        .unwrap();
+
+        let first = adapter.acquire(&source).unwrap();
+        let refresh = first.provenance().refresh().unwrap().clone();
+        let second = adapter.reacquire(refresh.adapter_view()).unwrap();
+
+        assert_ne!(first.package().revision(), second.package().revision());
+        assert!(second
+            .package()
+            .instructions()
+            .contains("UPDATED THROUGH TRACKING REF"));
+        assert!(matches!(
+            adapter.installed_source_presentation(second.provenance().adapter_view(), true),
+            Some(InstalledSkillSourcePresentation::GitHub {
+                tracking_reference: InstalledGitHubTrackingReference::Named(reference),
+                resolved_commit,
+                refreshable: true,
+                ..
+            }) if reference == "main" && resolved_commit == OTHER_COMMIT
+        ));
+        let state = transport.state.lock().unwrap();
+        assert_eq!(state.resolve_count, 2);
+        assert_eq!(state.archive_count, 2);
+    }
+
+    #[test]
+    fn immutable_commit_provenance_has_no_refresh_capability() {
+        let transport = Arc::new(FakeTransport::new(write_zip(
+            &[("repo-root/SKILL.md", SKILL)],
+            CompressionMethod::Stored,
+        )));
+        let adapter = GitHubWorkflowAcquisitionAdapter::new(Arc::new(
+            GitHubSkillAcquirer::with_transport(transport),
+        ));
+        let source = GitHubWorkflowAcquisitionAdapter::source_for(&GitHubSkillLocation::new(
+            GitHubRepository::parse("openai", "skills").unwrap(),
+            GitHubReference::commit(COMMIT).unwrap(),
+            GitHubSubdirectory::root(),
+        ))
+        .unwrap();
+
+        let acquisition = adapter.acquire(&source).unwrap();
+
+        assert!(acquisition.provenance().refresh().is_none());
+        assert!(matches!(
+            adapter.installed_source_presentation(acquisition.provenance().adapter_view(), false),
+            Some(InstalledSkillSourcePresentation::GitHub {
+                tracking_reference: InstalledGitHubTrackingReference::Commit,
+                refreshable: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn authority_projection_rejects_unknown_payload_fields() {
+        let authority = SkillInstallationAuthority::new(
+            GITHUB_SKILL_ORIGIN_PROVIDER,
+            GITHUB_PROVENANCE_SCHEMA_VERSION,
+            serde_json::json!({
+                "owner": "openai",
+                "repository": "skills",
+                "resolvedCommit": COMMIT,
+                "unexpected": "must fail closed"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let provenance = SkillInstallationProvenance::new(authority, None);
+
+        assert!(github_source_presentation(provenance.adapter_view(), false).is_none());
     }
 
     #[test]

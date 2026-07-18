@@ -1,0 +1,239 @@
+{
+  "schemaVersion": 2,
+  "method": "skills.resolveInstallationSource",
+  "cases": [
+    {
+      "name": "an exact Skill URL resolves without a selection step",
+      "request": {
+        "resolutionId": "11111111-1111-4111-8111-111111111111",
+        "locator": {
+          "kind": "url",
+          "url": "https://github.com/openai/example-skills/tree/main/skills/auditor"
+        }
+      },
+      "response": {
+        "schemaVersion": 2,
+        "resolutionId": "11111111-1111-4111-8111-111111111111",
+        "canonicalUrl": "https://github.com/openai/example-skills/tree/main/skills/auditor",
+        "provider": "github",
+        "resolvedCommit": "0123456789abcdef0123456789abcdef01234567",
+        "expiresAtUnixMs": 4102444800000,
+        "outcome": "resolved",
+        "candidates": [
+          {
+            "candidateId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "acquisition": {
+              "kind": "resolvedCandidate",
+              "resolutionId": "11111111-1111-4111-8111-111111111111",
+              "candidateId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "source": {
+              "kind": "githubRepository",
+              "owner": "openai",
+              "repository": "example-skills",
+              "reference": {
+                "kind": "named",
+                "value": "main"
+              },
+              "resolvedCommit": "0123456789abcdef0123456789abcdef01234567",
+              "subdirectory": "skills/auditor"
+            },
+            "package": {
+              "formatVersion": 1,
+              "packageRevision": "skill-package-sha256-v1:1111111111111111111111111111111111111111111111111111111111111111",
+              "name": "repository-evidence-auditor",
+              "description": "Audit repository claims against concrete evidence.",
+              "fileCount": 1,
+              "totalBytes": 512
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "a repository containing multiple Skills requires selection",
+      "request": {
+        "resolutionId": "22222222-2222-4222-8222-222222222222",
+        "locator": {
+          "kind": "url",
+          "url": "https://github.com/openai/example-skills"
+        }
+      },
+      "response": {
+        "schemaVersion": 2,
+        "resolutionId": "22222222-2222-4222-8222-222222222222",
+        "canonicalUrl": "https://github.com/openai/example-skills",
+        "provider": "github",
+        "resolvedCommit": "fedcba9876543210fedcba9876543210fedcba98",
+        "expiresAtUnixMs": 4102444800000,
+        "outcome": "selectionRequired",
+        "candidates": [
+          {
+            "candidateId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "acquisition": {
+              "kind": "resolvedCandidate",
+              "resolutionId": "22222222-2222-4222-8222-222222222222",
+              "candidateId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "source": {
+              "kind": "githubRepository",
+              "owner": "openai",
+              "repository": "example-skills",
+              "reference": {
+                "kind": "defaultBranch"
+              },
+              "resolvedCommit": "fedcba9876543210fedcba9876543210fedcba98",
+              "subdirectory": "skills/auditor"
+            },
+            "package": {
+              "formatVersion": 1,
+              "packageRevision": "skill-package-sha256-v1:2222222222222222222222222222222222222222222222222222222222222222",
+              "name": "repository-evidence-auditor",
+              "description": "Audit repository claims against concrete evidence.",
+              "fileCount": 1,
+              "totalBytes": 544
+            }
+          },
+          {
+            "candidateId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "acquisition": {
+              "kind": "resolvedCandidate",
+              "resolutionId": "22222222-2222-4222-8222-222222222222",
+              "candidateId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "source": {
+              "kind": "githubRepository",
+              "owner": "openai",
+              "repository": "example-skills",
+              "reference": {
+                "kind": "defaultBranch"
+              },
+              "resolvedCommit": "fedcba9876543210fedcba9876543210fedcba98",
+              "subdirectory": "skills/reviewer"
+            },
+            "package": {
+              "formatVersion": 2,
+              "packageRevision": "skill-package-sha256-v2:3333333333333333333333333333333333333333333333333333333333333333",
+              "name": "repository-reviewer",
+              "description": "Review repository changes using a repeatable workflow.",
+              "fileCount": 2,
+              "totalBytes": 896
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "cancel": {
+    "method": "skills.cancelSourceResolution",
+    "cases": [
+      {
+        "request": {
+          "resolutionId": "33333333-3333-4333-8333-333333333333"
+        },
+        "response": {
+          "schemaVersion": 2,
+          "resolutionId": "33333333-3333-4333-8333-333333333333",
+          "outcome": "cancelled"
+        }
+      },
+      {
+        "request": {
+          "resolutionId": "44444444-4444-4444-8444-444444444444"
+        },
+        "response": {
+          "schemaVersion": 2,
+          "resolutionId": "44444444-4444-4444-8444-444444444444",
+          "outcome": "alreadyCancelled"
+        }
+      },
+      {
+        "request": {
+          "resolutionId": "55555555-5555-4555-8555-555555555555"
+        },
+        "response": {
+          "schemaVersion": 2,
+          "resolutionId": "55555555-5555-4555-8555-555555555555",
+          "outcome": "alreadyConsumed"
+        }
+      },
+      {
+        "request": {
+          "resolutionId": "66666666-6666-4666-8666-666666666666"
+        },
+        "response": {
+          "schemaVersion": 2,
+          "resolutionId": "66666666-6666-4666-8666-666666666666",
+          "outcome": "alreadyAbsent"
+        }
+      }
+    ]
+  },
+  "errors": [
+    {
+      "type": "skillSourceResolution",
+      "phase": "parse",
+      "code": "unsupportedHost",
+      "recovery": "chooseDifferentSource",
+      "message": "This URL host is not supported."
+    },
+    {
+      "type": "skillSourceResolution",
+      "phase": "resolve",
+      "code": "rateLimited",
+      "recovery": "retryLater",
+      "message": "The Skill source provider temporarily refused the resolution request.",
+      "provider": "github"
+    },
+    {
+      "type": "skillSourceResolution",
+      "phase": "discover",
+      "code": "noSkillsFound",
+      "recovery": "chooseDifferentSource",
+      "message": "No valid Skill package was found at the resolved location.",
+      "provider": "github"
+    },
+    {
+      "type": "skillSourceResolution",
+      "phase": "resolve",
+      "code": "resolutionIdConflict",
+      "recovery": "startNewResolution",
+      "message": "The resolution ID is already bound to a different source locator."
+    },
+    {
+      "type": "skillSourceResolution",
+      "phase": "resolve",
+      "code": "resolutionNotFoundOrExpired",
+      "recovery": "startNewResolution",
+      "message": "The Skill source resolution was not found or has expired."
+    },
+    {
+      "type": "skillSourceResolution",
+      "phase": "resolve",
+      "code": "resolutionConsumed",
+      "recovery": "startNewResolution",
+      "message": "The Skill source resolution has already been consumed."
+    },
+    {
+      "type": "skillSourceResolution",
+      "phase": "resolve",
+      "code": "candidateNotFound",
+      "recovery": "retrySameResolution",
+      "message": "The selected Skill source candidate does not exist in this resolution."
+    },
+    {
+      "type": "skillSourceResolution",
+      "phase": "resolve",
+      "code": "capacityExceeded",
+      "recovery": "retryLater",
+      "message": "The Skill source resolution registry is temporarily at capacity."
+    },
+    {
+      "type": "skillSourceResolution",
+      "phase": "resolve",
+      "code": "cancelled",
+      "recovery": "startNewResolution",
+      "message": "The Skill source resolution was cancelled."
+    }
+  ]
+}

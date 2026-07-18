@@ -17,6 +17,8 @@ const MAX_LOCAL_SKILL_ID_BYTES: usize = 4 * 1024;
 const MAX_SOURCE_ID_BYTES: usize = MAX_OPAQUE_ID_BYTES - MAX_LOCAL_SKILL_ID_BYTES - 1;
 const MAX_REVISION_BYTES: usize = 256;
 
+pub const SKILL_INSTALLATION_REVISION_PREFIX: &str = "skill-installation-sha256-v1:";
+
 /// Stable identity of one configured Skill source.
 ///
 /// The value is opaque to callers. Its final `:`-separated component is part
@@ -270,6 +272,80 @@ impl PartialEq<str> for SkillRevision {
 }
 
 impl PartialEq<String> for SkillRevision {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
+/// Compare-and-swap identity for one exact managed installation receipt.
+///
+/// Unlike [`SkillRevision`], this token binds installation lifecycle state,
+/// including its monotonically increasing generation and acquisition
+/// provenance. It therefore changes even when an update retains identical
+/// package bytes but changes where future refreshes are resolved from.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SkillInstallationRevision(String);
+
+impl SkillInstallationRevision {
+    pub fn parse(value: impl Into<String>) -> Result<Self, SkillReferenceError> {
+        let value = value.into();
+        let Some(digest) = value.strip_prefix(SKILL_INSTALLATION_REVISION_PREFIX) else {
+            return Err(SkillReferenceError::new(format!(
+                "installation revision must start with `{SKILL_INSTALLATION_REVISION_PREFIX}`"
+            )));
+        };
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(SkillReferenceError::new(
+                "installation revision digest must contain exactly 64 lowercase hexadecimal characters",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub(super) fn trusted(value: String) -> Self {
+        debug_assert!(Self::parse(value.clone()).is_ok());
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SkillInstallationRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("SkillInstallationRevision")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+impl fmt::Display for SkillInstallationRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for SkillInstallationRevision {
+    type Err = SkillReferenceError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl PartialEq<str> for SkillInstallationRevision {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<String> for SkillInstallationRevision {
     fn eq(&self, other: &String) -> bool {
         self.as_str() == other
     }

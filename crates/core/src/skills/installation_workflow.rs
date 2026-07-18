@@ -1,6 +1,6 @@
 //! Two-phase orchestration for acquiring and committing managed Skills.
 //!
-//! Inspection captures one exact, validated [`PreparedSkillPackage`] and
+//! Inspection captures one exact, validated [`PreparedSkillAcquisition`] and
 //! returns a safe preview. Commit consumes that snapshot; it never re-reads
 //! the acquisition source. A bounded, expiring registry makes retries
 //! idempotent without turning preparation IDs into permanent server state.
@@ -9,25 +9,43 @@
 //! future Git, archive, or registry adapters can register another provider and
 //! still enter the same preview, acknowledgement, and installation transaction.
 
+use super::acquisition_provenance::{
+    SkillInstallationAuthority, SkillInstallationProvenance, SkillInstallationProvenanceView,
+    SkillInstallationRefresh, SkillInstallationRefreshView,
+};
 use super::installation_service::{
-    SkillInstallationMutation, SkillInstallationOperation, SkillInstallationService,
-    SkillInstallationServiceError,
+    InstalledSkillRecord, SkillInstallationMutation, SkillInstallationOperation,
+    SkillInstallationService, SkillInstallationServiceError,
+};
+#[cfg(test)]
+use super::installation_session::SessionClock;
+use super::installation_session::{
+    duration_millis, InstallationSessionState, PreparationSlot, ResolutionSlot,
+    SkillInstallationSessionConfig, SkillInstallationSessionStore,
 };
 use super::installed::USER_INSTALLED_SKILL_SOURCE_ID;
-use super::model::{SkillId, SkillInstallationId, SkillResourceKind, SkillRevision, SkillSourceId};
+use super::model::{
+    SkillId, SkillInstallationId, SkillInstallationRevision, SkillResourceKind, SkillRevision,
+    SkillSourceId,
+};
 use super::package::MAX_SKILL_PACKAGE_BYTES;
 use super::prepared::{PreparedSkillPackage, SkillPackagePreparationError};
+use super::prepared_acquisition::PreparedSkillAcquisition;
+use super::source_resolution::{SkillSourceCandidateId, SkillSourceResolutionId};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, MutexGuard};
+use std::time::Duration;
 use uuid::Uuid;
 
 const LOCAL_DIRECTORY_PROVIDER: &str = "local-directory";
+const RESOLVED_CANDIDATE_PROVIDER: &str = "resolved-candidate";
+const INSTALLED_SOURCE_PROVIDER: &str = "installed-source";
 const LOCAL_DIRECTORY_ORIGIN_REFERENCE: &str = "user-selected-directory";
+const LOCAL_DIRECTORY_PROVENANCE_AUTHORITY: &str = "user-selected-snapshot";
 const MAX_PROVIDER_BYTES: usize = 64;
 const MAX_ADAPTER_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_REGISTRY_ENTRIES: usize = 4_096;
@@ -278,6 +296,11 @@ pub enum SkillAcquisitionSource {
         provider: SkillAcquisitionProvider,
         request: Arc<[u8]>,
     },
+    ResolvedCandidate {
+        resolution_id: SkillSourceResolutionId,
+        candidate_id: SkillSourceCandidateId,
+    },
+    InstalledSource,
 }
 
 impl SkillAcquisitionSource {
@@ -303,10 +326,33 @@ impl SkillAcquisitionSource {
         })
     }
 
+    pub fn resolved_candidate(
+        resolution_id: SkillSourceResolutionId,
+        candidate_id: SkillSourceCandidateId,
+    ) -> Self {
+        Self::ResolvedCandidate {
+            resolution_id,
+            candidate_id,
+        }
+    }
+
+    /// Reacquires the update target from the typed refresh metadata stored in
+    /// its installation receipt. The source contains no provider payload;
+    /// workflow inspection reads and validates the authoritative receipt.
+    pub fn installed_source() -> Self {
+        Self::InstalledSource
+    }
+
     pub fn provider(&self) -> SkillAcquisitionProvider {
         match self {
             Self::LocalDirectory { .. } => SkillAcquisitionProvider::local_directory(),
             Self::Adapter { provider, .. } => provider.clone(),
+            Self::ResolvedCandidate { .. } => {
+                SkillAcquisitionProvider::parse(RESOLVED_CANDIDATE_PROVIDER)
+                    .expect("the built-in resolved-candidate provider id must remain valid")
+            }
+            Self::InstalledSource => SkillAcquisitionProvider::parse(INSTALLED_SOURCE_PROVIDER)
+                .expect("the built-in installed-source provider id must remain valid"),
         }
     }
 
@@ -314,6 +360,8 @@ impl SkillAcquisitionSource {
         match self {
             Self::LocalDirectory { directory } => Some(directory),
             Self::Adapter { .. } => None,
+            Self::ResolvedCandidate { .. } => None,
+            Self::InstalledSource => None,
         }
     }
 
@@ -321,6 +369,8 @@ impl SkillAcquisitionSource {
         match self {
             Self::LocalDirectory { .. } => None,
             Self::Adapter { request, .. } => Some(request),
+            Self::ResolvedCandidate { .. } => None,
+            Self::InstalledSource => None,
         }
     }
 }
@@ -337,6 +387,12 @@ impl fmt::Debug for SkillAcquisitionSource {
                 .field("provider", provider)
                 .field("request_bytes", &request.len())
                 .finish(),
+            Self::ResolvedCandidate { .. } => formatter
+                .debug_struct("ResolvedCandidate")
+                .field("resolution_id", &"[redacted]")
+                .field("candidate_id", &"[redacted]")
+                .finish(),
+            Self::InstalledSource => formatter.debug_struct("InstalledSource").finish(),
         }
     }
 }
@@ -370,13 +426,44 @@ impl Error for SkillAcquisitionSourceError {}
 pub trait SkillAcquisitionAdapter: Send + Sync {
     fn provider(&self) -> SkillAcquisitionProvider;
 
-    /// Converts provider input into an owned, fully validated package.
+    /// Converts provider input into owned, fully validated bytes and typed
+    /// receipt provenance.
     /// Implementations must return sanitized errors: paths, credentials, and
     /// opaque request contents must not be included in diagnostic messages.
     fn acquire(
         &self,
         source: &SkillAcquisitionSource,
-    ) -> Result<PreparedSkillPackage, SkillAcquisitionAdapterError>;
+    ) -> Result<PreparedSkillAcquisition, SkillAcquisitionAdapterError>;
+
+    /// Exact refresh payload schema versions accepted by [`Self::reacquire`].
+    /// An empty slice makes the adapter explicitly non-refreshable.
+    fn refresh_schema_versions(&self) -> &'static [u32] {
+        &[]
+    }
+
+    /// Reacquires from credential-free receipt metadata. Implementations must
+    /// decode and revalidate the payload on every call. The borrowed view is a
+    /// callback-scoped capability; it cannot be constructed from general
+    /// receipt APIs or retained beyond the receipt borrow.
+    fn reacquire(
+        &self,
+        _refresh: SkillInstallationRefreshView<'_>,
+    ) -> Result<PreparedSkillAcquisition, SkillAcquisitionAdapterError> {
+        Err(SkillAcquisitionAdapterError::invalid_request(
+            "this acquisition provider does not support installed-source refresh",
+        ))
+    }
+
+    /// Projects validated receipt metadata into a payload-free management
+    /// view. Providers opt in explicitly; malformed or mismatched metadata
+    /// returns `None` and is presented as unknown.
+    fn installed_source_presentation(
+        &self,
+        _provenance: SkillInstallationProvenanceView<'_>,
+        _refresh_capable: bool,
+    ) -> Option<InstalledSkillSourcePresentation> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -525,7 +612,7 @@ pub enum SkillInstallationPreparationIntent {
     },
     Update {
         skill_id: SkillId,
-        expected_revision: SkillRevision,
+        expected_revision: SkillInstallationRevision,
     },
 }
 
@@ -562,7 +649,7 @@ impl SkillInstallationPreparationRequest {
     pub fn update(
         preparation_id: SkillPreparationId,
         skill_id: SkillId,
-        expected_revision: SkillRevision,
+        expected_revision: SkillInstallationRevision,
         source: SkillAcquisitionSource,
     ) -> Self {
         Self {
@@ -732,6 +819,75 @@ pub struct SkillAcquisitionPresentation {
     reference: String,
 }
 
+const MAX_INSTALLED_SOURCE_DISPLAY_NAME_BYTES: usize = 256;
+
+/// Credential-free, provider-validated receipt projection for management UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InstalledSkillSourcePresentation {
+    LocalDirectory,
+    GitHub {
+        owner: String,
+        repository: String,
+        tracking_reference: InstalledGitHubTrackingReference,
+        resolved_commit: String,
+        subdirectory: Option<String>,
+        refreshable: bool,
+    },
+    Provider {
+        provider: String,
+        display_name: String,
+        refreshable: bool,
+    },
+    Unknown {
+        provider: String,
+        schema_version: u32,
+    },
+}
+
+impl InstalledSkillSourcePresentation {
+    pub fn refreshable(&self) -> bool {
+        matches!(
+            self,
+            Self::GitHub {
+                refreshable: true,
+                ..
+            } | Self::Provider {
+                refreshable: true,
+                ..
+            }
+        )
+    }
+
+    pub fn provider(&self) -> &str {
+        match self {
+            Self::LocalDirectory => LOCAL_DIRECTORY_PROVIDER,
+            Self::GitHub { .. } => "github",
+            Self::Provider { provider, .. } => provider,
+            Self::Unknown { provider, .. } => provider,
+        }
+    }
+
+    fn has_valid_boundary_fields(&self) -> bool {
+        match self {
+            Self::Provider { display_name, .. } => {
+                !display_name.trim().is_empty()
+                    && display_name.len() <= MAX_INSTALLED_SOURCE_DISPLAY_NAME_BYTES
+                    && !display_name.chars().any(char::is_control)
+            }
+            _ => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InstalledGitHubTrackingReference {
+    DefaultBranch,
+    Named(String),
+    Commit,
+}
+
 impl SkillAcquisitionPresentation {
     pub fn provider(&self) -> &str {
         &self.provider
@@ -760,7 +916,9 @@ pub struct SkillInstallationPreview {
     operation: SkillInstallationOperation,
     installation_id: SkillInstallationId,
     skill_id: SkillId,
-    expected_revision: Option<SkillRevision>,
+    expected_revision: Option<SkillInstallationRevision>,
+    content_changed: bool,
+    source_changed: bool,
     acquisition: SkillAcquisitionPresentation,
     package: SkillInstallationPackagePreview,
     warnings: Arc<[SkillInstallationWarning]>,
@@ -788,8 +946,16 @@ impl SkillInstallationPreview {
         &self.skill_id
     }
 
-    pub fn expected_revision(&self) -> Option<&SkillRevision> {
+    pub fn expected_revision(&self) -> Option<&SkillInstallationRevision> {
         self.expected_revision.as_ref()
+    }
+
+    pub fn content_changed(&self) -> bool {
+        self.content_changed
+    }
+
+    pub fn source_changed(&self) -> bool {
+        self.source_changed
     }
 
     pub fn acquisition(&self) -> &SkillAcquisitionPresentation {
@@ -819,6 +985,8 @@ impl fmt::Debug for SkillInstallationPreview {
             .field("installation_id", &self.installation_id)
             .field("skill_id", &self.skill_id)
             .field("expected_revision", &self.expected_revision)
+            .field("content_changed", &self.content_changed)
+            .field("source_changed", &self.source_changed)
             .field("acquisition", &self.acquisition)
             .field("package", &self.package)
             .field("warnings", &self.warnings)
@@ -979,10 +1147,8 @@ impl Error for SkillInstallationWorkflowConfigurationError {}
 pub struct SkillInstallationWorkflow {
     installation_service: SkillInstallationService,
     adapters: BTreeMap<SkillAcquisitionProvider, Arc<dyn SkillAcquisitionAdapter>>,
-    registry: Mutex<PreparationRegistry>,
-    changed: Condvar,
+    sessions: SkillInstallationSessionStore,
     config: SkillInstallationWorkflowConfig,
-    clock: Arc<dyn WorkflowClock>,
 }
 
 impl fmt::Debug for SkillInstallationWorkflow {
@@ -998,6 +1164,142 @@ impl fmt::Debug for SkillInstallationWorkflow {
     }
 }
 
+/// Panic recovery for adapter callbacks. The dispatcher catches unwinds, so
+/// the workflow must release the reservation before that unwind leaves the
+/// worker or the idempotency key would remain permanently busy. The attempt
+/// token makes a delayed guard harmless after the same key starts new work.
+struct PreparingSlotRecovery {
+    sessions: SkillInstallationSessionStore,
+    preparation_id: SkillPreparationId,
+    attempt_id: u64,
+    armed: bool,
+}
+
+impl PreparingSlotRecovery {
+    fn new(
+        sessions: &SkillInstallationSessionStore,
+        preparation_id: &SkillPreparationId,
+        attempt_id: u64,
+    ) -> Self {
+        Self {
+            sessions: sessions.clone(),
+            preparation_id: preparation_id.clone(),
+            attempt_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PreparingSlotRecovery {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let recovered = self.sessions.lock().is_ok_and(|mut state| {
+            if matches!(
+                state.preparations.get(&self.preparation_id),
+                Some(PreparationSlot::Preparing { attempt_id, .. })
+                    if *attempt_id == self.attempt_id
+            ) {
+                state.preparations.remove(&self.preparation_id);
+                true
+            } else {
+                false
+            }
+        });
+        if recovered {
+            self.sessions.notify_all();
+        }
+    }
+}
+
+/// Restores the exact frozen preview if a store call unwinds while commit
+/// state is unknown. Normal completion explicitly disarms the guard before
+/// notifying waiters; the attempt token is a second ownership check that
+/// prevents a delayed guard from rolling a later commit attempt back.
+struct CommittingSlotRecovery {
+    sessions: SkillInstallationSessionStore,
+    preparation_id: SkillPreparationId,
+    attempt_id: u64,
+    armed: bool,
+    request: Option<SkillInstallationPreparationRequest>,
+    preview: Option<SkillInstallationPreview>,
+    acquisition: Option<PreparedSkillAcquisition>,
+    snapshot_bytes: usize,
+    expires_at: Duration,
+}
+
+impl CommittingSlotRecovery {
+    fn new(
+        sessions: &SkillInstallationSessionStore,
+        attempt_id: u64,
+        request: &SkillInstallationPreparationRequest,
+        preview: &SkillInstallationPreview,
+        acquisition: &PreparedSkillAcquisition,
+        snapshot_bytes: usize,
+        expires_at: Duration,
+    ) -> Self {
+        Self {
+            sessions: sessions.clone(),
+            preparation_id: request.preparation_id().clone(),
+            attempt_id,
+            armed: true,
+            request: Some(request.clone()),
+            preview: Some(preview.clone()),
+            acquisition: Some(acquisition.clone()),
+            snapshot_bytes,
+            expires_at,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CommittingSlotRecovery {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let recovered = self.sessions.lock().is_ok_and(|mut state| {
+            let still_owns_slot = matches!(
+                state.preparations.get(&self.preparation_id),
+                Some(PreparationSlot::Committing { attempt_id, .. })
+                    if *attempt_id == self.attempt_id
+            );
+            if !still_owns_slot {
+                return false;
+            }
+            let (Some(request), Some(preview), Some(acquisition)) = (
+                self.request.take(),
+                self.preview.take(),
+                self.acquisition.take(),
+            ) else {
+                return false;
+            };
+            state.preparations.insert(
+                self.preparation_id.clone(),
+                PreparationSlot::Ready {
+                    request,
+                    preview,
+                    acquisition,
+                    snapshot_bytes: self.snapshot_bytes,
+                    expires_at: self.expires_at,
+                },
+            );
+            true
+        });
+        if recovered {
+            self.sessions.notify_all();
+        }
+    }
+}
+
 impl SkillInstallationWorkflow {
     pub fn new(installation_service: SkillInstallationService) -> Self {
         Self::with_config(
@@ -1010,17 +1312,39 @@ impl SkillInstallationWorkflow {
         installation_service: SkillInstallationService,
         config: SkillInstallationWorkflowConfig,
     ) -> Self {
-        Self::with_clock(
-            installation_service,
-            config,
-            Arc::new(SystemWorkflowClock::new()),
-        )
+        let sessions = SkillInstallationSessionStore::new(
+            SkillInstallationSessionConfig::new(
+                super::installation_session::DEFAULT_MAX_SKILL_SOURCE_RESOLUTIONS,
+                super::installation_session::DEFAULT_MAX_SKILL_SOURCE_RESOLUTION_CANDIDATES,
+                config.max_snapshot_bytes,
+                super::installation_session::DEFAULT_SKILL_SOURCE_RESOLUTION_TTL,
+            )
+            .expect("workflow configuration must form a valid session configuration"),
+        );
+        Self::with_session_store(installation_service, config, sessions)
     }
 
+    #[cfg(test)]
     fn with_clock(
         installation_service: SkillInstallationService,
         config: SkillInstallationWorkflowConfig,
-        clock: Arc<dyn WorkflowClock>,
+        clock: Arc<dyn SessionClock>,
+    ) -> Self {
+        let session_config = SkillInstallationSessionConfig::new(
+            super::installation_session::DEFAULT_MAX_SKILL_SOURCE_RESOLUTIONS,
+            super::installation_session::DEFAULT_MAX_SKILL_SOURCE_RESOLUTION_CANDIDATES,
+            config.max_snapshot_bytes,
+            super::installation_session::DEFAULT_SKILL_SOURCE_RESOLUTION_TTL,
+        )
+        .expect("workflow configuration must form a valid session configuration");
+        let sessions = SkillInstallationSessionStore::with_clock(session_config, clock);
+        Self::with_session_store(installation_service, config, sessions)
+    }
+
+    pub fn with_session_store(
+        installation_service: SkillInstallationService,
+        config: SkillInstallationWorkflowConfig,
+        sessions: SkillInstallationSessionStore,
     ) -> Self {
         let mut adapters: BTreeMap<SkillAcquisitionProvider, Arc<dyn SkillAcquisitionAdapter>> =
             BTreeMap::new();
@@ -1029,10 +1353,67 @@ impl SkillInstallationWorkflow {
         Self {
             installation_service,
             adapters,
-            registry: Mutex::new(PreparationRegistry::default()),
-            changed: Condvar::new(),
+            sessions,
             config,
-            clock,
+        }
+    }
+
+    pub fn session_store(&self) -> SkillInstallationSessionStore {
+        self.sessions.clone()
+    }
+
+    /// Returns whether this workflow has an adapter that can safely decode the
+    /// receipt's exact refresh provider and schema. Payload bytes remain
+    /// private to the selected adapter.
+    pub fn can_refresh(&self, provenance: &SkillInstallationProvenance) -> bool {
+        self.installed_source_presentation(provenance).refreshable()
+    }
+
+    /// Returns a provider-validated, payload-free source projection. Unknown
+    /// providers or semantically invalid provenance fail closed.
+    pub fn installed_source_presentation(
+        &self,
+        provenance: &SkillInstallationProvenance,
+    ) -> InstalledSkillSourcePresentation {
+        let authority_provider = provenance.authority().provider();
+        if provenance
+            .refresh()
+            .is_some_and(|refresh| refresh.provider() != authority_provider)
+        {
+            return InstalledSkillSourcePresentation::Unknown {
+                provider: authority_provider.to_string(),
+                schema_version: provenance.authority().schema_version(),
+            };
+        }
+        let refresh_capable = provenance.refresh().is_some_and(|refresh| {
+            self.adapter_for_refresh(refresh).is_ok_and(|(_, adapter)| {
+                adapter
+                    .refresh_schema_versions()
+                    .contains(&refresh.schema_version())
+            })
+        });
+        let presentation = self
+            .adapters
+            .iter()
+            .find_map(|(provider, adapter)| {
+                (provider.as_str() == authority_provider).then(|| {
+                    adapter
+                        .installed_source_presentation(provenance.adapter_view(), refresh_capable)
+                })
+            })
+            .flatten();
+        match presentation {
+            Some(presentation)
+                if presentation.provider() == authority_provider
+                    && (!presentation.refreshable() || refresh_capable)
+                    && presentation.has_valid_boundary_fields() =>
+            {
+                presentation
+            }
+            _ => InstalledSkillSourcePresentation::Unknown {
+                provider: authority_provider.to_string(),
+                schema_version: provenance.authority().schema_version(),
+            },
         }
     }
 
@@ -1070,7 +1451,7 @@ impl SkillInstallationWorkflow {
         &self,
         preparation_id: SkillPreparationId,
         skill_id: SkillId,
-        expected_revision: SkillRevision,
+        expected_revision: SkillInstallationRevision,
         directory: impl Into<PathBuf>,
     ) -> Result<SkillInstallationPreview, SkillInstallationWorkflowError> {
         self.inspect(&SkillInstallationPreparationRequest::update(
@@ -1088,6 +1469,26 @@ impl SkillInstallationWorkflow {
         request: &SkillInstallationPreparationRequest,
     ) -> Result<SkillInstallationPreview, SkillInstallationWorkflowError> {
         let action = PreparedAction::from_intent(&request.intent)?;
+        if let Some(preview) = self.existing_preparation(request)? {
+            return Ok(preview);
+        }
+        let current = self.preflight_action(&action)?;
+        if let SkillAcquisitionSource::ResolvedCandidate {
+            resolution_id,
+            candidate_id,
+        } = &request.source
+        {
+            return self.inspect_resolved_candidate(
+                request,
+                &action,
+                current.as_ref(),
+                resolution_id,
+                candidate_id,
+            );
+        }
+        if matches!(request.source, SkillAcquisitionSource::InstalledSource) {
+            return self.inspect_installed_source(request, &action, current.as_ref());
+        }
         let provider = request.source.provider();
         let adapter = self.adapters.get(&provider).ok_or_else(|| {
             SkillInstallationWorkflowError::UnknownAcquisitionProvider {
@@ -1095,11 +1496,11 @@ impl SkillInstallationWorkflow {
             }
         })?;
 
-        loop {
-            let now = self.clock.now();
+        let preparation_attempt_id = loop {
+            let now = self.sessions.now();
             let mut registry = self.lock_registry("inspect Skill preparation")?;
             registry.prune_expired(now.monotonic);
-            match registry.entries.get(request.preparation_id()) {
+            match registry.preparations.get(request.preparation_id()) {
                 Some(slot) if slot.request() != request => {
                     return Err(SkillInstallationWorkflowError::PreparationConflict {
                         preparation_id: request.preparation_id.clone(),
@@ -1120,46 +1521,526 @@ impl SkillInstallationWorkflow {
                     });
                 }
                 None => {
-                    registry.reserve(request.clone(), now.monotonic, &self.config)?;
-                    break;
+                    break self.reserve_preparation(
+                        &mut registry,
+                        request.clone(),
+                        now.monotonic,
+                    )?;
                 }
             }
-        }
+        };
 
-        let acquired = adapter.acquire(&request.source);
-        let now = self.clock.now();
+        let mut preparing_recovery = PreparingSlotRecovery::new(
+            &self.sessions,
+            request.preparation_id(),
+            preparation_attempt_id,
+        );
+        let acquired = adapter.acquire(&request.source).and_then(|acquisition| {
+            if acquisition.is_owned_by(provider.as_str()) {
+                Ok(acquisition)
+            } else {
+                Err(invalid_acquisition_provider_output())
+            }
+        });
+        let now = self.sessions.now();
         let mut registry = self.lock_registry("finish Skill preparation")?;
         let result = match acquired {
-            Ok(package) => {
+            Ok(acquisition) => {
+                let snapshot_bytes = acquisition_snapshot_bytes(&acquisition);
+                if let Err(error) =
+                    self.ensure_finished_preparation_capacity(&registry, snapshot_bytes)
+                {
+                    registry.preparations.remove(request.preparation_id());
+                    preparing_recovery.disarm();
+                    self.sessions.notify_all();
+                    return Err(error);
+                }
                 let preview = build_preview(
                     request,
                     &action,
-                    &package,
+                    &acquisition,
+                    current.as_ref(),
                     now.unix_ms
                         .saturating_add(duration_millis(self.config.preparation_ttl)),
                 );
-                registry.entries.insert(
+                registry.preparations.insert(
                     request.preparation_id.clone(),
                     PreparationSlot::Ready {
                         request: request.clone(),
                         preview: preview.clone(),
-                        snapshot_bytes: package_snapshot_bytes(&package),
-                        package,
+                        snapshot_bytes,
+                        acquisition,
                         expires_at: now.monotonic.saturating_add(self.config.preparation_ttl),
                     },
                 );
                 Ok(preview)
             }
             Err(source) => {
-                registry.entries.remove(request.preparation_id());
+                registry.preparations.remove(request.preparation_id());
                 Err(SkillInstallationWorkflowError::Acquisition {
                     provider,
                     source: Box::new(source),
                 })
             }
         };
-        self.changed.notify_all();
+        preparing_recovery.disarm();
+        self.sessions.notify_all();
         result
+    }
+
+    fn inspect_resolved_candidate(
+        &self,
+        request: &SkillInstallationPreparationRequest,
+        action: &PreparedAction,
+        current: Option<&InstalledSkillRecord>,
+        resolution_id: &SkillSourceResolutionId,
+        candidate_id: &SkillSourceCandidateId,
+    ) -> Result<SkillInstallationPreview, SkillInstallationWorkflowError> {
+        loop {
+            let now = self.sessions.now();
+            let mut state = self.lock_registry("inspect resolved Skill candidate")?;
+            state.prune_expired(now.monotonic);
+            match state.preparations.get(request.preparation_id()) {
+                Some(slot) if slot.request() != request => {
+                    return Err(SkillInstallationWorkflowError::PreparationConflict {
+                        preparation_id: request.preparation_id.clone(),
+                    });
+                }
+                Some(PreparationSlot::Preparing { .. })
+                | Some(PreparationSlot::Committing { .. }) => {
+                    drop(self.wait_for_change(state, "wait for resolved Skill preparation")?);
+                    continue;
+                }
+                Some(PreparationSlot::Ready { preview, .. })
+                | Some(PreparationSlot::Committed { preview, .. }) => {
+                    return Ok(preview.clone());
+                }
+                Some(PreparationSlot::Cancelled { .. }) => {
+                    return Err(SkillInstallationWorkflowError::PreparationCancelled {
+                        preparation_id: request.preparation_id.clone(),
+                    });
+                }
+                None => {}
+            }
+
+            if state.preparations.len() >= self.config.max_preparations {
+                return Err(
+                    SkillInstallationWorkflowError::PreparationCapacityExceeded {
+                        max_preparations: self.config.max_preparations,
+                    },
+                );
+            }
+
+            let Some(slot) = state.resolutions.remove(resolution_id) else {
+                return Err(
+                    SkillInstallationWorkflowError::SourceResolutionNotFoundOrExpired {
+                        resolution_id: resolution_id.clone(),
+                    },
+                );
+            };
+            match slot {
+                ResolutionSlot::Ready {
+                    locator,
+                    resolution,
+                    mut candidates,
+                    snapshot_bytes,
+                    expires_at: resolution_expires_at,
+                } => {
+                    let Some(acquisition) = candidates.remove(candidate_id) else {
+                        state.resolutions.insert(
+                            resolution_id.clone(),
+                            ResolutionSlot::Ready {
+                                locator,
+                                resolution,
+                                candidates,
+                                snapshot_bytes,
+                                expires_at: resolution_expires_at,
+                            },
+                        );
+                        return Err(SkillInstallationWorkflowError::SourceCandidateNotFound {
+                            resolution_id: resolution_id.clone(),
+                            candidate_id: candidate_id.clone(),
+                        });
+                    };
+                    let expires_at_unix_ms = now
+                        .unix_ms
+                        .saturating_add(duration_millis(self.config.preparation_ttl));
+                    let preview =
+                        build_preview(request, action, &acquisition, current, expires_at_unix_ms);
+                    let snapshot_bytes = acquisition_snapshot_bytes(&acquisition);
+                    state.preparations.insert(
+                        request.preparation_id.clone(),
+                        PreparationSlot::Ready {
+                            request: request.clone(),
+                            preview: preview.clone(),
+                            acquisition,
+                            snapshot_bytes,
+                            expires_at: now.monotonic.saturating_add(self.config.preparation_ttl),
+                        },
+                    );
+                    state.resolutions.insert(
+                        resolution_id.clone(),
+                        ResolutionSlot::Consumed {
+                            locator,
+                            candidate_id: candidate_id.clone(),
+                            preparation_id: request.preparation_id.clone(),
+                            expires_at: resolution_expires_at,
+                        },
+                    );
+                    self.sessions.notify_all();
+                    return Ok(preview);
+                }
+                ResolutionSlot::Resolving {
+                    locator,
+                    attempt_id,
+                    reserved_bytes,
+                    expires_at,
+                } => {
+                    state.resolutions.insert(
+                        resolution_id.clone(),
+                        ResolutionSlot::Resolving {
+                            locator,
+                            attempt_id,
+                            reserved_bytes,
+                            expires_at,
+                        },
+                    );
+                    return Err(SkillInstallationWorkflowError::SourceResolutionBusy {
+                        resolution_id: resolution_id.clone(),
+                    });
+                }
+                ResolutionSlot::Consumed {
+                    locator,
+                    candidate_id: consumed_candidate_id,
+                    preparation_id,
+                    expires_at,
+                } => {
+                    state.resolutions.insert(
+                        resolution_id.clone(),
+                        ResolutionSlot::Consumed {
+                            locator,
+                            candidate_id: consumed_candidate_id,
+                            preparation_id,
+                            expires_at,
+                        },
+                    );
+                    return Err(SkillInstallationWorkflowError::SourceResolutionConsumed {
+                        resolution_id: resolution_id.clone(),
+                    });
+                }
+                ResolutionSlot::Cancelled {
+                    locator,
+                    expires_at,
+                } => {
+                    state.resolutions.insert(
+                        resolution_id.clone(),
+                        ResolutionSlot::Cancelled {
+                            locator,
+                            expires_at,
+                        },
+                    );
+                    return Err(SkillInstallationWorkflowError::SourceResolutionCancelled {
+                        resolution_id: resolution_id.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn inspect_installed_source(
+        &self,
+        request: &SkillInstallationPreparationRequest,
+        action: &PreparedAction,
+        current: Option<&InstalledSkillRecord>,
+    ) -> Result<SkillInstallationPreview, SkillInstallationWorkflowError> {
+        let installation_id = match action {
+            PreparedAction::Update {
+                installation_id, ..
+            } => installation_id,
+            PreparedAction::Install { .. } => {
+                return Err(SkillInstallationWorkflowError::InstalledSourceRequiresUpdate)
+            }
+        };
+
+        let preparation_attempt_id = loop {
+            let now = self.sessions.now();
+            let mut state = self.lock_registry("inspect installed Skill source")?;
+            state.prune_expired(now.monotonic);
+            match state.preparations.get(request.preparation_id()) {
+                Some(slot) if slot.request() != request => {
+                    return Err(SkillInstallationWorkflowError::PreparationConflict {
+                        preparation_id: request.preparation_id.clone(),
+                    });
+                }
+                Some(PreparationSlot::Preparing { .. })
+                | Some(PreparationSlot::Committing { .. }) => {
+                    drop(self.wait_for_change(state, "wait for installed Skill refresh")?);
+                    continue;
+                }
+                Some(PreparationSlot::Ready { preview, .. })
+                | Some(PreparationSlot::Committed { preview, .. }) => {
+                    return Ok(preview.clone());
+                }
+                Some(PreparationSlot::Cancelled { .. }) => {
+                    return Err(SkillInstallationWorkflowError::PreparationCancelled {
+                        preparation_id: request.preparation_id.clone(),
+                    });
+                }
+                None => {
+                    break self.reserve_preparation(&mut state, request.clone(), now.monotonic)?;
+                }
+            }
+        };
+
+        let mut preparing_recovery = PreparingSlotRecovery::new(
+            &self.sessions,
+            request.preparation_id(),
+            preparation_attempt_id,
+        );
+        // Receipt read and lifecycle CAS validation intentionally precede all
+        // adapter/network work. Commit repeats the same CAS in the installer.
+        let acquired = (|| {
+            let record = current.expect("update preflight must return an installed record");
+            if record.is_legacy() {
+                return Err(SkillInstallationWorkflowError::InstalledSourceLegacy {
+                    installation_id: installation_id.clone(),
+                });
+            }
+            let refresh = record.provenance().refresh().ok_or_else(|| {
+                SkillInstallationWorkflowError::InstalledSourceNotRefreshable {
+                    installation_id: installation_id.clone(),
+                }
+            })?;
+            let authority_provider = record.provenance().authority().provider();
+            if refresh.provider() != authority_provider {
+                return Err(
+                    SkillInstallationWorkflowError::InvalidInstalledSourceProvenance {
+                        provider: authority_provider.to_string(),
+                    },
+                );
+            }
+            let (provider, adapter) = self.adapter_for_refresh(refresh)?;
+            if !adapter
+                .refresh_schema_versions()
+                .contains(&refresh.schema_version())
+            {
+                return Err(SkillInstallationWorkflowError::UnsupportedRefreshSchema {
+                    provider: refresh.provider().to_string(),
+                    schema_version: refresh.schema_version(),
+                });
+            }
+            if matches!(
+                self.installed_source_presentation(record.provenance()),
+                InstalledSkillSourcePresentation::Unknown { .. }
+            ) {
+                return Err(
+                    SkillInstallationWorkflowError::InvalidInstalledSourceProvenance {
+                        provider: record.provenance().authority().provider().to_string(),
+                    },
+                );
+            }
+            adapter
+                .reacquire(refresh.adapter_view())
+                .and_then(|acquisition| {
+                    if acquisition.is_owned_by(provider.as_str()) {
+                        Ok(acquisition)
+                    } else {
+                        Err(invalid_acquisition_provider_output())
+                    }
+                })
+                .map_err(|source| SkillInstallationWorkflowError::Acquisition {
+                    provider: provider.clone(),
+                    source: Box::new(source),
+                })
+        })();
+
+        let now = self.sessions.now();
+        let mut state = self.lock_registry("finish installed Skill refresh")?;
+        let result = match acquired {
+            Ok(acquisition) => {
+                let snapshot_bytes = acquisition_snapshot_bytes(&acquisition);
+                if let Err(error) =
+                    self.ensure_finished_preparation_capacity(&state, snapshot_bytes)
+                {
+                    state.preparations.remove(request.preparation_id());
+                    preparing_recovery.disarm();
+                    self.sessions.notify_all();
+                    return Err(error);
+                }
+                let preview = build_preview(
+                    request,
+                    action,
+                    &acquisition,
+                    current,
+                    now.unix_ms
+                        .saturating_add(duration_millis(self.config.preparation_ttl)),
+                );
+                state.preparations.insert(
+                    request.preparation_id.clone(),
+                    PreparationSlot::Ready {
+                        request: request.clone(),
+                        preview: preview.clone(),
+                        snapshot_bytes,
+                        acquisition,
+                        expires_at: now.monotonic.saturating_add(self.config.preparation_ttl),
+                    },
+                );
+                Ok(preview)
+            }
+            Err(error) => {
+                state.preparations.remove(request.preparation_id());
+                Err(error)
+            }
+        };
+        preparing_recovery.disarm();
+        self.sessions.notify_all();
+        result
+    }
+
+    fn adapter_for_refresh(
+        &self,
+        refresh: &SkillInstallationRefresh,
+    ) -> Result<
+        (&SkillAcquisitionProvider, &Arc<dyn SkillAcquisitionAdapter>),
+        SkillInstallationWorkflowError,
+    > {
+        self.adapters
+            .iter()
+            .find_map(|(provider, adapter)| {
+                (provider.as_str() == refresh.provider()).then_some((provider, adapter))
+            })
+            .ok_or_else(|| SkillInstallationWorkflowError::UnknownRefreshProvider {
+                provider: refresh.provider().to_string(),
+            })
+    }
+
+    fn existing_preparation(
+        &self,
+        request: &SkillInstallationPreparationRequest,
+    ) -> Result<Option<SkillInstallationPreview>, SkillInstallationWorkflowError> {
+        loop {
+            let now = self.sessions.now();
+            let mut state = self.lock_registry("check existing Skill preparation")?;
+            state.prune_expired(now.monotonic);
+            match state.preparations.get(request.preparation_id()) {
+                Some(slot) if slot.request() != request => {
+                    return Err(SkillInstallationWorkflowError::PreparationConflict {
+                        preparation_id: request.preparation_id.clone(),
+                    });
+                }
+                Some(PreparationSlot::Preparing { .. })
+                | Some(PreparationSlot::Committing { .. }) => {
+                    drop(self.wait_for_change(state, "wait for existing Skill preparation")?);
+                }
+                Some(PreparationSlot::Ready { preview, .. })
+                | Some(PreparationSlot::Committed { preview, .. }) => {
+                    return Ok(Some(preview.clone()));
+                }
+                Some(PreparationSlot::Cancelled { .. }) => {
+                    return Err(SkillInstallationWorkflowError::PreparationCancelled {
+                        preparation_id: request.preparation_id.clone(),
+                    });
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+
+    fn preflight_action(
+        &self,
+        action: &PreparedAction,
+    ) -> Result<Option<InstalledSkillRecord>, SkillInstallationWorkflowError> {
+        let PreparedAction::Update {
+            installation_id,
+            expected_revision,
+            ..
+        } = action
+        else {
+            return Ok(None);
+        };
+        let record = self
+            .installation_service
+            .read_installed_skill(installation_id)
+            .map_err(|error| SkillInstallationWorkflowError::InstalledSkillRead {
+                installation_id: installation_id.clone(),
+                reason: error.to_string(),
+            })?
+            .ok_or_else(|| SkillInstallationWorkflowError::InstalledSkillNotFound {
+                installation_id: installation_id.clone(),
+            })?;
+        if record.installation_revision() != expected_revision {
+            return Err(
+                SkillInstallationWorkflowError::InstalledSourceRevisionConflict {
+                    installation_id: installation_id.clone(),
+                    expected_revision: expected_revision.clone(),
+                    actual_revision: record.installation_revision().clone(),
+                },
+            );
+        }
+        Ok(Some(record))
+    }
+
+    fn reserve_preparation(
+        &self,
+        state: &mut InstallationSessionState,
+        request: SkillInstallationPreparationRequest,
+        now: Duration,
+    ) -> Result<u64, SkillInstallationWorkflowError> {
+        if state.preparations.len() >= self.config.max_preparations {
+            return Err(
+                SkillInstallationWorkflowError::PreparationCapacityExceeded {
+                    max_preparations: self.config.max_preparations,
+                },
+            );
+        }
+        let max_snapshot_bytes = self
+            .config
+            .max_snapshot_bytes
+            .min(self.sessions.config().max_snapshot_bytes());
+        if state
+            .reserved_snapshot_bytes()
+            .saturating_add(MAX_SKILL_PACKAGE_BYTES)
+            > max_snapshot_bytes
+        {
+            return Err(
+                SkillInstallationWorkflowError::PreparationMemoryCapacityExceeded {
+                    max_snapshot_bytes,
+                },
+            );
+        }
+        let attempt_id = state.next_preparation_attempt();
+        state.preparations.insert(
+            request.preparation_id.clone(),
+            PreparationSlot::Preparing {
+                request,
+                attempt_id,
+                _started_at: now,
+            },
+        );
+        Ok(attempt_id)
+    }
+
+    fn ensure_finished_preparation_capacity(
+        &self,
+        state: &InstallationSessionState,
+        snapshot_bytes: usize,
+    ) -> Result<(), SkillInstallationWorkflowError> {
+        let max_snapshot_bytes = self
+            .config
+            .max_snapshot_bytes
+            .min(self.sessions.config().max_snapshot_bytes());
+        let resident_without_reservation = state
+            .reserved_snapshot_bytes()
+            .saturating_sub(MAX_SKILL_PACKAGE_BYTES);
+        if resident_without_reservation.saturating_add(snapshot_bytes) > max_snapshot_bytes {
+            Err(
+                SkillInstallationWorkflowError::PreparationMemoryCapacityExceeded {
+                    max_snapshot_bytes,
+                },
+            )
+        } else {
+            Ok(())
+        }
     }
 
     /// Commits the exact package captured by `inspect`. Required warnings
@@ -1168,11 +2049,19 @@ impl SkillInstallationWorkflow {
         &self,
         request: &SkillInstallationCommitRequest,
     ) -> Result<SkillInstallationCommitResult, SkillInstallationWorkflowError> {
-        let (preparation_request, preview, package, action, snapshot_bytes, original_expires_at) = loop {
-            let now = self.clock.now();
+        let (
+            preparation_request,
+            preview,
+            acquisition,
+            action,
+            snapshot_bytes,
+            original_expires_at,
+            commit_attempt_id,
+        ) = loop {
+            let now = self.sessions.now();
             let mut registry = self.lock_registry("commit Skill preparation")?;
             registry.prune_expired(now.monotonic);
-            let Some(slot) = registry.entries.get(request.preparation_id()) else {
+            let Some(slot) = registry.preparations.get(request.preparation_id()) else {
                 return Err(
                     SkillInstallationWorkflowError::PreparationNotFoundOrExpired {
                         preparation_id: request.preparation_id.clone(),
@@ -1203,55 +2092,99 @@ impl SkillInstallationWorkflow {
                 PreparationSlot::Ready {
                     request: preparation_request,
                     preview,
-                    package,
+                    acquisition,
                     snapshot_bytes,
                     expires_at,
                 } => {
                     ensure_preview_matches(preview, request)?;
                     ensure_warnings_acknowledged(preview, request)?;
-                    let values = (
+                    let frozen = (
                         preparation_request.clone(),
                         preview.clone(),
-                        package.clone(),
+                        acquisition.clone(),
                         PreparedAction::from_intent(&preparation_request.intent)?,
                         *snapshot_bytes,
                         *expires_at,
                     );
-                    registry.entries.insert(
+                    let commit_attempt_id = registry.next_preparation_attempt();
+                    registry.preparations.insert(
                         request.preparation_id.clone(),
                         PreparationSlot::Committing {
-                            request: values.0.clone(),
-                            snapshot_bytes: values.4,
+                            request: frozen.0.clone(),
+                            attempt_id: commit_attempt_id,
+                            snapshot_bytes: frozen.4,
                         },
                     );
-                    break values;
+                    break (
+                        frozen.0,
+                        frozen.1,
+                        frozen.2,
+                        frozen.3,
+                        frozen.4,
+                        frozen.5,
+                        commit_attempt_id,
+                    );
                 }
             }
         };
 
+        let mut committing_recovery = CommittingSlotRecovery::new(
+            &self.sessions,
+            commit_attempt_id,
+            &preparation_request,
+            &preview,
+            &acquisition,
+            snapshot_bytes,
+            original_expires_at,
+        );
+        let (package, provenance) = acquisition.clone().into_parts();
         let committed = match action {
             PreparedAction::Install {
                 installation_id, ..
-            } => self
-                .installation_service
-                .install_prepared(installation_id, package.clone()),
+            } => self.installation_service.install_prepared_with_provenance(
+                installation_id,
+                package,
+                provenance,
+            ),
             PreparedAction::Update {
                 installation_id,
                 expected_revision,
                 ..
-            } => self.installation_service.update_prepared(
+            } => self.installation_service.update_prepared_exact(
                 installation_id,
                 expected_revision,
-                package.clone(),
+                package,
+                provenance,
             ),
         };
 
-        let now = self.clock.now();
-        let mut registry = self.lock_registry("finish Skill commit")?;
+        let now = self.sessions.now();
+        let mut registry = match self.lock_registry("finish Skill commit") {
+            Ok(registry) => registry,
+            Err(_) => {
+                // The store mutation is authoritative. Losing the in-memory
+                // replay cache must never turn a known commit result into an
+                // unrelated Internal error or hide commit-indeterminate
+                // semantics from the caller.
+                committing_recovery.disarm();
+                self.sessions.notify_all();
+                return match committed {
+                    Ok(mutation) => Ok(SkillInstallationCommitResult {
+                        preview,
+                        mutation,
+                        replayed: false,
+                    }),
+                    Err(source) => Err(SkillInstallationWorkflowError::Installation {
+                        preparation_id: request.preparation_id.clone(),
+                        source: Box::new(source),
+                    }),
+                };
+            }
+        };
         let result = match committed {
             Ok(mutation) => {
                 let result_preview = preview.clone();
-                registry.entries.insert(
+                registry.preparations.insert(
                     request.preparation_id.clone(),
                     PreparationSlot::Committed {
                         request: preparation_request,
@@ -1267,13 +2200,13 @@ impl SkillInstallationWorkflow {
                 })
             }
             Err(source) => {
-                registry.entries.insert(
+                registry.preparations.insert(
                     request.preparation_id.clone(),
                     PreparationSlot::Ready {
                         request: preparation_request,
                         preview,
                         snapshot_bytes,
-                        package,
+                        acquisition,
                         expires_at: original_expires_at,
                     },
                 );
@@ -1283,7 +2216,8 @@ impl SkillInstallationWorkflow {
                 })
             }
         };
-        self.changed.notify_all();
+        committing_recovery.disarm();
+        self.sessions.notify_all();
         result
     }
 
@@ -1291,10 +2225,10 @@ impl SkillInstallationWorkflow {
         &self,
         preparation_id: &SkillPreparationId,
     ) -> Result<SkillPreparationCancellation, SkillInstallationWorkflowError> {
-        let now = self.clock.now();
+        let now = self.sessions.now();
         let mut registry = self.lock_registry("cancel Skill preparation")?;
         registry.prune_expired(now.monotonic);
-        let Some(slot) = registry.entries.get(preparation_id) else {
+        let Some(slot) = registry.preparations.get(preparation_id) else {
             return Err(
                 SkillInstallationWorkflowError::PreparationNotFoundOrExpired {
                     preparation_id: preparation_id.clone(),
@@ -1315,14 +2249,14 @@ impl SkillInstallationWorkflow {
             PreparationSlot::Cancelled { .. } => Ok(SkillPreparationCancellation::AlreadyCancelled),
             PreparationSlot::Ready { request, .. } => {
                 let request = request.clone();
-                registry.entries.insert(
+                registry.preparations.insert(
                     preparation_id.clone(),
                     PreparationSlot::Cancelled {
                         request,
                         expires_at: now.monotonic.saturating_add(self.config.preparation_ttl),
                     },
                 );
-                self.changed.notify_all();
+                self.sessions.notify_all();
                 Ok(SkillPreparationCancellation::Cancelled)
             }
         }
@@ -1331,21 +2265,21 @@ impl SkillInstallationWorkflow {
     fn lock_registry(
         &self,
         operation: &'static str,
-    ) -> Result<MutexGuard<'_, PreparationRegistry>, SkillInstallationWorkflowError> {
-        self.registry
+    ) -> Result<MutexGuard<'_, InstallationSessionState>, SkillInstallationWorkflowError> {
+        self.sessions
             .lock()
             .map_err(|_| SkillInstallationWorkflowError::Internal {
                 operation,
-                reason: "preparation registry lock is poisoned".to_string(),
+                reason: "installation session registry lock is poisoned".to_string(),
             })
     }
 
     fn wait_for_change<'a>(
         &self,
-        registry: MutexGuard<'a, PreparationRegistry>,
+        registry: MutexGuard<'a, InstallationSessionState>,
         operation: &'static str,
-    ) -> Result<MutexGuard<'a, PreparationRegistry>, SkillInstallationWorkflowError> {
-        self.changed
+    ) -> Result<MutexGuard<'a, InstallationSessionState>, SkillInstallationWorkflowError> {
+        self.sessions
             .wait(registry)
             .map_err(|_| SkillInstallationWorkflowError::Internal {
                 operation,
@@ -1364,14 +2298,42 @@ impl SkillAcquisitionAdapter for LocalDirectoryAcquisitionAdapter {
     fn acquire(
         &self,
         source: &SkillAcquisitionSource,
-    ) -> Result<PreparedSkillPackage, SkillAcquisitionAdapterError> {
+    ) -> Result<PreparedSkillAcquisition, SkillAcquisitionAdapterError> {
         let directory = source.local_directory_path().ok_or_else(|| {
             SkillAcquisitionAdapterError::invalid_request(
                 "local-directory provider received a different source envelope",
             )
         })?;
-        PreparedSkillPackage::from_local_directory(directory, LOCAL_DIRECTORY_ORIGIN_REFERENCE)
-            .map_err(Into::into)
+        let package =
+            PreparedSkillPackage::from_local_directory(directory, LOCAL_DIRECTORY_ORIGIN_REFERENCE)
+                .map_err(SkillAcquisitionAdapterError::from)?;
+        let authority = SkillInstallationAuthority::new(
+            LOCAL_DIRECTORY_PROVIDER,
+            1,
+            LOCAL_DIRECTORY_PROVENANCE_AUTHORITY,
+        )
+        .map_err(|_| {
+            SkillAcquisitionAdapterError::unavailable(
+                "the built-in local-directory provenance contract is invalid",
+            )
+        })?;
+        Ok(PreparedSkillAcquisition::new(
+            package,
+            SkillInstallationProvenance::new(authority, None),
+        ))
+    }
+
+    fn installed_source_presentation(
+        &self,
+        provenance: SkillInstallationProvenanceView<'_>,
+        _refresh_capable: bool,
+    ) -> Option<InstalledSkillSourcePresentation> {
+        let authority = provenance.authority();
+        (authority.provider() == LOCAL_DIRECTORY_PROVIDER
+            && authority.schema_version() == 1
+            && authority.payload() == LOCAL_DIRECTORY_PROVENANCE_AUTHORITY
+            && provenance.refresh().is_none())
+        .then_some(InstalledSkillSourcePresentation::LocalDirectory)
     }
 }
 
@@ -1384,7 +2346,7 @@ enum PreparedAction {
     Update {
         installation_id: SkillInstallationId,
         skill_id: SkillId,
-        expected_revision: SkillRevision,
+        expected_revision: SkillInstallationRevision,
     },
 }
 
@@ -1455,7 +2417,7 @@ impl PreparedAction {
         }
     }
 
-    fn expected_revision(&self) -> Option<&SkillRevision> {
+    fn expected_revision(&self) -> Option<&SkillInstallationRevision> {
         match self {
             Self::Install { .. } => None,
             Self::Update {
@@ -1465,117 +2427,14 @@ impl PreparedAction {
     }
 }
 
-#[derive(Default)]
-struct PreparationRegistry {
-    entries: BTreeMap<SkillPreparationId, PreparationSlot>,
-}
-
-impl PreparationRegistry {
-    fn prune_expired(&mut self, now: Duration) {
-        self.entries.retain(|_, slot| !slot.is_expired(now));
-    }
-
-    fn reserve(
-        &mut self,
-        request: SkillInstallationPreparationRequest,
-        now: Duration,
-        config: &SkillInstallationWorkflowConfig,
-    ) -> Result<(), SkillInstallationWorkflowError> {
-        if self.entries.len() >= config.max_preparations {
-            return Err(
-                SkillInstallationWorkflowError::PreparationCapacityExceeded {
-                    max_preparations: config.max_preparations,
-                },
-            );
-        }
-        let resident = self
-            .entries
-            .values()
-            .map(PreparationSlot::reserved_snapshot_bytes)
-            .sum::<usize>();
-        if resident.saturating_add(MAX_SKILL_PACKAGE_BYTES) > config.max_snapshot_bytes {
-            return Err(
-                SkillInstallationWorkflowError::PreparationMemoryCapacityExceeded {
-                    max_snapshot_bytes: config.max_snapshot_bytes,
-                },
-            );
-        }
-        self.entries.insert(
-            request.preparation_id.clone(),
-            PreparationSlot::Preparing {
-                request,
-                _started_at: now,
-            },
-        );
-        Ok(())
-    }
-}
-
-enum PreparationSlot {
-    Preparing {
-        request: SkillInstallationPreparationRequest,
-        _started_at: Duration,
-    },
-    Ready {
-        request: SkillInstallationPreparationRequest,
-        preview: SkillInstallationPreview,
-        package: PreparedSkillPackage,
-        snapshot_bytes: usize,
-        expires_at: Duration,
-    },
-    Committing {
-        request: SkillInstallationPreparationRequest,
-        snapshot_bytes: usize,
-    },
-    Committed {
-        request: SkillInstallationPreparationRequest,
-        preview: SkillInstallationPreview,
-        mutation: SkillInstallationMutation,
-        expires_at: Duration,
-    },
-    Cancelled {
-        request: SkillInstallationPreparationRequest,
-        expires_at: Duration,
-    },
-}
-
-impl PreparationSlot {
-    fn request(&self) -> &SkillInstallationPreparationRequest {
-        match self {
-            Self::Preparing { request, .. }
-            | Self::Ready { request, .. }
-            | Self::Committing { request, .. }
-            | Self::Committed { request, .. }
-            | Self::Cancelled { request, .. } => request,
-        }
-    }
-
-    fn is_expired(&self, now: Duration) -> bool {
-        match self {
-            Self::Ready { expires_at, .. }
-            | Self::Committed { expires_at, .. }
-            | Self::Cancelled { expires_at, .. } => now >= *expires_at,
-            Self::Preparing { .. } | Self::Committing { .. } => false,
-        }
-    }
-
-    fn reserved_snapshot_bytes(&self) -> usize {
-        match self {
-            Self::Preparing { .. } => MAX_SKILL_PACKAGE_BYTES,
-            Self::Ready { snapshot_bytes, .. } | Self::Committing { snapshot_bytes, .. } => {
-                *snapshot_bytes
-            }
-            Self::Committed { .. } | Self::Cancelled { .. } => 0,
-        }
-    }
-}
-
 fn build_preview(
     request: &SkillInstallationPreparationRequest,
     action: &PreparedAction,
-    package: &PreparedSkillPackage,
+    acquisition: &PreparedSkillAcquisition,
+    current: Option<&InstalledSkillRecord>,
     expires_at_unix_ms: u64,
 ) -> SkillInstallationPreview {
+    let package = acquisition.package();
     let index = package.resource_index();
     let mut resources = SkillPackageResourceSummary {
         resource_count: index.len(),
@@ -1620,16 +2479,27 @@ fn build_preview(
         entrypoint_bytes: u64::try_from(package.source_bytes().len()).unwrap_or(u64::MAX),
         resources,
     };
-    let acquisition = SkillAcquisitionPresentation {
+    let presentation = SkillAcquisitionPresentation {
         provider: package.origin().provider().to_string(),
         reference: package.origin().reference().to_string(),
     };
+    let changes = current.map_or(
+        PreviewChanges {
+            content_changed: true,
+            source_changed: true,
+        },
+        |record| PreviewChanges {
+            content_changed: record.package_revision() != package.revision(),
+            source_changed: record.provenance() != acquisition.provenance(),
+        },
+    );
     let preview_revision = preview_revision(
         request,
         action,
-        &acquisition,
+        &presentation,
         &package_preview,
         &warnings,
+        changes,
         expires_at_unix_ms,
     );
     SkillInstallationPreview {
@@ -1639,11 +2509,19 @@ fn build_preview(
         installation_id: action.installation_id().clone(),
         skill_id: action.skill_id().clone(),
         expected_revision: action.expected_revision().cloned(),
-        acquisition,
+        content_changed: changes.content_changed,
+        source_changed: changes.source_changed,
+        acquisition: presentation,
         package: package_preview,
         warnings: warnings.into(),
         expires_at_unix_ms,
     }
+}
+
+#[derive(Clone, Copy)]
+struct PreviewChanges {
+    content_changed: bool,
+    source_changed: bool,
 }
 
 fn preview_revision(
@@ -1652,6 +2530,7 @@ fn preview_revision(
     acquisition: &SkillAcquisitionPresentation,
     package: &SkillInstallationPackagePreview,
     warnings: &[SkillInstallationWarning],
+    changes: PreviewChanges,
     expires_at_unix_ms: u64,
 ) -> SkillPreviewRevision {
     let mut hasher = Sha256::new();
@@ -1676,6 +2555,17 @@ fn preview_revision(
         SkillAcquisitionSource::Adapter { request, .. } => {
             update_hash_field(&mut hasher, b"adapter-request");
             update_hash_field(&mut hasher, request);
+        }
+        SkillAcquisitionSource::ResolvedCandidate {
+            resolution_id,
+            candidate_id,
+        } => {
+            update_hash_field(&mut hasher, b"resolved-candidate");
+            update_hash_field(&mut hasher, resolution_id.as_str().as_bytes());
+            update_hash_field(&mut hasher, candidate_id.as_str().as_bytes());
+        }
+        SkillAcquisitionSource::InstalledSource => {
+            update_hash_field(&mut hasher, b"installed-source");
         }
     }
     update_hash_field(&mut hasher, acquisition.provider.as_bytes());
@@ -1722,6 +2612,22 @@ fn preview_revision(
             },
         );
     }
+    update_hash_field(
+        &mut hasher,
+        if changes.content_changed {
+            b"content-changed"
+        } else {
+            b"content-unchanged"
+        },
+    );
+    update_hash_field(
+        &mut hasher,
+        if changes.source_changed {
+            b"source-changed"
+        } else {
+            b"source-unchanged"
+        },
+    );
     update_hash_field(&mut hasher, &expires_at_unix_ms.to_be_bytes());
     SkillPreviewRevision::from_digest(hasher.finalize().into())
 }
@@ -1753,12 +2659,13 @@ fn os_path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
     std::borrow::Cow::Owned(path.to_string_lossy().into_owned().into_bytes())
 }
 
-fn package_snapshot_bytes(package: &PreparedSkillPackage) -> usize {
-    package.resource_index().entries().iter().fold(
-        package.source_bytes().len(),
-        |total, resource| {
-            total.saturating_add(usize::try_from(resource.byte_length()).unwrap_or(usize::MAX))
-        },
+fn acquisition_snapshot_bytes(acquisition: &PreparedSkillAcquisition) -> usize {
+    acquisition.retained_payload_bytes()
+}
+
+fn invalid_acquisition_provider_output() -> SkillAcquisitionAdapterError {
+    SkillAcquisitionAdapterError::unavailable(
+        "the acquisition provider returned package or provenance metadata owned by a different provider",
     )
 }
 
@@ -1802,49 +2709,6 @@ fn ensure_warnings_acknowledged(
     }
 }
 
-fn duration_millis(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-}
-
-#[derive(Clone, Copy)]
-struct WorkflowTime {
-    monotonic: Duration,
-    unix_ms: u64,
-}
-
-trait WorkflowClock: Send + Sync {
-    fn now(&self) -> WorkflowTime;
-}
-
-struct SystemWorkflowClock {
-    started: Instant,
-    started_unix_ms: u64,
-}
-
-impl SystemWorkflowClock {
-    fn new() -> Self {
-        Self {
-            started: Instant::now(),
-            started_unix_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(duration_millis)
-                .unwrap_or(0),
-        }
-    }
-}
-
-impl WorkflowClock for SystemWorkflowClock {
-    fn now(&self) -> WorkflowTime {
-        let monotonic = self.started.elapsed();
-        WorkflowTime {
-            monotonic,
-            unix_ms: self
-                .started_unix_ms
-                .saturating_add(duration_millis(monotonic)),
-        }
-    }
-}
-
 #[non_exhaustive]
 pub enum SkillInstallationWorkflowError {
     UnknownAcquisitionProvider {
@@ -1853,6 +2717,35 @@ pub enum SkillInstallationWorkflowError {
     InvalidUpdateTarget {
         skill_id: SkillId,
         reason: String,
+    },
+    InstalledSourceRequiresUpdate,
+    InstalledSkillNotFound {
+        installation_id: SkillInstallationId,
+    },
+    InstalledSkillRead {
+        installation_id: SkillInstallationId,
+        reason: String,
+    },
+    InstalledSourceRevisionConflict {
+        installation_id: SkillInstallationId,
+        expected_revision: SkillInstallationRevision,
+        actual_revision: SkillInstallationRevision,
+    },
+    InstalledSourceLegacy {
+        installation_id: SkillInstallationId,
+    },
+    InstalledSourceNotRefreshable {
+        installation_id: SkillInstallationId,
+    },
+    UnknownRefreshProvider {
+        provider: String,
+    },
+    UnsupportedRefreshSchema {
+        provider: String,
+        schema_version: u32,
+    },
+    InvalidInstalledSourceProvenance {
+        provider: String,
     },
     PreparationConflict {
         preparation_id: SkillPreparationId,
@@ -1879,6 +2772,22 @@ pub enum SkillInstallationWorkflowError {
     },
     PreparationMemoryCapacityExceeded {
         max_snapshot_bytes: usize,
+    },
+    SourceResolutionNotFoundOrExpired {
+        resolution_id: SkillSourceResolutionId,
+    },
+    SourceResolutionBusy {
+        resolution_id: SkillSourceResolutionId,
+    },
+    SourceResolutionConsumed {
+        resolution_id: SkillSourceResolutionId,
+    },
+    SourceResolutionCancelled {
+        resolution_id: SkillSourceResolutionId,
+    },
+    SourceCandidateNotFound {
+        resolution_id: SkillSourceResolutionId,
+        candidate_id: SkillSourceCandidateId,
     },
     WarningAcknowledgementRequired {
         preparation_id: SkillPreparationId,
@@ -1954,6 +2863,53 @@ impl fmt::Debug for SkillInstallationWorkflowError {
                 debug.field("kind", &"invalidUpdateTarget");
                 debug.field("skill_id", skill_id);
             }
+            Self::InstalledSourceRequiresUpdate => {
+                debug.field("kind", &"installedSourceRequiresUpdate");
+            }
+            Self::InstalledSkillNotFound { installation_id } => {
+                debug.field("kind", &"installedSkillNotFound");
+                debug.field("installation_id", installation_id);
+            }
+            Self::InstalledSkillRead {
+                installation_id, ..
+            } => {
+                debug.field("kind", &"installedSkillRead");
+                debug.field("installation_id", installation_id);
+            }
+            Self::InstalledSourceRevisionConflict {
+                installation_id,
+                expected_revision,
+                actual_revision,
+            } => {
+                debug.field("kind", &"installedSourceRevisionConflict");
+                debug.field("installation_id", installation_id);
+                debug.field("expected_revision", expected_revision);
+                debug.field("actual_revision", actual_revision);
+            }
+            Self::InstalledSourceLegacy { installation_id } => {
+                debug.field("kind", &"installedSourceLegacy");
+                debug.field("installation_id", installation_id);
+            }
+            Self::InstalledSourceNotRefreshable { installation_id } => {
+                debug.field("kind", &"installedSourceNotRefreshable");
+                debug.field("installation_id", installation_id);
+            }
+            Self::UnknownRefreshProvider { provider } => {
+                debug.field("kind", &"unknownRefreshProvider");
+                debug.field("provider", provider);
+            }
+            Self::UnsupportedRefreshSchema {
+                provider,
+                schema_version,
+            } => {
+                debug.field("kind", &"unsupportedRefreshSchema");
+                debug.field("provider", provider);
+                debug.field("schema_version", schema_version);
+            }
+            Self::InvalidInstalledSourceProvenance { provider } => {
+                debug.field("kind", &"invalidInstalledSourceProvenance");
+                debug.field("provider", provider);
+            }
             Self::PreparationConflict { preparation_id } => {
                 debug.field("kind", &"preparationConflict");
                 debug.field("preparation_id", preparation_id);
@@ -1991,6 +2947,30 @@ impl fmt::Debug for SkillInstallationWorkflowError {
             Self::PreparationMemoryCapacityExceeded { max_snapshot_bytes } => {
                 debug.field("kind", &"preparationMemoryCapacityExceeded");
                 debug.field("max_snapshot_bytes", max_snapshot_bytes);
+            }
+            Self::SourceResolutionNotFoundOrExpired { resolution_id } => {
+                debug.field("kind", &"sourceResolutionNotFoundOrExpired");
+                debug.field("resolution_id", resolution_id);
+            }
+            Self::SourceResolutionBusy { resolution_id } => {
+                debug.field("kind", &"sourceResolutionBusy");
+                debug.field("resolution_id", resolution_id);
+            }
+            Self::SourceResolutionConsumed { resolution_id } => {
+                debug.field("kind", &"sourceResolutionConsumed");
+                debug.field("resolution_id", resolution_id);
+            }
+            Self::SourceResolutionCancelled { resolution_id } => {
+                debug.field("kind", &"sourceResolutionCancelled");
+                debug.field("resolution_id", resolution_id);
+            }
+            Self::SourceCandidateNotFound {
+                resolution_id,
+                candidate_id,
+            } => {
+                debug.field("kind", &"sourceCandidateNotFound");
+                debug.field("resolution_id", resolution_id);
+                debug.field("candidate_id", candidate_id);
             }
             Self::WarningAcknowledgementRequired {
                 preparation_id,
@@ -2030,6 +3010,39 @@ impl fmt::Display for SkillInstallationWorkflowError {
                 )
             }
             Self::InvalidUpdateTarget { reason, .. } => reason.fmt(formatter),
+            Self::InstalledSourceRequiresUpdate => {
+                formatter.write_str("Installed-source acquisition is valid only for updates")
+            }
+            Self::InstalledSkillNotFound { .. } => {
+                formatter.write_str("The installed Skill receipt was not found")
+            }
+            Self::InstalledSkillRead { .. } => {
+                formatter.write_str("The installed Skill receipt could not be read")
+            }
+            Self::InstalledSourceRevisionConflict { .. } => {
+                formatter.write_str("The installed Skill changed before source refresh could begin")
+            }
+            Self::InstalledSourceLegacy { .. } => {
+                formatter.write_str("Legacy Skill installations do not contain refresh provenance")
+            }
+            Self::InstalledSourceNotRefreshable { .. } => {
+                formatter.write_str("The installed Skill source is immutable or not refreshable")
+            }
+            Self::UnknownRefreshProvider { provider } => write!(
+                formatter,
+                "No Skill refresh adapter is registered for `{provider}`"
+            ),
+            Self::UnsupportedRefreshSchema {
+                provider,
+                schema_version,
+            } => write!(
+                formatter,
+                "Skill refresh provider `{provider}` does not support schema {schema_version}"
+            ),
+            Self::InvalidInstalledSourceProvenance { provider } => write!(
+                formatter,
+                "Installed Skill provenance for `{provider}` is invalid or inconsistent"
+            ),
             Self::PreparationConflict { .. } => {
                 formatter.write_str("Preparation ID is already bound to a different request")
             }
@@ -2056,6 +3069,21 @@ impl fmt::Display for SkillInstallationWorkflowError {
                 formatter,
                 "Skill preparation registry reached its {max_snapshot_bytes}-byte snapshot limit",
             ),
+            Self::SourceResolutionNotFoundOrExpired { .. } => {
+                formatter.write_str("Skill source resolution was not found or has expired")
+            }
+            Self::SourceResolutionBusy { .. } => {
+                formatter.write_str("Skill source resolution is still in progress")
+            }
+            Self::SourceResolutionConsumed { .. } => {
+                formatter.write_str("Skill source resolution was already consumed")
+            }
+            Self::SourceResolutionCancelled { .. } => {
+                formatter.write_str("Skill source resolution was cancelled")
+            }
+            Self::SourceCandidateNotFound { .. } => {
+                formatter.write_str("Resolved Skill candidate was not found")
+            }
             Self::WarningAcknowledgementRequired { .. } => {
                 formatter.write_str("Required Skill installation warnings were not acknowledged")
             }
@@ -2086,7 +3114,13 @@ impl Error for SkillInstallationWorkflowError {
 #[cfg(test)]
 mod tests {
     use super::super::origin::SkillPackageOrigin;
-    use super::super::{SkillInstallationOutcome, SkillsService};
+    use super::super::{
+        GitHubAcquisitionSummary, GitHubCommit, GitHubReference, GitHubRepository,
+        GitHubSubdirectory, PreparedSkillSourceResolution, PreparedSkillSourceResolutionCandidate,
+        ResolvedSkillSource, SkillInstallationOutcome, SkillInstallationSourceLocator,
+        SkillInstallationSourceResolver, SkillSourceResolution, SkillSourceResolutionError,
+        SkillSourceResolutionService, SkillSourceResolverId, SkillsService,
+    };
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -2121,6 +3155,289 @@ mod tests {
         SkillInstallationWorkflow::new(SkillInstallationService::new(store).unwrap())
     }
 
+    const REFRESH_FIXTURE_PROVIDER: &str = "fixture-refresh";
+
+    fn provider_acquisition(
+        marker: &str,
+        provider: &str,
+        authority_payload: &str,
+        refresh: Option<(&str, u32, &str)>,
+    ) -> PreparedSkillAcquisition {
+        let package = PreparedSkillPackage::from_bytes(
+            format!(
+                "---\nname: refresh-fixture\ndescription: Refresh fixture.\n---\n# Instructions\n{marker}\n"
+            )
+            .into_bytes(),
+            SkillPackageOrigin::new(provider, authority_payload).unwrap(),
+        )
+        .unwrap();
+        let authority = SkillInstallationAuthority::new(provider, 1, authority_payload).unwrap();
+        let refresh = refresh.map(|(provider, schema_version, payload)| {
+            SkillInstallationRefresh::new(provider, schema_version, payload).unwrap()
+        });
+        PreparedSkillAcquisition::new(
+            package,
+            SkillInstallationProvenance::new(authority, refresh),
+        )
+    }
+
+    fn fixture_acquisition(
+        marker: &str,
+        authority_payload: &str,
+        refresh: Option<(&str, u32, &str)>,
+    ) -> PreparedSkillAcquisition {
+        provider_acquisition(marker, REFRESH_FIXTURE_PROVIDER, authority_payload, refresh)
+    }
+
+    fn acquisition_with_provider_parts(
+        marker: &str,
+        origin_provider: &str,
+        authority_provider: &str,
+        refresh_provider: Option<&str>,
+    ) -> PreparedSkillAcquisition {
+        let package = PreparedSkillPackage::from_bytes(
+            format!(
+                "---\nname: provider-binding-fixture\ndescription: Provider binding fixture.\n---\n# Instructions\n{marker}\n"
+            )
+            .into_bytes(),
+            SkillPackageOrigin::new(origin_provider, "origin").unwrap(),
+        )
+        .unwrap();
+        let authority =
+            SkillInstallationAuthority::new(authority_provider, 1, "authority").unwrap();
+        let refresh = refresh_provider
+            .map(|provider| SkillInstallationRefresh::new(provider, 1, "tracking").unwrap());
+        PreparedSkillAcquisition::new(
+            package,
+            SkillInstallationProvenance::new(authority, refresh),
+        )
+    }
+
+    struct RefreshFixtureAdapter {
+        calls: Arc<AtomicUsize>,
+        next: PreparedSkillAcquisition,
+    }
+
+    impl SkillAcquisitionAdapter for RefreshFixtureAdapter {
+        fn provider(&self) -> SkillAcquisitionProvider {
+            SkillAcquisitionProvider::parse(REFRESH_FIXTURE_PROVIDER).unwrap()
+        }
+
+        fn acquire(
+            &self,
+            _source: &SkillAcquisitionSource,
+        ) -> Result<PreparedSkillAcquisition, SkillAcquisitionAdapterError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.next.clone())
+        }
+
+        fn refresh_schema_versions(&self) -> &'static [u32] {
+            &[1]
+        }
+
+        fn reacquire(
+            &self,
+            refresh: SkillInstallationRefreshView<'_>,
+        ) -> Result<PreparedSkillAcquisition, SkillAcquisitionAdapterError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if refresh.provider() != REFRESH_FIXTURE_PROVIDER
+                || refresh.schema_version() != 1
+                || refresh.payload() != "tracking"
+            {
+                return Err(SkillAcquisitionAdapterError::invalid_request(
+                    "invalid fixture refresh metadata",
+                ));
+            }
+            Ok(self.next.clone())
+        }
+
+        fn installed_source_presentation(
+            &self,
+            provenance: SkillInstallationProvenanceView<'_>,
+            refresh_capable: bool,
+        ) -> Option<InstalledSkillSourcePresentation> {
+            let authority = provenance.authority();
+            let refresh = provenance.refresh()?;
+            (authority.provider() == REFRESH_FIXTURE_PROVIDER
+                && authority.schema_version() == 1
+                && refresh.provider() == REFRESH_FIXTURE_PROVIDER
+                && refresh.schema_version() == 1
+                && refresh.payload() == "tracking")
+                .then(|| InstalledSkillSourcePresentation::Provider {
+                    provider: REFRESH_FIXTURE_PROVIDER.to_string(),
+                    display_name: "Fixture refresh".to_string(),
+                    refreshable: refresh_capable,
+                })
+        }
+    }
+
+    const PRESENTATION_FIXTURE_PROVIDER: &str = "fixture-presentation";
+
+    struct PresentationFixtureAdapter {
+        presentation: InstalledSkillSourcePresentation,
+    }
+
+    impl SkillAcquisitionAdapter for PresentationFixtureAdapter {
+        fn provider(&self) -> SkillAcquisitionProvider {
+            SkillAcquisitionProvider::parse(PRESENTATION_FIXTURE_PROVIDER).unwrap()
+        }
+
+        fn acquire(
+            &self,
+            _source: &SkillAcquisitionSource,
+        ) -> Result<PreparedSkillAcquisition, SkillAcquisitionAdapterError> {
+            Err(SkillAcquisitionAdapterError::invalid_request(
+                "the presentation fixture does not acquire packages",
+            ))
+        }
+
+        fn refresh_schema_versions(&self) -> &'static [u32] {
+            &[1]
+        }
+
+        fn installed_source_presentation(
+            &self,
+            _provenance: SkillInstallationProvenanceView<'_>,
+            _refresh_capable: bool,
+        ) -> Option<InstalledSkillSourcePresentation> {
+            Some(self.presentation.clone())
+        }
+    }
+
+    fn refresh_workflow(
+        store: &Path,
+        initial: PreparedSkillAcquisition,
+        next: PreparedSkillAcquisition,
+    ) -> (
+        SkillInstallationWorkflow,
+        InstalledSkillRecord,
+        Arc<AtomicUsize>,
+    ) {
+        let service = SkillInstallationService::new(store).unwrap();
+        let (package, provenance) = initial.into_parts();
+        service
+            .install_prepared_with_provenance(installation_id(), package, provenance)
+            .unwrap();
+        let record = service
+            .read_installed_skill(&installation_id())
+            .unwrap()
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut workflow = SkillInstallationWorkflow::new(service);
+        workflow
+            .register_adapter(Arc::new(RefreshFixtureAdapter {
+                calls: Arc::clone(&calls),
+                next,
+            }))
+            .unwrap();
+        (workflow, record, calls)
+    }
+
+    const HANDOFF_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    struct HandoffResolver {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl HandoffResolver {
+        fn prepared(
+            &self,
+            locator: &SkillInstallationSourceLocator,
+        ) -> PreparedSkillSourceResolution {
+            let repository = GitHubRepository::parse("example", "skills").unwrap();
+            let commit = GitHubCommit::parse(HANDOFF_COMMIT).unwrap();
+            let subdirectory = GitHubSubdirectory::parse("skills/handoff").unwrap();
+            let summary = GitHubAcquisitionSummary::for_resolved_pin(
+                &repository,
+                &GitHubReference::DefaultBranch,
+                &commit,
+                &subdirectory,
+            );
+            let origin = summary.origin().unwrap();
+            let package = PreparedSkillPackage::from_bytes(
+                b"---\nname: handoff-fixture\ndescription: Exact handoff fixture.\n---\n# Instructions\nRESOLVED_ONCE_EXACT_BYTES\n"
+                    .to_vec(),
+                origin,
+            )
+            .unwrap();
+            PreparedSkillSourceResolution::new(
+                locator.as_url(),
+                SkillSourceResolverId::parse("github").unwrap(),
+                HANDOFF_COMMIT,
+                vec![PreparedSkillSourceResolutionCandidate::new(
+                    SkillSourceCandidateId::parse("handoff").unwrap(),
+                    ResolvedSkillSource::GitHub {
+                        owner: "example".to_string(),
+                        repository: "skills".to_string(),
+                        tracking_reference: GitHubReference::DefaultBranch,
+                        resolved_commit: HANDOFF_COMMIT.to_string(),
+                        subdirectory: Some("skills/handoff".to_string()),
+                    },
+                    PreparedSkillAcquisition::new(package, summary.provenance().unwrap()),
+                )],
+            )
+            .unwrap()
+        }
+    }
+
+    impl SkillInstallationSourceResolver for HandoffResolver {
+        fn id(&self) -> SkillSourceResolverId {
+            SkillSourceResolverId::parse("github").unwrap()
+        }
+
+        fn supported_hosts(&self) -> Vec<String> {
+            vec!["github.com".to_string()]
+        }
+
+        fn resolve(
+            &self,
+            locator: &SkillInstallationSourceLocator,
+        ) -> Result<SkillSourceResolution, SkillSourceResolutionError> {
+            self.prepared(locator).public_resolution()
+        }
+
+        fn resolve_prepared(
+            &self,
+            locator: &SkillInstallationSourceLocator,
+        ) -> Result<PreparedSkillSourceResolution, SkillSourceResolutionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.prepared(locator))
+        }
+    }
+
+    fn resolved_handoff(
+        store: &Path,
+    ) -> (
+        SkillInstallationWorkflow,
+        SkillSourceResolutionId,
+        SkillSourceCandidateId,
+        Arc<AtomicUsize>,
+    ) {
+        let sessions = SkillInstallationSessionStore::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut resolutions = SkillSourceResolutionService::with_session_store(sessions.clone());
+        resolutions
+            .register_resolver(Arc::new(HandoffResolver {
+                calls: Arc::clone(&calls),
+            }))
+            .unwrap();
+        let resolution_id = SkillSourceResolutionId::new();
+        let locator =
+            SkillInstallationSourceLocator::url("https://github.com/example/skills").unwrap();
+        let registered = resolutions
+            .resolve_registered(resolution_id.clone(), &locator)
+            .unwrap();
+        let candidate_id =
+            SkillSourceCandidateId::parse(registered.resolution().candidates()[0].candidate_id())
+                .unwrap();
+        let workflow = SkillInstallationWorkflow::with_session_store(
+            SkillInstallationService::new(store).unwrap(),
+            SkillInstallationWorkflowConfig::default(),
+            sessions,
+        );
+        (workflow, resolution_id, candidate_id, calls)
+    }
+
     #[test]
     fn local_preview_is_idempotent_and_commit_uses_the_captured_snapshot() {
         let fixture = tempdir().unwrap();
@@ -2136,6 +3453,8 @@ mod tests {
         );
 
         let first = workflow.inspect(&request).unwrap();
+        assert!(first.content_changed());
+        assert!(first.source_changed());
         assert_eq!(first.acquisition().provider(), LOCAL_DIRECTORY_PROVIDER);
         assert_eq!(
             first.acquisition().reference(),
@@ -2174,6 +3493,522 @@ mod tests {
         let activated = reader.activate(&[catalog.skills()[0].selection()]).unwrap();
         assert!(activated.skills()[0].instructions().contains("ORIGINAL"));
         assert!(!activated.skills()[0].instructions().contains("MUTATED"));
+    }
+
+    #[test]
+    fn resolved_candidate_moves_exact_bytes_once_into_the_installation_transaction() {
+        let fixture = tempdir().unwrap();
+        let store = fixture.path().join("store");
+        let (workflow, resolution_id, candidate_id, calls) = resolved_handoff(&store);
+        let preparation_id = SkillPreparationId::new();
+        let request = SkillInstallationPreparationRequest::install(
+            preparation_id.clone(),
+            installation_id(),
+            SkillAcquisitionSource::resolved_candidate(resolution_id.clone(), candidate_id.clone()),
+        );
+
+        let preview = workflow.inspect(&request).unwrap();
+        assert_eq!(workflow.inspect(&request).unwrap(), preview);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(preview.acquisition().provider(), "github");
+        let origin: serde_json::Value =
+            serde_json::from_str(preview.acquisition().reference()).unwrap();
+        assert_eq!(origin["resolvedCommit"], HANDOFF_COMMIT);
+
+        let consumed = SkillInstallationPreparationRequest::install(
+            SkillPreparationId::new(),
+            SkillInstallationId::new(),
+            SkillAcquisitionSource::resolved_candidate(resolution_id, candidate_id),
+        );
+        assert!(matches!(
+            workflow.inspect(&consumed).unwrap_err(),
+            SkillInstallationWorkflowError::SourceResolutionConsumed { .. }
+        ));
+
+        workflow
+            .commit(&SkillInstallationCommitRequest::new(
+                preparation_id,
+                preview.preview_revision().clone(),
+            ))
+            .unwrap();
+        let record = SkillInstallationService::new(&store)
+            .unwrap()
+            .read_installed_skill(&installation_id())
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.provenance().authority().provider(), "github");
+        assert!(record.provenance().refresh().is_some());
+        let reader = SkillsService::new().with_installed_source(&store).unwrap();
+        let catalog = reader.list().unwrap();
+        let activated = reader.activate(&[catalog.skills()[0].selection()]).unwrap();
+        assert!(activated.skills()[0]
+            .instructions()
+            .contains("RESOLVED_ONCE_EXACT_BYTES"));
+    }
+
+    #[test]
+    fn consuming_a_resolved_candidate_immediately_releases_active_resolution_capacity() {
+        let fixture = tempdir().unwrap();
+        let config = SkillInstallationSessionConfig::new(
+            1,
+            2,
+            super::super::installation_session::DEFAULT_SKILL_SESSION_SNAPSHOT_BYTES,
+            Duration::from_secs(60),
+        )
+        .unwrap()
+        .with_max_resolution_tombstones(4)
+        .unwrap();
+        let sessions = SkillInstallationSessionStore::new(config);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut resolutions = SkillSourceResolutionService::with_session_store(sessions.clone());
+        resolutions
+            .register_resolver(Arc::new(HandoffResolver {
+                calls: Arc::clone(&calls),
+            }))
+            .unwrap();
+        let locator =
+            SkillInstallationSourceLocator::url("https://github.com/example/skills").unwrap();
+        let first_id = SkillSourceResolutionId::new();
+        let first = resolutions
+            .resolve_registered(first_id.clone(), &locator)
+            .unwrap();
+        let candidate_id =
+            SkillSourceCandidateId::parse(first.resolution().candidates()[0].candidate_id())
+                .unwrap();
+        let workflow = SkillInstallationWorkflow::with_session_store(
+            SkillInstallationService::new(fixture.path().join("store")).unwrap(),
+            SkillInstallationWorkflowConfig::default(),
+            sessions,
+        );
+        workflow
+            .inspect(&SkillInstallationPreparationRequest::install(
+                SkillPreparationId::new(),
+                installation_id(),
+                SkillAcquisitionSource::resolved_candidate(first_id, candidate_id),
+            ))
+            .unwrap();
+
+        resolutions
+            .resolve_registered(SkillSourceResolutionId::new(), &locator)
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn missing_candidate_does_not_consume_the_resolution() {
+        let fixture = tempdir().unwrap();
+        let (workflow, resolution_id, candidate_id, calls) =
+            resolved_handoff(&fixture.path().join("store"));
+        let missing = SkillInstallationPreparationRequest::install(
+            SkillPreparationId::new(),
+            installation_id(),
+            SkillAcquisitionSource::resolved_candidate(
+                resolution_id.clone(),
+                SkillSourceCandidateId::parse("missing").unwrap(),
+            ),
+        );
+        assert!(matches!(
+            workflow.inspect(&missing).unwrap_err(),
+            SkillInstallationWorkflowError::SourceCandidateNotFound { .. }
+        ));
+
+        let selected = SkillInstallationPreparationRequest::install(
+            SkillPreparationId::new(),
+            installation_id(),
+            SkillAcquisitionSource::resolved_candidate(resolution_id, candidate_id),
+        );
+        workflow.inspect(&selected).unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn installed_source_presentation_cannot_change_provider_or_escalate_refreshability() {
+        let fixture = tempdir().unwrap();
+        let cross_provider_provenance = provider_acquisition(
+            "CURRENT",
+            PRESENTATION_FIXTURE_PROVIDER,
+            "authority",
+            Some((PRESENTATION_FIXTURE_PROVIDER, 1, "tracking")),
+        )
+        .provenance()
+        .clone();
+        let mut cross_provider_workflow = workflow(&fixture.path().join("cross-provider"));
+        cross_provider_workflow
+            .register_adapter(Arc::new(PresentationFixtureAdapter {
+                presentation: InstalledSkillSourcePresentation::Provider {
+                    provider: "different-provider".to_string(),
+                    display_name: "Forged provider".to_string(),
+                    refreshable: false,
+                },
+            }))
+            .unwrap();
+        assert!(matches!(
+            cross_provider_workflow
+                .installed_source_presentation(&cross_provider_provenance),
+            InstalledSkillSourcePresentation::Unknown { ref provider, .. }
+                if provider == PRESENTATION_FIXTURE_PROVIDER
+        ));
+
+        let non_refreshable_provenance =
+            provider_acquisition("CURRENT", PRESENTATION_FIXTURE_PROVIDER, "authority", None)
+                .provenance()
+                .clone();
+        let mut escalating_workflow = workflow(&fixture.path().join("refresh-escalation"));
+        escalating_workflow
+            .register_adapter(Arc::new(PresentationFixtureAdapter {
+                presentation: InstalledSkillSourcePresentation::Provider {
+                    provider: PRESENTATION_FIXTURE_PROVIDER.to_string(),
+                    display_name: "Forged refresh capability".to_string(),
+                    refreshable: true,
+                },
+            }))
+            .unwrap();
+        assert!(matches!(
+            escalating_workflow.installed_source_presentation(&non_refreshable_provenance),
+            InstalledSkillSourcePresentation::Unknown { ref provider, .. }
+                if provider == PRESENTATION_FIXTURE_PROVIDER
+        ));
+        assert!(!escalating_workflow.can_refresh(&non_refreshable_provenance));
+    }
+
+    #[test]
+    fn installed_source_presentation_rejects_unsafe_provider_display_names() {
+        let fixture = tempdir().unwrap();
+        let provenance =
+            provider_acquisition("CURRENT", PRESENTATION_FIXTURE_PROVIDER, "authority", None)
+                .provenance()
+                .clone();
+        let invalid_display_names = [
+            String::new(),
+            "   ".to_string(),
+            "Fixture\nsource".to_string(),
+            "x".repeat(MAX_INSTALLED_SOURCE_DISPLAY_NAME_BYTES + 1),
+        ];
+
+        for (index, display_name) in invalid_display_names.into_iter().enumerate() {
+            let mut workflow = workflow(&fixture.path().join(format!("invalid-{index}")));
+            workflow
+                .register_adapter(Arc::new(PresentationFixtureAdapter {
+                    presentation: InstalledSkillSourcePresentation::Provider {
+                        provider: PRESENTATION_FIXTURE_PROVIDER.to_string(),
+                        display_name,
+                        refreshable: false,
+                    },
+                }))
+                .unwrap();
+
+            assert!(matches!(
+                workflow.installed_source_presentation(&provenance),
+                InstalledSkillSourcePresentation::Unknown { ref provider, .. }
+                    if provider == PRESENTATION_FIXTURE_PROVIDER
+            ));
+        }
+    }
+
+    #[test]
+    fn installed_source_refresh_updates_bytes_and_persists_new_provenance() {
+        let fixture = tempdir().unwrap();
+        let store = fixture.path().join("store");
+        let initial = fixture_acquisition(
+            "VERSION_ONE",
+            "authority-one",
+            Some((REFRESH_FIXTURE_PROVIDER, 1, "tracking")),
+        );
+        let next = fixture_acquisition(
+            "VERSION_TWO",
+            "authority-two",
+            Some((REFRESH_FIXTURE_PROVIDER, 1, "tracking")),
+        );
+        let expected_next = next.clone();
+        let (workflow, record, calls) = refresh_workflow(&store, initial, next);
+        assert!(workflow.can_refresh(record.provenance()));
+        assert!(matches!(
+            workflow.installed_source_presentation(record.provenance()),
+            InstalledSkillSourcePresentation::Provider {
+                refreshable: true,
+                ..
+            }
+        ));
+        let request = SkillInstallationPreparationRequest::update(
+            SkillPreparationId::new(),
+            record.skill_id().clone(),
+            record.installation_revision().clone(),
+            SkillAcquisitionSource::installed_source(),
+        );
+
+        let preview = workflow.inspect(&request).unwrap();
+        assert!(preview.content_changed());
+        assert!(preview.source_changed());
+        assert_eq!(workflow.inspect(&request).unwrap(), preview);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        workflow
+            .commit(&SkillInstallationCommitRequest::new(
+                request.preparation_id().clone(),
+                preview.preview_revision().clone(),
+            ))
+            .unwrap();
+
+        let updated = SkillInstallationService::new(&store)
+            .unwrap()
+            .read_installed_skill(&installation_id())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated.package_revision(),
+            expected_next.package().revision()
+        );
+        assert_eq!(updated.provenance(), expected_next.provenance());
+        assert_ne!(
+            updated.installation_revision(),
+            record.installation_revision()
+        );
+    }
+
+    #[test]
+    fn installed_source_can_commit_a_provenance_only_update() {
+        let fixture = tempdir().unwrap();
+        let store = fixture.path().join("store");
+        let initial = fixture_acquisition(
+            "SAME_BYTES",
+            "authority-one",
+            Some((REFRESH_FIXTURE_PROVIDER, 1, "tracking")),
+        );
+        let next = fixture_acquisition(
+            "SAME_BYTES",
+            "authority-two",
+            Some((REFRESH_FIXTURE_PROVIDER, 1, "tracking")),
+        );
+        let (workflow, record, _) = refresh_workflow(&store, initial, next);
+        let request = SkillInstallationPreparationRequest::update(
+            SkillPreparationId::new(),
+            record.skill_id().clone(),
+            record.installation_revision().clone(),
+            SkillAcquisitionSource::installed_source(),
+        );
+
+        let preview = workflow.inspect(&request).unwrap();
+        assert!(!preview.content_changed());
+        assert!(preview.source_changed());
+        let committed = workflow
+            .commit(&SkillInstallationCommitRequest::new(
+                request.preparation_id().clone(),
+                preview.preview_revision().clone(),
+            ))
+            .unwrap();
+        assert_eq!(
+            committed.mutation().outcome(),
+            SkillInstallationOutcome::Updated
+        );
+    }
+
+    #[test]
+    fn installed_source_refresh_rejects_cross_provider_adapter_output() {
+        let fixture = tempdir().unwrap();
+        let store = fixture.path().join("store");
+        let initial = fixture_acquisition(
+            "VERSION_ONE",
+            "authority-one",
+            Some((REFRESH_FIXTURE_PROVIDER, 1, "tracking")),
+        );
+        let next = acquisition_with_provider_parts(
+            "VERSION_TWO",
+            REFRESH_FIXTURE_PROVIDER,
+            "other-provider",
+            Some("other-provider"),
+        );
+        let (workflow, record, calls) = refresh_workflow(&store, initial, next);
+        let request = SkillInstallationPreparationRequest::update(
+            SkillPreparationId::new(),
+            record.skill_id().clone(),
+            record.installation_revision().clone(),
+            SkillAcquisitionSource::installed_source(),
+        );
+
+        let error = workflow.inspect(&request).unwrap_err();
+        match error {
+            SkillInstallationWorkflowError::Acquisition { provider, source } => {
+                assert_eq!(provider.as_str(), REFRESH_FIXTURE_PROVIDER);
+                assert_eq!(source.code(), SkillAcquisitionAdapterErrorCode::Unavailable);
+                assert!(!source.reason().contains("other-provider"));
+            }
+            other => panic!("unexpected provider-binding error: {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(SkillInstallationService::new(&store)
+            .unwrap()
+            .read_installed_skill(&installation_id())
+            .unwrap()
+            .is_some_and(
+                |installed| installed.installation_revision() == record.installation_revision()
+            ));
+    }
+
+    #[test]
+    fn stale_installed_source_preflight_never_calls_the_adapter() {
+        let fixture = tempdir().unwrap();
+        let initial = fixture_acquisition(
+            "VERSION_ONE",
+            "authority-one",
+            Some((REFRESH_FIXTURE_PROVIDER, 1, "tracking")),
+        );
+        let next = fixture_acquisition(
+            "VERSION_TWO",
+            "authority-two",
+            Some((REFRESH_FIXTURE_PROVIDER, 1, "tracking")),
+        );
+        let (workflow, record, calls) =
+            refresh_workflow(&fixture.path().join("store"), initial, next);
+        let stale = SkillInstallationRevision::parse(format!(
+            "skill-installation-sha256-v1:{}",
+            "0".repeat(64)
+        ))
+        .unwrap();
+        assert_ne!(&stale, record.installation_revision());
+        let request = SkillInstallationPreparationRequest::update(
+            SkillPreparationId::new(),
+            record.skill_id().clone(),
+            stale,
+            SkillAcquisitionSource::installed_source(),
+        );
+
+        assert!(matches!(
+            workflow.inspect(&request).unwrap_err(),
+            SkillInstallationWorkflowError::InstalledSourceRevisionConflict { .. }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn installed_source_rejects_missing_provider_unsupported_schema_and_install_intent() {
+        let fixture = tempdir().unwrap();
+        let next = fixture_acquisition(
+            "NEXT",
+            "authority-two",
+            Some((REFRESH_FIXTURE_PROVIDER, 1, "tracking")),
+        );
+
+        let unknown_initial = provider_acquisition(
+            "CURRENT",
+            "missing-provider",
+            "authority-one",
+            Some(("missing-provider", 1, "tracking")),
+        );
+        let (unknown_workflow, unknown_record, unknown_calls) = refresh_workflow(
+            &fixture.path().join("unknown"),
+            unknown_initial,
+            next.clone(),
+        );
+        let unknown_request = SkillInstallationPreparationRequest::update(
+            SkillPreparationId::new(),
+            unknown_record.skill_id().clone(),
+            unknown_record.installation_revision().clone(),
+            SkillAcquisitionSource::installed_source(),
+        );
+        assert!(matches!(
+            unknown_workflow.inspect(&unknown_request).unwrap_err(),
+            SkillInstallationWorkflowError::UnknownRefreshProvider { .. }
+        ));
+        assert_eq!(unknown_calls.load(Ordering::SeqCst), 0);
+
+        let delegated_initial = fixture_acquisition(
+            "CURRENT",
+            "authority-one",
+            Some(("missing-provider", 1, "tracking")),
+        );
+        let (delegated_workflow, delegated_record, delegated_calls) = refresh_workflow(
+            &fixture.path().join("delegated"),
+            delegated_initial,
+            next.clone(),
+        );
+        let delegated_request = SkillInstallationPreparationRequest::update(
+            SkillPreparationId::new(),
+            delegated_record.skill_id().clone(),
+            delegated_record.installation_revision().clone(),
+            SkillAcquisitionSource::installed_source(),
+        );
+        assert!(!delegated_workflow.can_refresh(delegated_record.provenance()));
+        assert!(matches!(
+            delegated_workflow.installed_source_presentation(delegated_record.provenance()),
+            InstalledSkillSourcePresentation::Unknown { .. }
+        ));
+        assert!(matches!(
+            delegated_workflow.inspect(&delegated_request).unwrap_err(),
+            SkillInstallationWorkflowError::InvalidInstalledSourceProvenance { .. }
+        ));
+        assert_eq!(delegated_calls.load(Ordering::SeqCst), 0);
+
+        let schema_initial = fixture_acquisition(
+            "CURRENT",
+            "authority-one",
+            Some((REFRESH_FIXTURE_PROVIDER, 2, "tracking")),
+        );
+        let (schema_workflow, schema_record, schema_calls) =
+            refresh_workflow(&fixture.path().join("schema"), schema_initial, next);
+        let schema_request = SkillInstallationPreparationRequest::update(
+            SkillPreparationId::new(),
+            schema_record.skill_id().clone(),
+            schema_record.installation_revision().clone(),
+            SkillAcquisitionSource::installed_source(),
+        );
+        assert!(matches!(
+            schema_workflow.inspect(&schema_request).unwrap_err(),
+            SkillInstallationWorkflowError::UnsupportedRefreshSchema { .. }
+        ));
+        assert_eq!(schema_calls.load(Ordering::SeqCst), 0);
+
+        let install_request = SkillInstallationPreparationRequest::install(
+            SkillPreparationId::new(),
+            SkillInstallationId::new(),
+            SkillAcquisitionSource::installed_source(),
+        );
+        assert!(matches!(
+            schema_workflow.inspect(&install_request).unwrap_err(),
+            SkillInstallationWorkflowError::InstalledSourceRequiresUpdate
+        ));
+    }
+
+    #[test]
+    fn local_installation_is_presented_as_nonrefreshable_without_paths() {
+        let fixture = tempdir().unwrap();
+        let source = fixture.path().join("source");
+        let store = fixture.path().join("store");
+        write_skill(&source, "LOCAL", false);
+        let workflow = workflow(&store);
+        let preview = workflow
+            .inspect_local_directory_install(SkillPreparationId::new(), installation_id(), &source)
+            .unwrap();
+        workflow
+            .commit(&SkillInstallationCommitRequest::new(
+                preview.preparation_id().clone(),
+                preview.preview_revision().clone(),
+            ))
+            .unwrap();
+        let record = SkillInstallationService::new(&store)
+            .unwrap()
+            .read_installed_skill(&installation_id())
+            .unwrap()
+            .unwrap();
+        assert!(!workflow.can_refresh(record.provenance()));
+        assert_eq!(
+            workflow.installed_source_presentation(record.provenance()),
+            InstalledSkillSourcePresentation::LocalDirectory
+        );
+        assert!(!record
+            .provenance()
+            .authority()
+            .payload()
+            .contains(source.to_str().unwrap()));
+
+        let request = SkillInstallationPreparationRequest::update(
+            SkillPreparationId::new(),
+            record.skill_id().clone(),
+            record.installation_revision().clone(),
+            SkillAcquisitionSource::installed_source(),
+        );
+        assert!(matches!(
+            workflow.inspect(&request).unwrap_err(),
+            SkillInstallationWorkflowError::InstalledSourceNotRefreshable { .. }
+        ));
     }
 
     #[test]
@@ -2216,7 +4051,7 @@ mod tests {
     }
 
     #[test]
-    fn package_revision_is_the_installation_cas_revision_across_updates() {
+    fn package_and_installation_revisions_keep_distinct_update_contracts() {
         let fixture = tempdir().unwrap();
         let store = fixture.path().join("store");
         let source = fixture.path().join("source");
@@ -2232,8 +4067,12 @@ mod tests {
                 install_preview.preview_revision().clone(),
             ))
             .unwrap();
-        let installed_revision = install.mutation().revision().unwrap().clone();
-        assert_eq!(installed_revision, *install_preview.package().revision());
+        let installed_package_revision = install.mutation().package_revision().unwrap().clone();
+        let installed_revision = install.mutation().installation_revision().unwrap().clone();
+        assert_eq!(
+            installed_package_revision,
+            *install_preview.package().revision()
+        );
 
         write_skill(&source, "VERSION_TWO", false);
         let update_preview = workflow
@@ -2244,11 +4083,16 @@ mod tests {
                 &source,
             )
             .unwrap();
+        assert!(update_preview.content_changed());
+        assert!(!update_preview.source_changed());
         assert_eq!(
             update_preview.expected_revision(),
             Some(&installed_revision)
         );
-        assert_ne!(update_preview.package().revision(), &installed_revision);
+        assert_ne!(
+            update_preview.package().revision(),
+            &installed_package_revision
+        );
         let update = workflow
             .commit(&SkillInstallationCommitRequest::new(
                 update_preview.preparation_id().clone(),
@@ -2260,11 +4104,15 @@ mod tests {
             update.preview().operation(),
             SkillInstallationOperation::Update
         );
-        let updated_revision = update.mutation().revision().unwrap().clone();
-        assert_eq!(updated_revision, *update_preview.package().revision());
+        let updated_package_revision = update.mutation().package_revision().unwrap().clone();
+        let updated_revision = update.mutation().installation_revision().unwrap().clone();
+        assert_eq!(
+            updated_package_revision,
+            *update_preview.package().revision()
+        );
 
-        // The returned revision is not synthetic: it is accepted directly by
-        // the installer's package-revision CAS on the following update.
+        // The lifecycle revision returned by commit is accepted directly by
+        // the following exact update CAS.
         write_skill(&source, "VERSION_THREE", false);
         let next_preview = workflow
             .inspect_local_directory_update(
@@ -2377,14 +4225,14 @@ mod tests {
             fn acquire(
                 &self,
                 source: &SkillAcquisitionSource,
-            ) -> Result<PreparedSkillPackage, SkillAcquisitionAdapterError> {
+            ) -> Result<PreparedSkillAcquisition, SkillAcquisitionAdapterError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 let marker = source.adapter_request().ok_or_else(|| {
                     SkillAcquisitionAdapterError::invalid_request("missing fixture request")
                 })?;
                 let origin = SkillPackageOrigin::new("fixture-adapter", "fixture")
                     .map_err(|_| SkillAcquisitionAdapterError::unavailable("invalid origin"))?;
-                PreparedSkillPackage::from_bytes(
+                let package = PreparedSkillPackage::from_bytes(
                     format!(
                         "---\nname: adapter-fixture\ndescription: Adapter fixture.\n---\n# Instructions\n{}\n",
                         String::from_utf8_lossy(marker)
@@ -2392,7 +4240,16 @@ mod tests {
                     .into_bytes(),
                     origin,
                 )
-                .map_err(Into::into)
+                .map_err(SkillAcquisitionAdapterError::from)?;
+                let authority =
+                    SkillInstallationAuthority::new("fixture-adapter", 1, "fixture-authority")
+                        .map_err(|_| {
+                            SkillAcquisitionAdapterError::unavailable("invalid provenance")
+                        })?;
+                Ok(PreparedSkillAcquisition::new(
+                    package,
+                    SkillInstallationProvenance::new(authority, None),
+                ))
             }
         }
 
@@ -2427,6 +4284,289 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn adapter_panic_releases_the_preparation_for_an_idempotent_retry() {
+        const PROVIDER: &str = "panic-once-adapter";
+
+        struct PanicOnceAdapter {
+            calls: AtomicUsize,
+            next: PreparedSkillAcquisition,
+        }
+
+        impl SkillAcquisitionAdapter for PanicOnceAdapter {
+            fn provider(&self) -> SkillAcquisitionProvider {
+                SkillAcquisitionProvider::parse(PROVIDER).unwrap()
+            }
+
+            fn acquire(
+                &self,
+                _source: &SkillAcquisitionSource,
+            ) -> Result<PreparedSkillAcquisition, SkillAcquisitionAdapterError> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("injected adapter panic");
+                }
+                Ok(self.next.clone())
+            }
+        }
+
+        let fixture = tempdir().unwrap();
+        let provider = SkillAcquisitionProvider::parse(PROVIDER).unwrap();
+        let mut workflow = workflow(&fixture.path().join("store"));
+        workflow
+            .register_adapter(Arc::new(PanicOnceAdapter {
+                calls: AtomicUsize::new(0),
+                next: provider_acquisition("RECOVERED", PROVIDER, "authority", None),
+            }))
+            .unwrap();
+        let request = SkillInstallationPreparationRequest::install(
+            SkillPreparationId::new(),
+            installation_id(),
+            SkillAcquisitionSource::adapter(provider, b"fixture".to_vec()).unwrap(),
+        );
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = workflow.inspect(&request);
+        }));
+        assert!(panic.is_err());
+        let preview = workflow
+            .inspect(&request)
+            .expect("the same preparation must be retryable after an adapter panic");
+        assert_eq!(preview.package().name(), "refresh-fixture");
+    }
+
+    #[test]
+    fn stale_preparing_recovery_cannot_remove_a_later_attempt() {
+        let fixture = tempdir().unwrap();
+        let workflow = workflow(&fixture.path().join("store"));
+        let preparation_id = SkillPreparationId::new();
+        let request = SkillInstallationPreparationRequest::install(
+            preparation_id.clone(),
+            installation_id(),
+            SkillAcquisitionSource::local_directory(fixture.path().join("skill")),
+        );
+
+        let first_attempt = {
+            let now = workflow.sessions.now();
+            let mut state = workflow.sessions.lock().unwrap();
+            workflow
+                .reserve_preparation(&mut state, request.clone(), now.monotonic)
+                .unwrap()
+        };
+        let stale_recovery =
+            PreparingSlotRecovery::new(&workflow.sessions, &preparation_id, first_attempt);
+
+        let second_attempt = {
+            let now = workflow.sessions.now();
+            let mut state = workflow.sessions.lock().unwrap();
+            state.preparations.remove(&preparation_id);
+            workflow
+                .reserve_preparation(&mut state, request, now.monotonic)
+                .unwrap()
+        };
+        assert_ne!(first_attempt, second_attempt);
+
+        drop(stale_recovery);
+
+        let state = workflow.sessions.lock().unwrap();
+        assert!(matches!(
+            state.preparations.get(&preparation_id),
+            Some(PreparationSlot::Preparing { attempt_id, .. })
+                if *attempt_id == second_attempt
+        ));
+    }
+
+    #[test]
+    fn commit_panic_recovery_restores_the_exact_ready_snapshot() {
+        let fixture = tempdir().unwrap();
+        let directory = fixture.path().join("skill");
+        write_skill(&directory, "RECOVER_COMMIT", false);
+        let workflow = workflow(&fixture.path().join("store"));
+        let preparation_id = SkillPreparationId::new();
+        let preparation = SkillInstallationPreparationRequest::install(
+            preparation_id.clone(),
+            installation_id(),
+            SkillAcquisitionSource::local_directory(directory),
+        );
+        let preview = workflow.inspect(&preparation).unwrap();
+
+        let (stored_request, acquisition, snapshot_bytes, expires_at, attempt_id) = {
+            let mut state = workflow.sessions.lock().unwrap();
+            let slot = state.preparations.remove(&preparation_id).unwrap();
+            let PreparationSlot::Ready {
+                request,
+                preview: stored_preview,
+                acquisition,
+                snapshot_bytes,
+                expires_at,
+            } = slot
+            else {
+                panic!("inspection must leave a ready preparation");
+            };
+            assert_eq!(stored_preview, preview);
+            let attempt_id = state.next_preparation_attempt();
+            state.preparations.insert(
+                preparation_id.clone(),
+                PreparationSlot::Committing {
+                    request: request.clone(),
+                    attempt_id,
+                    snapshot_bytes,
+                },
+            );
+            (request, acquisition, snapshot_bytes, expires_at, attempt_id)
+        };
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _recovery = CommittingSlotRecovery::new(
+                &workflow.sessions,
+                attempt_id,
+                &stored_request,
+                &preview,
+                &acquisition,
+                snapshot_bytes,
+                expires_at,
+            );
+            panic!("injected commit panic");
+        }));
+        assert!(panic.is_err());
+
+        let committed = workflow
+            .commit(&SkillInstallationCommitRequest::new(
+                preparation_id,
+                preview.preview_revision().clone(),
+            ))
+            .expect("commit retry must consume the restored exact snapshot");
+        assert_eq!(committed.preview(), &preview);
+    }
+
+    #[test]
+    fn stale_committing_recovery_cannot_overwrite_a_later_attempt() {
+        let fixture = tempdir().unwrap();
+        let directory = fixture.path().join("skill");
+        write_skill(&directory, "STALE_COMMIT_GUARD", false);
+        let workflow = workflow(&fixture.path().join("store"));
+        let preparation_id = SkillPreparationId::new();
+        let preparation = SkillInstallationPreparationRequest::install(
+            preparation_id.clone(),
+            installation_id(),
+            SkillAcquisitionSource::local_directory(directory),
+        );
+        let preview = workflow.inspect(&preparation).unwrap();
+
+        let (stored_request, acquisition, snapshot_bytes, expires_at, first_attempt) = {
+            let mut state = workflow.sessions.lock().unwrap();
+            let slot = state.preparations.remove(&preparation_id).unwrap();
+            let PreparationSlot::Ready {
+                request,
+                acquisition,
+                snapshot_bytes,
+                expires_at,
+                ..
+            } = slot
+            else {
+                panic!("inspection must leave a ready preparation");
+            };
+            let attempt_id = state.next_preparation_attempt();
+            state.preparations.insert(
+                preparation_id.clone(),
+                PreparationSlot::Committing {
+                    request: request.clone(),
+                    attempt_id,
+                    snapshot_bytes,
+                },
+            );
+            (request, acquisition, snapshot_bytes, expires_at, attempt_id)
+        };
+        let stale_recovery = CommittingSlotRecovery::new(
+            &workflow.sessions,
+            first_attempt,
+            &stored_request,
+            &preview,
+            &acquisition,
+            snapshot_bytes,
+            expires_at,
+        );
+
+        let second_attempt = {
+            let mut state = workflow.sessions.lock().unwrap();
+            let attempt_id = state.next_preparation_attempt();
+            state.preparations.insert(
+                preparation_id.clone(),
+                PreparationSlot::Committing {
+                    request: stored_request,
+                    attempt_id,
+                    snapshot_bytes,
+                },
+            );
+            attempt_id
+        };
+        assert_ne!(first_attempt, second_attempt);
+
+        drop(stale_recovery);
+
+        let state = workflow.sessions.lock().unwrap();
+        assert!(matches!(
+            state.preparations.get(&preparation_id),
+            Some(PreparationSlot::Committing { attempt_id, .. })
+                if *attempt_id == second_attempt
+        ));
+    }
+
+    #[test]
+    fn registered_adapter_cannot_cross_its_provider_ownership_boundary() {
+        let mismatched = [
+            acquisition_with_provider_parts(
+                "ORIGIN_MISMATCH",
+                "other-provider",
+                REFRESH_FIXTURE_PROVIDER,
+                None,
+            ),
+            acquisition_with_provider_parts(
+                "AUTHORITY_MISMATCH",
+                REFRESH_FIXTURE_PROVIDER,
+                "other-provider",
+                None,
+            ),
+            acquisition_with_provider_parts(
+                "REFRESH_MISMATCH",
+                REFRESH_FIXTURE_PROVIDER,
+                REFRESH_FIXTURE_PROVIDER,
+                Some("other-provider"),
+            ),
+        ];
+
+        for acquisition in mismatched {
+            let fixture = tempdir().unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut workflow = workflow(&fixture.path().join("store"));
+            workflow
+                .register_adapter(Arc::new(RefreshFixtureAdapter {
+                    calls: Arc::clone(&calls),
+                    next: acquisition,
+                }))
+                .unwrap();
+            let provider = SkillAcquisitionProvider::parse(REFRESH_FIXTURE_PROVIDER).unwrap();
+            let request = SkillInstallationPreparationRequest::install(
+                SkillPreparationId::new(),
+                installation_id(),
+                SkillAcquisitionSource::adapter(provider.clone(), b"fixture".to_vec()).unwrap(),
+            );
+
+            let error = workflow.inspect(&request).unwrap_err();
+            match error {
+                SkillInstallationWorkflowError::Acquisition {
+                    provider: actual,
+                    source,
+                } => {
+                    assert_eq!(actual, provider);
+                    assert_eq!(source.code(), SkillAcquisitionAdapterErrorCode::Unavailable);
+                    assert!(!source.reason().contains("other-provider"));
+                }
+                other => panic!("unexpected provider-binding error: {other:?}"),
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
     struct ManualClock {
         elapsed_ms: AtomicU64,
         started_unix_ms: u64,
@@ -2450,10 +4590,10 @@ mod tests {
         }
     }
 
-    impl WorkflowClock for ManualClock {
-        fn now(&self) -> WorkflowTime {
+    impl SessionClock for ManualClock {
+        fn now(&self) -> super::super::installation_session::SessionTime {
             let elapsed_ms = self.elapsed_ms.load(Ordering::SeqCst);
-            WorkflowTime {
+            super::super::installation_session::SessionTime {
                 monotonic: Duration::from_millis(elapsed_ms),
                 unix_ms: self.started_unix_ms.saturating_add(elapsed_ms),
             }

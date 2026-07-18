@@ -2,7 +2,7 @@ export const SKILL_CATALOG_SCHEMA_VERSION = 4 as const
 export const SKILL_MUTATION_SCHEMA_VERSION = 1 as const
 export const SKILL_INSTALLATION_WORKFLOW_SCHEMA_VERSION = 1 as const
 export const SKILL_MANAGEMENT_SCHEMA_VERSION = 1 as const
-export const SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION = 1 as const
+export const SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION = 2 as const
 export const SKILL_INSTALLATION_ERROR_CODE = -32010 as const
 export const SKILL_INSPECTION_ERROR_CODE = -32011 as const
 export const SKILL_MANAGEMENT_ERROR_CODE = -32012 as const
@@ -18,6 +18,7 @@ export const SKILLS_LIST_MANAGEMENT_METHOD = 'skills.listManagement' as const
 export const SKILLS_SET_ENABLED_METHOD = 'skills.setEnabled' as const
 export const SKILLS_CHANGED_NOTIFICATION_METHOD = 'skills.changed' as const
 export const SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD = 'skills.resolveInstallationSource' as const
+export const SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD = 'skills.cancelSourceResolution' as const
 
 export type SkillSourceKind = 'workspace' | 'bundled' | 'installed'
 
@@ -124,8 +125,17 @@ export type SkillAcquisitionSource =
       kind: 'githubRepository'
       owner: string
       repository: string
+      /** Moving reference to track. Omission means the repository default branch. */
       reference?: SkillGitHubReference
+      /** Presentation pins must cross the one-time resolvedCandidate handoff instead. */
+      resolvedCommit?: never
       subdirectory?: string
+    }
+  | {
+      /** Opaque one-time authority returned by source resolution. */
+      kind: 'resolvedCandidate'
+      resolutionId: string
+      candidateId: string
     }
   | { kind: 'installedSource' }
 
@@ -138,7 +148,11 @@ export type SkillInstallationIntent =
     }
 
 export interface SkillsInspectInstallationInput {
-  /** Stable idempotency key for reservation, acquisition, and preview retries. */
+  /**
+   * Stable idempotency key for reservation, acquisition, and preview retries. For an install,
+   * this UUID also becomes the new installation identity; `newInstallationIdentity` recovery
+   * therefore requires a newly generated preparationId.
+   */
   preparationId: string
   intent: SkillInstallationIntent
   source: SkillAcquisitionSource
@@ -159,24 +173,55 @@ export interface SkillPackagePreview {
 export type SkillInstallationSourceLocator = { kind: 'url'; url: string }
 
 export interface SkillsResolveInstallationSourceInput {
+  /**
+   * Client-generated canonical non-nil lowercase UUID used for idempotent retries of this exact
+   * locator. After cancellation or abandonment, clients must generate a new resolutionId.
+   */
+  resolutionId: string
   locator: SkillInstallationSourceLocator
 }
 
+export interface SkillsCancelSourceResolutionInput {
+  /** The client-generated identity of the resolution whose retained authority can be released. */
+  resolutionId: string
+}
+
 /**
- * The immutable subset of a GitHub acquisition source returned by source resolution.
- * A resolved candidate can be passed directly to skills.inspectInstallation.
+ * `alreadyAbsent` still establishes a bounded cancellation fence. Resolve and cancel share one
+ * FIFO backend lane, so a resolve admitted before this cancellation cannot publish authority
+ * after cancellation returns. Reusing a cancelled ID for a later resolve is unsupported; create
+ * a new resolutionId instead.
+ */
+export type SkillSourceResolutionCancellationOutcome =
+  'cancelled' | 'alreadyCancelled' | 'alreadyConsumed' | 'alreadyAbsent'
+
+export interface SkillsCancelSourceResolutionOutput {
+  schemaVersion: typeof SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION
+  resolutionId: string
+  outcome: SkillSourceResolutionCancellationOutcome
+}
+
+/**
+ * Immutable presentation metadata returned by source resolution. Acquisition uses the
+ * candidate's separate one-time `acquisition` handle.
  */
 export interface SkillResolvedGitHubRepositorySource {
   kind: 'githubRepository'
   owner: string
   repository: string
-  reference: { kind: 'commit'; sha: string }
+  /** The branch, tag, default branch, or fixed commit this installation tracks. */
+  reference: SkillGitHubReference
+  /** The exact immutable snapshot inspected by source resolution. */
+  resolvedCommit: string
   subdirectory?: string
 }
 
 export interface SkillSourceResolutionCandidate {
   /** Opaque stable identity. Clients must not derive meaning from this value. */
   candidateId: string
+  /** One-time acquisition authority. Pass this exact value to skills.inspectInstallation. */
+  acquisition: Extract<SkillAcquisitionSource, { kind: 'resolvedCandidate' }>
+  /** Presentation and audit metadata; never use this field as acquisition authority. */
   source: SkillResolvedGitHubRepositorySource
   package: SkillPackagePreview
 }
@@ -186,10 +231,13 @@ export type SkillSourceResolutionOutcome = 'resolved' | 'selectionRequired'
 
 interface SkillsResolveInstallationSourceOutputBase {
   schemaVersion: typeof SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION
+  resolutionId: string
   canonicalUrl: string
   provider: SkillSourceResolutionProvider
   /** Canonical, lower-case, complete 40-character commit SHA. */
   resolvedCommit: string
+  /** The one-time candidate authorities cannot be inspected after this Unix timestamp. */
+  expiresAtUnixMs: number
 }
 
 export type SkillsResolveInstallationSourceOutput =
@@ -224,10 +272,21 @@ export type SkillSourceResolutionErrorCode =
   | 'repositoryTooLarge'
   | 'unsafePackage'
   | 'invalidPackage'
+  | 'resolutionIdConflict'
+  | 'resolutionNotFoundOrExpired'
+  | 'resolutionConsumed'
+  | 'candidateNotFound'
+  | 'capacityExceeded'
+  | 'cancelled'
   | 'unavailable'
 
 export type SkillSourceResolutionRecovery =
-  'fixLocator' | 'retryLater' | 'narrowLocator' | 'chooseDifferentSource'
+  | 'fixLocator'
+  | 'retryLater'
+  | 'narrowLocator'
+  | 'chooseDifferentSource'
+  | 'retrySameResolution'
+  | 'startNewResolution'
 
 export interface SkillSourceResolutionErrorData {
   type: 'skillSourceResolution'
@@ -336,6 +395,16 @@ export type SkillInspectionErrorCode =
   | 'referenceNotFound'
   | 'subdirectoryNotFound'
   | 'sourceChangedDuringRead'
+  | 'resolutionNotFound'
+  | 'resolutionExpired'
+  | 'resolutionConsumed'
+  | 'candidateNotFound'
+  | 'capacityExceeded'
+  | 'installationRetired'
+  | 'installationNotFound'
+  | 'installationRevisionConflict'
+  | 'sourceNotRefreshable'
+  | 'persistedSourceInvalid'
   | 'networkUnavailable'
   | 'rateLimited'
   | 'repositoryTooLarge'
@@ -347,6 +416,7 @@ export type SkillInspectionErrorCode =
   | 'idempotencyConflict'
   | 'previewMismatch'
   | 'acknowledgementRequired'
+  | 'commitIndeterminate'
   | 'cancelled'
   | 'unavailable'
 
@@ -355,8 +425,13 @@ export type SkillInspectionRecovery =
   | 'retrySamePreparation'
   | 'retryLater'
   | 'inspectAgain'
+  | 'newInstallationIdentity'
+  | 'freeCapacity'
+  | 'contactSupport'
   | 'acknowledgeWarnings'
   | 'chooseDifferentSource'
+  | 'resolveAgain'
+  | 'refreshManagement'
 
 export interface SkillInspectionErrorData {
   type: 'skillInspection'
@@ -367,6 +442,10 @@ export interface SkillInspectionErrorData {
   preparationId?: string
   diagnosticCode?: string
   retryAfterMs?: number
+  /** Present only when a commit failure may describe an already-visible mutation. */
+  commitMayHaveSucceeded?: true
+  skillId?: string
+  intendedInstallationRevision?: string
 }
 
 export interface SkillsListManagementInput {
@@ -457,6 +536,7 @@ export interface SkillsUpdateLocalInput {
 
 export interface SkillsUninstallInput {
   skillId: string
+  /** Use the exact installationRevision returned by listManagement. */
   expectedRevision: string
 }
 
@@ -584,7 +664,7 @@ export function parseSkillsResolveInstallationSourceInput(
   value: unknown
 ): SkillsResolveInstallationSourceInput {
   const record = expectRecord(value, 'Skill source resolution request')
-  expectOnlyKeys(record, ['locator'] as const, 'Skill source resolution request')
+  expectOnlyKeys(record, ['resolutionId', 'locator'] as const, 'Skill source resolution request')
   const locator = expectRecord(record.locator, 'Skill source resolution request.locator')
   expectOnlyKeys(locator, ['kind', 'url'] as const, 'Skill source resolution request.locator')
   if (locator.kind !== 'url') {
@@ -594,6 +674,10 @@ export function parseSkillsResolveInstallationSourceInput(
     )
   }
   return {
+    resolutionId: expectCanonicalNonNilUuid(
+      record.resolutionId,
+      'Skill source resolution request.resolutionId'
+    ),
     locator: {
       kind: 'url',
       url: expectString(locator.url, 'Skill source resolution request.locator.url')
@@ -601,7 +685,67 @@ export function parseSkillsResolveInstallationSourceInput(
   }
 }
 
-/** Validates a resolved, immutable acquisition source before installation inspection. */
+/** Validates the idempotent release request for retained source-resolution authority. */
+export function parseSkillsCancelSourceResolutionInput(
+  value: unknown
+): SkillsCancelSourceResolutionInput {
+  const context = 'Skill source resolution cancellation request'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['resolutionId'] as const, context)
+  return {
+    resolutionId: expectCanonicalNonNilUuid(record.resolutionId, `${context}.resolutionId`)
+  }
+}
+
+/** Validates the authoritative result of an idempotent source-resolution cancellation. */
+export function parseSkillsCancelSourceResolutionOutput(
+  value: unknown
+): SkillsCancelSourceResolutionOutput {
+  const context = 'Skill source resolution cancellation response'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'resolutionId', 'outcome'] as const, context)
+  expectSchemaVersion(record, SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION, context)
+  return {
+    schemaVersion: SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION,
+    resolutionId: expectCanonicalNonNilUuid(record.resolutionId, `${context}.resolutionId`),
+    outcome: expectEnum(
+      record.outcome,
+      ['cancelled', 'alreadyCancelled', 'alreadyConsumed', 'alreadyAbsent'] as const,
+      `${context}.outcome`
+    )
+  }
+}
+
+/** Validates an acquisition source before it crosses a trusted application boundary. */
+export function parseSkillAcquisitionSource(value: unknown): SkillAcquisitionSource {
+  const context = 'Skill acquisition source'
+  const record = expectRecord(value, context)
+  switch (record.kind) {
+    case 'localDirectory':
+      expectOnlyKeys(record, ['kind', 'directory'] as const, context)
+      return {
+        kind: 'localDirectory',
+        directory: expectNonEmptyString(record.directory, `${context}.directory`)
+      }
+    case 'githubRepository':
+      return parseSkillGitHubAcquisitionSource(record, context)
+    case 'resolvedCandidate': {
+      expectOnlyKeys(record, ['kind', 'resolutionId', 'candidateId'] as const, context)
+      return {
+        kind: 'resolvedCandidate',
+        resolutionId: expectCanonicalNonNilUuid(record.resolutionId, `${context}.resolutionId`),
+        candidateId: expectNonEmptyString(record.candidateId, `${context}.candidateId`)
+      }
+    }
+    case 'installedSource':
+      expectOnlyKeys(record, ['kind'] as const, context)
+      return { kind: 'installedSource' }
+    default:
+      throw invalidProtocolValue(context, `unknown kind ${String(record.kind)}`)
+  }
+}
+
+/** Validates immutable presentation metadata and separate one-time acquisition handles. */
 export function parseSkillsResolveInstallationSourceOutput(
   value: unknown
 ): SkillsResolveInstallationSourceOutput {
@@ -611,18 +755,21 @@ export function parseSkillsResolveInstallationSourceOutput(
     record,
     [
       'schemaVersion',
+      'resolutionId',
       'canonicalUrl',
       'provider',
       'resolvedCommit',
+      'expiresAtUnixMs',
       'outcome',
       'candidates'
     ] as const,
     context
   )
   expectSchemaVersion(record, SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION, context)
+  const resolutionId = expectCanonicalNonNilUuid(record.resolutionId, `${context}.resolutionId`)
   const resolvedCommit = expectFullGitCommitSha(record.resolvedCommit, `${context}.resolvedCommit`)
   const candidates = expectArray(record.candidates, `${context}.candidates`).map((candidate) =>
-    parseSkillSourceResolutionCandidate(candidate, resolvedCommit)
+    parseSkillSourceResolutionCandidate(candidate, resolutionId, resolvedCommit)
   )
   const candidateIds = new Set(candidates.map((candidate) => candidate.candidateId))
   if (candidateIds.size !== candidates.length) {
@@ -631,9 +778,11 @@ export function parseSkillsResolveInstallationSourceOutput(
 
   const base = {
     schemaVersion: SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION,
+    resolutionId,
     canonicalUrl: expectNonEmptyString(record.canonicalUrl, `${context}.canonicalUrl`),
     provider: expectEnum(record.provider, ['github'] as const, `${context}.provider`),
-    resolvedCommit
+    resolvedCommit,
+    expiresAtUnixMs: expectSafeInteger(record.expiresAtUnixMs, `${context}.expiresAtUnixMs`, 1)
   }
   const outcome = expectEnum(
     record.outcome,
@@ -705,13 +854,26 @@ export function parseSkillSourceResolutionErrorData(
         'repositoryTooLarge',
         'unsafePackage',
         'invalidPackage',
+        'resolutionIdConflict',
+        'resolutionNotFoundOrExpired',
+        'resolutionConsumed',
+        'candidateNotFound',
+        'capacityExceeded',
+        'cancelled',
         'unavailable'
       ] as const,
       `${context}.code`
     ),
     recovery: expectEnum(
       record.recovery,
-      ['fixLocator', 'retryLater', 'narrowLocator', 'chooseDifferentSource'] as const,
+      [
+        'fixLocator',
+        'retryLater',
+        'narrowLocator',
+        'chooseDifferentSource',
+        'retrySameResolution',
+        'startNewResolution'
+      ] as const,
       `${context}.recovery`
     ),
     message: expectNonEmptyString(record.message, `${context}.message`),
@@ -914,6 +1076,31 @@ export function parseSkillInspectionErrorData(value: unknown): SkillInspectionEr
     record.retryAfterMs === undefined
       ? undefined
       : expectSafeInteger(record.retryAfterMs, 'Skill inspection error data.retryAfterMs', 0)
+  const commitMayHaveSucceeded =
+    record.commitMayHaveSucceeded === undefined
+      ? undefined
+      : record.commitMayHaveSucceeded === true
+        ? true
+        : (() => {
+            throw invalidProtocolValue(
+              'Skill inspection error data.commitMayHaveSucceeded',
+              'must be true when present'
+            )
+          })()
+  const skillId = optionalNonEmptyString(record.skillId, 'Skill inspection error data.skillId')
+  const intendedInstallationRevision = optionalNonEmptyString(
+    record.intendedInstallationRevision,
+    'Skill inspection error data.intendedInstallationRevision'
+  )
+  if (
+    commitMayHaveSucceeded === true &&
+    (record.phase !== 'commit' || record.code !== 'commitIndeterminate')
+  ) {
+    throw invalidProtocolValue(
+      'Skill inspection error data',
+      'commitMayHaveSucceeded requires a commitIndeterminate commit error'
+    )
+  }
   return {
     type: 'skillInspection',
     phase: expectEnum(
@@ -930,6 +1117,16 @@ export function parseSkillInspectionErrorData(value: unknown): SkillInspectionEr
         'referenceNotFound',
         'subdirectoryNotFound',
         'sourceChangedDuringRead',
+        'resolutionNotFound',
+        'resolutionExpired',
+        'resolutionConsumed',
+        'candidateNotFound',
+        'capacityExceeded',
+        'installationRetired',
+        'installationNotFound',
+        'installationRevisionConflict',
+        'sourceNotRefreshable',
+        'persistedSourceInvalid',
         'networkUnavailable',
         'rateLimited',
         'repositoryTooLarge',
@@ -941,6 +1138,7 @@ export function parseSkillInspectionErrorData(value: unknown): SkillInspectionEr
         'idempotencyConflict',
         'previewMismatch',
         'acknowledgementRequired',
+        'commitIndeterminate',
         'cancelled',
         'unavailable'
       ] as const,
@@ -953,15 +1151,23 @@ export function parseSkillInspectionErrorData(value: unknown): SkillInspectionEr
         'retrySamePreparation',
         'retryLater',
         'inspectAgain',
+        'newInstallationIdentity',
+        'freeCapacity',
+        'contactSupport',
         'acknowledgeWarnings',
-        'chooseDifferentSource'
+        'chooseDifferentSource',
+        'resolveAgain',
+        'refreshManagement'
       ] as const,
       'Skill inspection error data.recovery'
     ),
     message: expectNonEmptyString(record.message, 'Skill inspection error data.message'),
     ...(preparationId === undefined ? {} : { preparationId }),
     ...(diagnosticCode === undefined ? {} : { diagnosticCode }),
-    ...(retryAfterMs === undefined ? {} : { retryAfterMs })
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    ...(commitMayHaveSucceeded === undefined ? {} : { commitMayHaveSucceeded }),
+    ...(skillId === undefined ? {} : { skillId }),
+    ...(intendedInstallationRevision === undefined ? {} : { intendedInstallationRevision })
   }
 }
 
@@ -1017,13 +1223,43 @@ function parseSkillPackagePreview(value: unknown): SkillPackagePreview {
 
 function parseSkillSourceResolutionCandidate(
   value: unknown,
+  resolutionId: string,
   resolvedCommit: string
 ): SkillSourceResolutionCandidate {
   const context = 'Skill source resolution candidate'
   const record = expectRecord(value, context)
-  expectOnlyKeys(record, ['candidateId', 'source', 'package'] as const, context)
+  expectOnlyKeys(record, ['candidateId', 'acquisition', 'source', 'package'] as const, context)
+  const candidateId = expectNonEmptyString(record.candidateId, `${context}.candidateId`)
+  const acquisitionContext = `${context}.acquisition`
+  const acquisition = expectRecord(record.acquisition, acquisitionContext)
+  expectOnlyKeys(acquisition, ['kind', 'resolutionId', 'candidateId'] as const, acquisitionContext)
+  if (acquisition.kind !== 'resolvedCandidate') {
+    throw invalidProtocolValue(acquisitionContext, 'kind must be resolvedCandidate')
+  }
+  const acquisitionResolutionId = expectCanonicalNonNilUuid(
+    acquisition.resolutionId,
+    `${acquisitionContext}.resolutionId`
+  )
+  if (acquisitionResolutionId !== resolutionId) {
+    throw invalidProtocolValue(acquisitionContext, 'resolutionId must match response.resolutionId')
+  }
+  const acquisitionCandidateId = expectNonEmptyString(
+    acquisition.candidateId,
+    `${acquisitionContext}.candidateId`
+  )
+  if (acquisitionCandidateId !== candidateId) {
+    throw invalidProtocolValue(
+      acquisitionContext,
+      'candidateId must match the enclosing candidateId'
+    )
+  }
   return {
-    candidateId: expectNonEmptyString(record.candidateId, `${context}.candidateId`),
+    candidateId,
+    acquisition: {
+      kind: 'resolvedCandidate',
+      resolutionId: acquisitionResolutionId,
+      candidateId: acquisitionCandidateId
+    },
     source: parseSkillResolvedGitHubRepositorySource(record.source, resolvedCommit),
     package: parseSkillSourceResolutionPackagePreview(record.package)
   }
@@ -1037,29 +1273,83 @@ function parseSkillResolvedGitHubRepositorySource(
   const record = expectRecord(value, context)
   expectOnlyKeys(
     record,
-    ['kind', 'owner', 'repository', 'reference', 'subdirectory'] as const,
+    ['kind', 'owner', 'repository', 'reference', 'resolvedCommit', 'subdirectory'] as const,
     context
   )
   if (record.kind !== 'githubRepository') {
     throw invalidProtocolValue(context, 'kind must be githubRepository')
   }
-  const referenceContext = `${context}.reference`
-  const reference = expectRecord(record.reference, referenceContext)
-  expectOnlyKeys(reference, ['kind', 'sha'] as const, referenceContext)
-  if (reference.kind !== 'commit') {
-    throw invalidProtocolValue(referenceContext, 'kind must be commit')
+  const candidateResolvedCommit = expectFullGitCommitSha(
+    record.resolvedCommit,
+    `${context}.resolvedCommit`
+  )
+  if (candidateResolvedCommit !== resolvedCommit) {
+    throw invalidProtocolValue(context, 'resolvedCommit must match response.resolvedCommit')
   }
-  const sha = expectFullGitCommitSha(reference.sha, `${referenceContext}.sha`)
-  if (sha !== resolvedCommit) {
-    throw invalidProtocolValue(referenceContext, 'sha must match response.resolvedCommit')
+  const reference = parseSkillGitHubReference(record.reference, `${context}.reference`)
+  if (reference.kind === 'commit' && reference.sha !== candidateResolvedCommit) {
+    throw invalidProtocolValue(context, 'commit reference sha must match resolvedCommit')
   }
   const subdirectory = optionalNonEmptyString(record.subdirectory, `${context}.subdirectory`)
   return {
     kind: 'githubRepository',
     owner: expectNonEmptyString(record.owner, `${context}.owner`),
     repository: expectNonEmptyString(record.repository, `${context}.repository`),
-    reference: { kind: 'commit', sha },
+    reference,
+    resolvedCommit: candidateResolvedCommit,
     ...(subdirectory === undefined ? {} : { subdirectory })
+  }
+}
+
+function parseSkillGitHubAcquisitionSource(
+  record: Record<string, unknown>,
+  context: string
+): Extract<SkillAcquisitionSource, { kind: 'githubRepository' }> {
+  expectOnlyKeys(
+    record,
+    ['kind', 'owner', 'repository', 'reference', 'subdirectory'] as const,
+    context
+  )
+  if (record.kind !== 'githubRepository') {
+    throw invalidProtocolValue(context, 'kind must be githubRepository')
+  }
+  const reference =
+    record.reference === undefined
+      ? undefined
+      : parseSkillGitHubReference(record.reference, `${context}.reference`)
+  const subdirectory = optionalNonEmptyString(record.subdirectory, `${context}.subdirectory`)
+  return {
+    kind: 'githubRepository',
+    owner: expectNonEmptyString(record.owner, `${context}.owner`),
+    repository: expectNonEmptyString(record.repository, `${context}.repository`),
+    ...(reference === undefined ? {} : { reference }),
+    ...(subdirectory === undefined ? {} : { subdirectory })
+  }
+}
+
+function parseSkillGitHubReference(
+  value: unknown,
+  context = 'Skill GitHub reference'
+): SkillGitHubReference {
+  const record = expectRecord(value, context)
+  switch (record.kind) {
+    case 'defaultBranch':
+      expectOnlyKeys(record, ['kind'] as const, context)
+      return { kind: 'defaultBranch' }
+    case 'named':
+      expectOnlyKeys(record, ['kind', 'value'] as const, context)
+      return {
+        kind: 'named',
+        value: expectNonEmptyString(record.value, `${context}.value`)
+      }
+    case 'commit':
+      expectOnlyKeys(record, ['kind', 'sha'] as const, context)
+      return {
+        kind: 'commit',
+        sha: expectFullGitCommitSha(record.sha, `${context}.sha`)
+      }
+    default:
+      throw invalidProtocolValue(context, `unknown kind ${String(record.kind)}`)
   }
 }
 
@@ -1093,7 +1383,7 @@ function parseSkillPreviewSource(value: unknown): SkillPreviewSource {
         owner: expectNonEmptyString(record.owner, 'Skill preview source.owner'),
         repository: expectNonEmptyString(record.repository, 'Skill preview source.repository'),
         reference: parseSkillGitHubReference(record.reference),
-        resolvedCommit: expectNonEmptyString(
+        resolvedCommit: expectFullGitCommitSha(
           record.resolvedCommit,
           'Skill preview source.resolvedCommit'
         ),
@@ -1109,26 +1399,6 @@ function parseSkillPreviewSource(value: unknown): SkillPreviewSource {
       }
     default:
       throw invalidProtocolValue('Skill preview source', `unknown kind ${String(record.kind)}`)
-  }
-}
-
-function parseSkillGitHubReference(value: unknown): SkillGitHubReference {
-  const record = expectRecord(value, 'Skill GitHub reference')
-  switch (record.kind) {
-    case 'defaultBranch':
-      return { kind: 'defaultBranch' }
-    case 'named':
-      return {
-        kind: 'named',
-        value: expectNonEmptyString(record.value, 'Skill GitHub reference.value')
-      }
-    case 'commit':
-      return {
-        kind: 'commit',
-        sha: expectNonEmptyString(record.sha, 'Skill GitHub reference.sha')
-      }
-    default:
-      throw invalidProtocolValue('Skill GitHub reference', `unknown kind ${String(record.kind)}`)
   }
 }
 
@@ -1294,6 +1564,17 @@ function expectFullGitCommitSha(value: unknown, context: string): string {
   return sha
 }
 
+function expectCanonicalNonNilUuid(value: unknown, context: string): string {
+  const uuid = expectNonEmptyString(value, context)
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(uuid) ||
+    uuid === '00000000-0000-0000-0000-000000000000'
+  ) {
+    throw invalidProtocolValue(context, 'expected a canonical non-nil lower-case UUID')
+  }
+  return uuid
+}
+
 function optionalNonEmptyString(value: unknown, context: string): string | undefined {
   if (value === undefined) return undefined
   return expectNonEmptyString(value, context)
@@ -1350,6 +1631,7 @@ export type SkillInstallationErrorCode =
   | 'invalidStore'
   | 'capacityExceeded'
   | 'installationExists'
+  | 'installationRetired'
   | 'installationNotFound'
   | 'revisionConflict'
   | 'storeCorrupt'
@@ -1359,9 +1641,16 @@ export type SkillInstallationErrorCode =
   | 'cancelled'
 
 export type SkillInstallationRecovery =
-  'fixLocalSource' | 'retrySameRequest' | 'refreshCatalog' | 'freeCapacity' | 'repairStore'
+  | 'fixLocalSource'
+  | 'retrySameRequest'
+  | 'newInstallationIdentity'
+  | 'refreshCatalog'
+  | 'freeCapacity'
+  | 'contactSupport'
+  | 'repairStore'
 
-export type SkillInstallationCapacity = 'installations' | 'installationDirectory' | 'packages'
+export type SkillInstallationCapacity =
+  'installations' | 'installationDirectory' | 'retiredInstallationIds' | 'packages'
 
 export interface SkillInstallationErrorData {
   type: 'skillInstallation'

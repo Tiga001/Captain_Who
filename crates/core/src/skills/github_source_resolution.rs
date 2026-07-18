@@ -6,17 +6,17 @@
 
 use super::github_acquisition::{
     extract_selected_skill, validate_archive_entry_path, GitHubAcquisitionError,
-    GitHubAcquisitionErrorCode, GitHubAcquisitionTransport, GitHubArchiveRequest, GitHubCommit,
-    GitHubReference, GitHubRepository, GitHubResolveRequest, GitHubSubdirectory,
-    GitHubTransportError, MAX_GITHUB_ARCHIVE_ENTRIES, MAX_GITHUB_ZIP_BYTES,
+    GitHubAcquisitionErrorCode, GitHubAcquisitionSummary, GitHubAcquisitionTransport,
+    GitHubArchiveRequest, GitHubCommit, GitHubReference, GitHubRepository, GitHubResolveRequest,
+    GitHubSubdirectory, GitHubTransportError, MAX_GITHUB_ARCHIVE_ENTRIES, MAX_GITHUB_ZIP_BYTES,
 };
-use super::origin::SkillPackageOrigin;
 use super::prepared::PreparedSkillPackage;
+use super::prepared_acquisition::PreparedSkillAcquisition;
 use super::source_resolution::{
-    ResolvedSkillPackagePreview, ResolvedSkillSource, SkillInstallationSourceLocator,
-    SkillInstallationSourceResolver, SkillSourceResolution, SkillSourceResolutionCandidate,
-    SkillSourceResolutionError, SkillSourceResolutionErrorCode, SkillSourceResolutionRecovery,
-    SkillSourceResolverId,
+    PreparedSkillSourceResolution, PreparedSkillSourceResolutionCandidate, ResolvedSkillSource,
+    SkillInstallationSourceLocator, SkillInstallationSourceResolver, SkillSourceCandidateId,
+    SkillSourceResolution, SkillSourceResolutionError, SkillSourceResolutionErrorCode,
+    SkillSourceResolutionRecovery, SkillSourceResolverId,
 };
 use super::workspace::SKILL_FILE_NAME;
 use reqwest::Url;
@@ -57,7 +57,7 @@ impl GitHubInstallationSourceResolver {
     fn resolve_github_url(
         &self,
         locator: &SkillInstallationSourceLocator,
-    ) -> Result<SkillSourceResolution, SkillSourceResolutionError> {
+    ) -> Result<PreparedSkillSourceResolution, SkillSourceResolutionError> {
         let parsed = ParsedGitHubUrl::parse(locator.as_url())?;
 
         match parsed.target.clone() {
@@ -75,6 +75,7 @@ impl GitHubInstallationSourceResolver {
                     &archive,
                     &parsed.repository,
                     &default_commit,
+                    &GitHubReference::DefaultBranch,
                     &GitHubSubdirectory::root(),
                     CandidateSelection::Discover,
                     &mut preparation_budget,
@@ -95,7 +96,7 @@ impl GitHubInstallationSourceResolver {
         &self,
         parsed: ParsedGitHubUrl,
         tail: &[String],
-    ) -> Result<SkillSourceResolution, SkillSourceResolutionError> {
+    ) -> Result<PreparedSkillSourceResolution, SkillSourceResolutionError> {
         let direct_skill = matches!(parsed.target, GitHubUrlTarget::SkillFile { .. });
         let interpretations = reference_interpretations(tail, direct_skill)?;
         let reference_requests = interpretations
@@ -175,10 +176,18 @@ impl GitHubInstallationSourceResolver {
             } else {
                 CandidateSelection::Discover
             };
+            let tracking_reference = if is_full_sha(&interpretation.reference) {
+                GitHubReference::commit(interpretation.reference.clone())
+                    .map_err(|_| unavailable())?
+            } else {
+                GitHubReference::named(interpretation.reference.clone())
+                    .map_err(|_| unavailable())?
+            };
             match prepare_candidates(
                 archive,
                 &parsed.repository,
                 &commit,
+                &tracking_reference,
                 &interpretation.scope,
                 selection,
                 &mut preparation_budget,
@@ -285,6 +294,13 @@ impl SkillInstallationSourceResolver for GitHubInstallationSourceResolver {
         &self,
         locator: &SkillInstallationSourceLocator,
     ) -> Result<SkillSourceResolution, SkillSourceResolutionError> {
+        self.resolve_github_url(locator)?.public_resolution()
+    }
+
+    fn resolve_prepared(
+        &self,
+        locator: &SkillInstallationSourceLocator,
+    ) -> Result<PreparedSkillSourceResolution, SkillSourceResolutionError> {
         self.resolve_github_url(locator)
     }
 }
@@ -720,10 +736,11 @@ fn prepare_candidates(
     archive: &[u8],
     repository: &GitHubRepository,
     commit: &GitHubCommit,
+    tracking_reference: &GitHubReference,
     scope: &GitHubSubdirectory,
     selection: CandidateSelection,
     budget: &mut ResolutionPreparationBudget,
-) -> Result<Vec<SkillSourceResolutionCandidate>, SkillSourceResolutionError> {
+) -> Result<Vec<PreparedSkillSourceResolutionCandidate>, SkillSourceResolutionError> {
     let discovery = discover_archive_skills(archive, scope)?;
     if !discovery.scope_exists {
         return Err(SkillSourceResolutionError::discover(
@@ -753,7 +770,13 @@ fn prepare_candidates(
     for subdirectory in roots {
         let (declared_files, declared_bytes) = declared_candidate_cost(archive, &subdirectory)?;
         budget.reserve(declared_files, declared_bytes)?;
-        match prepare_candidate(archive, repository, commit, &subdirectory) {
+        match prepare_candidate(
+            archive,
+            repository,
+            tracking_reference,
+            commit,
+            &subdirectory,
+        ) {
             Ok(candidate) => candidates.push(candidate),
             Err(error) => {
                 if matches!(selection, CandidateSelection::Exact) {
@@ -799,21 +822,18 @@ fn declared_candidate_cost(
 fn prepare_candidate(
     archive: &[u8],
     repository: &GitHubRepository,
+    tracking_reference: &GitHubReference,
     commit: &GitHubCommit,
     subdirectory: &GitHubSubdirectory,
-) -> Result<SkillSourceResolutionCandidate, SkillSourceResolutionError> {
+) -> Result<PreparedSkillSourceResolutionCandidate, SkillSourceResolutionError> {
     let files = extract_selected_skill(archive, subdirectory).map_err(map_archive_error)?;
-    let origin = SkillPackageOrigin::new(
-        "github",
-        format!(
-            "{}/{}@{}:{}",
-            repository.owner(),
-            repository.name(),
-            commit.as_str(),
-            subdirectory.as_str()
-        ),
-    )
-    .map_err(|_| unavailable())?;
+    let summary = GitHubAcquisitionSummary::for_resolved_pin(
+        repository,
+        tracking_reference,
+        commit,
+        subdirectory,
+    );
+    let origin = summary.origin().map_err(|_| unavailable())?;
     let package = PreparedSkillPackage::from_files(files, origin).map_err(|_| {
         SkillSourceResolutionError::discover(
             SkillSourceResolutionErrorCode::InvalidPackage,
@@ -821,30 +841,12 @@ fn prepare_candidate(
             "The discovered GitHub Skill package is invalid or unsupported.",
         )
     })?;
-    let resource_index = package.resource_index();
-    let resource_bytes = resource_index
-        .entries()
-        .iter()
-        .fold(0_u64, |total, resource| {
-            total.saturating_add(resource.byte_length())
-        });
-    let file_count = u64::try_from(resource_index.len())
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    let total_bytes = u64::try_from(package.source_bytes().len())
-        .unwrap_or(u64::MAX)
-        .saturating_add(resource_bytes);
-    let preview = ResolvedSkillPackagePreview::new(
-        package.format_version(),
-        package.revision().clone(),
-        package.name(),
-        package.description(),
-        file_count,
-        total_bytes,
-    );
+    let provenance = summary.provenance().map_err(|_| unavailable())?;
+    let acquisition = PreparedSkillAcquisition::new(package, provenance);
     let source = ResolvedSkillSource::GitHub {
         owner: repository.owner().to_string(),
         repository: repository.name().to_string(),
+        tracking_reference: tracking_reference.clone(),
         resolved_commit: commit.as_str().to_string(),
         subdirectory: (!subdirectory.as_str().is_empty())
             .then(|| subdirectory.as_str().to_string()),
@@ -853,12 +855,13 @@ fn prepare_candidate(
         repository,
         commit,
         subdirectory,
-        package.revision().as_str(),
+        acquisition.package().revision().as_str(),
     );
-    Ok(SkillSourceResolutionCandidate::new(
+    let candidate_id = SkillSourceCandidateId::parse(candidate_id).map_err(|_| unavailable())?;
+    Ok(PreparedSkillSourceResolutionCandidate::new(
         candidate_id,
         source,
-        preview,
+        acquisition,
     ))
 }
 
@@ -885,7 +888,7 @@ fn candidate_id(
 
 #[derive(Debug)]
 struct ResolvedInterpretation {
-    candidates: Vec<SkillSourceResolutionCandidate>,
+    candidates: Vec<PreparedSkillSourceResolutionCandidate>,
     commit: GitHubCommit,
     reference: String,
     scope: GitHubSubdirectory,
@@ -906,9 +909,9 @@ impl ResolvedInterpretation {
 fn resolution_from_candidates(
     canonical_url: String,
     commit: GitHubCommit,
-    candidates: Vec<SkillSourceResolutionCandidate>,
-) -> Result<SkillSourceResolution, SkillSourceResolutionError> {
-    SkillSourceResolution::new(
+    candidates: Vec<PreparedSkillSourceResolutionCandidate>,
+) -> Result<PreparedSkillSourceResolution, SkillSourceResolutionError> {
+    PreparedSkillSourceResolution::new(
         canonical_url,
         github_resolver_id(),
         commit.as_str(),

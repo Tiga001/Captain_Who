@@ -4,11 +4,13 @@ use std::fmt::Write;
 use std::path::Path;
 
 use mycopilot_core::skills::{
+    InstalledGitHubTrackingReference, InstalledSkillRecord, InstalledSkillSourcePresentation,
     ManagedSkillInstallerError, ManagedSkillInstallerErrorCode, ManagedSkillStoreCapacity,
     SkillActivationError, SkillActivationScope, SkillCatalog, SkillDescriptor,
     SkillDiagnosticSeverity, SkillErrorCode, SkillInstallationMutation, SkillInstallationOperation,
-    SkillInstallationOutcome, SkillInstallationServiceError, SkillProvenance, SkillRecovery,
-    SkillSelection, SkillSourceKind, SkillTrust, SkillsService,
+    SkillInstallationOutcome, SkillInstallationService, SkillInstallationServiceError,
+    SkillInstallationWorkflow, SkillProvenance, SkillRecovery, SkillSelection, SkillSourceKind,
+    SkillTrust, SkillsService,
 };
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::storage::skill_enablement_repository::SkillEnablementCompareAndSetOutcome;
@@ -17,14 +19,15 @@ use mycopilot_core::{AgentActivatedSkill, AgentSkillActivation};
 use mycopilot_protocol_rs::{
     ActivatedSkillSummaryDto, SkillActivationErrorCodeDto, SkillActivationErrorData,
     SkillActivationRecoveryDto, SkillCompatibilityReportDto, SkillCompatibilityStatusDto,
-    SkillDescriptorDto, SkillDiagnosticDto, SkillInstallMutationOutcomeDto,
-    SkillInstallationCapacityDto, SkillInstallationErrorCodeDto, SkillInstallationErrorData,
-    SkillInstallationErrorTypeDto, SkillInstallationOperationDto, SkillInstallationRecoveryDto,
-    SkillManagementActionsDto, SkillManagementEntryDto, SkillManagementErrorCodeDto,
-    SkillManagementErrorData, SkillManagementErrorTypeDto, SkillManagementOperationDto,
-    SkillManagementRecoveryDto, SkillMutationResponse, SkillRemovalMutationOutcomeDto,
-    SkillSelectionDto, SkillSetEnabledOutcomeDto, SkillSourceDto, SkillSourceKindDto,
-    SkillTrustDto, SkillUpdateMutationOutcomeDto, SkillsListManagementResponse, SkillsListResponse,
+    SkillDescriptorDto, SkillDiagnosticDto, SkillGithubReferenceDto,
+    SkillInstallMutationOutcomeDto, SkillInstallationCapacityDto, SkillInstallationErrorCodeDto,
+    SkillInstallationErrorData, SkillInstallationErrorTypeDto, SkillInstallationOperationDto,
+    SkillInstallationRecoveryDto, SkillManagementActionsDto, SkillManagementEntryDto,
+    SkillManagementErrorCodeDto, SkillManagementErrorData, SkillManagementErrorTypeDto,
+    SkillManagementOperationDto, SkillManagementRecoveryDto, SkillMutationResponse,
+    SkillPreviewSourceDto, SkillRemovalMutationOutcomeDto, SkillSelectionDto,
+    SkillSetEnabledOutcomeDto, SkillSourceDto, SkillSourceKindDto, SkillTrustDto,
+    SkillUpdateMutationOutcomeDto, SkillsListManagementResponse, SkillsListResponse,
     SkillsSetEnabledRequest, SkillsSetEnabledResponse, SKILL_CATALOG_SCHEMA_VERSION,
     SKILL_MANAGEMENT_SCHEMA_VERSION,
 };
@@ -102,6 +105,14 @@ impl std::fmt::Display for SkillManagementFailure {
 impl std::error::Error for SkillManagementFailure {}
 
 impl SkillInstallationFailure {
+    pub(crate) fn commit_may_have_succeeded(&self) -> bool {
+        self.data.commit_may_have_succeeded
+    }
+
+    pub(crate) fn skill_id(&self) -> Option<&str> {
+        self.data.skill_id.as_deref()
+    }
+
     pub(crate) fn into_data(self) -> Box<SkillInstallationErrorData> {
         self.data
     }
@@ -206,7 +217,17 @@ pub(crate) fn installation_failure(
         limit: None,
     };
 
-    if let Some(source) = error.preparation_error() {
+    if let SkillInstallationServiceError::LegacyRevisionConflict {
+        expected_revision,
+        actual_revision,
+        ..
+    } = error
+    {
+        data.code = SkillInstallationErrorCodeDto::RevisionConflict;
+        data.recovery = SkillInstallationRecoveryDto::RefreshCatalog;
+        data.expected_revision = Some(expected_revision.as_str().to_string());
+        data.actual_revision = Some(actual_revision.as_str().to_string());
+    } else if let Some(source) = error.preparation_error() {
         data.code = SkillInstallationErrorCodeDto::PreparationFailed;
         data.recovery = SkillInstallationRecoveryDto::FixLocalSource;
         data.diagnostic_code = Some(source.code().stable_name().to_string());
@@ -234,6 +255,9 @@ fn installation_error_message(code: SkillInstallationErrorCodeDto) -> &'static s
         }
         SkillInstallationErrorCodeDto::InstallationExists => {
             "This installation identity is already in use."
+        }
+        SkillInstallationErrorCodeDto::InstallationRetired => {
+            "This installation identity was already used and permanently retired."
         }
         SkillInstallationErrorCodeDto::InstallationNotFound => {
             "The installed Skill no longer exists."
@@ -285,6 +309,10 @@ fn map_installer_error(
             SkillInstallationErrorCodeDto::InstallationExists,
             SkillInstallationRecoveryDto::RefreshCatalog,
         ),
+        ManagedSkillInstallerErrorCode::InstallationRetired => (
+            SkillInstallationErrorCodeDto::InstallationRetired,
+            SkillInstallationRecoveryDto::NewInstallationIdentity,
+        ),
         ManagedSkillInstallerErrorCode::InstallationNotFound => (
             SkillInstallationErrorCodeDto::InstallationNotFound,
             SkillInstallationRecoveryDto::RefreshCatalog,
@@ -323,7 +351,14 @@ fn map_installer_error(
                 ManagedSkillStoreCapacity::InstallationDirectory => {
                     SkillInstallationCapacityDto::InstallationDirectory
                 }
-                ManagedSkillStoreCapacity::Packages => SkillInstallationCapacityDto::Packages,
+                ManagedSkillStoreCapacity::RetiredInstallationIds => {
+                    data.recovery = SkillInstallationRecoveryDto::ContactSupport;
+                    SkillInstallationCapacityDto::RetiredInstallationIds
+                }
+                ManagedSkillStoreCapacity::Packages => {
+                    data.recovery = SkillInstallationRecoveryDto::ContactSupport;
+                    SkillInstallationCapacityDto::Packages
+                }
                 unsupported => {
                     return Err(format!(
                         "unsupported managed Skill capacity `{}`",
@@ -527,14 +562,18 @@ fn update_digest_bytes(digest: &mut Sha256, bytes: &[u8]) {
 pub(crate) fn management_response(
     storage: &StorageService,
     catalog: &SkillCatalog,
+    installations: &SkillInstallationService,
+    workflow: Option<&SkillInstallationWorkflow>,
 ) -> Result<SkillsListManagementResponse, SkillManagementFailure> {
-    let (response, _) = management_snapshot(storage, catalog)?;
+    let (response, _) = management_snapshot(storage, catalog, installations, workflow)?;
     Ok(response)
 }
 
 fn management_snapshot(
     storage: &StorageService,
     catalog: &SkillCatalog,
+    installations: &SkillInstallationService,
+    workflow: Option<&SkillInstallationWorkflow>,
 ) -> Result<
     (
         SkillsListManagementResponse,
@@ -542,6 +581,14 @@ fn management_snapshot(
     ),
     SkillManagementFailure,
 > {
+    let installed_inventory = installations
+        .list_installed_skills()
+        .map_err(|_| SkillManagementFailure::list_unavailable())?;
+    let installed_records = installed_inventory
+        .records()
+        .iter()
+        .map(|record| (record.skill_id().as_str(), record))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let ids = catalog
         .skills()
         .iter()
@@ -568,18 +615,39 @@ fn management_snapshot(
                         enabled: false,
                         generation: 0,
                     });
-            management_entry(skill, state.enabled, state.generation)
+            management_entry(
+                skill,
+                state.enabled,
+                state.generation,
+                installed_records.get(skill.id().as_str()).copied(),
+                workflow,
+            )
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| SkillManagementFailure::list_unavailable())?;
     let management_revision = management_revision(catalog.catalog_revision(), &skills);
+    let mut diagnostics = diagnostic_dtos(catalog);
+    diagnostics.extend(installed_inventory.issues().iter().map(|issue| {
+        SkillDiagnosticDto {
+            code: issue.code().stable_name().to_string(),
+            severity: match issue.severity() {
+                SkillDiagnosticSeverity::Warning => "warning",
+                SkillDiagnosticSeverity::Error => "error",
+                _ => "error",
+            }
+            .to_string(),
+            message: issue.message().to_string(),
+            skill_id: None,
+            location: Some(issue.location().to_string()),
+        }
+    }));
     Ok((
         SkillsListManagementResponse {
             schema_version: SKILL_MANAGEMENT_SCHEMA_VERSION,
             management_revision,
             skills,
-            diagnostics: diagnostic_dtos(catalog),
-            truncated: catalog.truncated(),
+            diagnostics,
+            truncated: catalog.truncated() || installed_inventory.truncated(),
         },
         enablement,
     ))
@@ -590,6 +658,8 @@ fn management_snapshot(
 pub(crate) fn set_enabled_response(
     storage: &StorageService,
     catalog: &SkillCatalog,
+    installations: &SkillInstallationService,
+    workflow: Option<&SkillInstallationWorkflow>,
     request: &SkillsSetEnabledRequest,
 ) -> Result<(SkillsSetEnabledResponse, bool), SkillManagementFailure> {
     let descriptor = catalog
@@ -625,7 +695,7 @@ pub(crate) fn set_enabled_response(
         ));
     }
 
-    let (current, enablement) = management_snapshot(storage, catalog)
+    let (current, enablement) = management_snapshot(storage, catalog, installations, workflow)
         .map_err(|_| SkillManagementFailure::set_enabled_unavailable())?;
     let current_state = enablement
         .get(request.skill_id.as_str())
@@ -693,7 +763,12 @@ pub(crate) fn set_enabled_response(
         .find(|skill| skill.id == request.skill_id)
         .expect("the validated global Skill remains present in the same catalog snapshot");
     item.enabled = request.enabled;
-    item.state_revision = management_state_revision(descriptor, request.enabled, target_generation);
+    item.state_revision = management_state_revision(
+        descriptor,
+        item.installation_revision.as_deref(),
+        request.enabled,
+        target_generation,
+    );
     let response_state_revision = item.state_revision.clone();
     refreshed.management_revision =
         management_revision(catalog.catalog_revision(), &refreshed.skills);
@@ -718,25 +793,46 @@ fn management_entry(
     descriptor: &SkillDescriptor,
     enabled: bool,
     generation: u64,
+    installation: Option<&InstalledSkillRecord>,
+    workflow: Option<&SkillInstallationWorkflow>,
 ) -> Result<SkillManagementEntryDto, String> {
     let installed = descriptor.source_kind() == SkillSourceKind::Installed;
+    let installation = installation
+        .filter(|record| installed && record.package_revision() == descriptor.revision());
+    let installation_revision =
+        installation.map(|record| record.installation_revision().as_str().to_string());
+    let source_presentation = installation.and_then(|record| {
+        workflow.map(|workflow| workflow.installed_source_presentation(record.provenance()))
+    });
+    let can_update = installation.is_some_and(|record| !record.is_legacy())
+        && source_presentation
+            .as_ref()
+            .is_some_and(InstalledSkillSourcePresentation::refreshable);
+    let acquisition = source_presentation
+        .as_ref()
+        .map(|source| management_acquisition(descriptor, source));
     Ok(SkillManagementEntryDto {
         id: descriptor.id().as_str().to_string(),
         name: descriptor.name().to_string(),
         description: descriptor.description().to_string(),
         source: source_dto(descriptor)?,
         package_revision: descriptor.revision().as_str().to_string(),
-        installation_revision: installed.then(|| installation_revision(descriptor)),
-        state_revision: management_state_revision(descriptor, enabled, generation),
+        installation_revision: installation_revision.clone(),
+        state_revision: management_state_revision(
+            descriptor,
+            installation_revision.as_deref(),
+            enabled,
+            generation,
+        ),
         enabled,
         actions: SkillManagementActionsDto {
             can_set_enabled: true,
-            can_update: installed,
-            can_uninstall: installed,
+            can_update,
+            can_uninstall: installation.is_some(),
         },
         // Legacy v1 receipts contain display-only origin strings, not an
         // authority-bearing typed source. Do not turn them back into paths.
-        acquisition: None,
+        acquisition,
         compatibility: SkillCompatibilityReportDto {
             status: if descriptor.source_kind() == SkillSourceKind::Bundled {
                 SkillCompatibilityStatusDto::Compatible
@@ -748,42 +844,107 @@ fn management_entry(
     })
 }
 
+fn management_acquisition(
+    descriptor: &SkillDescriptor,
+    source: &InstalledSkillSourcePresentation,
+) -> SkillPreviewSourceDto {
+    match source {
+        InstalledSkillSourcePresentation::LocalDirectory => SkillPreviewSourceDto::LocalDirectory {
+            display_name: descriptor.name().to_string(),
+            refreshable: false,
+        },
+        InstalledSkillSourcePresentation::GitHub {
+            owner,
+            repository,
+            tracking_reference,
+            resolved_commit,
+            subdirectory,
+            refreshable,
+        } => {
+            let (reference, reference_supported) = match tracking_reference {
+                InstalledGitHubTrackingReference::DefaultBranch => {
+                    (SkillGithubReferenceDto::DefaultBranch {}, true)
+                }
+                InstalledGitHubTrackingReference::Named(value) => (
+                    SkillGithubReferenceDto::Named {
+                        value: value.clone(),
+                    },
+                    true,
+                ),
+                InstalledGitHubTrackingReference::Commit => (
+                    SkillGithubReferenceDto::Commit {
+                        sha: resolved_commit.clone(),
+                    },
+                    true,
+                ),
+                _ => (
+                    SkillGithubReferenceDto::Commit {
+                        sha: resolved_commit.clone(),
+                    },
+                    false,
+                ),
+            };
+            SkillPreviewSourceDto::GithubRepository {
+                owner: owner.clone(),
+                repository: repository.clone(),
+                reference,
+                resolved_commit: resolved_commit.clone(),
+                subdirectory: subdirectory.clone(),
+                refreshable: *refreshable && reference_supported,
+            }
+        }
+        InstalledSkillSourcePresentation::Provider {
+            display_name,
+            refreshable,
+            ..
+        } => SkillPreviewSourceDto::InstalledSource {
+            display_name: display_name.clone(),
+            refreshable: *refreshable,
+        },
+        InstalledSkillSourcePresentation::Unknown { provider, .. } => {
+            SkillPreviewSourceDto::InstalledSource {
+                display_name: provider.clone(),
+                refreshable: false,
+            }
+        }
+        _ => SkillPreviewSourceDto::InstalledSource {
+            display_name: descriptor.name().to_string(),
+            refreshable: false,
+        },
+    }
+}
+
 fn management_state_revision(
     descriptor: &SkillDescriptor,
+    installation_revision: Option<&str>,
     enabled: bool,
     generation: u64,
 ) -> String {
     let generation = generation.to_be_bytes();
     revision_digest(
-        b"mycopilot.skill.management-state\0",
+        b"mycopilot.skill.management-state-v2\0",
         [
             descriptor.id().as_str().as_bytes(),
             descriptor.revision().as_str().as_bytes(),
+            installation_revision.unwrap_or("not-installed").as_bytes(),
             generation.as_slice(),
             if enabled { b"enabled" } else { b"disabled" },
         ],
-        "skill-management-state-sha256-v1:",
+        "skill-management-state-sha256-v2:",
     )
-}
-
-fn installation_revision(descriptor: &SkillDescriptor) -> String {
-    // Receipt schema v1 exposes package revision as its only durable CAS
-    // token. Keep the management and workflow contracts interoperable until
-    // receipt schema v2 introduces an independent lifecycle generation.
-    descriptor.revision().as_str().to_string()
 }
 
 fn management_revision(catalog_revision: &str, skills: &[SkillManagementEntryDto]) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"mycopilot.skill.management-catalog\0");
-    digest.update(1_u32.to_be_bytes());
+    digest.update(b"mycopilot.skill.management-catalog-v2\0");
+    digest.update(2_u32.to_be_bytes());
     update_digest_bytes(&mut digest, catalog_revision.as_bytes());
     digest.update((skills.len() as u64).to_be_bytes());
     for skill in skills {
         update_digest_bytes(&mut digest, skill.id.as_bytes());
         update_digest_bytes(&mut digest, skill.state_revision.as_bytes());
     }
-    format_sha256("skill-management-catalog-sha256-v1:", digest.finalize())
+    format_sha256("skill-management-catalog-sha256-v2:", digest.finalize())
 }
 
 fn revision_digest<'a>(
@@ -1163,6 +1324,55 @@ fn non_empty(value: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::skills_test_support::write_installed_skill;
+    use mycopilot_core::skills::{
+        GitHubAcquisitionTransport, GitHubArchiveRequest, GitHubResolveRequest,
+        GitHubSkillAcquirer, GitHubTransportError, GitHubWorkflowAcquisitionAdapter,
+        PreparedSkillPackage, SkillInstallationAuthority, SkillInstallationId,
+        SkillInstallationProvenance, SkillInstallationRefresh, SkillPackageOrigin,
+    };
+    use std::sync::Arc;
+
+    const FIRST_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    const SECOND_COMMIT: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+    struct NeverGitHubTransport;
+
+    impl GitHubAcquisitionTransport for NeverGitHubTransport {
+        fn resolve_commit(
+            &self,
+            _request: &GitHubResolveRequest,
+        ) -> Result<mycopilot_core::skills::GitHubCommit, GitHubTransportError> {
+            Err(GitHubTransportError::Unavailable)
+        }
+
+        fn download_archive(
+            &self,
+            _request: &GitHubArchiveRequest,
+        ) -> Result<Vec<u8>, GitHubTransportError> {
+            Err(GitHubTransportError::Unavailable)
+        }
+    }
+
+    fn management_github_provenance(resolved_commit: &str) -> SkillInstallationProvenance {
+        let authority = serde_json::json!({
+            "owner": "example",
+            "repository": "skills",
+            "resolvedCommit": resolved_commit,
+            "subdirectory": "auditor"
+        })
+        .to_string();
+        let refresh = serde_json::json!({
+            "owner": "example",
+            "repository": "skills",
+            "reference": { "kind": "named", "value": "main" },
+            "subdirectory": "auditor"
+        })
+        .to_string();
+        SkillInstallationProvenance::new(
+            SkillInstallationAuthority::new("github", 1, authority).unwrap(),
+            Some(SkillInstallationRefresh::new("github", 1, refresh).unwrap()),
+        )
+    }
 
     #[test]
     fn picker_catalog_filters_disabled_global_skills_and_revises_its_etag() {
@@ -1337,13 +1547,17 @@ mod tests {
     #[test]
     fn commit_indeterminate_preserves_retry_identity_without_a_path() {
         use mycopilot_core::skills::{
-            ManagedSkillMutation, SkillId, SkillInstallationId, SkillRevision,
+            ManagedSkillMutation, SkillId, SkillInstallationId, SkillInstallationRevision,
         };
 
         const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b334";
         let installation_id = SkillInstallationId::parse(INSTALLATION_ID).unwrap();
         let skill_id = SkillId::parse(format!("installed:user:{INSTALLATION_ID}")).unwrap();
-        let intended_revision = SkillRevision::parse("intended-revision").unwrap();
+        let intended_revision = SkillInstallationRevision::parse(format!(
+            "skill-installation-sha256-v1:{}",
+            "a".repeat(64)
+        ))
+        .unwrap();
         let error = SkillInstallationServiceError::Installer {
             operation: SkillInstallationOperation::Update,
             installation_id: installation_id.clone(),
@@ -1384,6 +1598,52 @@ mod tests {
     }
 
     #[test]
+    fn retired_identity_and_ledger_capacity_have_structured_recovery() {
+        use mycopilot_core::skills::{SkillId, SkillInstallationId};
+
+        const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b334";
+        let installation_id = SkillInstallationId::parse(INSTALLATION_ID).unwrap();
+        let skill_id = SkillId::parse(format!("installed:user:{INSTALLATION_ID}")).unwrap();
+        let retired = SkillInstallationServiceError::Installer {
+            operation: SkillInstallationOperation::Install,
+            installation_id: installation_id.clone(),
+            skill_id: skill_id.clone(),
+            source: Box::new(ManagedSkillInstallerError::InstallationRetired {
+                installation_id: installation_id.clone(),
+            }),
+        };
+        let retired_data = installation_failure(&retired).unwrap().into_data();
+        assert_eq!(
+            retired_data.code,
+            SkillInstallationErrorCodeDto::InstallationRetired
+        );
+        assert_eq!(
+            retired_data.recovery,
+            SkillInstallationRecoveryDto::NewInstallationIdentity
+        );
+
+        let full = SkillInstallationServiceError::Installer {
+            operation: SkillInstallationOperation::Install,
+            installation_id,
+            skill_id,
+            source: Box::new(ManagedSkillInstallerError::CapacityExceeded {
+                capacity: ManagedSkillStoreCapacity::RetiredInstallationIds,
+                limit: 100_000,
+            }),
+        };
+        let full_data = installation_failure(&full).unwrap().into_data();
+        assert_eq!(
+            full_data.capacity,
+            Some(SkillInstallationCapacityDto::RetiredInstallationIds)
+        );
+        assert_eq!(
+            full_data.recovery,
+            SkillInstallationRecoveryDto::ContactSupport
+        );
+        assert_eq!(full_data.limit, Some(100_000));
+    }
+
+    #[test]
     fn non_installed_targets_map_to_a_refreshable_invalid_skill_error() {
         let skill_id = mycopilot_core::skills::SkillId::parse("workspace:project:auditor").unwrap();
         let error = SkillInstallationServiceError::InvalidInstalledSkill {
@@ -1398,5 +1658,119 @@ mod tests {
         assert_eq!(data.recovery, SkillInstallationRecoveryDto::RefreshCatalog);
         assert_eq!(data.skill_id.as_deref(), Some(skill_id.as_str()));
         assert!(!data.commit_may_have_succeeded);
+    }
+
+    #[test]
+    fn management_inventory_tracks_refreshable_source_only_updates() {
+        const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b335";
+        let fixture = tempfile::tempdir().unwrap();
+        let store_root = fixture.path().join("skills");
+        let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+        let installations = SkillInstallationService::new(&store_root).unwrap();
+        let installation_id = SkillInstallationId::parse(INSTALLATION_ID).unwrap();
+        let package = PreparedSkillPackage::from_bytes(
+            b"---\nname: managed-auditor\ndescription: Management projection fixture.\n---\n# Instructions\nAudit the repository.\n".to_vec(),
+            SkillPackageOrigin::new("github", "resolved-fixture").unwrap(),
+        )
+        .unwrap();
+        let installed = installations
+            .install_prepared_with_provenance(
+                installation_id.clone(),
+                package.clone(),
+                management_github_provenance(FIRST_COMMIT),
+            )
+            .unwrap();
+        let mut workflow =
+            SkillInstallationWorkflow::new(SkillInstallationService::new(&store_root).unwrap());
+        workflow
+            .register_adapter(Arc::new(GitHubWorkflowAcquisitionAdapter::new(Arc::new(
+                GitHubSkillAcquirer::with_transport(Arc::new(NeverGitHubTransport)),
+            ))))
+            .unwrap();
+        let catalog_service = SkillsService::new()
+            .with_installed_source(&store_root)
+            .unwrap();
+        let catalog = catalog_service.list().unwrap();
+
+        let first =
+            management_response(&storage, &catalog, &installations, Some(&workflow)).unwrap();
+        let entry = &first.skills[0];
+        assert_eq!(
+            entry.installation_revision.as_deref(),
+            Some(installed.installation_revision().unwrap().as_str())
+        );
+        assert!(entry.actions.can_update);
+        assert!(entry.actions.can_uninstall);
+        match entry.acquisition.as_ref().unwrap() {
+            SkillPreviewSourceDto::GithubRepository {
+                owner,
+                repository,
+                reference,
+                resolved_commit,
+                subdirectory,
+                refreshable,
+            } => {
+                assert_eq!(owner, "example");
+                assert_eq!(repository, "skills");
+                assert_eq!(
+                    reference,
+                    &SkillGithubReferenceDto::Named {
+                        value: "main".to_string()
+                    }
+                );
+                assert_eq!(resolved_commit, FIRST_COMMIT);
+                assert_eq!(subdirectory.as_deref(), Some("auditor"));
+                assert!(*refreshable);
+            }
+            source => panic!("expected GitHub management source, got {source:?}"),
+        }
+        assert_eq!(
+            management_acquisition(
+                &catalog.skills()[0],
+                &InstalledSkillSourcePresentation::Provider {
+                    provider: "registry".to_string(),
+                    display_name: "Example Registry".to_string(),
+                    refreshable: true,
+                },
+            ),
+            SkillPreviewSourceDto::InstalledSource {
+                display_name: "Example Registry".to_string(),
+                refreshable: true,
+            },
+            "future adapters retain their safe display name and refresh capability"
+        );
+
+        let updated = installations
+            .update_prepared_exact(
+                installation_id,
+                installed.installation_revision().unwrap().clone(),
+                package,
+                management_github_provenance(SECOND_COMMIT),
+            )
+            .unwrap();
+        assert_eq!(
+            updated.package_revision(),
+            installed.package_revision(),
+            "the fixture performs a provenance-only update"
+        );
+        let second =
+            management_response(&storage, &catalog, &installations, Some(&workflow)).unwrap();
+        assert_ne!(
+            second.skills[0].installation_revision,
+            first.skills[0].installation_revision
+        );
+        assert_ne!(
+            second.skills[0].state_revision,
+            first.skills[0].state_revision
+        );
+        assert_ne!(second.management_revision, first.management_revision);
+        assert!(matches!(
+            second.skills[0].acquisition.as_ref(),
+            Some(SkillPreviewSourceDto::GithubRepository {
+                resolved_commit,
+                refreshable: true,
+                ..
+            }) if resolved_commit == SECOND_COMMIT
+        ));
     }
 }

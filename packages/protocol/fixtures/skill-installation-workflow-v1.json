@@ -15,10 +15,10 @@
       "preview": {
         "schemaVersion": 1,
         "preparationId": "11111111-1111-4111-8111-111111111111",
-        "previewRevision": "skill-preview-sha256-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "previewRevision": "skill-install-preview-sha256-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "operation": "install",
-        "installationId": "22222222-2222-4222-8222-222222222222",
-        "skillId": "installed:user:22222222-2222-4222-8222-222222222222",
+        "installationId": "11111111-1111-4111-8111-111111111111",
+        "skillId": "installed:user:11111111-1111-4111-8111-111111111111",
         "package": {
           "formatVersion": 2,
           "packageRevision": "skill-package-sha256-v2:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -30,14 +30,22 @@
         "source": {
           "kind": "localDirectory",
           "displayName": "repository-auditor",
-          "refreshable": true
+          "refreshable": false
         },
         "compatibility": {
-          "status": "compatible",
-          "issues": []
+          "status": "compatibleWithWarnings",
+          "issues": [
+            {
+              "id": "resourcesNotExposed",
+              "code": "resourcesNotExposed",
+              "severity": "warning",
+              "message": "This version preserves sibling Skill files but does not yet expose them to the agent runtime. Instructions that depend on those files may not work.",
+              "requiresAcknowledgement": false
+            }
+          ]
         },
         "changes": { "content": "new", "source": "new" },
-        "expiresAtUnixMs": 1760000000000
+        "expiresAtUnixMs": 4102444800000
       }
     },
     {
@@ -60,7 +68,7 @@
       "preview": {
         "schemaVersion": 1,
         "preparationId": "33333333-3333-4333-8333-333333333333",
-        "previewRevision": "skill-preview-sha256-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "previewRevision": "skill-install-preview-sha256-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         "operation": "update",
         "installationId": "22222222-2222-4222-8222-222222222222",
         "skillId": "installed:user:22222222-2222-4222-8222-222222222222",
@@ -85,17 +93,23 @@
           "status": "compatibleWithWarnings",
           "issues": [
             {
-              "id": "missing-capability:mcp.example.audit",
-              "code": "missingCapability",
+              "id": "resourcesNotExposed",
+              "code": "resourcesNotExposed",
               "severity": "warning",
-              "message": "The optional audit integration is not configured.",
-              "capability": "mcp.example.audit",
+              "message": "This version preserves sibling Skill files but does not yet expose them to the agent runtime. Instructions that depend on those files may not work.",
+              "requiresAcknowledgement": false
+            },
+            {
+              "id": "containsScripts",
+              "code": "containsScripts",
+              "severity": "warning",
+              "message": "This Skill contains script files. They are installed as inert resources and are never executed automatically.",
               "requiresAcknowledgement": true
             }
           ]
         },
         "changes": { "content": "changed", "source": "changed" },
-        "expiresAtUnixMs": 1760001000000
+        "expiresAtUnixMs": 4102444800000
       }
     },
     {
@@ -112,7 +126,7 @@
       "preview": {
         "schemaVersion": 1,
         "preparationId": "44444444-4444-4444-8444-444444444444",
-        "previewRevision": "skill-preview-sha256-v1:1111111111111111111111111111111111111111111111111111111111111111",
+        "previewRevision": "skill-install-preview-sha256-v1:1111111111111111111111111111111111111111111111111111111111111111",
         "operation": "update",
         "installationId": "22222222-2222-4222-8222-222222222222",
         "skillId": "installed:user:22222222-2222-4222-8222-222222222222",
@@ -125,24 +139,43 @@
           "totalBytes": 12288
         },
         "source": {
-          "kind": "installedSource",
-          "displayName": "example/shared-skills",
+          "kind": "githubRepository",
+          "owner": "example",
+          "repository": "shared-skills",
+          "reference": { "kind": "named", "value": "main" },
+          "resolvedCommit": "0123456789abcdef0123456789abcdef01234567",
+          "subdirectory": "skills/repository-auditor",
           "refreshable": true
         },
         "compatibility": {
-          "status": "unknown",
-          "issues": []
+          "status": "compatibleWithWarnings",
+          "issues": [
+            {
+              "id": "resourcesNotExposed",
+              "code": "resourcesNotExposed",
+              "severity": "warning",
+              "message": "This version preserves sibling Skill files but does not yet expose them to the agent runtime. Instructions that depend on those files may not work.",
+              "requiresAcknowledgement": false
+            },
+            {
+              "id": "containsScripts",
+              "code": "containsScripts",
+              "severity": "warning",
+              "message": "This Skill contains script files. They are installed as inert resources and are never executed automatically.",
+              "requiresAcknowledgement": true
+            }
+          ]
         },
         "changes": { "content": "unchanged", "source": "unchanged" },
-        "expiresAtUnixMs": 1760002000000
+        "expiresAtUnixMs": 4102444800000
       }
     }
   ],
   "commit": {
     "request": {
       "preparationId": "33333333-3333-4333-8333-333333333333",
-      "previewRevision": "skill-preview-sha256-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-      "acceptedIssueIds": ["missing-capability:mcp.example.audit"]
+      "previewRevision": "skill-install-preview-sha256-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "acceptedIssueIds": ["containsScripts"]
     },
     "response": {
       "schemaVersion": 1,
@@ -170,7 +203,7 @@
     "listRequest": {},
     "listResponse": {
       "schemaVersion": 1,
-      "managementRevision": "skill-management-sha256-v1:3333333333333333333333333333333333333333333333333333333333333333",
+      "managementRevision": "skill-management-catalog-sha256-v2:3333333333333333333333333333333333333333333333333333333333333333",
       "skills": [
         {
           "id": "bundled:application:repository-evidence-auditor",
@@ -178,7 +211,7 @@
           "description": "Audit repository claims using evidence.",
           "source": { "kind": "bundled", "id": "bundled:application" },
           "packageRevision": "skill-package-sha256-v1:4444444444444444444444444444444444444444444444444444444444444444",
-          "stateRevision": "skill-state-sha256-v1:5555555555555555555555555555555555555555555555555555555555555555",
+          "stateRevision": "skill-management-state-sha256-v2:5555555555555555555555555555555555555555555555555555555555555555",
           "enabled": true,
           "actions": {
             "canSetEnabled": true,
@@ -194,7 +227,7 @@
           "source": { "kind": "installed", "id": "installed:user" },
           "packageRevision": "skill-package-sha256-v2:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
           "installationRevision": "skill-installation-sha256-v1:2222222222222222222222222222222222222222222222222222222222222222",
-          "stateRevision": "skill-state-sha256-v1:6666666666666666666666666666666666666666666666666666666666666666",
+          "stateRevision": "skill-management-state-sha256-v2:6666666666666666666666666666666666666666666666666666666666666666",
           "enabled": true,
           "actions": {
             "canSetEnabled": true,
@@ -211,17 +244,8 @@
             "refreshable": true
           },
           "compatibility": {
-            "status": "compatibleWithWarnings",
-            "issues": [
-              {
-                "id": "missing-capability:mcp.example.audit",
-                "code": "missingCapability",
-                "severity": "warning",
-                "message": "The optional audit integration is not configured.",
-                "capability": "mcp.example.audit",
-                "requiresAcknowledgement": true
-              }
-            ]
+            "status": "unknown",
+            "issues": []
           }
         }
       ],
@@ -230,20 +254,20 @@
     },
     "setEnabledRequest": {
       "skillId": "installed:user:22222222-2222-4222-8222-222222222222",
-      "expectedStateRevision": "skill-state-sha256-v1:6666666666666666666666666666666666666666666666666666666666666666",
+      "expectedStateRevision": "skill-management-state-sha256-v2:6666666666666666666666666666666666666666666666666666666666666666",
       "enabled": false
     },
     "setEnabledResponse": {
       "schemaVersion": 1,
-      "managementRevision": "skill-management-sha256-v1:7777777777777777777777777777777777777777777777777777777777777777",
+      "managementRevision": "skill-management-catalog-sha256-v2:7777777777777777777777777777777777777777777777777777777777777777",
       "skillId": "installed:user:22222222-2222-4222-8222-222222222222",
-      "stateRevision": "skill-state-sha256-v1:8888888888888888888888888888888888888888888888888888888888888888",
+      "stateRevision": "skill-management-state-sha256-v2:8888888888888888888888888888888888888888888888888888888888888888",
       "enabled": false,
       "outcome": "updated"
     },
     "changed": {
       "schemaVersion": 1,
-      "managementRevision": "skill-management-sha256-v1:7777777777777777777777777777777777777777777777777777777777777777",
+      "managementRevision": "skill-management-catalog-sha256-v2:7777777777777777777777777777777777777777777777777777777777777777",
       "reason": "enablementChanged",
       "skillId": "installed:user:22222222-2222-4222-8222-222222222222"
     }
@@ -253,11 +277,102 @@
     "phase": "inspect",
     "code": "rateLimited",
     "recovery": "retryLater",
-    "message": "GitHub temporarily rejected the inspection request.",
-    "preparationId": "33333333-3333-4333-8333-333333333333",
-    "diagnosticCode": "githubRateLimited",
-    "retryAfterMs": 60000
+    "message": "GitHub temporarily rate-limited this Skill acquisition.",
+    "preparationId": "33333333-3333-4333-8333-333333333333"
   },
+  "inspectionErrors": [
+    {
+      "type": "skillInspection",
+      "phase": "inspect",
+      "code": "resolutionNotFound",
+      "recovery": "resolveAgain",
+      "message": "The resolved Skill source was not found or has expired. Resolve the URL again.",
+      "preparationId": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "type": "skillInspection",
+      "phase": "inspect",
+      "code": "resolutionExpired",
+      "recovery": "resolveAgain",
+      "message": "The resolved Skill source is no longer available. Resolve the URL again.",
+      "preparationId": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "type": "skillInspection",
+      "phase": "inspect",
+      "code": "resolutionConsumed",
+      "recovery": "resolveAgain",
+      "message": "The resolved candidate has already been consumed. Resolve the URL again.",
+      "preparationId": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "type": "skillInspection",
+      "phase": "inspect",
+      "code": "candidateNotFound",
+      "recovery": "resolveAgain",
+      "message": "The selected Skill candidate is not part of this resolution.",
+      "preparationId": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "type": "skillInspection",
+      "phase": "inspect",
+      "code": "installationNotFound",
+      "recovery": "refreshManagement",
+      "message": "The installed Skill no longer exists.",
+      "preparationId": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "type": "skillInspection",
+      "phase": "inspect",
+      "code": "installationRevisionConflict",
+      "recovery": "refreshManagement",
+      "message": "The installed Skill changed. Refresh the Skill list before updating it.",
+      "preparationId": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "type": "skillInspection",
+      "phase": "inspect",
+      "code": "sourceNotRefreshable",
+      "recovery": "refreshManagement",
+      "message": "This installation does not have a supported refresh source.",
+      "preparationId": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "type": "skillInspection",
+      "phase": "inspect",
+      "code": "persistedSourceInvalid",
+      "recovery": "refreshManagement",
+      "message": "The saved Skill source is not supported by this backend version.",
+      "preparationId": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "type": "skillInspection",
+      "phase": "commit",
+      "code": "installationRetired",
+      "recovery": "newInstallationIdentity",
+      "message": "This installation identity was already retired. Start a new installation with a new preparation ID.",
+      "preparationId": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "type": "skillInspection",
+      "phase": "commit",
+      "code": "capacityExceeded",
+      "recovery": "contactSupport",
+      "message": "The managed Skill store reached a non-reclaimable safety limit.",
+      "preparationId": "33333333-3333-4333-8333-333333333333"
+    },
+    {
+      "type": "skillInspection",
+      "phase": "commit",
+      "code": "commitIndeterminate",
+      "recovery": "refreshManagement",
+      "message": "The Skill commit may have completed. Refresh the Skill list before deciding whether to retry.",
+      "preparationId": "33333333-3333-4333-8333-333333333333",
+      "commitMayHaveSucceeded": true,
+      "skillId": "installed:user:22222222-2222-4222-8222-222222222222",
+      "intendedInstallationRevision": "skill-installation-sha256-v1:9999999999999999999999999999999999999999999999999999999999999999"
+    }
+  ],
   "managementErrors": [
     {
       "type": "skillManagement",
@@ -271,21 +386,21 @@
       "operation": "setEnabled",
       "code": "notFound",
       "recovery": "refreshManagement",
-      "message": "The selected Skill no longer exists."
+      "message": "The requested Skill is no longer installed or available."
     },
     {
       "type": "skillManagement",
       "operation": "setEnabled",
       "code": "notManageable",
       "recovery": "refreshManagement",
-      "message": "The selected Skill cannot be managed globally."
+      "message": "The requested Skill cannot be managed from global settings."
     },
     {
       "type": "skillManagement",
       "operation": "setEnabled",
       "code": "stateConflict",
       "recovery": "refreshManagement",
-      "message": "The selected Skill changed after the management list was loaded."
+      "message": "The Skill state changed. Refresh the Skill management list before retrying."
     }
   ]
 }

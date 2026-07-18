@@ -43,6 +43,8 @@ import type {
   SkillMutationOutput,
   SkillPreparationCancellationOutput,
   SkillsCancelPreparationInput,
+  SkillsCancelSourceResolutionInput,
+  SkillsCancelSourceResolutionOutput,
   SkillsChangedNotification,
   SkillsCommitInstallationInput,
   SkillsInspectInstallationInput,
@@ -138,10 +140,14 @@ export interface SkillsHostApi {
   list(input: SkillsListInput): Promise<SkillsListOutput>
   /** Opens a native single-directory picker. Cancellation is not an error. */
   selectInstallationDirectory(): Promise<string | null>
-  /** Resolves a user-facing locator into one or more immutable, inspected acquisition sources. */
+  /** Resolves a user-facing locator into expiring one-time candidate acquisition handles. */
   resolveInstallationSource(
     input: SkillsResolveInstallationSourceInput
   ): Promise<HostInvocationResult<SkillsResolveInstallationSourceOutput>>
+  /** Idempotently releases retained candidate authority for a completed or abandoned preview. */
+  cancelSourceResolution(
+    input: SkillsCancelSourceResolutionInput
+  ): Promise<HostInvocationResult<SkillsCancelSourceResolutionOutput>>
   inspectInstallation(
     input: SkillsInspectInstallationInput
   ): Promise<HostInvocationResult<SkillInstallationPreview>>

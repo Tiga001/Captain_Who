@@ -21,9 +21,10 @@ use mycopilot_core::skills::{
     GitHubAcquisitionTransport, GitHubInstallationSourceResolver, GitHubSkillAcquirer,
     GitHubWorkflowAcquisitionAdapter, LocalSkillInstallRequest, LocalSkillUpdateRequest,
     ReqwestGitHubTransport, SkillId, SkillInstallationId, SkillInstallationMutation,
-    SkillInstallationOperation, SkillInstallationService, SkillInstallationServiceError,
-    SkillInstallationWorkflow, SkillRevision, SkillSourceResolutionService,
-    SkillUninstallRequest as CoreSkillUninstallRequest, SkillsService,
+    SkillInstallationOperation, SkillInstallationRevision, SkillInstallationService,
+    SkillInstallationServiceError, SkillInstallationWorkflow, SkillRevision,
+    SkillSourceResolutionService, SkillUninstallExactRequest, SkillUninstallRequest, SkillsService,
+    SKILL_INSTALLATION_REVISION_PREFIX,
 };
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatMessageRecord,
@@ -38,23 +39,24 @@ use mycopilot_protocol_rs::{
     CorePingResponse, CoreShutdownResponse, GitRepositoryInspectRequest,
     GitReviewFileContentRequest, GitReviewFileDiffRequest, GitReviewFileMutationRequest,
     GitReviewSummaryRequest, JsonRpcId, JsonRpcRequest, SkillsCancelPreparationRequest,
-    SkillsChangedNotification, SkillsChangedReasonDto, SkillsCommitInstallationRequest,
-    SkillsInspectInstallationRequest, SkillsInstallLocalRequest, SkillsListManagementRequest,
-    SkillsListRequest, SkillsResolveInstallationSourceRequest, SkillsSetEnabledRequest,
-    SkillsUninstallRequest, SkillsUpdateLocalRequest, AGENT_APPROVE_ACTION_METHOD,
-    AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD, AGENT_CLEAR_USAGE_RECORDS_METHOD,
-    AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD, AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
-    AGENT_GET_FILE_WRITE_DIFF_METHOD, AGENT_GET_USAGE_SUMMARY_METHOD,
-    AGENT_LIST_PENDING_ACTIONS_METHOD, AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD,
-    AGENT_START_CONVERSATION_TURN_METHOD, CORE_PING_METHOD, CORE_SHUTDOWN_METHOD,
-    GIT_GET_REVIEW_FILE_CONTENT_METHOD, GIT_GET_REVIEW_FILE_DIFF_METHOD,
-    GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD, GIT_MUTATE_REVIEW_FILE_METHOD,
-    SEARCH_SEARCH_CHATS_METHOD, SKILLS_CANCEL_PREPARATION_METHOD,
-    SKILLS_CHANGED_NOTIFICATION_METHOD, SKILLS_COMMIT_INSTALLATION_METHOD,
-    SKILLS_INSPECT_INSTALLATION_METHOD, SKILLS_INSTALL_LOCAL_METHOD, SKILLS_LIST_MANAGEMENT_METHOD,
-    SKILLS_LIST_METHOD, SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD, SKILLS_SET_ENABLED_METHOD,
-    SKILLS_UNINSTALL_METHOD, SKILLS_UPDATE_LOCAL_METHOD, SKILL_INSPECTION_ERROR_CODE,
-    SKILL_INSTALLATION_ERROR_CODE, SKILL_MANAGEMENT_ERROR_CODE, SKILL_MANAGEMENT_SCHEMA_VERSION,
+    SkillsCancelSourceResolutionRequest, SkillsChangedNotification, SkillsChangedReasonDto,
+    SkillsCommitInstallationRequest, SkillsInspectInstallationRequest, SkillsInstallLocalRequest,
+    SkillsListManagementRequest, SkillsListRequest, SkillsResolveInstallationSourceRequest,
+    SkillsSetEnabledRequest, SkillsUninstallRequest, SkillsUpdateLocalRequest,
+    AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD,
+    AGENT_CLEAR_USAGE_RECORDS_METHOD, AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD,
+    AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD, AGENT_GET_FILE_WRITE_DIFF_METHOD,
+    AGENT_GET_USAGE_SUMMARY_METHOD, AGENT_LIST_PENDING_ACTIONS_METHOD,
+    AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
+    CORE_PING_METHOD, CORE_SHUTDOWN_METHOD, GIT_GET_REVIEW_FILE_CONTENT_METHOD,
+    GIT_GET_REVIEW_FILE_DIFF_METHOD, GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD,
+    GIT_MUTATE_REVIEW_FILE_METHOD, SEARCH_SEARCH_CHATS_METHOD, SKILLS_CANCEL_PREPARATION_METHOD,
+    SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD, SKILLS_CHANGED_NOTIFICATION_METHOD,
+    SKILLS_COMMIT_INSTALLATION_METHOD, SKILLS_INSPECT_INSTALLATION_METHOD,
+    SKILLS_INSTALL_LOCAL_METHOD, SKILLS_LIST_MANAGEMENT_METHOD, SKILLS_LIST_METHOD,
+    SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD, SKILLS_SET_ENABLED_METHOD, SKILLS_UNINSTALL_METHOD,
+    SKILLS_UPDATE_LOCAL_METHOD, SKILL_INSPECTION_ERROR_CODE, SKILL_INSTALLATION_ERROR_CODE,
+    SKILL_MANAGEMENT_ERROR_CODE, SKILL_MANAGEMENT_SCHEMA_VERSION,
     SKILL_SOURCE_RESOLUTION_ERROR_CODE, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
     STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
     STORAGE_FORK_CONVERSATION_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
@@ -75,7 +77,8 @@ use skill_installation_workflow_adapter::{
     preview_response, workflow_failure, SkillInspectionFailure,
 };
 use skill_source_resolution_adapter::{
-    resolution_dispatch_failure, resolution_failure, resolution_response, source_locator,
+    cancellation_resolution_id, resolution_dispatch_failure, resolution_failure,
+    resolution_request, resolution_response, source_resolution_cancellation_response,
     SkillSourceResolutionFailure,
 };
 use skills_adapter::{
@@ -161,7 +164,9 @@ impl CoreServerBootstrap {
                     "failed to register GitHub Skill acquisition: {error}"
                 ))
             })?;
-        let mut skill_source_resolution = SkillSourceResolutionService::new();
+        let mut skill_source_resolution = SkillSourceResolutionService::with_session_store(
+            skill_installation_workflow.session_store(),
+        );
         let github_resolution_transport: Arc<dyn GitHubAcquisitionTransport> = Arc::new(
             ReqwestGitHubTransport::new_for_source_resolution().map_err(|error| {
                 io::Error::other(format!(
@@ -363,12 +368,12 @@ where
                 let acquisition_lane = request.uses_acquisition_lane();
                 let source_resolution_request = request.is_source_resolution();
                 let workflow_metadata = request.workflow_metadata();
+                let workflow_commit_preparation_id = request.workflow_commit_preparation_id();
                 let mutation_metadata = request.mutation_metadata();
-                let submit_result = match mutation_metadata.clone() {
-                    Some((operation, target)) => dispatchers.skills.try_submit_mutation(
+                let submit_result = if let Some(preparation_id) = workflow_commit_preparation_id {
+                    dispatchers.skills.try_submit_workflow_commit(
                         request_id.clone(),
-                        operation,
-                        target,
+                        preparation_id,
                         move || {
                             handle_parsed_skills_request(
                                 &request_storage,
@@ -380,11 +385,14 @@ where
                                 request,
                             )
                         },
-                    ),
-                    None if acquisition_lane => {
-                        dispatchers
-                            .skill_acquisition
-                            .try_submit(request_id.clone(), move || {
+                    )
+                } else {
+                    match mutation_metadata.clone() {
+                        Some((operation, target)) => dispatchers.skills.try_submit_mutation(
+                            request_id.clone(),
+                            operation,
+                            target,
+                            move || {
                                 handle_parsed_skills_request(
                                     &request_storage,
                                     &request_catalog,
@@ -394,19 +402,34 @@ where
                                     Some(&request_outbound),
                                     request,
                                 )
-                            })
+                            },
+                        ),
+                        None if acquisition_lane => dispatchers.skill_acquisition.try_submit(
+                            request_id.clone(),
+                            move || {
+                                handle_parsed_skills_request(
+                                    &request_storage,
+                                    &request_catalog,
+                                    &request_installations,
+                                    Some(&request_workflow),
+                                    Some(&request_source_resolution),
+                                    Some(&request_outbound),
+                                    request,
+                                )
+                            },
+                        ),
+                        None => dispatchers.skills.try_submit(request_id.clone(), move || {
+                            handle_parsed_skills_request(
+                                &request_storage,
+                                &request_catalog,
+                                &request_installations,
+                                Some(&request_workflow),
+                                Some(&request_source_resolution),
+                                Some(&request_outbound),
+                                request,
+                            )
+                        }),
                     }
-                    None => dispatchers.skills.try_submit(request_id.clone(), move || {
-                        handle_parsed_skills_request(
-                            &request_storage,
-                            &request_catalog,
-                            &request_installations,
-                            Some(&request_workflow),
-                            Some(&request_source_resolution),
-                            Some(&request_outbound),
-                            request,
-                        )
-                    }),
                 };
                 if let Err(error) = submit_result {
                     let response = match mutation_metadata {
@@ -505,6 +528,7 @@ fn is_skills_method(method: &str) -> bool {
         SKILLS_LIST_METHOD
             | SKILLS_INSPECT_INSTALLATION_METHOD
             | SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD
+            | SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD
             | SKILLS_COMMIT_INSTALLATION_METHOD
             | SKILLS_CANCEL_PREPARATION_METHOD
             | SKILLS_INSTALL_LOCAL_METHOD
@@ -774,11 +798,26 @@ enum ParsedSkillsOperation {
     SetEnabled(SkillsSetEnabledRequest),
     InspectInstallation(SkillsInspectInstallationRequest),
     ResolveInstallationSource(SkillsResolveInstallationSourceRequest),
+    CancelSourceResolution(SkillsCancelSourceResolutionRequest),
     CommitInstallation(SkillsCommitInstallationRequest),
     CancelPreparation(SkillsCancelPreparationRequest),
     InstallLocal(LocalSkillInstallRequest),
     UpdateLocal(LocalSkillUpdateRequest),
-    Uninstall(CoreSkillUninstallRequest),
+    Uninstall(ParsedSkillUninstallRequest),
+}
+
+enum ParsedSkillUninstallRequest {
+    Exact(SkillUninstallExactRequest),
+    Legacy(SkillUninstallRequest),
+}
+
+impl ParsedSkillUninstallRequest {
+    fn skill_id(&self) -> &SkillId {
+        match self {
+            Self::Exact(request) => request.skill_id(),
+            Self::Legacy(request) => request.skill_id(),
+        }
+    }
 }
 
 impl ParsedSkillsRequest {
@@ -787,6 +826,7 @@ impl ParsedSkillsRequest {
             self.operation,
             ParsedSkillsOperation::InspectInstallation(_)
                 | ParsedSkillsOperation::ResolveInstallationSource(_)
+                | ParsedSkillsOperation::CancelSourceResolution(_)
         )
     }
 
@@ -794,6 +834,7 @@ impl ParsedSkillsRequest {
         matches!(
             self.operation,
             ParsedSkillsOperation::ResolveInstallationSource(_)
+                | ParsedSkillsOperation::CancelSourceResolution(_)
         )
     }
 
@@ -817,6 +858,15 @@ impl ParsedSkillsRequest {
         }
     }
 
+    fn workflow_commit_preparation_id(&self) -> Option<String> {
+        match &self.operation {
+            ParsedSkillsOperation::CommitInstallation(request) => {
+                Some(request.preparation_id.clone())
+            }
+            _ => None,
+        }
+    }
+
     fn mutation_metadata(&self) -> Option<(SkillInstallationOperation, SkillMutationTarget)> {
         match &self.operation {
             ParsedSkillsOperation::List(_)
@@ -824,6 +874,7 @@ impl ParsedSkillsRequest {
             | ParsedSkillsOperation::SetEnabled(_)
             | ParsedSkillsOperation::InspectInstallation(_)
             | ParsedSkillsOperation::ResolveInstallationSource(_)
+            | ParsedSkillsOperation::CancelSourceResolution(_)
             | ParsedSkillsOperation::CommitInstallation(_)
             | ParsedSkillsOperation::CancelPreparation(_) => None,
             ParsedSkillsOperation::InstallLocal(request) => Some((
@@ -871,6 +922,10 @@ fn parse_skills_request(request: JsonRpcRequest) -> Result<ParsedSkillsRequest, 
                     .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
             )
         }
+        SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD => ParsedSkillsOperation::CancelSourceResolution(
+            parse_params::<SkillsCancelSourceResolutionRequest>(request.params)
+                .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
+        ),
         SKILLS_COMMIT_INSTALLATION_METHOD => ParsedSkillsOperation::CommitInstallation(
             parse_params::<SkillsCommitInstallationRequest>(request.params)
                 .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
@@ -909,12 +964,27 @@ fn parse_skills_request(request: JsonRpcRequest) -> Result<ParsedSkillsRequest, 
                 .map_err(|message| response_error(Some(id.clone()), -32602, message))?;
             let skill_id = SkillId::parse(input.skill_id)
                 .map_err(|error| invalid_skill_installation_params(&id, error.to_string()))?;
-            let expected_revision = SkillRevision::parse(input.expected_revision)
-                .map_err(|error| invalid_skill_installation_params(&id, error.to_string()))?;
-            ParsedSkillsOperation::Uninstall(CoreSkillUninstallRequest::new(
-                skill_id,
-                expected_revision,
-            ))
+            let uninstall = if input
+                .expected_revision
+                .starts_with(SKILL_INSTALLATION_REVISION_PREFIX)
+            {
+                let expected_revision = SkillInstallationRevision::parse(input.expected_revision)
+                    .map_err(|error| {
+                    invalid_skill_installation_params(&id, error.to_string())
+                })?;
+                ParsedSkillUninstallRequest::Exact(SkillUninstallExactRequest::new(
+                    skill_id,
+                    expected_revision,
+                ))
+            } else {
+                let expected_revision = SkillRevision::parse(input.expected_revision)
+                    .map_err(|error| invalid_skill_installation_params(&id, error.to_string()))?;
+                ParsedSkillUninstallRequest::Legacy(SkillUninstallRequest::new(
+                    skill_id,
+                    expected_revision,
+                ))
+            };
+            ParsedSkillsOperation::Uninstall(uninstall)
         }
         _ => return Err(response_error(Some(id), -32601, "Method not found")),
     };
@@ -994,7 +1064,14 @@ fn handle_parsed_skills_request(
             let result = skills_service
                 .list()
                 .map_err(|_| SkillManagementFailure::list_unavailable())
-                .and_then(|catalog| management_response(storage, &catalog));
+                .and_then(|catalog| {
+                    management_response(
+                        storage,
+                        &catalog,
+                        skill_installation_service,
+                        skill_installation_workflow,
+                    )
+                });
             match result {
                 Ok(response) => response_success(request.id, response),
                 Err(error) => skill_management_error_response(request.id, error),
@@ -1004,13 +1081,23 @@ fn handle_parsed_skills_request(
             let result = skills_service
                 .list()
                 .map_err(|_| SkillManagementFailure::set_enabled_unavailable())
-                .and_then(|catalog| set_enabled_response(storage, &catalog, &input));
+                .and_then(|catalog| {
+                    set_enabled_response(
+                        storage,
+                        &catalog,
+                        skill_installation_service,
+                        skill_installation_workflow,
+                        &input,
+                    )
+                });
             match result {
                 Ok((response, changed)) => {
                     if changed {
                         notify_skills_changed(
                             storage,
                             skills_service,
+                            skill_installation_service,
+                            skill_installation_workflow,
                             notification_tx,
                             SkillsChangedReasonDto::EnablementChanged,
                             Some(input.skill_id),
@@ -1051,9 +1138,31 @@ fn handle_parsed_skills_request(
                     resolution_dispatch_failure("Skill source resolution is unavailable."),
                 );
             };
-            let result = source_locator(input)
-                .and_then(|locator| service.resolve(&locator).map_err(resolution_failure))
-                .and_then(|resolution| resolution_response(&resolution));
+            let result = resolution_request(input)
+                .and_then(|(resolution_id, locator)| {
+                    service
+                        .resolve_registered(resolution_id, &locator)
+                        .map_err(resolution_failure)
+                })
+                .and_then(|registered| resolution_response(&registered));
+            match result {
+                Ok(response) => response_success(request.id, response),
+                Err(error) => skill_source_resolution_error_response(request.id, error),
+            }
+        }
+        ParsedSkillsOperation::CancelSourceResolution(input) => {
+            let Some(service) = skill_source_resolution else {
+                return skill_source_resolution_error_response(
+                    request.id,
+                    resolution_dispatch_failure("Skill source resolution is unavailable."),
+                );
+            };
+            let result = cancellation_resolution_id(input).and_then(|resolution_id| {
+                let outcome = service
+                    .cancel_registered_resolution(&resolution_id)
+                    .map_err(resolution_failure)?;
+                source_resolution_cancellation_response(&resolution_id, outcome)
+            });
             match result {
                 Ok(response) => response_success(request.id, response),
                 Err(error) => skill_source_resolution_error_response(request.id, error),
@@ -1089,6 +1198,8 @@ fn handle_parsed_skills_request(
                         notify_skills_changed(
                             storage,
                             skills_service,
+                            skill_installation_service,
+                            skill_installation_workflow,
                             notification_tx,
                             reason,
                             Some(result.mutation().skill_id().as_str().to_string()),
@@ -1098,7 +1209,15 @@ fn handle_parsed_skills_request(
                 Ok(response)
             }) {
                 Ok(response) => response_success(request.id, response),
-                Err(error) => skill_inspection_error_response(request.id, error),
+                Err(error) => skill_workflow_commit_error_response_with_invalidation(
+                    storage,
+                    skills_service,
+                    skill_installation_service,
+                    skill_installation_workflow,
+                    notification_tx,
+                    request.id,
+                    error,
+                ),
             }
         }
         ParsedSkillsOperation::CancelPreparation(input) => {
@@ -1144,12 +1263,22 @@ fn handle_parsed_skills_request(
                 notify_skills_changed(
                     storage,
                     skills_service,
+                    skill_installation_service,
+                    skill_installation_workflow,
                     notification_tx,
                     SkillsChangedReasonDto::Installed,
                     Some(skill_id),
                 );
             }
-            skill_mutation_response(request.id, result)
+            skill_mutation_response_with_invalidation(
+                storage,
+                skills_service,
+                skill_installation_service,
+                skill_installation_workflow,
+                notification_tx,
+                request.id,
+                result,
+            )
         }
         ParsedSkillsOperation::UpdateLocal(input) => {
             let result = skill_installation_service.update_local_directory(&input);
@@ -1160,25 +1289,38 @@ fn handle_parsed_skills_request(
                 notify_skills_changed(
                     storage,
                     skills_service,
+                    skill_installation_service,
+                    skill_installation_workflow,
                     notification_tx,
                     SkillsChangedReasonDto::Updated,
                     Some(input.skill_id().as_str().to_string()),
                 );
             }
-            skill_mutation_response(request.id, result)
+            skill_mutation_response_with_invalidation(
+                storage,
+                skills_service,
+                skill_installation_service,
+                skill_installation_workflow,
+                notification_tx,
+                request.id,
+                result,
+            )
         }
         ParsedSkillsOperation::Uninstall(input) => {
-            let result = skill_installation_service.uninstall(&input);
-            if result.is_ok() {
-                if let Err(error) =
-                    storage.delete_skill_enablement_override(input.skill_id().as_str())
-                {
-                    return response_error(
-                        Some(request.id),
-                        -32000,
-                        format!("Skill was uninstalled but its enablement override could not be cleaned up: {error}"),
-                    );
+            let result = match &input {
+                ParsedSkillUninstallRequest::Exact(request) => {
+                    skill_installation_service.uninstall_exact(request)
                 }
+                ParsedSkillUninstallRequest::Legacy(request) => {
+                    skill_installation_service.uninstall(request)
+                }
+            };
+            if result.is_ok() {
+                // The managed-store mutation is the authoritative commit. SQLite is
+                // a derived preference store: cleanup must never turn a
+                // completed uninstall into a false failure. Idempotent
+                // uninstall retries repeat the same reconciliation.
+                best_effort_delete_skill_enablement(storage, input.skill_id().as_str());
             }
             if matches!(
                 result.as_ref().map(SkillInstallationMutation::outcome),
@@ -1187,19 +1329,109 @@ fn handle_parsed_skills_request(
                 notify_skills_changed(
                     storage,
                     skills_service,
+                    skill_installation_service,
+                    skill_installation_workflow,
                     notification_tx,
                     SkillsChangedReasonDto::Uninstalled,
                     Some(input.skill_id().as_str().to_string()),
                 );
             }
-            skill_mutation_response(request.id, result)
+            skill_mutation_response_with_invalidation(
+                storage,
+                skills_service,
+                skill_installation_service,
+                skill_installation_workflow,
+                notification_tx,
+                request.id,
+                result,
+            )
         }
     }
+}
+
+fn best_effort_delete_skill_enablement(storage: &StorageService, skill_id: &str) {
+    // Uninstalled installation IDs are durably retired and cannot be reused,
+    // so deleting their derived preference row cannot create state-token ABA.
+    let _ = storage.delete_skill_enablement_override(skill_id);
+}
+
+fn skill_mutation_response_with_invalidation(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    skill_installation_service: &SkillInstallationService,
+    skill_installation_workflow: Option<&SkillInstallationWorkflow>,
+    notification_tx: Option<&mpsc::UnboundedSender<Value>>,
+    id: JsonRpcId,
+    result: Result<SkillInstallationMutation, SkillInstallationServiceError>,
+) -> Value {
+    if let Err(error) = &result {
+        if let Ok(failure) = installation_failure(error) {
+            notify_skills_changed_if_commit_outcome_uncertain(
+                storage,
+                skills_service,
+                skill_installation_service,
+                skill_installation_workflow,
+                notification_tx,
+                failure.commit_may_have_succeeded(),
+                failure.skill_id(),
+            );
+        }
+    }
+    skill_mutation_response(id, result)
+}
+
+fn skill_workflow_commit_error_response_with_invalidation(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    skill_installation_service: &SkillInstallationService,
+    skill_installation_workflow: Option<&SkillInstallationWorkflow>,
+    notification_tx: Option<&mpsc::UnboundedSender<Value>>,
+    id: JsonRpcId,
+    failure: SkillInspectionFailure,
+) -> Value {
+    notify_skills_changed_if_commit_outcome_uncertain(
+        storage,
+        skills_service,
+        skill_installation_service,
+        skill_installation_workflow,
+        notification_tx,
+        failure.commit_may_have_succeeded(),
+        failure.skill_id(),
+    );
+    skill_inspection_error_response(id, failure)
+}
+
+fn notify_skills_changed_if_commit_outcome_uncertain(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    skill_installation_service: &SkillInstallationService,
+    skill_installation_workflow: Option<&SkillInstallationWorkflow>,
+    notification_tx: Option<&mpsc::UnboundedSender<Value>>,
+    commit_may_have_succeeded: bool,
+    skill_id: Option<&str>,
+) {
+    if !commit_may_have_succeeded {
+        return;
+    }
+    // This is an invalidation, not a success claim. The durable store must be
+    // re-read because a post-publication fsync failure cannot prove whether the
+    // requested mutation became visible.
+    notify_skills_changed(
+        storage,
+        skills_service,
+        skill_installation_service,
+        skill_installation_workflow,
+        notification_tx,
+        SkillsChangedReasonDto::CatalogChanged,
+        skill_id.map(str::to_string),
+    );
 }
 
 fn notify_skills_changed(
     storage: &StorageService,
     skills_service: &SkillsService,
+    skill_installation_service: &SkillInstallationService,
+    skill_installation_workflow: Option<&SkillInstallationWorkflow>,
     notification_tx: Option<&mpsc::UnboundedSender<Value>>,
     reason: SkillsChangedReasonDto,
     skill_id: Option<String>,
@@ -1210,7 +1442,15 @@ fn notify_skills_changed(
     let management_revision = skills_service
         .list()
         .ok()
-        .and_then(|catalog| management_response(storage, &catalog).ok())
+        .and_then(|catalog| {
+            management_response(
+                storage,
+                &catalog,
+                skill_installation_service,
+                skill_installation_workflow,
+            )
+            .ok()
+        })
         .map(|response| response.management_revision)
         .unwrap_or_else(|| "unavailable".to_string());
     let notification = SkillsChangedNotification {
@@ -1668,12 +1908,16 @@ mod server_tests {
     use super::*;
     use crate::skills_test_support::write_installed_skill;
     use mycopilot_core::skills::{
-        ResolvedSkillPackagePreview, ResolvedSkillSource, SkillInstallationSourceLocator,
-        SkillInstallationSourceResolver, SkillSourceResolution, SkillSourceResolutionCandidate,
-        SkillSourceResolutionError, SkillSourceResolverId,
+        GitHubReference, PreparedSkillAcquisition, PreparedSkillPackage,
+        PreparedSkillSourceResolution, PreparedSkillSourceResolutionCandidate,
+        ResolvedSkillPackagePreview, ResolvedSkillSource, SkillInstallationAuthority,
+        SkillInstallationProvenance, SkillInstallationRefresh, SkillInstallationSourceLocator,
+        SkillInstallationSourceResolver, SkillPackageOrigin, SkillSourceCandidateId,
+        SkillSourceResolution, SkillSourceResolutionCandidate, SkillSourceResolutionError,
+        SkillSourceResolverId, GITHUB_SKILL_ORIGIN_PROVIDER,
     };
     use std::fs;
-    use std::sync::mpsc as std_mpsc;
+    use std::sync::{mpsc as std_mpsc, Mutex};
     use tokio::io::AsyncReadExt;
 
     struct StaticGitHubSourceResolver;
@@ -1701,6 +1945,7 @@ mod server_tests {
                     ResolvedSkillSource::GitHub {
                         owner: "example".to_string(),
                         repository: "skills".to_string(),
+                        tracking_reference: GitHubReference::named("main").unwrap(),
                         resolved_commit: commit.to_string(),
                         subdirectory: Some("skills/auditor".to_string()),
                     },
@@ -1714,6 +1959,114 @@ mod server_tests {
                     ),
                 )],
             )
+        }
+
+        fn resolve_prepared(
+            &self,
+            _locator: &SkillInstallationSourceLocator,
+        ) -> Result<PreparedSkillSourceResolution, SkillSourceResolutionError> {
+            let commit = "0123456789abcdef0123456789abcdef01234567";
+            let package = PreparedSkillPackage::from_bytes(
+                concat!(
+                    "---\n",
+                    "name: auditor\n",
+                    "description: Audit a repository.\n",
+                    "---\n",
+                    "# Instructions\n",
+                    "Audit the repository.\n"
+                )
+                .as_bytes()
+                .to_vec(),
+                SkillPackageOrigin::new(
+                    GITHUB_SKILL_ORIGIN_PROVIDER,
+                    serde_json::json!({
+                        "schemaVersion": 1,
+                        "owner": "example",
+                        "repository": "skills",
+                        "requestedReference": { "kind": "named", "value": "main" },
+                        "resolvedCommit": commit,
+                        "subdirectory": "skills/auditor"
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let provenance = SkillInstallationProvenance::new(
+                SkillInstallationAuthority::new(
+                    GITHUB_SKILL_ORIGIN_PROVIDER,
+                    1,
+                    serde_json::json!({
+                        "owner": "example",
+                        "repository": "skills",
+                        "resolvedCommit": commit,
+                        "subdirectory": "skills/auditor"
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+                Some(
+                    SkillInstallationRefresh::new(
+                        GITHUB_SKILL_ORIGIN_PROVIDER,
+                        1,
+                        serde_json::json!({
+                            "owner": "example",
+                            "repository": "skills",
+                            "reference": { "kind": "named", "value": "main" },
+                            "subdirectory": "skills/auditor"
+                        })
+                        .to_string(),
+                    )
+                    .unwrap(),
+                ),
+            );
+            PreparedSkillSourceResolution::new(
+                "https://github.com/example/skills/tree/main/skills/auditor",
+                self.id(),
+                commit,
+                vec![PreparedSkillSourceResolutionCandidate::new(
+                    SkillSourceCandidateId::parse("candidate-auditor").unwrap(),
+                    ResolvedSkillSource::GitHub {
+                        owner: "example".to_string(),
+                        repository: "skills".to_string(),
+                        tracking_reference: GitHubReference::named("main").unwrap(),
+                        resolved_commit: commit.to_string(),
+                        subdirectory: Some("skills/auditor".to_string()),
+                    },
+                    PreparedSkillAcquisition::new(package, provenance),
+                )],
+            )
+        }
+    }
+
+    struct BlockingGitHubSourceResolver {
+        started: std_mpsc::Sender<()>,
+        release: Mutex<std_mpsc::Receiver<()>>,
+    }
+
+    impl SkillInstallationSourceResolver for BlockingGitHubSourceResolver {
+        fn id(&self) -> SkillSourceResolverId {
+            StaticGitHubSourceResolver.id()
+        }
+
+        fn supported_hosts(&self) -> Vec<String> {
+            StaticGitHubSourceResolver.supported_hosts()
+        }
+
+        fn resolve(
+            &self,
+            locator: &SkillInstallationSourceLocator,
+        ) -> Result<SkillSourceResolution, SkillSourceResolutionError> {
+            StaticGitHubSourceResolver.resolve(locator)
+        }
+
+        fn resolve_prepared(
+            &self,
+            locator: &SkillInstallationSourceLocator,
+        ) -> Result<PreparedSkillSourceResolution, SkillSourceResolutionError> {
+            self.started.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            StaticGitHubSourceResolver.resolve_prepared(locator)
         }
     }
 
@@ -2147,8 +2500,86 @@ mod server_tests {
         );
     }
 
+    #[test]
+    fn source_resolution_cancellation_is_routed_and_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&temp.path().join("storage.sqlite")).unwrap();
+        let catalog = SkillsService::new();
+        let installations = SkillInstallationService::new(temp.path().join("skills")).unwrap();
+        let workflow = SkillInstallationWorkflow::new(
+            SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+        );
+        let mut source_resolution =
+            SkillSourceResolutionService::with_session_store(workflow.session_store());
+        source_resolution
+            .register_resolver(Arc::new(StaticGitHubSourceResolver))
+            .unwrap();
+        let resolution_id = "11111111-1111-4111-8111-111111111111";
+
+        let resolve = parse_skills_request(
+            serde_json::from_value::<JsonRpcRequest>(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD,
+                "params": {
+                    "resolutionId": resolution_id,
+                    "locator": {
+                        "kind": "url",
+                        "url": "https://github.com/example/skills"
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let resolved = handle_parsed_skills_request(
+            &storage,
+            &catalog,
+            &installations,
+            Some(&workflow),
+            Some(&source_resolution),
+            None,
+            resolve,
+        );
+        assert_eq!(resolved["result"]["resolutionId"], resolution_id);
+
+        let cancel = |id, resolution_id: &str| {
+            let request = parse_skills_request(
+                serde_json::from_value::<JsonRpcRequest>(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD,
+                    "params": { "resolutionId": resolution_id }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            handle_parsed_skills_request(
+                &storage,
+                &catalog,
+                &installations,
+                Some(&workflow),
+                Some(&source_resolution),
+                None,
+                request,
+            )
+        };
+
+        let first = cancel(2, resolution_id);
+        assert_eq!(first["result"]["outcome"], "cancelled");
+        assert_eq!(first["result"]["resolutionId"], resolution_id);
+        assert_eq!(
+            cancel(3, resolution_id)["result"]["outcome"],
+            "alreadyCancelled"
+        );
+        assert_eq!(
+            cancel(4, "99999999-9999-4999-8999-999999999999")["result"]["outcome"],
+            "alreadyAbsent"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn request_loop_resolves_a_url_on_the_read_only_acquisition_lane() {
+    async fn queued_source_cancellation_cannot_overtake_the_resolution_it_fences() {
         let temp = tempfile::tempdir().unwrap();
         let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
         let agent_service = AgentService::new(Arc::clone(&storage));
@@ -2161,15 +2592,32 @@ mod server_tests {
             skills: &skills_dispatcher,
             skill_acquisition: &acquisition_dispatcher,
         };
-        let mut source_resolution = SkillSourceResolutionService::new();
+        let workflow = SkillInstallationWorkflow::new(
+            SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+        );
+        let (started_tx, started_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let mut source_resolution =
+            SkillSourceResolutionService::with_session_store(workflow.session_store());
         source_resolution
-            .register_resolver(Arc::new(StaticGitHubSourceResolver))
+            .register_resolver(Arc::new(BlockingGitHubSourceResolver {
+                started: started_tx,
+                release: Mutex::new(release_rx),
+            }))
             .unwrap();
-        let input = concat!(
-            "{\"jsonrpc\":\"2.0\",\"id\":71,",
-            "\"method\":\"skills.resolveInstallationSource\",",
-            "\"params\":{\"locator\":{\"kind\":\"url\",",
-            "\"url\":\"https://github.com/example/skills\"}}}\n"
+        let resolution_id = "11111111-1111-4111-8111-111111111111";
+        let input = format!(
+            concat!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":81,",
+                "\"method\":\"skills.resolveInstallationSource\",",
+                "\"params\":{{\"resolutionId\":\"{resolution_id}\",",
+                "\"locator\":{{\"kind\":\"url\",",
+                "\"url\":\"https://github.com/example/skills\"}}}}}}\n",
+                "{{\"jsonrpc\":\"2.0\",\"id\":82,",
+                "\"method\":\"skills.cancelSourceResolution\",",
+                "\"params\":{{\"resolutionId\":\"{resolution_id}\"}}}}\n"
+            ),
+            resolution_id = resolution_id,
         );
 
         let shutdown_id = run_request_loop(
@@ -2181,9 +2629,7 @@ mod server_tests {
                 installations: Arc::new(
                     SkillInstallationService::new(temp.path().join("skills")).unwrap(),
                 ),
-                workflow: Arc::new(SkillInstallationWorkflow::new(
-                    SkillInstallationService::new(temp.path().join("skills")).unwrap(),
-                )),
+                workflow: Arc::new(workflow),
                 source_resolution: Arc::new(source_resolution),
             },
             Arc::new(GitReviewService::new()),
@@ -2192,26 +2638,208 @@ mod server_tests {
         )
         .await
         .unwrap();
-        let response = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
-            .await
-            .expect("source resolution must complete")
-            .expect("source resolution must produce a response");
-
         assert!(shutdown_id.is_none());
-        assert_eq!(response["id"], 71);
-        assert_eq!(response["result"]["outcome"], "resolved");
-        assert_eq!(
-            response["result"]["candidates"][0]["source"]["reference"]["kind"],
-            "commit"
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("resolution must enter the acquisition lane");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv())
+                .await
+                .is_err(),
+            "cancellation must wait behind the earlier accepted resolution"
         );
-        assert_eq!(
-            response["result"]["candidates"][0]["source"]["reference"]["sha"],
-            "0123456789abcdef0123456789abcdef01234567"
-        );
+        release_tx.send(()).unwrap();
+        let resolved = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let cancelled = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resolved["id"], 81);
+        assert_eq!(resolved["result"]["outcome"], "resolved");
+        assert_eq!(cancelled["id"], 82);
+        assert_eq!(cancelled["result"]["outcome"], "cancelled");
 
         git_dispatcher.shutdown().await.unwrap();
         skills_dispatcher.shutdown().await.unwrap();
         acquisition_dispatcher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_loop_resolves_and_hands_off_a_candidate_on_one_acquisition_lane() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+        let agent_service = AgentService::new(Arc::clone(&storage));
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
+        let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+        let acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+        let dispatchers = RequestDispatchers {
+            git: &git_dispatcher,
+            skills: &skills_dispatcher,
+            skill_acquisition: &acquisition_dispatcher,
+        };
+        let workflow = SkillInstallationWorkflow::new(
+            SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+        );
+        let mut source_resolution =
+            SkillSourceResolutionService::with_session_store(workflow.session_store());
+        source_resolution
+            .register_resolver(Arc::new(StaticGitHubSourceResolver))
+            .unwrap();
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":71,",
+            "\"method\":\"skills.resolveInstallationSource\",",
+            "\"params\":{\"resolutionId\":",
+            "\"11111111-1111-4111-8111-111111111111\",",
+            "\"locator\":{\"kind\":\"url\",",
+            "\"url\":\"https://github.com/example/skills\"}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":72,",
+            "\"method\":\"skills.inspectInstallation\",",
+            "\"params\":{\"preparationId\":",
+            "\"33333333-3333-4333-8333-333333333333\",",
+            "\"intent\":{\"operation\":\"install\"},",
+            "\"source\":{\"kind\":\"resolvedCandidate\",",
+            "\"resolutionId\":\"11111111-1111-4111-8111-111111111111\",",
+            "\"candidateId\":\"candidate-auditor\"}}}\n"
+        );
+
+        let shutdown_id = run_request_loop(
+            BufReader::new(input.as_bytes()),
+            Arc::clone(&storage),
+            &agent_service,
+            SkillServices {
+                catalog: Arc::new(SkillsService::new()),
+                installations: Arc::new(
+                    SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+                ),
+                workflow: Arc::new(workflow),
+                source_resolution: Arc::new(source_resolution),
+            },
+            Arc::new(GitReviewService::new()),
+            &dispatchers,
+            &outbound_tx,
+        )
+        .await
+        .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .expect("source resolution must complete")
+            .expect("source resolution must produce a response");
+        let second = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .expect("candidate inspection must complete")
+            .expect("candidate inspection must produce a response");
+        let responses = [first, second];
+        let response = responses
+            .iter()
+            .find(|response| response["id"] == 71)
+            .expect("source resolution response");
+        let preview = responses
+            .iter()
+            .find(|response| response["id"] == 72)
+            .expect("candidate inspection response");
+
+        assert!(shutdown_id.is_none());
+        assert_eq!(response["id"], 71);
+        assert_eq!(
+            response["result"]["resolutionId"],
+            "11111111-1111-4111-8111-111111111111"
+        );
+        assert!(response["result"]["expiresAtUnixMs"].as_u64().unwrap() > 0);
+        assert_eq!(response["result"]["outcome"], "resolved");
+        assert_eq!(
+            response["result"]["candidates"][0]["source"]["reference"]["kind"],
+            "named"
+        );
+        assert_eq!(
+            response["result"]["candidates"][0]["source"]["reference"]["value"],
+            "main"
+        );
+        assert_eq!(
+            response["result"]["candidates"][0]["source"]["resolvedCommit"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(
+            response["result"]["candidates"][0]["acquisition"],
+            json!({
+                "kind": "resolvedCandidate",
+                "resolutionId": "11111111-1111-4111-8111-111111111111",
+                "candidateId": "candidate-auditor"
+            })
+        );
+        assert!(
+            preview.get("error").is_none(),
+            "candidate inspection failed: {preview}"
+        );
+        assert_eq!(
+            preview["result"]["preparationId"],
+            "33333333-3333-4333-8333-333333333333"
+        );
+        assert_eq!(preview["result"]["package"]["name"], "auditor");
+
+        git_dispatcher.shutdown().await.unwrap();
+        skills_dispatcher.shutdown().await.unwrap();
+        acquisition_dispatcher.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn source_resolution_rejects_invalid_resolution_ids_as_invalid_params() {
+        let request = serde_json::from_value::<JsonRpcRequest>(json!({
+            "jsonrpc": "2.0",
+            "id": 72,
+            "method": SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD,
+            "params": {
+                "resolutionId": "00000000-0000-0000-0000-000000000000",
+                "locator": {
+                    "kind": "url",
+                    "url": "https://github.com/example/skills"
+                }
+            }
+        }))
+        .unwrap();
+
+        let response = match parse_skills_request(request) {
+            Ok(_) => panic!("a nil resolution ID must not cross the protocol boundary"),
+            Err(response) => response,
+        };
+
+        assert_eq!(response["id"], 72);
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("canonical non-nil lower-case UUID"));
+    }
+
+    #[test]
+    fn uninstall_rejects_a_malformed_exact_revision_without_legacy_fallback() {
+        let request = serde_json::from_value::<JsonRpcRequest>(json!({
+            "jsonrpc": "2.0",
+            "id": 73,
+            "method": SKILLS_UNINSTALL_METHOD,
+            "params": {
+                "skillId": "installed:user:0190b0f2-7c50-7cc0-8b25-3bb80f08b336",
+                "expectedRevision": format!("{SKILL_INSTALLATION_REVISION_PREFIX}malformed")
+            }
+        }))
+        .unwrap();
+
+        let response = match parse_skills_request(request) {
+            Ok(_) => panic!("malformed installation revisions must fail closed"),
+            Err(response) => response,
+        };
+
+        assert_eq!(response["id"], 73);
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("installation revision"));
     }
 
     #[test]
@@ -2225,6 +2853,7 @@ mod server_tests {
             "id": 72,
             "method": SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD,
             "params": {
+                "resolutionId": "22222222-2222-4222-8222-222222222222",
                 "locator": {
                     "kind": "url",
                     "url": "https://untrusted.example/private?token=secret"
@@ -2334,7 +2963,17 @@ mod server_tests {
         let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
         let skills_service = Arc::new(SkillsService::new().with_bundled_source().unwrap());
         let catalog = skills_service.list().unwrap();
-        let management = management_response(&storage, &catalog).unwrap();
+        let skill_store = temp.path().join("skills");
+        let installation_service = SkillInstallationService::new(&skill_store).unwrap();
+        let installation_workflow =
+            SkillInstallationWorkflow::new(SkillInstallationService::new(&skill_store).unwrap());
+        let management = management_response(
+            &storage,
+            &catalog,
+            &installation_service,
+            Some(&installation_workflow),
+        )
+        .unwrap();
         let item = management.skills.first().unwrap();
         let skill_id = item.id.clone();
         let request_value = json!({
@@ -2403,6 +3042,162 @@ mod server_tests {
 
         git_dispatcher.shutdown().await.unwrap();
         skills_dispatcher.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn indeterminate_direct_mutation_emits_catalog_invalidation_without_claiming_success() {
+        const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b336";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&temp.path().join("storage.sqlite")).unwrap();
+        let catalog = SkillsService::new();
+        let installations = SkillInstallationService::new(temp.path().join("skills")).unwrap();
+        let workflow = SkillInstallationWorkflow::new(
+            SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+        );
+        let (notification_tx, mut notification_rx) = mpsc::unbounded_channel();
+        let installation_id = SkillInstallationId::parse(INSTALLATION_ID).unwrap();
+        let skill_id = SkillId::parse(format!("installed:user:{INSTALLATION_ID}")).unwrap();
+        let intended_revision = SkillInstallationRevision::parse(format!(
+            "skill-installation-sha256-v1:{}",
+            "a".repeat(64)
+        ))
+        .unwrap();
+        let error = SkillInstallationServiceError::Installer {
+            operation: SkillInstallationOperation::Update,
+            installation_id: installation_id.clone(),
+            skill_id: skill_id.clone(),
+            source: Box::new(
+                mycopilot_core::skills::ManagedSkillInstallerError::CommitIndeterminate {
+                    operation: mycopilot_core::skills::ManagedSkillMutation::Update,
+                    installation_id,
+                    intended_revision: Some(intended_revision),
+                    reason: "receipt directory acknowledgement was lost".to_string(),
+                },
+            ),
+        };
+
+        let response = skill_mutation_response_with_invalidation(
+            &storage,
+            &catalog,
+            &installations,
+            Some(&workflow),
+            Some(&notification_tx),
+            JsonRpcId::Number(91),
+            Err(error),
+        );
+
+        assert_eq!(response["error"]["data"]["code"], "commitIndeterminate");
+        assert_eq!(response["error"]["data"]["commitMayHaveSucceeded"], true);
+        assert!(response.get("result").is_none());
+        let notification = notification_rx
+            .try_recv()
+            .expect("an uncertain direct mutation must invalidate management inventory");
+        assert_eq!(notification["method"], SKILLS_CHANGED_NOTIFICATION_METHOD);
+        assert_eq!(notification["params"]["reason"], "catalogChanged");
+        assert_eq!(notification["params"]["skillId"], skill_id.as_str());
+        assert!(notification["params"]["managementRevision"].is_string());
+        assert!(notification_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn indeterminate_workflow_commit_emits_catalog_invalidation_without_claiming_success() {
+        const INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&temp.path().join("storage.sqlite")).unwrap();
+        let catalog = SkillsService::new();
+        let installations = SkillInstallationService::new(temp.path().join("skills")).unwrap();
+        let workflow = SkillInstallationWorkflow::new(
+            SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+        );
+        let (notification_tx, mut notification_rx) = mpsc::unbounded_channel();
+        let preparation_id =
+            mycopilot_core::skills::SkillPreparationId::parse(INSTALLATION_ID).unwrap();
+        let installation_id = SkillInstallationId::parse(INSTALLATION_ID).unwrap();
+        let skill_id = SkillId::parse(format!("installed:user:{INSTALLATION_ID}")).unwrap();
+        let intended_revision = SkillInstallationRevision::parse(format!(
+            "skill-installation-sha256-v1:{}",
+            "b".repeat(64)
+        ))
+        .unwrap();
+        let workflow_error = mycopilot_core::skills::SkillInstallationWorkflowError::Installation {
+            preparation_id,
+            source: Box::new(SkillInstallationServiceError::Installer {
+                operation: SkillInstallationOperation::Install,
+                installation_id: installation_id.clone(),
+                skill_id: skill_id.clone(),
+                source: Box::new(
+                    mycopilot_core::skills::ManagedSkillInstallerError::CommitIndeterminate {
+                        operation: mycopilot_core::skills::ManagedSkillMutation::Install,
+                        installation_id,
+                        intended_revision: Some(intended_revision),
+                        reason: "receipt directory acknowledgement was lost".to_string(),
+                    },
+                ),
+            }),
+        };
+        let failure = workflow_failure(
+            mycopilot_protocol_rs::SkillInspectionPhaseDto::Commit,
+            &workflow_error,
+        );
+
+        let response = skill_workflow_commit_error_response_with_invalidation(
+            &storage,
+            &catalog,
+            &installations,
+            Some(&workflow),
+            Some(&notification_tx),
+            JsonRpcId::Number(92),
+            failure,
+        );
+
+        assert_eq!(response["error"]["data"]["code"], "commitIndeterminate");
+        assert_eq!(response["error"]["data"]["commitMayHaveSucceeded"], true);
+        assert!(response.get("result").is_none());
+        let notification = notification_rx
+            .try_recv()
+            .expect("an uncertain workflow commit must invalidate management inventory");
+        assert_eq!(notification["method"], SKILLS_CHANGED_NOTIFICATION_METHOD);
+        assert_eq!(notification["params"]["reason"], "catalogChanged");
+        assert_eq!(notification["params"]["skillId"], skill_id.as_str());
+        assert!(notification_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn ordinary_direct_mutation_failure_does_not_emit_an_invalidation() {
+        const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b337";
+        let temp = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&temp.path().join("storage.sqlite")).unwrap();
+        let catalog = SkillsService::new();
+        let installations = SkillInstallationService::new(temp.path().join("skills")).unwrap();
+        let workflow = SkillInstallationWorkflow::new(
+            SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+        );
+        let (notification_tx, mut notification_rx) = mpsc::unbounded_channel();
+        let installation_id = SkillInstallationId::parse(INSTALLATION_ID).unwrap();
+        let skill_id = SkillId::parse(format!("installed:user:{INSTALLATION_ID}")).unwrap();
+        let error = SkillInstallationServiceError::Installer {
+            operation: SkillInstallationOperation::Update,
+            installation_id,
+            skill_id,
+            source: Box::new(mycopilot_core::skills::ManagedSkillInstallerError::Io {
+                operation: "publish managed receipt".to_string(),
+                reason: "injected pre-publication failure".to_string(),
+            }),
+        };
+
+        let response = skill_mutation_response_with_invalidation(
+            &storage,
+            &catalog,
+            &installations,
+            Some(&workflow),
+            Some(&notification_tx),
+            JsonRpcId::Number(93),
+            Err(error),
+        );
+
+        assert_eq!(response["error"]["data"]["code"], "io");
+        assert_eq!(response["error"]["data"]["commitMayHaveSucceeded"], false);
+        assert!(notification_rx.try_recv().is_err());
     }
 
     #[tokio::test]

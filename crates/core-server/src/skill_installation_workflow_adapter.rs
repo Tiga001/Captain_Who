@@ -2,12 +2,13 @@
 
 use mycopilot_core::skills::{
     GitHubCommit, GitHubReference, GitHubRepository, GitHubSkillLocation, GitHubSubdirectory,
-    GitHubWorkflowAcquisitionAdapter, ManagedSkillInstallerErrorCode,
-    SkillAcquisitionAdapterErrorCode, SkillAcquisitionSource, SkillId,
+    GitHubWorkflowAcquisitionAdapter, ManagedSkillInstallerError, ManagedSkillInstallerErrorCode,
+    ManagedSkillStoreCapacity, SkillAcquisitionAdapterErrorCode, SkillAcquisitionSource, SkillId,
     SkillInstallationCommitRequest, SkillInstallationCommitResult, SkillInstallationMutation,
     SkillInstallationOperation, SkillInstallationOutcome, SkillInstallationPreparationRequest,
-    SkillInstallationPreview, SkillInstallationWarningCode, SkillInstallationWorkflowError,
-    SkillPreparationCancellation, SkillPreparationId, SkillPreviewRevision, SkillRevision,
+    SkillInstallationPreview, SkillInstallationRevision, SkillInstallationWarningCode,
+    SkillInstallationWorkflowError, SkillPreparationCancellation, SkillPreparationId,
+    SkillPreviewRevision, SkillSourceCandidateId, SkillSourceResolutionId,
 };
 use mycopilot_protocol_rs::{
     SkillAcquisitionSourceDto, SkillCompatibilityIssueDto, SkillCompatibilityIssueSeverityDto,
@@ -50,6 +51,9 @@ impl SkillInspectionFailure {
                 preparation_id,
                 diagnostic_code,
                 retry_after_ms: None,
+                commit_may_have_succeeded: false,
+                skill_id: None,
+                intended_installation_revision: None,
             }),
         }
     }
@@ -78,6 +82,14 @@ impl SkillInspectionFailure {
 
     pub(crate) fn into_data(self) -> Box<SkillInspectionErrorData> {
         self.data
+    }
+
+    pub(crate) fn commit_may_have_succeeded(&self) -> bool {
+        self.data.commit_may_have_succeeded
+    }
+
+    pub(crate) fn skill_id(&self) -> Option<&str> {
+        self.data.skill_id.as_deref()
     }
 }
 
@@ -144,7 +156,7 @@ pub(crate) fn preparation_request(
                 )
             })?;
             let expected_revision =
-                SkillRevision::parse(expected_installation_revision).map_err(|_| {
+                SkillInstallationRevision::parse(expected_installation_revision).map_err(|_| {
                     SkillInspectionFailure::invalid_source(
                         Some(preparation_id.as_str().to_string()),
                         "The expected installation revision is invalid.",
@@ -225,8 +237,31 @@ fn acquisition_source(
                 )
             })
         }
+        SkillAcquisitionSourceDto::ResolvedCandidate {
+            resolution_id,
+            candidate_id,
+        } => {
+            let resolution_id =
+                SkillSourceResolutionId::parse(resolution_id.as_str()).map_err(|_| {
+                    SkillInspectionFailure::invalid_source(
+                        preparation_id.clone(),
+                        "The source resolution ID is invalid.",
+                    )
+                })?;
+            let candidate_id =
+                SkillSourceCandidateId::parse(candidate_id.clone()).map_err(|_| {
+                    SkillInspectionFailure::invalid_source(
+                        preparation_id,
+                        "The source resolution candidate ID is invalid.",
+                    )
+                })?;
+            Ok(SkillAcquisitionSource::resolved_candidate(
+                resolution_id,
+                candidate_id,
+            ))
+        }
         SkillAcquisitionSourceDto::InstalledSource {} => {
-            Err(SkillInspectionFailure::unsupported_source(preparation_id))
+            Ok(SkillAcquisitionSource::installed_source())
         }
     }
 }
@@ -288,7 +323,7 @@ fn preview_source(
     match preview.acquisition().provider() {
         "local-directory" => Ok(SkillPreviewSourceDto::LocalDirectory {
             display_name: preview.package().name().to_string(),
-            refreshable: true,
+            refreshable: false,
         }),
         "github" => github_preview_source(preview),
         _ => Err(SkillInspectionFailure::unsupported_source(Some(
@@ -341,15 +376,15 @@ fn github_preview_source(
     {
         return Err(invalid_origin());
     }
-    let reference = match document.requested_reference {
-        GitHubOriginReference::DefaultBranch => SkillGithubReferenceDto::DefaultBranch {},
+    let (reference, refreshable) = match document.requested_reference {
+        GitHubOriginReference::DefaultBranch => (SkillGithubReferenceDto::DefaultBranch {}, true),
         GitHubOriginReference::Named { value } => {
             GitHubReference::named(value.clone()).map_err(|_| invalid_origin())?;
-            SkillGithubReferenceDto::Named { value }
+            (SkillGithubReferenceDto::Named { value }, true)
         }
         GitHubOriginReference::Commit { sha } => {
             GitHubReference::commit(sha.clone()).map_err(|_| invalid_origin())?;
-            SkillGithubReferenceDto::Commit { sha }
+            (SkillGithubReferenceDto::Commit { sha }, false)
         }
     };
     if GitHubSubdirectory::parse(document.subdirectory.clone().unwrap_or_default()).is_err() {
@@ -361,7 +396,7 @@ fn github_preview_source(
         reference,
         resolved_commit: document.resolved_commit,
         subdirectory: document.subdirectory,
-        refreshable: true,
+        refreshable,
     })
 }
 
@@ -418,12 +453,22 @@ pub(crate) fn commit_response(
 ) -> Result<SkillInstallationCommitResponse, SkillInspectionFailure> {
     let mutation = result.mutation();
     let preview = result.preview();
-    let revision = mutation.revision().ok_or_else(|| {
+    let package_revision = mutation.package_revision().ok_or_else(|| {
         SkillInspectionFailure::new(
             SkillInspectionPhaseDto::Commit,
             SkillInspectionErrorCodeDto::Unavailable,
             SkillInspectionRecoveryDto::RetrySamePreparation,
             "The committed Skill mutation did not return a package revision.",
+            Some(preview.preparation_id().as_str().to_string()),
+            None,
+        )
+    })?;
+    let installation_revision = mutation.installation_revision().ok_or_else(|| {
+        SkillInspectionFailure::new(
+            SkillInspectionPhaseDto::Commit,
+            SkillInspectionErrorCodeDto::Unavailable,
+            SkillInspectionRecoveryDto::RetrySamePreparation,
+            "The committed Skill mutation did not return an installation revision.",
             Some(preview.preparation_id().as_str().to_string()),
             None,
         )
@@ -435,9 +480,8 @@ pub(crate) fn commit_response(
         outcome: commit_outcome(mutation)?,
         installation_id: mutation.installation_id().as_str().to_string(),
         skill_id: mutation.skill_id().as_str().to_string(),
-        package_revision: revision.as_str().to_string(),
-        // Receipt schema v1 uses its package revision as the lifecycle CAS.
-        installation_revision: revision.as_str().to_string(),
+        package_revision: package_revision.as_str().to_string(),
+        installation_revision: installation_revision.as_str().to_string(),
         changes: installation_changes(preview),
     })
 }
@@ -489,14 +533,16 @@ fn installation_changes(preview: &SkillInstallationPreview) -> SkillInstallation
             source: SkillInstallationChangeDto::New,
         },
         SkillInstallationOperation::Update => SkillInstallationChangesDto {
-            content: if preview.expected_revision() == Some(preview.package().revision()) {
-                SkillInstallationChangeDto::Unchanged
-            } else {
+            content: if preview.content_changed() {
                 SkillInstallationChangeDto::Changed
+            } else {
+                SkillInstallationChangeDto::Unchanged
             },
-            // Receipt v1 cannot compare typed acquisition metadata. An update
-            // is conservatively presented as a source refresh.
-            source: SkillInstallationChangeDto::Changed,
+            source: if preview.source_changed() {
+                SkillInstallationChangeDto::Changed
+            } else {
+                SkillInstallationChangeDto::Unchanged
+            },
         },
         _ => SkillInstallationChangesDto {
             content: SkillInstallationChangeDto::Changed,
@@ -574,6 +620,44 @@ pub(crate) fn workflow_failure(
             "The selected Skill cannot be updated through the managed installer.",
             None,
         ),
+        SkillInstallationWorkflowError::InstalledSourceRequiresUpdate => (
+            SkillInspectionErrorCodeDto::InvalidSource,
+            SkillInspectionRecoveryDto::FixSource,
+            "An installed source can only be used for an update.",
+            None,
+        ),
+        SkillInstallationWorkflowError::InstalledSkillNotFound { .. } => (
+            SkillInspectionErrorCodeDto::InstallationNotFound,
+            SkillInspectionRecoveryDto::RefreshManagement,
+            "The installed Skill no longer exists.",
+            None,
+        ),
+        SkillInstallationWorkflowError::InstalledSourceRevisionConflict { .. } => (
+            SkillInspectionErrorCodeDto::InstallationRevisionConflict,
+            SkillInspectionRecoveryDto::RefreshManagement,
+            "The installed Skill changed. Refresh the Skill list before updating it.",
+            None,
+        ),
+        SkillInstallationWorkflowError::InstalledSourceLegacy { .. }
+        | SkillInstallationWorkflowError::InstalledSourceNotRefreshable { .. } => (
+            SkillInspectionErrorCodeDto::SourceNotRefreshable,
+            SkillInspectionRecoveryDto::RefreshManagement,
+            "This installation does not have a supported refresh source.",
+            None,
+        ),
+        SkillInstallationWorkflowError::UnknownRefreshProvider { .. }
+        | SkillInstallationWorkflowError::UnsupportedRefreshSchema { .. } => (
+            SkillInspectionErrorCodeDto::PersistedSourceInvalid,
+            SkillInspectionRecoveryDto::RefreshManagement,
+            "The saved Skill source is not supported by this backend version.",
+            None,
+        ),
+        SkillInstallationWorkflowError::InstalledSkillRead { .. } => (
+            SkillInspectionErrorCodeDto::PersistedSourceInvalid,
+            SkillInspectionRecoveryDto::RetryLater,
+            "The saved Skill installation record could not be read safely.",
+            None,
+        ),
         SkillInstallationWorkflowError::PreparationConflict { .. } => (
             SkillInspectionErrorCodeDto::IdempotencyConflict,
             SkillInspectionRecoveryDto::InspectAgain,
@@ -615,6 +699,36 @@ pub(crate) fn workflow_failure(
             SkillInspectionErrorCodeDto::Unavailable,
             SkillInspectionRecoveryDto::RetryLater,
             "The Skill preparation service is at capacity.",
+            None,
+        ),
+        SkillInstallationWorkflowError::SourceResolutionNotFoundOrExpired { .. } => (
+            SkillInspectionErrorCodeDto::ResolutionNotFound,
+            SkillInspectionRecoveryDto::ResolveAgain,
+            "The resolved Skill source was not found or has expired. Resolve the URL again.",
+            None,
+        ),
+        SkillInstallationWorkflowError::SourceResolutionBusy { .. } => (
+            SkillInspectionErrorCodeDto::Unavailable,
+            SkillInspectionRecoveryDto::RetrySamePreparation,
+            "The Skill source is still being resolved.",
+            None,
+        ),
+        SkillInstallationWorkflowError::SourceResolutionConsumed { .. } => (
+            SkillInspectionErrorCodeDto::ResolutionConsumed,
+            SkillInspectionRecoveryDto::ResolveAgain,
+            "The resolved candidate has already been consumed. Resolve the URL again.",
+            None,
+        ),
+        SkillInstallationWorkflowError::SourceResolutionCancelled { .. } => (
+            SkillInspectionErrorCodeDto::ResolutionExpired,
+            SkillInspectionRecoveryDto::ResolveAgain,
+            "The resolved Skill source is no longer available. Resolve the URL again.",
+            None,
+        ),
+        SkillInstallationWorkflowError::SourceCandidateNotFound { .. } => (
+            SkillInspectionErrorCodeDto::CandidateNotFound,
+            SkillInspectionRecoveryDto::ResolveAgain,
+            "The selected Skill candidate is not part of this resolution.",
             None,
         ),
         SkillInstallationWorkflowError::WarningAcknowledgementRequired { missing, .. } => (
@@ -682,15 +796,56 @@ pub(crate) fn workflow_failure(
         }
         SkillInstallationWorkflowError::Installation { source, .. } => {
             let installer = source.installer_error();
-            match installer.map(|error| error.code()) {
+            if let Some(ManagedSkillInstallerError::CapacityExceeded { capacity, .. }) = installer {
+                match capacity {
+                    ManagedSkillStoreCapacity::Installations
+                    | ManagedSkillStoreCapacity::InstallationDirectory => (
+                        SkillInspectionErrorCodeDto::CapacityExceeded,
+                        SkillInspectionRecoveryDto::FreeCapacity,
+                        "The managed Skill store is full. Uninstall an unused Skill and inspect again.",
+                        None,
+                    ),
+                    ManagedSkillStoreCapacity::RetiredInstallationIds
+                    | ManagedSkillStoreCapacity::Packages => (
+                        SkillInspectionErrorCodeDto::CapacityExceeded,
+                        SkillInspectionRecoveryDto::ContactSupport,
+                        "The managed Skill store reached a non-reclaimable safety limit.",
+                        None,
+                    ),
+                    _ => (
+                        SkillInspectionErrorCodeDto::Unavailable,
+                        SkillInspectionRecoveryDto::RetryLater,
+                        "The managed Skill store is at capacity.",
+                        None,
+                    ),
+                }
+            } else {
+                match installer.map(|error| error.code()) {
                 Some(
                     ManagedSkillInstallerErrorCode::InstallationExists
-                    | ManagedSkillInstallerErrorCode::InstallationNotFound
-                    | ManagedSkillInstallerErrorCode::RevisionConflict,
+                    | ManagedSkillInstallerErrorCode::InstallationNotFound,
                 ) => (
                     SkillInspectionErrorCodeDto::SourceChangedDuringRead,
                     SkillInspectionRecoveryDto::InspectAgain,
                     "The installed Skill changed after it was inspected.",
+                    None,
+                ),
+                Some(ManagedSkillInstallerErrorCode::InstallationRetired) => (
+                    SkillInspectionErrorCodeDto::InstallationRetired,
+                    SkillInspectionRecoveryDto::NewInstallationIdentity,
+                    "This installation identity was already retired. Start a new installation with a new preparation ID.",
+                    None,
+                ),
+                Some(ManagedSkillInstallerErrorCode::RevisionConflict) => (
+                    SkillInspectionErrorCodeDto::InstallationRevisionConflict,
+                    SkillInspectionRecoveryDto::RefreshManagement,
+                    "The installed Skill changed after it was inspected. Refresh the Skill list before retrying.",
+                    None,
+                ),
+                Some(ManagedSkillInstallerErrorCode::CommitIndeterminate) => (
+                    SkillInspectionErrorCodeDto::CommitIndeterminate,
+                    SkillInspectionRecoveryDto::RefreshManagement,
+                    "The Skill commit may have completed. Refresh the Skill list before deciding whether to retry.",
                     None,
                 ),
                 _ => (
@@ -699,6 +854,7 @@ pub(crate) fn workflow_failure(
                     "The prepared Skill could not be committed. Retry the same preparation.",
                     None,
                 ),
+                }
             }
         }
         SkillInstallationWorkflowError::Internal { .. } => (
@@ -714,23 +870,37 @@ pub(crate) fn workflow_failure(
             None,
         ),
     };
-    SkillInspectionFailure::new(
+    let mut failure = SkillInspectionFailure::new(
         phase,
         code,
         recovery,
         message,
         preparation_id,
         diagnostic_code,
-    )
+    );
+    if let SkillInstallationWorkflowError::Installation { source, .. } = error {
+        if let Some(ManagedSkillInstallerError::CommitIndeterminate {
+            intended_revision, ..
+        }) = source.installer_error()
+        {
+            failure.data.commit_may_have_succeeded = true;
+            failure.data.skill_id = Some(source.skill_id().as_str().to_string());
+            failure.data.intended_installation_revision = intended_revision
+                .as_ref()
+                .map(|revision| revision.as_str().to_string());
+        }
+    }
+    failure
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mycopilot_core::skills::{
-        PreparedSkillPackage, SkillAcquisitionAdapter, SkillAcquisitionAdapterError,
-        SkillAcquisitionProvider, SkillInstallationService, SkillInstallationWorkflow,
-        SkillPackageOrigin,
+        ManagedSkillMutation, PreparedSkillAcquisition, PreparedSkillPackage,
+        SkillAcquisitionAdapter, SkillAcquisitionAdapterError, SkillAcquisitionProvider,
+        SkillInstallationAuthority, SkillInstallationProvenance, SkillInstallationService,
+        SkillInstallationWorkflow, SkillPackageOrigin,
     };
     use std::sync::Arc;
 
@@ -744,7 +914,7 @@ mod tests {
         fn acquire(
             &self,
             _source: &SkillAcquisitionSource,
-        ) -> Result<PreparedSkillPackage, SkillAcquisitionAdapterError> {
+        ) -> Result<PreparedSkillAcquisition, SkillAcquisitionAdapterError> {
             let origin = SkillPackageOrigin::new(
                 "github",
                 serde_json::json!({
@@ -758,12 +928,22 @@ mod tests {
                 .to_string(),
             )
             .unwrap();
-            PreparedSkillPackage::from_bytes(
+            let package = PreparedSkillPackage::from_bytes(
                 b"---\nname: github-auditor\ndescription: Audit from GitHub.\n---\n# Instructions\nVERIFY\n"
                     .to_vec(),
                 origin,
             )
-            .map_err(Into::into)
+            .map_err(SkillAcquisitionAdapterError::from)?;
+            let authority = SkillInstallationAuthority::new("github", 1, "fixture-authority")
+                .map_err(|_| {
+                    SkillAcquisitionAdapterError::unavailable(
+                        "the fixture provenance could not be constructed",
+                    )
+                })?;
+            Ok(PreparedSkillAcquisition::new(
+                package,
+                SkillInstallationProvenance::new(authority, None),
+            ))
         }
     }
 
@@ -811,21 +991,136 @@ mod tests {
     }
 
     #[test]
-    fn installed_source_is_an_explicit_future_adapter_not_a_fallback() {
-        let error = preparation_request(SkillsInspectInstallationRequest {
+    fn installed_source_is_accepted_only_as_an_update_source() {
+        let request = preparation_request(SkillsInspectInstallationRequest {
             preparation_id: "11111111-1111-4111-8111-111111111111".to_string(),
             intent: SkillInstallationIntentDto::Install {},
             source: SkillAcquisitionSourceDto::InstalledSource {},
         })
-        .unwrap_err();
+        .unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let workflow = SkillInstallationWorkflow::new(
+            SkillInstallationService::new(fixture.path().join("skills")).unwrap(),
+        );
+        let error = workflow.inspect(&request).unwrap_err();
+        let failure = workflow_failure(SkillInspectionPhaseDto::Inspect, &error);
 
         assert_eq!(
-            error.data.code,
-            SkillInspectionErrorCodeDto::UnsupportedSource
+            failure.data.code,
+            SkillInspectionErrorCodeDto::InvalidSource
+        );
+        assert_eq!(failure.data.recovery, SkillInspectionRecoveryDto::FixSource);
+    }
+
+    #[test]
+    fn indeterminate_workflow_commit_requires_authoritative_management_refresh() {
+        const ID: &str = "11111111-1111-4111-8111-111111111111";
+        let preparation_id = SkillPreparationId::parse(ID).unwrap();
+        let installation_id = mycopilot_core::skills::SkillInstallationId::parse(ID).unwrap();
+        let skill_id = SkillId::parse(format!("installed:user:{ID}")).unwrap();
+        let intended_revision = SkillInstallationRevision::parse(format!(
+            "skill-installation-sha256-v1:{}",
+            "a".repeat(64)
+        ))
+        .unwrap();
+        let error = SkillInstallationWorkflowError::Installation {
+            preparation_id,
+            source: Box::new(
+                mycopilot_core::skills::SkillInstallationServiceError::Installer {
+                    operation: SkillInstallationOperation::Install,
+                    installation_id: installation_id.clone(),
+                    skill_id: skill_id.clone(),
+                    source: Box::new(ManagedSkillInstallerError::CommitIndeterminate {
+                        operation: ManagedSkillMutation::Install,
+                        installation_id,
+                        intended_revision: Some(intended_revision.clone()),
+                        reason: "receipt directory acknowledgement was lost".to_string(),
+                    }),
+                },
+            ),
+        };
+
+        let failure = workflow_failure(SkillInspectionPhaseDto::Commit, &error);
+
+        assert_eq!(
+            failure.data.code,
+            SkillInspectionErrorCodeDto::CommitIndeterminate
         );
         assert_eq!(
-            error.data.recovery,
-            SkillInspectionRecoveryDto::ChooseDifferentSource
+            failure.data.recovery,
+            SkillInspectionRecoveryDto::RefreshManagement
+        );
+        assert!(failure.data.commit_may_have_succeeded);
+        assert_eq!(failure.data.skill_id.as_deref(), Some(skill_id.as_str()));
+        assert_eq!(
+            failure.data.intended_installation_revision.as_deref(),
+            Some(intended_revision.as_str())
+        );
+    }
+
+    #[test]
+    fn retired_installation_identity_requires_a_new_preparation() {
+        const ID: &str = "11111111-1111-4111-8111-111111111111";
+        let preparation_id = SkillPreparationId::parse(ID).unwrap();
+        let installation_id = mycopilot_core::skills::SkillInstallationId::parse(ID).unwrap();
+        let skill_id = SkillId::parse(format!("installed:user:{ID}")).unwrap();
+        let error = SkillInstallationWorkflowError::Installation {
+            preparation_id,
+            source: Box::new(
+                mycopilot_core::skills::SkillInstallationServiceError::Installer {
+                    operation: SkillInstallationOperation::Install,
+                    installation_id: installation_id.clone(),
+                    skill_id,
+                    source: Box::new(ManagedSkillInstallerError::InstallationRetired {
+                        installation_id,
+                    }),
+                },
+            ),
+        };
+
+        let failure = workflow_failure(SkillInspectionPhaseDto::Commit, &error);
+
+        assert_eq!(
+            failure.data.code,
+            SkillInspectionErrorCodeDto::InstallationRetired
+        );
+        assert_eq!(
+            failure.data.recovery,
+            SkillInspectionRecoveryDto::NewInstallationIdentity
+        );
+        assert!(!failure.data.commit_may_have_succeeded);
+    }
+
+    #[test]
+    fn non_reclaimable_workflow_capacity_does_not_offer_a_dead_end_retry() {
+        const ID: &str = "11111111-1111-4111-8111-111111111111";
+        let preparation_id = SkillPreparationId::parse(ID).unwrap();
+        let installation_id = mycopilot_core::skills::SkillInstallationId::parse(ID).unwrap();
+        let skill_id = SkillId::parse(format!("installed:user:{ID}")).unwrap();
+        let error = SkillInstallationWorkflowError::Installation {
+            preparation_id,
+            source: Box::new(
+                mycopilot_core::skills::SkillInstallationServiceError::Installer {
+                    operation: SkillInstallationOperation::Install,
+                    installation_id: installation_id.clone(),
+                    skill_id,
+                    source: Box::new(ManagedSkillInstallerError::CapacityExceeded {
+                        capacity: ManagedSkillStoreCapacity::RetiredInstallationIds,
+                        limit: 100_000,
+                    }),
+                },
+            ),
+        };
+
+        let failure = workflow_failure(SkillInspectionPhaseDto::Commit, &error);
+
+        assert_eq!(
+            failure.data.code,
+            SkillInspectionErrorCodeDto::CapacityExceeded
+        );
+        assert_eq!(
+            failure.data.recovery,
+            SkillInspectionRecoveryDto::ContactSupport
         );
     }
 }

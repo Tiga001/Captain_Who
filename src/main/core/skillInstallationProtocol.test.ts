@@ -41,6 +41,7 @@ interface InstallationWorkflowGolden {
     changed: unknown
   }
   inspectionError: unknown
+  inspectionErrors: unknown[]
   managementErrors: unknown[]
 }
 
@@ -84,9 +85,103 @@ describe('Skill installation workflow protocol', () => {
       golden.management.changed
     )
     expect(parseSkillInspectionErrorData(golden.inspectionError)).toEqual(golden.inspectionError)
+    for (const error of golden.inspectionErrors) {
+      expect(parseSkillInspectionErrorData(error)).toEqual(error)
+    }
     for (const error of golden.managementErrors) {
       expect(parseSkillManagementErrorData(error)).toEqual(error)
     }
+  })
+
+  it('keeps the golden aligned with backend installation identity and source semantics', () => {
+    const localInstall = golden.inspectCases.find((testCase) => testCase.name === 'local install')
+    const githubUpdate = golden.inspectCases.find((testCase) => testCase.name === 'GitHub update')
+    const installedSourceUpdate = golden.inspectCases.find(
+      (testCase) => testCase.name === 'update from installed source'
+    )
+    if (!localInstall || !githubUpdate || !installedSourceUpdate) {
+      throw new Error('The workflow fixture must cover all current acquisition paths')
+    }
+
+    const localRequest = localInstall.request as { preparationId: string }
+    const localPreview = localInstall.preview as {
+      installationId: string
+      previewRevision: string
+      source: { kind: string; refreshable: boolean }
+    }
+    expect(localPreview.installationId).toBe(localRequest.preparationId)
+    expect(localPreview.source).toMatchObject({ kind: 'localDirectory', refreshable: false })
+
+    for (const testCase of golden.inspectCases) {
+      const preview = testCase.preview as {
+        compatibility: { issues: Array<{ code: string }>; status: string }
+        expiresAtUnixMs: number
+        package: { fileCount: number }
+        previewRevision: string
+      }
+      expect(preview.previewRevision).toMatch(/^skill-install-preview-sha256-v1:[0-9a-f]{64}$/)
+      expect(preview.expiresAtUnixMs).toBe(4102444800000)
+      if (preview.package.fileCount > 1) {
+        expect(preview.compatibility.status).toBe('compatibleWithWarnings')
+        expect(preview.compatibility.issues).toContainEqual(
+          expect.objectContaining({ code: 'resourcesNotExposed' })
+        )
+      }
+    }
+
+    const githubPreview = githubUpdate.preview as {
+      compatibility: { issues: Array<{ id: string; code: string }> }
+    }
+    expect(githubPreview.compatibility.issues).toContainEqual(
+      expect.objectContaining({ id: 'containsScripts', code: 'containsScripts' })
+    )
+    expect((golden.commit.request as { acceptedIssueIds: string[] }).acceptedIssueIds).toEqual([
+      'containsScripts'
+    ])
+
+    expect((installedSourceUpdate.request as { source: { kind: string } }).source.kind).toBe(
+      'installedSource'
+    )
+    const installedSourcePreview = installedSourceUpdate.preview as {
+      compatibility: { status: string }
+      source: { kind: string }
+    }
+    expect(installedSourcePreview.source.kind).toBe('githubRepository')
+    expect(installedSourcePreview.compatibility.status).toBe('compatibleWithWarnings')
+
+    const management = golden.management.listResponse as {
+      managementRevision: string
+      skills: Array<{
+        compatibility: { issues: unknown[]; status: string }
+        source: { kind: string }
+        stateRevision: string
+      }>
+    }
+    expect(management.managementRevision).toMatch(/^skill-management-catalog-sha256-v2:/)
+    expect(
+      management.skills.every((skill) =>
+        /^skill-management-state-sha256-v2:/.test(skill.stateRevision)
+      )
+    ).toBe(true)
+    expect(
+      management.skills.find((skill) => skill.source.kind === 'installed')?.compatibility
+    ).toEqual({
+      status: 'unknown',
+      issues: []
+    })
+
+    const sourceNotRefreshable = golden.inspectionErrors
+      .map(parseSkillInspectionErrorData)
+      .find((error) => error.code === 'sourceNotRefreshable')
+    expect(sourceNotRefreshable).toMatchObject({
+      recovery: 'refreshManagement',
+      message: 'This installation does not have a supported refresh source.'
+    })
+
+    const commitIndeterminate = golden.inspectionErrors
+      .map(parseSkillInspectionErrorData)
+      .find((error) => error.code === 'commitIndeterminate')
+    expect(commitIndeterminate?.skillId).toBe((githubUpdate.preview as { skillId: string }).skillId)
   })
 
   it('models every acquisition source and permits catalog listing without a project', () => {

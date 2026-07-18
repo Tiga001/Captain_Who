@@ -28,6 +28,7 @@ pub const SKILLS_LIST_MANAGEMENT_METHOD: &str = "skills.listManagement";
 pub const SKILLS_SET_ENABLED_METHOD: &str = "skills.setEnabled";
 pub const SKILLS_CHANGED_NOTIFICATION_METHOD: &str = "skills.changed";
 pub const SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD: &str = "skills.resolveInstallationSource";
+pub const SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD: &str = "skills.cancelSourceResolution";
 pub const GIT_INSPECT_REPOSITORY_METHOD: &str = "git.inspectRepository";
 pub const GIT_GET_REVIEW_SUMMARY_METHOD: &str = "git.getReviewSummary";
 pub const GIT_GET_REVIEW_FILE_DIFF_METHOD: &str = "git.getReviewFileDiff";
@@ -167,7 +168,7 @@ pub const SKILL_CATALOG_SCHEMA_VERSION: u32 = 4;
 pub const SKILL_MUTATION_SCHEMA_VERSION: u32 = 1;
 pub const SKILL_INSTALLATION_WORKFLOW_SCHEMA_VERSION: u32 = 1;
 pub const SKILL_MANAGEMENT_SCHEMA_VERSION: u32 = 1;
-pub const SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION: u32 = 1;
+pub const SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION: u32 = 2;
 pub const SKILL_INSTALLATION_ERROR_CODE: i64 = -32010;
 pub const SKILL_INSPECTION_ERROR_CODE: i64 = -32011;
 pub const SKILL_MANAGEMENT_ERROR_CODE: i64 = -32012;
@@ -192,6 +193,8 @@ pub struct SkillsUpdateLocalRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SkillsUninstallRequest {
     pub skill_id: String,
+    /// Exact installation lifecycle revision returned by `skills.listManagement`.
+    /// The server still accepts a package revision for legacy callers.
     pub expected_revision: String,
 }
 
@@ -215,9 +218,27 @@ pub enum SkillInstallationIntentDto {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillAcquisitionSourceDto {
+    LocalDirectory {
+        directory: String,
+    },
+    GithubRepository {
+        owner: String,
+        repository: String,
+        reference: Option<SkillGithubReferenceDto>,
+        subdirectory: Option<String>,
+    },
+    ResolvedCandidate {
+        resolution_id: SkillResolutionIdDto,
+        candidate_id: String,
+    },
+    InstalledSource {},
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", deny_unknown_fields)]
-pub enum SkillAcquisitionSourceDto {
+enum SkillAcquisitionSourceDtoWire {
     #[serde(rename = "localDirectory", rename_all = "camelCase")]
     LocalDirectory { directory: String },
     #[serde(rename = "githubRepository", rename_all = "camelCase")]
@@ -229,8 +250,133 @@ pub enum SkillAcquisitionSourceDto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subdirectory: Option<String>,
     },
+    #[serde(rename = "resolvedCandidate", rename_all = "camelCase")]
+    ResolvedCandidate {
+        resolution_id: SkillResolutionIdDto,
+        candidate_id: String,
+    },
     #[serde(rename = "installedSource")]
     InstalledSource {},
+}
+
+impl SkillAcquisitionSourceDto {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::LocalDirectory { directory } if directory.trim().is_empty() => {
+                return Err("local directory must be non-empty".to_string());
+            }
+            Self::GithubRepository {
+                owner,
+                repository,
+                reference,
+                subdirectory,
+            } => {
+                if owner.trim().is_empty() || repository.trim().is_empty() {
+                    return Err("GitHub owner and repository must be non-empty".to_string());
+                }
+                if subdirectory
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    return Err("GitHub subdirectory must be non-empty when present".to_string());
+                }
+                match reference {
+                    Some(SkillGithubReferenceDto::Named { value }) if value.trim().is_empty() => {
+                        return Err("GitHub named reference must be non-empty".to_string());
+                    }
+                    Some(SkillGithubReferenceDto::Commit { sha }) => {
+                        SkillResolvedGithubCommitShaDto::parse(sha.clone())
+                            .map_err(|reason| reason.to_string())?;
+                    }
+                    _ => {}
+                }
+            }
+            Self::ResolvedCandidate { candidate_id, .. } if candidate_id.trim().is_empty() => {
+                return Err("resolved candidate id must be non-empty".to_string());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+impl From<SkillAcquisitionSourceDtoWire> for SkillAcquisitionSourceDto {
+    fn from(value: SkillAcquisitionSourceDtoWire) -> Self {
+        match value {
+            SkillAcquisitionSourceDtoWire::LocalDirectory { directory } => {
+                Self::LocalDirectory { directory }
+            }
+            SkillAcquisitionSourceDtoWire::GithubRepository {
+                owner,
+                repository,
+                reference,
+                subdirectory,
+            } => Self::GithubRepository {
+                owner,
+                repository,
+                reference,
+                subdirectory,
+            },
+            SkillAcquisitionSourceDtoWire::ResolvedCandidate {
+                resolution_id,
+                candidate_id,
+            } => Self::ResolvedCandidate {
+                resolution_id,
+                candidate_id,
+            },
+            SkillAcquisitionSourceDtoWire::InstalledSource {} => Self::InstalledSource {},
+        }
+    }
+}
+
+impl From<&SkillAcquisitionSourceDto> for SkillAcquisitionSourceDtoWire {
+    fn from(value: &SkillAcquisitionSourceDto) -> Self {
+        match value {
+            SkillAcquisitionSourceDto::LocalDirectory { directory } => Self::LocalDirectory {
+                directory: directory.clone(),
+            },
+            SkillAcquisitionSourceDto::GithubRepository {
+                owner,
+                repository,
+                reference,
+                subdirectory,
+            } => Self::GithubRepository {
+                owner: owner.clone(),
+                repository: repository.clone(),
+                reference: reference.clone(),
+                subdirectory: subdirectory.clone(),
+            },
+            SkillAcquisitionSourceDto::ResolvedCandidate {
+                resolution_id,
+                candidate_id,
+            } => Self::ResolvedCandidate {
+                resolution_id: resolution_id.clone(),
+                candidate_id: candidate_id.clone(),
+            },
+            SkillAcquisitionSourceDto::InstalledSource {} => Self::InstalledSource {},
+        }
+    }
+}
+
+impl Serialize for SkillAcquisitionSourceDto {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        SkillAcquisitionSourceDtoWire::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SkillAcquisitionSourceDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Self::from(SkillAcquisitionSourceDtoWire::deserialize(deserializer)?);
+        value.validate().map_err(serde::de::Error::custom)?;
+        Ok(value)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -281,7 +427,31 @@ pub struct SkillPackagePreviewDto {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SkillsResolveInstallationSourceRequest {
+    pub resolution_id: SkillResolutionIdDto,
     pub locator: SkillInstallationSourceLocatorDto,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsCancelSourceResolutionRequest {
+    pub resolution_id: SkillResolutionIdDto,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillSourceResolutionCancellationOutcomeDto {
+    Cancelled,
+    AlreadyCancelled,
+    AlreadyConsumed,
+    AlreadyAbsent,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsCancelSourceResolutionResponse {
+    pub schema_version: u32,
+    pub resolution_id: SkillResolutionIdDto,
+    pub outcome: SkillSourceResolutionCancellationOutcomeDto,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -289,6 +459,56 @@ pub struct SkillsResolveInstallationSourceRequest {
 pub enum SkillInstallationSourceLocatorDto {
     #[serde(rename = "url")]
     Url { url: String },
+}
+
+/// A canonical non-nil lower-case UUID generated by the client for one source resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SkillResolutionIdDto(String);
+
+impl SkillResolutionIdDto {
+    pub fn parse(value: impl Into<String>) -> Result<Self, &'static str> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        let valid = bytes.len() == 36
+            && bytes.iter().enumerate().all(|(index, byte)| match index {
+                8 | 13 | 18 | 23 => *byte == b'-',
+                _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(byte),
+            })
+            && bytes
+                .iter()
+                .any(|byte| matches!(*byte, b'1'..=b'9' | b'a'..=b'f'));
+        if !valid {
+            return Err("expected a canonical non-nil lower-case UUID");
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl Serialize for SkillResolutionIdDto {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SkillResolutionIdDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
 }
 
 /// A canonical, lower-case, complete Git commit SHA.
@@ -356,7 +576,8 @@ pub enum SkillResolvedAcquisitionSourceDto {
     GithubRepository {
         owner: String,
         repository: String,
-        reference: SkillResolvedGithubReferenceDto,
+        reference: SkillGithubReferenceDto,
+        resolved_commit: SkillResolvedGithubCommitShaDto,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subdirectory: Option<String>,
     },
@@ -364,10 +585,11 @@ pub enum SkillResolvedAcquisitionSourceDto {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", deny_unknown_fields)]
-pub enum SkillResolvedGithubReferenceDto {
-    #[serde(rename = "commit")]
-    Commit {
-        sha: SkillResolvedGithubCommitShaDto,
+pub enum SkillResolvedCandidateAcquisitionDto {
+    #[serde(rename = "resolvedCandidate", rename_all = "camelCase")]
+    ResolvedCandidate {
+        resolution_id: SkillResolutionIdDto,
+        candidate_id: String,
     },
 }
 
@@ -375,6 +597,7 @@ pub enum SkillResolvedGithubReferenceDto {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SkillSourceResolutionCandidateDto {
     pub candidate_id: String,
+    pub acquisition: SkillResolvedCandidateAcquisitionDto,
     pub source: SkillResolvedAcquisitionSourceDto,
     pub package: SkillPackagePreviewDto,
 }
@@ -382,9 +605,11 @@ pub struct SkillSourceResolutionCandidateDto {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillsResolveInstallationSourceResponse {
     pub schema_version: u32,
+    pub resolution_id: SkillResolutionIdDto,
     pub canonical_url: String,
     pub provider: SkillSourceResolutionProviderDto,
     pub resolved_commit: SkillResolvedGithubCommitShaDto,
+    pub expires_at_unix_ms: u64,
     pub outcome: SkillSourceResolutionOutcomeDto,
     pub candidates: Vec<SkillSourceResolutionCandidateDto>,
 }
@@ -393,9 +618,11 @@ pub struct SkillsResolveInstallationSourceResponse {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SkillsResolveInstallationSourceResponseWire {
     schema_version: u32,
+    resolution_id: SkillResolutionIdDto,
     canonical_url: String,
     provider: SkillSourceResolutionProviderDto,
     resolved_commit: SkillResolvedGithubCommitShaDto,
+    expires_at_unix_ms: u64,
     outcome: SkillSourceResolutionOutcomeDto,
     candidates: Vec<SkillSourceResolutionCandidateDto>,
 }
@@ -404,9 +631,11 @@ struct SkillsResolveInstallationSourceResponseWire {
 #[serde(rename_all = "camelCase")]
 struct SkillsResolveInstallationSourceResponseWireRef<'a> {
     schema_version: u32,
+    resolution_id: &'a SkillResolutionIdDto,
     canonical_url: &'a str,
     provider: SkillSourceResolutionProviderDto,
     resolved_commit: &'a SkillResolvedGithubCommitShaDto,
+    expires_at_unix_ms: u64,
     outcome: SkillSourceResolutionOutcomeDto,
     candidates: &'a [SkillSourceResolutionCandidateDto],
 }
@@ -419,9 +648,11 @@ impl Serialize for SkillsResolveInstallationSourceResponse {
         self.validate().map_err(serde::ser::Error::custom)?;
         SkillsResolveInstallationSourceResponseWireRef {
             schema_version: self.schema_version,
+            resolution_id: &self.resolution_id,
             canonical_url: &self.canonical_url,
             provider: self.provider,
             resolved_commit: &self.resolved_commit,
+            expires_at_unix_ms: self.expires_at_unix_ms,
             outcome: self.outcome,
             candidates: &self.candidates,
         }
@@ -437,9 +668,11 @@ impl<'de> Deserialize<'de> for SkillsResolveInstallationSourceResponse {
         let wire = SkillsResolveInstallationSourceResponseWire::deserialize(deserializer)?;
         let response = Self {
             schema_version: wire.schema_version,
+            resolution_id: wire.resolution_id,
             canonical_url: wire.canonical_url,
             provider: wire.provider,
             resolved_commit: wire.resolved_commit,
+            expires_at_unix_ms: wire.expires_at_unix_ms,
             outcome: wire.outcome,
             candidates: wire.candidates,
         };
@@ -458,6 +691,9 @@ impl SkillsResolveInstallationSourceResponse {
         }
         if self.canonical_url.trim().is_empty() {
             return Err("canonicalUrl must be non-empty".to_string());
+        }
+        if self.expires_at_unix_ms == 0 || self.expires_at_unix_ms > 9_007_199_254_740_991 {
+            return Err("expiresAtUnixMs must be a positive JavaScript-safe integer".to_string());
         }
         match self.outcome {
             SkillSourceResolutionOutcomeDto::Resolved if self.candidates.len() != 1 => {
@@ -479,6 +715,22 @@ impl SkillsResolveInstallationSourceResponse {
             if !candidate_ids.insert(candidate.candidate_id.as_str()) {
                 return Err("candidateId values must be unique".to_string());
             }
+            let SkillResolvedCandidateAcquisitionDto::ResolvedCandidate {
+                resolution_id,
+                candidate_id,
+            } = &candidate.acquisition;
+            if resolution_id != &self.resolution_id {
+                return Err(
+                    "candidate acquisition resolutionId must match response.resolutionId"
+                        .to_string(),
+                );
+            }
+            if candidate_id != &candidate.candidate_id {
+                return Err(
+                    "candidate acquisition candidateId must match candidate.candidateId"
+                        .to_string(),
+                );
+            }
             if candidate.package.format_version == 0
                 || candidate.package.package_revision.trim().is_empty()
                 || candidate.package.name.trim().is_empty()
@@ -493,6 +745,7 @@ impl SkillsResolveInstallationSourceResponse {
                     owner,
                     repository,
                     reference,
+                    resolved_commit,
                     subdirectory,
                 } => {
                     if owner.trim().is_empty() || repository.trim().is_empty() {
@@ -503,11 +756,26 @@ impl SkillsResolveInstallationSourceResponse {
                             "candidate subdirectory must be non-empty when present".to_string()
                         );
                     }
-                    let SkillResolvedGithubReferenceDto::Commit { sha } = reference;
-                    if sha != &self.resolved_commit {
+                    if resolved_commit != &self.resolved_commit {
                         return Err(
-                            "candidate commit SHA must match response.resolvedCommit".to_string()
+                            "candidate resolvedCommit must match response.resolvedCommit"
+                                .to_string(),
                         );
+                    }
+                    match reference {
+                        SkillGithubReferenceDto::DefaultBranch {} => {}
+                        SkillGithubReferenceDto::Named { value } if value.trim().is_empty() => {
+                            return Err("candidate named reference must be non-empty".to_string());
+                        }
+                        SkillGithubReferenceDto::Named { .. } => {}
+                        SkillGithubReferenceDto::Commit { sha } => {
+                            let reference_commit =
+                                SkillResolvedGithubCommitShaDto::parse(sha.clone())
+                                    .map_err(|reason| reason.to_string())?;
+                            if &reference_commit != resolved_commit {
+                                return Err("candidate commit reference sha must match candidate resolvedCommit".to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -542,6 +810,12 @@ pub enum SkillSourceResolutionErrorCodeDto {
     RepositoryTooLarge,
     UnsafePackage,
     InvalidPackage,
+    ResolutionIdConflict,
+    ResolutionNotFoundOrExpired,
+    ResolutionConsumed,
+    CandidateNotFound,
+    CapacityExceeded,
+    Cancelled,
     Unavailable,
 }
 
@@ -552,6 +826,8 @@ pub enum SkillSourceResolutionRecoveryDto {
     RetryLater,
     NarrowLocator,
     ChooseDifferentSource,
+    RetrySameResolution,
+    StartNewResolution,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -721,6 +997,16 @@ pub enum SkillInspectionErrorCodeDto {
     ReferenceNotFound,
     SubdirectoryNotFound,
     SourceChangedDuringRead,
+    ResolutionNotFound,
+    ResolutionExpired,
+    ResolutionConsumed,
+    CandidateNotFound,
+    CapacityExceeded,
+    InstallationRetired,
+    InstallationNotFound,
+    InstallationRevisionConflict,
+    SourceNotRefreshable,
+    PersistedSourceInvalid,
     NetworkUnavailable,
     RateLimited,
     RepositoryTooLarge,
@@ -732,6 +1018,7 @@ pub enum SkillInspectionErrorCodeDto {
     IdempotencyConflict,
     PreviewMismatch,
     AcknowledgementRequired,
+    CommitIndeterminate,
     Cancelled,
     Unavailable,
 }
@@ -743,8 +1030,13 @@ pub enum SkillInspectionRecoveryDto {
     RetrySamePreparation,
     RetryLater,
     InspectAgain,
+    NewInstallationIdentity,
+    FreeCapacity,
+    ContactSupport,
     AcknowledgeWarnings,
     ChooseDifferentSource,
+    ResolveAgain,
+    RefreshManagement,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -762,6 +1054,16 @@ pub struct SkillInspectionErrorData {
     pub diagnostic_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub commit_may_have_succeeded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intended_installation_revision: Option<String>,
+}
+
+fn bool_is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -1028,6 +1330,7 @@ pub enum SkillInstallationErrorCodeDto {
     InvalidStore,
     CapacityExceeded,
     InstallationExists,
+    InstallationRetired,
     InstallationNotFound,
     RevisionConflict,
     StoreCorrupt,
@@ -1042,8 +1345,10 @@ pub enum SkillInstallationErrorCodeDto {
 pub enum SkillInstallationRecoveryDto {
     FixLocalSource,
     RetrySameRequest,
+    NewInstallationIdentity,
     RefreshCatalog,
     FreeCapacity,
+    ContactSupport,
     RepairStore,
 }
 
@@ -1052,6 +1357,7 @@ pub enum SkillInstallationRecoveryDto {
 pub enum SkillInstallationCapacityDto {
     Installations,
     InstallationDirectory,
+    RetiredInstallationIds,
     Packages,
 }
 
@@ -1541,15 +1847,18 @@ mod tests {
         );
         assert_wire_round_trip::<SkillsChangedNotification>(&golden["management"]["changed"]);
         assert_wire_round_trip::<SkillInspectionErrorData>(&golden["inspectionError"]);
+        for error in golden["inspectionErrors"].as_array().unwrap() {
+            assert_wire_round_trip::<SkillInspectionErrorData>(error);
+        }
         for error in golden["managementErrors"].as_array().unwrap() {
             assert_wire_round_trip::<SkillManagementErrorData>(error);
         }
     }
 
     #[test]
-    fn skill_source_resolution_v1_matches_the_shared_wire_golden() {
+    fn skill_source_resolution_v2_matches_the_shared_wire_golden() {
         let golden: Value = serde_json::from_str(include_str!(
-            "../../../packages/protocol/fixtures/skill-source-resolution-v1.json"
+            "../../../packages/protocol/fixtures/skill-source-resolution-v2.json"
         ))
         .unwrap();
 
@@ -1558,6 +1867,10 @@ mod tests {
             SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION
         );
         assert_eq!(golden["method"], SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD);
+        assert_eq!(
+            golden["cancel"]["method"],
+            SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD
+        );
         assert_eq!(SKILL_SOURCE_RESOLUTION_ERROR_CODE, -32013);
         for case in golden["cases"].as_array().unwrap() {
             assert_wire_round_trip::<SkillsResolveInstallationSourceRequest>(&case["request"]);
@@ -1566,17 +1879,22 @@ mod tests {
         for error in golden["errors"].as_array().unwrap() {
             assert_wire_round_trip::<SkillSourceResolutionErrorData>(error);
         }
+        for case in golden["cancel"]["cases"].as_array().unwrap() {
+            assert_wire_round_trip::<SkillsCancelSourceResolutionRequest>(&case["request"]);
+            assert_wire_round_trip::<SkillsCancelSourceResolutionResponse>(&case["response"]);
+        }
     }
 
     #[test]
     fn skill_source_resolution_boundaries_are_strict_and_immutable() {
         let golden: Value = serde_json::from_str(include_str!(
-            "../../../packages/protocol/fixtures/skill-source-resolution-v1.json"
+            "../../../packages/protocol/fixtures/skill-source-resolution-v2.json"
         ))
         .unwrap();
 
         assert!(
             serde_json::from_value::<SkillsResolveInstallationSourceRequest>(serde_json::json!({
+                "resolutionId": "11111111-1111-4111-8111-111111111111",
                 "locator": {
                     "kind": "url",
                     "url": "https://github.com/openai/example-skills",
@@ -1586,7 +1904,33 @@ mod tests {
             .is_err()
         );
         assert!(
+            serde_json::from_value::<SkillsCancelSourceResolutionRequest>(serde_json::json!({
+                "resolutionId": "11111111-1111-4111-8111-111111111111",
+                "candidateId": "must-not-cross-the-boundary"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SkillsCancelSourceResolutionResponse>(serde_json::json!({
+                "schemaVersion": 2,
+                "resolutionId": "11111111-1111-4111-8111-111111111111",
+                "outcome": "forgotten"
+            }))
+            .is_err()
+        );
+        assert!(
             serde_json::from_value::<SkillsResolveInstallationSourceRequest>(serde_json::json!({
+                "resolutionId": "00000000-0000-0000-0000-000000000000",
+                "locator": {
+                    "kind": "url",
+                    "url": "https://github.com/openai/example-skills"
+                }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceRequest>(serde_json::json!({
+                "resolutionId": "11111111-1111-4111-8111-111111111111",
                 "locator": {
                     "kind": "git",
                     "url": "https://github.com/openai/example-skills"
@@ -1609,19 +1953,77 @@ mod tests {
                 .is_err()
         );
 
-        let mut mutable_reference = golden["cases"][0]["response"].clone();
-        mutable_reference["candidates"][0]["source"]["reference"] =
-            serde_json::json!({ "kind": "defaultBranch" });
-        assert!(
-            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(mutable_reference)
-                .is_err()
-        );
-
-        let mut mismatched_commit = golden["cases"][0]["response"].clone();
-        mismatched_commit["candidates"][0]["source"]["reference"]["sha"] =
+        let mut mismatched_candidate_commit = golden["cases"][0]["response"].clone();
+        mismatched_candidate_commit["candidates"][0]["source"]["resolvedCommit"] =
             serde_json::json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         assert!(
-            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(mismatched_commit)
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(
+                mismatched_candidate_commit
+            )
+            .is_err()
+        );
+
+        let mut mismatched_tracking_commit = golden["cases"][0]["response"].clone();
+        mismatched_tracking_commit["candidates"][0]["source"]["reference"] = serde_json::json!({
+            "kind": "commit",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        });
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(
+                mismatched_tracking_commit
+            )
+            .is_err()
+        );
+
+        let mut missing_candidate_commit = golden["cases"][0]["response"].clone();
+        missing_candidate_commit["candidates"][0]["source"]
+            .as_object_mut()
+            .unwrap()
+            .remove("resolvedCommit");
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(
+                missing_candidate_commit
+            )
+            .is_err()
+        );
+
+        let mut mismatched_resolution_id = golden["cases"][0]["response"].clone();
+        mismatched_resolution_id["candidates"][0]["acquisition"]["resolutionId"] =
+            serde_json::json!("99999999-9999-4999-8999-999999999999");
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(
+                mismatched_resolution_id
+            )
+            .is_err()
+        );
+
+        let mut mismatched_candidate_id = golden["cases"][0]["response"].clone();
+        mismatched_candidate_id["candidates"][0]["acquisition"]["candidateId"] =
+            serde_json::json!("different-candidate");
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(
+                mismatched_candidate_id
+            )
+            .is_err()
+        );
+
+        for invalid_resolution_id in [
+            "00000000-0000-0000-0000-000000000000",
+            "11111111-1111-4111-8111-11111111111A",
+            "not-a-uuid",
+        ] {
+            let mut response = golden["cases"][0]["response"].clone();
+            response["resolutionId"] = serde_json::json!(invalid_resolution_id);
+            assert!(
+                serde_json::from_value::<SkillsResolveInstallationSourceResponse>(response)
+                    .is_err()
+            );
+        }
+
+        let mut invalid_expiry = golden["cases"][0]["response"].clone();
+        invalid_expiry["expiresAtUnixMs"] = serde_json::json!(0);
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(invalid_expiry)
                 .is_err()
         );
 
@@ -1638,7 +2040,8 @@ mod tests {
 
         let mut duplicate_candidate_ids = golden["cases"][1]["response"].clone();
         let first_candidate_id = duplicate_candidate_ids["candidates"][0]["candidateId"].clone();
-        duplicate_candidate_ids["candidates"][1]["candidateId"] = first_candidate_id;
+        duplicate_candidate_ids["candidates"][1]["candidateId"] = first_candidate_id.clone();
+        duplicate_candidate_ids["candidates"][1]["acquisition"]["candidateId"] = first_candidate_id;
         assert!(
             serde_json::from_value::<SkillsResolveInstallationSourceResponse>(
                 duplicate_candidate_ids
@@ -1658,7 +2061,7 @@ mod tests {
             .is_err()
         );
         for (field, value) in [
-            ("schemaVersion", serde_json::json!(2)),
+            ("schemaVersion", serde_json::json!(1)),
             ("provider", serde_json::json!("gitlab")),
             ("outcome", serde_json::json!("installed")),
         ] {
@@ -1748,6 +2151,56 @@ mod tests {
                     "repository": "skills",
                     "reference": { "kind": "commit", "sha": "abc", "ref": "main" }
                 }
+            }))
+            .is_err()
+        );
+        for invalid_source in [
+            serde_json::json!({ "kind": "localDirectory", "directory": "  " }),
+            serde_json::json!({
+                "kind": "githubRepository",
+                "owner": "",
+                "repository": "skills"
+            }),
+            serde_json::json!({
+                "kind": "githubRepository",
+                "owner": "example",
+                "repository": "skills",
+                "reference": { "kind": "named", "value": " " }
+            }),
+            serde_json::json!({
+                "kind": "githubRepository",
+                "owner": "example",
+                "repository": "skills",
+                "subdirectory": " "
+            }),
+        ] {
+            assert!(serde_json::from_value::<SkillAcquisitionSourceDto>(invalid_source).is_err());
+        }
+        assert!(
+            serde_json::from_value::<SkillAcquisitionSourceDto>(serde_json::json!({
+                "kind": "githubRepository",
+                "owner": "example",
+                "repository": "skills",
+                "reference": { "kind": "named", "value": "main" },
+                "subdirectory": "skills/auditor"
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<SkillAcquisitionSourceDto>(serde_json::json!({
+                "kind": "githubRepository",
+                "owner": "example",
+                "repository": "skills",
+                "reference": { "kind": "named", "value": "main" },
+                "resolvedCommit": "0123456789abcdef0123456789abcdef01234567"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SkillAcquisitionSourceDto>(serde_json::json!({
+                "kind": "resolvedCandidate",
+                "resolutionId": "00000000-0000-0000-0000-000000000000",
+                "candidateId": "candidate"
             }))
             .is_err()
         );
