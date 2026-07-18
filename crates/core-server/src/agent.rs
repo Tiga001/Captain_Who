@@ -3576,7 +3576,10 @@ fn agent_input_project_id(input: &AgentChatInput) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills_test_support::write_installed_skill;
+    use mycopilot_core::skills::{
+        LocalSkillInstallRequest, SkillInstallationId, SkillInstallationOutcome,
+        SkillInstallationService,
+    };
     use mycopilot_core::storage::models::{
         ChatConversationRecord, ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord,
         ProjectRecord,
@@ -3999,6 +4002,8 @@ mod tests {
         let workspace = fixture.path().join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         let store_root = fixture.path().join("skills");
+        let local_skill = fixture.path().join("local-skill");
+        fs::create_dir_all(&local_skill).unwrap();
         let source_text = format!(
             concat!(
                 "---\n",
@@ -4010,7 +4015,16 @@ mod tests {
             ),
             DESCRIPTION_MARKER, INSTRUCTION_MARKER
         );
-        write_installed_skill(&store_root, INSTALLATION_ID, &source_text);
+        fs::write(local_skill.join("SKILL.md"), &source_text).unwrap();
+        let installation_id = SkillInstallationId::parse(INSTALLATION_ID).unwrap();
+        let installations = SkillInstallationService::new(&store_root).unwrap();
+        let installed = installations
+            .install_local_directory(&LocalSkillInstallRequest::new(
+                installation_id,
+                &local_skill,
+            ))
+            .unwrap();
+        assert_eq!(installed.outcome(), SkillInstallationOutcome::Installed);
         let storage =
             Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
         storage.save_model_settings(test_model_settings()).unwrap();

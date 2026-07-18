@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "operation": "install",
+      "response": {
+        "schemaVersion": 1,
+        "installationId": "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "revision": "skill-package-sha256-v1:current",
+        "outcome": "installed"
+      }
+    },
+    {
+      "operation": "install",
+      "response": {
+        "schemaVersion": 1,
+        "installationId": "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "revision": "skill-package-sha256-v1:current",
+        "outcome": "alreadyInstalled"
+      }
+    },
+    {
+      "operation": "update",
+      "response": {
+        "schemaVersion": 1,
+        "installationId": "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "revision": "skill-package-sha256-v1:current",
+        "outcome": "updated"
+      }
+    },
+    {
+      "operation": "update",
+      "response": {
+        "schemaVersion": 1,
+        "installationId": "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "revision": "skill-package-sha256-v1:current",
+        "outcome": "alreadyCurrent"
+      }
+    },
+    {
+      "operation": "uninstall",
+      "response": {
+        "schemaVersion": 1,
+        "installationId": "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "outcome": "uninstalled"
+      }
+    },
+    {
+      "operation": "uninstall",
+      "response": {
+        "schemaVersion": 1,
+        "installationId": "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+        "outcome": "alreadyAbsent"
+      }
+    }
+  ]
+}

@@ -4,6 +4,8 @@ mod git_dispatcher;
 mod skills_adapter;
 mod skills_dispatcher;
 #[cfg(test)]
+mod skills_installation_tests;
+#[cfg(test)]
 mod skills_test_support;
 
 use std::path::PathBuf;
@@ -13,7 +15,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use agent::{AgentConversationTurnInput, AgentService, AgentServiceError};
 use git_dispatcher::{GitDispatcher, GitJobPriority};
 use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
-use mycopilot_core::skills::SkillsService;
+use mycopilot_core::skills::{
+    LocalSkillInstallRequest, LocalSkillUpdateRequest, SkillId, SkillInstallationId,
+    SkillInstallationMutation, SkillInstallationOperation, SkillInstallationService,
+    SkillInstallationServiceError, SkillRevision,
+    SkillUninstallRequest as CoreSkillUninstallRequest, SkillsService,
+};
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatMessageRecord,
     ChatMessageStateRecord, ChatSearchInput, ComposerDraftRecord, ForkConversationInput,
@@ -26,7 +33,8 @@ use mycopilot_protocol_rs::{
     AgentCancelRunResponse, AgentFileDraftReadRequest, AgentRejectActionRequest, CorePingRequest,
     CorePingResponse, CoreShutdownResponse, GitRepositoryInspectRequest,
     GitReviewFileContentRequest, GitReviewFileDiffRequest, GitReviewFileMutationRequest,
-    GitReviewSummaryRequest, JsonRpcId, JsonRpcRequest, SkillsListRequest,
+    GitReviewSummaryRequest, JsonRpcId, JsonRpcRequest, SkillsInstallLocalRequest,
+    SkillsListRequest, SkillsUninstallRequest, SkillsUpdateLocalRequest,
     AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD,
     AGENT_CLEAR_USAGE_RECORDS_METHOD, AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD,
     AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD, AGENT_GET_FILE_WRITE_DIFF_METHOD,
@@ -34,22 +42,24 @@ use mycopilot_protocol_rs::{
     AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
     CORE_PING_METHOD, CORE_SHUTDOWN_METHOD, GIT_GET_REVIEW_FILE_CONTENT_METHOD,
     GIT_GET_REVIEW_FILE_DIFF_METHOD, GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD,
-    GIT_MUTATE_REVIEW_FILE_METHOD, SEARCH_SEARCH_CHATS_METHOD, SKILLS_LIST_METHOD,
-    STORAGE_DELETE_CHAT_MESSAGES_METHOD, STORAGE_DELETE_CONVERSATION_METHOD,
-    STORAGE_DELETE_PROJECT_METHOD, STORAGE_FORK_CONVERSATION_METHOD,
-    STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
-    STORAGE_LOAD_COMPOSER_DRAFTS_METHOD, STORAGE_LOAD_CONVERSATIONS_METHOD,
-    STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD, STORAGE_LOAD_MODEL_SETTINGS_METHOD,
-    STORAGE_LOAD_PROJECTS_METHOD, STORAGE_LOAD_UI_PREFERENCES_METHOD,
-    STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD,
-    STORAGE_SAVE_COMPOSER_DRAFT_METHOD, STORAGE_SAVE_CONVERSATION_META_METHOD,
-    STORAGE_SAVE_MODEL_SETTINGS_METHOD, STORAGE_SAVE_PROJECT_METHOD,
-    STORAGE_SAVE_UI_PREFERENCES_METHOD, STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
+    GIT_MUTATE_REVIEW_FILE_METHOD, SEARCH_SEARCH_CHATS_METHOD, SKILLS_INSTALL_LOCAL_METHOD,
+    SKILLS_LIST_METHOD, SKILLS_UNINSTALL_METHOD, SKILLS_UPDATE_LOCAL_METHOD,
+    SKILL_INSTALLATION_ERROR_CODE, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
+    STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
+    STORAGE_FORK_CONVERSATION_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
+    STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD, STORAGE_LOAD_COMPOSER_DRAFTS_METHOD,
+    STORAGE_LOAD_CONVERSATIONS_METHOD, STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD,
+    STORAGE_LOAD_MODEL_SETTINGS_METHOD, STORAGE_LOAD_PROJECTS_METHOD,
+    STORAGE_LOAD_UI_PREFERENCES_METHOD, STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD,
+    STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD, STORAGE_SAVE_COMPOSER_DRAFT_METHOD,
+    STORAGE_SAVE_CONVERSATION_META_METHOD, STORAGE_SAVE_MODEL_SETTINGS_METHOD,
+    STORAGE_SAVE_PROJECT_METHOD, STORAGE_SAVE_UI_PREFERENCES_METHOD,
+    STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use skills_adapter::catalog_response;
-use skills_dispatcher::SkillsDispatcher;
+use skills_adapter::{catalog_response, installation_failure, mutation_response};
+use skills_dispatcher::{mutation_admission_error_response, SkillMutationTarget, SkillsDispatcher};
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
@@ -65,11 +75,22 @@ async fn main() -> io::Result<()> {
     let skills_service = Arc::new(
         SkillsService::new()
             .with_bundled_source()
-            .and_then(|service| service.with_installed_source(skill_store_root))
+            .and_then(|service| service.with_installed_source(skill_store_root.clone()))
             .map_err(|error| io::Error::other(format!("failed to initialize Skills: {error}")))?,
+    );
+    let skill_installation_service = Arc::new(
+        SkillInstallationService::new(skill_store_root).map_err(|error| {
+            io::Error::other(format!(
+                "failed to initialize Skill installation service: {error}"
+            ))
+        })?,
     );
     let agent_service =
         AgentService::new(storage.clone()).with_skills_service(Arc::clone(&skills_service));
+    let skill_services = SkillServices {
+        catalog: skills_service,
+        installations: skill_installation_service,
+    };
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
     let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
     let writer = tokio::spawn(run_outbound_writer(
@@ -88,7 +109,7 @@ async fn main() -> io::Result<()> {
         BufReader::new(io::stdin()),
         storage,
         &agent_service,
-        skills_service,
+        skill_services,
         git_review_service,
         &request_dispatchers,
         &outbound_tx,
@@ -142,11 +163,16 @@ struct RequestDispatchers<'a> {
     skills: &'a SkillsDispatcher,
 }
 
+struct SkillServices {
+    catalog: Arc<SkillsService>,
+    installations: Arc<SkillInstallationService>,
+}
+
 async fn run_request_loop<R>(
     input: R,
     storage: Arc<StorageService>,
     agent_service: &AgentService,
-    skills_service: Arc<SkillsService>,
+    skill_services: SkillServices,
     git_review_service: Arc<GitReviewService>,
     dispatchers: &RequestDispatchers<'_>,
     outbound: &mpsc::UnboundedSender<Value>,
@@ -199,17 +225,50 @@ where
                 }
                 continue;
             }
-            if request.method == SKILLS_LIST_METHOD {
+            if is_skills_method(&request.method) {
                 let request_id = request.id.clone();
+                let request = match parse_skills_request(request) {
+                    Ok(request) => request,
+                    Err(response) => {
+                        enqueue_outbound(outbound, response)?;
+                        continue;
+                    }
+                };
                 let request_storage = Arc::clone(&storage);
-                let request_service = Arc::clone(&skills_service);
-                if let Err(error) = dispatchers.skills.try_submit(request_id.clone(), move || {
-                    handle_skills_request(&request_storage, &request_service, request)
-                }) {
-                    enqueue_outbound(
-                        outbound,
-                        response_error(Some(request_id), error.code(), error.message()),
-                    )?;
+                let request_catalog = Arc::clone(&skill_services.catalog);
+                let request_installations = Arc::clone(&skill_services.installations);
+                let mutation_metadata = request.mutation_metadata();
+                let submit_result = match mutation_metadata.clone() {
+                    Some((operation, target)) => dispatchers.skills.try_submit_mutation(
+                        request_id.clone(),
+                        operation,
+                        target,
+                        move || {
+                            handle_parsed_skills_request(
+                                &request_storage,
+                                &request_catalog,
+                                &request_installations,
+                                request,
+                            )
+                        },
+                    ),
+                    None => dispatchers.skills.try_submit(request_id.clone(), move || {
+                        handle_parsed_skills_request(
+                            &request_storage,
+                            &request_catalog,
+                            &request_installations,
+                            request,
+                        )
+                    }),
+                };
+                if let Err(error) = submit_result {
+                    let response = match mutation_metadata {
+                        Some((operation, target)) => {
+                            mutation_admission_error_response(request_id, operation, target, error)
+                        }
+                        None => response_error(Some(request_id), error.code(), error.message()),
+                    };
+                    enqueue_outbound(outbound, response)?;
                 }
                 continue;
             }
@@ -277,6 +336,16 @@ fn git_request_priority(method: &str) -> Option<GitJobPriority> {
         }
         _ => None,
     }
+}
+
+fn is_skills_method(method: &str) -> bool {
+    matches!(
+        method,
+        SKILLS_LIST_METHOD
+            | SKILLS_INSTALL_LOCAL_METHOD
+            | SKILLS_UPDATE_LOCAL_METHOD
+            | SKILLS_UNINSTALL_METHOD
+    )
 }
 
 fn handle_request(
@@ -527,30 +596,183 @@ fn handle_request(
     }
 }
 
+struct ParsedSkillsRequest {
+    id: JsonRpcId,
+    operation: ParsedSkillsOperation,
+}
+
+enum ParsedSkillsOperation {
+    List(SkillsListRequest),
+    InstallLocal(LocalSkillInstallRequest),
+    UpdateLocal(LocalSkillUpdateRequest),
+    Uninstall(CoreSkillUninstallRequest),
+}
+
+impl ParsedSkillsRequest {
+    fn mutation_metadata(&self) -> Option<(SkillInstallationOperation, SkillMutationTarget)> {
+        match &self.operation {
+            ParsedSkillsOperation::List(_) => None,
+            ParsedSkillsOperation::InstallLocal(request) => Some((
+                SkillInstallationOperation::Install,
+                SkillMutationTarget::InstallationId(request.installation_id().clone()),
+            )),
+            ParsedSkillsOperation::UpdateLocal(request) => Some((
+                SkillInstallationOperation::Update,
+                SkillMutationTarget::SkillId(request.skill_id().clone()),
+            )),
+            ParsedSkillsOperation::Uninstall(request) => Some((
+                SkillInstallationOperation::Uninstall,
+                SkillMutationTarget::SkillId(request.skill_id().clone()),
+            )),
+        }
+    }
+}
+
+fn parse_skills_request(request: JsonRpcRequest) -> Result<ParsedSkillsRequest, Value> {
+    let id = request.id;
+    if request.jsonrpc != "2.0" {
+        return Err(response_error(Some(id), -32600, "Invalid JSON-RPC version"));
+    }
+
+    let operation = match request.method.as_str() {
+        SKILLS_LIST_METHOD => ParsedSkillsOperation::List(
+            parse_params::<SkillsListRequest>(request.params)
+                .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
+        ),
+        SKILLS_INSTALL_LOCAL_METHOD => {
+            let input = parse_params::<SkillsInstallLocalRequest>(request.params)
+                .map_err(|message| response_error(Some(id.clone()), -32602, message))?;
+            let installation_id = SkillInstallationId::parse(input.installation_id)
+                .map_err(|error| invalid_skill_installation_params(&id, error.to_string()))?;
+            let directory = parse_absolute_skill_directory(&id, input.directory)?;
+            ParsedSkillsOperation::InstallLocal(LocalSkillInstallRequest::new(
+                installation_id,
+                directory,
+            ))
+        }
+        SKILLS_UPDATE_LOCAL_METHOD => {
+            let input = parse_params::<SkillsUpdateLocalRequest>(request.params)
+                .map_err(|message| response_error(Some(id.clone()), -32602, message))?;
+            let skill_id = SkillId::parse(input.skill_id)
+                .map_err(|error| invalid_skill_installation_params(&id, error.to_string()))?;
+            let expected_revision = SkillRevision::parse(input.expected_revision)
+                .map_err(|error| invalid_skill_installation_params(&id, error.to_string()))?;
+            let directory = parse_absolute_skill_directory(&id, input.directory)?;
+            ParsedSkillsOperation::UpdateLocal(LocalSkillUpdateRequest::new(
+                skill_id,
+                expected_revision,
+                directory,
+            ))
+        }
+        SKILLS_UNINSTALL_METHOD => {
+            let input = parse_params::<SkillsUninstallRequest>(request.params)
+                .map_err(|message| response_error(Some(id.clone()), -32602, message))?;
+            let skill_id = SkillId::parse(input.skill_id)
+                .map_err(|error| invalid_skill_installation_params(&id, error.to_string()))?;
+            let expected_revision = SkillRevision::parse(input.expected_revision)
+                .map_err(|error| invalid_skill_installation_params(&id, error.to_string()))?;
+            ParsedSkillsOperation::Uninstall(CoreSkillUninstallRequest::new(
+                skill_id,
+                expected_revision,
+            ))
+        }
+        _ => return Err(response_error(Some(id), -32601, "Method not found")),
+    };
+    Ok(ParsedSkillsRequest { id, operation })
+}
+
+fn invalid_skill_installation_params(id: &JsonRpcId, reason: String) -> Value {
+    response_error(
+        Some(id.clone()),
+        -32602,
+        format!("Invalid params: {reason}"),
+    )
+}
+
+fn parse_absolute_skill_directory(id: &JsonRpcId, value: String) -> Result<PathBuf, Value> {
+    let directory = PathBuf::from(value);
+    if !directory.is_absolute() {
+        return Err(invalid_skill_installation_params(
+            id,
+            "Skill directory must be an absolute path".to_string(),
+        ));
+    }
+    Ok(directory)
+}
+
+#[cfg(test)]
 fn handle_skills_request(
     storage: &StorageService,
     skills_service: &SkillsService,
+    skill_installation_service: &SkillInstallationService,
     request: JsonRpcRequest,
 ) -> Value {
-    if request.jsonrpc != "2.0" {
-        return response_error(Some(request.id), -32600, "Invalid JSON-RPC version");
+    match parse_skills_request(request) {
+        Ok(request) => handle_parsed_skills_request(
+            storage,
+            skills_service,
+            skill_installation_service,
+            request,
+        ),
+        Err(response) => response,
     }
-    if request.method != SKILLS_LIST_METHOD {
-        return response_error(Some(request.id), -32601, "Method not found");
-    }
+}
 
-    let input = match parse_params::<SkillsListRequest>(request.params) {
-        Ok(input) => input,
-        Err(message) => return response_error(Some(request.id), -32602, message),
-    };
-    let result = resolve_project_path(storage, &input.project_id).and_then(|workspace| {
-        skills_service
-            .list_with_workspace(&input.project_id, &workspace)
-            .map_err(|error| error.to_string())
-    });
-    match result.and_then(|catalog| catalog_response(&catalog)) {
-        Ok(catalog) => response_success(request.id, catalog),
-        Err(message) => response_error(Some(request.id), -32000, message),
+fn handle_parsed_skills_request(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    skill_installation_service: &SkillInstallationService,
+    request: ParsedSkillsRequest,
+) -> Value {
+    match request.operation {
+        ParsedSkillsOperation::List(input) => {
+            let result = resolve_project_path(storage, &input.project_id).and_then(|workspace| {
+                skills_service
+                    .list_with_workspace(&input.project_id, &workspace)
+                    .map_err(|error| error.to_string())
+            });
+            match result.and_then(|catalog| catalog_response(&catalog)) {
+                Ok(catalog) => response_success(request.id, catalog),
+                Err(message) => response_error(Some(request.id), -32000, message),
+            }
+        }
+        ParsedSkillsOperation::InstallLocal(input) => skill_mutation_response(
+            request.id,
+            skill_installation_service.install_local_directory(&input),
+        ),
+        ParsedSkillsOperation::UpdateLocal(input) => skill_mutation_response(
+            request.id,
+            skill_installation_service.update_local_directory(&input),
+        ),
+        ParsedSkillsOperation::Uninstall(input) => {
+            skill_mutation_response(request.id, skill_installation_service.uninstall(&input))
+        }
+    }
+}
+
+fn skill_mutation_response(
+    id: JsonRpcId,
+    result: Result<SkillInstallationMutation, SkillInstallationServiceError>,
+) -> Value {
+    match result {
+        Ok(mutation) => match mutation_response(&mutation) {
+            Ok(response) => response_success(id, response),
+            Err(message) => response_error(Some(id), -32603, message),
+        },
+        Err(error) => match installation_failure(&error) {
+            Ok(failure) => {
+                let message = failure.to_string();
+                serde_json::to_value(error_with_data(
+                    Some(id),
+                    SKILL_INSTALLATION_ERROR_CODE,
+                    message,
+                    serde_json::to_value(failure.into_data())
+                        .expect("Skill installation error data must serialize"),
+                ))
+                .expect("JSON-RPC Skill installation error response must serialize")
+            }
+            Err(mapping_error) => response_error(Some(id), -32603, mapping_error),
+        },
     }
 }
 
@@ -1012,6 +1234,8 @@ mod server_tests {
             .with_bundled_source()
             .and_then(|service| service.with_installed_source(&installed_store_root))
             .unwrap();
+        let skill_installation_service =
+            SkillInstallationService::new(&installed_store_root).unwrap();
         assert!(
             !installed_store_root.exists(),
             "registering the read-only source must not create its store"
@@ -1041,7 +1265,12 @@ mod server_tests {
         }))
         .unwrap();
 
-        let response = handle_skills_request(&storage, &skills_service, request);
+        let response = handle_skills_request(
+            &storage,
+            &skills_service,
+            &skill_installation_service,
+            request,
+        );
 
         assert_eq!(response["id"], 1);
         let skills = response["result"]["skills"].as_array().unwrap();
@@ -1108,6 +1337,8 @@ mod server_tests {
         let temp = tempfile::tempdir().unwrap();
         let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
         let skills_service = SkillsService::new();
+        let skill_installation_service =
+            SkillInstallationService::new(temp.path().join("skills")).unwrap();
         let request = serde_json::from_value::<JsonRpcRequest>(json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1116,7 +1347,12 @@ mod server_tests {
         }))
         .unwrap();
 
-        let response = handle_skills_request(&storage, &skills_service, request);
+        let response = handle_skills_request(
+            &storage,
+            &skills_service,
+            &skill_installation_service,
+            request,
+        );
 
         assert_eq!(response["error"]["code"], -32602);
     }
@@ -1125,6 +1361,8 @@ mod server_tests {
     fn skills_list_rejects_an_unknown_project_with_a_server_error() {
         let temp = tempfile::tempdir().unwrap();
         let storage = StorageService::open(&temp.path().join("storage.sqlite")).unwrap();
+        let skill_installation_service =
+            SkillInstallationService::new(temp.path().join("skills")).unwrap();
         let request = serde_json::from_value::<JsonRpcRequest>(json!({
             "jsonrpc": "2.0",
             "id": "skills-request",
@@ -1133,7 +1371,12 @@ mod server_tests {
         }))
         .unwrap();
 
-        let response = handle_skills_request(&storage, &SkillsService::new(), request);
+        let response = handle_skills_request(
+            &storage,
+            &SkillsService::new(),
+            &skill_installation_service,
+            request,
+        );
 
         assert_eq!(response["id"], "skills-request");
         assert_eq!(response["error"]["code"], -32000);
@@ -1165,6 +1408,8 @@ mod server_tests {
             })
             .unwrap();
         let agent_service = AgentService::new(Arc::clone(&storage));
+        let skill_installation_service =
+            Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
         let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
         let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
@@ -1181,7 +1426,10 @@ mod server_tests {
             BufReader::new(input.as_bytes()),
             storage,
             &agent_service,
-            Arc::new(SkillsService::new()),
+            SkillServices {
+                catalog: Arc::new(SkillsService::new()),
+                installations: skill_installation_service,
+            },
             Arc::new(GitReviewService::new()),
             &dispatchers,
             &outbound_tx,
@@ -1240,6 +1488,8 @@ mod server_tests {
         let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
         let agent_service = AgentService::new(Arc::clone(&storage));
         let skills_service = Arc::new(SkillsService::new());
+        let skill_installation_service =
+            Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
         let git_review_service = Arc::new(GitReviewService::new());
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
         let dispatcher = GitDispatcher::new(outbound_tx.clone());
@@ -1292,7 +1542,10 @@ mod server_tests {
             BufReader::new(input.as_bytes()),
             storage,
             &agent_service,
-            skills_service,
+            SkillServices {
+                catalog: skills_service,
+                installations: skill_installation_service,
+            },
             git_review_service,
             &request_dispatchers,
             &outbound_tx,

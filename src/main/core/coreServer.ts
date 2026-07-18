@@ -35,8 +35,12 @@ import type {
   GitReviewSummaryInput,
   ChatSearchInput,
   ChatSearchResult,
+  SkillMutationOutput,
+  SkillsInstallLocalInput,
   SkillsListInput,
   SkillsListOutput,
+  SkillsUninstallInput,
+  SkillsUpdateLocalInput,
   StorageAgentPromptPreferencesRecord,
   StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
@@ -51,6 +55,12 @@ import type {
   StorageModelSettingsRecord,
   StorageProjectRecord,
   StorageUiPreferencesRecord
+} from '@mycopilot/protocol'
+import {
+  parseSkillMutationOutput,
+  SKILLS_INSTALL_LOCAL_METHOD,
+  SKILLS_UNINSTALL_METHOD,
+  SKILLS_UPDATE_LOCAL_METHOD
 } from '@mycopilot/protocol'
 
 import { CoreJsonRpcClient } from './jsonRpcClient'
@@ -231,6 +241,24 @@ export class CoreServer {
 
   listSkills(input: SkillsListInput): Promise<SkillsListOutput> {
     return this.rpc.request<SkillsListOutput, SkillsListInput>(SKILLS_LIST_METHOD, input)
+  }
+
+  installLocalSkill(input: SkillsInstallLocalInput): Promise<SkillMutationOutput> {
+    return this.rpc
+      .request<unknown, SkillsInstallLocalInput>(SKILLS_INSTALL_LOCAL_METHOD, input)
+      .then((value) => parseSkillMutationOutput(value, 'install'))
+  }
+
+  updateLocalSkill(input: SkillsUpdateLocalInput): Promise<SkillMutationOutput> {
+    return this.rpc
+      .request<unknown, SkillsUpdateLocalInput>(SKILLS_UPDATE_LOCAL_METHOD, input)
+      .then((value) => parseSkillMutationOutput(value, 'update'))
+  }
+
+  uninstallSkill(input: SkillsUninstallInput): Promise<SkillMutationOutput> {
+    return this.rpc
+      .request<unknown, SkillsUninstallInput>(SKILLS_UNINSTALL_METHOD, input)
+      .then((value) => parseSkillMutationOutput(value, 'uninstall'))
   }
 
   inspectGitRepository(input: GitRepositoryInspectInput): Promise<GitRepositoryInspection> {

@@ -2,7 +2,12 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mycopilot_protocol_rs::{error, JsonRpcId};
+use mycopilot_core::skills::{SkillId, SkillInstallationId, SkillInstallationOperation};
+use mycopilot_protocol_rs::{
+    error, error_with_data, JsonRpcId, SkillInstallationErrorCodeDto, SkillInstallationErrorData,
+    SkillInstallationErrorTypeDto, SkillInstallationOperationDto, SkillInstallationRecoveryDto,
+    SKILL_INSTALLATION_ERROR_CODE,
+};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -16,15 +21,42 @@ const SKILL_DISPATCH_QUEUE_FULL_CODE: i64 = -32002;
 const SKILL_DISPATCH_UNAVAILABLE_CODE: i64 = -32603;
 
 const SKILL_DISPATCH_QUEUE_FULL_MESSAGE: &str =
-    "The skill discovery queue is full. Please retry shortly.";
-const SKILL_DISPATCH_CLOSED_MESSAGE: &str = "The skill discovery service is shutting down.";
+    "The Skill filesystem queue is full. Please retry shortly.";
+const SKILL_DISPATCH_CLOSED_MESSAGE: &str = "The Skill filesystem service is shutting down.";
 const SKILL_DISPATCH_CANCELLED_MESSAGE: &str =
-    "Skill discovery request was cancelled because the core server is shutting down.";
-const SKILL_DISPATCH_PANICKED_MESSAGE: &str = "Skill discovery request worker panicked.";
+    "Skill filesystem request was cancelled because the core server is shutting down.";
+const SKILL_DISPATCH_PANICKED_MESSAGE: &str = "Skill filesystem request worker panicked.";
 const SKILL_DISPATCH_TIMED_OUT_MESSAGE: &str =
-    "Skill discovery request did not finish before the core server shut down.";
+    "Skill filesystem request did not finish before the core server shut down.";
+const SKILL_DISPATCH_WORKER_UNAVAILABLE_MESSAGE: &str =
+    "Skill filesystem request worker could not start.";
+const SKILL_MUTATION_CANCELLED_MESSAGE: &str =
+    "Skill mutation was cancelled before it started because the core server is shutting down.";
+const SKILL_MUTATION_UNAVAILABLE_MESSAGE: &str =
+    "Skill mutation could not start. Retry the same request.";
+const SKILL_MUTATION_INDETERMINATE_MESSAGE: &str =
+    "Skill mutation did not finish before shutdown; its commit state is indeterminate.";
 
 type SkillJobTask = Box<dyn FnOnce() -> Value + Send + 'static>;
+type SkillWorkerTask = Box<dyn FnOnce() + Send + 'static>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SkillJobKind {
+    Read,
+    Mutation(SkillMutationJob),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillMutationJob {
+    operation: SkillInstallationOperation,
+    target: SkillMutationTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SkillMutationTarget {
+    InstallationId(SkillInstallationId),
+    SkillId(SkillId),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SkillsDispatchError {
@@ -48,6 +80,21 @@ impl SkillsDispatchError {
     }
 }
 
+pub(crate) fn mutation_admission_error_response(
+    request_id: JsonRpcId,
+    operation: SkillInstallationOperation,
+    target: SkillMutationTarget,
+    error: SkillsDispatchError,
+) -> Value {
+    mutation_error_response(
+        request_id,
+        &SkillMutationJob { operation, target },
+        false,
+        SkillInstallationErrorCodeDto::Unavailable,
+        error.message(),
+    )
+}
+
 #[derive(Debug)]
 pub(crate) struct SkillsDispatcherShutdownError {
     message: String,
@@ -61,12 +108,12 @@ impl std::fmt::Display for SkillsDispatcherShutdownError {
 
 impl std::error::Error for SkillsDispatcherShutdownError {}
 
-/// Runs bounded, read-only skill discovery work away from the async control plane.
+/// Runs bounded Skill filesystem work away from the async control plane.
 ///
-/// A single serial lane intentionally limits filesystem scans. Each accepted scan runs on a
-/// detachable OS thread so an unresponsive filesystem cannot hold Tokio runtime shutdown. The semaphore limits
-/// running and queued work together; the Tokio channel alone would only bound work
-/// that has not yet been received by the dispatcher task.
+/// A single serial lane intentionally limits filesystem scans and mutations. Each accepted job
+/// runs on a detachable OS thread so an unresponsive filesystem cannot hold Tokio runtime
+/// shutdown. The semaphore limits running and queued work together; the Tokio channel alone would
+/// only bound work that has not yet been received by the dispatcher task.
 pub(crate) struct SkillsDispatcher {
     admission: Arc<Semaphore>,
     manager: JoinHandle<()>,
@@ -119,6 +166,37 @@ impl SkillsDispatcher {
     where
         F: FnOnce() -> Value + Send + 'static,
     {
+        self.try_submit_job(request_id, SkillJobKind::Read, task)
+    }
+
+    /// Submits a mutating filesystem job with enough non-sensitive metadata to
+    /// report an indeterminate commit if shutdown outlives its grace period.
+    pub(crate) fn try_submit_mutation<F>(
+        &self,
+        request_id: JsonRpcId,
+        operation: SkillInstallationOperation,
+        target: SkillMutationTarget,
+        task: F,
+    ) -> Result<(), SkillsDispatchError>
+    where
+        F: FnOnce() -> Value + Send + 'static,
+    {
+        self.try_submit_job(
+            request_id,
+            SkillJobKind::Mutation(SkillMutationJob { operation, target }),
+            task,
+        )
+    }
+
+    fn try_submit_job<F>(
+        &self,
+        request_id: JsonRpcId,
+        kind: SkillJobKind,
+        task: F,
+    ) -> Result<(), SkillsDispatchError>
+    where
+        F: FnOnce() -> Value + Send + 'static,
+    {
         let Some(sender) = self.sender.as_ref() else {
             return Err(SkillsDispatchError::Closed);
         };
@@ -128,6 +206,7 @@ impl SkillsDispatcher {
         let job = QueuedSkillJob {
             permit,
             request_id,
+            kind,
             task: Box::new(task),
         };
         sender.try_send(job).map_err(|error| match error {
@@ -136,7 +215,8 @@ impl SkillsDispatcher {
         })
     }
 
-    /// Stops admission, cancels queued requests, and gives the running scan a bounded grace period.
+    /// Stops admission, cancels queued requests, and gives the running filesystem job a bounded
+    /// grace period.
     pub(crate) async fn shutdown(mut self) -> Result<(), SkillsDispatcherShutdownError> {
         self.sender.take();
         if let Some(shutdown) = self.shutdown.take() {
@@ -153,7 +233,16 @@ impl SkillsDispatcher {
 struct QueuedSkillJob {
     permit: OwnedSemaphorePermit,
     request_id: JsonRpcId,
+    kind: SkillJobKind,
     task: SkillJobTask,
+}
+
+struct StartedSkillJob {
+    _permit: OwnedSemaphorePermit,
+    request_id: JsonRpcId,
+    kind: SkillJobKind,
+    completion: oneshot::Receiver<std::thread::Result<Value>>,
+    worker: std::thread::JoinHandle<()>,
 }
 
 async fn run_dispatcher(
@@ -178,17 +267,26 @@ async fn run_dispatcher(
         };
 
         let running_request_id = job.request_id.clone();
-        let mut running = Box::pin(execute_job(job));
+        let running_kind = job.kind.clone();
+        // Starting is deliberately synchronous: after a job leaves the queue it is either
+        // running or has a start-failure response. No shutdown await-point may exist between
+        // dequeue and worker admission, otherwise shutdown could start a mutation merely by
+        // polling its cleanup path.
+        let started = match start_job(job) {
+            Ok(started) => started,
+            Err(response) => {
+                let _ = outbound.send(response);
+                continue;
+            }
+        };
+        let mut running = Box::pin(finish_started_job(started));
         let response = tokio::select! {
             biased;
             _ = &mut shutdown => {
                 cancel_queued_jobs(&mut receiver, &outbound);
                 let response = match tokio::time::timeout(shutdown_grace, &mut running).await {
                     Ok(response) => response,
-                    Err(_) => worker_failure_response(
-                        running_request_id,
-                        SKILL_DISPATCH_TIMED_OUT_MESSAGE,
-                    ),
+                    Err(_) => running_timeout_response(running_request_id, &running_kind),
                 };
                 let _ = outbound.send(response);
                 return;
@@ -205,46 +303,169 @@ fn cancel_queued_jobs(
 ) {
     receiver.close();
     while let Ok(job) = receiver.try_recv() {
-        let _ = outbound.send(worker_failure_response(
-            job.request_id,
-            SKILL_DISPATCH_CANCELLED_MESSAGE,
-        ));
+        let response = match &job.kind {
+            SkillJobKind::Read => {
+                worker_failure_response(job.request_id.clone(), SKILL_DISPATCH_CANCELLED_MESSAGE)
+            }
+            SkillJobKind::Mutation(mutation) => mutation_error_response(
+                job.request_id.clone(),
+                mutation,
+                false,
+                SkillInstallationErrorCodeDto::Cancelled,
+                SKILL_MUTATION_CANCELLED_MESSAGE,
+            ),
+        };
+        let _ = outbound.send(response);
         // Dropping the job releases its admission permit and task closure.
     }
 }
 
-async fn execute_job(job: QueuedSkillJob) -> Value {
+fn start_job(job: QueuedSkillJob) -> Result<StartedSkillJob, Value> {
+    start_job_with_spawner(job, |worker| {
+        std::thread::Builder::new()
+            .name("skill-filesystem".to_string())
+            .spawn(worker)
+    })
+}
+
+fn start_job_with_spawner<S>(job: QueuedSkillJob, spawn: S) -> Result<StartedSkillJob, Value>
+where
+    S: FnOnce(SkillWorkerTask) -> std::io::Result<std::thread::JoinHandle<()>>,
+{
     let QueuedSkillJob {
         permit,
         request_id,
+        kind,
         task,
     } = job;
-    let _permit = permit;
     let (completion_tx, completion_rx) = oneshot::channel();
-    let worker = std::thread::Builder::new()
-        .name("skill-discovery".to_string())
-        .spawn(move || {
-            let _ = completion_tx.send(catch_unwind(AssertUnwindSafe(task)));
-        });
-    let worker = match worker {
-        Ok(worker) => worker,
-        Err(error) => {
-            return worker_failure_response(
-                request_id,
-                &format!("Skill discovery request worker could not start: {error}"),
-            );
-        }
-    };
-    let worker_result = completion_rx.await;
+    let worker_task: SkillWorkerTask = Box::new(move || {
+        let _ = completion_tx.send(catch_unwind(AssertUnwindSafe(task)));
+    });
+    let worker =
+        spawn(worker_task).map_err(|_| worker_start_failure_response(request_id.clone(), &kind))?;
+    Ok(StartedSkillJob {
+        _permit: permit,
+        request_id,
+        kind,
+        completion: completion_rx,
+        worker,
+    })
+}
+
+async fn finish_started_job(job: StartedSkillJob) -> Value {
+    let StartedSkillJob {
+        _permit,
+        request_id,
+        kind,
+        completion,
+        worker,
+    } = job;
+    let worker_result = completion.await;
     drop(worker);
     match worker_result {
         Ok(Ok(response)) => response,
-        Ok(Err(_)) => worker_failure_response(request_id, SKILL_DISPATCH_PANICKED_MESSAGE),
-        Err(error) => worker_failure_response(
+        Ok(Err(_)) => {
+            worker_execution_failure_response(request_id, &kind, SKILL_DISPATCH_PANICKED_MESSAGE)
+        }
+        Err(error) => worker_execution_failure_response(
             request_id,
-            &format!("Skill discovery request worker stopped without a response: {error}"),
+            &kind,
+            &format!("Skill filesystem request worker stopped without a response: {error}"),
         ),
     }
+}
+
+fn worker_start_failure_response(request_id: JsonRpcId, kind: &SkillJobKind) -> Value {
+    match kind {
+        SkillJobKind::Read => {
+            worker_failure_response(request_id, SKILL_DISPATCH_WORKER_UNAVAILABLE_MESSAGE)
+        }
+        SkillJobKind::Mutation(mutation) => mutation_error_response(
+            request_id,
+            mutation,
+            false,
+            SkillInstallationErrorCodeDto::Unavailable,
+            SKILL_MUTATION_UNAVAILABLE_MESSAGE,
+        ),
+    }
+}
+
+fn running_timeout_response(request_id: JsonRpcId, kind: &SkillJobKind) -> Value {
+    match kind {
+        SkillJobKind::Read => worker_failure_response(request_id, SKILL_DISPATCH_TIMED_OUT_MESSAGE),
+        SkillJobKind::Mutation(mutation) => mutation_error_response(
+            request_id,
+            mutation,
+            true,
+            SkillInstallationErrorCodeDto::CommitIndeterminate,
+            SKILL_MUTATION_INDETERMINATE_MESSAGE,
+        ),
+    }
+}
+
+fn worker_execution_failure_response(
+    request_id: JsonRpcId,
+    kind: &SkillJobKind,
+    message: &str,
+) -> Value {
+    match kind {
+        SkillJobKind::Read => worker_failure_response(request_id, message),
+        // A mutation closure can panic or lose its completion signal after its
+        // receipt commit point. Conservatively preserve retry-safe semantics.
+        SkillJobKind::Mutation(mutation) => mutation_error_response(
+            request_id,
+            mutation,
+            true,
+            SkillInstallationErrorCodeDto::CommitIndeterminate,
+            message,
+        ),
+    }
+}
+
+fn mutation_error_response(
+    request_id: JsonRpcId,
+    mutation: &SkillMutationJob,
+    commit_may_have_succeeded: bool,
+    code: SkillInstallationErrorCodeDto,
+    message: &str,
+) -> Value {
+    let fallback_request_id = request_id.clone();
+    let operation = match mutation.operation {
+        SkillInstallationOperation::Install => SkillInstallationOperationDto::Install,
+        SkillInstallationOperation::Update => SkillInstallationOperationDto::Update,
+        SkillInstallationOperation::Uninstall => SkillInstallationOperationDto::Uninstall,
+        _ => return worker_failure_response(fallback_request_id, message),
+    };
+    let (installation_id, skill_id) = match &mutation.target {
+        SkillMutationTarget::InstallationId(installation_id) => {
+            (Some(installation_id.as_str().to_string()), None)
+        }
+        SkillMutationTarget::SkillId(skill_id) => (None, Some(skill_id.as_str().to_string())),
+    };
+    let data = SkillInstallationErrorData {
+        error_type: SkillInstallationErrorTypeDto::SkillInstallation,
+        operation,
+        code,
+        recovery: SkillInstallationRecoveryDto::RetrySameRequest,
+        message: message.to_string(),
+        commit_may_have_succeeded,
+        installation_id,
+        skill_id,
+        diagnostic_code: None,
+        intended_revision: None,
+        expected_revision: None,
+        actual_revision: None,
+        capacity: None,
+        limit: None,
+    };
+    serde_json::to_value(error_with_data(
+        Some(request_id),
+        SKILL_INSTALLATION_ERROR_CODE,
+        message,
+        serde_json::to_value(data).expect("Skill installation error data must serialize"),
+    ))
+    .unwrap_or_else(|_| worker_failure_response(fallback_request_id, message))
 }
 
 fn worker_failure_response(request_id: JsonRpcId, message: &str) -> Value {
@@ -265,7 +486,7 @@ fn worker_failure_response(request_id: JsonRpcId, message: &str) -> Value {
         );
         error.insert(
             "message".to_string(),
-            Value::String("Skill discovery request worker failed.".to_string()),
+            Value::String("Skill filesystem request worker failed.".to_string()),
         );
 
         let mut response = serde_json::Map::new();
@@ -291,6 +512,14 @@ mod tests {
         serde_json::json!({ "label": value })
     }
 
+    fn installation_id() -> SkillInstallationId {
+        SkillInstallationId::parse("0190b0f2-7c50-7cc0-8b25-3bb80f08b334").unwrap()
+    }
+
+    fn installed_skill_id() -> SkillId {
+        SkillId::parse(format!("installed:user:{}", installation_id())).unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bounds_running_and_queued_work_together() {
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
@@ -306,7 +535,14 @@ mod tests {
             })
             .unwrap();
         started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        dispatcher.try_submit(id(2), || label("queued")).unwrap();
+        dispatcher
+            .try_submit_mutation(
+                id(2),
+                SkillInstallationOperation::Install,
+                SkillMutationTarget::InstallationId(installation_id()),
+                || label("queued"),
+            )
+            .unwrap();
         assert_eq!(
             dispatcher.try_submit(id(3), || label("rejected")),
             Err(SkillsDispatchError::Full)
@@ -356,6 +592,102 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mutation_worker_panic_is_conservatively_commit_indeterminate() {
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 2);
+
+        dispatcher
+            .try_submit_mutation(
+                JsonRpcId::String("mutation-panic".to_string()),
+                SkillInstallationOperation::Install,
+                SkillMutationTarget::InstallationId(installation_id()),
+                || panic!("test mutation panic"),
+            )
+            .unwrap();
+        let response = outbound_rx.recv().await.unwrap();
+        dispatcher.shutdown().await.unwrap();
+
+        assert_eq!(response["id"], "mutation-panic");
+        assert_eq!(response["error"]["code"], SKILL_INSTALLATION_ERROR_CODE);
+        assert_eq!(response["error"]["data"]["code"], "commitIndeterminate");
+        assert_eq!(response["error"]["data"]["operation"], "install");
+        assert_eq!(
+            response["error"]["data"]["installationId"],
+            installation_id().as_str()
+        );
+        assert_eq!(response["error"]["data"]["commitMayHaveSucceeded"], true);
+    }
+
+    #[test]
+    fn mutation_worker_start_failure_is_retryable_and_definitely_not_committed() {
+        let admission = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&admission).try_acquire_owned().unwrap();
+        let task_ran = Arc::new(AtomicBool::new(false));
+        let task_ran_from_worker = Arc::clone(&task_ran);
+        let job = QueuedSkillJob {
+            permit,
+            request_id: JsonRpcId::String("mutation-start-failure".to_string()),
+            kind: SkillJobKind::Mutation(SkillMutationJob {
+                operation: SkillInstallationOperation::Update,
+                target: SkillMutationTarget::SkillId(installed_skill_id()),
+            }),
+            task: Box::new(move || {
+                task_ran_from_worker.store(true, Ordering::Release);
+                label("must-not-run")
+            }),
+        };
+
+        let response = match start_job_with_spawner(job, |_worker| {
+            Err(std::io::Error::other("forced worker start failure"))
+        }) {
+            Ok(_) => panic!("forced worker start failure unexpectedly succeeded"),
+            Err(response) => response,
+        };
+
+        assert!(!task_ran.load(Ordering::Acquire));
+        assert_eq!(admission.available_permits(), 1);
+        assert_eq!(response["id"], "mutation-start-failure");
+        assert_eq!(response["error"]["code"], SKILL_INSTALLATION_ERROR_CODE);
+        assert_eq!(
+            response["error"]["message"],
+            SKILL_MUTATION_UNAVAILABLE_MESSAGE
+        );
+        assert_eq!(response["error"]["data"]["code"], "unavailable");
+        assert_eq!(response["error"]["data"]["recovery"], "retrySameRequest");
+        assert_eq!(response["error"]["data"]["operation"], "update");
+        assert_eq!(
+            response["error"]["data"]["skillId"],
+            installed_skill_id().as_str()
+        );
+        assert_eq!(response["error"]["data"]["commitMayHaveSucceeded"], false);
+        assert!(!response.to_string().contains("forced worker start failure"));
+    }
+
+    #[test]
+    fn mutation_admission_failure_preserves_retry_identity() {
+        let response = mutation_admission_error_response(
+            id(27),
+            SkillInstallationOperation::Install,
+            SkillMutationTarget::InstallationId(installation_id()),
+            SkillsDispatchError::Full,
+        );
+
+        assert_eq!(response["id"], 27);
+        assert_eq!(response["error"]["code"], SKILL_INSTALLATION_ERROR_CODE);
+        assert_eq!(
+            response["error"]["message"],
+            SKILL_DISPATCH_QUEUE_FULL_MESSAGE
+        );
+        assert_eq!(response["error"]["data"]["code"], "unavailable");
+        assert_eq!(response["error"]["data"]["operation"], "install");
+        assert_eq!(
+            response["error"]["data"]["installationId"],
+            installation_id().as_str()
+        );
+        assert_eq!(response["error"]["data"]["commitMayHaveSucceeded"], false);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_cancels_queued_jobs_and_waits_for_running_work() {
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
         let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 3);
@@ -397,6 +729,63 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_marks_a_queued_mutation_as_not_started() {
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let dispatcher = SkillsDispatcher::with_limit(outbound_tx, 3);
+        let queued_ran = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+
+        dispatcher
+            .try_submit(id(1), move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                label("running-read")
+            })
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let queued_ran_from_task = Arc::clone(&queued_ran);
+        dispatcher
+            .try_submit_mutation(
+                id(2),
+                SkillInstallationOperation::Update,
+                SkillMutationTarget::SkillId(installed_skill_id()),
+                move || {
+                    queued_ran_from_task.store(true, Ordering::Release);
+                    label("must-not-run")
+                },
+            )
+            .unwrap();
+
+        let shutdown = tokio::spawn(dispatcher.shutdown());
+        let cancelled = outbound_rx.recv().await.unwrap();
+
+        assert_eq!(cancelled["id"], 2);
+        assert_eq!(cancelled["error"]["code"], SKILL_INSTALLATION_ERROR_CODE);
+        assert_eq!(
+            cancelled["error"]["message"],
+            SKILL_MUTATION_CANCELLED_MESSAGE
+        );
+        assert_eq!(cancelled["error"]["data"]["type"], "skillInstallation");
+        assert_eq!(cancelled["error"]["data"]["code"], "cancelled");
+        assert_eq!(cancelled["error"]["data"]["recovery"], "retrySameRequest");
+        assert_eq!(cancelled["error"]["data"]["operation"], "update");
+        assert_eq!(
+            cancelled["error"]["data"]["skillId"],
+            installed_skill_id().as_str()
+        );
+        assert!(cancelled["error"]["data"].get("installationId").is_none());
+        assert_eq!(cancelled["error"]["data"]["commitMayHaveSucceeded"], false);
+        assert!(cancelled["error"]["data"].get("commitState").is_none());
+        assert!(!queued_ran.load(Ordering::Acquire));
+        assert!(!shutdown.is_finished());
+
+        release_tx.send(()).unwrap();
+        assert_eq!(outbound_rx.recv().await.unwrap()["label"], "running-read");
+        shutdown.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutdown_has_a_deadline_for_an_unresponsive_filesystem_worker() {
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
         let dispatcher = SkillsDispatcher::with_limit_and_shutdown_grace(
@@ -427,6 +816,61 @@ mod tests {
             response["error"]["message"],
             SKILL_DISPATCH_TIMED_OUT_MESSAGE
         );
+        assert!(response["error"].get("data").is_none());
+        release_tx.send(()).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn running_mutation_shutdown_timeout_reports_an_indeterminate_commit() {
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let dispatcher = SkillsDispatcher::with_limit_and_shutdown_grace(
+            outbound_tx,
+            2,
+            Duration::from_millis(25),
+        );
+        let (started_tx, started_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        dispatcher
+            .try_submit_mutation(
+                JsonRpcId::String("mutation-9".to_string()),
+                SkillInstallationOperation::Uninstall,
+                SkillMutationTarget::SkillId(installed_skill_id()),
+                move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    label("late-mutation")
+                },
+            )
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), dispatcher.shutdown())
+            .await
+            .expect("dispatcher shutdown must respect its deadline")
+            .unwrap();
+        let response = outbound_rx.recv().await.unwrap();
+
+        assert_eq!(response["id"], "mutation-9");
+        assert_eq!(response["error"]["code"], SKILL_INSTALLATION_ERROR_CODE);
+        assert_eq!(
+            response["error"]["message"],
+            SKILL_MUTATION_INDETERMINATE_MESSAGE
+        );
+        assert_eq!(response["error"]["data"]["type"], "skillInstallation");
+        assert_eq!(response["error"]["data"]["code"], "commitIndeterminate");
+        assert_eq!(response["error"]["data"]["recovery"], "retrySameRequest");
+        assert_eq!(response["error"]["data"]["operation"], "uninstall");
+        assert_eq!(
+            response["error"]["data"]["skillId"],
+            installed_skill_id().as_str()
+        );
+        assert!(response["error"]["data"].get("installationId").is_none());
+        assert_eq!(response["error"]["data"]["commitMayHaveSucceeded"], true);
+        assert_eq!(
+            response["error"]["data"]["message"],
+            SKILL_MUTATION_INDETERMINATE_MESSAGE
+        );
+        assert!(response["error"]["data"].get("commitState").is_none());
         release_tx.send(()).unwrap();
     }
 

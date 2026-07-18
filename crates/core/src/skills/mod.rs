@@ -1,6 +1,7 @@
 mod bundled;
 mod digest;
 mod discovery;
+mod installation_service;
 mod installed;
 mod managed_fs;
 mod managed_installer;
@@ -15,6 +16,11 @@ mod source;
 mod workspace;
 
 pub use bundled::{APPLICATION_BUNDLED_SKILL_SOURCE_ID, REPOSITORY_EVIDENCE_AUDITOR_LOCAL_ID};
+pub use installation_service::{
+    LocalSkillInstallRequest, LocalSkillUpdateRequest, SkillInstallationMutation,
+    SkillInstallationOperation, SkillInstallationOutcome, SkillInstallationService,
+    SkillInstallationServiceError, SkillUninstallRequest,
+};
 pub use installed::USER_INSTALLED_SKILL_SOURCE_ID;
 pub use managed_installer::{
     ManagedSkillInstallOutcome, ManagedSkillInstallRequest, ManagedSkillInstaller,

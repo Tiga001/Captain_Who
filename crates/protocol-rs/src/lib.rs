@@ -18,6 +18,9 @@ pub const AGENT_GET_FILE_WRITE_DIFF_METHOD: &str = "agent.getFileWriteDiff";
 pub const AGENT_EVENT_NOTIFICATION_METHOD: &str = "agent.event";
 pub const SEARCH_SEARCH_CHATS_METHOD: &str = "search.searchChats";
 pub const SKILLS_LIST_METHOD: &str = "skills.list";
+pub const SKILLS_INSTALL_LOCAL_METHOD: &str = "skills.installLocal";
+pub const SKILLS_UPDATE_LOCAL_METHOD: &str = "skills.updateLocal";
+pub const SKILLS_UNINSTALL_METHOD: &str = "skills.uninstall";
 pub const GIT_INSPECT_REPOSITORY_METHOD: &str = "git.inspectRepository";
 pub const GIT_GET_REVIEW_SUMMARY_METHOD: &str = "git.getReviewSummary";
 pub const GIT_GET_REVIEW_FILE_DIFF_METHOD: &str = "git.getReviewFileDiff";
@@ -153,6 +156,220 @@ pub struct SkillsListRequest {
 }
 
 pub const SKILL_CATALOG_SCHEMA_VERSION: u32 = 4;
+pub const SKILL_MUTATION_SCHEMA_VERSION: u32 = 1;
+pub const SKILL_INSTALLATION_ERROR_CODE: i64 = -32010;
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsInstallLocalRequest {
+    pub installation_id: String,
+    pub directory: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsUpdateLocalRequest {
+    pub skill_id: String,
+    pub expected_revision: String,
+    pub directory: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsUninstallRequest {
+    pub skill_id: String,
+    pub expected_revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillMutationResponse {
+    schema_version: u32,
+    installation_id: String,
+    skill_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+    outcome: SkillMutationOutcomeDto,
+}
+
+impl SkillMutationResponse {
+    pub fn install(
+        installation_id: String,
+        skill_id: String,
+        revision: String,
+        outcome: SkillInstallMutationOutcomeDto,
+    ) -> Self {
+        Self {
+            schema_version: SKILL_MUTATION_SCHEMA_VERSION,
+            installation_id,
+            skill_id,
+            revision: Some(revision),
+            outcome: outcome.into(),
+        }
+    }
+
+    pub fn update(
+        installation_id: String,
+        skill_id: String,
+        revision: String,
+        outcome: SkillUpdateMutationOutcomeDto,
+    ) -> Self {
+        Self {
+            schema_version: SKILL_MUTATION_SCHEMA_VERSION,
+            installation_id,
+            skill_id,
+            revision: Some(revision),
+            outcome: outcome.into(),
+        }
+    }
+
+    pub fn removal(
+        installation_id: String,
+        skill_id: String,
+        outcome: SkillRemovalMutationOutcomeDto,
+    ) -> Self {
+        Self {
+            schema_version: SKILL_MUTATION_SCHEMA_VERSION,
+            installation_id,
+            skill_id,
+            revision: None,
+            outcome: outcome.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum SkillMutationOutcomeDto {
+    Installed,
+    AlreadyInstalled,
+    Updated,
+    AlreadyCurrent,
+    Uninstalled,
+    AlreadyAbsent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillInstallMutationOutcomeDto {
+    Installed,
+    AlreadyInstalled,
+}
+
+impl From<SkillInstallMutationOutcomeDto> for SkillMutationOutcomeDto {
+    fn from(value: SkillInstallMutationOutcomeDto) -> Self {
+        match value {
+            SkillInstallMutationOutcomeDto::Installed => Self::Installed,
+            SkillInstallMutationOutcomeDto::AlreadyInstalled => Self::AlreadyInstalled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillUpdateMutationOutcomeDto {
+    Updated,
+    AlreadyCurrent,
+}
+
+impl From<SkillUpdateMutationOutcomeDto> for SkillMutationOutcomeDto {
+    fn from(value: SkillUpdateMutationOutcomeDto) -> Self {
+        match value {
+            SkillUpdateMutationOutcomeDto::Updated => Self::Updated,
+            SkillUpdateMutationOutcomeDto::AlreadyCurrent => Self::AlreadyCurrent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillRemovalMutationOutcomeDto {
+    Uninstalled,
+    AlreadyAbsent,
+}
+
+impl From<SkillRemovalMutationOutcomeDto> for SkillMutationOutcomeDto {
+    fn from(value: SkillRemovalMutationOutcomeDto) -> Self {
+        match value {
+            SkillRemovalMutationOutcomeDto::Uninstalled => Self::Uninstalled,
+            SkillRemovalMutationOutcomeDto::AlreadyAbsent => Self::AlreadyAbsent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInstallationOperationDto {
+    Install,
+    Update,
+    Uninstall,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInstallationErrorCodeDto {
+    PreparationFailed,
+    InvalidSkill,
+    InvalidStore,
+    CapacityExceeded,
+    InstallationExists,
+    InstallationNotFound,
+    RevisionConflict,
+    StoreCorrupt,
+    Io,
+    Unavailable,
+    CommitIndeterminate,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInstallationRecoveryDto {
+    FixLocalSource,
+    RetrySameRequest,
+    RefreshCatalog,
+    FreeCapacity,
+    RepairStore,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInstallationCapacityDto {
+    Installations,
+    InstallationDirectory,
+    Packages,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallationErrorData {
+    #[serde(rename = "type")]
+    pub error_type: SkillInstallationErrorTypeDto,
+    pub operation: SkillInstallationOperationDto,
+    pub code: SkillInstallationErrorCodeDto,
+    pub recovery: SkillInstallationRecoveryDto,
+    pub message: String,
+    pub commit_may_have_succeeded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intended_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<SkillInstallationCapacityDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInstallationErrorTypeDto {
+    SkillInstallation,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -366,5 +583,214 @@ mod tests {
         );
         assert!(serde_json::from_str::<SkillSourceKindDto>("\"remote\"").is_err());
         assert!(serde_json::from_str::<SkillTrustDto>("\"userApproved\"").is_err());
+    }
+
+    #[test]
+    fn skill_mutation_requests_are_strict_camel_case_contracts() {
+        assert_eq!(SKILLS_INSTALL_LOCAL_METHOD, "skills.installLocal");
+        assert_eq!(SKILLS_UPDATE_LOCAL_METHOD, "skills.updateLocal");
+        assert_eq!(SKILLS_UNINSTALL_METHOD, "skills.uninstall");
+
+        let install = serde_json::from_value::<SkillsInstallLocalRequest>(serde_json::json!({
+            "installationId": "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+            "directory": "/tmp/local-skill"
+        }))
+        .unwrap();
+        assert_eq!(
+            install.installation_id,
+            "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d"
+        );
+        assert_eq!(install.directory, "/tmp/local-skill");
+
+        let update = serde_json::from_value::<SkillsUpdateLocalRequest>(serde_json::json!({
+            "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+            "expectedRevision": "skill-package-sha256-v1:old",
+            "directory": "/tmp/local-skill"
+        }))
+        .unwrap();
+        assert_eq!(
+            update.skill_id,
+            "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d"
+        );
+        assert_eq!(update.expected_revision, "skill-package-sha256-v1:old");
+
+        let uninstall = serde_json::from_value::<SkillsUninstallRequest>(serde_json::json!({
+            "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+            "expectedRevision": "skill-package-sha256-v1:current"
+        }))
+        .unwrap();
+        assert_eq!(
+            uninstall.skill_id,
+            "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d"
+        );
+
+        assert!(
+            serde_json::from_value::<SkillsInstallLocalRequest>(serde_json::json!({
+                "installationId": "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+                "directory": "/tmp/local-skill",
+                "storeRoot": "/tmp/attacker-controlled"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SkillsUpdateLocalRequest>(serde_json::json!({
+                "skillId": "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d",
+                "directory": "/tmp/local-skill"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn skill_mutation_v1_serializes_all_idempotent_outcomes() {
+        assert_eq!(SKILL_MUTATION_SCHEMA_VERSION, 1);
+        let install_outcomes = [
+            (SkillInstallMutationOutcomeDto::Installed, "installed"),
+            (
+                SkillInstallMutationOutcomeDto::AlreadyInstalled,
+                "alreadyInstalled",
+            ),
+        ];
+
+        for (outcome, expected) in install_outcomes {
+            let response = SkillMutationResponse::install(
+                "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d".to_string(),
+                "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d".to_string(),
+                "skill-package-sha256-v1:current".to_string(),
+                outcome,
+            );
+            let value = serde_json::to_value(response).unwrap();
+
+            assert_eq!(value["schemaVersion"], SKILL_MUTATION_SCHEMA_VERSION);
+            assert_eq!(value["outcome"], expected);
+            assert_eq!(value["revision"], "skill-package-sha256-v1:current");
+        }
+
+        let update_outcomes = [
+            (SkillUpdateMutationOutcomeDto::Updated, "updated"),
+            (
+                SkillUpdateMutationOutcomeDto::AlreadyCurrent,
+                "alreadyCurrent",
+            ),
+        ];
+
+        for (outcome, expected) in update_outcomes {
+            let response = SkillMutationResponse::update(
+                "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d".to_string(),
+                "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d".to_string(),
+                "skill-package-sha256-v1:current".to_string(),
+                outcome,
+            );
+            let value = serde_json::to_value(response).unwrap();
+
+            assert_eq!(value["schemaVersion"], SKILL_MUTATION_SCHEMA_VERSION);
+            assert_eq!(value["outcome"], expected);
+            assert_eq!(value["revision"], "skill-package-sha256-v1:current");
+        }
+
+        let removal_outcomes = [
+            (SkillRemovalMutationOutcomeDto::Uninstalled, "uninstalled"),
+            (
+                SkillRemovalMutationOutcomeDto::AlreadyAbsent,
+                "alreadyAbsent",
+            ),
+        ];
+        for (outcome, expected) in removal_outcomes {
+            let response = SkillMutationResponse::removal(
+                "018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d".to_string(),
+                "installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d".to_string(),
+                outcome,
+            );
+            let value = serde_json::to_value(response).unwrap();
+
+            assert_eq!(value["outcome"], expected);
+            assert!(value.get("revision").is_none());
+        }
+    }
+
+    #[test]
+    fn skill_mutation_v1_matches_the_shared_rust_typescript_wire_golden() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../packages/protocol/fixtures/skill-mutation-v1.json"
+        ))
+        .unwrap();
+        assert_eq!(golden["schemaVersion"], SKILL_MUTATION_SCHEMA_VERSION);
+
+        for case in golden["cases"].as_array().unwrap() {
+            let expected = &case["response"];
+            let installation_id = expected["installationId"].as_str().unwrap().to_string();
+            let skill_id = expected["skillId"].as_str().unwrap().to_string();
+            let outcome = expected["outcome"].as_str().unwrap();
+            let response = match (case["operation"].as_str().unwrap(), outcome) {
+                ("install", "installed") => SkillMutationResponse::install(
+                    installation_id,
+                    skill_id,
+                    expected["revision"].as_str().unwrap().to_string(),
+                    SkillInstallMutationOutcomeDto::Installed,
+                ),
+                ("install", "alreadyInstalled") => SkillMutationResponse::install(
+                    installation_id,
+                    skill_id,
+                    expected["revision"].as_str().unwrap().to_string(),
+                    SkillInstallMutationOutcomeDto::AlreadyInstalled,
+                ),
+                ("update", "updated") => SkillMutationResponse::update(
+                    installation_id,
+                    skill_id,
+                    expected["revision"].as_str().unwrap().to_string(),
+                    SkillUpdateMutationOutcomeDto::Updated,
+                ),
+                ("update", "alreadyCurrent") => SkillMutationResponse::update(
+                    installation_id,
+                    skill_id,
+                    expected["revision"].as_str().unwrap().to_string(),
+                    SkillUpdateMutationOutcomeDto::AlreadyCurrent,
+                ),
+                ("uninstall", "uninstalled") => SkillMutationResponse::removal(
+                    installation_id,
+                    skill_id,
+                    SkillRemovalMutationOutcomeDto::Uninstalled,
+                ),
+                ("uninstall", "alreadyAbsent") => SkillMutationResponse::removal(
+                    installation_id,
+                    skill_id,
+                    SkillRemovalMutationOutcomeDto::AlreadyAbsent,
+                ),
+                combination => panic!("unexpected shared Skill mutation case {combination:?}"),
+            };
+
+            assert_eq!(serde_json::to_value(response).unwrap(), *expected);
+        }
+    }
+
+    #[test]
+    fn skill_installation_error_data_is_stable_and_never_contains_a_directory() {
+        let data = SkillInstallationErrorData {
+            error_type: SkillInstallationErrorTypeDto::SkillInstallation,
+            operation: SkillInstallationOperationDto::Update,
+            code: SkillInstallationErrorCodeDto::CommitIndeterminate,
+            recovery: SkillInstallationRecoveryDto::RetrySameRequest,
+            message: "The update may already be visible.".to_string(),
+            commit_may_have_succeeded: true,
+            installation_id: Some("018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d".to_string()),
+            skill_id: Some("installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d".to_string()),
+            diagnostic_code: None,
+            intended_revision: Some("skill-package-sha256-v1:new".to_string()),
+            expected_revision: Some("skill-package-sha256-v1:old".to_string()),
+            actual_revision: None,
+            capacity: None,
+            limit: None,
+        };
+
+        let value = serde_json::to_value(data).unwrap();
+
+        assert_eq!(SKILL_INSTALLATION_ERROR_CODE, -32010);
+        assert_eq!(value["type"], "skillInstallation");
+        assert_eq!(value["operation"], "update");
+        assert_eq!(value["code"], "commitIndeterminate");
+        assert_eq!(value["recovery"], "retrySameRequest");
+        assert_eq!(value["commitMayHaveSucceeded"], true);
+        assert!(value.get("directory").is_none());
+        assert!(value.get("actualRevision").is_none());
     }
 }
