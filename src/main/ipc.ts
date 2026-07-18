@@ -109,6 +109,23 @@ async function selectProjectDirectory(
   return createProjectRecord(result.filePaths[0])
 }
 
+/** Selects one local Skill package root without granting the renderer broader filesystem access. */
+export async function selectInstallationDirectory(
+  event: IpcMainInvokeEvent
+): Promise<string | null> {
+  const result = await showOpenDialog(event, {
+    title: 'Select Skill installation directory',
+    properties: ['openDirectory']
+  })
+
+  const selectedPath = result.filePaths[0]
+  if (result.canceled || !selectedPath) {
+    return null
+  }
+
+  return resolve(selectedPath)
+}
+
 async function selectProfileAvatar(event: IpcMainInvokeEvent): Promise<string | null> {
   const result = await showOpenDialog(event, {
     title: 'Select profile avatar',
@@ -294,6 +311,13 @@ export function registerHostIpc(
       }
     }
   })
+  coreServer.onSkillsChanged((event) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send('host:skills.changed', event)
+      }
+    }
+  })
 
   ipcMain.handle('host:core.ping', (_event, input) => coreServer.ping(input))
   ipcMain.handle('host:app.getWindowState', (event) => getAppWindowState(getInvokeWindow(event)))
@@ -328,6 +352,27 @@ export function registerHostIpc(
   )
   ipcMain.handle('host:search.searchChats', (_event, input) => coreServer.searchChats(input))
   ipcMain.handle('host:skills.list', (_event, input) => coreServer.listSkills(input))
+  ipcMain.handle('host:skills.selectInstallationDirectory', (event) =>
+    selectInstallationDirectory(event)
+  )
+  ipcMain.handle('host:skills.inspectInstallation', (_event, input) =>
+    captureHostInvocation(() => coreServer.inspectSkillInstallation(input))
+  )
+  ipcMain.handle('host:skills.commitInstallation', (_event, input) =>
+    captureHostInvocation(() => coreServer.commitSkillInstallation(input))
+  )
+  ipcMain.handle('host:skills.cancelPreparation', (_event, input) =>
+    captureHostInvocation(() => coreServer.cancelSkillPreparation(input))
+  )
+  ipcMain.handle('host:skills.listManagement', (_event, input) =>
+    captureHostInvocation(() => coreServer.listSkillManagement(input))
+  )
+  ipcMain.handle('host:skills.setEnabled', (_event, input) =>
+    captureHostInvocation(() => coreServer.setSkillEnabled(input))
+  )
+  ipcMain.handle('host:skills.uninstall', (_event, input) =>
+    captureHostInvocation(() => coreServer.uninstallSkill(input))
+  )
   ipcMain.handle('host:git.inspectRepository', (_event, input) =>
     coreServer.inspectGitRepository(input)
   )

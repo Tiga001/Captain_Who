@@ -6,15 +6,22 @@
 //! call the managed-store installer.
 
 use super::digest::package_revision;
-use super::model::{SkillDiagnosticCode, SkillRevision};
+use super::model::{
+    SkillDiagnosticCode, SkillResourceDescriptor, SkillResourceIndex, SkillRevision,
+    SKILL_PACKAGE_FORMAT_VERSION, SKILL_PACKAGE_FORMAT_VERSION_V2,
+};
 use super::origin::SkillPackageOrigin;
+use super::package::{
+    PackageManifest, PackageManifestEntry, SkillPackagePath, MAX_SKILL_PACKAGE_BYTES,
+    MAX_SKILL_PACKAGE_DIRECTORIES, MAX_SKILL_PACKAGE_DIRECTORY_ENTRIES, MAX_SKILL_PACKAGE_FILES,
+    MAX_SKILL_RESOURCE_FILE_BYTES,
+};
 use super::parser::parse_skill_document;
 use super::workspace::{
     is_symlink_or_reparse, metadata_if_present, read_bounded_verified, verify_opened_file_identity,
-    verify_plain_directory, BoundedReadError, ByteBudget, MAX_SKILL_FILE_BYTES, SKILL_FILE_NAME,
+    verify_plain_directory, BoundedReadError, ByteBudget, MAX_SKILL_FILE_BYTES,
 };
 use std::error::Error;
-use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::ops::Range;
@@ -32,13 +39,16 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 pub const LOCAL_DIRECTORY_SKILL_ORIGIN_PROVIDER: &str = "local-directory";
 
-/// An exact package byte snapshot that has passed all package-v1 validation.
+/// An exact package byte snapshot that has passed package-format validation.
 ///
 /// The type has no unchecked constructor and exposes no mutable contents. Once
 /// prepared, installation never reads the acquisition path again.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedSkillPackage {
+    format_version: u32,
     source: Arc<str>,
+    resources: Arc<[PreparedSkillResource]>,
+    manifest_bytes: Option<Arc<[u8]>>,
     revision: SkillRevision,
     name: String,
     description: String,
@@ -50,9 +60,11 @@ impl fmt::Debug for PreparedSkillPackage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PreparedSkillPackage")
+            .field("format_version", &self.format_version)
             .field("revision", &self.revision)
             .field("name", &self.name)
             .field("source_bytes", &self.source.len())
+            .field("resource_count", &self.resources.len())
             .field("instructions_range", &self.instructions_range)
             .field("origin", &self.origin)
             .finish()
@@ -69,7 +81,10 @@ impl PreparedSkillPackage {
             .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
         let revision = package_revision(validated.source.as_bytes());
         Ok(Self {
+            format_version: SKILL_PACKAGE_FORMAT_VERSION,
             source: validated.source,
+            resources: Arc::from([]),
+            manifest_bytes: None,
             revision,
             name: validated.name,
             description: validated.description,
@@ -78,8 +93,8 @@ impl PreparedSkillPackage {
         })
     }
 
-    /// Imports a package-v1 local directory containing only exact-case
-    /// `SKILL.md`, then captures and validates its bytes.
+    /// Imports an exact-case `SKILL.md` and any supported resource trees from
+    /// a local directory, then captures and validates their bytes.
     ///
     /// The returned package does not retain or trust the directory: all model
     /// input comes from the owned, validated byte snapshot. The caller must
@@ -98,8 +113,99 @@ impl PreparedSkillPackage {
                     format!("Invalid local-directory origin reference: {error}"),
                 )
             })?;
-        let bytes = read_local_skill_directory(directory.as_ref())?;
-        Self::from_bytes(bytes, origin)
+        let files = read_local_skill_directory(directory.as_ref())?;
+        Self::from_files(files, origin)
+    }
+
+    /// Constructs a fully validated package snapshot from an acquisition
+    /// adapter's owned file bytes. Paths are logical, forward-slash relative
+    /// paths. A package containing only SKILL.md retains format-v1 identity;
+    /// the presence of any supported sibling resource selects format v2.
+    pub fn from_files(
+        files: Vec<(String, Vec<u8>)>,
+        origin: SkillPackageOrigin,
+    ) -> Result<Self, SkillPackagePreparationError> {
+        if files.is_empty() || files.len() > MAX_SKILL_PACKAGE_FILES {
+            return Err(SkillPackagePreparationError::new(
+                SkillDiagnosticCode::TooManyEntries,
+                format!("Skill package must contain 1 to {MAX_SKILL_PACKAGE_FILES} files."),
+            ));
+        }
+
+        let mut canonical = Vec::with_capacity(files.len());
+        for (path, bytes) in files {
+            let path = SkillPackagePath::parse(path)
+                .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
+            canonical.push((path, bytes));
+        }
+        canonical.sort_by(|left, right| left.0.cmp(&right.0));
+        if canonical.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(SkillPackagePreparationError::new(
+                SkillDiagnosticCode::InvalidResourcePath,
+                "Skill package contains the same canonical path more than once.",
+            ));
+        }
+
+        let skill_index = canonical
+            .binary_search_by(|(path, _)| path.as_str().cmp(super::workspace::SKILL_FILE_NAME))
+            .map_err(|_| {
+                SkillPackagePreparationError::new(
+                    SkillDiagnosticCode::MissingSkillFile,
+                    "Skill package does not contain an exact-case SKILL.md file.",
+                )
+            })?;
+        if canonical.len() == 1 {
+            let (_, bytes) = canonical.pop().expect("one package file");
+            return Self::from_bytes(bytes, origin);
+        }
+
+        let skill_bytes = canonical[skill_index].1.clone();
+        let validated = validate_installable_skill_bytes(skill_bytes)
+            .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
+        let manifest = PackageManifest::new(
+            canonical
+                .iter()
+                .map(|(path, bytes)| PackageManifestEntry::from_bytes(path.clone(), bytes))
+                .collect(),
+        )
+        .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
+        let revision = manifest.revision();
+        let manifest_bytes = manifest
+            .encode()
+            .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
+
+        let resources = canonical
+            .into_iter()
+            .filter(|(path, _)| path.as_str() != super::workspace::SKILL_FILE_NAME)
+            .map(|(path, bytes)| {
+                let manifest_entry = manifest
+                    .files()
+                    .iter()
+                    .find(|entry| entry.path() == path.as_str())
+                    .expect("manifest contains prepared resource");
+                PreparedSkillResource {
+                    descriptor: manifest_entry
+                        .resource_descriptor()
+                        .expect("non-entrypoint has resource kind"),
+                    bytes: bytes.into(),
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(Self {
+            format_version: SKILL_PACKAGE_FORMAT_VERSION_V2,
+            source: validated.source,
+            resources: resources.into(),
+            manifest_bytes: Some(manifest_bytes.into()),
+            revision,
+            name: validated.name,
+            description: validated.description,
+            instructions_range: validated.instructions_range,
+            origin,
+        })
+    }
+
+    pub fn format_version(&self) -> u32 {
+        self.format_version
     }
 
     pub fn revision(&self) -> &SkillRevision {
@@ -124,6 +230,39 @@ impl PreparedSkillPackage {
 
     pub fn instructions(&self) -> &str {
         &self.source[self.instructions_range.clone()]
+    }
+
+    pub fn resource_index(&self) -> SkillResourceIndex {
+        SkillResourceIndex::new(
+            self.resources
+                .iter()
+                .map(|resource| resource.descriptor.clone())
+                .collect(),
+        )
+    }
+
+    pub(super) fn resources(&self) -> &[PreparedSkillResource] {
+        &self.resources
+    }
+
+    pub(super) fn manifest_bytes(&self) -> Option<&[u8]> {
+        self.manifest_bytes.as_deref()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct PreparedSkillResource {
+    descriptor: SkillResourceDescriptor,
+    bytes: Arc<[u8]>,
+}
+
+impl PreparedSkillResource {
+    pub fn descriptor(&self) -> &SkillResourceDescriptor {
+        &self.descriptor
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -224,7 +363,9 @@ fn content_error(
     }
 }
 
-fn read_local_skill_directory(directory: &Path) -> Result<Vec<u8>, SkillPackagePreparationError> {
+fn read_local_skill_directory(
+    directory: &Path,
+) -> Result<Vec<(String, Vec<u8>)>, SkillPackagePreparationError> {
     if !directory.is_absolute() {
         return Err(SkillPackagePreparationError::new(
             SkillDiagnosticCode::InvalidRoot,
@@ -262,73 +403,172 @@ fn read_local_skill_directory(directory: &Path) -> Result<Vec<u8>, SkillPackageP
     .map_err(|issue| SkillPackagePreparationError::new(issue.code, issue.message))?;
     let directory_handle = open_local_directory(directory, &metadata, &canonical_directory)?;
 
-    let skill_path = exact_local_skill_path(directory)?;
-    let file_metadata = metadata_if_present(&skill_path)
-        .map_err(|error| preparation_io("Cannot inspect local SKILL.md", error))?
-        .ok_or_else(|| {
-            SkillPackagePreparationError::new(
-                SkillDiagnosticCode::PathChangedDuringRead,
-                "Local SKILL.md disappeared while it was inspected.",
-            )
-        })?;
-    if is_symlink_or_reparse(&file_metadata) {
-        return Err(SkillPackagePreparationError::new(
-            SkillDiagnosticCode::SymlinkNotAllowed,
-            "Local Skill acquisition does not follow a symlinked SKILL.md.",
-        ));
-    }
-    if !file_metadata.is_file() {
-        return Err(SkillPackagePreparationError::new(
-            SkillDiagnosticCode::MissingSkillFile,
-            "Local SKILL.md is not a regular file.",
-        ));
-    }
-    let canonical_skill_file = skill_path
-        .canonicalize()
-        .map_err(|error| preparation_io("Cannot resolve local SKILL.md", error))?;
-    if !canonical_skill_file.starts_with(&canonical_directory) {
-        return Err(SkillPackagePreparationError::new(
-            SkillDiagnosticCode::RootEscapesWorkspace,
-            "Local SKILL.md resolves outside its acquisition directory.",
-        ));
-    }
-    let mut budget = ByteBudget::new(MAX_SKILL_FILE_BYTES.saturating_add(1));
-    let bytes = read_bounded_verified(
-        &skill_path,
-        &canonical_skill_file,
-        &file_metadata,
+    let mut files = Vec::new();
+    let mut directory_count = 0usize;
+    let mut budget = ByteBudget::new(MAX_SKILL_PACKAGE_BYTES.saturating_add(1));
+    collect_local_package_files(
+        directory,
         &canonical_directory,
-        &canonical_directory,
-        MAX_SKILL_FILE_BYTES,
+        directory,
+        "",
+        &mut files,
+        &mut directory_count,
         &mut budget,
-    )
-    .map_err(|error| match error {
-        BoundedReadError::TooLarge | BoundedReadError::CatalogBudgetExceeded => {
-            SkillPackagePreparationError::new(
-                SkillDiagnosticCode::SkillFileTooLarge,
-                format!("SKILL.md exceeds {MAX_SKILL_FILE_BYTES} bytes."),
-            )
-        }
-        BoundedReadError::Io(error) => preparation_io("Cannot read local SKILL.md", error),
-        BoundedReadError::PathChanged(reason) => SkillPackagePreparationError::new(
-            SkillDiagnosticCode::PathChangedDuringRead,
-            format!("Local SKILL.md changed while it was read: {reason}"),
-        ),
-    })?;
+    )?;
     verify_plain_directory(
         directory,
         &canonical_directory,
-        "The local Skill directory changed while SKILL.md was read.",
+        "The local Skill directory changed while its package files were read.",
     )
     .map_err(|issue| SkillPackagePreparationError::new(issue.code, issue.message))?;
-    if exact_local_skill_path(directory)? != skill_path {
+    verify_local_directory_binding(&directory_handle, directory, &canonical_directory)?;
+    Ok(files)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_local_package_files(
+    directory: &Path,
+    canonical_directory: &Path,
+    package_root: &Path,
+    logical_directory: &str,
+    files: &mut Vec<(String, Vec<u8>)>,
+    directory_count: &mut usize,
+    budget: &mut ByteBudget,
+) -> Result<(), SkillPackagePreparationError> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| preparation_io("Cannot read local Skill package directory", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| preparation_io("Cannot inspect local Skill package entry", error))?;
+    if entries.len() > MAX_SKILL_PACKAGE_DIRECTORY_ENTRIES {
         return Err(SkillPackagePreparationError::new(
-            SkillDiagnosticCode::PathChangedDuringRead,
-            "The local SKILL.md path changed while it was read.",
+            SkillDiagnosticCode::TooManyEntries,
+            format!(
+                "A Skill package directory contains more than {MAX_SKILL_PACKAGE_DIRECTORY_ENTRIES} entries."
+            ),
         ));
     }
-    verify_local_directory_binding(&directory_handle, directory, &canonical_directory)?;
-    Ok(bytes)
+    entries.sort_by_key(fs::DirEntry::file_name);
+
+    for entry in entries {
+        let name = entry.file_name().into_string().map_err(|_| {
+            SkillPackagePreparationError::new(
+                SkillDiagnosticCode::UnsupportedPathEncoding,
+                "Skill package paths must use valid UTF-8 names.",
+            )
+        })?;
+        let logical_path = if logical_directory.is_empty() {
+            name.clone()
+        } else {
+            format!("{logical_directory}/{name}")
+        };
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| preparation_io("Cannot inspect local Skill package entry", error))?;
+        if is_symlink_or_reparse(&metadata) {
+            return Err(SkillPackagePreparationError::new(
+                SkillDiagnosticCode::SymlinkNotAllowed,
+                format!("Local Skill package entry `{logical_path}` cannot be a symlink or reparse point."),
+            ));
+        }
+        let canonical_path = path
+            .canonicalize()
+            .map_err(|error| preparation_io("Cannot resolve local Skill package entry", error))?;
+        if !canonical_path.starts_with(canonical_directory) {
+            return Err(SkillPackagePreparationError::new(
+                SkillDiagnosticCode::RootEscapesWorkspace,
+                format!("Local Skill package entry `{logical_path}` resolves outside its acquisition directory."),
+            ));
+        }
+
+        if metadata.is_dir() {
+            *directory_count = directory_count.saturating_add(1);
+            if *directory_count > MAX_SKILL_PACKAGE_DIRECTORIES {
+                return Err(SkillPackagePreparationError::new(
+                    SkillDiagnosticCode::TooManyEntries,
+                    format!("Skill package contains more than {MAX_SKILL_PACKAGE_DIRECTORIES} directories."),
+                ));
+            }
+            SkillPackagePath::parse(format!("{logical_path}/.directory-contract"))
+                .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
+            verify_plain_directory(
+                &path,
+                &canonical_path,
+                "A local Skill package directory changed while it was inspected.",
+            )
+            .map_err(|issue| SkillPackagePreparationError::new(issue.code, issue.message))?;
+            collect_local_package_files(
+                &path,
+                canonical_directory,
+                package_root,
+                &logical_path,
+                files,
+                directory_count,
+                budget,
+            )?;
+            verify_plain_directory(
+                &path,
+                &canonical_path,
+                "A local Skill package directory changed while its children were read.",
+            )
+            .map_err(|issue| SkillPackagePreparationError::new(issue.code, issue.message))?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(SkillPackagePreparationError::new(
+                SkillDiagnosticCode::UnexpectedPackageEntry,
+                format!("Local Skill package entry `{logical_path}` is not a regular file."),
+            ));
+        }
+        if files.len() >= MAX_SKILL_PACKAGE_FILES {
+            return Err(SkillPackagePreparationError::new(
+                SkillDiagnosticCode::TooManyEntries,
+                format!("Skill package contains more than {MAX_SKILL_PACKAGE_FILES} files."),
+            ));
+        }
+        SkillPackagePath::parse(logical_path.clone())
+            .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
+        let max_bytes = if logical_path == super::workspace::SKILL_FILE_NAME {
+            MAX_SKILL_FILE_BYTES
+        } else {
+            MAX_SKILL_RESOURCE_FILE_BYTES
+        };
+        let bytes = read_bounded_verified(
+            &path,
+            &canonical_path,
+            &metadata,
+            canonical_directory,
+            &package_root.canonicalize().map_err(|error| {
+                preparation_io("Cannot resolve local Skill package root", error)
+            })?,
+            max_bytes,
+            budget,
+        )
+        .map_err(|error| match error {
+            BoundedReadError::TooLarge => SkillPackagePreparationError::new(
+                if logical_path == super::workspace::SKILL_FILE_NAME {
+                    SkillDiagnosticCode::SkillFileTooLarge
+                } else {
+                    SkillDiagnosticCode::ResourceFileTooLarge
+                },
+                format!("Skill package file `{logical_path}` exceeds {max_bytes} bytes."),
+            ),
+            BoundedReadError::CatalogBudgetExceeded => SkillPackagePreparationError::new(
+                SkillDiagnosticCode::PackageTooLarge,
+                format!("Skill package exceeds {MAX_SKILL_PACKAGE_BYTES} bytes."),
+            ),
+            BoundedReadError::Io(error) => {
+                preparation_io("Cannot read local Skill package file", error)
+            }
+            BoundedReadError::PathChanged(reason) => SkillPackagePreparationError::new(
+                SkillDiagnosticCode::PathChangedDuringRead,
+                format!(
+                    "Local Skill package file `{logical_path}` changed while it was read: {reason}"
+                ),
+            ),
+        })?;
+        files.push((logical_path, bytes));
+    }
+    Ok(())
 }
 
 fn open_local_directory(
@@ -408,38 +648,6 @@ fn verify_local_directory_binding(
     })
 }
 
-fn exact_local_skill_path(
-    directory: &Path,
-) -> Result<std::path::PathBuf, SkillPackagePreparationError> {
-    let mut entries = fs::read_dir(directory)
-        .map_err(|error| preparation_io("Cannot read local Skill directory", error))?;
-    let entry = match entries.next() {
-        Some(entry) => entry
-            .map_err(|error| preparation_io("Cannot inspect local Skill directory entry", error))?,
-        None => {
-            return Err(SkillPackagePreparationError::new(
-                SkillDiagnosticCode::MissingSkillFile,
-                "Local Skill directory does not contain an exact-case SKILL.md file.",
-            ))
-        }
-    };
-    if entry.file_name() != OsStr::new(SKILL_FILE_NAME) {
-        return Err(SkillPackagePreparationError::new(
-            SkillDiagnosticCode::UnexpectedPackageEntry,
-            "Package format v1 permits only an exact-case SKILL.md file.",
-        ));
-    }
-    if let Some(entry) = entries.next() {
-        entry
-            .map_err(|error| preparation_io("Cannot inspect local Skill directory entry", error))?;
-        return Err(SkillPackagePreparationError::new(
-            SkillDiagnosticCode::UnexpectedPackageEntry,
-            "Package format v1 permits no sibling resources or additional entries.",
-        ));
-    }
-    Ok(entry.path())
-}
-
 fn preparation_io(action: &str, error: std::io::Error) -> SkillPackagePreparationError {
     SkillPackagePreparationError::new(
         SkillDiagnosticCode::UnreadableEntry,
@@ -450,6 +658,7 @@ fn preparation_io(action: &str, error: std::io::Error) -> SkillPackagePreparatio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::workspace::SKILL_FILE_NAME;
     use std::fs;
     use tempfile::tempdir;
 
@@ -497,6 +706,145 @@ mod tests {
         let debug = format!("{package:?}");
         assert!(!debug.contains("ORIGINAL"));
         assert!(!debug.contains("fixture"));
+    }
+
+    #[test]
+    fn file_tree_with_resources_produces_a_deterministic_v2_snapshot() {
+        let source = document(Some("resourceful"), "USE_REFERENCES").into_bytes();
+        let first = PreparedSkillPackage::from_files(
+            vec![
+                ("references/guide.md".to_string(), b"GUIDE_V1".to_vec()),
+                ("assets/icon.bin".to_string(), vec![0, 1, 2, 255]),
+                (SKILL_FILE_NAME.to_string(), source.clone()),
+            ],
+            origin(),
+        )
+        .unwrap();
+        let second = PreparedSkillPackage::from_files(
+            vec![
+                (SKILL_FILE_NAME.to_string(), source),
+                ("assets/icon.bin".to_string(), vec![0, 1, 2, 255]),
+                ("references/guide.md".to_string(), b"GUIDE_V1".to_vec()),
+            ],
+            origin(),
+        )
+        .unwrap();
+
+        assert_eq!(first.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V2);
+        assert_eq!(first.revision(), second.revision());
+        assert_eq!(first.resource_index().len(), 2);
+        assert_eq!(
+            first
+                .resource_index()
+                .get("references/guide.md")
+                .unwrap()
+                .kind(),
+            super::super::model::SkillResourceKind::Reference
+        );
+        assert!(first.manifest_bytes().is_some());
+
+        let changed = PreparedSkillPackage::from_files(
+            vec![
+                (
+                    SKILL_FILE_NAME.to_string(),
+                    document(Some("resourceful"), "USE_REFERENCES").into_bytes(),
+                ),
+                ("references/guide.md".to_string(), b"GUIDE_V2".to_vec()),
+            ],
+            origin(),
+        )
+        .unwrap();
+        assert_ne!(first.revision(), changed.revision());
+    }
+
+    #[test]
+    fn local_directory_captures_nested_resources_without_retaining_the_source_path() {
+        let fixture = tempdir().unwrap();
+        let directory = fixture.path().join("resourceful");
+        fs::create_dir_all(directory.join("references/deep")).unwrap();
+        fs::create_dir(directory.join("assets")).unwrap();
+        fs::write(
+            directory.join(SKILL_FILE_NAME),
+            document(Some("resourceful"), "READ_THE_GUIDE"),
+        )
+        .unwrap();
+        fs::write(directory.join("references/deep/guide.md"), "ORIGINAL").unwrap();
+        fs::write(directory.join("assets/data.bin"), [0, 255]).unwrap();
+
+        let package = PreparedSkillPackage::from_local_directory(&directory, "fixture").unwrap();
+        fs::write(directory.join("references/deep/guide.md"), "MUTATED").unwrap();
+
+        assert_eq!(package.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V2);
+        assert_eq!(package.resources().len(), 2);
+        assert_eq!(
+            package
+                .resources()
+                .iter()
+                .find(|resource| resource.descriptor().path() == "references/deep/guide.md")
+                .unwrap()
+                .bytes(),
+            b"ORIGINAL"
+        );
+    }
+
+    #[test]
+    fn v2_preparation_rejects_collisions_and_resource_budget_overflow() {
+        let source = document(Some("bounded-v2"), "INSTRUCTIONS").into_bytes();
+        let collision = PreparedSkillPackage::from_files(
+            vec![
+                (SKILL_FILE_NAME.to_string(), source.clone()),
+                ("references/A.md".to_string(), b"A".to_vec()),
+                ("references/a.md".to_string(), b"a".to_vec()),
+            ],
+            origin(),
+        )
+        .unwrap_err();
+        assert_eq!(collision.code(), SkillDiagnosticCode::InvalidResourcePath);
+
+        let file_directory_collision = PreparedSkillPackage::from_files(
+            vec![
+                (SKILL_FILE_NAME.to_string(), source.clone()),
+                ("references/guide".to_string(), b"file".to_vec()),
+                (
+                    "references/guide/section.md".to_string(),
+                    b"nested".to_vec(),
+                ),
+            ],
+            origin(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            file_directory_collision.code(),
+            SkillDiagnosticCode::InvalidResourcePath
+        );
+
+        let oversized = PreparedSkillPackage::from_files(
+            vec![
+                (SKILL_FILE_NAME.to_string(), source),
+                (
+                    "assets/large.bin".to_string(),
+                    vec![0; MAX_SKILL_RESOURCE_FILE_BYTES + 1],
+                ),
+            ],
+            origin(),
+        )
+        .unwrap_err();
+        assert_eq!(oversized.code(), SkillDiagnosticCode::ResourceFileTooLarge);
+    }
+
+    #[test]
+    fn v2_file_count_budget_is_inclusive() {
+        let mut files = vec![(
+            SKILL_FILE_NAME.to_string(),
+            document(Some("many-files"), "INSTRUCTIONS").into_bytes(),
+        )];
+        for index in 0..MAX_SKILL_PACKAGE_FILES - 1 {
+            files.push((format!("references/file-{index:04}.md"), b"x".to_vec()));
+        }
+        assert!(PreparedSkillPackage::from_files(files.clone(), origin()).is_ok());
+        files.push(("references/overflow.md".to_string(), b"x".to_vec()));
+        let error = PreparedSkillPackage::from_files(files, origin()).unwrap_err();
+        assert_eq!(error.code(), SkillDiagnosticCode::TooManyEntries);
     }
 
     #[test]
@@ -589,6 +937,25 @@ mod tests {
         .unwrap();
         assert_eq!(
             PreparedSkillPackage::from_local_directory(&linked_file_root, "fixture")
+                .unwrap_err()
+                .code(),
+            SkillDiagnosticCode::SymlinkNotAllowed
+        );
+
+        let linked_resource_root = fixture.path().join("linked-resource-root");
+        fs::create_dir_all(linked_resource_root.join("references")).unwrap();
+        fs::write(
+            linked_resource_root.join(SKILL_FILE_NAME),
+            document(Some("linked-resource"), "READ_RESOURCE"),
+        )
+        .unwrap();
+        symlink(
+            target.join(SKILL_FILE_NAME),
+            linked_resource_root.join("references/guide.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            PreparedSkillPackage::from_local_directory(&linked_resource_root, "fixture")
                 .unwrap_err()
                 .code(),
             SkillDiagnosticCode::SymlinkNotAllowed

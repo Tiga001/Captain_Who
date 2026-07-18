@@ -7,8 +7,9 @@ use super::model::{
     SkillCatalog, SkillDescriptor, SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity,
     SkillDiscoveryError, SkillProvenance, SkillRegistrationError, SkillResolveError,
     SkillResolveRequest, SkillSelection, SkillSourceId, SkillSourceKind,
-    SKILL_PACKAGE_FORMAT_VERSION,
+    SKILL_PACKAGE_FORMAT_VERSION, SKILL_PACKAGE_FORMAT_VERSION_V2,
 };
+use super::package::PackageManifest;
 use super::parser::parse_skill_document;
 use super::source::{SkillSource, WorkspaceSkillSource};
 use super::workspace::{
@@ -486,7 +487,26 @@ fn validate_resolved_contract(
             "resolved package source exceeds the {MAX_SKILL_FILE_BYTES}-byte limit"
         ));
     }
-    let actual_revision = package_revision(package.source_text().as_bytes());
+    let actual_revision = match package.format_version() {
+        SKILL_PACKAGE_FORMAT_VERSION => package_revision(package.source_text().as_bytes()),
+        SKILL_PACKAGE_FORMAT_VERSION_V2 => {
+            PackageManifest::from_resolved(package.source_text().as_bytes(), package.resources())
+                .map_err(|error| {
+                    format!(
+                        "resolved package `{}` has an invalid resource index: {}",
+                        package.id(),
+                        error.message
+                    )
+                })?
+                .revision()
+        }
+        version => {
+            return Err(format!(
+                "resolved package `{}` uses unsupported format {version}",
+                package.id()
+            ))
+        }
+    };
     if package.revision() != &actual_revision {
         return Err(format!(
             "resolved package revision `{}` does not match its source snapshot `{actual_revision}`",
@@ -562,13 +582,7 @@ fn validate_resolved_contract(
             selection.expected_revision()
         ));
     }
-    if package.format_version() != SKILL_PACKAGE_FORMAT_VERSION {
-        return Err(format!(
-            "resolved package format {} is unsupported",
-            package.format_version()
-        ));
-    }
-    if !package.resources().is_empty() {
+    if package.format_version() == SKILL_PACKAGE_FORMAT_VERSION && !package.resources().is_empty() {
         return Err("package format v1 cannot expose sibling resources".to_string());
     }
     Ok(())

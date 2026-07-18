@@ -1,8 +1,6 @@
 // Support types and helper functions for core-server agent orchestration.
 use crate::agent::{AGENT_EVENT_NAME, ID_COUNTER, THINKING_PLACEHOLDER};
-use crate::skills_adapter::{
-    activate_workspace, missing_workspace_failure, PreparedSkillActivation, SkillActivationFailure,
-};
+use crate::skills_adapter::{activate_selected_skills, SkillActivationFailure};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -350,17 +348,16 @@ pub(super) fn prepare_conversation_turn(
         normalized_optional(input.project_id.as_deref()),
     )?;
     let project = resolve_project(storage, resolved_project_id.as_deref())?;
-    let prepared_skills = if input.skills.is_empty() {
-        PreparedSkillActivation::default()
-    } else {
-        let project = project.as_ref().ok_or_else(missing_workspace_failure)?;
-        let workspace_root = project
-            .path
-            .as_deref()
-            .map(PathBuf::from)
-            .ok_or_else(missing_workspace_failure)?;
-        activate_workspace(skills_service, &project.id, &workspace_root, &input.skills)?
-    };
+    let workspace_root = project
+        .as_ref()
+        .and_then(|project| project.path.as_deref())
+        .map(PathBuf::from);
+    let workspace = project
+        .as_ref()
+        .zip(workspace_root.as_deref())
+        .map(|(project, root)| (project.id.as_str(), root));
+    let prepared_skills =
+        activate_selected_skills(storage, skills_service, workspace, &input.skills)?;
 
     let mut conversation = existing.unwrap_or_else(|| ChatConversationRecord {
         id: conversation_id.clone(),

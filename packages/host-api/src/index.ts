@@ -38,8 +38,21 @@ import type {
   ResourceFaviconResponse,
   ChatSearchInput,
   ChatSearchResult,
+  SkillInstallationCommitOutput,
+  SkillInstallationPreview,
+  SkillMutationOutput,
+  SkillPreparationCancellationOutput,
+  SkillsCancelPreparationInput,
+  SkillsChangedNotification,
+  SkillsCommitInstallationInput,
+  SkillsInspectInstallationInput,
   SkillsListInput,
+  SkillsListManagementInput,
+  SkillsListManagementOutput,
   SkillsListOutput,
+  SkillsSetEnabledInput,
+  SkillsSetEnabledOutput,
+  SkillsUninstallInput,
   StorageAgentPromptPreferencesRecord,
   StorageAttachmentImageRecord,
   StorageChatConversationMetaRecord,
@@ -121,6 +134,23 @@ export interface SearchHostApi {
 
 export interface SkillsHostApi {
   list(input: SkillsListInput): Promise<SkillsListOutput>
+  /** Opens a native single-directory picker. Cancellation is not an error. */
+  selectInstallationDirectory(): Promise<string | null>
+  inspectInstallation(
+    input: SkillsInspectInstallationInput
+  ): Promise<HostInvocationResult<SkillInstallationPreview>>
+  commitInstallation(
+    input: SkillsCommitInstallationInput
+  ): Promise<HostInvocationResult<SkillInstallationCommitOutput>>
+  cancelPreparation(
+    input: SkillsCancelPreparationInput
+  ): Promise<HostInvocationResult<SkillPreparationCancellationOutput>>
+  listManagement(
+    input: SkillsListManagementInput
+  ): Promise<HostInvocationResult<SkillsListManagementOutput>>
+  setEnabled(input: SkillsSetEnabledInput): Promise<HostInvocationResult<SkillsSetEnabledOutput>>
+  uninstall(input: SkillsUninstallInput): Promise<HostInvocationResult<SkillMutationOutput>>
+  onChanged(handler: (event: SkillsChangedNotification) => void): () => void
 }
 
 export interface GitHostApi {

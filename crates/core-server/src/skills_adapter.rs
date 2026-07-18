@@ -1,5 +1,6 @@
 //! Explicit boundary between the Skill domain model, runtime snapshots, and JSON-RPC DTOs.
 
+use std::fmt::Write;
 use std::path::Path;
 
 use mycopilot_core::skills::{
@@ -9,15 +10,25 @@ use mycopilot_core::skills::{
     SkillInstallationOutcome, SkillInstallationServiceError, SkillProvenance, SkillRecovery,
     SkillSelection, SkillSourceKind, SkillTrust, SkillsService,
 };
+use mycopilot_core::storage::service::StorageService;
+use mycopilot_core::storage::skill_enablement_repository::SkillEnablementCompareAndSetOutcome;
+use mycopilot_core::storage::skill_enablement_repository::SkillEnablementState;
 use mycopilot_core::{AgentActivatedSkill, AgentSkillActivation};
 use mycopilot_protocol_rs::{
-    ActivatedSkillSummaryDto, SkillActivationErrorData, SkillDescriptorDto, SkillDiagnosticDto,
-    SkillInstallMutationOutcomeDto, SkillInstallationCapacityDto, SkillInstallationErrorCodeDto,
-    SkillInstallationErrorData, SkillInstallationErrorTypeDto, SkillInstallationOperationDto,
-    SkillInstallationRecoveryDto, SkillMutationResponse, SkillRemovalMutationOutcomeDto,
-    SkillSelectionDto, SkillSourceDto, SkillSourceKindDto, SkillTrustDto,
-    SkillUpdateMutationOutcomeDto, SkillsListResponse, SKILL_CATALOG_SCHEMA_VERSION,
+    ActivatedSkillSummaryDto, SkillActivationErrorCodeDto, SkillActivationErrorData,
+    SkillActivationRecoveryDto, SkillCompatibilityReportDto, SkillCompatibilityStatusDto,
+    SkillDescriptorDto, SkillDiagnosticDto, SkillInstallMutationOutcomeDto,
+    SkillInstallationCapacityDto, SkillInstallationErrorCodeDto, SkillInstallationErrorData,
+    SkillInstallationErrorTypeDto, SkillInstallationOperationDto, SkillInstallationRecoveryDto,
+    SkillManagementActionsDto, SkillManagementEntryDto, SkillManagementErrorCodeDto,
+    SkillManagementErrorData, SkillManagementErrorTypeDto, SkillManagementOperationDto,
+    SkillManagementRecoveryDto, SkillMutationResponse, SkillRemovalMutationOutcomeDto,
+    SkillSelectionDto, SkillSetEnabledOutcomeDto, SkillSourceDto, SkillSourceKindDto,
+    SkillTrustDto, SkillUpdateMutationOutcomeDto, SkillsListManagementResponse, SkillsListResponse,
+    SkillsSetEnabledRequest, SkillsSetEnabledResponse, SKILL_CATALOG_SCHEMA_VERSION,
+    SKILL_MANAGEMENT_SCHEMA_VERSION,
 };
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Default)]
 pub(crate) struct PreparedSkillActivation {
@@ -35,6 +46,60 @@ pub(crate) struct SkillActivationFailure {
 pub(crate) struct SkillInstallationFailure {
     data: Box<SkillInstallationErrorData>,
 }
+
+#[derive(Debug)]
+pub(crate) struct SkillManagementFailure {
+    data: Box<SkillManagementErrorData>,
+}
+
+impl SkillManagementFailure {
+    fn new(
+        operation: SkillManagementOperationDto,
+        code: SkillManagementErrorCodeDto,
+        recovery: SkillManagementRecoveryDto,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            data: Box::new(SkillManagementErrorData {
+                error_type: SkillManagementErrorTypeDto::SkillManagement,
+                operation,
+                code,
+                recovery,
+                message: message.into(),
+            }),
+        }
+    }
+
+    pub(crate) fn list_unavailable() -> Self {
+        Self::new(
+            SkillManagementOperationDto::List,
+            SkillManagementErrorCodeDto::StorageUnavailable,
+            SkillManagementRecoveryDto::Retry,
+            "The Skill management inventory is temporarily unavailable.",
+        )
+    }
+
+    pub(crate) fn set_enabled_unavailable() -> Self {
+        Self::new(
+            SkillManagementOperationDto::SetEnabled,
+            SkillManagementErrorCodeDto::StorageUnavailable,
+            SkillManagementRecoveryDto::Retry,
+            "The Skill management inventory is temporarily unavailable.",
+        )
+    }
+
+    pub(crate) fn into_data(self) -> Box<SkillManagementErrorData> {
+        self.data
+    }
+}
+
+impl std::fmt::Display for SkillManagementFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.data.message)
+    }
+}
+
+impl std::error::Error for SkillManagementFailure {}
 
 impl SkillInstallationFailure {
     pub(crate) fn into_data(self) -> Box<SkillInstallationErrorData> {
@@ -306,9 +371,38 @@ impl SkillActivationFailure {
         Self {
             data: Box::new(SkillActivationErrorData {
                 error_type: "skillActivation",
-                code: "invalidSelection".to_string(),
-                recovery: "rejectSelection".to_string(),
+                code: SkillActivationErrorCodeDto::InvalidSelection,
+                recovery: SkillActivationRecoveryDto::RejectSelection,
                 message,
+                skill_id,
+                expected_revision: None,
+                actual_revision: None,
+            }),
+        }
+    }
+
+    fn disabled(skill_id: String) -> Self {
+        Self {
+            data: Box::new(SkillActivationErrorData {
+                error_type: "skillActivation",
+                code: SkillActivationErrorCodeDto::Disabled,
+                recovery: SkillActivationRecoveryDto::RejectSelection,
+                message: "The selected Skill is disabled. Enable it before using it.".to_string(),
+                skill_id: Some(skill_id),
+                expected_revision: None,
+                actual_revision: None,
+            }),
+        }
+    }
+
+    fn enablement_unavailable(skill_id: Option<String>) -> Self {
+        Self {
+            data: Box::new(SkillActivationErrorData {
+                error_type: "skillActivation",
+                code: SkillActivationErrorCodeDto::SourceUnavailable,
+                recovery: SkillActivationRecoveryDto::RetrySameSelection,
+                message: "Skill enablement could not be verified. Retry the same selection."
+                    .to_string(),
                 skill_id,
                 expected_revision: None,
                 actual_revision: None,
@@ -325,13 +419,52 @@ impl std::fmt::Display for SkillActivationFailure {
 
 impl std::error::Error for SkillActivationFailure {}
 
+#[cfg(test)]
 pub(crate) fn catalog_response(catalog: &SkillCatalog) -> Result<SkillsListResponse, String> {
+    catalog_response_filtered(catalog, |_| true, catalog.catalog_revision().to_string())
+}
+
+/// Builds the picker catalog from the durable global enablement snapshot.
+///
+/// Workspace Skills are request-scoped and intentionally unaffected by the
+/// global settings switch. A storage failure is returned to the caller so the
+/// picker cannot optimistically expose a Skill whose eligibility is unknown.
+pub(crate) fn enabled_catalog_response(
+    storage: &StorageService,
+    catalog: &SkillCatalog,
+) -> Result<SkillsListResponse, String> {
+    let managed_ids = catalog
+        .skills()
+        .iter()
+        .filter(|skill| {
+            matches!(
+                skill.source_kind(),
+                SkillSourceKind::Bundled | SkillSourceKind::Installed
+            )
+        })
+        .map(|skill| skill.id().as_str().to_string())
+        .collect::<Vec<_>>();
+    let enablement = storage.load_skill_enablement(&managed_ids)?;
+    let is_enabled = |descriptor: &SkillDescriptor| {
+        descriptor.source_kind() == SkillSourceKind::Workspace
+            || enablement.get(descriptor.id().as_str()) == Some(&true)
+    };
+    let revision = enabled_catalog_revision(catalog, &enablement);
+    catalog_response_filtered(catalog, is_enabled, revision)
+}
+
+fn catalog_response_filtered(
+    catalog: &SkillCatalog,
+    include: impl Fn(&SkillDescriptor) -> bool,
+    catalog_revision: String,
+) -> Result<SkillsListResponse, String> {
     Ok(SkillsListResponse {
         schema_version: SKILL_CATALOG_SCHEMA_VERSION,
-        catalog_revision: catalog.catalog_revision().to_string(),
+        catalog_revision,
         skills: catalog
             .skills()
             .iter()
+            .filter(|descriptor| include(descriptor))
             .map(descriptor_dto)
             .collect::<Result<Vec<_>, _>>()?,
         diagnostics: catalog
@@ -354,6 +487,347 @@ pub(crate) fn catalog_response(catalog: &SkillCatalog) -> Result<SkillsListRespo
     })
 }
 
+fn enabled_catalog_revision(
+    catalog: &SkillCatalog,
+    enablement: &std::collections::BTreeMap<String, bool>,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mycopilot.skill.enabled-catalog\0");
+    digest.update(1_u32.to_be_bytes());
+    update_digest_bytes(&mut digest, catalog.catalog_revision().as_bytes());
+    digest.update((catalog.skills().len() as u64).to_be_bytes());
+    for descriptor in catalog.skills() {
+        update_digest_bytes(&mut digest, descriptor.id().as_str().as_bytes());
+        let enabled = match descriptor.source_kind() {
+            SkillSourceKind::Workspace => true,
+            SkillSourceKind::Bundled | SkillSourceKind::Installed => enablement
+                .get(descriptor.id().as_str())
+                .copied()
+                .unwrap_or(false),
+            _ => false,
+        };
+        digest.update([u8::from(enabled)]);
+    }
+    let bytes = digest.finalize();
+    let mut revision = String::from("skill-enabled-catalog-sha256-v1:");
+    for byte in bytes {
+        write!(&mut revision, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    revision
+}
+
+fn update_digest_bytes(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+}
+
+/// Builds the global settings-page inventory. Workspace Skills deliberately
+/// remain outside this view because their lifetime and identity are scoped to
+/// one project, while Enabled is a global eligibility preference.
+pub(crate) fn management_response(
+    storage: &StorageService,
+    catalog: &SkillCatalog,
+) -> Result<SkillsListManagementResponse, SkillManagementFailure> {
+    let (response, _) = management_snapshot(storage, catalog)?;
+    Ok(response)
+}
+
+fn management_snapshot(
+    storage: &StorageService,
+    catalog: &SkillCatalog,
+) -> Result<
+    (
+        SkillsListManagementResponse,
+        std::collections::BTreeMap<String, SkillEnablementState>,
+    ),
+    SkillManagementFailure,
+> {
+    let ids = catalog
+        .skills()
+        .iter()
+        .map(|skill| skill.id().as_str().to_string())
+        .collect::<Vec<_>>();
+    let enablement = storage
+        .load_skill_enablement_states(&ids)
+        .map_err(|_| SkillManagementFailure::list_unavailable())?;
+    let skills = catalog
+        .skills()
+        .iter()
+        .filter(|skill| {
+            matches!(
+                skill.source_kind(),
+                SkillSourceKind::Bundled | SkillSourceKind::Installed
+            )
+        })
+        .map(|skill| {
+            let state =
+                enablement
+                    .get(skill.id().as_str())
+                    .copied()
+                    .unwrap_or(SkillEnablementState {
+                        enabled: false,
+                        generation: 0,
+                    });
+            management_entry(skill, state.enabled, state.generation)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| SkillManagementFailure::list_unavailable())?;
+    let management_revision = management_revision(catalog.catalog_revision(), &skills);
+    Ok((
+        SkillsListManagementResponse {
+            schema_version: SKILL_MANAGEMENT_SCHEMA_VERSION,
+            management_revision,
+            skills,
+            diagnostics: diagnostic_dtos(catalog),
+            truncated: catalog.truncated(),
+        },
+        enablement,
+    ))
+}
+
+/// Applies one compare-and-swap enablement mutation against the exact item
+/// state the settings page displayed.
+pub(crate) fn set_enabled_response(
+    storage: &StorageService,
+    catalog: &SkillCatalog,
+    request: &SkillsSetEnabledRequest,
+) -> Result<(SkillsSetEnabledResponse, bool), SkillManagementFailure> {
+    let descriptor = catalog
+        .skills()
+        .iter()
+        .find(|skill| skill.id().as_str() == request.skill_id)
+        .ok_or_else(|| {
+            if request.skill_id.starts_with("workspace:") {
+                SkillManagementFailure::new(
+                    SkillManagementOperationDto::SetEnabled,
+                    SkillManagementErrorCodeDto::NotManageable,
+                    SkillManagementRecoveryDto::RefreshManagement,
+                    "Workspace Skills are scoped to a project and cannot be globally enabled or disabled.",
+                )
+            } else {
+                SkillManagementFailure::new(
+                    SkillManagementOperationDto::SetEnabled,
+                    SkillManagementErrorCodeDto::NotFound,
+                    SkillManagementRecoveryDto::RefreshManagement,
+                    "The requested Skill is no longer installed or available.",
+                )
+            }
+        })?;
+    if !matches!(
+        descriptor.source_kind(),
+        SkillSourceKind::Bundled | SkillSourceKind::Installed
+    ) {
+        return Err(SkillManagementFailure::new(
+            SkillManagementOperationDto::SetEnabled,
+            SkillManagementErrorCodeDto::NotManageable,
+            SkillManagementRecoveryDto::RefreshManagement,
+            "The requested Skill cannot be managed from global settings.",
+        ));
+    }
+
+    let (current, enablement) = management_snapshot(storage, catalog)
+        .map_err(|_| SkillManagementFailure::set_enabled_unavailable())?;
+    let current_state = enablement
+        .get(request.skill_id.as_str())
+        .copied()
+        .expect("the management snapshot contains every catalog Skill id");
+    let current_item = current
+        .skills
+        .iter()
+        .find(|skill| skill.id == request.skill_id)
+        .expect("the validated global Skill must be present in the management snapshot");
+    let current_enabled = current_state.enabled;
+    let current_state_revision = current_item.state_revision.clone();
+
+    // A lost successful response must converge when the client retries the
+    // same desired state with its original compare token.
+    if current_enabled == request.enabled {
+        return Ok((
+            SkillsSetEnabledResponse {
+                schema_version: SKILL_MANAGEMENT_SCHEMA_VERSION,
+                management_revision: current.management_revision,
+                skill_id: request.skill_id.clone(),
+                state_revision: current_state_revision,
+                enabled: current_enabled,
+                outcome: SkillSetEnabledOutcomeDto::AlreadyCurrent,
+            },
+            false,
+        ));
+    }
+    if current_state_revision != request.expected_state_revision {
+        return Err(SkillManagementFailure::new(
+            SkillManagementOperationDto::SetEnabled,
+            SkillManagementErrorCodeDto::StateConflict,
+            SkillManagementRecoveryDto::RefreshManagement,
+            "The Skill state changed. Refresh the Skill management list before retrying.",
+        ));
+    }
+
+    let outcome = storage
+        .compare_and_set_skill_enablement(
+            &request.skill_id,
+            current_enabled,
+            current_state.generation,
+            request.enabled,
+        )
+        .map_err(|_| SkillManagementFailure::set_enabled_unavailable())?;
+    let (changed, target_generation) = match outcome {
+        SkillEnablementCompareAndSetOutcome::Updated { generation } => (true, generation),
+        SkillEnablementCompareAndSetOutcome::AlreadyCurrent { generation } => (false, generation),
+        SkillEnablementCompareAndSetOutcome::Conflict => {
+            return Err(SkillManagementFailure::new(
+                SkillManagementOperationDto::SetEnabled,
+                SkillManagementErrorCodeDto::StateConflict,
+                SkillManagementRecoveryDto::RefreshManagement,
+                "The Skill state changed. Refresh the Skill management list before retrying.",
+            ));
+        }
+    };
+
+    // Every remaining step is infallible. Once SQLite commits, response
+    // construction cannot turn success into an ambiguous error.
+    let mut refreshed = current;
+    let item = refreshed
+        .skills
+        .iter_mut()
+        .find(|skill| skill.id == request.skill_id)
+        .expect("the validated global Skill remains present in the same catalog snapshot");
+    item.enabled = request.enabled;
+    item.state_revision = management_state_revision(descriptor, request.enabled, target_generation);
+    let response_state_revision = item.state_revision.clone();
+    refreshed.management_revision =
+        management_revision(catalog.catalog_revision(), &refreshed.skills);
+    Ok((
+        SkillsSetEnabledResponse {
+            schema_version: SKILL_MANAGEMENT_SCHEMA_VERSION,
+            management_revision: refreshed.management_revision,
+            skill_id: request.skill_id.clone(),
+            state_revision: response_state_revision,
+            enabled: request.enabled,
+            outcome: if changed {
+                SkillSetEnabledOutcomeDto::Updated
+            } else {
+                SkillSetEnabledOutcomeDto::AlreadyCurrent
+            },
+        },
+        changed,
+    ))
+}
+
+fn management_entry(
+    descriptor: &SkillDescriptor,
+    enabled: bool,
+    generation: u64,
+) -> Result<SkillManagementEntryDto, String> {
+    let installed = descriptor.source_kind() == SkillSourceKind::Installed;
+    Ok(SkillManagementEntryDto {
+        id: descriptor.id().as_str().to_string(),
+        name: descriptor.name().to_string(),
+        description: descriptor.description().to_string(),
+        source: source_dto(descriptor)?,
+        package_revision: descriptor.revision().as_str().to_string(),
+        installation_revision: installed.then(|| installation_revision(descriptor)),
+        state_revision: management_state_revision(descriptor, enabled, generation),
+        enabled,
+        actions: SkillManagementActionsDto {
+            can_set_enabled: true,
+            can_update: installed,
+            can_uninstall: installed,
+        },
+        // Legacy v1 receipts contain display-only origin strings, not an
+        // authority-bearing typed source. Do not turn them back into paths.
+        acquisition: None,
+        compatibility: SkillCompatibilityReportDto {
+            status: if descriptor.source_kind() == SkillSourceKind::Bundled {
+                SkillCompatibilityStatusDto::Compatible
+            } else {
+                SkillCompatibilityStatusDto::Unknown
+            },
+            issues: Vec::new(),
+        },
+    })
+}
+
+fn management_state_revision(
+    descriptor: &SkillDescriptor,
+    enabled: bool,
+    generation: u64,
+) -> String {
+    let generation = generation.to_be_bytes();
+    revision_digest(
+        b"mycopilot.skill.management-state\0",
+        [
+            descriptor.id().as_str().as_bytes(),
+            descriptor.revision().as_str().as_bytes(),
+            generation.as_slice(),
+            if enabled { b"enabled" } else { b"disabled" },
+        ],
+        "skill-management-state-sha256-v1:",
+    )
+}
+
+fn installation_revision(descriptor: &SkillDescriptor) -> String {
+    // Receipt schema v1 exposes package revision as its only durable CAS
+    // token. Keep the management and workflow contracts interoperable until
+    // receipt schema v2 introduces an independent lifecycle generation.
+    descriptor.revision().as_str().to_string()
+}
+
+fn management_revision(catalog_revision: &str, skills: &[SkillManagementEntryDto]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mycopilot.skill.management-catalog\0");
+    digest.update(1_u32.to_be_bytes());
+    update_digest_bytes(&mut digest, catalog_revision.as_bytes());
+    digest.update((skills.len() as u64).to_be_bytes());
+    for skill in skills {
+        update_digest_bytes(&mut digest, skill.id.as_bytes());
+        update_digest_bytes(&mut digest, skill.state_revision.as_bytes());
+    }
+    format_sha256("skill-management-catalog-sha256-v1:", digest.finalize())
+}
+
+fn revision_digest<'a>(
+    domain: &[u8],
+    values: impl IntoIterator<Item = &'a [u8]>,
+    prefix: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update(1_u32.to_be_bytes());
+    for value in values {
+        update_digest_bytes(&mut digest, value);
+    }
+    format_sha256(prefix, digest.finalize())
+}
+
+fn format_sha256(prefix: &str, bytes: impl AsRef<[u8]>) -> String {
+    let mut output = String::from(prefix);
+    for byte in bytes.as_ref() {
+        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    output
+}
+
+fn diagnostic_dtos(catalog: &SkillCatalog) -> Vec<SkillDiagnosticDto> {
+    catalog
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| SkillDiagnosticDto {
+            code: diagnostic.code().stable_name().to_string(),
+            severity: match diagnostic.severity() {
+                SkillDiagnosticSeverity::Warning => "warning",
+                SkillDiagnosticSeverity::Error => "error",
+                _ => "error",
+            }
+            .to_string(),
+            message: diagnostic.message().to_string(),
+            skill_id: None,
+            location: Some(diagnostic.path().to_string()),
+        })
+        .collect()
+}
+
+#[cfg(test)]
 pub(crate) fn activate_workspace(
     service: &SkillsService,
     workspace_id: &str,
@@ -364,7 +838,83 @@ pub(crate) fn activate_workspace(
         return Ok(PreparedSkillActivation::default());
     }
 
-    let selections = selections
+    let selections = parse_selections(selections)?;
+    let activated = service
+        .activate_workspace(workspace_id, workspace_root, &selections)
+        .map_err(activation_failure)?;
+
+    prepare_activated_skills(activated, Some(workspace_id))
+}
+
+/// Resolves one run's selected Skills while enforcing durable enablement at
+/// the last server-side boundary before instructions enter the model context.
+///
+/// Workspace sources are request-scoped and therefore require a concrete
+/// workspace. Bundled and installed sources are global: they remain usable in
+/// project-less conversations, but only after their complete opaque ids have
+/// been checked against persistent enablement state.
+pub(crate) fn activate_selected_skills(
+    storage: &StorageService,
+    service: &SkillsService,
+    workspace: Option<(&str, &Path)>,
+    selections: &[SkillSelectionDto],
+) -> Result<PreparedSkillActivation, SkillActivationFailure> {
+    if selections.is_empty() {
+        return Ok(PreparedSkillActivation::default());
+    }
+
+    let selections = parse_selections(selections)?;
+    let mut managed_ids = Vec::new();
+    let mut requires_workspace = false;
+    for selection in &selections {
+        let source_kind = selection
+            .skill_id()
+            .source_id()
+            .as_str()
+            .split_once(':')
+            .map(|(kind, _)| kind);
+        match source_kind {
+            Some("bundled" | "installed") => {
+                managed_ids.push(selection.skill_id().as_str().to_string());
+            }
+            Some("workspace") => requires_workspace = true,
+            _ => {}
+        }
+    }
+
+    if requires_workspace && workspace.is_none() {
+        return Err(missing_workspace_failure());
+    }
+
+    let enablement = storage.load_skill_enablement(&managed_ids).map_err(|_| {
+        SkillActivationFailure::enablement_unavailable(managed_ids.first().cloned())
+    })?;
+    if let Some(disabled_id) = managed_ids
+        .iter()
+        .find(|skill_id| enablement.get(*skill_id) != Some(&true))
+    {
+        return Err(SkillActivationFailure::disabled(disabled_id.clone()));
+    }
+
+    let (activated, expected_workspace_id) = match workspace {
+        Some((workspace_id, workspace_root)) => (
+            service
+                .activate_workspace(workspace_id, workspace_root, &selections)
+                .map_err(activation_failure)?,
+            Some(workspace_id),
+        ),
+        None => (
+            service.activate(&selections).map_err(activation_failure)?,
+            None,
+        ),
+    };
+    prepare_activated_skills(activated, expected_workspace_id)
+}
+
+fn parse_selections(
+    selections: &[SkillSelectionDto],
+) -> Result<Vec<SkillSelection>, SkillActivationFailure> {
+    selections
         .iter()
         .map(|selection| {
             SkillSelection::parse(&selection.id, &selection.revision).map_err(|error| {
@@ -374,13 +924,15 @@ pub(crate) fn activate_workspace(
                 )
             })
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let activated = service
-        .activate_workspace(workspace_id, workspace_root, &selections)
-        .map_err(activation_failure)?;
+        .collect()
+}
 
+fn prepare_activated_skills(
+    activated: mycopilot_core::skills::ActivatedSkillSet,
+    expected_workspace_id: Option<&str>,
+) -> Result<PreparedSkillActivation, SkillActivationFailure> {
     for skill in activated.skills() {
-        validate_protocol_descriptor(skill.descriptor(), Some(workspace_id)).map_err(
+        validate_protocol_descriptor(skill.descriptor(), expected_workspace_id).map_err(
             |message| {
                 SkillActivationFailure::invalid_selection(
                     Some(skill.id().as_str().to_string()),
@@ -566,28 +1118,30 @@ fn supports_protocol_contract(source_kind: SkillSourceKindDto, trust: SkillTrust
 
 fn activation_failure(error: SkillActivationError) -> SkillActivationFailure {
     let code = match error.code() {
-        SkillErrorCode::InvalidReference => "invalidSelection",
-        SkillErrorCode::DuplicateSelection => "duplicateSelection",
-        SkillErrorCode::TooManySkills => "tooManySkills",
-        SkillErrorCode::SourceBudgetExceeded => "activationTooLarge",
-        SkillErrorCode::NotFound => "notFound",
-        SkillErrorCode::Stale => "stale",
-        SkillErrorCode::InvalidSkill => "invalidSkill",
-        _ => "sourceUnavailable",
+        SkillErrorCode::InvalidReference => SkillActivationErrorCodeDto::InvalidSelection,
+        SkillErrorCode::DuplicateSelection => SkillActivationErrorCodeDto::DuplicateSelection,
+        SkillErrorCode::TooManySkills => SkillActivationErrorCodeDto::TooManySkills,
+        SkillErrorCode::SourceBudgetExceeded => SkillActivationErrorCodeDto::ActivationTooLarge,
+        SkillErrorCode::NotFound => SkillActivationErrorCodeDto::NotFound,
+        SkillErrorCode::Stale => SkillActivationErrorCodeDto::Stale,
+        SkillErrorCode::InvalidSkill => SkillActivationErrorCodeDto::InvalidSkill,
+        _ => SkillActivationErrorCodeDto::SourceUnavailable,
     };
     let recovery = match error.recovery() {
-        SkillRecovery::Retry => "retrySameSelection",
+        SkillRecovery::Retry => SkillActivationRecoveryDto::RetrySameSelection,
         SkillRecovery::RefreshCatalog
         | SkillRecovery::RepairSkill
-        | SkillRecovery::ReconfigureSource => "refreshCatalog",
-        SkillRecovery::ChangeSelection | SkillRecovery::ReduceSelection => "rejectSelection",
-        _ => "rejectSelection",
+        | SkillRecovery::ReconfigureSource => SkillActivationRecoveryDto::RefreshCatalog,
+        SkillRecovery::ChangeSelection | SkillRecovery::ReduceSelection => {
+            SkillActivationRecoveryDto::RejectSelection
+        }
+        _ => SkillActivationRecoveryDto::RejectSelection,
     };
     SkillActivationFailure {
         data: Box::new(SkillActivationErrorData {
             error_type: "skillActivation",
-            code: code.to_string(),
-            recovery: recovery.to_string(),
+            code,
+            recovery,
             message: error.message(),
             skill_id: error.skill_id().map(|id| id.as_str().to_string()),
             expected_revision: error
@@ -609,6 +1163,33 @@ fn non_empty(value: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::skills_test_support::write_installed_skill;
+
+    #[test]
+    fn picker_catalog_filters_disabled_global_skills_and_revises_its_etag() {
+        let fixture = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+        let service = SkillsService::new().with_bundled_source().unwrap();
+        let catalog = service.list().unwrap();
+        let descriptor = catalog.skills().first().unwrap();
+
+        let enabled = enabled_catalog_response(&storage, &catalog).unwrap();
+        assert_eq!(enabled.skills.len(), 1);
+        assert_ne!(enabled.catalog_revision, catalog.catalog_revision());
+
+        storage
+            .set_skill_enablement_override(descriptor.id().as_str(), false)
+            .unwrap();
+        let disabled = enabled_catalog_response(&storage, &catalog).unwrap();
+        assert!(disabled.skills.is_empty());
+        assert_ne!(disabled.catalog_revision, enabled.catalog_revision);
+
+        storage
+            .set_skill_enablement_override(descriptor.id().as_str(), true)
+            .unwrap();
+        let restored = enabled_catalog_response(&storage, &catalog).unwrap();
+        assert_eq!(restored.skills.len(), 1);
+        assert_eq!(restored.catalog_revision, enabled.catalog_revision);
+    }
 
     #[test]
     fn bundled_activation_crosses_schema_v4_as_an_opaque_selection() {

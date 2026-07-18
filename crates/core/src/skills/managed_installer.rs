@@ -16,13 +16,18 @@ use super::managed_store::{
     encode_receipt, InstalledPackageRef, InstalledSkillReceipt, ManagedSkillStore,
     ManagedStoreLoadError, INSTALLATIONS_DIRECTORY, MAX_INSTALLATION_DIRECTORY_ENTRIES,
     MAX_LIVE_INSTALLATIONS, MAX_MANAGED_DIRECTORY_ENTRIES, PACKAGES_DIRECTORY,
-    PACKAGE_VERSION_DIRECTORY,
+    PACKAGE_V1_DIRECTORY, PACKAGE_V2_DIRECTORY,
 };
-use super::model::{SkillInstallationId, SkillRevision};
+use super::model::{
+    SkillInstallationId, SkillRevision, SKILL_PACKAGE_FORMAT_VERSION,
+    SKILL_PACKAGE_FORMAT_VERSION_V2,
+};
+use super::package::PACKAGE_V2_MANIFEST_FILE;
 use super::prepared::PreparedSkillPackage;
 use super::workspace::{
     is_symlink_or_reparse, metadata_if_present, verify_opened_file_identity, SKILL_FILE_NAME,
 };
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt;
@@ -234,11 +239,13 @@ impl ManagedSkillInstaller {
         let writer_lock = acquire_writer_lock(&root)?;
         let installations = ensure_exact_directory(&root, INSTALLATIONS_DIRECTORY)?;
         let packages = ensure_exact_directory(&root, PACKAGES_DIRECTORY)?;
-        let version = ensure_exact_directory(&packages, PACKAGE_VERSION_DIRECTORY)?;
+        let package_v1 = ensure_exact_directory(&packages, PACKAGE_V1_DIRECTORY)?;
+        let package_v2 = ensure_exact_directory(&packages, PACKAGE_V2_DIRECTORY)?;
         let layout = ManagedStoreLayout {
             root,
             installations,
-            package_version: version,
+            package_v1,
+            package_v2,
         };
         cleanup_stale_transaction_entries(&layout)?;
         let store = ManagedSkillStore::new(layout.root.clone())
@@ -585,9 +592,13 @@ impl ManagedStoreTransaction<'_> {
         &self,
         package: &PreparedSkillPackage,
     ) -> Result<(), ManagedSkillInstallerError> {
-        let package_ref = InstalledPackageRef::from_revision(package.revision().clone())
-            .map_err(|reason| ManagedSkillInstallerError::StoreCorrupt { reason })?;
-        let target = self.layout.package_version.join(&package_ref.digest_hex);
+        let package_ref = InstalledPackageRef::from_format_and_revision(
+            package.format_version(),
+            package.revision().clone(),
+        )
+        .map_err(|reason| ManagedSkillInstallerError::StoreCorrupt { reason })?;
+        let package_version = self.layout.package_version(package.format_version());
+        let target = package_version.join(&package_ref.digest_hex);
         if metadata_if_present(&target)
             .map_err(|error| self.io_error("inspect managed Skill package", error))?
             .is_some()
@@ -595,34 +606,18 @@ impl ManagedStoreTransaction<'_> {
             return self.ensure_existing_package_durable(package);
         }
         ensure_directory_has_room(
-            &self.layout.package_version,
+            package_version,
             MAX_MANAGED_DIRECTORY_ENTRIES,
             ManagedSkillStoreCapacity::Packages,
         )?;
 
         let mut staging = self
             .layout
-            .unique_package_staging(&package_ref.digest_hex)?;
-        let skill_path = staging.path.join(SKILL_FILE_NAME);
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&skill_path)
-            .map_err(|error| self.io_error("create managed Skill package staging file", error))?;
-        file.write_all(package.source_bytes())
-            .map_err(|error| self.io_error("write managed Skill package staging file", error))?;
-        file.flush()
-            .map_err(|error| self.io_error("flush managed Skill package staging file", error))?;
-        file.sync_all()
-            .map_err(|error| self.io_error("sync managed Skill package staging file", error))?;
-        drop(file);
+            .unique_package_staging(package.format_version(), &package_ref.digest_hex)?;
+        self.write_staged_package(&staging.path, package)?;
         if self.should_fail(ManagedSkillInstallerFailpoint::PackageFileSynced) {
             return Err(self.injected_io("publish managed Skill package after file sync"));
         }
-        sync_directory(&staging.path).map_err(|error| {
-            self.io_error("sync managed Skill package staging directory", error)
-        })?;
-
         match atomic_rename_noreplace(&staging.path, &target) {
             Ok(()) => staging.disarm(),
             Err(error)
@@ -638,13 +633,79 @@ impl ManagedStoreTransaction<'_> {
         if self.should_fail(ManagedSkillInstallerFailpoint::PackagePublished) {
             return Err(self.injected_io("publish managed Skill package before parent sync"));
         }
-        sync_directory(&self.layout.package_version).map_err(|error| {
+        sync_directory(package_version).map_err(|error| {
             self.io_error("sync managed Skill package version directory", error)
         })?;
         if self.should_fail(ManagedSkillInstallerFailpoint::PackageParentSynced) {
             return Err(self.injected_io("publish managed Skill package after parent sync"));
         }
         verify_prepared_package(&self.store, package)
+    }
+
+    fn write_staged_package(
+        &self,
+        staging_root: &Path,
+        package: &PreparedSkillPackage,
+    ) -> Result<(), ManagedSkillInstallerError> {
+        self.write_staged_file(&staging_root.join(SKILL_FILE_NAME), package.source_bytes())?;
+        let mut directories = BTreeSet::new();
+        if package.format_version() == SKILL_PACKAGE_FORMAT_VERSION_V2 {
+            for resource in package.resources() {
+                let relative = Path::new(resource.descriptor().path());
+                let parent =
+                    relative
+                        .parent()
+                        .ok_or_else(|| ManagedSkillInstallerError::StoreCorrupt {
+                            reason: "prepared v2 resource has no parent directory".to_string(),
+                        })?;
+                let mut current = PathBuf::new();
+                for component in parent.components() {
+                    current.push(component.as_os_str());
+                    if directories.insert(current.clone()) {
+                        fs::create_dir(staging_root.join(&current)).map_err(|error| {
+                            self.io_error("create managed Skill resource staging directory", error)
+                        })?;
+                    }
+                }
+                self.write_staged_file(&staging_root.join(relative), resource.bytes())?;
+            }
+            let manifest = package.manifest_bytes().ok_or_else(|| {
+                ManagedSkillInstallerError::StoreCorrupt {
+                    reason: "prepared v2 package has no manifest bytes".to_string(),
+                }
+            })?;
+            self.write_staged_file(&staging_root.join(PACKAGE_V2_MANIFEST_FILE), manifest)?;
+        }
+
+        let mut directories = directories.into_iter().collect::<Vec<_>>();
+        directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        for directory in directories {
+            sync_directory(&staging_root.join(directory)).map_err(|error| {
+                self.io_error("sync managed Skill resource staging directory", error)
+            })?;
+        }
+        sync_directory(staging_root)
+            .map_err(|error| self.io_error("sync managed Skill package staging directory", error))
+    }
+
+    fn write_staged_file(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<(), ManagedSkillInstallerError> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(path)
+            .map_err(|error| self.io_error("create managed Skill package staging file", error))?;
+        file.write_all(bytes)
+            .map_err(|error| self.io_error("write managed Skill package staging file", error))?;
+        file.flush()
+            .map_err(|error| self.io_error("flush managed Skill package staging file", error))?;
+        file.sync_all()
+            .map_err(|error| self.io_error("sync managed Skill package staging file", error))
     }
 
     fn ensure_existing_package_durable(
@@ -654,7 +715,7 @@ impl ManagedStoreTransaction<'_> {
         verify_prepared_package(&self.store, package)?;
         // The package may be an orphan left by a crash immediately after its
         // rename. Re-sync the parent before any receipt may reference it.
-        sync_directory(&self.layout.package_version).map_err(|error| {
+        sync_directory(self.layout.package_version(package.format_version())).map_err(|error| {
             self.io_error("sync reused managed Skill package version directory", error)
         })?;
         if self.should_fail(ManagedSkillInstallerFailpoint::PackageParentSynced) {
@@ -676,6 +737,7 @@ impl ManagedStoreTransaction<'_> {
         self.ensure_receipt_staging_capacity()?;
         let receipt_bytes = encode_receipt(
             installation_id,
+            package.format_version(),
             package.revision(),
             package.origin(),
             installed_at_unix_ms,
@@ -815,20 +877,30 @@ enum ManagedSkillInstallerFailpoint {
 struct ManagedStoreLayout {
     root: PathBuf,
     installations: PathBuf,
-    package_version: PathBuf,
+    package_v1: PathBuf,
+    package_v2: PathBuf,
 }
 
 impl ManagedStoreLayout {
+    fn package_version(&self, format_version: u32) -> &Path {
+        match format_version {
+            SKILL_PACKAGE_FORMAT_VERSION => &self.package_v1,
+            SKILL_PACKAGE_FORMAT_VERSION_V2 => &self.package_v2,
+            _ => unreachable!("PreparedSkillPackage validates format version"),
+        }
+    }
+
     fn receipt_path(&self, installation_id: &SkillInstallationId) -> PathBuf {
         self.installations.join(format!("{installation_id}.json"))
     }
 
     fn unique_package_staging(
         &self,
+        format_version: u32,
         digest: &str,
     ) -> Result<StagingPath, ManagedSkillInstallerError> {
         create_unique_staging(
-            &self.package_version,
+            self.package_version(format_version),
             |nonce| format!(".package-{digest}-{nonce}.tmp"),
             StagingKind::Directory,
         )
@@ -993,10 +1065,25 @@ fn verify_prepared_package(
     store: &ManagedSkillStore,
     package: &PreparedSkillPackage,
 ) -> Result<(), ManagedSkillInstallerError> {
-    let package_ref = InstalledPackageRef::from_revision(package.revision().clone())
-        .map_err(|reason| ManagedSkillInstallerError::StoreCorrupt { reason })?;
-    match store.load_package(&package_ref) {
-        Ok(snapshot) if snapshot.bytes == package.source_bytes() => Ok(()),
+    let package_ref = InstalledPackageRef::from_format_and_revision(
+        package.format_version(),
+        package.revision().clone(),
+    )
+    .map_err(|reason| ManagedSkillInstallerError::StoreCorrupt { reason })?;
+    match store.load_complete_package(&package_ref) {
+        Ok(snapshot)
+            if snapshot.package.bytes == package.source_bytes()
+                && snapshot.package.format_version == package.format_version()
+                && snapshot.package.resources == package.resource_index()
+                && snapshot.resource_bytes.len() == package.resources().len()
+                && snapshot.resource_bytes.iter().zip(package.resources()).all(
+                    |((path, bytes), prepared)| {
+                        path == prepared.descriptor().path() && bytes == prepared.bytes()
+                    },
+                ) =>
+        {
+            Ok(())
+        }
         Ok(_) => Err(ManagedSkillInstallerError::StoreCorrupt {
             reason: format!(
                 "managed Skill package `{}` does not match its prepared byte snapshot",
@@ -1458,7 +1545,7 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::digest::PACKAGE_REVISION_PREFIX;
+    use crate::skills::digest::{PACKAGE_REVISION_PREFIX, PACKAGE_REVISION_V2_PREFIX};
     use crate::skills::{
         SkillPackageOrigin, SkillSourceKind, SkillsService, USER_INSTALLED_SKILL_SOURCE_ID,
     };
@@ -1483,6 +1570,24 @@ mod tests {
         .unwrap()
     }
 
+    fn package_v2(name: &str, marker: &str, resource: &[u8]) -> PreparedSkillPackage {
+        PreparedSkillPackage::from_files(
+            vec![
+                (
+                    SKILL_FILE_NAME.to_string(),
+                    format!(
+                        "---\nname: {name}\ndescription: Managed fixture {name}.\n---\n# Instructions\n{marker}\n"
+                    )
+                    .into_bytes(),
+                ),
+                ("references/guide.md".to_string(), resource.to_vec()),
+                ("assets/data.bin".to_string(), vec![0, 1, 2, 255]),
+            ],
+            SkillPackageOrigin::new("local-directory", format!("fixture:{name}")).unwrap(),
+        )
+        .unwrap()
+    }
+
     fn install_request(id: &str, package: PreparedSkillPackage) -> ManagedSkillInstallRequest {
         let mut request =
             ManagedSkillInstallRequest::with_installation_id(installation_id(id), package);
@@ -1500,7 +1605,7 @@ mod tests {
 
     fn package_path(root: &Path, revision: &SkillRevision) -> PathBuf {
         root.join(PACKAGES_DIRECTORY)
-            .join(PACKAGE_VERSION_DIRECTORY)
+            .join(PACKAGE_V1_DIRECTORY)
             .join(
                 revision
                     .as_str()
@@ -1604,6 +1709,266 @@ mod tests {
             .id()
             .as_str()
             .starts_with(USER_INSTALLED_SKILL_SOURCE_ID));
+    }
+
+    #[test]
+    fn v2_install_update_and_v1_downgrade_share_the_existing_transaction() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("store");
+        let installer = ManagedSkillInstaller::new(&root).unwrap();
+        let original = package("resourceful", "V1_INSTRUCTIONS");
+        let original_revision = original.revision().clone();
+        let install = install_request(INSTALLATION_ID, original);
+        installer.install(&install).unwrap();
+
+        let resourceful = package_v2("resourceful", "V2_INSTRUCTIONS", b"GUIDE_V2");
+        assert_eq!(
+            resourceful.format_version(),
+            SKILL_PACKAGE_FORMAT_VERSION_V2
+        );
+        assert!(resourceful
+            .revision()
+            .as_str()
+            .starts_with(PACKAGE_REVISION_V2_PREFIX));
+        let v2_revision = resourceful.revision().clone();
+        let update = ManagedSkillUpdateRequest::new(
+            install.installation_id().clone(),
+            original_revision,
+            resourceful.clone(),
+        );
+        assert_eq!(
+            installer.update(&update).unwrap(),
+            ManagedSkillUpdateOutcome::Updated
+        );
+        assert_eq!(
+            installer.update(&update).unwrap(),
+            ManagedSkillUpdateOutcome::AlreadyCurrent
+        );
+
+        let digest = v2_revision
+            .as_str()
+            .strip_prefix(PACKAGE_REVISION_V2_PREFIX)
+            .unwrap();
+        let v2_root = root
+            .join(PACKAGES_DIRECTORY)
+            .join(PACKAGE_V2_DIRECTORY)
+            .join(digest);
+        assert_eq!(
+            fs::read(v2_root.join("references/guide.md")).unwrap(),
+            b"GUIDE_V2"
+        );
+        assert!(v2_root.join(PACKAGE_V2_MANIFEST_FILE).is_file());
+
+        let service = SkillsService::new().with_installed_source(&root).unwrap();
+        let catalog = service.list().unwrap();
+        let resolved = service.resolve(&catalog.skills()[0].selection()).unwrap();
+        assert_eq!(resolved.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V2);
+        assert_eq!(resolved.resources().len(), 2);
+        assert_eq!(
+            resolved
+                .resources()
+                .get("references/guide.md")
+                .unwrap()
+                .byte_length(),
+            8
+        );
+
+        let downgraded = package("resourceful", "V1_AGAIN");
+        let downgrade_revision = downgraded.revision().clone();
+        let downgrade = ManagedSkillUpdateRequest::new(
+            install.installation_id().clone(),
+            v2_revision,
+            downgraded,
+        );
+        assert_eq!(
+            installer.update(&downgrade).unwrap(),
+            ManagedSkillUpdateOutcome::Updated
+        );
+        let catalog = service.list().unwrap();
+        assert_eq!(catalog.skills()[0].revision(), &downgrade_revision);
+        let resolved = service.resolve(&catalog.skills()[0].selection()).unwrap();
+        assert_eq!(resolved.format_version(), SKILL_PACKAGE_FORMAT_VERSION);
+        assert!(resolved.resources().is_empty());
+    }
+
+    #[test]
+    fn v2_retry_deeply_verifies_an_existing_content_addressed_tree() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("store");
+        let installer = ManagedSkillInstaller::new(&root).unwrap();
+        let package = package_v2("resourceful", "READ_RESOURCE", b"ORIGINAL");
+        let request = install_request(INSTALLATION_ID, package.clone());
+        installer.install(&request).unwrap();
+
+        let digest = package
+            .revision()
+            .as_str()
+            .strip_prefix(PACKAGE_REVISION_V2_PREFIX)
+            .unwrap();
+        fs::write(
+            root.join(PACKAGES_DIRECTORY)
+                .join(PACKAGE_V2_DIRECTORY)
+                .join(digest)
+                .join("references/guide.md"),
+            b"TAMPERED",
+        )
+        .unwrap();
+
+        let error = installer.install(&request).unwrap_err();
+        assert_eq!(error.code(), ManagedSkillInstallerErrorCode::StoreCorrupt);
+    }
+
+    #[test]
+    fn v2_resolve_deeply_verifies_every_revision_bound_resource() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("store");
+        let installer = ManagedSkillInstaller::new(&root).unwrap();
+        let package = package_v2("resourceful", "READ_RESOURCE", b"ORIGINAL");
+        let request = install_request(INSTALLATION_ID, package.clone());
+        installer.install(&request).unwrap();
+
+        let service = SkillsService::new().with_installed_source(&root).unwrap();
+        let selection = service.list().unwrap().skills()[0].selection();
+        let digest = package
+            .revision()
+            .as_str()
+            .strip_prefix(PACKAGE_REVISION_V2_PREFIX)
+            .unwrap();
+        fs::remove_file(
+            root.join(PACKAGES_DIRECTORY)
+                .join(PACKAGE_V2_DIRECTORY)
+                .join(digest)
+                .join("references/guide.md"),
+        )
+        .unwrap();
+
+        // Catalog discovery is intentionally manifest-only, but activation
+        // must not expose a resource index for an incomplete package.
+        assert_eq!(service.list().unwrap().skills().len(), 1);
+        let error = service.resolve(&selection).unwrap_err();
+        assert_eq!(error.code(), crate::skills::SkillErrorCode::InvalidSkill);
+        assert_eq!(
+            error.diagnostic_code(),
+            Some(crate::skills::SkillDiagnosticCode::MissingSkillFile)
+        );
+    }
+
+    #[test]
+    fn mixed_v1_v2_receipts_list_and_resolve_together() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("store");
+        let installer = ManagedSkillInstaller::new(&root).unwrap();
+        let v1 = install_request(INSTALLATION_ID, package("plain", "PLAIN"));
+        let v2 = install_request(
+            SECOND_INSTALLATION_ID,
+            package_v2("resourceful", "RESOURCEFUL", b"GUIDE"),
+        );
+        installer.install(&v1).unwrap();
+        installer.install(&v2).unwrap();
+
+        let v1_receipt = ManagedSkillStore::new(&root)
+            .unwrap()
+            .load_receipt(v1.installation_id())
+            .unwrap();
+        let v2_receipt = ManagedSkillStore::new(&root)
+            .unwrap()
+            .load_receipt(v2.installation_id())
+            .unwrap();
+        assert_eq!(
+            v1_receipt.package.format_version,
+            SKILL_PACKAGE_FORMAT_VERSION
+        );
+        assert_eq!(
+            v2_receipt.package.format_version,
+            SKILL_PACKAGE_FORMAT_VERSION_V2
+        );
+
+        let service = SkillsService::new().with_installed_source(&root).unwrap();
+        let catalog = service.list().unwrap();
+        assert_eq!(catalog.skills().len(), 2);
+        let resolved = catalog
+            .skills()
+            .iter()
+            .map(|descriptor| service.resolve(&descriptor.selection()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(resolved
+            .iter()
+            .any(|package| package.format_version() == SKILL_PACKAGE_FORMAT_VERSION));
+        assert!(resolved.iter().any(|package| {
+            package.format_version() == SKILL_PACKAGE_FORMAT_VERSION_V2
+                && package.resources().len() == 2
+        }));
+    }
+
+    #[test]
+    fn corrupt_v2_manifest_is_isolated_by_the_read_only_source() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("store");
+        let installer = ManagedSkillInstaller::new(&root).unwrap();
+        let package = package_v2("resourceful", "READ_RESOURCE", b"GUIDE");
+        let request = install_request(INSTALLATION_ID, package.clone());
+        installer.install(&request).unwrap();
+        let digest = package
+            .revision()
+            .as_str()
+            .strip_prefix(PACKAGE_REVISION_V2_PREFIX)
+            .unwrap();
+        let manifest_path = root
+            .join(PACKAGES_DIRECTORY)
+            .join(PACKAGE_V2_DIRECTORY)
+            .join(digest)
+            .join(PACKAGE_V2_MANIFEST_FILE);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["unexpected"] = serde_json::json!(true);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let catalog = installed_catalog(&root);
+        assert!(catalog.skills().is_empty());
+        assert_eq!(
+            catalog.diagnostics()[0].code(),
+            crate::skills::SkillDiagnosticCode::InvalidPackageManifest
+        );
+    }
+
+    #[test]
+    fn v2_failpoints_preserve_the_same_receipt_linearization_boundary() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("store");
+        let request = install_request(
+            INSTALLATION_ID,
+            package_v2("resourceful", "READ_RESOURCE", b"GUIDE"),
+        );
+        let precommit = ManagedSkillInstaller::with_failpoint(
+            &root,
+            ManagedSkillInstallerFailpoint::PackagePublished,
+        );
+        assert_eq!(
+            precommit.install(&request).unwrap_err().code(),
+            ManagedSkillInstallerErrorCode::Io
+        );
+        assert!(installed_catalog(&root).skills().is_empty());
+
+        let indeterminate = ManagedSkillInstaller::with_failpoint(
+            &root,
+            ManagedSkillInstallerFailpoint::ReceiptPublished,
+        );
+        assert_eq!(
+            indeterminate.install(&request).unwrap_err().code(),
+            ManagedSkillInstallerErrorCode::CommitIndeterminate
+        );
+        let catalog = installed_catalog(&root);
+        assert_eq!(catalog.skills().len(), 1);
+        assert_eq!(
+            SkillsService::new()
+                .with_installed_source(&root)
+                .unwrap()
+                .resolve(&catalog.skills()[0].selection())
+                .unwrap()
+                .resources()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -1898,6 +2263,7 @@ mod tests {
                 SkillInstallationId::parse(Uuid::from_u128(value as u128).to_string()).unwrap();
             let bytes = encode_receipt(
                 &id,
+                original.package().format_version(),
                 original.package().revision(),
                 receipt_origin,
                 1_784_347_513_399,
@@ -2082,7 +2448,7 @@ mod tests {
             .unwrap();
         let package_stage = root
             .join(PACKAGES_DIRECTORY)
-            .join(PACKAGE_VERSION_DIRECTORY)
+            .join(PACKAGE_V1_DIRECTORY)
             .join(format!(".package-{digest}-{}.tmp", Uuid::new_v4()));
         fs::create_dir(&package_stage).unwrap();
         let unknown = root
@@ -2140,13 +2506,12 @@ mod tests {
         let request = install_request(INSTALLATION_ID, package("auditor", "BUDGET"));
         installer.install(&request).unwrap();
         let installations = root.join(INSTALLATIONS_DIRECTORY);
-        let package_version = root
-            .join(PACKAGES_DIRECTORY)
-            .join(PACKAGE_VERSION_DIRECTORY);
+        let package_version = root.join(PACKAGES_DIRECTORY).join(PACKAGE_V1_DIRECTORY);
         let layout = ManagedStoreLayout {
             root,
             installations: installations.clone(),
-            package_version,
+            package_v1: package_version,
+            package_v2: fixture.path().join("unused-v2"),
         };
         let stale = installations.join(format!(
             ".receipt-{}-{}.tmp",

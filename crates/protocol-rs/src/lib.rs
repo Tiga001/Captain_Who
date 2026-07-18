@@ -21,6 +21,12 @@ pub const SKILLS_LIST_METHOD: &str = "skills.list";
 pub const SKILLS_INSTALL_LOCAL_METHOD: &str = "skills.installLocal";
 pub const SKILLS_UPDATE_LOCAL_METHOD: &str = "skills.updateLocal";
 pub const SKILLS_UNINSTALL_METHOD: &str = "skills.uninstall";
+pub const SKILLS_INSPECT_INSTALLATION_METHOD: &str = "skills.inspectInstallation";
+pub const SKILLS_COMMIT_INSTALLATION_METHOD: &str = "skills.commitInstallation";
+pub const SKILLS_CANCEL_PREPARATION_METHOD: &str = "skills.cancelPreparation";
+pub const SKILLS_LIST_MANAGEMENT_METHOD: &str = "skills.listManagement";
+pub const SKILLS_SET_ENABLED_METHOD: &str = "skills.setEnabled";
+pub const SKILLS_CHANGED_NOTIFICATION_METHOD: &str = "skills.changed";
 pub const GIT_INSPECT_REPOSITORY_METHOD: &str = "git.inspectRepository";
 pub const GIT_GET_REVIEW_SUMMARY_METHOD: &str = "git.getReviewSummary";
 pub const GIT_GET_REVIEW_FILE_DIFF_METHOD: &str = "git.getReviewFileDiff";
@@ -149,15 +155,20 @@ pub struct GitRepositoryInspectRequest {
     pub project_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SkillsListRequest {
-    pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 pub const SKILL_CATALOG_SCHEMA_VERSION: u32 = 4;
 pub const SKILL_MUTATION_SCHEMA_VERSION: u32 = 1;
+pub const SKILL_INSTALLATION_WORKFLOW_SCHEMA_VERSION: u32 = 1;
+pub const SKILL_MANAGEMENT_SCHEMA_VERSION: u32 = 1;
 pub const SKILL_INSTALLATION_ERROR_CODE: i64 = -32010;
+pub const SKILL_INSPECTION_ERROR_CODE: i64 = -32011;
+pub const SKILL_MANAGEMENT_ERROR_CODE: i64 = -32012;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -179,6 +190,413 @@ pub struct SkillsUpdateLocalRequest {
 pub struct SkillsUninstallRequest {
     pub skill_id: String,
     pub expected_revision: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsInspectInstallationRequest {
+    pub preparation_id: String,
+    pub intent: SkillInstallationIntentDto,
+    pub source: SkillAcquisitionSourceDto,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "operation", deny_unknown_fields)]
+pub enum SkillInstallationIntentDto {
+    #[serde(rename = "install")]
+    Install {},
+    #[serde(rename = "update", rename_all = "camelCase")]
+    Update {
+        skill_id: String,
+        expected_installation_revision: String,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SkillAcquisitionSourceDto {
+    #[serde(rename = "localDirectory", rename_all = "camelCase")]
+    LocalDirectory { directory: String },
+    #[serde(rename = "githubRepository", rename_all = "camelCase")]
+    GithubRepository {
+        owner: String,
+        repository: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<SkillGithubReferenceDto>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subdirectory: Option<String>,
+    },
+    #[serde(rename = "installedSource")]
+    InstalledSource {},
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SkillGithubReferenceDto {
+    #[serde(rename = "defaultBranch")]
+    DefaultBranch {},
+    #[serde(rename = "named")]
+    Named { value: String },
+    #[serde(rename = "commit")]
+    Commit { sha: String },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillPreparationOperationDto {
+    Install,
+    Update,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillInstallationPreviewDto {
+    pub schema_version: u32,
+    pub preparation_id: String,
+    pub preview_revision: String,
+    pub operation: SkillPreparationOperationDto,
+    pub installation_id: String,
+    pub skill_id: String,
+    pub package: SkillPackagePreviewDto,
+    pub source: SkillPreviewSourceDto,
+    pub compatibility: SkillCompatibilityReportDto,
+    pub changes: SkillInstallationChangesDto,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillPackagePreviewDto {
+    pub format_version: u32,
+    pub package_revision: String,
+    pub name: String,
+    pub description: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
+}
+
+/// A presentation-safe source summary. Authority-bearing local paths and
+/// credentials must never be placed in this DTO.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SkillPreviewSourceDto {
+    #[serde(rename = "localDirectory", rename_all = "camelCase")]
+    LocalDirectory {
+        display_name: String,
+        refreshable: bool,
+    },
+    #[serde(rename = "githubRepository", rename_all = "camelCase")]
+    GithubRepository {
+        owner: String,
+        repository: String,
+        reference: SkillGithubReferenceDto,
+        resolved_commit: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subdirectory: Option<String>,
+        refreshable: bool,
+    },
+    #[serde(rename = "installedSource", rename_all = "camelCase")]
+    InstalledSource {
+        display_name: String,
+        refreshable: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillCompatibilityStatusDto {
+    Compatible,
+    CompatibleWithWarnings,
+    Unknown,
+    Incompatible,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillCompatibilityIssueSeverityDto {
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillCompatibilityIssueDto {
+    pub id: String,
+    pub code: String,
+    pub severity: SkillCompatibilityIssueSeverityDto,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+    pub requires_acknowledgement: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillCompatibilityReportDto {
+    pub status: SkillCompatibilityStatusDto,
+    pub issues: Vec<SkillCompatibilityIssueDto>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInstallationChangeDto {
+    New,
+    Changed,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillInstallationChangesDto {
+    pub content: SkillInstallationChangeDto,
+    pub source: SkillInstallationChangeDto,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsCommitInstallationRequest {
+    pub preparation_id: String,
+    pub preview_revision: String,
+    pub accepted_issue_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInstallationCommitOutcomeDto {
+    Installed,
+    AlreadyInstalled,
+    Updated,
+    AlreadyCurrent,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillInstallationCommitResponse {
+    pub schema_version: u32,
+    pub preparation_id: String,
+    pub operation: SkillPreparationOperationDto,
+    pub outcome: SkillInstallationCommitOutcomeDto,
+    pub installation_id: String,
+    pub skill_id: String,
+    pub package_revision: String,
+    pub installation_revision: String,
+    pub changes: SkillInstallationChangesDto,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsCancelPreparationRequest {
+    pub preparation_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillPreparationCancellationOutcomeDto {
+    Cancelled,
+    AlreadyAbsent,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillPreparationCancellationResponse {
+    pub schema_version: u32,
+    pub preparation_id: String,
+    pub outcome: SkillPreparationCancellationOutcomeDto,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInspectionPhaseDto {
+    Inspect,
+    Commit,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInspectionErrorCodeDto {
+    InvalidSource,
+    UnsupportedSource,
+    SourceNotAccessible,
+    ReferenceNotFound,
+    SubdirectoryNotFound,
+    SourceChangedDuringRead,
+    NetworkUnavailable,
+    RateLimited,
+    RepositoryTooLarge,
+    UnsafePackage,
+    InvalidPackage,
+    Incompatible,
+    PreparationNotFound,
+    PreparationExpired,
+    IdempotencyConflict,
+    PreviewMismatch,
+    AcknowledgementRequired,
+    Cancelled,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInspectionRecoveryDto {
+    FixSource,
+    RetrySamePreparation,
+    RetryLater,
+    InspectAgain,
+    AcknowledgeWarnings,
+    ChooseDifferentSource,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillInspectionErrorData {
+    #[serde(rename = "type")]
+    pub error_type: SkillInspectionErrorTypeDto,
+    pub phase: SkillInspectionPhaseDto,
+    pub code: SkillInspectionErrorCodeDto,
+    pub recovery: SkillInspectionRecoveryDto,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInspectionErrorTypeDto {
+    SkillInspection,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsListManagementRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillManagementOperationDto {
+    List,
+    SetEnabled,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillManagementErrorCodeDto {
+    NotFound,
+    NotManageable,
+    StateConflict,
+    StorageUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillManagementRecoveryDto {
+    RefreshManagement,
+    Retry,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillManagementErrorData {
+    #[serde(rename = "type")]
+    pub error_type: SkillManagementErrorTypeDto,
+    pub operation: SkillManagementOperationDto,
+    pub code: SkillManagementErrorCodeDto,
+    pub recovery: SkillManagementRecoveryDto,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillManagementErrorTypeDto {
+    SkillManagement,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillManagementActionsDto {
+    pub can_set_enabled: bool,
+    pub can_update: bool,
+    pub can_uninstall: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillManagementEntryDto {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub source: SkillSourceDto,
+    pub package_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installation_revision: Option<String>,
+    pub state_revision: String,
+    pub enabled: bool,
+    pub actions: SkillManagementActionsDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquisition: Option<SkillPreviewSourceDto>,
+    pub compatibility: SkillCompatibilityReportDto,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsListManagementResponse {
+    pub schema_version: u32,
+    pub management_revision: String,
+    pub skills: Vec<SkillManagementEntryDto>,
+    pub diagnostics: Vec<SkillDiagnosticDto>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsSetEnabledRequest {
+    pub skill_id: String,
+    pub expected_state_revision: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillSetEnabledOutcomeDto {
+    Updated,
+    AlreadyCurrent,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsSetEnabledResponse {
+    pub schema_version: u32,
+    pub management_revision: String,
+    pub skill_id: String,
+    pub state_revision: String,
+    pub enabled: bool,
+    pub outcome: SkillSetEnabledOutcomeDto,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillsChangedReasonDto {
+    Installed,
+    Updated,
+    Uninstalled,
+    EnablementChanged,
+    CatalogChanged,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsChangedNotification {
+    pub schema_version: u32,
+    pub management_revision: String,
+    pub reason: SkillsChangedReasonDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -378,8 +796,8 @@ pub struct SkillSelectionDto {
     pub revision: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SkillSourceDto {
     pub kind: SkillSourceKindDto,
     pub id: String,
@@ -414,8 +832,8 @@ pub struct SkillDescriptorDto {
     pub location: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SkillDiagnosticDto {
     pub code: String,
     pub severity: String,
@@ -450,8 +868,8 @@ pub struct ActivatedSkillSummaryDto {
 pub struct SkillActivationErrorData {
     #[serde(rename = "type")]
     pub error_type: &'static str,
-    pub code: String,
-    pub recovery: String,
+    pub code: SkillActivationErrorCodeDto,
+    pub recovery: SkillActivationRecoveryDto,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_id: Option<String>,
@@ -459,6 +877,28 @@ pub struct SkillActivationErrorData {
     pub expected_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillActivationErrorCodeDto {
+    InvalidSelection,
+    DuplicateSelection,
+    TooManySkills,
+    ActivationTooLarge,
+    NotFound,
+    Stale,
+    InvalidSkill,
+    Disabled,
+    SourceUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillActivationRecoveryDto {
+    RetrySameSelection,
+    RefreshCatalog,
+    RejectSelection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -761,6 +1201,155 @@ mod tests {
 
             assert_eq!(serde_json::to_value(response).unwrap(), *expected);
         }
+    }
+
+    #[test]
+    fn skill_installation_workflow_v1_matches_the_shared_wire_golden() {
+        let golden: Value = serde_json::from_str(include_str!(
+            "../../../packages/protocol/fixtures/skill-installation-workflow-v1.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            golden["workflowSchemaVersion"],
+            SKILL_INSTALLATION_WORKFLOW_SCHEMA_VERSION
+        );
+        assert_eq!(
+            golden["managementSchemaVersion"],
+            SKILL_MANAGEMENT_SCHEMA_VERSION
+        );
+        assert_eq!(SKILL_MANAGEMENT_ERROR_CODE, -32012);
+
+        for case in golden["inspectCases"].as_array().unwrap() {
+            assert_wire_round_trip::<SkillsInspectInstallationRequest>(&case["request"]);
+            assert_wire_round_trip::<SkillInstallationPreviewDto>(&case["preview"]);
+        }
+        assert_wire_round_trip::<SkillsCommitInstallationRequest>(&golden["commit"]["request"]);
+        assert_wire_round_trip::<SkillInstallationCommitResponse>(&golden["commit"]["response"]);
+        assert_wire_round_trip::<SkillsCancelPreparationRequest>(&golden["cancel"]["request"]);
+        assert_wire_round_trip::<SkillPreparationCancellationResponse>(
+            &golden["cancel"]["response"],
+        );
+        assert_wire_round_trip::<SkillsListManagementRequest>(&golden["management"]["listRequest"]);
+        assert_wire_round_trip::<SkillsListManagementResponse>(
+            &golden["management"]["listResponse"],
+        );
+        assert_wire_round_trip::<SkillsSetEnabledRequest>(
+            &golden["management"]["setEnabledRequest"],
+        );
+        assert_wire_round_trip::<SkillsSetEnabledResponse>(
+            &golden["management"]["setEnabledResponse"],
+        );
+        assert_wire_round_trip::<SkillsChangedNotification>(&golden["management"]["changed"]);
+        assert_wire_round_trip::<SkillInspectionErrorData>(&golden["inspectionError"]);
+        for error in golden["managementErrors"].as_array().unwrap() {
+            assert_wire_round_trip::<SkillManagementErrorData>(error);
+        }
+    }
+
+    #[test]
+    fn skill_installation_workflow_requests_are_strict_discriminated_unions() {
+        assert_eq!(
+            SKILLS_INSPECT_INSTALLATION_METHOD,
+            "skills.inspectInstallation"
+        );
+        assert_eq!(
+            SKILLS_COMMIT_INSTALLATION_METHOD,
+            "skills.commitInstallation"
+        );
+        assert_eq!(SKILLS_CANCEL_PREPARATION_METHOD, "skills.cancelPreparation");
+        assert_eq!(SKILLS_LIST_MANAGEMENT_METHOD, "skills.listManagement");
+        assert_eq!(SKILLS_SET_ENABLED_METHOD, "skills.setEnabled");
+        assert_eq!(SKILLS_CHANGED_NOTIFICATION_METHOD, "skills.changed");
+
+        let no_workspace = serde_json::from_value::<SkillsListRequest>(serde_json::json!({}))
+            .expect("projectId is optional");
+        assert_eq!(no_workspace.project_id, None);
+        let workspace = serde_json::from_value::<SkillsListRequest>(serde_json::json!({
+            "projectId": "project-one"
+        }))
+        .unwrap();
+        assert_eq!(workspace.project_id.as_deref(), Some("project-one"));
+
+        assert!(
+            serde_json::from_value::<SkillsInspectInstallationRequest>(serde_json::json!({
+                "preparationId": "11111111-1111-4111-8111-111111111111",
+                "intent": { "operation": "install", "skillId": "not-allowed" },
+                "source": { "kind": "installedSource" }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SkillsInspectInstallationRequest>(serde_json::json!({
+                "preparationId": "11111111-1111-4111-8111-111111111111",
+                "intent": { "operation": "install" },
+                "source": {
+                    "kind": "localDirectory",
+                    "directory": "/tmp/skill",
+                    "credential": "must-not-cross-the-boundary"
+                }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SkillsInspectInstallationRequest>(serde_json::json!({
+                "preparationId": "11111111-1111-4111-8111-111111111111",
+                "intent": { "operation": "install" },
+                "source": {
+                    "kind": "githubRepository",
+                    "owner": "example",
+                    "repository": "skills",
+                    "reference": { "kind": "commit", "sha": "abc", "ref": "main" }
+                }
+            }))
+            .is_err()
+        );
+
+        assert!(
+            serde_json::from_value::<SkillManagementErrorData>(serde_json::json!({
+                "type": "skillManagement",
+                "operation": "setEnabled",
+                "code": "stateConflict",
+                "recovery": "refreshManagement",
+                "message": "Refresh the management inventory.",
+                "currentStateRevision": "must-not-be-invented"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SkillManagementErrorData>(serde_json::json!({
+                "type": "skillManagement",
+                "operation": "setEnabled",
+                "code": "stale",
+                "recovery": "refreshManagement",
+                "message": "Refresh the management inventory."
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn disabled_skill_activation_has_a_stable_reject_selection_contract() {
+        let data = SkillActivationErrorData {
+            error_type: "skillActivation",
+            code: SkillActivationErrorCodeDto::Disabled,
+            recovery: SkillActivationRecoveryDto::RejectSelection,
+            message: "The selected Skill is disabled.".to_string(),
+            skill_id: Some("installed:user:22222222-2222-4222-8222-222222222222".to_string()),
+            expected_revision: None,
+            actual_revision: None,
+        };
+        let value = serde_json::to_value(data).unwrap();
+
+        assert_eq!(value["code"], "disabled");
+        assert_eq!(value["recovery"], "rejectSelection");
+    }
+
+    fn assert_wire_round_trip<T>(value: &Value)
+    where
+        T: for<'de> Deserialize<'de> + Serialize,
+    {
+        let decoded: T = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), *value);
     }
 
     #[test]

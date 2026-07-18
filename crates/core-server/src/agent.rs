@@ -6,9 +6,7 @@ pub use crate::agent_support::{
     AgentFileDraftContentPage, AgentFileWriteDiffPage, AgentServiceError, PendingActionStatus,
     PendingAgentActionSnapshot,
 };
-use crate::skills_adapter::{
-    activate_workspace, missing_workspace_failure, PreparedSkillActivation,
-};
+use crate::skills_adapter::activate_selected_skills;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
@@ -2804,17 +2802,16 @@ impl AgentService {
             normalized_optional(input.project_id.as_deref()),
         )?;
         let project = resolve_project(&self.storage, project_id.as_deref())?;
-        let prepared_skills = if input.skills.is_empty() {
-            PreparedSkillActivation::default()
-        } else {
-            let project = project.as_ref().ok_or_else(missing_workspace_failure)?;
-            let workspace_root = project
-                .path
-                .as_deref()
-                .map(std::path::PathBuf::from)
-                .ok_or_else(missing_workspace_failure)?;
-            activate_workspace(&self.skills, &project.id, &workspace_root, &input.skills)?
-        };
+        let workspace_root = project
+            .as_ref()
+            .and_then(|project| project.path.as_deref())
+            .map(std::path::PathBuf::from);
+        let workspace = project
+            .as_ref()
+            .zip(workspace_root.as_deref())
+            .map(|(project, root)| (project.id.as_str(), root));
+        let prepared_skills =
+            activate_selected_skills(&self.storage, &self.skills, workspace, &input.skills)?;
         let attachment_library = conversation_id
             .as_deref()
             .map(|conversation_id| {
@@ -3868,6 +3865,15 @@ mod tests {
         }
     }
 
+    fn global_skill_turn_input(
+        selection: mycopilot_protocol_rs::SkillSelectionDto,
+        conversation_id: &str,
+    ) -> AgentConversationTurnInput {
+        let mut input = skill_turn_input("unused-project", selection, conversation_id);
+        input.project_id = None;
+        input
+    }
+
     #[test]
     fn conversation_turn_resolves_skill_snapshot_before_persisting_the_run() {
         const INSTRUCTIONS: &str = "SKILL_SERVER_MARKER: inspect evidence before editing.";
@@ -3991,6 +3997,168 @@ mod tests {
         assert!(!serde_json::to_string(&persisted)
             .unwrap()
             .contains(BUNDLED_INSTRUCTION_MARKER));
+    }
+
+    #[test]
+    fn bundled_skill_activates_without_a_project_in_turn_and_preview_paths() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(test_model_settings()).unwrap();
+        let skills = Arc::new(SkillsService::new().with_bundled_source().unwrap());
+        let descriptor = skills.list().unwrap().skills()[0].clone();
+        let selection = mycopilot_protocol_rs::SkillSelectionDto {
+            id: descriptor.id().as_str().to_string(),
+            revision: descriptor.revision().as_str().to_string(),
+        };
+
+        let prepared = prepare_conversation_turn(
+            &storage,
+            &skills,
+            global_skill_turn_input(selection.clone(), "conversation-global-bundled"),
+            "run-global-bundled",
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.agent_input.context.as_ref().unwrap().project_id,
+            None
+        );
+        assert_eq!(
+            prepared
+                .agent_input
+                .skill_activation
+                .as_ref()
+                .unwrap()
+                .skills[0]
+                .id,
+            descriptor.id().as_str()
+        );
+
+        let service = AgentService::new(Arc::clone(&storage)).with_skills_service(skills);
+        let preview = service
+            .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+                conversation_id: None,
+                project_id: None,
+                model_id: "model-1".to_string(),
+                max_tokens: Some(30_000),
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+                skills: vec![selection],
+            })
+            .unwrap();
+        assert!(preview.snapshot.is_some());
+    }
+
+    #[test]
+    fn disabled_global_skill_is_rejected_by_turn_and_preview_paths() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(test_model_settings()).unwrap();
+        let skills = Arc::new(SkillsService::new().with_bundled_source().unwrap());
+        let descriptor = skills.list().unwrap().skills()[0].clone();
+        let skill_id = descriptor.id().as_str().to_string();
+        storage
+            .set_skill_enablement_override(&skill_id, false)
+            .unwrap();
+        let selection = mycopilot_protocol_rs::SkillSelectionDto {
+            id: skill_id.clone(),
+            revision: descriptor.revision().as_str().to_string(),
+        };
+
+        let turn_error = match prepare_conversation_turn(
+            &storage,
+            &skills,
+            global_skill_turn_input(selection.clone(), "conversation-disabled-bundled"),
+            "run-disabled-bundled",
+        ) {
+            Ok(_) => panic!("a disabled Skill must fail before preparing the run"),
+            Err(error) => error,
+        };
+        let turn_data = turn_error.skill_activation().unwrap();
+        assert_eq!(
+            turn_data.code,
+            mycopilot_protocol_rs::SkillActivationErrorCodeDto::Disabled
+        );
+        assert_eq!(
+            turn_data.recovery,
+            mycopilot_protocol_rs::SkillActivationRecoveryDto::RejectSelection
+        );
+        assert_eq!(turn_data.skill_id.as_deref(), Some(skill_id.as_str()));
+        assert!(storage
+            .load_conversation("conversation-disabled-bundled")
+            .unwrap()
+            .is_none());
+
+        let service = AgentService::new(Arc::clone(&storage)).with_skills_service(skills);
+        let preview_error = service
+            .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+                conversation_id: None,
+                project_id: None,
+                model_id: "model-1".to_string(),
+                max_tokens: Some(30_000),
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+                skills: vec![selection],
+            })
+            .unwrap_err();
+        assert_eq!(
+            preview_error.skill_activation().unwrap().code,
+            mycopilot_protocol_rs::SkillActivationErrorCodeDto::Disabled
+        );
+    }
+
+    #[test]
+    fn workspace_skill_without_a_project_is_rejected_explicitly() {
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        write_test_skill(&workspace, "WORKSPACE_ONLY_SKILL_MARKER");
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(test_model_settings()).unwrap();
+        let skills = Arc::new(SkillsService::new());
+        let descriptor = skills
+            .list_workspace("detached-workspace", &workspace)
+            .unwrap()
+            .skills()[0]
+            .clone();
+        let selection = mycopilot_protocol_rs::SkillSelectionDto {
+            id: descriptor.id().as_str().to_string(),
+            revision: descriptor.revision().as_str().to_string(),
+        };
+
+        let turn_error = match prepare_conversation_turn(
+            &storage,
+            &skills,
+            global_skill_turn_input(selection.clone(), "conversation-workspace-without-project"),
+            "run-workspace-without-project",
+        ) {
+            Ok(_) => panic!("a workspace Skill must not activate without a project"),
+            Err(error) => error,
+        };
+        let turn_data = turn_error.skill_activation().unwrap();
+        assert_eq!(
+            turn_data.code,
+            mycopilot_protocol_rs::SkillActivationErrorCodeDto::InvalidSelection
+        );
+        assert!(turn_data.message.contains("requires a project"));
+
+        let service = AgentService::new(Arc::clone(&storage)).with_skills_service(skills);
+        let preview_error = service
+            .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+                conversation_id: None,
+                project_id: None,
+                model_id: "model-1".to_string(),
+                max_tokens: Some(30_000),
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+                skills: vec![selection],
+            })
+            .unwrap_err();
+        assert_eq!(
+            preview_error.skill_activation().unwrap().code,
+            mycopilot_protocol_rs::SkillActivationErrorCodeDto::InvalidSelection
+        );
     }
 
     #[test]
@@ -4138,8 +4306,14 @@ mod tests {
         };
 
         let data = error.skill_activation().unwrap();
-        assert_eq!(data.code, "stale");
-        assert_eq!(data.recovery, "refreshCatalog");
+        assert_eq!(
+            data.code,
+            mycopilot_protocol_rs::SkillActivationErrorCodeDto::Stale
+        );
+        assert_eq!(
+            data.recovery,
+            mycopilot_protocol_rs::SkillActivationRecoveryDto::RefreshCatalog
+        );
         assert!(data.expected_revision.is_some());
         assert!(data.actual_revision.is_some());
         assert!(storage

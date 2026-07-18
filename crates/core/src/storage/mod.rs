@@ -19,6 +19,7 @@ pub mod pending_action_repository;
 pub mod preferences_repository;
 pub mod project_repository;
 pub mod service;
+pub mod skill_enablement_repository;
 pub mod usage_repository;
 
 use rusqlite::Connection;

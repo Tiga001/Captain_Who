@@ -12,8 +12,8 @@ mycopilot-core.workspace = true
 mycopilot-protocol-rs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 tokio.workspace = true
 
 [dev-dependencies]
-sha2 = "0.10"
 tempfile = "3"

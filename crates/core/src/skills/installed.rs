@@ -48,9 +48,9 @@ impl InstalledSkillSource {
     ) -> Result<ResolvedSkillPackage, InstalledPackageLoadError> {
         let snapshot = self
             .store
-            .load_package(&receipt.package)
+            .load_complete_package(&receipt.package)
             .map_err(|error| store_package_error(error, &receipt.package.relative_path))?;
-        build_resolved_package(&self.source_id, receipt, snapshot)
+        build_resolved_package(&self.source_id, receipt, snapshot.package)
             .map_err(InstalledPackageLoadError::Invalid)
     }
 
@@ -223,15 +223,20 @@ fn build_resolved_package(
             relative_path: location.clone(),
         },
     });
-    ResolvedSkillPackage::new(descriptor, document.source, document.instructions_range).map_err(
-        |error| {
-            ManagedStoreIssue::error(
-                SkillDiagnosticCode::SourceContractViolation,
-                location,
-                format!("Cannot construct verified managed Skill snapshot: {error}"),
-            )
-        },
+    ResolvedSkillPackage::with_resources(
+        descriptor,
+        snapshot.format_version,
+        snapshot.resources,
+        document.source,
+        document.instructions_range,
     )
+    .map_err(|error| {
+        ManagedStoreIssue::error(
+            SkillDiagnosticCode::SourceContractViolation,
+            location,
+            format!("Cannot construct verified managed Skill snapshot: {error}"),
+        )
+    })
 }
 
 enum InstalledPackageLoadError {

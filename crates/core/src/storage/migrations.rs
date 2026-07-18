@@ -289,6 +289,17 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             updated_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS skill_enablement_overrides (
+            skill_id TEXT PRIMARY KEY
+                CHECK (
+                    typeof(skill_id) = 'text'
+                    AND length(CAST(skill_id AS BLOB)) BETWEEN 1 AND 16384
+                ),
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+            updated_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS ui_preferences (
             id TEXT PRIMARY KEY CHECK (id = 'default'),
             sidebar_conversation_sort TEXT NOT NULL,
@@ -441,6 +452,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         ",
     )?;
 
+    add_column_if_missing(
+        connection,
+        "skill_enablement_overrides",
+        "generation",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0)",
+    )?;
     add_column_if_missing(connection, "projects", "pinned_at", "INTEGER")?;
     add_column_if_missing(connection, "models", "context_window_tokens", "INTEGER")?;
     add_column_if_missing(connection, "models", "api_url_override", "TEXT")?;
@@ -1009,6 +1026,41 @@ mod tests {
         assert_eq!(context_window, None);
         assert_eq!(api_url_override, None);
         assert_eq!(api_token_override, None);
+    }
+
+    #[test]
+    fn adds_enablement_generation_without_changing_existing_preferences() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE skill_enablement_overrides (
+                    skill_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO skill_enablement_overrides (skill_id, enabled, updated_at)
+                VALUES ('bundled:application:auditor', 0, 42);
+                ",
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        let state = connection
+            .query_row(
+                "SELECT enabled, generation, updated_at FROM skill_enablement_overrides WHERE skill_id = ?1",
+                ["bundled:application:auditor"],
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state, (false, 0, 42));
     }
 
     #[test]

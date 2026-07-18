@@ -7,6 +7,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 pub const SKILL_PACKAGE_FORMAT_VERSION: u32 = 1;
+pub const SKILL_PACKAGE_FORMAT_VERSION_V2: u32 = 2;
 pub const DEFAULT_MAX_ACTIVATED_SKILLS: usize = 8;
 pub const DEFAULT_MAX_ACTIVATED_SKILL_BYTES: usize = 512 * 1024;
 
@@ -539,21 +540,93 @@ impl SkillDescriptor {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum SkillResourceKind {
+    Reference,
+    Asset,
+    Script,
+}
+
+impl SkillResourceKind {
+    pub fn stable_name(self) -> &'static str {
+        match self {
+            Self::Reference => "reference",
+            Self::Asset => "asset",
+            Self::Script => "script",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SkillResourceDescriptor {
+    path: String,
+    kind: SkillResourceKind,
+    byte_length: u64,
+    content_digest: String,
+}
+
+impl SkillResourceDescriptor {
+    pub(super) fn new(
+        path: String,
+        kind: SkillResourceKind,
+        byte_length: u64,
+        content_digest: String,
+    ) -> Self {
+        Self {
+            path,
+            kind,
+            byte_length,
+            content_digest,
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn kind(&self) -> SkillResourceKind {
+        self.kind
+    }
+
+    pub fn byte_length(&self) -> u64 {
+        self.byte_length
+    }
+
+    pub fn content_digest(&self) -> &str {
+        &self.content_digest
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkillResourceIndex {
-    // Package format v1 intentionally has no loadable sibling resources. Keep
-    // the index as an explicit boundary so v2 can add descriptors without
-    // changing the resolved package abstraction.
-    entry_count: usize,
+    entries: Arc<[SkillResourceDescriptor]>,
 }
 
 impl SkillResourceIndex {
     pub fn len(&self) -> usize {
-        self.entry_count
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entry_count == 0
+        self.entries.is_empty()
+    }
+
+    pub fn entries(&self) -> &[SkillResourceDescriptor] {
+        &self.entries
+    }
+
+    pub fn get(&self, path: &str) -> Option<&SkillResourceDescriptor> {
+        self.entries
+            .binary_search_by(|entry| entry.path().cmp(path))
+            .ok()
+            .map(|index| &self.entries[index])
+    }
+
+    pub(super) fn new(entries: Vec<SkillResourceDescriptor>) -> Self {
+        Self {
+            entries: entries.into(),
+        }
     }
 }
 
@@ -594,6 +667,22 @@ impl ResolvedSkillPackage {
         source_text: Arc<str>,
         instructions_range: Range<usize>,
     ) -> Result<Self, SkillPackageInvariantError> {
+        Self::with_resources(
+            descriptor,
+            SKILL_PACKAGE_FORMAT_VERSION,
+            SkillResourceIndex::default(),
+            source_text,
+            instructions_range,
+        )
+    }
+
+    pub(super) fn with_resources(
+        descriptor: SkillDescriptor,
+        format_version: u32,
+        resources: SkillResourceIndex,
+        source_text: Arc<str>,
+        instructions_range: Range<usize>,
+    ) -> Result<Self, SkillPackageInvariantError> {
         if instructions_range.start > instructions_range.end {
             return Err(SkillPackageInvariantError::new(
                 "Skill instruction range starts after it ends",
@@ -611,11 +700,38 @@ impl ResolvedSkillPackage {
                 "Skill instruction range is not aligned to UTF-8 boundaries",
             ));
         }
+        if format_version == SKILL_PACKAGE_FORMAT_VERSION && !resources.is_empty() {
+            return Err(SkillPackageInvariantError::new(
+                "Skill package format v1 cannot expose sibling resources",
+            ));
+        }
+        if !matches!(
+            format_version,
+            SKILL_PACKAGE_FORMAT_VERSION | SKILL_PACKAGE_FORMAT_VERSION_V2
+        ) {
+            return Err(SkillPackageInvariantError::new(format!(
+                "unsupported Skill package format version {format_version}"
+            )));
+        }
+        let mut previous = None;
+        for resource in resources.entries() {
+            if resource.path().is_empty() {
+                return Err(SkillPackageInvariantError::new(
+                    "Skill resource path cannot be empty",
+                ));
+            }
+            if previous.is_some_and(|path: &str| path >= resource.path()) {
+                return Err(SkillPackageInvariantError::new(
+                    "Skill resources must use unique canonical sorted paths",
+                ));
+            }
+            previous = Some(resource.path());
+        }
 
         Ok(Self {
             descriptor,
-            format_version: SKILL_PACKAGE_FORMAT_VERSION,
-            resources: SkillResourceIndex::default(),
+            format_version,
+            resources,
             source_text,
             instructions_range,
         })
@@ -823,6 +939,10 @@ pub enum SkillDiagnosticCode {
     InvalidInstallationReceipt,
     PackageRevisionMismatch,
     UnexpectedPackageEntry,
+    InvalidResourcePath,
+    ResourceFileTooLarge,
+    PackageTooLarge,
+    InvalidPackageManifest,
 }
 
 impl SkillDiagnosticCode {
@@ -855,6 +975,10 @@ impl SkillDiagnosticCode {
             Self::InvalidInstallationReceipt => "invalidInstallationReceipt",
             Self::PackageRevisionMismatch => "packageRevisionMismatch",
             Self::UnexpectedPackageEntry => "unexpectedPackageEntry",
+            Self::InvalidResourcePath => "invalidResourcePath",
+            Self::ResourceFileTooLarge => "resourceFileTooLarge",
+            Self::PackageTooLarge => "packageTooLarge",
+            Self::InvalidPackageManifest => "invalidPackageManifest",
         }
     }
 }

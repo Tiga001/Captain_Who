@@ -1,6 +1,7 @@
 mod agent;
 mod agent_support;
 mod git_dispatcher;
+mod skill_installation_workflow_adapter;
 mod skills_adapter;
 mod skills_dispatcher;
 #[cfg(test)]
@@ -16,10 +17,10 @@ use agent::{AgentConversationTurnInput, AgentService, AgentServiceError};
 use git_dispatcher::{GitDispatcher, GitJobPriority};
 use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
 use mycopilot_core::skills::{
-    LocalSkillInstallRequest, LocalSkillUpdateRequest, SkillId, SkillInstallationId,
-    SkillInstallationMutation, SkillInstallationOperation, SkillInstallationService,
-    SkillInstallationServiceError, SkillRevision,
-    SkillUninstallRequest as CoreSkillUninstallRequest, SkillsService,
+    GitHubWorkflowAcquisitionAdapter, LocalSkillInstallRequest, LocalSkillUpdateRequest, SkillId,
+    SkillInstallationId, SkillInstallationMutation, SkillInstallationOperation,
+    SkillInstallationService, SkillInstallationServiceError, SkillInstallationWorkflow,
+    SkillRevision, SkillUninstallRequest as CoreSkillUninstallRequest, SkillsService,
 };
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatMessageRecord,
@@ -33,8 +34,10 @@ use mycopilot_protocol_rs::{
     AgentCancelRunResponse, AgentFileDraftReadRequest, AgentRejectActionRequest, CorePingRequest,
     CorePingResponse, CoreShutdownResponse, GitRepositoryInspectRequest,
     GitReviewFileContentRequest, GitReviewFileDiffRequest, GitReviewFileMutationRequest,
-    GitReviewSummaryRequest, JsonRpcId, JsonRpcRequest, SkillsInstallLocalRequest,
-    SkillsListRequest, SkillsUninstallRequest, SkillsUpdateLocalRequest,
+    GitReviewSummaryRequest, JsonRpcId, JsonRpcRequest, SkillsCancelPreparationRequest,
+    SkillsChangedNotification, SkillsChangedReasonDto, SkillsCommitInstallationRequest,
+    SkillsInspectInstallationRequest, SkillsInstallLocalRequest, SkillsListManagementRequest,
+    SkillsListRequest, SkillsSetEnabledRequest, SkillsUninstallRequest, SkillsUpdateLocalRequest,
     AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD,
     AGENT_CLEAR_USAGE_RECORDS_METHOD, AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD,
     AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD, AGENT_GET_FILE_WRITE_DIFF_METHOD,
@@ -42,23 +45,34 @@ use mycopilot_protocol_rs::{
     AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
     CORE_PING_METHOD, CORE_SHUTDOWN_METHOD, GIT_GET_REVIEW_FILE_CONTENT_METHOD,
     GIT_GET_REVIEW_FILE_DIFF_METHOD, GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD,
-    GIT_MUTATE_REVIEW_FILE_METHOD, SEARCH_SEARCH_CHATS_METHOD, SKILLS_INSTALL_LOCAL_METHOD,
-    SKILLS_LIST_METHOD, SKILLS_UNINSTALL_METHOD, SKILLS_UPDATE_LOCAL_METHOD,
-    SKILL_INSTALLATION_ERROR_CODE, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
-    STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
-    STORAGE_FORK_CONVERSATION_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
-    STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD, STORAGE_LOAD_COMPOSER_DRAFTS_METHOD,
-    STORAGE_LOAD_CONVERSATIONS_METHOD, STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD,
-    STORAGE_LOAD_MODEL_SETTINGS_METHOD, STORAGE_LOAD_PROJECTS_METHOD,
-    STORAGE_LOAD_UI_PREFERENCES_METHOD, STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD,
-    STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD, STORAGE_SAVE_COMPOSER_DRAFT_METHOD,
-    STORAGE_SAVE_CONVERSATION_META_METHOD, STORAGE_SAVE_MODEL_SETTINGS_METHOD,
-    STORAGE_SAVE_PROJECT_METHOD, STORAGE_SAVE_UI_PREFERENCES_METHOD,
-    STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
+    GIT_MUTATE_REVIEW_FILE_METHOD, SEARCH_SEARCH_CHATS_METHOD, SKILLS_CANCEL_PREPARATION_METHOD,
+    SKILLS_CHANGED_NOTIFICATION_METHOD, SKILLS_COMMIT_INSTALLATION_METHOD,
+    SKILLS_INSPECT_INSTALLATION_METHOD, SKILLS_INSTALL_LOCAL_METHOD, SKILLS_LIST_MANAGEMENT_METHOD,
+    SKILLS_LIST_METHOD, SKILLS_SET_ENABLED_METHOD, SKILLS_UNINSTALL_METHOD,
+    SKILLS_UPDATE_LOCAL_METHOD, SKILL_INSPECTION_ERROR_CODE, SKILL_INSTALLATION_ERROR_CODE,
+    SKILL_MANAGEMENT_ERROR_CODE, SKILL_MANAGEMENT_SCHEMA_VERSION,
+    STORAGE_DELETE_CHAT_MESSAGES_METHOD, STORAGE_DELETE_CONVERSATION_METHOD,
+    STORAGE_DELETE_PROJECT_METHOD, STORAGE_FORK_CONVERSATION_METHOD,
+    STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
+    STORAGE_LOAD_COMPOSER_DRAFTS_METHOD, STORAGE_LOAD_CONVERSATIONS_METHOD,
+    STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD, STORAGE_LOAD_MODEL_SETTINGS_METHOD,
+    STORAGE_LOAD_PROJECTS_METHOD, STORAGE_LOAD_UI_PREFERENCES_METHOD,
+    STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD,
+    STORAGE_SAVE_COMPOSER_DRAFT_METHOD, STORAGE_SAVE_CONVERSATION_META_METHOD,
+    STORAGE_SAVE_MODEL_SETTINGS_METHOD, STORAGE_SAVE_PROJECT_METHOD,
+    STORAGE_SAVE_UI_PREFERENCES_METHOD, STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use skills_adapter::{catalog_response, installation_failure, mutation_response};
+use skill_installation_workflow_adapter::{
+    absent_cancellation_response, cancellation_preparation_id, cancellation_response,
+    commit_request, commit_response, dispatch_failure, is_missing_preparation, preparation_request,
+    preview_response, workflow_failure, SkillInspectionFailure,
+};
+use skills_adapter::{
+    enabled_catalog_response, installation_failure, management_response, mutation_response,
+    set_enabled_response, SkillManagementFailure,
+};
 use skills_dispatcher::{mutation_admission_error_response, SkillMutationTarget, SkillsDispatcher};
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
@@ -79,17 +93,38 @@ async fn main() -> io::Result<()> {
             .map_err(|error| io::Error::other(format!("failed to initialize Skills: {error}")))?,
     );
     let skill_installation_service = Arc::new(
-        SkillInstallationService::new(skill_store_root).map_err(|error| {
+        SkillInstallationService::new(skill_store_root.clone()).map_err(|error| {
             io::Error::other(format!(
                 "failed to initialize Skill installation service: {error}"
             ))
         })?,
     );
+    let mut skill_installation_workflow = SkillInstallationWorkflow::new(
+        SkillInstallationService::new(skill_store_root).map_err(|error| {
+            io::Error::other(format!(
+                "failed to initialize Skill installation workflow: {error}"
+            ))
+        })?,
+    );
+    let github_acquisition =
+        GitHubWorkflowAcquisitionAdapter::public_github().map_err(|error| {
+            io::Error::other(format!(
+                "failed to initialize public GitHub Skill acquisition: {error}"
+            ))
+        })?;
+    skill_installation_workflow
+        .register_adapter(Arc::new(github_acquisition))
+        .map_err(|error| {
+            io::Error::other(format!(
+                "failed to register GitHub Skill acquisition: {error}"
+            ))
+        })?;
     let agent_service =
         AgentService::new(storage.clone()).with_skills_service(Arc::clone(&skills_service));
     let skill_services = SkillServices {
         catalog: skills_service,
         installations: skill_installation_service,
+        workflow: Arc::new(skill_installation_workflow),
     };
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
     let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
@@ -100,9 +135,11 @@ async fn main() -> io::Result<()> {
     ));
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skill_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let skill_acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let request_dispatchers = RequestDispatchers {
         git: &git_dispatcher,
         skills: &skill_dispatcher,
+        skill_acquisition: &skill_acquisition_dispatcher,
     };
 
     let input_result = run_request_loop(
@@ -119,9 +156,15 @@ async fn main() -> io::Result<()> {
     // Admission has stopped. Settle accepted filesystem jobs while active agents are cancelled in
     // parallel; queued jobs receive cancellation errors and running jobs get a bounded grace
     // period. The outbound writer remains live for every final response and notification.
-    let (git_dispatcher_result, skill_dispatcher_result, (cancelled_runs, timed_out)) = tokio::join!(
+    let (
+        git_dispatcher_result,
+        skill_dispatcher_result,
+        skill_acquisition_dispatcher_result,
+        (cancelled_runs, timed_out),
+    ) = tokio::join!(
         git_dispatcher.shutdown(),
         skill_dispatcher.shutdown(),
+        skill_acquisition_dispatcher.shutdown(),
         agent_service.shutdown_active_runs(Duration::from_secs(2))
     );
 
@@ -152,6 +195,7 @@ async fn main() -> io::Result<()> {
     input_result?;
     git_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
     skill_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
+    skill_acquisition_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
     if let Some(error) = outbound_error {
         return Err(error);
     }
@@ -161,11 +205,13 @@ async fn main() -> io::Result<()> {
 struct RequestDispatchers<'a> {
     git: &'a GitDispatcher,
     skills: &'a SkillsDispatcher,
+    skill_acquisition: &'a SkillsDispatcher,
 }
 
 struct SkillServices {
     catalog: Arc<SkillsService>,
     installations: Arc<SkillInstallationService>,
+    workflow: Arc<SkillInstallationWorkflow>,
 }
 
 async fn run_request_loop<R>(
@@ -237,6 +283,10 @@ where
                 let request_storage = Arc::clone(&storage);
                 let request_catalog = Arc::clone(&skill_services.catalog);
                 let request_installations = Arc::clone(&skill_services.installations);
+                let request_workflow = Arc::clone(&skill_services.workflow);
+                let request_outbound = outbound.clone();
+                let acquisition_inspection = request.is_acquisition_inspection();
+                let workflow_metadata = request.workflow_metadata();
                 let mutation_metadata = request.mutation_metadata();
                 let submit_result = match mutation_metadata.clone() {
                     Some((operation, target)) => dispatchers.skills.try_submit_mutation(
@@ -248,15 +298,33 @@ where
                                 &request_storage,
                                 &request_catalog,
                                 &request_installations,
+                                Some(&request_workflow),
+                                Some(&request_outbound),
                                 request,
                             )
                         },
                     ),
+                    None if acquisition_inspection => {
+                        dispatchers
+                            .skill_acquisition
+                            .try_submit(request_id.clone(), move || {
+                                handle_parsed_skills_request(
+                                    &request_storage,
+                                    &request_catalog,
+                                    &request_installations,
+                                    Some(&request_workflow),
+                                    Some(&request_outbound),
+                                    request,
+                                )
+                            })
+                    }
                     None => dispatchers.skills.try_submit(request_id.clone(), move || {
                         handle_parsed_skills_request(
                             &request_storage,
                             &request_catalog,
                             &request_installations,
+                            Some(&request_workflow),
+                            Some(&request_outbound),
                             request,
                         )
                     }),
@@ -265,6 +333,14 @@ where
                     let response = match mutation_metadata {
                         Some((operation, target)) => {
                             mutation_admission_error_response(request_id, operation, target, error)
+                        }
+                        None if workflow_metadata.is_some() => {
+                            let (phase, preparation_id) =
+                                workflow_metadata.expect("checked Skill workflow request metadata");
+                            skill_inspection_error_response(
+                                request_id,
+                                dispatch_failure(phase, preparation_id, error.message()),
+                            )
                         }
                         None => response_error(Some(request_id), error.code(), error.message()),
                     };
@@ -342,9 +418,14 @@ fn is_skills_method(method: &str) -> bool {
     matches!(
         method,
         SKILLS_LIST_METHOD
+            | SKILLS_INSPECT_INSTALLATION_METHOD
+            | SKILLS_COMMIT_INSTALLATION_METHOD
+            | SKILLS_CANCEL_PREPARATION_METHOD
             | SKILLS_INSTALL_LOCAL_METHOD
             | SKILLS_UPDATE_LOCAL_METHOD
             | SKILLS_UNINSTALL_METHOD
+            | SKILLS_LIST_MANAGEMENT_METHOD
+            | SKILLS_SET_ENABLED_METHOD
     )
 }
 
@@ -603,15 +684,52 @@ struct ParsedSkillsRequest {
 
 enum ParsedSkillsOperation {
     List(SkillsListRequest),
+    ListManagement(SkillsListManagementRequest),
+    SetEnabled(SkillsSetEnabledRequest),
+    InspectInstallation(SkillsInspectInstallationRequest),
+    CommitInstallation(SkillsCommitInstallationRequest),
+    CancelPreparation(SkillsCancelPreparationRequest),
     InstallLocal(LocalSkillInstallRequest),
     UpdateLocal(LocalSkillUpdateRequest),
     Uninstall(CoreSkillUninstallRequest),
 }
 
 impl ParsedSkillsRequest {
+    fn is_acquisition_inspection(&self) -> bool {
+        matches!(
+            self.operation,
+            ParsedSkillsOperation::InspectInstallation(_)
+        )
+    }
+
+    fn workflow_metadata(
+        &self,
+    ) -> Option<(mycopilot_protocol_rs::SkillInspectionPhaseDto, String)> {
+        match &self.operation {
+            ParsedSkillsOperation::InspectInstallation(request) => Some((
+                mycopilot_protocol_rs::SkillInspectionPhaseDto::Inspect,
+                request.preparation_id.clone(),
+            )),
+            ParsedSkillsOperation::CommitInstallation(request) => Some((
+                mycopilot_protocol_rs::SkillInspectionPhaseDto::Commit,
+                request.preparation_id.clone(),
+            )),
+            ParsedSkillsOperation::CancelPreparation(request) => Some((
+                mycopilot_protocol_rs::SkillInspectionPhaseDto::Cancel,
+                request.preparation_id.clone(),
+            )),
+            _ => None,
+        }
+    }
+
     fn mutation_metadata(&self) -> Option<(SkillInstallationOperation, SkillMutationTarget)> {
         match &self.operation {
-            ParsedSkillsOperation::List(_) => None,
+            ParsedSkillsOperation::List(_)
+            | ParsedSkillsOperation::ListManagement(_)
+            | ParsedSkillsOperation::SetEnabled(_)
+            | ParsedSkillsOperation::InspectInstallation(_)
+            | ParsedSkillsOperation::CommitInstallation(_)
+            | ParsedSkillsOperation::CancelPreparation(_) => None,
             ParsedSkillsOperation::InstallLocal(request) => Some((
                 SkillInstallationOperation::Install,
                 SkillMutationTarget::InstallationId(request.installation_id().clone()),
@@ -637,6 +755,26 @@ fn parse_skills_request(request: JsonRpcRequest) -> Result<ParsedSkillsRequest, 
     let operation = match request.method.as_str() {
         SKILLS_LIST_METHOD => ParsedSkillsOperation::List(
             parse_params::<SkillsListRequest>(request.params)
+                .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
+        ),
+        SKILLS_LIST_MANAGEMENT_METHOD => ParsedSkillsOperation::ListManagement(
+            parse_params::<SkillsListManagementRequest>(request.params)
+                .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
+        ),
+        SKILLS_SET_ENABLED_METHOD => ParsedSkillsOperation::SetEnabled(
+            parse_params::<SkillsSetEnabledRequest>(request.params)
+                .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
+        ),
+        SKILLS_INSPECT_INSTALLATION_METHOD => ParsedSkillsOperation::InspectInstallation(
+            parse_params::<SkillsInspectInstallationRequest>(request.params)
+                .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
+        ),
+        SKILLS_COMMIT_INSTALLATION_METHOD => ParsedSkillsOperation::CommitInstallation(
+            parse_params::<SkillsCommitInstallationRequest>(request.params)
+                .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
+        ),
+        SKILLS_CANCEL_PREPARATION_METHOD => ParsedSkillsOperation::CancelPreparation(
+            parse_params::<SkillsCancelPreparationRequest>(request.params)
                 .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
         ),
         SKILLS_INSTALL_LOCAL_METHOD => {
@@ -712,6 +850,8 @@ fn handle_skills_request(
             storage,
             skills_service,
             skill_installation_service,
+            None,
+            None,
             request,
         ),
         Err(response) => response,
@@ -722,32 +862,249 @@ fn handle_parsed_skills_request(
     storage: &StorageService,
     skills_service: &SkillsService,
     skill_installation_service: &SkillInstallationService,
+    skill_installation_workflow: Option<&SkillInstallationWorkflow>,
+    notification_tx: Option<&mpsc::UnboundedSender<Value>>,
     request: ParsedSkillsRequest,
 ) -> Value {
     match request.operation {
         ParsedSkillsOperation::List(input) => {
-            let result = resolve_project_path(storage, &input.project_id).and_then(|workspace| {
-                skills_service
-                    .list_with_workspace(&input.project_id, &workspace)
-                    .map_err(|error| error.to_string())
-            });
-            match result.and_then(|catalog| catalog_response(&catalog)) {
+            let result = match input.project_id.as_deref() {
+                Some(project_id) => {
+                    resolve_project_path(storage, project_id).and_then(|workspace| {
+                        skills_service
+                            .list_with_workspace(project_id, &workspace)
+                            .map_err(|error| error.to_string())
+                    })
+                }
+                None => skills_service.list().map_err(|error| error.to_string()),
+            };
+            match result.and_then(|catalog| enabled_catalog_response(storage, &catalog)) {
                 Ok(catalog) => response_success(request.id, catalog),
                 Err(message) => response_error(Some(request.id), -32000, message),
             }
         }
-        ParsedSkillsOperation::InstallLocal(input) => skill_mutation_response(
-            request.id,
-            skill_installation_service.install_local_directory(&input),
-        ),
-        ParsedSkillsOperation::UpdateLocal(input) => skill_mutation_response(
-            request.id,
-            skill_installation_service.update_local_directory(&input),
-        ),
+        ParsedSkillsOperation::ListManagement(input) => {
+            // Reserved for a future project-scoped management extension. The
+            // settings-page inventory is global in schema v1.
+            let _ = input.project_id;
+            let result = skills_service
+                .list()
+                .map_err(|_| SkillManagementFailure::list_unavailable())
+                .and_then(|catalog| management_response(storage, &catalog));
+            match result {
+                Ok(response) => response_success(request.id, response),
+                Err(error) => skill_management_error_response(request.id, error),
+            }
+        }
+        ParsedSkillsOperation::SetEnabled(input) => {
+            let result = skills_service
+                .list()
+                .map_err(|_| SkillManagementFailure::set_enabled_unavailable())
+                .and_then(|catalog| set_enabled_response(storage, &catalog, &input));
+            match result {
+                Ok((response, changed)) => {
+                    if changed {
+                        notify_skills_changed(
+                            storage,
+                            skills_service,
+                            notification_tx,
+                            SkillsChangedReasonDto::EnablementChanged,
+                            Some(input.skill_id),
+                        );
+                    }
+                    response_success(request.id, response)
+                }
+                Err(error) => skill_management_error_response(request.id, error),
+            }
+        }
+        ParsedSkillsOperation::InspectInstallation(input) => {
+            let Some(workflow) = skill_installation_workflow else {
+                return response_error(
+                    Some(request.id),
+                    -32603,
+                    "Skill installation workflow is unavailable.",
+                );
+            };
+            let result = preparation_request(input)
+                .and_then(|request| {
+                    workflow.inspect(&request).map_err(|error| {
+                        workflow_failure(
+                            mycopilot_protocol_rs::SkillInspectionPhaseDto::Inspect,
+                            &error,
+                        )
+                    })
+                })
+                .and_then(|preview| preview_response(&preview));
+            match result {
+                Ok(preview) => response_success(request.id, preview),
+                Err(error) => skill_inspection_error_response(request.id, error),
+            }
+        }
+        ParsedSkillsOperation::CommitInstallation(input) => {
+            let Some(workflow) = skill_installation_workflow else {
+                return response_error(
+                    Some(request.id),
+                    -32603,
+                    "Skill installation workflow is unavailable.",
+                );
+            };
+            let result = commit_request(input).and_then(|commit| {
+                workflow.commit(&commit).map_err(|error| {
+                    workflow_failure(
+                        mycopilot_protocol_rs::SkillInspectionPhaseDto::Commit,
+                        &error,
+                    )
+                })
+            });
+            match result.and_then(|result| {
+                let response = commit_response(&result)?;
+                if !result.replayed() {
+                    let reason = match result.mutation().operation() {
+                        SkillInstallationOperation::Install => {
+                            Some(SkillsChangedReasonDto::Installed)
+                        }
+                        SkillInstallationOperation::Update => Some(SkillsChangedReasonDto::Updated),
+                        _ => None,
+                    };
+                    if let Some(reason) = reason {
+                        notify_skills_changed(
+                            storage,
+                            skills_service,
+                            notification_tx,
+                            reason,
+                            Some(result.mutation().skill_id().as_str().to_string()),
+                        );
+                    }
+                }
+                Ok(response)
+            }) {
+                Ok(response) => response_success(request.id, response),
+                Err(error) => skill_inspection_error_response(request.id, error),
+            }
+        }
+        ParsedSkillsOperation::CancelPreparation(input) => {
+            let Some(workflow) = skill_installation_workflow else {
+                return response_error(
+                    Some(request.id),
+                    -32603,
+                    "Skill installation workflow is unavailable.",
+                );
+            };
+            let preparation_id = match cancellation_preparation_id(input) {
+                Ok(preparation_id) => preparation_id,
+                Err(error) => return skill_inspection_error_response(request.id, error),
+            };
+            match workflow.cancel(&preparation_id) {
+                Ok(outcome) => {
+                    response_success(request.id, cancellation_response(&preparation_id, outcome))
+                }
+                Err(error) if is_missing_preparation(&error) => {
+                    response_success(request.id, absent_cancellation_response(&preparation_id))
+                }
+                Err(error) => skill_inspection_error_response(
+                    request.id,
+                    workflow_failure(
+                        mycopilot_protocol_rs::SkillInspectionPhaseDto::Cancel,
+                        &error,
+                    ),
+                ),
+            }
+        }
+        ParsedSkillsOperation::InstallLocal(input) => {
+            let result = skill_installation_service.install_local_directory(&input);
+            if matches!(
+                result.as_ref().map(SkillInstallationMutation::outcome),
+                Ok(mycopilot_core::skills::SkillInstallationOutcome::Installed)
+            ) {
+                let skill_id = result
+                    .as_ref()
+                    .expect("matched successful installation")
+                    .skill_id()
+                    .as_str()
+                    .to_string();
+                notify_skills_changed(
+                    storage,
+                    skills_service,
+                    notification_tx,
+                    SkillsChangedReasonDto::Installed,
+                    Some(skill_id),
+                );
+            }
+            skill_mutation_response(request.id, result)
+        }
+        ParsedSkillsOperation::UpdateLocal(input) => {
+            let result = skill_installation_service.update_local_directory(&input);
+            if matches!(
+                result.as_ref().map(SkillInstallationMutation::outcome),
+                Ok(mycopilot_core::skills::SkillInstallationOutcome::Updated)
+            ) {
+                notify_skills_changed(
+                    storage,
+                    skills_service,
+                    notification_tx,
+                    SkillsChangedReasonDto::Updated,
+                    Some(input.skill_id().as_str().to_string()),
+                );
+            }
+            skill_mutation_response(request.id, result)
+        }
         ParsedSkillsOperation::Uninstall(input) => {
-            skill_mutation_response(request.id, skill_installation_service.uninstall(&input))
+            let result = skill_installation_service.uninstall(&input);
+            if result.is_ok() {
+                if let Err(error) =
+                    storage.delete_skill_enablement_override(input.skill_id().as_str())
+                {
+                    return response_error(
+                        Some(request.id),
+                        -32000,
+                        format!("Skill was uninstalled but its enablement override could not be cleaned up: {error}"),
+                    );
+                }
+            }
+            if matches!(
+                result.as_ref().map(SkillInstallationMutation::outcome),
+                Ok(mycopilot_core::skills::SkillInstallationOutcome::Uninstalled)
+            ) {
+                notify_skills_changed(
+                    storage,
+                    skills_service,
+                    notification_tx,
+                    SkillsChangedReasonDto::Uninstalled,
+                    Some(input.skill_id().as_str().to_string()),
+                );
+            }
+            skill_mutation_response(request.id, result)
         }
     }
+}
+
+fn notify_skills_changed(
+    storage: &StorageService,
+    skills_service: &SkillsService,
+    notification_tx: Option<&mpsc::UnboundedSender<Value>>,
+    reason: SkillsChangedReasonDto,
+    skill_id: Option<String>,
+) {
+    let Some(notification_tx) = notification_tx else {
+        return;
+    };
+    let management_revision = skills_service
+        .list()
+        .ok()
+        .and_then(|catalog| management_response(storage, &catalog).ok())
+        .map(|response| response.management_revision)
+        .unwrap_or_else(|| "unavailable".to_string());
+    let notification = SkillsChangedNotification {
+        schema_version: SKILL_MANAGEMENT_SCHEMA_VERSION,
+        management_revision,
+        reason,
+        skill_id,
+    };
+    let _ = notification_tx.send(json!({
+        "jsonrpc": "2.0",
+        "method": SKILLS_CHANGED_NOTIFICATION_METHOD,
+        "params": notification,
+    }));
 }
 
 fn skill_mutation_response(
@@ -774,6 +1131,30 @@ fn skill_mutation_response(
             Err(mapping_error) => response_error(Some(id), -32603, mapping_error),
         },
     }
+}
+
+fn skill_management_error_response(id: JsonRpcId, failure: SkillManagementFailure) -> Value {
+    let message = failure.to_string();
+    serde_json::to_value(error_with_data(
+        Some(id),
+        SKILL_MANAGEMENT_ERROR_CODE,
+        message,
+        serde_json::to_value(failure.into_data())
+            .expect("Skill management error data must serialize"),
+    ))
+    .expect("JSON-RPC Skill management error response must serialize")
+}
+
+fn skill_inspection_error_response(id: JsonRpcId, failure: SkillInspectionFailure) -> Value {
+    let message = failure.to_string();
+    serde_json::to_value(error_with_data(
+        Some(id),
+        SKILL_INSPECTION_ERROR_CODE,
+        message,
+        serde_json::to_value(failure.into_data())
+            .expect("Skill inspection error data must serialize"),
+    ))
+    .expect("JSON-RPC Skill inspection error response must serialize")
 }
 
 fn handle_git_request(
@@ -1333,10 +1714,10 @@ mod server_tests {
     }
 
     #[test]
-    fn skills_list_rejects_missing_project_id_as_invalid_params() {
+    fn skills_list_without_a_project_returns_only_global_sources() {
         let temp = tempfile::tempdir().unwrap();
         let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
-        let skills_service = SkillsService::new();
+        let skills_service = SkillsService::new().with_bundled_source().unwrap();
         let skill_installation_service =
             SkillInstallationService::new(temp.path().join("skills")).unwrap();
         let request = serde_json::from_value::<JsonRpcRequest>(json!({
@@ -1354,7 +1735,207 @@ mod server_tests {
             request,
         );
 
-        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(response["result"]["schemaVersion"], 4);
+        assert_eq!(response["result"]["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(response["result"]["skills"][0]["source"]["kind"], "bundled");
+    }
+
+    #[test]
+    fn management_enablement_is_cas_protected_and_filters_only_the_picker() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+        let skills_service = SkillsService::new().with_bundled_source().unwrap();
+        let skill_installation_service =
+            SkillInstallationService::new(temp.path().join("skills")).unwrap();
+        let list_management = || {
+            handle_skills_request(
+                &storage,
+                &skills_service,
+                &skill_installation_service,
+                serde_json::from_value::<JsonRpcRequest>(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": SKILLS_LIST_MANAGEMENT_METHOD,
+                    "params": {}
+                }))
+                .unwrap(),
+            )
+        };
+
+        let first = list_management();
+        let skill_id = first["result"]["skills"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let first_state = first["result"]["skills"][0]["stateRevision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(first["result"]["skills"][0]["enabled"], true);
+        assert_eq!(
+            first["result"]["skills"][0]["actions"]["canUninstall"],
+            false
+        );
+
+        let disable = handle_skills_request(
+            &storage,
+            &skills_service,
+            &skill_installation_service,
+            serde_json::from_value::<JsonRpcRequest>(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": SKILLS_SET_ENABLED_METHOD,
+                "params": {
+                    "skillId": skill_id,
+                    "expectedStateRevision": first_state.clone(),
+                    "enabled": false
+                }
+            }))
+            .unwrap(),
+        );
+        assert_eq!(disable["result"]["outcome"], "updated");
+        assert_eq!(disable["result"]["enabled"], false);
+        let disabled_state = disable["result"]["stateRevision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let lost_response_retry = handle_skills_request(
+            &storage,
+            &skills_service,
+            &skill_installation_service,
+            serde_json::from_value::<JsonRpcRequest>(json!({
+                "jsonrpc": "2.0",
+                "id": 20,
+                "method": SKILLS_SET_ENABLED_METHOD,
+                "params": {
+                    "skillId": skill_id,
+                    "expectedStateRevision": first_state,
+                    "enabled": false
+                }
+            }))
+            .unwrap(),
+        );
+        assert_eq!(lost_response_retry["result"]["outcome"], "alreadyCurrent");
+        assert_eq!(
+            lost_response_retry["result"]["stateRevision"],
+            disabled_state
+        );
+
+        let picker = handle_skills_request(
+            &storage,
+            &skills_service,
+            &skill_installation_service,
+            serde_json::from_value::<JsonRpcRequest>(json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": SKILLS_LIST_METHOD,
+                "params": {}
+            }))
+            .unwrap(),
+        );
+        assert!(picker["result"]["skills"].as_array().unwrap().is_empty());
+        let management = list_management();
+        assert_eq!(management["result"]["skills"][0]["enabled"], false);
+
+        let idempotent = handle_skills_request(
+            &storage,
+            &skills_service,
+            &skill_installation_service,
+            serde_json::from_value::<JsonRpcRequest>(json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": SKILLS_SET_ENABLED_METHOD,
+                "params": {
+                    "skillId": skill_id,
+                    "expectedStateRevision": disabled_state,
+                    "enabled": false
+                }
+            }))
+            .unwrap(),
+        );
+        assert_eq!(idempotent["result"]["outcome"], "alreadyCurrent");
+
+        let stale = handle_skills_request(
+            &storage,
+            &skills_service,
+            &skill_installation_service,
+            serde_json::from_value::<JsonRpcRequest>(json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": SKILLS_SET_ENABLED_METHOD,
+                "params": {
+                    "skillId": skill_id,
+                    "expectedStateRevision": "stale",
+                    "enabled": true
+                }
+            }))
+            .unwrap(),
+        );
+        assert_eq!(stale["error"]["code"], -32012);
+        assert_eq!(stale["error"]["data"]["type"], "skillManagement");
+        assert_eq!(stale["error"]["data"]["operation"], "setEnabled");
+        assert_eq!(stale["error"]["data"]["code"], "stateConflict");
+        assert_eq!(stale["error"]["data"]["recovery"], "refreshManagement");
+
+        let reenabled = handle_skills_request(
+            &storage,
+            &skills_service,
+            &skill_installation_service,
+            serde_json::from_value::<JsonRpcRequest>(json!({
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": SKILLS_SET_ENABLED_METHOD,
+                "params": {
+                    "skillId": skill_id,
+                    "expectedStateRevision": disabled_state,
+                    "enabled": true
+                }
+            }))
+            .unwrap(),
+        );
+        assert_eq!(reenabled["result"]["outcome"], "updated");
+        assert_ne!(
+            reenabled["result"]["stateRevision"], first_state,
+            "monotonic enablement generation must prevent boolean-state ABA"
+        );
+    }
+
+    #[test]
+    fn set_enabled_distinguishes_missing_and_project_scoped_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&temp.path().join("storage.sqlite")).unwrap();
+        let skills_service = SkillsService::new().with_bundled_source().unwrap();
+        let skill_installation_service =
+            SkillInstallationService::new(temp.path().join("skills")).unwrap();
+        let invoke = |skill_id: &str| {
+            handle_skills_request(
+                &storage,
+                &skills_service,
+                &skill_installation_service,
+                serde_json::from_value::<JsonRpcRequest>(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": SKILLS_SET_ENABLED_METHOD,
+                    "params": {
+                        "skillId": skill_id,
+                        "expectedStateRevision": "unknown",
+                        "enabled": false
+                    }
+                }))
+                .unwrap(),
+            )
+        };
+
+        let missing = invoke("installed:user:01234567-89ab-4def-8123-456789abcdef");
+        assert_eq!(missing["error"]["code"], SKILL_MANAGEMENT_ERROR_CODE);
+        assert_eq!(missing["error"]["data"]["code"], "notFound");
+        assert_eq!(missing["error"]["data"]["operation"], "setEnabled");
+
+        let workspace = invoke("workspace:project-1:auditor");
+        assert_eq!(workspace["error"]["code"], SKILL_MANAGEMENT_ERROR_CODE);
+        assert_eq!(workspace["error"]["data"]["code"], "notManageable");
+        assert_eq!(workspace["error"]["data"]["recovery"], "refreshManagement");
     }
 
     #[test]
@@ -1416,6 +1997,7 @@ mod server_tests {
         let dispatchers = RequestDispatchers {
             git: &git_dispatcher,
             skills: &skills_dispatcher,
+            skill_acquisition: &skills_dispatcher,
         };
         let input = concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"skills.list\",",
@@ -1429,6 +2011,9 @@ mod server_tests {
             SkillServices {
                 catalog: Arc::new(SkillsService::new()),
                 installations: skill_installation_service,
+                workflow: Arc::new(SkillInstallationWorkflow::new(
+                    SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+                )),
             },
             Arc::new(GitReviewService::new()),
             &dispatchers,
@@ -1447,6 +2032,82 @@ mod server_tests {
             response["result"]["skills"][0]["id"],
             "workspace:project-1:auditor"
         );
+        git_dispatcher.shutdown().await.unwrap();
+        skills_dispatcher.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn changed_enablement_emits_one_invalidation_notification() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+        let skills_service = Arc::new(SkillsService::new().with_bundled_source().unwrap());
+        let catalog = skills_service.list().unwrap();
+        let management = management_response(&storage, &catalog).unwrap();
+        let item = management.skills.first().unwrap();
+        let skill_id = item.id.clone();
+        let request_value = json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": SKILLS_SET_ENABLED_METHOD,
+            "params": {
+                "skillId": skill_id,
+                "expectedStateRevision": item.state_revision,
+                "enabled": false
+            }
+        });
+        let input = format!("{request_value}\n");
+        let agent_service = AgentService::new(Arc::clone(&storage));
+        let installations =
+            Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
+        let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+        let dispatchers = RequestDispatchers {
+            git: &git_dispatcher,
+            skills: &skills_dispatcher,
+            skill_acquisition: &skills_dispatcher,
+        };
+
+        run_request_loop(
+            BufReader::new(input.as_bytes()),
+            Arc::clone(&storage),
+            &agent_service,
+            SkillServices {
+                catalog: Arc::clone(&skills_service),
+                installations,
+                workflow: Arc::new(SkillInstallationWorkflow::new(
+                    SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+                )),
+            },
+            Arc::new(GitReviewService::new()),
+            &dispatchers,
+            &outbound_tx,
+        )
+        .await
+        .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let messages = [first, second];
+        let notification = messages
+            .iter()
+            .find(|message| message["method"] == SKILLS_CHANGED_NOTIFICATION_METHOD)
+            .expect("a changed Skill must emit an invalidation");
+        assert_eq!(notification["params"]["reason"], "enablementChanged");
+        assert_eq!(notification["params"]["skillId"], skill_id);
+        assert!(notification["params"]["managementRevision"].is_string());
+        let response = messages
+            .iter()
+            .find(|message| message["id"] == 42)
+            .expect("the mutation response must also be delivered");
+        assert_eq!(response["result"]["outcome"], "updated");
+
         git_dispatcher.shutdown().await.unwrap();
         skills_dispatcher.shutdown().await.unwrap();
     }
@@ -1497,6 +2158,7 @@ mod server_tests {
         let request_dispatchers = RequestDispatchers {
             git: &dispatcher,
             skills: &skill_dispatcher,
+            skill_acquisition: &skill_dispatcher,
         };
         let (started_tx, started_rx) = std_mpsc::channel();
         let mut release_senders = Vec::new();
@@ -1545,6 +2207,9 @@ mod server_tests {
             SkillServices {
                 catalog: skills_service,
                 installations: skill_installation_service,
+                workflow: Arc::new(SkillInstallationWorkflow::new(
+                    SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+                )),
             },
             git_review_service,
             &request_dispatchers,

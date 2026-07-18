@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -16,8 +16,8 @@ use crate::storage::{
     context_compaction_audit_repository, context_compaction_receipt_repository,
     context_compaction_repository, conversation_fork_repository, conversation_history_repository,
     conversation_trace_repository, file_draft_repository, model_request_observation_repository,
-    now_ms, pending_action_repository, preferences_repository, project_repository, storage_error,
-    usage_repository, StorageState,
+    now_ms, pending_action_repository, preferences_repository, project_repository,
+    skill_enablement_repository, storage_error, usage_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
@@ -29,6 +29,8 @@ use crate::{
 };
 use base64::Engine;
 use uuid::Uuid;
+
+const MAX_SKILL_ENABLEMENT_ID_BYTES: usize = 16 * 1024;
 
 pub struct StorageService {
     state: StorageState,
@@ -913,6 +915,92 @@ impl StorageService {
         Ok(draft)
     }
 
+    /// Loads effective enablement for a batch of complete, opaque Skill ids.
+    ///
+    /// An absent override is intentionally enabled by default. The returned
+    /// map contains one entry for every distinct requested id.
+    pub fn load_skill_enablement(
+        &self,
+        skill_ids: &[String],
+    ) -> Result<BTreeMap<String, bool>, String> {
+        for skill_id in skill_ids {
+            validate_skill_enablement_id(skill_id)?;
+        }
+        let mut enablement = skill_ids
+            .iter()
+            .cloned()
+            .map(|skill_id| (skill_id, true))
+            .collect::<BTreeMap<_, _>>();
+        if enablement.is_empty() {
+            return Ok(enablement);
+        }
+
+        let mut connection = self.state.connection()?;
+        let overrides = skill_enablement_repository::load_skill_enablement_overrides(
+            &mut connection,
+            skill_ids,
+        )
+        .map_err(storage_error)?;
+        enablement.extend(overrides);
+        Ok(enablement)
+    }
+
+    /// Loads effective enablement together with its monotonic mutation
+    /// generation for compare-and-swap state tokens.
+    pub fn load_skill_enablement_states(
+        &self,
+        skill_ids: &[String],
+    ) -> Result<BTreeMap<String, skill_enablement_repository::SkillEnablementState>, String> {
+        for skill_id in skill_ids {
+            validate_skill_enablement_id(skill_id)?;
+        }
+        let mut connection = self.state.connection()?;
+        skill_enablement_repository::load_skill_enablement_states(&mut connection, skill_ids)
+            .map_err(storage_error)
+    }
+
+    /// Stores an explicit enablement override and reports whether state changed.
+    pub fn set_skill_enablement_override(
+        &self,
+        skill_id: &str,
+        enabled: bool,
+    ) -> Result<bool, String> {
+        validate_skill_enablement_id(skill_id)?;
+        let connection = self.state.connection()?;
+        skill_enablement_repository::set_skill_enablement_override(&connection, skill_id, enabled)
+            .map_err(storage_error)
+    }
+
+    /// Atomically mutates effective enablement if it still matches the state
+    /// observed by the caller. An absent row participates as the product
+    /// default (`enabled = true`).
+    pub fn compare_and_set_skill_enablement(
+        &self,
+        skill_id: &str,
+        expected_enabled: bool,
+        expected_generation: u64,
+        target: bool,
+    ) -> Result<skill_enablement_repository::SkillEnablementCompareAndSetOutcome, String> {
+        validate_skill_enablement_id(skill_id)?;
+        let mut connection = self.state.connection()?;
+        skill_enablement_repository::compare_and_set_skill_enablement(
+            &mut connection,
+            skill_id,
+            expected_enabled,
+            expected_generation,
+            target,
+        )
+        .map_err(storage_error)
+    }
+
+    /// Removes an explicit override, restoring the default enabled state.
+    pub fn delete_skill_enablement_override(&self, skill_id: &str) -> Result<bool, String> {
+        validate_skill_enablement_id(skill_id)?;
+        let connection = self.state.connection()?;
+        skill_enablement_repository::delete_skill_enablement_override(&connection, skill_id)
+            .map_err(storage_error)
+    }
+
     pub fn load_ui_preferences(&self) -> Result<UiPreferencesRecord, String> {
         let connection = self.state.connection()?;
         preferences_repository::load_ui_preferences(&connection).map_err(storage_error)
@@ -1471,6 +1559,18 @@ fn ensure_project_reference_exists(
     } else {
         Err(format!("项目已不存在，拒绝保存关联数据：{project_id}"))
     }
+}
+
+fn validate_skill_enablement_id(skill_id: &str) -> Result<(), String> {
+    if skill_id.is_empty() {
+        return Err("Skill ID 不能为空。".to_string());
+    }
+    if skill_id.len() > MAX_SKILL_ENABLEMENT_ID_BYTES {
+        return Err(format!(
+            "Skill ID 不能超过 {MAX_SKILL_ENABLEMENT_ID_BYTES} 字节。"
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_conversation_exists(
@@ -2064,6 +2164,81 @@ mod tests {
         assert_eq!(rollup_count, 1);
         assert_eq!(pending_count, 0);
         assert_eq!(audit_count, 0);
+    }
+
+    #[test]
+    fn skill_enablement_defaults_to_true_and_persists_explicit_overrides() {
+        let fixture = StorageFixture::new();
+        let first = "bundled:application:repository-evidence-auditor".to_string();
+        let second = "installed:user:01234567-89ab-4def-8123-456789abcdef".to_string();
+
+        {
+            let service = fixture.service();
+            let initial = service
+                .load_skill_enablement(&[first.clone(), second.clone(), first.clone()])
+                .unwrap();
+            assert_eq!(initial.len(), 2);
+            assert_eq!(initial.get(&first), Some(&true));
+            assert_eq!(initial.get(&second), Some(&true));
+
+            assert!(service
+                .set_skill_enablement_override(&first, false)
+                .unwrap());
+            assert!(!service
+                .set_skill_enablement_override(&first, false)
+                .unwrap());
+            assert!(service
+                .set_skill_enablement_override(&second, true)
+                .unwrap());
+        }
+
+        let reopened = fixture.service();
+        let persisted = reopened
+            .load_skill_enablement(&[second.clone(), first.clone()])
+            .unwrap();
+        assert_eq!(persisted.get(&first), Some(&false));
+        assert_eq!(persisted.get(&second), Some(&true));
+
+        assert!(reopened.delete_skill_enablement_override(&first).unwrap());
+        assert!(!reopened.delete_skill_enablement_override(&first).unwrap());
+        assert_eq!(
+            reopened
+                .load_skill_enablement(std::slice::from_ref(&first))
+                .unwrap()
+                .get(&first),
+            Some(&true)
+        );
+    }
+
+    #[test]
+    fn skill_enablement_rejects_empty_and_oversized_ids_before_storage() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let oversized = "x".repeat(MAX_SKILL_ENABLEMENT_ID_BYTES + 1);
+
+        assert!(service.set_skill_enablement_override("", false).is_err());
+        assert!(service.delete_skill_enablement_override("").is_err());
+        assert!(service
+            .load_skill_enablement(&["valid:id".to_string(), String::new()])
+            .is_err());
+        assert!(service
+            .set_skill_enablement_override(&oversized, false)
+            .is_err());
+        assert!(service
+            .delete_skill_enablement_override(&oversized)
+            .is_err());
+
+        let maximum = "x".repeat(MAX_SKILL_ENABLEMENT_ID_BYTES);
+        assert!(service
+            .set_skill_enablement_override(&maximum, false)
+            .unwrap());
+        assert_eq!(
+            service
+                .load_skill_enablement(std::slice::from_ref(&maximum))
+                .unwrap()
+                .get(&maximum),
+            Some(&false)
+        );
     }
 
     struct StorageFixture {

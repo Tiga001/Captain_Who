@@ -10,12 +10,18 @@
 //! replace the receipt last. Old packages can be garbage-collected only after
 //! receipt removal/replacement and with already-resolved snapshots in mind.
 
-use super::digest::{package_revision, PACKAGE_REVISION_PREFIX};
+use super::digest::{
+    package_file_digest, package_revision, PACKAGE_REVISION_PREFIX, PACKAGE_REVISION_V2_PREFIX,
+};
 use super::model::{
-    SkillDiagnosticCode, SkillDiagnosticSeverity, SkillInstallationId, SkillRevision,
-    SKILL_PACKAGE_FORMAT_VERSION,
+    SkillDiagnosticCode, SkillDiagnosticSeverity, SkillInstallationId, SkillResourceIndex,
+    SkillRevision, SKILL_PACKAGE_FORMAT_VERSION, SKILL_PACKAGE_FORMAT_VERSION_V2,
 };
 use super::origin::SkillPackageOrigin;
+use super::package::{
+    PackageManifest, PackageManifestEntry, PackageValidationError, MAX_SKILL_PACKAGE_BYTES,
+    MAX_SKILL_PACKAGE_MANIFEST_BYTES, MAX_SKILL_RESOURCE_FILE_BYTES, PACKAGE_V2_MANIFEST_FILE,
+};
 use super::workspace::{
     is_symlink_or_reparse, metadata_if_present, percent_encode, read_bounded_verified,
     verify_plain_directory, BoundedReadError, ByteBudget, MAX_SKILL_FILE_BYTES, SKILL_FILE_NAME,
@@ -27,7 +33,8 @@ use std::path::{Path, PathBuf};
 
 pub(super) const INSTALLATIONS_DIRECTORY: &str = "installations";
 pub(super) const PACKAGES_DIRECTORY: &str = "packages";
-pub(super) const PACKAGE_VERSION_DIRECTORY: &str = "v1";
+pub(super) const PACKAGE_V1_DIRECTORY: &str = "v1";
+pub(super) const PACKAGE_V2_DIRECTORY: &str = "v2";
 const RECEIPT_EXTENSION: &str = "json";
 const RECEIPT_SCHEMA_VERSION: u32 = 1;
 pub(super) const MAX_LIVE_INSTALLATIONS: usize = 2_000;
@@ -286,12 +293,16 @@ impl ManagedSkillStore {
         )
     }
 
-    pub fn load_package(
+    pub fn load_complete_package(
         &self,
         package: &InstalledPackageRef,
-    ) -> Result<ManagedPackageSnapshot, ManagedStoreLoadError> {
-        let mut byte_budget = ByteBudget::new(MAX_SKILL_FILE_BYTES.saturating_add(1));
-        self.load_package_with_budget(package, &mut byte_budget)
+    ) -> Result<ManagedCompletePackageSnapshot, ManagedStoreLoadError> {
+        let mut byte_budget = ByteBudget::new(
+            MAX_SKILL_PACKAGE_BYTES
+                .saturating_add(MAX_SKILL_PACKAGE_MANIFEST_BYTES)
+                .saturating_add(1),
+        );
+        self.load_package_internal(package, &mut byte_budget, true)
     }
 
     pub fn load_package_with_budget(
@@ -299,6 +310,16 @@ impl ManagedSkillStore {
         package: &InstalledPackageRef,
         byte_budget: &mut ByteBudget,
     ) -> Result<ManagedPackageSnapshot, ManagedStoreLoadError> {
+        self.load_package_internal(package, byte_budget, false)
+            .map(|snapshot| snapshot.package)
+    }
+
+    fn load_package_internal(
+        &self,
+        package: &InstalledPackageRef,
+        byte_budget: &mut ByteBudget,
+        include_resource_bytes: bool,
+    ) -> Result<ManagedCompletePackageSnapshot, ManagedStoreLoadError> {
         let roots = self
             .resolve_roots()
             .map_err(|error| unavailable_issue(&package.relative_path, error.to_string()))?
@@ -306,13 +327,74 @@ impl ManagedSkillStore {
         let packages_root = checked_child_directory(&roots.store_root, PACKAGES_DIRECTORY)
             .map_err(|error| map_directory_error(&package.relative_path, error))?
             .ok_or(ManagedStoreLoadError::NotFound)?;
-        let version_root = checked_child_directory(&packages_root, PACKAGE_VERSION_DIRECTORY)
+        let version_root = checked_child_directory(&packages_root, package.version_directory())
             .map_err(|error| map_directory_error(&package.relative_path, error))?
             .ok_or(ManagedStoreLoadError::NotFound)?;
         let package_root = checked_child_directory(&version_root, &package.digest_hex)
             .map_err(|error| map_directory_error(&package.relative_path, error))?
             .ok_or(ManagedStoreLoadError::NotFound)?;
 
+        let snapshot = match package.format_version {
+            SKILL_PACKAGE_FORMAT_VERSION => self.load_v1_package(
+                package,
+                &roots,
+                &packages_root,
+                &version_root,
+                &package_root,
+                byte_budget,
+            ),
+            SKILL_PACKAGE_FORMAT_VERSION_V2 => self.load_v2_package(
+                package,
+                &roots,
+                &packages_root,
+                &version_root,
+                &package_root,
+                byte_budget,
+                include_resource_bytes,
+            ),
+            _ => Err(invalid_issue(
+                SkillDiagnosticCode::InvalidInstallationReceipt,
+                &package.relative_path,
+                format!(
+                    "Unsupported package format version {}.",
+                    package.format_version
+                ),
+            )),
+        }?;
+
+        verify_checked_directory(
+            &package_root,
+            "The managed package changed while it was read.",
+        )
+        .map_err(|reason| unavailable_issue(&package.relative_path, reason))?;
+        verify_checked_directory(
+            &version_root,
+            "The managed package version directory changed while a package was read.",
+        )
+        .map_err(|reason| unavailable_issue(&package.relative_path, reason))?;
+        verify_checked_directory(
+            &packages_root,
+            "The managed packages directory changed while a package was read.",
+        )
+        .map_err(|reason| unavailable_issue(&package.relative_path, reason))?;
+        verify_checked_directory(
+            &roots.store_root,
+            "The managed Skill store changed while a package was read.",
+        )
+        .map_err(|reason| unavailable_issue(&package.relative_path, reason))?;
+        Ok(snapshot)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_v1_package(
+        &self,
+        package: &InstalledPackageRef,
+        roots: &StoreRoots,
+        _packages_root: &CheckedDirectory,
+        _version_root: &CheckedDirectory,
+        package_root: &CheckedDirectory,
+        byte_budget: &mut ByteBudget,
+    ) -> Result<ManagedCompletePackageSnapshot, ManagedStoreLoadError> {
         let entries = fs::read_dir(&package_root.canonical_path).map_err(|error| {
             unavailable_issue(
                 &package.relative_path,
@@ -355,7 +437,7 @@ impl ManagedSkillStore {
         let skill_path = skill_path.ok_or(ManagedStoreLoadError::NotFound)?;
         let bytes = read_checked_file(
             &skill_path,
-            &package_root,
+            package_root,
             &roots.store_root,
             byte_budget,
             &package.relative_path,
@@ -376,30 +458,102 @@ impl ManagedSkillStore {
             ));
         }
 
-        verify_checked_directory(
-            &package_root,
-            "The managed package changed while SKILL.md was read.",
-        )
-        .map_err(|reason| unavailable_issue(&package.relative_path, reason))?;
-        verify_checked_directory(
-            &version_root,
-            "The managed package version directory changed while SKILL.md was read.",
-        )
-        .map_err(|reason| unavailable_issue(&package.relative_path, reason))?;
-        verify_checked_directory(
-            &packages_root,
-            "The managed packages directory changed while SKILL.md was read.",
-        )
-        .map_err(|reason| unavailable_issue(&package.relative_path, reason))?;
-        verify_checked_directory(
-            &roots.store_root,
-            "The managed Skill store changed while SKILL.md was read.",
-        )
-        .map_err(|reason| unavailable_issue(&package.relative_path, reason))?;
+        Ok(ManagedCompletePackageSnapshot {
+            package: ManagedPackageSnapshot {
+                bytes,
+                relative_path: package.relative_path.clone(),
+                format_version: SKILL_PACKAGE_FORMAT_VERSION,
+                resources: SkillResourceIndex::default(),
+            },
+            resource_bytes: Vec::new(),
+        })
+    }
 
-        Ok(ManagedPackageSnapshot {
-            bytes,
-            relative_path: package.relative_path.clone(),
+    #[allow(clippy::too_many_arguments)]
+    fn load_v2_package(
+        &self,
+        package: &InstalledPackageRef,
+        roots: &StoreRoots,
+        _packages_root: &CheckedDirectory,
+        _version_root: &CheckedDirectory,
+        package_root: &CheckedDirectory,
+        byte_budget: &mut ByteBudget,
+        include_resource_bytes: bool,
+    ) -> Result<ManagedCompletePackageSnapshot, ManagedStoreLoadError> {
+        let manifest_path = exact_child_path(
+            package_root,
+            OsStr::new(PACKAGE_V2_MANIFEST_FILE),
+            MAX_MANAGED_DIRECTORY_ENTRIES,
+        )
+        .map_err(|error| map_directory_error(&package.relative_path, error))?
+        .ok_or(ManagedStoreLoadError::NotFound)?;
+        let manifest_bytes = read_checked_file(
+            &manifest_path,
+            package_root,
+            &roots.store_root,
+            byte_budget,
+            &package.relative_path,
+            ManagedFileReadPolicy {
+                max_bytes: MAX_SKILL_PACKAGE_MANIFEST_BYTES,
+                too_large_code: SkillDiagnosticCode::InvalidPackageManifest,
+            },
+        )?;
+        let manifest = PackageManifest::decode(&manifest_bytes)
+            .map_err(|error| package_validation_issue(&package.relative_path, error))?;
+        let actual_revision = manifest.revision();
+        if actual_revision != package.revision {
+            return Err(invalid_issue(
+                SkillDiagnosticCode::PackageRevisionMismatch,
+                &package.relative_path,
+                format!(
+                    "Managed Skill package manifest does not match receipt revision `{}`.",
+                    package.revision
+                ),
+            ));
+        }
+
+        let skill_entry = manifest.entrypoint_entry();
+        let skill_bytes = read_v2_manifest_file(
+            package_root,
+            &roots.store_root,
+            skill_entry.path(),
+            usize::try_from(skill_entry.byte_length()).unwrap_or(usize::MAX),
+            SkillDiagnosticCode::SkillFileTooLarge,
+            byte_budget,
+            &package.relative_path,
+        )?;
+        verify_manifest_file_bytes(skill_entry, &skill_bytes, &package.relative_path)?;
+
+        let mut resource_bytes = Vec::new();
+        if include_resource_bytes {
+            resource_bytes.reserve(manifest.files().len().saturating_sub(1));
+            for entry in manifest
+                .files()
+                .iter()
+                .filter(|entry| entry.path() != SKILL_FILE_NAME)
+            {
+                let bytes = read_v2_manifest_file(
+                    package_root,
+                    &roots.store_root,
+                    entry.path(),
+                    MAX_SKILL_RESOURCE_FILE_BYTES,
+                    SkillDiagnosticCode::ResourceFileTooLarge,
+                    byte_budget,
+                    &package.relative_path,
+                )?;
+                verify_manifest_file_bytes(entry, &bytes, &package.relative_path)?;
+                resource_bytes.push((entry.path().to_string(), bytes));
+            }
+        }
+
+        Ok(ManagedCompletePackageSnapshot {
+            package: ManagedPackageSnapshot {
+                bytes: skill_bytes,
+                relative_path: package.relative_path.clone(),
+                format_version: SKILL_PACKAGE_FORMAT_VERSION_V2,
+                resources: SkillResourceIndex::new(manifest.resource_descriptors()),
+            },
+            resource_bytes,
         })
     }
 
@@ -492,20 +646,33 @@ pub(super) struct InstalledSkillReceipt {
 
 #[derive(Debug, Clone)]
 pub(super) struct InstalledPackageRef {
+    pub format_version: u32,
     pub revision: SkillRevision,
     pub digest_hex: String,
     pub relative_path: String,
 }
 
 impl InstalledPackageRef {
-    pub fn from_revision(revision: SkillRevision) -> Result<Self, String> {
-        let digest_hex = package_digest_hex(&revision)?;
-        let relative_path = managed_package_relative_path_from_digest(&digest_hex);
+    pub fn from_format_and_revision(
+        format_version: u32,
+        revision: SkillRevision,
+    ) -> Result<Self, String> {
+        let digest_hex = package_digest_hex(format_version, &revision)?;
+        let relative_path = managed_package_relative_path_from_digest(format_version, &digest_hex)?;
         Ok(Self {
+            format_version,
             revision,
             digest_hex,
             relative_path,
         })
+    }
+
+    pub fn version_directory(&self) -> &'static str {
+        match self.format_version {
+            SKILL_PACKAGE_FORMAT_VERSION => PACKAGE_V1_DIRECTORY,
+            SKILL_PACKAGE_FORMAT_VERSION_V2 => PACKAGE_V2_DIRECTORY,
+            _ => unreachable!("InstalledPackageRef validates package format"),
+        }
     }
 }
 
@@ -513,6 +680,14 @@ impl InstalledPackageRef {
 pub(super) struct ManagedPackageSnapshot {
     pub bytes: Vec<u8>,
     pub relative_path: String,
+    pub format_version: u32,
+    pub resources: SkillResourceIndex,
+}
+
+#[derive(Debug)]
+pub(super) struct ManagedCompletePackageSnapshot {
+    pub package: ManagedPackageSnapshot,
+    pub resource_bytes: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -570,7 +745,7 @@ struct StoreRoots {
     installations_root: Option<CheckedDirectory>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CheckedDirectory {
     lexical_path: PathBuf,
     canonical_path: PathBuf,
@@ -644,7 +819,10 @@ fn validate_receipt(
                 format!("Invalid receipt installation id: {error}"),
             )
         })?;
-    if document.package.format_version != SKILL_PACKAGE_FORMAT_VERSION {
+    if !matches!(
+        document.package.format_version,
+        SKILL_PACKAGE_FORMAT_VERSION | SKILL_PACKAGE_FORMAT_VERSION_V2
+    ) {
         return Err(invalid_issue(
             SkillDiagnosticCode::InvalidInstallationReceipt,
             location,
@@ -658,7 +836,7 @@ fn validate_receipt(
         return Err(invalid_issue(
             SkillDiagnosticCode::InvalidInstallationReceipt,
             location,
-            format!("Package format v1 entrypoint must be exactly `{SKILL_FILE_NAME}`."),
+            format!("Managed Skill package entrypoint must be exactly `{SKILL_FILE_NAME}`."),
         ));
     }
     let origin = SkillPackageOrigin::new(document.origin.provider, document.origin.reference)
@@ -677,13 +855,15 @@ fn validate_receipt(
             format!("Invalid package revision: {error}"),
         )
     })?;
-    let package = InstalledPackageRef::from_revision(revision).map_err(|reason| {
-        invalid_issue(
-            SkillDiagnosticCode::InvalidInstallationReceipt,
-            location,
-            reason,
-        )
-    })?;
+    let package =
+        InstalledPackageRef::from_format_and_revision(document.package.format_version, revision)
+            .map_err(|reason| {
+                invalid_issue(
+                    SkillDiagnosticCode::InvalidInstallationReceipt,
+                    location,
+                    reason,
+                )
+            })?;
     Ok(InstalledSkillReceipt {
         installation_id,
         package,
@@ -694,18 +874,22 @@ fn validate_receipt(
 
 pub(super) fn encode_receipt(
     installation_id: &SkillInstallationId,
+    package_format_version: u32,
     package_revision: &SkillRevision,
     origin: &SkillPackageOrigin,
     installed_at_unix_ms: u64,
 ) -> Result<Vec<u8>, String> {
     // Validate the revision through the same constructor used by the reader so
     // no writer-only revision form can enter a receipt.
-    InstalledPackageRef::from_revision(package_revision.clone())?;
+    InstalledPackageRef::from_format_and_revision(
+        package_format_version,
+        package_revision.clone(),
+    )?;
     let document = ReceiptDocument {
         schema_version: RECEIPT_SCHEMA_VERSION,
         installation_id: installation_id.as_str().to_string(),
         package: ReceiptPackageDocument {
-            format_version: SKILL_PACKAGE_FORMAT_VERSION,
+            format_version: package_format_version,
             revision: package_revision.as_str().to_string(),
             entrypoint: SKILL_FILE_NAME.to_string(),
         },
@@ -726,17 +910,34 @@ pub(super) fn encode_receipt(
 }
 
 pub(super) fn managed_package_relative_path(revision: &SkillRevision) -> Result<String, String> {
-    package_digest_hex(revision).map(|digest| managed_package_relative_path_from_digest(&digest))
+    let format_version = revision_format_version(revision)?;
+    let digest = package_digest_hex(format_version, revision)?;
+    managed_package_relative_path_from_digest(format_version, &digest)
 }
 
-fn managed_package_relative_path_from_digest(digest_hex: &str) -> String {
-    format!("{PACKAGES_DIRECTORY}/{PACKAGE_VERSION_DIRECTORY}/{digest_hex}/{SKILL_FILE_NAME}")
+fn managed_package_relative_path_from_digest(
+    format_version: u32,
+    digest_hex: &str,
+) -> Result<String, String> {
+    let version = package_version_directory(format_version)?;
+    Ok(format!(
+        "{PACKAGES_DIRECTORY}/{version}/{digest_hex}/{SKILL_FILE_NAME}"
+    ))
 }
 
-fn package_digest_hex(revision: &SkillRevision) -> Result<String, String> {
-    let Some(digest) = revision.as_str().strip_prefix(PACKAGE_REVISION_PREFIX) else {
+fn package_digest_hex(format_version: u32, revision: &SkillRevision) -> Result<String, String> {
+    let prefix = match format_version {
+        SKILL_PACKAGE_FORMAT_VERSION => PACKAGE_REVISION_PREFIX,
+        SKILL_PACKAGE_FORMAT_VERSION_V2 => PACKAGE_REVISION_V2_PREFIX,
+        _ => {
+            return Err(format!(
+                "Unsupported package format version {format_version}."
+            ))
+        }
+    };
+    let Some(digest) = revision.as_str().strip_prefix(prefix) else {
         return Err(format!(
-            "Package revision must start with `{PACKAGE_REVISION_PREFIX}`."
+            "Package format {format_version} revision must start with `{prefix}`."
         ));
     };
     if digest.len() != 64
@@ -750,6 +951,26 @@ fn package_digest_hex(revision: &SkillRevision) -> Result<String, String> {
         );
     }
     Ok(digest.to_string())
+}
+
+fn revision_format_version(revision: &SkillRevision) -> Result<u32, String> {
+    if revision.as_str().starts_with(PACKAGE_REVISION_PREFIX) {
+        Ok(SKILL_PACKAGE_FORMAT_VERSION)
+    } else if revision.as_str().starts_with(PACKAGE_REVISION_V2_PREFIX) {
+        Ok(SKILL_PACKAGE_FORMAT_VERSION_V2)
+    } else {
+        Err("Managed package revision uses an unsupported format prefix.".to_string())
+    }
+}
+
+fn package_version_directory(format_version: u32) -> Result<&'static str, String> {
+    match format_version {
+        SKILL_PACKAGE_FORMAT_VERSION => Ok(PACKAGE_V1_DIRECTORY),
+        SKILL_PACKAGE_FORMAT_VERSION_V2 => Ok(PACKAGE_V2_DIRECTORY),
+        _ => Err(format!(
+            "Unsupported package format version {format_version}."
+        )),
+    }
 }
 
 fn checked_root_directory(path: &Path) -> Result<Option<CheckedDirectory>, ManagedStoreFatalError> {
@@ -990,6 +1211,73 @@ fn read_checked_file(
             format!("Managed Skill file changed while it was read: {reason}"),
         ),
     })
+}
+
+fn read_v2_manifest_file(
+    package_root: &CheckedDirectory,
+    store_root: &CheckedDirectory,
+    relative_path: &str,
+    max_bytes: usize,
+    too_large_code: SkillDiagnosticCode,
+    byte_budget: &mut ByteBudget,
+    package_location: &str,
+) -> Result<Vec<u8>, ManagedStoreLoadError> {
+    let components = relative_path.split('/').collect::<Vec<_>>();
+    let (file_name, directories) = components.split_last().ok_or_else(|| {
+        invalid_issue(
+            SkillDiagnosticCode::InvalidResourcePath,
+            package_location,
+            "Managed Skill package contains an empty resource path.",
+        )
+    })?;
+    let mut parent = package_root.clone();
+    for component in directories {
+        parent = checked_child_directory(&parent, component)
+            .map_err(|error| map_directory_error(package_location, error))?
+            .ok_or(ManagedStoreLoadError::NotFound)?;
+    }
+    let path = exact_child_path(
+        &parent,
+        OsStr::new(file_name),
+        MAX_MANAGED_DIRECTORY_ENTRIES,
+    )
+    .map_err(|error| map_directory_error(package_location, error))?
+    .ok_or(ManagedStoreLoadError::NotFound)?;
+    read_checked_file(
+        &path,
+        &parent,
+        store_root,
+        byte_budget,
+        &format!("{package_location}:{relative_path}"),
+        ManagedFileReadPolicy {
+            max_bytes,
+            too_large_code,
+        },
+    )
+}
+
+fn verify_manifest_file_bytes(
+    entry: &PackageManifestEntry,
+    bytes: &[u8],
+    package_location: &str,
+) -> Result<(), ManagedStoreLoadError> {
+    if entry.byte_length() != u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+        || entry.digest() != package_file_digest(bytes)
+    {
+        return Err(invalid_issue(
+            SkillDiagnosticCode::PackageRevisionMismatch,
+            format!("{package_location}:{}", entry.path()),
+            "Managed Skill package file does not match its revision-bound manifest entry.",
+        ));
+    }
+    Ok(())
+}
+
+fn package_validation_issue(
+    location: &str,
+    error: PackageValidationError,
+) -> ManagedStoreLoadError {
+    invalid_issue(error.code, location, error.message)
 }
 
 fn map_directory_error(location: &str, error: DirectoryCheckError) -> ManagedStoreLoadError {

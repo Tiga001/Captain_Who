@@ -50,6 +50,23 @@ fn call_skill_rpc(
     )
 }
 
+async fn receive_rpc_response(
+    receiver: &mut mpsc::UnboundedReceiver<Value>,
+    expected_id: i64,
+    notifications: &mut Vec<Value>,
+) -> Value {
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .expect("Skill RPC response timed out")
+            .expect("Skill RPC outbound channel closed");
+        if message["id"] == expected_id {
+            return message;
+        }
+        notifications.push(message);
+    }
+}
+
 #[test]
 fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
     let fixture = tempfile::tempdir().unwrap();
@@ -188,7 +205,10 @@ fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
     )
     .unwrap_err()
     .into_data();
-    assert_eq!(stale.code, "stale");
+    assert_eq!(
+        stale.code,
+        mycopilot_protocol_rs::SkillActivationErrorCodeDto::Stale
+    );
     let relisted = call_skill_rpc(
         &storage,
         &catalog,
@@ -264,7 +284,10 @@ fn local_skill_installation_service_runs_the_complete_backend_lifecycle() {
     )
     .unwrap_err()
     .into_data();
-    assert_eq!(unavailable.code, "notFound");
+    assert_eq!(
+        unavailable.code,
+        mycopilot_protocol_rs::SkillActivationErrorCodeDto::NotFound
+    );
 }
 
 #[test]
@@ -357,6 +380,7 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
     let dispatchers = RequestDispatchers {
         git: &git_dispatcher,
         skills: &skills_dispatcher,
+        skill_acquisition: &skills_dispatcher,
     };
     let input = format!(
         "{}\n{}\n",
@@ -384,6 +408,9 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
         SkillServices {
             catalog,
             installations,
+            workflow: Arc::new(SkillInstallationWorkflow::new(
+                SkillInstallationService::new(&store_root).unwrap(),
+            )),
         },
         Arc::new(GitReviewService::new()),
         &dispatchers,
@@ -391,14 +418,9 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
     )
     .await
     .unwrap();
-    let install = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
-        .await
-        .expect("install must complete")
-        .expect("install must produce a response");
-    let list = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
-        .await
-        .expect("list must complete")
-        .expect("list must produce a response");
+    let mut notifications = Vec::new();
+    let install = receive_rpc_response(&mut outbound_rx, 11, &mut notifications).await;
+    let list = receive_rpc_response(&mut outbound_rx, 12, &mut notifications).await;
 
     assert!(shutdown_id.is_none());
     assert_eq!(install["id"], 11);
@@ -409,6 +431,279 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
         .unwrap()
         .iter()
         .any(|skill| skill["id"] == install["result"]["skillId"]));
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(
+        notifications[0]["method"],
+        SKILLS_CHANGED_NOTIFICATION_METHOD
+    );
+    assert_eq!(notifications[0]["params"]["reason"], "installed");
     git_dispatcher.shutdown().await.unwrap();
     skills_dispatcher.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_phase_rpc_runs_install_update_activation_and_uninstall_end_to_end() {
+    const INSTALL_PREPARATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const UPDATE_PREPARATION_ID: &str = "22222222-2222-4222-8222-222222222222";
+
+    let fixture = tempfile::tempdir().unwrap();
+    let local_skill = fixture.path().join("local-skill");
+    let store_root = fixture.path().join("skills");
+    write_local_skill(&local_skill, "TWO_PHASE_VERSION_ONE");
+    fs::create_dir_all(local_skill.join("references")).unwrap();
+    fs::write(
+        local_skill.join("references").join("evidence.md"),
+        "immutable evidence",
+    )
+    .unwrap();
+    fs::create_dir_all(local_skill.join("scripts")).unwrap();
+    fs::write(
+        local_skill.join("scripts").join("check.sh"),
+        "#!/bin/sh\nexit 0\n",
+    )
+    .unwrap();
+
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let catalog = Arc::new(
+        SkillsService::new()
+            .with_installed_source(&store_root)
+            .unwrap(),
+    );
+    let installations = Arc::new(SkillInstallationService::new(&store_root).unwrap());
+    let workflow = Arc::new(SkillInstallationWorkflow::new(
+        SkillInstallationService::new(&store_root).unwrap(),
+    ));
+    let agent_service = AgentService::new(Arc::clone(&storage));
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
+    let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let dispatchers = RequestDispatchers {
+        git: &git_dispatcher,
+        skills: &skills_dispatcher,
+        skill_acquisition: &acquisition_dispatcher,
+    };
+    let (mut input_writer, input_reader) = io::duplex(64 * 1024);
+    let server = run_request_loop(
+        BufReader::new(input_reader),
+        Arc::clone(&storage),
+        &agent_service,
+        SkillServices {
+            catalog: Arc::clone(&catalog),
+            installations,
+            workflow,
+        },
+        Arc::new(GitReviewService::new()),
+        &dispatchers,
+        &outbound_tx,
+    );
+    let local_directory = local_skill.to_string_lossy().into_owned();
+    let client = async {
+        let mut notifications = Vec::new();
+        let inspect_install = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": SKILLS_INSPECT_INSTALLATION_METHOD,
+            "params": {
+                "preparationId": INSTALL_PREPARATION_ID,
+                "intent": { "operation": "install" },
+                "source": { "kind": "localDirectory", "directory": local_directory }
+            }
+        });
+        input_writer
+            .write_all(format!("{inspect_install}\n").as_bytes())
+            .await
+            .unwrap();
+        let install_preview = receive_rpc_response(&mut outbound_rx, 1, &mut notifications).await;
+        assert_eq!(install_preview["result"]["operation"], "install");
+        assert_eq!(install_preview["result"]["package"]["formatVersion"], 2);
+        assert_eq!(install_preview["result"]["package"]["fileCount"], 3);
+        assert_eq!(
+            install_preview["result"]["source"]["kind"],
+            "localDirectory"
+        );
+        assert_eq!(
+            install_preview["result"]["compatibility"]["status"],
+            "compatibleWithWarnings"
+        );
+        assert_eq!(
+            install_preview["result"]["compatibility"]["issues"][0]["id"],
+            "containsScripts"
+        );
+
+        let commit_install = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": SKILLS_COMMIT_INSTALLATION_METHOD,
+            "params": {
+                "preparationId": INSTALL_PREPARATION_ID,
+                "previewRevision": install_preview["result"]["previewRevision"],
+                "acceptedIssueIds": []
+            }
+        });
+        input_writer
+            .write_all(format!("{commit_install}\n").as_bytes())
+            .await
+            .unwrap();
+        let acknowledgement_required =
+            receive_rpc_response(&mut outbound_rx, 2, &mut notifications).await;
+        assert_eq!(acknowledgement_required["error"]["code"], -32011);
+        assert_eq!(
+            acknowledgement_required["error"]["data"]["code"],
+            "acknowledgementRequired"
+        );
+
+        let accepted_commit = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": SKILLS_COMMIT_INSTALLATION_METHOD,
+            "params": {
+                "preparationId": INSTALL_PREPARATION_ID,
+                "previewRevision": install_preview["result"]["previewRevision"],
+                "acceptedIssueIds": ["containsScripts"]
+            }
+        });
+        input_writer
+            .write_all(format!("{accepted_commit}\n").as_bytes())
+            .await
+            .unwrap();
+        let install = receive_rpc_response(&mut outbound_rx, 8, &mut notifications).await;
+        assert_eq!(install["result"]["outcome"], "installed");
+        assert_eq!(
+            install["result"]["installationRevision"],
+            install["result"]["packageRevision"]
+        );
+
+        write_local_skill(&local_skill, "TWO_PHASE_VERSION_TWO");
+        let inspect_update = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": SKILLS_INSPECT_INSTALLATION_METHOD,
+            "params": {
+                "preparationId": UPDATE_PREPARATION_ID,
+                "intent": {
+                    "operation": "update",
+                    "skillId": install["result"]["skillId"],
+                    "expectedInstallationRevision": install["result"]["installationRevision"]
+                },
+                "source": { "kind": "localDirectory", "directory": local_directory }
+            }
+        });
+        input_writer
+            .write_all(format!("{inspect_update}\n").as_bytes())
+            .await
+            .unwrap();
+        let update_preview = receive_rpc_response(&mut outbound_rx, 3, &mut notifications).await;
+        assert_eq!(update_preview["result"]["changes"]["content"], "changed");
+
+        let commit_update = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": SKILLS_COMMIT_INSTALLATION_METHOD,
+            "params": {
+                "preparationId": UPDATE_PREPARATION_ID,
+                "previewRevision": update_preview["result"]["previewRevision"],
+                "acceptedIssueIds": ["containsScripts"]
+            }
+        });
+        input_writer
+            .write_all(format!("{commit_update}\n").as_bytes())
+            .await
+            .unwrap();
+        let update = receive_rpc_response(&mut outbound_rx, 4, &mut notifications).await;
+        assert_eq!(update["result"]["outcome"], "updated");
+
+        let list = json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": SKILLS_LIST_METHOD,
+            "params": {}
+        });
+        input_writer
+            .write_all(format!("{list}\n").as_bytes())
+            .await
+            .unwrap();
+        let listed = receive_rpc_response(&mut outbound_rx, 5, &mut notifications).await;
+        assert_eq!(listed["result"]["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            listed["result"]["skills"][0]["revision"],
+            update["result"]["packageRevision"]
+        );
+        let activation = skills_adapter::activate_selected_skills(
+            &storage,
+            &catalog,
+            None,
+            &[mycopilot_protocol_rs::SkillSelectionDto {
+                id: listed["result"]["skills"][0]["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+                revision: listed["result"]["skills"][0]["revision"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            }],
+        )
+        .unwrap();
+        assert!(activation.runtime.unwrap().skills[0]
+            .instructions
+            .contains("TWO_PHASE_VERSION_TWO"));
+
+        let list_management = json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": SKILLS_LIST_MANAGEMENT_METHOD,
+            "params": {}
+        });
+        input_writer
+            .write_all(format!("{list_management}\n").as_bytes())
+            .await
+            .unwrap();
+        let management = receive_rpc_response(&mut outbound_rx, 6, &mut notifications).await;
+        assert_eq!(management["result"]["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            management["result"]["skills"][0]["actions"]["canUpdate"],
+            true
+        );
+        assert_eq!(
+            management["result"]["skills"][0]["installationRevision"],
+            update["result"]["installationRevision"]
+        );
+
+        let uninstall = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": SKILLS_UNINSTALL_METHOD,
+            "params": {
+                "skillId": update["result"]["skillId"],
+                "expectedRevision": update["result"]["installationRevision"]
+            }
+        });
+        input_writer
+            .write_all(format!("{uninstall}\n").as_bytes())
+            .await
+            .unwrap();
+        let removed = receive_rpc_response(&mut outbound_rx, 7, &mut notifications).await;
+        assert_eq!(removed["result"]["outcome"], "uninstalled");
+        drop(input_writer);
+        (listed, notifications)
+    };
+
+    let (server_result, (listed, notifications)) = tokio::join!(server, client);
+    assert!(server_result.unwrap().is_none());
+    assert_eq!(
+        notifications
+            .iter()
+            .filter_map(|message| message["params"]["reason"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["installed", "updated", "uninstalled"]
+    );
+
+    let descriptor = catalog.list().unwrap();
+    assert!(descriptor.skills().is_empty());
+    assert_eq!(listed["result"]["skills"][0]["source"]["kind"], "installed");
+
+    git_dispatcher.shutdown().await.unwrap();
+    skills_dispatcher.shutdown().await.unwrap();
+    acquisition_dispatcher.shutdown().await.unwrap();
 }

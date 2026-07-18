@@ -2,13 +2,17 @@ use super::model::{
     SkillActivationRevision, SkillDescriptor, SkillDiagnostic, SkillProvenance, SkillRevision,
     SKILL_PACKAGE_FORMAT_VERSION,
 };
+use super::package::PackageManifestEntry;
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
 
 const PACKAGE_DOMAIN: &[u8] = b"mycopilot.skill.package\0";
+const PACKAGE_FILE_DOMAIN: &[u8] = b"mycopilot.skill.file\0";
 const ACTIVATION_DOMAIN: &[u8] = b"mycopilot.skill.activation\0";
 const CATALOG_DOMAIN: &[u8] = b"mycopilot.skill.catalog\0";
 pub(super) const PACKAGE_REVISION_PREFIX: &str = "skill-package-sha256-v1:";
+pub(super) const PACKAGE_REVISION_V2_PREFIX: &str = "skill-package-sha256-v2:";
+pub(super) const PACKAGE_FILE_DIGEST_PREFIX: &str = "skill-file-sha256-v1:";
 
 pub(super) fn package_revision(source_bytes: &[u8]) -> SkillRevision {
     // This collision-resistant content token detects changes; it is not an
@@ -21,6 +25,28 @@ pub(super) fn package_revision(source_bytes: &[u8]) -> SkillRevision {
     // loads no sibling resources.
     digest.update(0_u64.to_be_bytes());
     SkillRevision::trusted(format_digest(PACKAGE_REVISION_PREFIX, digest.finalize()))
+}
+
+pub(super) fn package_file_digest(bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(PACKAGE_FILE_DOMAIN);
+    digest.update(1_u32.to_be_bytes());
+    update_bytes(&mut digest, bytes);
+    format_digest(PACKAGE_FILE_DIGEST_PREFIX, digest.finalize())
+}
+
+pub(super) fn package_revision_v2(entries: &[PackageManifestEntry]) -> SkillRevision {
+    let mut digest = Sha256::new();
+    digest.update(PACKAGE_DOMAIN);
+    digest.update(2_u32.to_be_bytes());
+    digest.update((entries.len() as u64).to_be_bytes());
+    for entry in entries {
+        update_bytes(&mut digest, entry.path().as_bytes());
+        update_bytes(&mut digest, entry.kind_name().as_bytes());
+        digest.update(entry.byte_length().to_be_bytes());
+        update_bytes(&mut digest, entry.digest().as_bytes());
+    }
+    SkillRevision::trusted(format_digest(PACKAGE_REVISION_V2_PREFIX, digest.finalize()))
 }
 
 pub(super) fn activation_revision<'a>(
@@ -141,6 +167,7 @@ mod tests {
         SkillActivationScope, SkillDescriptorParts, SkillId, SkillSourceId, SkillSourceKind,
         SkillTrust,
     };
+    use crate::skills::package::{PackageManifest, PackageManifestEntry, SkillPackagePath};
 
     #[test]
     fn package_revision_is_versioned_deterministic_and_byte_exact() {
@@ -152,6 +179,29 @@ mod tests {
         );
         assert_eq!(revision, package_revision(b"skill\n"));
         assert_ne!(revision, package_revision(b"skill\r\n"));
+    }
+
+    #[test]
+    fn package_v2_digest_has_a_cross_platform_golden_vector() {
+        let manifest = PackageManifest::new(vec![
+            PackageManifestEntry::from_bytes(
+                SkillPackagePath::parse("references/a.md").unwrap(),
+                b"A",
+            ),
+            PackageManifestEntry::from_bytes(
+                SkillPackagePath::parse("SKILL.md").unwrap(),
+                b"skill",
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            package_file_digest(b"skill"),
+            "skill-file-sha256-v1:1ff3116893cf39163cd0876408ca9697449c513fdabdfc2902180997a0b075f0"
+        );
+        assert_eq!(
+            manifest.revision().as_str(),
+            "skill-package-sha256-v2:c786b51c62a834cc561c3fa158288444b270e3974d1b06796207bcae1e8c1900"
+        );
     }
 
     #[test]

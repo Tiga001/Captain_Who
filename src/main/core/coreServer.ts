@@ -35,10 +35,21 @@ import type {
   GitReviewSummaryInput,
   ChatSearchInput,
   ChatSearchResult,
+  SkillInstallationCommitOutput,
+  SkillInstallationPreview,
   SkillMutationOutput,
+  SkillPreparationCancellationOutput,
+  SkillsCancelPreparationInput,
+  SkillsChangedNotification,
+  SkillsCommitInstallationInput,
   SkillsInstallLocalInput,
+  SkillsInspectInstallationInput,
   SkillsListInput,
+  SkillsListManagementInput,
+  SkillsListManagementOutput,
   SkillsListOutput,
+  SkillsSetEnabledInput,
+  SkillsSetEnabledOutput,
   SkillsUninstallInput,
   SkillsUpdateLocalInput,
   StorageAgentPromptPreferencesRecord,
@@ -57,8 +68,24 @@ import type {
   StorageUiPreferencesRecord
 } from '@mycopilot/protocol'
 import {
+  parseSkillInstallationCommitOutput,
+  parseSkillInstallationPreview,
+  parseSkillInspectionErrorData,
+  parseSkillManagementErrorData,
   parseSkillMutationOutput,
+  parseSkillPreparationCancellationOutput,
+  parseSkillsChangedNotification,
+  parseSkillsListManagementOutput,
+  parseSkillsSetEnabledOutput,
+  SKILLS_CANCEL_PREPARATION_METHOD,
+  SKILLS_CHANGED_NOTIFICATION_METHOD,
+  SKILLS_COMMIT_INSTALLATION_METHOD,
   SKILLS_INSTALL_LOCAL_METHOD,
+  SKILLS_INSPECT_INSTALLATION_METHOD,
+  SKILL_INSPECTION_ERROR_CODE,
+  SKILL_MANAGEMENT_ERROR_CODE,
+  SKILLS_LIST_MANAGEMENT_METHOD,
+  SKILLS_SET_ENABLED_METHOD,
   SKILLS_UNINSTALL_METHOD,
   SKILLS_UPDATE_LOCAL_METHOD
 } from '@mycopilot/protocol'
@@ -107,6 +134,45 @@ const STORAGE_LOAD_UI_PREFERENCES_METHOD = 'storage.loadUiPreferences'
 const STORAGE_SAVE_UI_PREFERENCES_METHOD = 'storage.saveUiPreferences'
 const STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD = 'storage.loadAttachmentImage'
 const STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD = 'storage.loadInputAttachments'
+
+function rethrowValidatedSkillError<TData extends { message: string }>(
+  error: unknown,
+  code: number,
+  parseData: (value: unknown) => TData
+): never {
+  if (
+    typeof error !== 'object' ||
+    error === null ||
+    Array.isArray(error) ||
+    !('code' in error) ||
+    error.code !== code
+  ) {
+    throw error
+  }
+
+  const data = parseData('data' in error ? error.data : undefined)
+  throw Object.assign(new Error(error instanceof Error ? error.message : data.message), {
+    name: error instanceof Error ? error.name : 'Error',
+    code,
+    data
+  })
+}
+
+function rethrowValidatedSkillInspectionError(error: unknown): never {
+  return rethrowValidatedSkillError(
+    error,
+    SKILL_INSPECTION_ERROR_CODE,
+    parseSkillInspectionErrorData
+  )
+}
+
+function rethrowValidatedSkillManagementError(error: unknown): never {
+  return rethrowValidatedSkillError(
+    error,
+    SKILL_MANAGEMENT_ERROR_CODE,
+    parseSkillManagementErrorData
+  )
+}
 
 export class CoreServer {
   private readonly rpc = new CoreJsonRpcClient()
@@ -241,6 +307,57 @@ export class CoreServer {
 
   listSkills(input: SkillsListInput): Promise<SkillsListOutput> {
     return this.rpc.request<SkillsListOutput, SkillsListInput>(SKILLS_LIST_METHOD, input)
+  }
+
+  inspectSkillInstallation(
+    input: SkillsInspectInstallationInput
+  ): Promise<SkillInstallationPreview> {
+    return this.rpc
+      .request<unknown, SkillsInspectInstallationInput>(SKILLS_INSPECT_INSTALLATION_METHOD, input)
+      .then(parseSkillInstallationPreview)
+      .catch(rethrowValidatedSkillInspectionError)
+  }
+
+  commitSkillInstallation(
+    input: SkillsCommitInstallationInput
+  ): Promise<SkillInstallationCommitOutput> {
+    return this.rpc
+      .request<unknown, SkillsCommitInstallationInput>(SKILLS_COMMIT_INSTALLATION_METHOD, input)
+      .then(parseSkillInstallationCommitOutput)
+      .catch(rethrowValidatedSkillInspectionError)
+  }
+
+  cancelSkillPreparation(
+    input: SkillsCancelPreparationInput
+  ): Promise<SkillPreparationCancellationOutput> {
+    return this.rpc
+      .request<unknown, SkillsCancelPreparationInput>(SKILLS_CANCEL_PREPARATION_METHOD, input)
+      .then(parseSkillPreparationCancellationOutput)
+      .catch(rethrowValidatedSkillInspectionError)
+  }
+
+  listSkillManagement(input: SkillsListManagementInput): Promise<SkillsListManagementOutput> {
+    return this.rpc
+      .request<unknown, SkillsListManagementInput>(SKILLS_LIST_MANAGEMENT_METHOD, input)
+      .then(parseSkillsListManagementOutput)
+      .catch(rethrowValidatedSkillManagementError)
+  }
+
+  setSkillEnabled(input: SkillsSetEnabledInput): Promise<SkillsSetEnabledOutput> {
+    return this.rpc
+      .request<unknown, SkillsSetEnabledInput>(SKILLS_SET_ENABLED_METHOD, input)
+      .then(parseSkillsSetEnabledOutput)
+      .catch(rethrowValidatedSkillManagementError)
+  }
+
+  onSkillsChanged(handler: (event: SkillsChangedNotification) => void): () => void {
+    return this.rpc.onNotification(SKILLS_CHANGED_NOTIFICATION_METHOD, (params) => {
+      try {
+        handler(parseSkillsChangedNotification(params))
+      } catch (error) {
+        console.warn('Ignored invalid skills.changed notification', error)
+      }
+    })
   }
 
   installLocalSkill(input: SkillsInstallLocalInput): Promise<SkillMutationOutput> {
