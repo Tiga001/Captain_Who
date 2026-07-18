@@ -5,6 +5,7 @@ import { join } from 'node:path'
 
 import type {
   JsonRpcErrorResponse,
+  JsonRpcErrorObject,
   JsonRpcId,
   JsonRpcNotification,
   JsonRpcRequest,
@@ -18,6 +19,19 @@ interface PendingRequest {
 }
 
 type NotificationHandler = (params: unknown) => void
+
+/** Preserves JSON-RPC error metadata for callers that can apply typed recovery policies. */
+export class CoreJsonRpcError extends Error {
+  readonly code: number
+  readonly data: unknown
+
+  constructor(error: JsonRpcErrorObject) {
+    super(error.message)
+    this.name = 'CoreJsonRpcError'
+    this.code = error.code
+    this.data = error.data
+  }
+}
 
 export class CoreJsonRpcClient {
   private child: ChildProcessWithoutNullStreams | null = null
@@ -141,7 +155,7 @@ export class CoreJsonRpcClient {
     this.pendingRequests.delete(response.id)
 
     if (this.isErrorResponse(response)) {
-      pending.reject(new Error(response.error.message))
+      pending.reject(new CoreJsonRpcError(response.error))
       return
     }
 

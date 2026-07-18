@@ -5,7 +5,8 @@ import type {
   AgentContextWindowSnapshot,
   AgentEvent,
   AgentInputAttachment,
-  AgentProposedAction
+  AgentProposedAction,
+  SkillSelection
 } from '@mycopilot/protocol'
 import { ResizeHandle } from '../components/layout/ResizeHandle'
 import { LeftSidebar } from '../components/sidebar/LeftSidebar'
@@ -41,6 +42,12 @@ import {
 } from '../features/agent/agentClient'
 import { resolveChatPermissions } from '../features/chat/chatPermissions'
 import { createAttachmentSummary } from '../features/chat/chatAttachments'
+import {
+  planSkillActivationRecovery,
+  reconcileSkillActivationSelections,
+  type SkillActivationRecoveryPlan
+} from '../features/skills/skillActivationRecovery'
+import { mergeSkillSelections } from '../features/skills/skillSelection'
 import {
   defaultUiPreferences,
   deleteChatMessages,
@@ -147,6 +154,20 @@ function getActiveRunModelId(conversation: ChatConversation | null) {
   return runIsActive ? conversation.modelId : null
 }
 
+function getActiveRunSkillSelections(conversation: ChatConversation | null): SkillSelection[] {
+  if (!conversation) return []
+
+  const latestAssistantMessage = [...conversation.messages]
+    .reverse()
+    .find((message) => message.role === 'assistant')
+  return (
+    latestAssistantMessage?.agentRun?.activatedSkills?.map((skill) => ({
+      id: skill.id,
+      revision: skill.revision
+    })) ?? []
+  )
+}
+
 function getContextWindowSnapshotKey(scopeId: string, model: string) {
   return JSON.stringify([scopeId, model])
 }
@@ -212,6 +233,10 @@ export function AppShell() {
   const [drafts, setDrafts] = useState<Record<string, ChatComposerDraft>>({
     [NEW_CONVERSATION_DRAFT_ID]: createComposerDraft()
   })
+  const draftsRef = useRef(drafts)
+  const [skillCatalogRefreshTokens, setSkillCatalogRefreshTokens] = useState<
+    Record<string, number>
+  >({})
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === activeConversationId) ?? null,
     [activeConversationId, conversations]
@@ -220,6 +245,7 @@ export function AppShell() {
   const activeDraft =
     drafts[activeDraftId] ??
     createComposerDraft({ projectId: activeConversation?.projectId ?? null })
+  const activeSkillCatalogRefreshToken = skillCatalogRefreshTokens[activeDraftId] ?? 0
   const activeDraftSelectedModel = useMemo(
     () =>
       enabledModels.find((model) => model.id === activeDraft.modelId) ?? enabledModels[0] ?? null,
@@ -228,6 +254,10 @@ export function AppShell() {
   const activeRunModelId = useMemo(
     () => getActiveRunModelId(activeConversation),
     [activeConversation]
+  )
+  const contextWindowSkills = useMemo(
+    () => (activeRunModelId ? getActiveRunSkillSelections(activeConversation) : activeDraft.skills),
+    [activeConversation, activeDraft.skills, activeRunModelId]
   )
   // The composer selects the next run. Capacity reporting stays pinned to the immutable model of
   // the current run until that run reaches a terminal state.
@@ -311,6 +341,23 @@ export function AppShell() {
     setConversations(nextConversations)
   }, [])
 
+  const setDraftsWithRef = useCallback(
+    (value: SetStateAction<Record<string, ChatComposerDraft>>) => {
+      const nextDrafts =
+        typeof value === 'function'
+          ? (
+              value as (
+                currentDrafts: Record<string, ChatComposerDraft>
+              ) => Record<string, ChatComposerDraft>
+            )(draftsRef.current)
+          : value
+
+      draftsRef.current = nextDrafts
+      setDrafts(nextDrafts)
+    },
+    []
+  )
+
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId
   }, [activeConversationId])
@@ -332,6 +379,7 @@ export function AppShell() {
       projectId: activeConversation?.projectId ?? activeDraft.projectId,
       modelId: contextWindowModel.id,
       maxTokens: DEFAULT_AGENT_MAX_TOKENS,
+      skills: contextWindowSkills.length > 0 ? contextWindowSkills : undefined,
       permissions: resolveChatPermissions(
         activeDraft.permissionMode,
         uiPreferences.customPermissions
@@ -364,6 +412,7 @@ export function AppShell() {
     activeConversation?.projectId,
     activeDraft.permissionMode,
     activeDraft.projectId,
+    contextWindowSkills,
     contextWindowModel,
     contextWindowModelProviderPath,
     contextWindowIndicatorEnabled,
@@ -398,7 +447,7 @@ export function AppShell() {
         if (cancelled) return
         setUiPreferences(preferences)
         setConversationsWithRef(storedConversations)
-        setDrafts({
+        setDraftsWithRef({
           [NEW_CONVERSATION_DRAFT_ID]: createComposerDraft(),
           ...storedDrafts
         })
@@ -410,7 +459,7 @@ export function AppShell() {
     return () => {
       cancelled = true
     }
-  }, [setConversationsWithRef])
+  }, [setConversationsWithRef, setDraftsWithRef])
 
   const updateUiPreferences = useCallback((patch: Partial<UiPreferencesSnapshot>) => {
     setUiPreferences((currentPreferences) => {
@@ -424,12 +473,66 @@ export function AppShell() {
     })
   }, [])
 
-  const updateDraft = useCallback((scopeId: string, draft: ChatComposerDraft) => {
-    setDrafts((currentDrafts) => ({
-      ...currentDrafts,
-      [scopeId]: draft
+  const updateDraft = useCallback(
+    (scopeId: string, draft: ChatComposerDraft) => {
+      setDraftsWithRef((currentDrafts) => ({
+        ...currentDrafts,
+        [scopeId]: draft
+      }))
+      void saveComposerDraft(scopeId, draft)
+    },
+    [setDraftsWithRef]
+  )
+
+  const restoreSubmittedSkills = useCallback(
+    (
+      scopeId: string,
+      submittedSkills: readonly SkillSelection[],
+      fallback: Pick<ChatComposerDraft, 'modelId' | 'permissionMode' | 'projectId'>
+    ) => {
+      if (submittedSkills.length === 0) return
+
+      const currentDraft = draftsRef.current[scopeId] ?? createComposerDraft(fallback)
+      const nextDraft = {
+        ...currentDraft,
+        // A user may already have started composing the next turn. Preserve that live choice for
+        // duplicate ids and only restore submitted selections that are currently missing.
+        skills: mergeSkillSelections(currentDraft.skills, submittedSkills),
+        updatedAt: Date.now()
+      }
+      setDraftsWithRef({ ...draftsRef.current, [scopeId]: nextDraft })
+      void saveComposerDraft(scopeId, nextDraft)
+    },
+    [setDraftsWithRef]
+  )
+
+  const reconcileFailedSkillActivation = useCallback(
+    (
+      scopeId: string,
+      recovery: SkillActivationRecoveryPlan,
+      fallback: Pick<ChatComposerDraft, 'modelId' | 'permissionMode' | 'projectId'>
+    ) => {
+      if (recovery.draftPolicy !== 'rejectSelection' && recovery.selectionsToRestore.length === 0) {
+        return
+      }
+
+      const currentDraft = draftsRef.current[scopeId] ?? createComposerDraft(fallback)
+      const nextDraft = {
+        ...currentDraft,
+        skills: reconcileSkillActivationSelections(currentDraft.skills, recovery),
+        updatedAt: Date.now()
+      }
+      setDraftsWithRef({ ...draftsRef.current, [scopeId]: nextDraft })
+      void saveComposerDraft(scopeId, nextDraft)
+    },
+    [setDraftsWithRef]
+  )
+
+  const requestSkillCatalogRefresh = useCallback((scopeId: string) => {
+    setSkillCatalogRefreshTokens((currentTokens) => ({
+      ...currentTokens,
+      [scopeId]: (currentTokens[scopeId] ?? 0) + 1
     }))
-    void saveComposerDraft(scopeId, draft)
   }, [])
 
   const clearPendingMessageDelta = useCallback((runId: string) => {
@@ -855,6 +958,7 @@ export function AppShell() {
       projectId: string | null,
       permissionMode: ChatPermissionMode,
       attachments: ChatSubmitOptions['attachments'],
+      skills: readonly SkillSelection[],
       title?: string
     ) => {
       updateAssistantMessage(conversationId, assistantMessageId, (message) => ({
@@ -873,6 +977,7 @@ export function AppShell() {
           modelId,
           permissions: resolveChatPermissions(permissionMode, uiPreferences.customPermissions),
           projectId,
+          skills: skills.length > 0 ? [...skills] : undefined,
           title,
           userMessageId
         })
@@ -907,7 +1012,11 @@ export function AppShell() {
                       ...mergedMessage,
                       content: mergedMessage.content || message.content || THINKING_PLACEHOLDER,
                       status: 'pending' as const,
-                      agentRun: ensureAgentRun(mergedMessage.agentRun, startOutput.runId, 'running')
+                      agentRun: {
+                        ...ensureAgentRun(mergedMessage.agentRun, startOutput.runId, 'running'),
+                        activatedSkills: startOutput.activatedSkills,
+                        skillActivationRevision: startOutput.skillActivationRevision
+                      }
                     }
                   }
 
@@ -946,6 +1055,15 @@ export function AppShell() {
         }
 
         const message = error instanceof Error ? error.message : String(error)
+        const recovery = planSkillActivationRecovery(error, skills)
+        reconcileFailedSkillActivation(conversationId, recovery, {
+          modelId,
+          permissionMode,
+          projectId
+        })
+        if (recovery.refreshCatalog) {
+          requestSkillCatalogRefresh(conversationId)
+        }
         updateAssistantMessage(
           conversationId,
           assistantMessageId,
@@ -966,6 +1084,8 @@ export function AppShell() {
       cancelBackendAgentRun,
       contextWindowIndicatorEnabled,
       handleBoundAgentEvent,
+      reconcileFailedSkillActivation,
+      requestSkillCatalogRefresh,
       setConversationsWithRef,
       uiPreferences.customPermissions,
       updateAssistantMessage
@@ -1037,6 +1157,7 @@ export function AppShell() {
         activeConversation?.projectId ?? options.projectId,
         options.permissionMode,
         options.attachments,
+        options.skills,
         activeConversation ? undefined : title
       )
     },
@@ -1106,6 +1227,11 @@ export function AppShell() {
       const now = Date.now()
       const modelId = activeDraftSelectedModel.id
       const permissionMode = activeDraft.permissionMode
+      const editedSkillSelections =
+        latestEditableTurn.assistantMessage.agentRun?.activatedSkills?.map((skill) => ({
+          id: skill.id,
+          revision: skill.revision
+        })) ?? []
       const userMessage = createUserMessage(messageContent, attachments)
       const assistantMessage = createAssistantMessage(THINKING_PLACEHOLDER, 'pending')
       const messagesBeforeEditedTurn = latestConversation.messages.slice(
@@ -1169,11 +1295,17 @@ export function AppShell() {
             latestConversation.projectId,
             permissionMode,
             attachments,
+            editedSkillSelections,
             undefined
           )
         } catch (error) {
           if (editSubmissionSeqRef.current !== submissionSeq) return
           const errorMessage = error instanceof Error ? error.message : String(error)
+          restoreSubmittedSkills(conversationId, editedSkillSelections, {
+            modelId,
+            permissionMode,
+            projectId: latestConversation.projectId
+          })
           updateAssistantMessage(
             conversationId,
             assistantMessage.id,
@@ -1196,6 +1328,7 @@ export function AppShell() {
       activeDraftSelectedModel,
       cleanupRunBinding,
       requestAssistantResponse,
+      restoreSubmittedSkills,
       setConversationsWithRef,
       t,
       updateDraft,
@@ -1265,7 +1398,7 @@ export function AppShell() {
           newConversation,
           ...currentConversations.filter((conversation) => conversation.id !== newConversation.id)
         ])
-        setDrafts((currentDrafts) => ({
+        setDraftsWithRef((currentDrafts) => ({
           ...currentDrafts,
           [newConversation.id]: newDraft
         }))
@@ -1282,7 +1415,7 @@ export function AppShell() {
         showToast(t('chat.continueInNewTaskFailed'))
       }
     },
-    [drafts, setConversationsWithRef, showToast, t]
+    [drafts, setConversationsWithRef, setDraftsWithRef, showToast, t]
   )
 
   const rememberConversationScrollPosition = useCallback(
@@ -1435,7 +1568,7 @@ export function AppShell() {
       setConversationsWithRef((currentConversations) =>
         currentConversations.filter((conversation) => !removedConversationIds.has(conversation.id))
       )
-      setDrafts((currentDrafts) =>
+      setDraftsWithRef((currentDrafts) =>
         Object.fromEntries(
           Object.entries(currentDrafts)
             .filter(([scopeId]) => !removedConversationIds.has(scopeId))
@@ -1478,6 +1611,7 @@ export function AppShell() {
       deleteProject,
       enqueueChatMessageStateSave,
       setConversationsWithRef,
+      setDraftsWithRef,
       showToast,
       t,
       waitForConversationSaves,
@@ -1736,6 +1870,7 @@ export function AppShell() {
               editSelectedModelSupportsImage={Boolean(activeDraftSelectedModel?.supportsImage)}
               initialScrollTop={activeConversationInitialScrollTop}
               permissionModeAvailability={permissionModeAvailability}
+              skillCatalogRefreshToken={activeSkillCatalogRefreshToken}
               scrollToBottomSignal={conversationScrollToBottomSignal}
               scrollTargetMessageId={scrollTargetMessageId}
               showTokenUsageDetails={uiPreferences.showTokenUsageDetails}
@@ -1780,6 +1915,7 @@ export function AppShell() {
               contextWindowSnapshot={activeContextWindowSnapshot}
               draft={activeDraft}
               permissionModeAvailability={permissionModeAvailability}
+              skillCatalogRefreshToken={activeSkillCatalogRefreshToken}
               onDraftChange={(draft) => updateDraft(NEW_CONVERSATION_DRAFT_ID, draft)}
               onSubmitMessage={submitMessage}
             />

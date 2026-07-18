@@ -17,7 +17,7 @@ import { basename, extname, isAbsolute, join, relative, resolve } from 'path'
 import { readFile } from 'fs/promises'
 import type { StorageImageFileRecord } from '@mycopilot/protocol'
 import type { StorageProjectRecord } from '@mycopilot/protocol'
-import type { AppWindowState } from '@mycopilot/host-api'
+import { captureHostInvocation, type AppWindowState } from '@mycopilot/host-api'
 import { BROWSER_WEBVIEW_PARTITION } from '@mycopilot/protocol'
 
 import { CoreServer } from './core/coreServer'
@@ -305,10 +305,10 @@ export function registerHostIpc(
     nativeTheme.themeSource = themeSource
   })
   ipcMain.handle('host:agent.startConversationTurn', (_event, input) =>
-    coreServer.startConversationTurn(input)
+    captureHostInvocation(() => coreServer.startConversationTurn(input))
   )
   ipcMain.handle('host:agent.getContextWindowSnapshot', (_event, input) =>
-    coreServer.getContextWindowSnapshot(input)
+    captureHostInvocation(() => coreServer.getContextWindowSnapshot(input))
   )
   ipcMain.handle('host:agent.getContextCompactionAudit', (_event, input) =>
     coreServer.getContextCompactionAudit(input)

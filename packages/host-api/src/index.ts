@@ -157,10 +157,12 @@ export interface WorkspaceFilesHostApi {
 }
 
 export interface AgentHostApi {
-  startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput>
+  startConversationTurn(
+    input: AgentConversationTurnInput
+  ): Promise<HostInvocationResult<AgentConversationTurnOutput>>
   getContextWindowSnapshot(
     input: AgentContextWindowSnapshotInput
-  ): Promise<AgentContextWindowSnapshotOutput>
+  ): Promise<HostInvocationResult<AgentContextWindowSnapshotOutput>>
   getContextCompactionAudit(
     input: AgentContextCompactionAuditInput
   ): Promise<AgentContextCompactionAuditOutput>
@@ -207,6 +209,60 @@ export interface HostApi {
 
 export interface MyCopilotGlobal {
   host: HostApi
+}
+
+export interface HostInvocationErrorPayload {
+  message: string
+  code?: number
+  data?: unknown
+}
+
+/**
+ * Serializable Main-to-Renderer result for operations whose structured errors are part of their
+ * public contract. Electron otherwise preserves only an IPC handler error's message.
+ */
+export type HostInvocationResult<T> =
+  { ok: true; value: T } | { ok: false; error: HostInvocationErrorPayload }
+
+export class HostInvocationError extends Error {
+  readonly code?: number
+  readonly data?: unknown
+
+  constructor(payload: HostInvocationErrorPayload) {
+    super(payload.message)
+    this.name = 'HostInvocationError'
+    this.code = payload.code
+    this.data = payload.data
+  }
+}
+
+export async function captureHostInvocation<T>(
+  operation: () => Promise<T>
+): Promise<HostInvocationResult<T>> {
+  try {
+    return { ok: true, value: await operation() }
+  } catch (error) {
+    const record = isRecord(error) ? error : undefined
+    const code = typeof record?.code === 'number' ? record.code : undefined
+    const data = record && 'data' in record ? record.data : undefined
+    return {
+      ok: false,
+      error: {
+        message: error instanceof Error ? error.message : String(error),
+        ...(code === undefined ? {} : { code }),
+        ...(data === undefined ? {} : { data })
+      }
+    }
+  }
+}
+
+export function unwrapHostInvocation<T>(result: HostInvocationResult<T>): T {
+  if (result.ok) return result.value
+  throw new HostInvocationError(result.error)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object')
 }
 
 export function getHostApi(): HostApi {

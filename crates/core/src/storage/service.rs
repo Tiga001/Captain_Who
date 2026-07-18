@@ -983,21 +983,28 @@ impl StorageService {
         pending_action_repository::list_pending_actions(&connection).map_err(storage_error)
     }
 
-    pub fn update_pending_agent_action_status(
+    pub fn transition_pending_agent_action(
         &self,
         action_id: &str,
         status: &str,
+        agent_input_json: &str,
         updated_at: i64,
     ) -> Result<(), String> {
         let connection = self.state.connection()?;
-        pending_action_repository::update_pending_action_status(
+        let affected = pending_action_repository::transition_pending_action(
             &connection,
             action_id,
             status,
+            agent_input_json,
             updated_at,
         )
-        .map(|_| ())
-        .map_err(storage_error)
+        .map_err(storage_error)?;
+        if affected != 1 {
+            return Err(format!(
+                "待审批操作状态迁移必须且只能更新一条记录，actionId={action_id}，实际更新 {affected} 条。"
+            ));
+        }
+        Ok(())
     }
 
     pub fn create_agent_file_draft(&self, draft: AgentFileDraftRecord) -> Result<(), String> {
@@ -2155,6 +2162,7 @@ mod tests {
             model_id: Some("model-1".to_string()),
             project_id: project_id.map(ToString::to_string),
             attachments_json: "[]".to_string(),
+            skills_json: "[]".to_string(),
             updated_at: 1,
         }
     }

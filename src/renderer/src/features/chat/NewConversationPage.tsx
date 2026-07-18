@@ -16,6 +16,7 @@ interface NewConversationPageProps {
     custom: boolean
     full: boolean
   }
+  skillCatalogRefreshToken?: number
 }
 
 export function NewConversationPage({
@@ -25,7 +26,8 @@ export function NewConversationPage({
   draft,
   onDraftChange,
   onSubmitMessage,
-  permissionModeAvailability
+  permissionModeAvailability,
+  skillCatalogRefreshToken
 }: NewConversationPageProps) {
   const { t } = useFrontendConfig()
   const { projects } = useProjectSettings()
@@ -47,6 +49,7 @@ export function NewConversationPage({
           onDraftChange={onDraftChange}
           permissionModeAvailability={permissionModeAvailability}
           resetKey={`new:${defaultProjectId ?? 'root'}`}
+          skillCatalogRefreshToken={skillCatalogRefreshToken}
           showProjectSelector
           onSubmitMessage={onSubmitMessage}
         />

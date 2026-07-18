@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import type { AppWindowState, HostApi } from '@mycopilot/host-api'
 import type { AgentEvent, TerminalExitEvent, TerminalOutputEvent } from '@mycopilot/protocol'
+import { createSkillsIpcBridge } from './SkillsIpcBridge'
 import { TerminalEventRouter } from './TerminalEventRouter'
 
 const AGENT_EVENT_CHANNEL = 'host:agent.event'
@@ -92,9 +93,7 @@ const host: HostApi = {
   search: {
     searchChats: (input) => ipcRenderer.invoke('host:search.searchChats', input)
   },
-  skills: {
-    list: (input) => ipcRenderer.invoke('host:skills.list', input)
-  },
+  skills: createSkillsIpcBridge(ipcRenderer),
   storage: {
     loadModelSettings: () => ipcRenderer.invoke('host:storage.loadModelSettings'),
     saveModelSettings: (settings) => ipcRenderer.invoke('host:storage.saveModelSettings', settings),

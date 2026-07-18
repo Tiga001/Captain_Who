@@ -4,7 +4,7 @@ use rusqlite::{params, Connection};
 pub fn list_composer_drafts(connection: &Connection) -> rusqlite::Result<Vec<ComposerDraftRecord>> {
     let mut statement = connection.prepare(
         "
-        SELECT scope_id, message, permission_mode, model_id, project_id, attachments_json, updated_at
+        SELECT scope_id, message, permission_mode, model_id, project_id, attachments_json, skills_json, updated_at
         FROM composer_drafts
         ORDER BY updated_at DESC
         ",
@@ -19,7 +19,8 @@ pub fn list_composer_drafts(connection: &Connection) -> rusqlite::Result<Vec<Com
                 model_id: row.get(3)?,
                 project_id: row.get(4)?,
                 attachments_json: row.get(5)?,
-                updated_at: row.get(6)?,
+                skills_json: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         })?
         .collect();
@@ -40,15 +41,17 @@ pub fn save_composer_draft(
             model_id,
             project_id,
             attachments_json,
+            skills_json,
             updated_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         ON CONFLICT(scope_id) DO UPDATE SET
             message = excluded.message,
             permission_mode = excluded.permission_mode,
             model_id = excluded.model_id,
             project_id = excluded.project_id,
             attachments_json = excluded.attachments_json,
+            skills_json = excluded.skills_json,
             updated_at = excluded.updated_at
         ",
         params![
@@ -58,6 +61,7 @@ pub fn save_composer_draft(
             &draft.model_id,
             &draft.project_id,
             &draft.attachments_json,
+            &draft.skills_json,
             draft.updated_at
         ],
     )?;

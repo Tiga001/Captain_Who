@@ -3,8 +3,11 @@ pub use crate::agent_support::{
     AgentActionExecutionOutput, AgentContextCompactionAuditInput,
     AgentContextCompactionAuditOutput, AgentContextWindowSnapshotInput,
     AgentContextWindowSnapshotOutput, AgentConversationTurnInput, AgentConversationTurnOutput,
-    AgentFileDraftContentPage, AgentFileWriteDiffPage, PendingActionStatus,
+    AgentFileDraftContentPage, AgentFileWriteDiffPage, AgentServiceError, PendingActionStatus,
     PendingAgentActionSnapshot,
+};
+use crate::skills_adapter::{
+    activate_workspace, missing_workspace_failure, PreparedSkillActivation,
 };
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -16,6 +19,7 @@ use std::time::Duration;
 
 use mycopilot_core::command::{run_approved_command, AgentCommandExecutionResult, CommandRunState};
 use mycopilot_core::file_write::{file_draft_snapshot, file_write_diff};
+use mycopilot_core::skills::SkillsService;
 use mycopilot_core::storage::models::{
     AgentActionAuditRecord, AgentPendingActionRecord, AgentUsageRecordInsert,
 };
@@ -136,6 +140,24 @@ fn emit_terminal_events_after_persistence(
     }
 }
 
+fn emit_pending_transition_error(
+    notifications: &CoreServerNotificationSender,
+    run_id: &str,
+    status: PendingActionStatus,
+    error: &str,
+) {
+    let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+        run_id: Some(run_id.to_string()),
+        message: format!(
+            "待审批操作无法可靠迁移为 `{}`；已抑制终态事件：{error}",
+            pending_status_label(status)
+        ),
+        recoverable: true,
+        code: Some("pending_action_transition_failed".to_string()),
+        details: None,
+    }));
+}
+
 struct ConversationContextStateEntry {
     state: AgentConversationContextState,
     configuration_revision: String,
@@ -154,6 +176,7 @@ struct ConversationContextStateUpdate {
 #[derive(Clone)]
 pub struct AgentService {
     storage: Arc<StorageService>,
+    skills: Arc<SkillsService>,
     cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
     pending_actions: Arc<Mutex<HashMap<String, PendingActionRecord>>>,
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
@@ -170,6 +193,7 @@ impl AgentService {
         let pending_actions = load_persisted_pending_actions(&storage);
         Self {
             storage,
+            skills: Arc::new(SkillsService::new()),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             pending_actions: Arc::new(Mutex::new(pending_actions)),
             usage_contexts: Arc::new(Mutex::new(HashMap::new())),
@@ -180,6 +204,11 @@ impl AgentService {
             command_runs: CommandRunState::default(),
             deleting_projects: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    pub fn with_skills_service(mut self, skills: Arc<SkillsService>) -> Self {
+        self.skills = skills;
+        self
     }
 
     #[cfg(test)]
@@ -195,15 +224,16 @@ impl AgentService {
         &self,
         input: AgentConversationTurnInput,
         notifications: CoreServerNotificationSender,
-    ) -> Result<AgentConversationTurnOutput, String> {
+    ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
         if self.is_project_deleting(input.project_id.as_deref()) {
-            return Err("项目正在移除，无法开始新的 agent 运行。".to_string());
+            return Err("项目正在移除，无法开始新的 agent 运行。".to_string().into());
         }
         let run_id = next_run_id();
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
 
-        let prepared = match prepare_conversation_turn(&self.storage, input, &run_id) {
+        let prepared = match prepare_conversation_turn(&self.storage, &self.skills, input, &run_id)
+        {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.unregister_cancellation(&run_id);
@@ -215,7 +245,7 @@ impl AgentService {
         if self.is_agent_input_project_deleting(&prepared.agent_input) {
             self.discard_usage_context(&run_id);
             self.unregister_cancellation(&run_id);
-            return Err("项目正在移除，无法开始新的 agent 运行。".to_string());
+            return Err("项目正在移除，无法开始新的 agent 运行。".to_string().into());
         }
 
         let output = prepared.output.clone();
@@ -874,8 +904,8 @@ impl AgentService {
         {
             let cancelled = self.command_runs.cancel(action_id);
             if cancelled {
+                self.persist_pending_status(record, PendingActionStatus::Cancelled)?;
                 record.snapshot.status = PendingActionStatus::Cancelled;
-                self.persist_pending_status(action_id, PendingActionStatus::Cancelled);
                 self.record_action_audit(
                     record,
                     Some("cancelled"),
@@ -893,21 +923,19 @@ impl AgentService {
         if record.snapshot.status != PendingActionStatus::Pending {
             return Ok(false);
         }
+        self.persist_pending_status(record, PendingActionStatus::Cancelled)?;
         record.snapshot.status = PendingActionStatus::Cancelled;
-        self.persist_pending_status(action_id, PendingActionStatus::Cancelled);
         let record = record.clone();
         drop(pending_actions);
         drop(deleting_projects);
         if let Err(error) = self.finalize_cancelled_pending_action(&record) {
-            let mut pending_actions = self
-                .pending_actions
-                .lock()
-                .unwrap_or_else(|lock_error| lock_error.into_inner());
-            if let Some(pending) = pending_actions.get_mut(action_id) {
-                pending.snapshot.status = PendingActionStatus::Pending;
+            if let Err(rollback_error) =
+                self.transition_pending_status(&record, PendingActionStatus::Pending)
+            {
+                return Err(format!(
+                    "{error} 此外，待审批操作无法回滚为 pending；已保持 cancelled 状态以避免内存与数据库分歧：{rollback_error}"
+                ));
             }
-            drop(pending_actions);
-            self.persist_pending_status(action_id, PendingActionStatus::Pending);
             return Err(error);
         }
         Ok(true)
@@ -1004,8 +1032,8 @@ impl AgentService {
             {
                 return Err("项目正在移除，无法处理待审批操作。".to_string());
             }
+            self.persist_pending_status(record, pending_status)?;
             record.snapshot.status = pending_status;
-            self.persist_pending_status(action_id, pending_status);
             record.clone()
         };
 
@@ -1189,7 +1217,15 @@ impl AgentService {
             return;
         }
         let AgentProposedAction::Command { command } = record.snapshot.action.clone() else {
-            self.update_pending_status(&action_id, PendingActionStatus::Failed);
+            if let Err(error) = self.transition_pending_status(&record, PendingActionStatus::Failed)
+            {
+                emit_pending_transition_error(
+                    &notifications,
+                    &run_id,
+                    PendingActionStatus::Failed,
+                    &error,
+                );
+            }
             return;
         };
 
@@ -1276,7 +1312,16 @@ impl AgentService {
         if let Err(error) =
             self.commit_trace_snapshot_with_continuation(&record, &agent_input, &notifications)
         {
-            self.update_pending_status(&action_id, PendingActionStatus::Failed);
+            if let Err(transition_error) =
+                self.transition_pending_status(&record, PendingActionStatus::Failed)
+            {
+                emit_pending_transition_error(
+                    &notifications,
+                    &run_id,
+                    PendingActionStatus::Failed,
+                    &transition_error,
+                );
+            }
             self.unregister_cancellation(&run_id);
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                 run_id: Some(run_id),
@@ -1333,7 +1378,16 @@ impl AgentService {
                 Err("cancelled command is missing its conversation trace checkpoint".to_string())
             };
             if let Err(error) = persisted {
-                self.update_pending_status(&action_id, PendingActionStatus::Failed);
+                if let Err(transition_error) =
+                    self.transition_pending_status(&record, PendingActionStatus::Failed)
+                {
+                    emit_pending_transition_error(
+                        &notifications,
+                        &run_id,
+                        PendingActionStatus::Failed,
+                        &transition_error,
+                    );
+                }
                 self.unregister_cancellation(&run_id);
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                     run_id: Some(run_id),
@@ -1346,7 +1400,18 @@ impl AgentService {
                 }));
                 return;
             }
-            self.update_pending_status(&action_id, PendingActionStatus::Cancelled);
+            if let Err(error) =
+                self.transition_pending_status(&record, PendingActionStatus::Cancelled)
+            {
+                emit_pending_transition_error(
+                    &notifications,
+                    &run_id,
+                    PendingActionStatus::Cancelled,
+                    &error,
+                );
+                self.unregister_cancellation(&run_id);
+                return;
+            }
             self.discard_trace_snapshot(&run_id);
             self.unregister_cancellation(&run_id);
             let _ = notifications.send(agent_event_notification(AgentEvent::Done {
@@ -1489,6 +1554,17 @@ impl AgentService {
         match result {
             Ok(agent_output) => {
                 let committed_durable_context = is_terminal_run_status(agent_output.status);
+                let pending_transition = self
+                    .transition_pending_status(&record, final_pending_status)
+                    .inspect_err(|error| {
+                        terminal_event_gate.discard();
+                        emit_pending_transition_error(
+                            &notifications,
+                            &run_id,
+                            final_pending_status,
+                            error,
+                        );
+                    });
                 if let (Some(conversation_id), Some(assistant_message_id)) = (
                     record.snapshot.conversation_id.as_deref(),
                     record.snapshot.assistant_message_id.as_deref(),
@@ -1498,7 +1574,8 @@ impl AgentService {
                         assistant_message_id,
                         &agent_output,
                     );
-                    if persisted.is_ok() && committed_durable_context {
+                    if persisted.is_ok() && pending_transition.is_ok() && committed_durable_context
+                    {
                         self.emit_terminal_context_window_snapshot(
                             &notifications,
                             &record.agent_input,
@@ -1521,7 +1598,7 @@ impl AgentService {
                             details: None,
                         }));
                     }
-                    if committed_durable_context {
+                    if pending_transition.is_ok() && committed_durable_context {
                         emit_terminal_events_after_persistence(
                             &notifications,
                             &terminal_event_gate,
@@ -1529,10 +1606,19 @@ impl AgentService {
                         );
                     }
                 }
-                self.update_pending_status(&record.snapshot.action_id, final_pending_status);
             }
             Err(error) => {
                 terminal_event_gate.discard();
+                let pending_transition = self
+                    .transition_pending_status(&record, PendingActionStatus::Failed)
+                    .inspect_err(|transition_error| {
+                        emit_pending_transition_error(
+                            &notifications,
+                            &run_id,
+                            PendingActionStatus::Failed,
+                            transition_error,
+                        );
+                    });
                 let usage = error.usage().cloned();
                 let code = error.code().map(ToString::to_string);
                 let details = error.details().cloned();
@@ -1566,7 +1652,7 @@ impl AgentService {
                             .as_ref()
                             .expect("trace exists when conversation and assistant ids exist"),
                     );
-                    if persisted.is_ok() {
+                    if persisted.is_ok() && pending_transition.is_ok() {
                         self.emit_terminal_context_window_snapshot(
                             &notifications,
                             &record.agent_input,
@@ -1594,16 +1680,17 @@ impl AgentService {
                     code,
                     details,
                 }));
-                let _ = notifications.send(agent_event_notification(AgentEvent::Done {
-                    run_id: run_id.clone(),
-                    success: false,
-                    status: Some(AgentRunStatus::Failed),
-                    content: Some(message),
-                    usage,
-                    finish_reason: None,
-                    proposed_actions: Vec::new(),
-                }));
-                self.update_pending_status(&record.snapshot.action_id, PendingActionStatus::Failed);
+                if pending_transition.is_ok() {
+                    let _ = notifications.send(agent_event_notification(AgentEvent::Done {
+                        run_id: run_id.clone(),
+                        success: false,
+                        status: Some(AgentRunStatus::Failed),
+                        content: Some(message),
+                        usage,
+                        finish_reason: None,
+                        proposed_actions: Vec::new(),
+                    }));
+                }
             }
         }
 
@@ -1672,16 +1759,22 @@ impl AgentService {
         drop(deleting_projects);
     }
 
-    fn update_pending_status(&self, action_id: &str, status: PendingActionStatus) {
+    fn transition_pending_status(
+        &self,
+        record: &PendingActionRecord,
+        status: PendingActionStatus,
+    ) -> Result<(), String> {
+        let action_id = &record.snapshot.action_id;
         let mut pending_actions = self
             .pending_actions
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(record) = pending_actions.get_mut(action_id) {
-            record.snapshot.status = status;
-        }
-        drop(pending_actions);
-        self.persist_pending_status(action_id, status);
+        let pending = pending_actions
+            .get_mut(action_id)
+            .ok_or_else(|| format!("待审批操作的内存状态不存在：{action_id}"))?;
+        self.persist_pending_status(pending, status)?;
+        pending.snapshot.status = status;
+        Ok(())
     }
 
     fn persist_pending_action(&self, record: &PendingActionRecord) -> Result<(), String> {
@@ -1689,14 +1782,17 @@ impl AgentService {
             .upsert_pending_agent_action(pending_storage_record(record, now_ms()))
     }
 
-    fn persist_pending_status(&self, action_id: &str, status: PendingActionStatus) {
-        if let Err(error) = self.storage.update_pending_agent_action_status(
-            action_id,
+    fn persist_pending_status(
+        &self,
+        record: &PendingActionRecord,
+        status: PendingActionStatus,
+    ) -> Result<(), String> {
+        self.storage.transition_pending_agent_action(
+            &record.snapshot.action_id,
             pending_status_label(status),
+            &persisted_pending_agent_input_json(&record.agent_input, status),
             now_ms(),
-        ) {
-            eprintln!("failed to update pending agent action status: {error}");
-        }
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2201,9 +2297,18 @@ impl AgentService {
         };
         // Measure and freeze the appended trace chunk once for the conversation cache and circle.
         state.shared_baseline().map_err(|error| error.to_string())?;
-        let snapshot = agent_input
-            .context_window_indicator_enabled
-            .then(|| state.snapshot(AgentContextWindowPhase::DurableCommit));
+        let snapshot = if agent_input.context_window_indicator_enabled {
+            Some(
+                state
+                    .snapshot_with_skill_activation(
+                        AgentContextWindowPhase::DurableCommit,
+                        agent_input.skill_activation.as_ref(),
+                    )
+                    .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
         let entry = ConversationContextStateEntry {
             configuration_revision: state.configuration_revision().to_string(),
             state,
@@ -2325,10 +2430,19 @@ impl AgentService {
                                 .state
                                 .shared_baseline()
                                 .map_err(|error| error.to_string())?;
-                            let snapshot =
-                                agent_input.context_window_indicator_enabled.then(|| {
-                                    entry.state.snapshot(AgentContextWindowPhase::DurableCommit)
-                                });
+                            let snapshot = if agent_input.context_window_indicator_enabled {
+                                Some(
+                                    entry
+                                        .state
+                                        .snapshot_with_skill_activation(
+                                            AgentContextWindowPhase::DurableCommit,
+                                            agent_input.skill_activation.as_ref(),
+                                        )
+                                        .map_err(|error| error.to_string())?,
+                                )
+                            } else {
+                                None
+                            };
                             return Ok(ConversationContextStateUpdate { baseline, snapshot });
                         }
                         Err(_) => needs_rebuild = true,
@@ -2347,6 +2461,7 @@ impl AgentService {
             conversation_id,
             AgentContextWindowPhase::DurableCommit,
             Some(run_id),
+            agent_input.skill_activation.as_ref(),
         )
     }
 
@@ -2659,10 +2774,10 @@ impl AgentService {
     pub fn get_context_window_snapshot(
         &self,
         input: AgentContextWindowSnapshotInput,
-    ) -> Result<AgentContextWindowSnapshotOutput, String> {
+    ) -> Result<AgentContextWindowSnapshotOutput, AgentServiceError> {
         let model_id = input.model_id.trim();
         if model_id.is_empty() {
-            return Err("modelId 不能为空。".to_string());
+            return Err("modelId 不能为空。".to_string().into());
         }
         let settings = self
             .storage
@@ -2675,7 +2790,7 @@ impl AgentService {
             .cloned()
             .ok_or_else(|| format!("未找到模型配置：{model_id}"))?;
         if !model.enabled {
-            return Err(format!("模型未启用：{model_id}"));
+            return Err(format!("模型未启用：{model_id}").into());
         }
         let connection = settings.effective_connection_for(&model)?;
 
@@ -2684,12 +2799,22 @@ impl AgentService {
             Some(conversation_id) => self.storage.load_conversation(conversation_id)?,
             None => None,
         };
-        let project_id = normalized_optional(input.project_id.as_deref()).or_else(|| {
-            conversation
-                .as_ref()
-                .and_then(|conversation| normalized_optional(conversation.project_id.as_deref()))
-        });
+        let project_id = resolve_conversation_project_id(
+            conversation.as_ref(),
+            normalized_optional(input.project_id.as_deref()),
+        )?;
         let project = resolve_project(&self.storage, project_id.as_deref())?;
+        let prepared_skills = if input.skills.is_empty() {
+            PreparedSkillActivation::default()
+        } else {
+            let project = project.as_ref().ok_or_else(missing_workspace_failure)?;
+            let workspace_root = project
+                .path
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .ok_or_else(missing_workspace_failure)?;
+            activate_workspace(&self.skills, &project.id, &workspace_root, &input.skills)?
+        };
         let attachment_library = conversation_id
             .as_deref()
             .map(|conversation_id| {
@@ -2757,6 +2882,7 @@ impl AgentService {
             resume_checkpoint: None,
             assistant_message_id: None,
             context_compaction_summary,
+            skill_activation: prepared_skills.runtime,
             messages,
         };
 
@@ -2853,13 +2979,26 @@ impl AgentService {
             if let Some(entry) = states.get_mut(conversation_id) {
                 if entry.configuration_revision == configuration_revision {
                     entry.last_access = access;
-                    return Ok(Some(entry.state.snapshot(phase)));
+                    return entry
+                        .state
+                        .snapshot_with_skill_activation(
+                            phase,
+                            agent_input.skill_activation.as_ref(),
+                        )
+                        .map(Some)
+                        .map_err(|error| error.to_string());
                 }
                 states.remove(conversation_id);
             }
         }
-        self.rebuild_conversation_context_state(agent_input, conversation_id, phase, None)
-            .map(|update| update.snapshot)
+        self.rebuild_conversation_context_state(
+            agent_input,
+            conversation_id,
+            phase,
+            None,
+            agent_input.skill_activation.as_ref(),
+        )
+        .map(|update| update.snapshot)
     }
 
     fn rebuild_conversation_context_state(
@@ -2868,15 +3007,22 @@ impl AgentService {
         conversation_id: &str,
         phase: AgentContextWindowPhase,
         active_run_id: Option<&str>,
+        snapshot_skill_activation: Option<&mycopilot_core::AgentSkillActivation>,
     ) -> Result<ConversationContextStateUpdate, String> {
         let (preview_input, traces) =
             self.persisted_conversation_context_state(agent_input, conversation_id)?;
         let mut state =
             create_conversation_context_state(preview_input).map_err(|error| error.to_string())?;
         let baseline = state.shared_baseline().map_err(|error| error.to_string())?;
-        let snapshot = agent_input
-            .context_window_indicator_enabled
-            .then(|| state.snapshot(phase));
+        let snapshot = if agent_input.context_window_indicator_enabled {
+            Some(
+                state
+                    .snapshot_with_skill_activation(phase, snapshot_skill_activation)
+                    .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
         let latest_trace = traces.last();
         let entry = ConversationContextStateEntry {
             configuration_revision: state.configuration_revision().to_string(),
@@ -2965,6 +3111,7 @@ impl AgentService {
             conversation_id,
             AgentContextWindowPhase::DurableCommit,
             Some(run_id),
+            None,
         )
         .map(|update| update.snapshot)
     }
@@ -3241,8 +3388,6 @@ fn pending_storage_record(
     record: &PendingActionRecord,
     updated_at: i64,
 ) -> AgentPendingActionRecord {
-    let mut persisted_agent_input = record.agent_input.clone();
-    persisted_agent_input.api_token.clear();
     AgentPendingActionRecord {
         action_id: record.snapshot.action_id.clone(),
         run_id: record.snapshot.run_id.clone(),
@@ -3253,9 +3398,56 @@ fn pending_storage_record(
         tool_call_id: record.snapshot.tool_call_id.clone(),
         status: pending_status_label(record.snapshot.status).to_string(),
         action_json: serialize_json(&record.snapshot.action),
-        agent_input_json: serialize_json(&persisted_agent_input),
+        agent_input_json: persisted_pending_agent_input_json(
+            &record.agent_input,
+            record.snapshot.status,
+        ),
         created_at: record.snapshot.created_at,
         updated_at,
+    }
+}
+
+fn persisted_pending_agent_input_json(
+    agent_input: &AgentChatInput,
+    status: PendingActionStatus,
+) -> String {
+    let mut persisted_agent_input = agent_input.clone();
+    persisted_agent_input.api_token.clear();
+    // Pending actions must survive restart, while an approved action may still be executing and
+    // need its continuation input. Once the action is terminal, the live continuation owns any
+    // remaining in-memory copy; the durable row only retains Skill identity and revision metadata.
+    if pending_status_redacts_run_scoped_input(status) {
+        if let Some(activation) = persisted_agent_input.skill_activation.as_mut() {
+            for skill in &mut activation.skills {
+                skill.instructions.clear();
+            }
+        }
+        if let Some(checkpoint) = persisted_agent_input.resume_checkpoint.as_mut() {
+            for item in &mut checkpoint.context_items {
+                let is_skill_instructions = item
+                    .sources
+                    .iter()
+                    .any(|source| source == "skill_instructions")
+                    || item
+                        .origin
+                        .as_ref()
+                        .is_some_and(|origin| origin.kind == "skill");
+                if is_skill_instructions {
+                    item.content.clear();
+                }
+            }
+        }
+    }
+    serialize_json(&persisted_agent_input)
+}
+
+fn pending_status_redacts_run_scoped_input(status: PendingActionStatus) -> bool {
+    match status {
+        PendingActionStatus::Pending | PendingActionStatus::Approved => false,
+        PendingActionStatus::Rejected
+        | PendingActionStatus::Cancelled
+        | PendingActionStatus::Completed
+        | PendingActionStatus::Failed => true,
     }
 }
 
@@ -3386,16 +3578,19 @@ mod tests {
     use super::*;
     use mycopilot_core::storage::models::{
         ChatConversationRecord, ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord,
+        ProjectRecord,
     };
     use mycopilot_core::{
-        AgentCommandRequest, AgentCommandRiskLevel, AgentPermissions, AgentUsageSummaryRange,
-        AgentWorkspaceContext, ContextCompactionGeneration, ContextCompactionPrefix,
-        ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
-        ContextJournalCursor, ConversationTraceToolResultStatus, ConversationTurnTraceItem,
+        AgentActivatedSkill, AgentCommandRequest, AgentCommandRiskLevel, AgentPermissions,
+        AgentSkillActivation, AgentUsageSummaryRange, AgentWorkspaceContext,
+        ContextCompactionGeneration, ContextCompactionPrefix, ContextCompactionSourceItem,
+        ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
+        ConversationTraceToolResultStatus, ConversationTurnTraceItem,
         ConversationTurnTraceTerminalStatus, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
         CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
     use serde_json::json;
+    use std::fs;
     use tempfile::tempdir;
 
     fn completed_output_for_terminal_gate() -> AgentChatOutput {
@@ -3634,6 +3829,310 @@ mod tests {
         }
     }
 
+    fn write_test_skill(workspace: &Path, body: &str) {
+        let skill_directory = workspace.join(".agents").join("skills").join("reviewer");
+        fs::create_dir_all(&skill_directory).unwrap();
+        fs::write(
+            skill_directory.join("SKILL.md"),
+            format!(
+                "---\nname: repository-reviewer\ndescription: DESCRIPTION_DISCOVERY_ONLY\n---\n{body}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn skill_turn_input(
+        project_id: &str,
+        selection: mycopilot_protocol_rs::SkillSelectionDto,
+        conversation_id: &str,
+    ) -> AgentConversationTurnInput {
+        AgentConversationTurnInput {
+            conversation_id: Some(conversation_id.to_string()),
+            project_id: Some(project_id.to_string()),
+            model_id: "model-1".to_string(),
+            context_window_indicator_enabled: true,
+            content: "Review this repository.".to_string(),
+            attachments: Vec::new(),
+            skills: vec![selection],
+            title: None,
+            user_message_id: Some(format!("user-{conversation_id}")),
+            assistant_message_id: Some(format!("assistant-{conversation_id}")),
+            max_tokens: None,
+            temperature: None,
+            prompt_preferences: None,
+            permissions: AgentPermissions::default(),
+        }
+    }
+
+    #[test]
+    fn conversation_turn_resolves_skill_snapshot_before_persisting_the_run() {
+        const INSTRUCTIONS: &str = "SKILL_SERVER_MARKER: inspect evidence before editing.";
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        write_test_skill(&workspace, INSTRUCTIONS);
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(test_model_settings()).unwrap();
+        storage
+            .save_project(ProjectRecord {
+                id: "project-skills".to_string(),
+                name: "Skill workspace".to_string(),
+                path: Some(workspace.to_string_lossy().into_owned()),
+                created_at: 1,
+                pinned_at: None,
+            })
+            .unwrap();
+        let skills = SkillsService::new();
+        let catalog = skills.list_workspace("project-skills", &workspace).unwrap();
+        let descriptor = catalog.skills().first().unwrap();
+        let selection = mycopilot_protocol_rs::SkillSelectionDto {
+            id: descriptor.id().as_str().to_string(),
+            revision: descriptor.revision().as_str().to_string(),
+        };
+
+        let prepared = prepare_conversation_turn(
+            &storage,
+            &skills,
+            skill_turn_input("project-skills", selection, "conversation-skills"),
+            "run-skills",
+        )
+        .unwrap();
+
+        let activation = prepared.agent_input.skill_activation.as_ref().unwrap();
+        assert_eq!(activation.skills.len(), 1);
+        assert_eq!(activation.skills[0].instructions.trim(), INSTRUCTIONS);
+        assert_eq!(prepared.output.activated_skills.len(), 1);
+        assert_eq!(
+            prepared.output.skill_activation_revision.as_deref(),
+            Some(activation.activation_revision.as_str())
+        );
+        let public_output = serde_json::to_string(&prepared.output).unwrap();
+        assert!(!public_output.contains(INSTRUCTIONS));
+        assert!(!public_output.contains("DESCRIPTION_DISCOVERY_ONLY"));
+
+        let mut without_skill = prepared.agent_input.clone();
+        without_skill.skill_activation = None;
+        assert_eq!(
+            conversation_context_configuration_revision(&prepared.agent_input).unwrap(),
+            conversation_context_configuration_revision(&without_skill).unwrap()
+        );
+    }
+
+    #[test]
+    fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction_leakage() {
+        const BUNDLED_INSTRUCTION_MARKER: &str = "Treat Application trust as package provenance";
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(test_model_settings()).unwrap();
+        storage
+            .save_project(ProjectRecord {
+                id: "project-bundled-skill".to_string(),
+                name: "Bundled Skill workspace".to_string(),
+                path: Some(workspace.to_string_lossy().into_owned()),
+                created_at: 1,
+                pinned_at: None,
+            })
+            .unwrap();
+
+        let skills = SkillsService::new().with_bundled_source().unwrap();
+        let catalog = skills
+            .list_with_workspace("project-bundled-skill", &workspace)
+            .unwrap();
+        let descriptor = catalog
+            .skills()
+            .iter()
+            .find(|skill| skill.source_kind() == mycopilot_core::skills::SkillSourceKind::Bundled)
+            .expect("production catalog must expose the bundled auditor");
+        let selection = mycopilot_protocol_rs::SkillSelectionDto {
+            id: descriptor.id().as_str().to_string(),
+            revision: descriptor.revision().as_str().to_string(),
+        };
+
+        let prepared = prepare_conversation_turn(
+            &storage,
+            &skills,
+            skill_turn_input(
+                "project-bundled-skill",
+                selection,
+                "conversation-bundled-skill",
+            ),
+            "run-bundled-skill",
+        )
+        .unwrap();
+
+        let activation = prepared.agent_input.skill_activation.as_ref().unwrap();
+        assert_eq!(activation.skills.len(), 1);
+        assert_eq!(
+            activation.skills[0].id,
+            "bundled:application:repository-evidence-auditor"
+        );
+        assert!(activation.skills[0]
+            .instructions
+            .contains(BUNDLED_INSTRUCTION_MARKER));
+        assert_eq!(prepared.output.activated_skills.len(), 1);
+        assert_eq!(
+            prepared.output.activated_skills[0].source.kind,
+            mycopilot_protocol_rs::SkillSourceKindDto::Bundled
+        );
+
+        let public_output = serde_json::to_string(&prepared.output).unwrap();
+        assert!(!public_output.contains(BUNDLED_INSTRUCTION_MARKER));
+        let persisted = storage
+            .load_conversation("conversation-bundled-skill")
+            .unwrap()
+            .unwrap();
+        assert!(!serde_json::to_string(&persisted)
+            .unwrap()
+            .contains(BUNDLED_INSTRUCTION_MARKER));
+    }
+
+    #[test]
+    fn stale_skill_selection_fails_before_conversation_mutation() {
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        write_test_skill(&workspace, "first revision");
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(test_model_settings()).unwrap();
+        storage
+            .save_project(ProjectRecord {
+                id: "project-stale-skill".to_string(),
+                name: "Skill workspace".to_string(),
+                path: Some(workspace.to_string_lossy().into_owned()),
+                created_at: 1,
+                pinned_at: None,
+            })
+            .unwrap();
+        let skills = SkillsService::new();
+        let catalog = skills
+            .list_workspace("project-stale-skill", &workspace)
+            .unwrap();
+        let descriptor = catalog.skills().first().unwrap();
+        let selection = mycopilot_protocol_rs::SkillSelectionDto {
+            id: descriptor.id().as_str().to_string(),
+            revision: descriptor.revision().as_str().to_string(),
+        };
+        write_test_skill(&workspace, "second revision");
+
+        let error = match prepare_conversation_turn(
+            &storage,
+            &skills,
+            skill_turn_input("project-stale-skill", selection, "conversation-stale-skill"),
+            "run-stale-skill",
+        ) {
+            Ok(_) => panic!("a stale Skill selection must fail before preparing the run"),
+            Err(error) => error,
+        };
+
+        let data = error.skill_activation().unwrap();
+        assert_eq!(data.code, "stale");
+        assert_eq!(data.recovery, "refreshCatalog");
+        assert!(data.expected_revision.is_some());
+        assert!(data.actual_revision.is_some());
+        assert!(storage
+            .load_conversation("conversation-stale-skill")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn existing_conversation_rejects_cross_project_skill_turn_and_preview() {
+        let fixture = tempdir().unwrap();
+        let workspace_a = fixture.path().join("workspace-a");
+        let workspace_b = fixture.path().join("workspace-b");
+        fs::create_dir_all(&workspace_a).unwrap();
+        write_test_skill(&workspace_b, "SKILL_PROJECT_B_MARKER");
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(test_model_settings()).unwrap();
+        for (id, name, path) in [
+            ("project-a", "Project A", &workspace_a),
+            ("project-b", "Project B", &workspace_b),
+        ] {
+            storage
+                .save_project(ProjectRecord {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    path: Some(path.to_string_lossy().into_owned()),
+                    created_at: 1,
+                    pinned_at: None,
+                })
+                .unwrap();
+        }
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-project-boundary".to_string(),
+                project_id: Some("project-a".to_string()),
+                model_id: Some("model-1".to_string()),
+                title: "Project-bound conversation".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "user-existing-project-a".to_string(),
+                    role: "user".to_string(),
+                    content: "History from project A.".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+
+        let skills = Arc::new(SkillsService::new());
+        let descriptor = skills
+            .list_workspace("project-b", &workspace_b)
+            .unwrap()
+            .skills()[0]
+            .clone();
+        let selection = mycopilot_protocol_rs::SkillSelectionDto {
+            id: descriptor.id().as_str().to_string(),
+            revision: descriptor.revision().as_str().to_string(),
+        };
+        let turn_error = match prepare_conversation_turn(
+            &storage,
+            &skills,
+            skill_turn_input(
+                "project-b",
+                selection.clone(),
+                "conversation-project-boundary",
+            ),
+            "run-project-boundary",
+        ) {
+            Ok(_) => panic!("an ordinary turn must not migrate an existing conversation"),
+            Err(error) => error,
+        };
+        assert!(turn_error.message().contains("不能迁移会话项目"));
+        assert!(turn_error.skill_activation().is_none());
+        let unchanged = storage
+            .load_conversation("conversation-project-boundary")
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.project_id.as_deref(), Some("project-a"));
+        assert_eq!(unchanged.messages.len(), 1);
+
+        let service = AgentService::new(Arc::clone(&storage)).with_skills_service(skills);
+        let preview_error = service
+            .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+                conversation_id: Some("conversation-project-boundary".to_string()),
+                project_id: Some("project-b".to_string()),
+                model_id: "model-1".to_string(),
+                max_tokens: Some(30_000),
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+                skills: vec![selection],
+            })
+            .unwrap_err();
+        assert!(preview_error.message().contains("不能迁移会话项目"));
+    }
+
     #[test]
     fn conversation_turn_and_pending_restore_use_the_model_connection_override() {
         let fixture = tempdir().unwrap();
@@ -3648,6 +4147,7 @@ mod tests {
 
         let prepared = prepare_conversation_turn(
             &storage,
+            &SkillsService::new(),
             AgentConversationTurnInput {
                 conversation_id: Some("conversation-model-override".to_string()),
                 project_id: None,
@@ -3655,6 +4155,7 @@ mod tests {
                 context_window_indicator_enabled: true,
                 content: "Hello".to_string(),
                 attachments: Vec::new(),
+                skills: Vec::new(),
                 title: None,
                 user_message_id: Some("user-model-override".to_string()),
                 assistant_message_id: Some("assistant-model-override".to_string()),
@@ -3804,6 +4305,7 @@ mod tests {
 
         let prepared = prepare_conversation_turn(
             &storage,
+            &SkillsService::new(),
             AgentConversationTurnInput {
                 conversation_id: Some("conversation-history".to_string()),
                 project_id: None,
@@ -3811,6 +4313,7 @@ mod tests {
                 context_window_indicator_enabled: true,
                 content: "What changed?".to_string(),
                 attachments: Vec::new(),
+                skills: Vec::new(),
                 title: None,
                 user_message_id: Some("user-next".to_string()),
                 assistant_message_id: Some("assistant-next".to_string()),
@@ -3907,6 +4410,7 @@ mod tests {
 
         let prepared = prepare_conversation_turn(
             &storage,
+            &SkillsService::new(),
             AgentConversationTurnInput {
                 conversation_id: Some("conversation-summary".to_string()),
                 project_id: None,
@@ -3914,6 +4418,7 @@ mod tests {
                 context_window_indicator_enabled: true,
                 content: "Continue".to_string(),
                 attachments: Vec::new(),
+                skills: Vec::new(),
                 title: None,
                 user_message_id: Some("user-next".to_string()),
                 assistant_message_id: Some("assistant-next".to_string()),
@@ -4157,6 +4662,7 @@ mod tests {
                 max_tokens: Some(30_000),
                 prompt_preferences: None,
                 permissions: AgentPermissions::default(),
+                skills: Vec::new(),
             })
             .unwrap()
             .snapshot
@@ -4168,6 +4674,84 @@ mod tests {
             .durable_capacity_tokens
             .is_some_and(|value| value > 0));
         assert_eq!(enabled.durable_input_tokens, 0);
+    }
+
+    #[test]
+    fn cached_context_preview_measures_skill_without_polluting_durable_revision() {
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        write_test_skill(&workspace, "SKILL_PREVIEW_MARKER: verify the repository.");
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(test_model_settings()).unwrap();
+        storage
+            .save_project(ProjectRecord {
+                id: "project-preview-skill".to_string(),
+                name: "Preview workspace".to_string(),
+                path: Some(workspace.to_string_lossy().into_owned()),
+                created_at: 1,
+                pinned_at: None,
+            })
+            .unwrap();
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-preview-skill".to_string(),
+                project_id: Some("project-preview-skill".to_string()),
+                model_id: Some("model-1".to_string()),
+                title: "Preview".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "user-preview-skill".to_string(),
+                    role: "user".to_string(),
+                    content: "Review the repository.".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let skills = Arc::new(SkillsService::new());
+        let catalog = skills
+            .list_workspace("project-preview-skill", &workspace)
+            .unwrap();
+        let descriptor = catalog.skills().first().unwrap();
+        let service =
+            AgentService::new(Arc::clone(&storage)).with_skills_service(Arc::clone(&skills));
+        let base_input = AgentContextWindowSnapshotInput {
+            conversation_id: Some("conversation-preview-skill".to_string()),
+            project_id: Some("project-preview-skill".to_string()),
+            model_id: "model-1".to_string(),
+            max_tokens: Some(30_000),
+            prompt_preferences: None,
+            permissions: AgentPermissions::default(),
+            skills: Vec::new(),
+        };
+        let plain = service
+            .get_context_window_snapshot(base_input.clone())
+            .unwrap()
+            .snapshot
+            .unwrap();
+        let selected = service
+            .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+                skills: vec![mycopilot_protocol_rs::SkillSelectionDto {
+                    id: descriptor.id().as_str().to_string(),
+                    revision: descriptor.revision().as_str().to_string(),
+                }],
+                ..base_input
+            })
+            .unwrap()
+            .snapshot
+            .unwrap();
+
+        assert_eq!(selected.persistent_revision, plain.persistent_revision);
+        assert!(selected.run_transient_input_tokens > 0);
+        assert!(selected.request_input_tokens > plain.request_input_tokens);
     }
 
     #[test]
@@ -4219,6 +4803,7 @@ mod tests {
             max_tokens: Some(30_000),
             prompt_preferences: None,
             permissions: AgentPermissions::default(),
+            skills: Vec::new(),
         };
         let before = service
             .get_context_window_snapshot(snapshot_input.clone())
@@ -4351,6 +4936,16 @@ mod tests {
             "contextWindowIndicatorEnabled": true,
             "maxTokens": 1000,
             "assistantMessageId": "assistant-current",
+            "skillActivation": {
+                "activationRevision": "skill-activation-sha256-v1:compaction",
+                "skills": [{
+                    "id": "workspace:project:compaction-review",
+                    "name": "compaction-review",
+                    "revision": "skill-package-sha256-v1:compaction",
+                    "source": "workspace:project",
+                    "instructions": "SKILL_COMPACTION_OVERLAY_MARKER"
+                }]
+            },
             "context": {
                 "conversationId": "conversation-compaction-host"
             },
@@ -4562,9 +5157,15 @@ mod tests {
         assert_eq!(state.active_run_id.as_deref(), Some("run-compaction-host"));
         assert!(!state.terminal);
         drop(states);
+        let context_event = receiver.try_recv().unwrap();
         assert_eq!(
-            receiver.try_recv().unwrap()["params"]["type"].as_str(),
+            context_event["params"]["type"].as_str(),
             Some("context_window_updated")
+        );
+        assert!(
+            context_event["params"]["snapshot"]["runTransientInputTokens"]
+                .as_u64()
+                .is_some_and(|tokens| tokens > 0)
         );
     }
 
@@ -4617,6 +5218,16 @@ mod tests {
             "contextWindowTokens": 128000,
             "contextWindowIndicatorEnabled": true,
             "maxTokens": 30000,
+            "skillActivation": {
+                "activationRevision": "skill-activation-sha256-v1:live",
+                "skills": [{
+                    "id": "workspace:project:live-review",
+                    "name": "live-review",
+                    "revision": "skill-package-sha256-v1:live",
+                    "source": "workspace:project",
+                    "instructions": "SKILL_LIVE_OVERLAY_MARKER"
+                }]
+            },
             "context": {
                 "conversationId": "conversation-live"
             },
@@ -4638,6 +5249,10 @@ mod tests {
         let initial_tokens = initial["params"]["snapshot"]["durableInputTokens"]
             .as_u64()
             .unwrap();
+        let skill_tokens = initial["params"]["snapshot"]["runTransientInputTokens"]
+            .as_u64()
+            .unwrap();
+        assert!(skill_tokens > 0);
 
         let narration = ConversationTurnTraceItem::AssistantNarration {
             sequence: 0,
@@ -4655,6 +5270,10 @@ mod tests {
             .as_u64()
             .unwrap();
         assert!(narrated_tokens > initial_tokens);
+        assert_eq!(
+            narrated["params"]["snapshot"]["runTransientInputTokens"],
+            skill_tokens
+        );
         {
             let states = service
                 .conversation_context_states
@@ -4713,6 +5332,10 @@ mod tests {
             .as_u64()
             .unwrap();
         assert!(closed_tokens > narrated_tokens);
+        assert_eq!(
+            closed["params"]["snapshot"]["runTransientInputTokens"],
+            skill_tokens
+        );
 
         let trace = storage
             .get_conversation_turn_trace("assistant-live")
@@ -4733,6 +5356,103 @@ mod tests {
                 .committed_trace_items,
             3
         );
+    }
+
+    #[test]
+    fn terminal_cache_rebuild_drops_the_completed_run_skill_overlay() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-terminal-skill".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Terminal Skill".to_string(),
+                messages: vec![
+                    ChatMessageRecord {
+                        id: "user-terminal-skill".to_string(),
+                        role: "user".to_string(),
+                        content: "Review the completed run.".to_string(),
+                        created_at: 1,
+                        status: Some("sent".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                    ChatMessageRecord {
+                        id: "assistant-terminal-skill".to_string(),
+                        role: "assistant".to_string(),
+                        content: THINKING_PLACEHOLDER.to_string(),
+                        created_at: 2,
+                        status: Some("pending".to_string()),
+                        attachments: Vec::new(),
+                        agent_run_json: None,
+                        ui_state_json: None,
+                    },
+                ],
+                created_at: 1,
+                updated_at: 2,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let trace = completed_conversation_trace_without_items(
+            "run-terminal-skill",
+            "conversation-terminal-skill",
+            "assistant-terminal-skill",
+        );
+        storage
+            .finalize_chat_message_with_conversation_trace(
+                "conversation-terminal-skill",
+                "assistant-terminal-skill",
+                "The review is complete.",
+                Some("sent"),
+                "completed",
+                &trace,
+                2,
+                3,
+            )
+            .unwrap();
+
+        let service = AgentService::new(storage);
+        let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "model-1",
+            "contextWindowTokens": 128000,
+            "contextWindowIndicatorEnabled": true,
+            "maxTokens": 30000,
+            "skillActivation": {
+                "activationRevision": "skill-activation-sha256-v1:terminal",
+                "skills": [{
+                    "id": "workspace:project:terminal-review",
+                    "name": "terminal-review",
+                    "revision": "skill-package-sha256-v1:terminal",
+                    "source": "workspace:project",
+                    "instructions": "SKILL_TERMINAL_OVERLAY_MARKER"
+                }]
+            },
+            "context": {
+                "conversationId": "conversation-terminal-skill"
+            },
+            "messages": []
+        }))
+        .unwrap();
+
+        let snapshot = service
+            .finalize_conversation_context_state(
+                &agent_input,
+                "run-terminal-skill",
+                "conversation-terminal-skill",
+                "assistant-terminal-skill",
+                "The review is complete.",
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(snapshot.run_transient_input_tokens, 0);
     }
 
     #[test]
@@ -5089,6 +5809,282 @@ mod tests {
         assert!(record.agent_input.attachments.is_empty());
         assert!(record.agent_input.api_token.is_empty());
         assert_eq!(record.agent_input.context_window_tokens, Some(128_000));
+    }
+
+    #[test]
+    fn terminal_pending_action_persistence_redacts_only_skill_instruction_bodies() {
+        const MARKER: &str = "PENDING_SKILL_INSTRUCTION_BODY_MUST_NOT_SURVIVE";
+        let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        agent_input.skill_activation = Some(AgentSkillActivation {
+            activation_revision: "activation-revision".to_string(),
+            skills: vec![AgentActivatedSkill {
+                id: "bundled:application:repository-evidence-auditor".to_string(),
+                name: "repository-evidence-auditor".to_string(),
+                revision: "package-revision".to_string(),
+                source: "bundled:application".to_string(),
+                instructions: MARKER.to_string(),
+            }],
+        });
+        agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+            version: 2,
+            run_id: "run-skill-redaction".to_string(),
+            context_items: vec![
+                mycopilot_core::AgentContextCheckpointItem {
+                    role: "user".to_string(),
+                    content: format!("<backend_activated_skill>{MARKER}</backend_activated_skill>"),
+                    images: Vec::new(),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    is_error: false,
+                    sources: vec!["skill_instructions".to_string()],
+                    scope: "run".to_string(),
+                    retention: "retained".to_string(),
+                    group: None,
+                    origin: Some(mycopilot_core::AgentContextCheckpointOrigin {
+                        kind: "skill".to_string(),
+                        id: "bundled:application:repository-evidence-auditor".to_string(),
+                    }),
+                },
+                mycopilot_core::AgentContextCheckpointItem {
+                    role: "system".to_string(),
+                    content: "NON_SKILL_CHECKPOINT_CONTENT".to_string(),
+                    images: Vec::new(),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    is_error: false,
+                    sources: vec!["runtime_guard".to_string()],
+                    scope: "run".to_string(),
+                    retention: "retained".to_string(),
+                    group: None,
+                    origin: None,
+                },
+            ],
+            next_model_request_index: 1,
+            queued_tool_calls: Vec::new(),
+            suppressed_narration: false,
+            extension_snapshots: Vec::new(),
+            pending_tool_call_id: "action-skill-redaction".to_string(),
+            conversation_trace_items: Vec::new(),
+            next_conversation_trace_sequence: 0,
+            conversation_trace_truncated: false,
+            model_visible_trace_item_count: 0,
+        });
+        let mut record = PendingActionRecord {
+            snapshot: PendingAgentActionSnapshot {
+                action_id: "action-skill-redaction".to_string(),
+                action_type: "tool_call".to_string(),
+                tool_name: "approval_tool".to_string(),
+                tool_call_id: Some("action-skill-redaction".to_string()),
+                run_id: "run-skill-redaction".to_string(),
+                conversation_id: Some("conversation-skill-redaction".to_string()),
+                assistant_message_id: Some("assistant-skill-redaction".to_string()),
+                action: AgentProposedAction::ToolCall {
+                    call: AgentToolCall {
+                        id: "action-skill-redaction".to_string(),
+                        tool: "approval_tool".to_string(),
+                        args: json!({}),
+                        approval_status: AgentApprovalStatus::Required,
+                        reason: None,
+                    },
+                },
+                created_at: 1,
+                status: PendingActionStatus::Pending,
+            },
+            agent_input,
+        };
+
+        for status in [PendingActionStatus::Pending, PendingActionStatus::Approved] {
+            record.snapshot.status = status;
+            let persisted = pending_storage_record(&record, 2);
+            assert!(persisted.agent_input_json.contains(MARKER));
+        }
+
+        for status in [
+            PendingActionStatus::Completed,
+            PendingActionStatus::Rejected,
+            PendingActionStatus::Cancelled,
+            PendingActionStatus::Failed,
+        ] {
+            record.snapshot.status = status;
+            let persisted = pending_storage_record(&record, 3);
+            assert!(!persisted.agent_input_json.contains(MARKER));
+            assert!(!persisted.agent_input_json.contains("secret"));
+            let restored: AgentChatInput =
+                serde_json::from_str(&persisted.agent_input_json).unwrap();
+            let activation = restored.skill_activation.unwrap();
+            assert_eq!(activation.activation_revision, "activation-revision");
+            assert_eq!(activation.skills.len(), 1);
+            assert_eq!(
+                activation.skills[0].id,
+                "bundled:application:repository-evidence-auditor"
+            );
+            assert_eq!(activation.skills[0].revision, "package-revision");
+            assert_eq!(activation.skills[0].source, "bundled:application");
+            assert!(activation.skills[0].instructions.is_empty());
+            let checkpoint = restored.resume_checkpoint.unwrap();
+            assert!(checkpoint.context_items[0].content.is_empty());
+            assert_eq!(
+                checkpoint.context_items[0].sources,
+                vec!["skill_instructions"]
+            );
+            assert_eq!(
+                checkpoint.context_items[0].origin.as_ref().unwrap().id,
+                "bundled:application:repository-evidence-auditor"
+            );
+            assert_eq!(
+                checkpoint.context_items[1].content,
+                "NON_SKILL_CHECKPOINT_CONTENT"
+            );
+        }
+
+        record.snapshot.status = PendingActionStatus::Pending;
+        assert!(pending_storage_record(&record, 4)
+            .agent_input_json
+            .contains(MARKER));
+    }
+
+    #[test]
+    fn missing_pending_transition_row_fails_closed_without_terminal_success() {
+        const MARKER: &str = "MISSING_TRANSITION_SKILL_BODY";
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let service = AgentService::new(Arc::clone(&storage));
+        let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        agent_input.skill_activation = Some(AgentSkillActivation {
+            activation_revision: "activation-missing-row".to_string(),
+            skills: vec![AgentActivatedSkill {
+                id: "bundled:application/repository-evidence-auditor".to_string(),
+                name: "repository-evidence-auditor".to_string(),
+                revision: "package-missing-row".to_string(),
+                source: "bundled:application".to_string(),
+                instructions: MARKER.to_string(),
+            }],
+        });
+        let call = AgentToolCall {
+            id: "action-missing-transition-row".to_string(),
+            tool: "approval_tool".to_string(),
+            args: json!({}),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        service.store_pending_action(
+            "run-missing-transition-row",
+            "conversation-missing-transition-row",
+            "assistant-missing-transition-row",
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input,
+        );
+        assert!(storage.list_pending_agent_actions().unwrap()[0]
+            .agent_input_json
+            .contains(MARKER));
+
+        // Reproduce a cross-boundary missing-row race: durable conversation deletion has removed
+        // the pending row while this service instance still owns its pre-deletion memory snapshot.
+        storage
+            .delete_conversation("conversation-missing-transition-row")
+            .unwrap();
+        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let error = service.approve_action(&call.id, notifications).unwrap_err();
+        assert!(error.contains("实际更新 0 条"));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            service
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|lock_error| lock_error.into_inner())[&call.id]
+                .snapshot
+                .status,
+            PendingActionStatus::Pending
+        );
+
+        let reloaded = AgentService::new(storage);
+        assert!(reloaded.list_pending_actions().is_empty());
+    }
+
+    #[test]
+    fn cancel_finalize_failure_atomically_restores_pending_payload() {
+        const MARKER: &str = "CANCEL_ROLLBACK_SKILL_BODY";
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let service = AgentService::new(Arc::clone(&storage));
+        let call = AgentToolCall {
+            id: "action-cancel-rollback".to_string(),
+            tool: "approval_tool".to_string(),
+            args: json!({}),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        agent_input.skill_activation = Some(AgentSkillActivation {
+            activation_revision: "activation-cancel-rollback".to_string(),
+            skills: vec![AgentActivatedSkill {
+                id: "bundled:application/repository-evidence-auditor".to_string(),
+                name: "repository-evidence-auditor".to_string(),
+                revision: "package-cancel-rollback".to_string(),
+                source: "bundled:application".to_string(),
+                instructions: MARKER.to_string(),
+            }],
+        });
+        agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+            version: 2,
+            run_id: "run-cancel-rollback".to_string(),
+            context_items: Vec::new(),
+            next_model_request_index: 1,
+            queued_tool_calls: Vec::new(),
+            suppressed_narration: false,
+            extension_snapshots: Vec::new(),
+            pending_tool_call_id: call.id.clone(),
+            conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: call.id.clone(),
+                tool: call.tool.clone(),
+                operation: json!({}),
+                approval_status: AgentApprovalStatus::Required,
+                truncated: false,
+            }],
+            next_conversation_trace_sequence: 1,
+            conversation_trace_truncated: false,
+            model_visible_trace_item_count: 0,
+        });
+        // These durable owner rows intentionally do not exist, forcing final trace persistence to
+        // fail after the action has first transitioned to cancelled.
+        service.store_pending_action(
+            "run-cancel-rollback",
+            "conversation-cancel-rollback-missing",
+            "assistant-cancel-rollback-missing",
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input,
+        );
+
+        assert!(service.cancel_action(&call.id).is_err());
+        assert_eq!(
+            service.list_pending_actions()[0].status,
+            PendingActionStatus::Pending
+        );
+        let persisted = storage.list_pending_agent_actions().unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].status, "pending");
+        assert!(persisted[0].agent_input_json.contains(MARKER));
     }
 
     #[test]

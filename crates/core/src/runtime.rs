@@ -28,8 +28,8 @@ use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
     AgentContextCompactionEventOutcome, AgentContextWindowPhase, AgentContextWindowSnapshot,
     AgentError, AgentEvent, AgentExtensionSnapshot, AgentPatchPermission, AgentPromptPreferences,
-    AgentProposedAction, AgentResult, AgentRunContext, AgentRunStatus, AgentToolCall,
-    AgentToolDefinition, AgentToolResult,
+    AgentProposedAction, AgentResult, AgentRunContext, AgentRunStatus, AgentSkillActivation,
+    AgentToolCall, AgentToolDefinition, AgentToolResult,
 };
 use crate::revision::content_revision;
 use crate::storage::service::StorageService;
@@ -257,10 +257,13 @@ pub fn next_run_id() -> String {
 }
 
 pub fn inspect_context_window(
-    input: AgentChatInput,
+    mut input: AgentChatInput,
 ) -> AgentResult<Option<AgentContextWindowSnapshot>> {
+    let skill_activation = input.skill_activation.take();
     let mut state = create_conversation_context_state(input)?;
-    Ok(Some(state.snapshot(AgentContextWindowPhase::Idle)))
+    state
+        .snapshot_with_skill_activation(AgentContextWindowPhase::Idle, skill_activation.as_ref())
+        .map(Some)
 }
 
 pub fn conversation_context_configuration_revision(input: &AgentChatInput) -> AgentResult<String> {
@@ -274,6 +277,7 @@ pub fn create_conversation_context_state(
     let assembled = assemble_context_preview(
         input.context_compaction_summary.clone(),
         input.messages,
+        None,
         input.context.as_ref(),
         input.prompt_preferences.as_ref(),
         &prepared.tool_definitions,
@@ -1673,6 +1677,7 @@ fn prepare_runtime_capabilities(
 fn assemble_context_preview(
     compaction_summary: Option<crate::ContextCompactionSummary>,
     messages: Vec<AgentChatMessage>,
+    skill_activation: Option<AgentSkillActivation>,
     context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
     tool_definitions: &[AgentToolDefinition],
@@ -1687,6 +1692,7 @@ fn assemble_context_preview(
             system_prompt: build_system_prompt(context, prompt_preferences, tool_definitions),
             compaction_summary,
             messages,
+            skill_activation,
             attachments: ContextAttachments::default(),
         });
     }
@@ -1752,11 +1758,20 @@ fn build_llm_request(
         }
         None => {
             let attachment_context = build_attachment_context(&input.attachments)?;
+            let skill_activation = input.skill_activation;
             let mut context = match shared_context_baseline {
-                Some(baseline) => baseline.into_frame(),
+                Some(baseline) => {
+                    let mut context = baseline.into_frame();
+                    ContextAssembler::append_skill_activation(
+                        &mut context,
+                        skill_activation.as_ref(),
+                    )?;
+                    context
+                }
                 None => assemble_initial_context(
                     input.context_compaction_summary,
                     input.messages,
+                    skill_activation,
                     AttachmentContext {
                         text: String::new(),
                         images: Vec::new(),
@@ -1924,6 +1939,7 @@ fn set_schema_property_description(schema: &mut Value, property: &str, descripti
 fn assemble_initial_context(
     compaction_summary: Option<crate::ContextCompactionSummary>,
     messages: Vec<AgentChatMessage>,
+    skill_activation: Option<AgentSkillActivation>,
     attachment_context: AttachmentContext,
     context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
@@ -1933,6 +1949,7 @@ fn assemble_initial_context(
         system_prompt: build_system_prompt(context, prompt_preferences, tool_definitions),
         compaction_summary,
         messages,
+        skill_activation,
         attachments: ContextAttachments {
             text: attachment_context.text,
             images: attachment_context.images,

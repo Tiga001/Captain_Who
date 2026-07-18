@@ -26,6 +26,7 @@ import type {
   ChatMessageAttachment,
   ChatMessageUiState
 } from '../chat/chatTypes'
+import { normalizeSkillSelections, parseStoredSkillSelections } from '../skills/skillSelection'
 import { hostClient } from '../../host/hostClient'
 
 export interface ModelSettingsSnapshot {
@@ -432,6 +433,7 @@ function mapDraftFromStorage(draft: StorageComposerDraftRecord): ChatComposerDra
     modelId: draft.modelId ?? '',
     projectId: draft.projectId ?? null,
     attachments: parseDraftAttachments(draft.attachmentsJson),
+    skills: parseStoredSkillSelections(draft.skillsJson),
     updatedAt: draft.updatedAt
   }
 }
@@ -444,6 +446,7 @@ function mapDraftToStorage(scopeId: string, draft: ChatComposerDraft): StorageCo
     modelId: draft.modelId || null,
     projectId: draft.projectId,
     attachmentsJson: JSON.stringify(draft.attachments),
+    skillsJson: JSON.stringify(normalizeSkillSelections(draft.skills)),
     updatedAt: draft.updatedAt
   }
 }

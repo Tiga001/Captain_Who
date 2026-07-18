@@ -5,13 +5,14 @@
 //! baseline.
 
 use super::{
-    ContextCapacityDetector, ContextFrame, ContextItem, ContextMetadata, ContextOrigin,
-    ContextRetention, ContextScope, ContextSource, ConversationTimingTracker,
+    ContextAssembler, ContextCapacityDetector, ContextFrame, ContextItem, ContextMetadata,
+    ContextOrigin, ContextRetention, ContextScope, ContextSource, ConversationTimingTracker,
     ConversationTraceRenderer, MeasuredContextBaseline,
 };
 use crate::llm::LlmMessageRole;
 use crate::protocol::{
     AgentContextWindowPhase, AgentContextWindowSnapshot, AgentError, AgentResult,
+    AgentSkillActivation,
 };
 use crate::{ConversationTurnTrace, ConversationTurnTraceTerminalStatus};
 
@@ -199,5 +200,27 @@ impl AgentConversationContextState {
                 self.reserved_output_tokens,
             )
             .persistent_snapshot(&self.model, phase)
+    }
+
+    /// Measures a current-run Skill selection on top of the immutable durable cache without
+    /// admitting that selection into conversation state. This is the preview counterpart of the
+    /// runtime's shared-baseline path and keeps `configuration_revision`/`persistent_revision`
+    /// stable while accounting for the run-transient token cost.
+    pub fn snapshot_with_skill_activation(
+        &mut self,
+        phase: AgentContextWindowPhase,
+        activation: Option<&AgentSkillActivation>,
+    ) -> AgentResult<AgentContextWindowSnapshot> {
+        let baseline = self.shared_baseline()?;
+        let mut preview = baseline.into_frame();
+        ContextAssembler::append_skill_activation(&mut preview, activation)?;
+        Ok(self
+            .detector
+            .inspect(
+                &mut preview,
+                self.context_window_tokens,
+                self.reserved_output_tokens,
+            )
+            .persistent_snapshot(&self.model, phase))
     }
 }

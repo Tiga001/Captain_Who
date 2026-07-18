@@ -152,6 +152,97 @@ pub struct SkillsListRequest {
     pub project_id: String,
 }
 
+pub const SKILL_CATALOG_SCHEMA_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillSelectionDto {
+    pub id: String,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillSourceDto {
+    pub kind: SkillSourceKindDto,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillSourceKindDto {
+    Workspace,
+    Bundled,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillTrustDto {
+    Untrusted,
+    Application,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDescriptorDto {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub source: SkillSourceDto,
+    pub trust: SkillTrustDto,
+    pub activation_scope: String,
+    pub revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDiagnosticDto {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsListResponse {
+    pub schema_version: u32,
+    pub catalog_revision: String,
+    pub skills: Vec<SkillDescriptorDto>,
+    pub diagnostics: Vec<SkillDiagnosticDto>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivatedSkillSummaryDto {
+    pub id: String,
+    pub name: String,
+    pub revision: String,
+    pub source: SkillSourceDto,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillActivationErrorData {
+    #[serde(rename = "type")]
+    pub error_type: &'static str,
+    pub code: String,
+    pub recovery: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_revision: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitReviewSummaryRequest {
@@ -201,5 +292,62 @@ pub fn error(id: Option<JsonRpcId>, code: i64, message: impl Into<String>) -> Js
             message: message.into(),
             data: None,
         },
+    }
+}
+
+pub fn error_with_data(
+    id: Option<JsonRpcId>,
+    code: i64,
+    message: impl Into<String>,
+    data: Value,
+) -> JsonRpcErrorResponse {
+    JsonRpcErrorResponse {
+        jsonrpc: "2.0",
+        id,
+        error: JsonRpcErrorObject {
+            code,
+            message: message.into(),
+            data: Some(data),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_catalog_v3_serializes_explicit_source_and_trust_unions() {
+        let response = SkillsListResponse {
+            schema_version: SKILL_CATALOG_SCHEMA_VERSION,
+            catalog_revision: "catalog-revision".to_string(),
+            skills: vec![SkillDescriptorDto {
+                id: "bundled:application:repository-evidence-auditor".to_string(),
+                name: "repository-evidence-auditor".to_string(),
+                description: "Audit repository claims using evidence.".to_string(),
+                source: SkillSourceDto {
+                    kind: SkillSourceKindDto::Bundled,
+                    id: "bundled:application".to_string(),
+                },
+                trust: SkillTrustDto::Application,
+                activation_scope: "run".to_string(),
+                revision: "skill-sha256-v1:revision".to_string(),
+                location: Some("skills/repository-evidence-auditor/SKILL.md".to_string()),
+            }],
+            diagnostics: Vec::new(),
+            truncated: false,
+        };
+
+        let value = serde_json::to_value(response).unwrap();
+
+        assert_eq!(value["schemaVersion"], 3);
+        assert_eq!(value["skills"][0]["source"]["kind"], "bundled");
+        assert_eq!(value["skills"][0]["trust"], "application");
+    }
+
+    #[test]
+    fn skill_catalog_v3_source_and_trust_enums_reject_unknown_values() {
+        assert!(serde_json::from_str::<SkillSourceKindDto>("\"remote\"").is_err());
+        assert!(serde_json::from_str::<SkillTrustDto>("\"userApproved\"").is_err());
     }
 }

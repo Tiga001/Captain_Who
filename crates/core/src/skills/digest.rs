@@ -1,0 +1,177 @@
+use super::model::{
+    SkillActivationRevision, SkillDescriptor, SkillDiagnostic, SkillProvenance, SkillRevision,
+    SKILL_PACKAGE_FORMAT_VERSION,
+};
+use sha2::{Digest, Sha256};
+use std::fmt::Write;
+
+const PACKAGE_DOMAIN: &[u8] = b"mycopilot.skill.package\0";
+const ACTIVATION_DOMAIN: &[u8] = b"mycopilot.skill.activation\0";
+const CATALOG_DOMAIN: &[u8] = b"mycopilot.skill.catalog\0";
+
+pub(super) fn package_revision(source_bytes: &[u8]) -> SkillRevision {
+    // This collision-resistant content token detects changes; it is not an
+    // authenticity signature and does not elevate the package's trust.
+    let mut digest = Sha256::new();
+    digest.update(PACKAGE_DOMAIN);
+    digest.update(SKILL_PACKAGE_FORMAT_VERSION.to_be_bytes());
+    update_bytes(&mut digest, source_bytes);
+    // Package format v1 reserves an explicit resource index but intentionally
+    // loads no sibling resources.
+    digest.update(0_u64.to_be_bytes());
+    SkillRevision::trusted(format_digest("skill-package-sha256-v1:", digest.finalize()))
+}
+
+pub(super) fn activation_revision<'a>(
+    descriptors: impl IntoIterator<Item = &'a SkillDescriptor>,
+) -> SkillActivationRevision {
+    let descriptors = descriptors.into_iter().collect::<Vec<_>>();
+    let mut digest = Sha256::new();
+    digest.update(ACTIVATION_DOMAIN);
+    digest.update(1_u32.to_be_bytes());
+    digest.update((descriptors.len() as u64).to_be_bytes());
+    for descriptor in descriptors {
+        update_bytes(&mut digest, descriptor.id().as_str().as_bytes());
+        update_bytes(&mut digest, descriptor.revision().as_str().as_bytes());
+    }
+    SkillActivationRevision::trusted(format_digest(
+        "skill-activation-sha256-v1:",
+        digest.finalize(),
+    ))
+}
+
+pub(super) fn catalog_revision(
+    skills: &[SkillDescriptor],
+    diagnostics: &[SkillDiagnostic],
+    truncated: bool,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(CATALOG_DOMAIN);
+    digest.update(1_u32.to_be_bytes());
+    digest.update([u8::from(truncated)]);
+    digest.update((skills.len() as u64).to_be_bytes());
+    for skill in skills {
+        update_bytes(&mut digest, skill.id().as_str().as_bytes());
+        update_bytes(&mut digest, skill.name().as_bytes());
+        update_bytes(&mut digest, skill.description().as_bytes());
+        update_bytes(&mut digest, skill.revision().as_str().as_bytes());
+        update_bytes(&mut digest, skill.source_kind().stable_name().as_bytes());
+        update_bytes(&mut digest, skill.trust().stable_name().as_bytes());
+        update_bytes(
+            &mut digest,
+            skill.activation_scope().stable_name().as_bytes(),
+        );
+        update_provenance(&mut digest, skill.provenance());
+    }
+    digest.update((diagnostics.len() as u64).to_be_bytes());
+    for diagnostic in diagnostics {
+        update_bytes(&mut digest, diagnostic.code().stable_name().as_bytes());
+        update_bytes(&mut digest, diagnostic.severity().stable_name().as_bytes());
+        update_bytes(&mut digest, diagnostic.path().as_bytes());
+        update_bytes(&mut digest, diagnostic.message().as_bytes());
+    }
+    format_digest("skill-catalog-sha256-v1:", digest.finalize())
+}
+
+fn update_provenance(digest: &mut Sha256, provenance: &SkillProvenance) {
+    match provenance {
+        SkillProvenance::Workspace {
+            workspace_id,
+            relative_path,
+        } => {
+            update_bytes(digest, b"workspace");
+            update_bytes(digest, workspace_id.as_bytes());
+            update_bytes(digest, relative_path.as_bytes());
+        }
+        SkillProvenance::Bundled {
+            source_id,
+            relative_path,
+        } => {
+            update_bytes(digest, b"bundled");
+            update_bytes(digest, source_id.as_str().as_bytes());
+            update_bytes(digest, relative_path.as_bytes());
+        }
+        SkillProvenance::Other {
+            source_id,
+            display_location,
+        } => {
+            update_bytes(digest, b"other");
+            update_bytes(digest, source_id.as_str().as_bytes());
+            match display_location {
+                Some(location) => {
+                    digest.update([1]);
+                    update_bytes(digest, location.as_bytes());
+                }
+                None => digest.update([0]),
+            }
+        }
+    }
+}
+
+fn update_bytes(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+}
+
+fn format_digest(prefix: &str, digest: impl AsRef<[u8]>) -> String {
+    let digest = digest.as_ref();
+    let mut revision = String::with_capacity(prefix.len() + digest.len() * 2);
+    revision.push_str(prefix);
+    for byte in digest {
+        write!(&mut revision, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    revision
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::model::{
+        SkillActivationScope, SkillDescriptorParts, SkillId, SkillSourceId, SkillSourceKind,
+        SkillTrust,
+    };
+
+    #[test]
+    fn package_revision_is_versioned_deterministic_and_byte_exact() {
+        let revision = package_revision(b"skill\n");
+        assert!(revision.as_str().starts_with("skill-package-sha256-v1:"));
+        assert_eq!(
+            revision.as_str().len(),
+            "skill-package-sha256-v1:".len() + 64
+        );
+        assert_eq!(revision, package_revision(b"skill\n"));
+        assert_ne!(revision, package_revision(b"skill\r\n"));
+    }
+
+    #[test]
+    fn catalog_revision_domain_separates_bundled_and_other_provenance() {
+        let source_id = SkillSourceId::parse("bundled:application").unwrap();
+        let skill_id = SkillId::from_parts(source_id.clone(), "auditor").unwrap();
+        let revision = package_revision(b"skill\n");
+        let descriptor = |provenance| {
+            SkillDescriptor::new(SkillDescriptorParts {
+                id: skill_id.clone(),
+                name: "auditor".to_string(),
+                description: "Audit a repository.".to_string(),
+                source_kind: SkillSourceKind::Bundled,
+                trust: SkillTrust::Application,
+                activation_scope: SkillActivationScope::Run,
+                revision: revision.clone(),
+                provenance,
+            })
+        };
+        let bundled = descriptor(SkillProvenance::Bundled {
+            source_id: source_id.clone(),
+            relative_path: "auditor/SKILL.md".to_string(),
+        });
+        let other = descriptor(SkillProvenance::Other {
+            source_id,
+            display_location: Some("auditor/SKILL.md".to_string()),
+        });
+
+        assert_ne!(
+            catalog_revision(&[bundled], &[], false),
+            catalog_revision(&[other], &[], false)
+        );
+    }
+}

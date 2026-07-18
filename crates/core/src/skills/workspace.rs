@@ -5,7 +5,6 @@
 //! no-follow/identity checks so the two phases cannot drift apart.
 
 use super::model::{SkillDiagnosticCode, SkillDiagnosticSeverity, SkillDiscoveryError};
-use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
@@ -766,14 +765,6 @@ pub(super) fn metadata_if_present(path: &Path) -> io::Result<Option<fs::Metadata
     }
 }
 
-pub(super) fn workspace_skill_id(workspace_id: &str, directory_name: &str) -> String {
-    format!(
-        "workspace:{}:{}",
-        percent_encode(workspace_id.as_bytes()),
-        percent_encode(directory_name.as_bytes())
-    )
-}
-
 pub(super) fn validate_skill_directory_name(directory_name: &str) -> Result<(), &'static str> {
     if directory_name.is_empty() {
         return Err("Skill directory names must not be empty.");
@@ -787,20 +778,6 @@ pub(super) fn validate_skill_directory_name(directory_name: &str) -> Result<(), 
         );
     }
     Ok(())
-}
-
-/// Skill revisions bind a selection to exact bytes. SHA-256 provides collision
-/// resistance, but this unkeyed digest does not establish that a Skill is trusted.
-pub(super) fn skill_revision(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-
-    let digest = Sha256::digest(bytes);
-    let mut revision = String::with_capacity("skill-sha256-v1:".len() + digest.len() * 2);
-    revision.push_str("skill-sha256-v1:");
-    for byte in digest {
-        write!(&mut revision, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    revision
 }
 
 pub(super) fn relative_display(root: &Path, path: &Path) -> String {
@@ -832,16 +809,6 @@ pub(super) fn percent_encode(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    #[test]
-    fn skill_revision_is_versioned_deterministic_and_byte_exact() {
-        let revision = skill_revision(b"skill\n");
-
-        assert!(revision.starts_with("skill-sha256-v1:"));
-        assert_eq!(revision.len(), "skill-sha256-v1:".len() + 64);
-        assert_eq!(revision, skill_revision(b"skill\n"));
-        assert_ne!(revision, skill_revision(b"skill\r\n"));
-    }
 
     #[cfg(unix)]
     #[test]

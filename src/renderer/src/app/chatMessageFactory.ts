@@ -1,6 +1,7 @@
 import type { AgentConversationMessage, AgentInputAttachment } from '@mycopilot/protocol'
 import { modelConfig } from '../config/modelConfig'
 import type { ChatComposerDraft, ChatMessage } from '../features/chat/chatTypes'
+import { normalizeSkillSelections } from '../features/skills/skillSelection'
 
 export function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -59,6 +60,7 @@ export function createComposerDraft(overrides: Partial<ChatComposerDraft> = {}):
     modelId: modelConfig.defaults.selectedModelId,
     projectId: null,
     attachments: [],
+    skills: [],
     updatedAt: Date.now(),
     ...overrides
   }
@@ -70,7 +72,8 @@ export function createComposerDraft(overrides: Partial<ChatComposerDraft> = {}):
       draft.permissionMode === 'default' || draft.permissionMode === 'custom'
         ? draft.permissionMode
         : 'full',
-    attachments: draft.attachments ?? []
+    attachments: draft.attachments ?? [],
+    skills: normalizeSkillSelections(draft.skills)
   }
 }
 

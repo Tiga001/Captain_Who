@@ -60,6 +60,7 @@ pub(crate) enum ContextCompactionProtectionReason {
     FixedRequest,
     RequestOnly,
     CurrentUser,
+    SkillInstructions,
     UserAttachment,
     RuntimeGuard,
     VisualInput,
@@ -475,6 +476,11 @@ fn absolute_protection_reason(
     if unit.mixed_usage_classes {
         return Some(ContextCompactionProtectionReason::MixedAtomicGroup);
     }
+    // Activated Skill instructions are an immutable run snapshot. They must survive every
+    // compaction attempt exactly as selected, even if run-transient policy is refined later.
+    if unit.sources.contains(&ContextSource::SkillInstructions) {
+        return Some(ContextCompactionProtectionReason::SkillInstructions);
+    }
     match unit.usage_class {
         ContextUsageClass::Fixed => return Some(ContextCompactionProtectionReason::FixedRequest),
         ContextUsageClass::RequestOnly => {
@@ -630,6 +636,7 @@ fn durable_prefix_for_units<'a>(
             ContextOriginKind::ConversationMessage | ContextOriginKind::ConversationTraceItem => {
                 covered_through = origin.journal_cursor();
             }
+            ContextOriginKind::Skill => return None,
         }
     }
     Some(ContextCompactionDurablePrefix {
@@ -673,6 +680,7 @@ fn protection_reason_name(reason: ContextCompactionProtectionReason) -> String {
         ContextCompactionProtectionReason::FixedRequest => "fixed_request",
         ContextCompactionProtectionReason::RequestOnly => "request_only",
         ContextCompactionProtectionReason::CurrentUser => "current_user",
+        ContextCompactionProtectionReason::SkillInstructions => "skill_instructions",
         ContextCompactionProtectionReason::UserAttachment => "user_attachment",
         ContextCompactionProtectionReason::RuntimeGuard => "runtime_guard",
         ContextCompactionProtectionReason::VisualInput => "visual_input",
@@ -1158,6 +1166,34 @@ mod tests {
         );
         assert_eq!(plan.compactable_input_tokens, 0);
         assert_eq!(plan.protected.reasons.get("uncommitted_run"), Some(&9_000));
+    }
+
+    #[test]
+    fn activated_skill_snapshot_has_explicit_compaction_protection() {
+        let items = vec![item(
+            0,
+            ContextUsageClass::RunTransient,
+            2_000,
+            LlmMessageRole::User,
+            ContextSource::SkillInstructions,
+            Some(ContextOrigin::skill("workspace:w:review")),
+        )];
+
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(ContextBudgetStatus::OverBudget, Some(1_000), 0, 0, 2_000, 0),
+            &items,
+            false,
+        );
+
+        assert_eq!(
+            plan.status,
+            ContextCompactionPlanStatus::InsufficientCompactableContext
+        );
+        assert_eq!(plan.compactable_input_tokens, 0);
+        assert_eq!(
+            plan.protected.reasons.get("skill_instructions"),
+            Some(&2_000)
+        );
     }
 
     #[test]

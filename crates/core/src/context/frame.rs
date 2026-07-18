@@ -88,6 +88,7 @@ pub(crate) enum ContextSource {
     ConversationHistory,
     ConversationTrace,
     CurrentTurn,
+    SkillInstructions,
     InputAttachment,
     ToolContinuation,
     ModelResponse,
@@ -106,6 +107,7 @@ impl ContextSource {
             Self::ConversationHistory => "conversation_history",
             Self::ConversationTrace => "conversation_trace",
             Self::CurrentTurn => "current_turn",
+            Self::SkillInstructions => "skill_instructions",
             Self::InputAttachment => "input_attachment",
             Self::ToolContinuation => "tool_continuation",
             Self::ModelResponse => "model_response",
@@ -124,6 +126,7 @@ impl ContextSource {
             "conversation_history" => Some(Self::ConversationHistory),
             "conversation_trace" => Some(Self::ConversationTrace),
             "current_turn" => Some(Self::CurrentTurn),
+            "skill_instructions" => Some(Self::SkillInstructions),
             "input_attachment" => Some(Self::InputAttachment),
             "tool_continuation" => Some(Self::ToolContinuation),
             "model_response" => Some(Self::ModelResponse),
@@ -168,6 +171,7 @@ pub(crate) enum ContextOriginKind {
     ConversationMessage,
     ConversationTraceItem,
     CompactionSummary,
+    Skill,
 }
 
 impl ContextOriginKind {
@@ -176,6 +180,7 @@ impl ContextOriginKind {
             Self::ConversationMessage => "conversation_message",
             Self::ConversationTraceItem => "conversation_trace_item",
             Self::CompactionSummary => "compaction_summary",
+            Self::Skill => "skill",
         }
     }
 
@@ -184,6 +189,7 @@ impl ContextOriginKind {
             "conversation_message" => Some(Self::ConversationMessage),
             "conversation_trace_item" => Some(Self::ConversationTraceItem),
             "compaction_summary" => Some(Self::CompactionSummary),
+            "skill" => Some(Self::Skill),
             _ => None,
         }
     }
@@ -206,6 +212,13 @@ impl ContextOrigin {
     pub(crate) fn compaction_summary(id: impl Into<String>) -> Self {
         Self {
             kind: ContextOriginKind::CompactionSummary,
+            id: id.into(),
+        }
+    }
+
+    pub(crate) fn skill(id: impl Into<String>) -> Self {
+        Self {
+            kind: ContextOriginKind::Skill,
             id: id.into(),
         }
     }
@@ -236,7 +249,7 @@ impl ContextOrigin {
                 Some(ContextJournalCursor::message(self.id.clone()))
             }
             ContextOriginKind::ConversationTraceItem => serde_json::from_str(&self.id).ok(),
-            ContextOriginKind::CompactionSummary => None,
+            ContextOriginKind::CompactionSummary | ContextOriginKind::Skill => None,
         }
     }
 }
@@ -910,6 +923,8 @@ impl ContextFrame {
                     retention: item.metadata.retention().as_str(),
                     group_id: item.metadata.group().map(ContextGroup::id),
                     group_kind: item.metadata.group().map(|group| group.kind().as_str()),
+                    origin_kind: item.metadata.origin().map(|origin| origin.kind().as_str()),
+                    origin_id: item.metadata.origin().map(ContextOrigin::id),
                     text_character_count: item.message.content.chars().count(),
                     image_count: item.message.images.len(),
                     image_base64_bytes: item
@@ -1302,6 +1317,8 @@ pub(crate) struct ContextManifestEntry<'a> {
     pub(crate) retention: &'static str,
     pub(crate) group_id: Option<&'a str>,
     pub(crate) group_kind: Option<&'static str>,
+    pub(crate) origin_kind: Option<&'static str>,
+    pub(crate) origin_id: Option<&'a str>,
     pub(crate) text_character_count: usize,
     pub(crate) image_count: usize,
     pub(crate) image_base64_bytes: usize,
@@ -1381,6 +1398,32 @@ mod tests {
         assert_eq!(
             serde_json::to_value(frame.manifest()).unwrap(),
             serde_json::to_value(restored.manifest()).unwrap()
+        );
+    }
+
+    #[test]
+    fn checkpoint_round_trip_preserves_skill_snapshot_source_and_origin() {
+        let frame = ContextFrame::new(vec![ContextItem::new(
+            LlmMessage::text(
+                LlmMessageRole::User,
+                "<backend_activated_skill>\nSKILL_CHECKPOINT_MARKER\n</backend_activated_skill>",
+            ),
+            ContextMetadata::new(
+                ContextSource::SkillInstructions,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_origin(ContextOrigin::skill("workspace:w:review")),
+        )]);
+
+        let checkpoint = frame.checkpoint_items().unwrap();
+        assert_eq!(checkpoint[0].sources, vec!["skill_instructions"]);
+        assert_eq!(checkpoint[0].origin.as_ref().unwrap().kind, "skill");
+        let restored = ContextFrame::from_checkpoint_items(checkpoint).unwrap();
+        assert_eq!(restored.to_messages(), frame.to_messages());
+        assert_eq!(
+            serde_json::to_value(restored.manifest()).unwrap(),
+            serde_json::to_value(frame.manifest()).unwrap()
         );
     }
 

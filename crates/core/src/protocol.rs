@@ -34,7 +34,53 @@ pub struct AgentChatInput {
     pub assistant_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compaction_summary: Option<ContextCompactionSummary>,
+    /// Immutable Skill snapshots selected for this logical agent run. The runtime treats this as
+    /// dynamic run context; it is deliberately excluded from the stable system prompt and the
+    /// conversation context configuration fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_activation: Option<AgentSkillActivation>,
     pub messages: Vec<AgentChatMessage>,
+}
+
+#[derive(Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillActivation {
+    pub activation_revision: String,
+    #[serde(default)]
+    pub skills: Vec<AgentActivatedSkill>,
+}
+
+impl std::fmt::Debug for AgentSkillActivation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentSkillActivation")
+            .field("activation_revision", &self.activation_revision)
+            .field("skills", &self.skills)
+            .finish()
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivatedSkill {
+    pub id: String,
+    pub name: String,
+    pub revision: String,
+    pub source: String,
+    pub instructions: String,
+}
+
+impl std::fmt::Debug for AgentActivatedSkill {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentActivatedSkill")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("revision", &self.revision)
+            .field("source", &self.source)
+            .field("instructions_bytes", &self.instructions.len())
+            .finish()
+    }
 }
 
 fn default_true() -> bool {
@@ -70,7 +116,7 @@ pub struct AgentRunCheckpoint {
     pub model_visible_trace_item_count: usize,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentContextCheckpointItem {
     pub role: String,
@@ -87,6 +133,25 @@ pub struct AgentContextCheckpointItem {
     pub group: Option<AgentContextCheckpointGroup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<AgentContextCheckpointOrigin>,
+}
+
+impl std::fmt::Debug for AgentContextCheckpointItem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentContextCheckpointItem")
+            .field("role", &self.role)
+            .field("content_bytes", &self.content.len())
+            .field("image_count", &self.images.len())
+            .field("tool_call_id", &self.tool_call_id)
+            .field("tool_call_count", &self.tool_calls.len())
+            .field("is_error", &self.is_error)
+            .field("sources", &self.sources)
+            .field("scope", &self.scope)
+            .field("retention", &self.retention)
+            .field("group", &self.group)
+            .field("origin", &self.origin)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -429,6 +494,11 @@ pub struct AgentContextWindowSnapshot {
     pub durable_capacity_tokens: Option<u64>,
     /// Conversation history and trace content that survives into later turns.
     pub durable_input_tokens: u64,
+    /// Run-scoped context such as activated Skill instructions. This is measured for the current
+    /// preview/request but never contributes to the durable cache revision.
+    pub run_transient_input_tokens: u64,
+    /// Fully assembled input estimate, including fixed, durable and run-scoped context.
+    pub request_input_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_durable_tokens: Option<i64>,
     /// Opaque fingerprint that changes when the fixed or durable assembled context changes.
@@ -1156,6 +1226,32 @@ mod tests {
         assert!(serialized.contains("\"conversationTurnTrace\""));
         assert!(serialized.contains("\"createdAt\":0"));
         assert!(!serialized.contains("conversation_turn_trace"));
+    }
+
+    #[test]
+    fn skill_activation_uses_camel_case_and_redacts_instructions_from_debug() {
+        let activation = AgentSkillActivation {
+            activation_revision: "activation-sha256-v1:test".to_string(),
+            skills: vec![AgentActivatedSkill {
+                id: "workspace:w:review".to_string(),
+                name: "review".to_string(),
+                revision: "skill-sha256-v1:test".to_string(),
+                source: "workspace".to_string(),
+                instructions: "PRIVATE_SKILL_INSTRUCTIONS".to_string(),
+            }],
+        };
+
+        let serialized = serde_json::to_value(&activation).unwrap();
+        assert_eq!(
+            serialized["activationRevision"],
+            "activation-sha256-v1:test"
+        );
+        assert_eq!(
+            serialized["skills"][0]["instructions"],
+            "PRIVATE_SKILL_INSTRUCTIONS"
+        );
+        assert!(serialized.get("activation_revision").is_none());
+        assert!(!format!("{activation:?}").contains("PRIVATE_SKILL_INSTRUCTIONS"));
     }
 
     #[test]

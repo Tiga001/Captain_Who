@@ -1,8 +1,8 @@
 // Tests for runtime message construction and tool-flow helpers.
 use super::*;
 use crate::protocol::{
-    AgentInputAttachment, AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentRunContext,
-    AgentWorkspaceContext,
+    AgentActivatedSkill, AgentInputAttachment, AgentInputAttachmentEncoding,
+    AgentInputAttachmentKind, AgentRunContext, AgentSkillActivation, AgentWorkspaceContext,
 };
 use crate::runtime::tool_flow::parse_tool_call_request;
 use crate::{
@@ -27,6 +27,19 @@ fn empty_attachment_context() -> AttachmentContext {
     }
 }
 
+fn activated_skill(instructions: &str) -> AgentSkillActivation {
+    AgentSkillActivation {
+        activation_revision: "activation-sha256-v1:test".to_string(),
+        skills: vec![AgentActivatedSkill {
+            id: "workspace:workspace-1:review".to_string(),
+            name: "repository-review".to_string(),
+            revision: "skill-sha256-v1:test".to_string(),
+            source: "workspace".to_string(),
+            instructions: instructions.to_string(),
+        }],
+    }
+}
+
 #[test]
 fn runtime_messages_add_backend_system_prompt() {
     let context = AgentRunContext {
@@ -43,6 +56,7 @@ fn runtime_messages_add_backend_system_prompt() {
     let context = assemble_initial_context(
         None,
         vec![message("user", "Read src/main.rs")],
+        None,
         empty_attachment_context(),
         Some(&context),
         None,
@@ -62,6 +76,7 @@ fn runtime_messages_include_text_attachment_content() {
     let context = assemble_initial_context(
         None,
         vec![message("user", "Summarize this attachment")],
+        None,
         AttachmentContext {
             text: "用户输入框附件内容如下。\n\n### notes.txt\nhello from attachment".to_string(),
             images: Vec::new(),
@@ -231,6 +246,7 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         resume_checkpoint: None,
         assistant_message_id: None,
         context_compaction_summary: None,
+        skill_activation: None,
         messages,
     }
 }
@@ -377,6 +393,225 @@ fn runtime_shared_baseline_matches_full_context_assembly() {
         build_llm_request(input, &capabilities.tool_definitions, None, Some(baseline)).unwrap();
 
     assert_eq!(shared.context.to_messages(), full.context.to_messages());
+}
+
+#[test]
+fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
+    const INSTRUCTIONS: &str = "SKILL_DYNAMIC_MARKER: inspect evidence before editing.";
+    let mut input = conversation_context_input(vec![
+        message("user", "First question"),
+        message("assistant", "First answer"),
+        message("user", "Current question"),
+    ]);
+    input.skill_activation = Some(activated_skill(INSTRUCTIONS));
+
+    let mut changed_selection = input.clone();
+    changed_selection.skill_activation = Some(activated_skill(
+        "SKILL_CHANGED_MARKER: use a different workflow.",
+    ));
+    assert_eq!(
+        conversation_context_configuration_revision(&input).unwrap(),
+        conversation_context_configuration_revision(&changed_selection).unwrap()
+    );
+
+    let capabilities = prepare_runtime_capabilities(&input, "skill-overlay", &[], true).unwrap();
+    let mut full =
+        build_llm_request(input.clone(), &capabilities.tool_definitions, None, None).unwrap();
+    let manifest = full.context.manifest();
+    let skill_entry = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.sources == vec!["skill_instructions"])
+        .unwrap();
+    assert_eq!(skill_entry.role, "user");
+    assert_eq!(skill_entry.scope, "run");
+    assert_eq!(skill_entry.retention, "retained");
+    assert_eq!(skill_entry.origin_kind, Some("skill"));
+    assert_eq!(skill_entry.origin_id, Some("workspace:workspace-1:review"));
+    let messages = full.context.to_messages();
+    let skill_index = messages
+        .iter()
+        .position(|message| message.content.contains(INSTRUCTIONS))
+        .unwrap();
+    let current_user_index = messages
+        .iter()
+        .position(|message| message.content == "Current question")
+        .unwrap();
+    assert!(skill_index > current_user_index);
+    assert!(!messages[0].content.contains(INSTRUCTIONS));
+
+    let detector = ContextCapacityDetector::for_model(
+        &input.model,
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &capabilities.tool_definitions,
+    );
+    let skill_report = detector.inspect(
+        &mut full.context,
+        input.context_window_tokens,
+        sanitize_max_tokens(input.max_tokens),
+    );
+    assert_eq!(
+        skill_report
+            .usage
+            .breakdown
+            .run_transient
+            .context_item_count,
+        1
+    );
+    assert!(skill_report.usage.breakdown.run_transient.input_tokens > 0);
+
+    let mut without_skill = input.clone();
+    without_skill.skill_activation = None;
+    let mut plain = build_llm_request(
+        without_skill.clone(),
+        &capabilities.tool_definitions,
+        None,
+        None,
+    )
+    .unwrap();
+    let plain_report = detector.inspect(
+        &mut plain.context,
+        without_skill.context_window_tokens,
+        sanitize_max_tokens(without_skill.max_tokens),
+    );
+    assert_eq!(
+        skill_report.usage.persistent_revision,
+        plain_report.usage.persistent_revision
+    );
+    assert!(skill_report.usage.request_input_tokens() > plain_report.usage.request_input_tokens());
+
+    let plain_preview = inspect_context_window(without_skill).unwrap().unwrap();
+    let skill_preview = inspect_context_window(input.clone()).unwrap().unwrap();
+    assert_eq!(
+        skill_preview.persistent_revision,
+        plain_preview.persistent_revision
+    );
+    assert!(skill_preview.run_transient_input_tokens > 0);
+    assert!(skill_preview.request_input_tokens > plain_preview.request_input_tokens);
+
+    let mut durable_state = create_conversation_context_state(input.clone()).unwrap();
+    let cached_plain = durable_state.snapshot(AgentContextWindowPhase::Idle);
+    let cached_skill = durable_state
+        .snapshot_with_skill_activation(
+            AgentContextWindowPhase::Idle,
+            input.skill_activation.as_ref(),
+        )
+        .unwrap();
+    let cached_plain_after = durable_state.snapshot(AgentContextWindowPhase::Idle);
+    assert_eq!(cached_plain, cached_plain_after);
+    assert_eq!(
+        cached_skill.persistent_revision,
+        cached_plain.persistent_revision
+    );
+    assert!(cached_skill.run_transient_input_tokens > cached_plain.run_transient_input_tokens);
+    let baseline = durable_state.shared_baseline().unwrap();
+    let shared = build_llm_request(
+        input.clone(),
+        &capabilities.tool_definitions,
+        None,
+        Some(baseline),
+    )
+    .unwrap();
+    assert_eq!(shared.context.to_messages(), full.context.to_messages());
+
+    let debug = format!("{:?}", input.skill_activation);
+    assert!(!debug.contains(INSTRUCTIONS));
+}
+
+#[tokio::test]
+async fn anthropic_payload_keeps_current_user_skill_and_attachment_compatible() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_json_request(stream: &mut TcpStream) -> Value {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+        let mut body_start = None;
+        let mut expected_len = None;
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request completed");
+            request.extend_from_slice(&buffer[..read]);
+            if body_start.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    let start = header_end + 4;
+                    body_start = Some(start);
+                    expected_len = Some(start + content_length);
+                }
+            }
+            if expected_len.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        serde_json::from_slice(&request[body_start.unwrap()..expected_len.unwrap()]).unwrap()
+    }
+
+    async fn write_response(stream: &mut TcpStream, body: Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let captured = Arc::new(std::sync::Mutex::new(None));
+    let captured_for_server = captured.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        *captured_for_server.lock().unwrap() = Some(read_json_request(&mut stream).await);
+        write_response(
+            &mut stream,
+            json!({
+                "content": [{ "type": "text", "text": "done" }],
+                "stop_reason": "end_turn"
+            }),
+        )
+        .await;
+    });
+
+    let mut input = conversation_context_input(vec![message("user", "CURRENT_USER_MARKER")]);
+    input.api_url = format!("http://{address}/v1/messages");
+    input.api_token = "test-token".to_string();
+    input.api_style = Some(crate::protocol::AgentApiStyle::AnthropicCompatible);
+    input.stream = Some(false);
+    input.skill_activation = Some(activated_skill("ANTHROPIC_SKILL_MARKER"));
+    input.attachments = vec![AgentInputAttachment {
+        id: "attachment-anthropic".to_string(),
+        kind: AgentInputAttachmentKind::File,
+        name: "notes.txt".to_string(),
+        mime_type: Some("text/plain".to_string()),
+        size_bytes: 19,
+        encoding: AgentInputAttachmentEncoding::Utf8,
+        data: "ATTACHMENT_MARKER".to_string(),
+        truncated: None,
+    }];
+
+    let output = AgentRuntime::default().send_chat(input).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(output.content, "done");
+    let payload = captured.lock().unwrap().take().unwrap();
+    let messages = payload["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    let serialized = serde_json::to_string(&messages[0]["content"]).unwrap();
+    let current = serialized.find("CURRENT_USER_MARKER").unwrap();
+    let skill = serialized.find("ANTHROPIC_SKILL_MARKER").unwrap();
+    let attachment = serialized.find("ATTACHMENT_MARKER").unwrap();
+    assert!(current < skill && skill < attachment);
 }
 
 #[test]
@@ -551,6 +786,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         resume_checkpoint: None,
         assistant_message_id: Some("assistant-current".to_string()),
         context_compaction_summary: None,
+        skill_activation: None,
         messages: vec![old_user, old_assistant, current_user.clone()],
     };
     let durable_prefix = Arc::new(ContextCompactionPrefix {
@@ -823,6 +1059,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
         resume_checkpoint: None,
         assistant_message_id: None,
         context_compaction_summary: None,
+        skill_activation: None,
         messages: vec![AgentChatMessage {
             message_id: None,
             role: "user".to_string(),
@@ -994,6 +1231,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
         resume_checkpoint: None,
         assistant_message_id: None,
         context_compaction_summary: None,
+        skill_activation: None,
         messages: vec![message("user", "Read large.txt and summarize it")],
     };
 
@@ -1247,6 +1485,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         resume_checkpoint: None,
         assistant_message_id: None,
         context_compaction_summary: None,
+        skill_activation: None,
         messages: vec![message("user", "create a preview")],
     };
     let output = AgentRuntime::default()
@@ -1485,6 +1724,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         resume_checkpoint: None,
         assistant_message_id: Some("assistant-checkpoint".to_string()),
         context_compaction_summary: None,
+        skill_activation: Some(activated_skill("SKILL_SNAPSHOT_BEFORE_APPROVAL")),
         messages: vec![message("user", "collect evidence and write report.txt")],
     };
     let waiting = AgentRuntime::default()
@@ -1510,6 +1750,15 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     assert_eq!(checkpoint.pending_tool_call_id, "patch-approval");
     assert_eq!(checkpoint.queued_tool_calls.len(), 1);
     assert_eq!(checkpoint.extension_snapshots[0].extension_id, "todo");
+    assert!(checkpoint.context_items.iter().any(|item| {
+        item.sources == vec!["skill_instructions"]
+            && item.content.contains("SKILL_SNAPSHOT_BEFORE_APPROVAL")
+            && item.origin.as_ref().is_some_and(|origin| {
+                origin.kind == "skill" && origin.id == "workspace:workspace-1:review"
+            })
+    }));
+    assert!(!format!("{checkpoint:?}").contains("SKILL_SNAPSHOT_BEFORE_APPROVAL"));
+    assert!(!format!("{:?}", waiting.events).contains("SKILL_SNAPSHOT_BEFORE_APPROVAL"));
     assert!(checkpoint
         .conversation_trace_items
         .iter()
@@ -1521,6 +1770,9 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
 
     let mut resume_input = base_input;
     resume_input.messages.clear();
+    // The checkpoint is authoritative for the logical run; a changed resume payload must not
+    // replace the frozen Skill snapshot selected before approval.
+    resume_input.skill_activation = Some(activated_skill("SKILL_CHANGED_DURING_RESUME"));
     resume_input.resume_checkpoint = Some(checkpoint);
     resume_input.approval_decision = Some(AgentApprovalDecision {
         action_id: "patch-approval".to_string(),
@@ -1569,6 +1821,8 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     assert!(messages.contains("read-before"));
     assert!(messages.contains("patch-approval"));
     assert!(messages.contains("read-queued"));
+    assert!(messages.contains("SKILL_SNAPSHOT_BEFORE_APPROVAL"));
+    assert!(!messages.contains("SKILL_CHANGED_DURING_RESUME"));
     let trace = completed.conversation_turn_trace.as_ref().unwrap();
     trace.validate().unwrap();
     for call_id in [

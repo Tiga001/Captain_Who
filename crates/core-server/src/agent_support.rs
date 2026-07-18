@@ -1,5 +1,8 @@
 // Support types and helper functions for core-server agent orchestration.
 use crate::agent::{AGENT_EVENT_NAME, ID_COUNTER, THINKING_PLACEHOLDER};
+use crate::skills_adapter::{
+    activate_workspace, missing_workspace_failure, PreparedSkillActivation, SkillActivationFailure,
+};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use mycopilot_core::command::AgentCommandExecutionResult;
 use mycopilot_core::file_write::{apply_file_write, failed_file_write_result};
 use mycopilot_core::patch::apply_unified_diff_in_workspace;
+use mycopilot_core::skills::SkillsService;
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationRecord, ChatMessageAttachmentRecord,
     ChatMessageRecord, ModelConfigRecord, ProjectRecord,
@@ -24,7 +28,10 @@ use mycopilot_core::{
     ContextCompactionAuditBundle, ContextJournalCursor, ConversationTurnTrace,
     ConversationTurnTraceTerminalStatus,
 };
-use mycopilot_protocol_rs::AGENT_EVENT_NOTIFICATION_METHOD;
+use mycopilot_protocol_rs::{
+    ActivatedSkillSummaryDto, SkillActivationErrorData, SkillSelectionDto,
+    AGENT_EVENT_NOTIFICATION_METHOD,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -163,6 +170,8 @@ pub struct AgentConversationTurnInput {
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<AgentInputAttachment>,
+    #[serde(default)]
+    pub skills: Vec<SkillSelectionDto>,
     pub title: Option<String>,
     pub user_message_id: Option<String>,
     pub assistant_message_id: Option<String>,
@@ -187,6 +196,8 @@ pub struct AgentContextWindowSnapshotInput {
     pub prompt_preferences: Option<AgentPromptPreferences>,
     #[serde(default)]
     pub permissions: AgentPermissions,
+    #[serde(default)]
+    pub skills: Vec<SkillSelectionDto>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -220,7 +231,53 @@ pub struct AgentConversationTurnOutput {
     pub assistant_message_id: String,
     pub user_message: ChatMessageRecord,
     pub assistant_message: ChatMessageRecord,
+    pub activated_skills: Vec<ActivatedSkillSummaryDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_activation_revision: Option<String>,
 }
+
+#[derive(Debug)]
+pub struct AgentServiceError {
+    message: String,
+    skill_activation: Option<Box<SkillActivationErrorData>>,
+}
+
+impl AgentServiceError {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn skill_activation(&self) -> Option<&SkillActivationErrorData> {
+        self.skill_activation.as_deref()
+    }
+}
+
+impl From<String> for AgentServiceError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            skill_activation: None,
+        }
+    }
+}
+
+impl From<SkillActivationFailure> for AgentServiceError {
+    fn from(failure: SkillActivationFailure) -> Self {
+        let message = failure.to_string();
+        Self {
+            message,
+            skill_activation: Some(failure.into_data()),
+        }
+    }
+}
+
+impl std::fmt::Display for AgentServiceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AgentServiceError {}
 
 pub(super) struct PreparedConversationTurn {
     pub(super) output: AgentConversationTurnOutput,
@@ -230,17 +287,18 @@ pub(super) struct PreparedConversationTurn {
 
 pub(super) fn prepare_conversation_turn(
     storage: &StorageService,
+    skills_service: &SkillsService,
     input: AgentConversationTurnInput,
     run_id: &str,
-) -> Result<PreparedConversationTurn, String> {
+) -> Result<PreparedConversationTurn, AgentServiceError> {
     let content = input.content.trim().to_string();
     if content.is_empty() {
-        return Err("消息内容不能为空。".to_string());
+        return Err("消息内容不能为空。".to_string().into());
     }
 
     let model_id = input.model_id.trim().to_string();
     if model_id.is_empty() {
-        return Err("modelId 不能为空。".to_string());
+        return Err("modelId 不能为空。".to_string().into());
     }
 
     let settings = storage
@@ -254,7 +312,7 @@ pub(super) fn prepare_conversation_turn(
         .cloned()
         .ok_or_else(|| format!("未找到模型配置：{model_id}"))?;
     if !model.enabled {
-        return Err(format!("模型未启用：{model_id}"));
+        return Err(format!("模型未启用：{model_id}").into());
     }
     // Resolve the complete pair once and carry it through the run. Model-level credentials
     // take priority; otherwise both values come from global settings. This prevents a URL
@@ -269,7 +327,8 @@ pub(super) fn prepare_conversation_turn(
         return Err(format!(
             "当前模型「{}」不支持图片输入，请切换支持图片的模型后再发送。",
             model.display_name
-        ));
+        )
+        .into());
     }
 
     let prompt_preferences = match input.prompt_preferences.clone() {
@@ -286,13 +345,22 @@ pub(super) fn prepare_conversation_turn(
         .unwrap_or_else(|| create_id("message"));
 
     let existing = storage.load_conversation(&conversation_id)?;
-    let input_project_id = normalized_optional(input.project_id.as_deref());
-    let resolved_project_id = input_project_id.or_else(|| {
-        existing
-            .as_ref()
-            .and_then(|conversation| normalized_optional(conversation.project_id.as_deref()))
-    });
+    let resolved_project_id = resolve_conversation_project_id(
+        existing.as_ref(),
+        normalized_optional(input.project_id.as_deref()),
+    )?;
     let project = resolve_project(storage, resolved_project_id.as_deref())?;
+    let prepared_skills = if input.skills.is_empty() {
+        PreparedSkillActivation::default()
+    } else {
+        let project = project.as_ref().ok_or_else(missing_workspace_failure)?;
+        let workspace_root = project
+            .path
+            .as_deref()
+            .map(PathBuf::from)
+            .ok_or_else(missing_workspace_failure)?;
+        activate_workspace(skills_service, &project.id, &workspace_root, &input.skills)?
+    };
 
     let mut conversation = existing.unwrap_or_else(|| ChatConversationRecord {
         id: conversation_id.clone(),
@@ -402,6 +470,7 @@ pub(super) fn prepare_conversation_turn(
         resume_checkpoint: None,
         assistant_message_id: Some(assistant_message_id.clone()),
         context_compaction_summary,
+        skill_activation: prepared_skills.runtime,
         messages: agent_messages,
     };
 
@@ -426,6 +495,8 @@ pub(super) fn prepare_conversation_turn(
             assistant_message_id,
             user_message,
             assistant_message,
+            activated_skills: prepared_skills.summaries,
+            skill_activation_revision: prepared_skills.revision,
         },
         agent_input,
     })
@@ -559,6 +630,27 @@ pub(super) fn resolve_project(
         ));
     }
     Ok(Some(project))
+}
+
+/// Existing conversation history is bound to the workspace that produced it. A normal turn may
+/// omit that project id, but it may not migrate the conversation to another project implicitly.
+/// Project migration needs a dedicated operation that can validate and update every dependent
+/// artifact atomically.
+pub(super) fn resolve_conversation_project_id(
+    existing: Option<&ChatConversationRecord>,
+    requested_project_id: Option<String>,
+) -> Result<Option<String>, String> {
+    let Some(existing) = existing else {
+        return Ok(requested_project_id);
+    };
+    let stored_project_id = normalized_optional(existing.project_id.as_deref());
+    if requested_project_id.is_some() && requested_project_id != stored_project_id {
+        return Err(format!(
+            "会话 `{}` 已绑定到另一个项目；普通消息不能迁移会话项目。",
+            existing.id
+        ));
+    }
+    Ok(stored_project_id)
 }
 
 pub(super) fn message_attachments_from_input(

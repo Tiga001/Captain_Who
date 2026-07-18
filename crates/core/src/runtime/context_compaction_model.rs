@@ -470,6 +470,7 @@ mod tests {
             resume_checkpoint: None,
             assistant_message_id: None,
             context_compaction_summary: None,
+            skill_activation: None,
             messages: Vec::new(),
         }
     }

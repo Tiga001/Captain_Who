@@ -313,6 +313,7 @@ pub struct ComposerDraftRecord {
     pub model_id: Option<String>,
     pub project_id: Option<String>,
     pub attachments_json: String,
+    pub skills_json: String,
     pub updated_at: i64,
 }
 

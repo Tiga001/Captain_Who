@@ -1,3 +1,5 @@
+import type { ActivatedSkillSummary, SkillSelection } from './skills'
+
 export type AgentMessageRole = 'system' | 'user' | 'assistant'
 
 export type AgentRunStatus =
@@ -265,6 +267,10 @@ export interface AgentContextWindowSnapshot {
   durableCapacityTokens?: number
   /** Conversation history and trace content retained for later turns. */
   durableInputTokens: number
+  /** Current-run overlays, including activated Skill instructions. */
+  runTransientInputTokens: number
+  /** Total estimated input for the current preview request. */
+  requestInputTokens: number
   remainingDurableTokens?: number
   /** Opaque fingerprint that changes with fixed or durable context. */
   persistentRevision: string
@@ -388,6 +394,8 @@ export interface AgentConversationTurnInput {
   temperature?: number
   promptPreferences?: AgentPromptPreferences
   permissions?: AgentPermissions
+  /** Ordered, revision-bound Skills selected for this agent run. */
+  skills?: SkillSelection[]
 }
 
 export interface AgentContextWindowSnapshotInput {
@@ -397,6 +405,7 @@ export interface AgentContextWindowSnapshotInput {
   maxTokens?: number
   promptPreferences?: AgentPromptPreferences
   permissions?: AgentPermissions
+  skills?: SkillSelection[]
 }
 
 export interface AgentContextWindowSnapshotOutput {
@@ -617,6 +626,8 @@ export interface AgentConversationTurnOutput {
   assistantMessageId: string
   userMessage: AgentConversationMessage
   assistantMessage: AgentConversationMessage
+  activatedSkills: ActivatedSkillSummary[]
+  skillActivationRevision?: string
 }
 
 export interface AgentCancelRunRequest {

@@ -1,14 +1,18 @@
+use super::digest::package_revision;
+use super::model::SkillId;
 use super::model::{
-    SkillCatalog, SkillDescriptor, SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity,
-    SkillDiscoveryError, SkillScope,
+    SkillActivationScope, SkillCatalog, SkillDescriptor, SkillDescriptorParts, SkillDiagnostic,
+    SkillDiagnosticCode, SkillDiagnosticSeverity, SkillDiscoveryError, SkillProvenance,
+    SkillSourceKind, SkillTrust,
 };
 use super::parser::parse_skill_document;
+use super::service::finalize_catalog;
+use super::source::WorkspaceSkillSource;
 use super::workspace::{
-    load_workspace_skill, percent_encode, resolve_workspace_skills_root, skill_revision,
-    workspace_skill_id, ByteBudget, ScanBudget, WorkspaceRootError, WorkspaceSkillsRoot,
-    MAX_SKILL_CATALOG_BYTES, MAX_SKILL_ROOT_ENTRIES, MAX_SKILL_SCAN_ENTRIES,
+    load_workspace_skill, percent_encode, resolve_workspace_skills_root, ByteBudget, ScanBudget,
+    WorkspaceRootError, WorkspaceSkillsRoot, MAX_SKILL_CATALOG_BYTES, MAX_SKILL_ROOT_ENTRIES,
+    MAX_SKILL_SCAN_ENTRIES,
 };
-use crate::content_revision;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,146 +26,141 @@ use super::workspace::{
 #[cfg(test)]
 use std::fs::File;
 
-#[derive(Debug, Default)]
-pub struct SkillsService;
+pub(super) fn list_workspace_source(
+    source: &WorkspaceSkillSource,
+) -> Result<SkillCatalog, SkillDiscoveryError> {
+    let roots = match resolve_workspace_skills_root(source.workspace_root()) {
+        Ok(WorkspaceSkillsRoot::Missing) => {
+            return Ok(finalize_catalog(Vec::new(), Vec::new(), false));
+        }
+        Ok(WorkspaceSkillsRoot::Ready(roots)) => roots,
+        Err(WorkspaceRootError::Discovery(error)) => return Err(error),
+        Err(WorkspaceRootError::Invalid(issue)) => {
+            return Ok(catalog_with_root_diagnostic(
+                &issue.path,
+                issue.code,
+                issue.message,
+            ));
+        }
+    };
+    let canonical_skills_root = &roots.skills_root;
 
-impl SkillsService {
-    pub fn new() -> Self {
-        Self
+    let mut scan_budget = ScanBudget::new(MAX_SKILL_SCAN_ENTRIES);
+    let (candidates, mut diagnostics, root_truncated) =
+        collect_skill_directories(canonical_skills_root, &mut scan_budget);
+    if root_truncated {
+        return Ok(finalize_catalog(Vec::new(), diagnostics, true));
     }
 
-    pub fn list_workspace(
-        &self,
-        workspace_id: &str,
-        workspace_root: &Path,
-    ) -> Result<SkillCatalog, SkillDiscoveryError> {
-        let roots = match resolve_workspace_skills_root(workspace_root) {
-            Ok(WorkspaceSkillsRoot::Missing) => {
-                return Ok(finalize_catalog(Vec::new(), Vec::new(), false));
-            }
-            Ok(WorkspaceSkillsRoot::Ready(roots)) => roots,
-            Err(WorkspaceRootError::Discovery(error)) => return Err(error),
-            Err(WorkspaceRootError::Invalid(issue)) => {
-                return Ok(catalog_with_root_diagnostic(
+    let mut skills = Vec::new();
+    let mut byte_budget = ByteBudget::new(MAX_SKILL_CATALOG_BYTES);
+    let mut catalog_truncated = false;
+    for skill_directory in candidates {
+        let loaded = match load_workspace_skill(
+            &roots,
+            &skill_directory,
+            &mut scan_budget,
+            &mut byte_budget,
+        ) {
+            Ok(loaded) => loaded,
+            Err(issue) => {
+                let truncates_catalog = issue.truncates_catalog();
+                diagnostics.push(diagnostic(
                     &issue.path,
                     issue.code,
+                    issue.severity,
                     issue.message,
                 ));
+                if truncates_catalog {
+                    catalog_truncated = true;
+                    break;
+                }
+                continue;
             }
         };
-        let canonical_skills_root = &roots.skills_root;
+        let directory_name = loaded.directory_name.as_str();
+        let canonical_skill_file = &loaded.canonical_path;
+        let bytes = &loaded.bytes;
 
-        let mut scan_budget = ScanBudget::new(MAX_SKILL_SCAN_ENTRIES);
-        let (candidates, mut diagnostics, root_truncated) =
-            collect_skill_directories(canonical_skills_root, &mut scan_budget);
-        if root_truncated {
-            return Ok(finalize_catalog(Vec::new(), diagnostics, true));
+        if bytes.contains(&0) {
+            diagnostics.push(diagnostic(
+                canonical_skill_file,
+                SkillDiagnosticCode::NulByte,
+                SkillDiagnosticSeverity::Error,
+                "SKILL.md contains a NUL byte.",
+            ));
+            continue;
+        }
+        let contents = match std::str::from_utf8(bytes) {
+            Ok(contents) => contents,
+            Err(_) => {
+                diagnostics.push(diagnostic(
+                    canonical_skill_file,
+                    SkillDiagnosticCode::InvalidUtf8,
+                    SkillDiagnosticSeverity::Error,
+                    "SKILL.md must be valid UTF-8.",
+                ));
+                continue;
+            }
+        };
+        let document = match parse_skill_document(contents, directory_name) {
+            Ok(document) => document,
+            Err(error) => {
+                diagnostics.push(diagnostic(
+                    canonical_skill_file,
+                    error.diagnostic_code(),
+                    SkillDiagnosticSeverity::Error,
+                    error.to_string(),
+                ));
+                continue;
+            }
+        };
+        let metadata = document.metadata;
+        if metadata.name_was_defaulted {
+            diagnostics.push(diagnostic(
+                canonical_skill_file,
+                SkillDiagnosticCode::DefaultedName,
+                SkillDiagnosticSeverity::Warning,
+                format!("Skill frontmatter has no name; using directory name `{directory_name}`."),
+            ));
         }
 
-        let mut skills = Vec::new();
-        let mut byte_budget = ByteBudget::new(MAX_SKILL_CATALOG_BYTES);
-        let mut catalog_truncated = false;
-        for skill_directory in candidates {
-            let loaded = match load_workspace_skill(
-                &roots,
-                &skill_directory,
-                &mut scan_budget,
-                &mut byte_budget,
-            ) {
-                Ok(loaded) => loaded,
-                Err(issue) => {
-                    let truncates_catalog = issue.truncates_catalog();
-                    diagnostics.push(diagnostic(
-                        &issue.path,
-                        issue.code,
-                        issue.severity,
-                        issue.message,
-                    ));
-                    if truncates_catalog {
-                        catalog_truncated = true;
-                        break;
-                    }
-                    continue;
-                }
-            };
-            let directory_name = loaded.directory_name.as_str();
-            let canonical_skill_file = &loaded.canonical_path;
-            let bytes = &loaded.bytes;
-
-            if bytes.contains(&0) {
+        let local_id = percent_encode(directory_name.as_bytes());
+        let id = match SkillId::from_parts(source.source_id().clone(), &local_id) {
+            Ok(id) => id,
+            Err(error) => {
                 diagnostics.push(diagnostic(
                     canonical_skill_file,
-                    SkillDiagnosticCode::NulByte,
+                    SkillDiagnosticCode::InvalidDirectoryName,
                     SkillDiagnosticSeverity::Error,
-                    "SKILL.md contains a NUL byte.",
+                    format!("Skill directory cannot form a bounded Skill id: {error}"),
                 ));
                 continue;
             }
-            let contents = match std::str::from_utf8(bytes) {
-                Ok(contents) => contents,
-                Err(_) => {
-                    diagnostics.push(diagnostic(
-                        canonical_skill_file,
-                        SkillDiagnosticCode::InvalidUtf8,
-                        SkillDiagnosticSeverity::Error,
-                        "SKILL.md must be valid UTF-8.",
-                    ));
-                    continue;
-                }
-            };
-            let document = match parse_skill_document(contents, directory_name) {
-                Ok(document) => document,
-                Err(error) => {
-                    diagnostics.push(diagnostic(
-                        canonical_skill_file,
-                        error.diagnostic_code(),
-                        SkillDiagnosticSeverity::Error,
-                        error.to_string(),
-                    ));
-                    continue;
-                }
-            };
-            let metadata = document.metadata;
-            if metadata.name_was_defaulted {
-                diagnostics.push(diagnostic(
-                    canonical_skill_file,
-                    SkillDiagnosticCode::DefaultedName,
-                    SkillDiagnosticSeverity::Warning,
-                    format!(
-                        "Skill frontmatter has no name; using directory name `{directory_name}`."
-                    ),
-                ));
-            }
-
-            let Some(path) = canonical_skill_file.to_str() else {
-                diagnostics.push(diagnostic(
-                    canonical_skill_file,
-                    SkillDiagnosticCode::UnsupportedPathEncoding,
-                    SkillDiagnosticSeverity::Error,
-                    "The canonical SKILL.md path cannot be represented as UTF-8.",
-                ));
-                continue;
-            };
-            skills.push(SkillDescriptor {
-                id: workspace_skill_id(workspace_id, directory_name),
-                name: metadata.name,
-                description: metadata.description,
-                scope: SkillScope::Workspace,
-                path: path.to_owned(),
+        };
+        skills.push(SkillDescriptor::new(SkillDescriptorParts {
+            id,
+            name: metadata.name,
+            description: metadata.description,
+            source_kind: SkillSourceKind::Workspace,
+            trust: SkillTrust::Untrusted,
+            activation_scope: SkillActivationScope::Run,
+            revision: package_revision(bytes),
+            provenance: SkillProvenance::Workspace {
+                workspace_id: source.workspace_id().to_owned(),
                 relative_path: loaded.relative_path,
-                revision: skill_revision(bytes),
-            });
-        }
-
-        skills.sort_by(|left, right| {
-            left.name
-                .cmp(&right.name)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        append_duplicate_name_diagnostics(&skills, canonical_skills_root, &mut diagnostics);
-
-        Ok(finalize_catalog(skills, diagnostics, catalog_truncated))
+            },
+        }));
     }
+
+    skills.sort_by(|left, right| {
+        left.name()
+            .cmp(right.name())
+            .then_with(|| left.id().cmp(right.id()))
+    });
+    append_duplicate_name_diagnostics(&skills, canonical_skills_root, &mut diagnostics);
+
+    Ok(finalize_catalog(skills, diagnostics, catalog_truncated))
 }
 
 fn collect_skill_directories(
@@ -267,10 +266,14 @@ fn append_duplicate_name_diagnostics(
 ) {
     let mut paths_by_name = BTreeMap::<&str, Vec<&str>>::new();
     for skill in skills {
+        let relative_path = match skill.provenance() {
+            SkillProvenance::Workspace { relative_path, .. } => relative_path.as_str(),
+            _ => skill.id().as_str(),
+        };
         paths_by_name
-            .entry(&skill.name)
+            .entry(skill.name())
             .or_default()
-            .push(&skill.relative_path);
+            .push(relative_path);
     }
     for (name, paths) in paths_by_name {
         if paths.len() < 2 {
@@ -311,12 +314,7 @@ fn diagnostic(
     severity: SkillDiagnosticSeverity,
     message: impl Into<String>,
 ) -> SkillDiagnostic {
-    SkillDiagnostic {
-        code,
-        severity,
-        message: message.into(),
-        path: diagnostic_path(path),
-    }
+    SkillDiagnostic::new(code, severity, message.into(), diagnostic_path(path))
 }
 
 fn diagnostic_path(path: &Path) -> String {
@@ -352,30 +350,10 @@ fn diagnostic_path_encoded(path: &Path) -> String {
     format!("platform-path:{:?}", path.as_os_str())
 }
 
-fn finalize_catalog(
-    skills: Vec<SkillDescriptor>,
-    mut diagnostics: Vec<SkillDiagnostic>,
-    truncated: bool,
-) -> SkillCatalog {
-    diagnostics.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
-            .then_with(|| left.code.stable_name().cmp(right.code.stable_name()))
-            .then_with(|| left.message.cmp(&right.message))
-    });
-    let revision_material = serde_json::to_vec(&(&skills, &diagnostics, truncated))
-        .expect("Skill catalog revision material must serialize");
-    SkillCatalog {
-        catalog_revision: content_revision(&revision_material),
-        skills,
-        diagnostics,
-        truncated,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills::SkillsService;
     use std::fs;
     use tempfile::tempdir;
 
@@ -402,21 +380,23 @@ mod tests {
             .list_workspace("fixture-workspace", &fixture)
             .unwrap();
 
-        assert!(!catalog.truncated);
-        assert!(catalog.diagnostics.is_empty());
-        assert_eq!(catalog.skills.len(), 1);
-        let skill = &catalog.skills[0];
+        assert!(!catalog.truncated());
+        assert!(catalog.diagnostics().is_empty());
+        assert_eq!(catalog.skills().len(), 1);
+        let skill = &catalog.skills()[0];
         assert_eq!(
-            skill.id,
+            skill.id(),
             "workspace:fixture-workspace:repository-evidence-auditor"
         );
-        assert_eq!(skill.name, "repository-evidence-auditor");
-        assert_eq!(skill.scope, SkillScope::Workspace);
-        assert_eq!(
-            skill.relative_path,
-            ".agents/skills/repository-evidence-auditor/SKILL.md"
-        );
-        assert!(!skill.revision.is_empty());
+        assert_eq!(skill.name(), "repository-evidence-auditor");
+        assert_eq!(skill.source_kind(), SkillSourceKind::Workspace);
+        assert_eq!(skill.activation_scope(), SkillActivationScope::Run);
+        assert!(matches!(
+            skill.provenance(),
+            SkillProvenance::Workspace { relative_path, .. }
+                if relative_path == ".agents/skills/repository-evidence-auditor/SKILL.md"
+        ));
+        assert!(!skill.revision().as_str().is_empty());
     }
 
     #[test]
@@ -431,9 +411,9 @@ mod tests {
             .list_workspace("workspace", workspace.path())
             .unwrap();
 
-        assert!(first.skills.is_empty());
-        assert!(first.diagnostics.is_empty());
-        assert_eq!(first.catalog_revision, second.catalog_revision);
+        assert!(first.skills().is_empty());
+        assert!(first.diagnostics().is_empty());
+        assert_eq!(first.catalog_revision(), second.catalog_revision());
     }
 
     #[test]
@@ -457,15 +437,15 @@ mod tests {
 
         assert_eq!(
             catalog
-                .skills
+                .skills()
                 .iter()
-                .map(|skill| skill.name.as_str())
+                .map(SkillDescriptor::name)
                 .collect::<Vec<_>>(),
             vec!["alpha", "zeta"]
         );
-        assert_eq!(catalog.diagnostics.len(), 1);
+        assert_eq!(catalog.diagnostics().len(), 1);
         assert_eq!(
-            catalog.diagnostics[0].code,
+            catalog.diagnostics()[0].code(),
             SkillDiagnosticCode::MissingFrontmatter
         );
     }
@@ -496,9 +476,9 @@ mod tests {
             .list_workspace("workspace", workspace.path())
             .unwrap();
 
-        assert_eq!(first.skills[0].id, second.skills[0].id);
-        assert_ne!(first.skills[0].revision, second.skills[0].revision);
-        assert_ne!(first.catalog_revision, second.catalog_revision);
+        assert_eq!(first.skills()[0].id(), second.skills()[0].id());
+        assert_ne!(first.skills()[0].revision(), second.skills()[0].revision());
+        assert_ne!(first.catalog_revision(), second.catalog_revision());
     }
 
     #[test]
@@ -518,10 +498,10 @@ mod tests {
             .list_workspace("project:two", &second_workspace)
             .unwrap();
 
-        assert_eq!(first.skills[0].id, "workspace:project%3Aone:auditor");
-        assert_eq!(second.skills[0].id, "workspace:project%3Atwo:auditor");
-        assert_ne!(first.skills[0].id, second.skills[0].id);
-        assert_eq!(first.skills[0].revision, second.skills[0].revision);
+        assert_eq!(first.skills()[0].id(), "workspace:project%3Aone:auditor");
+        assert_eq!(second.skills()[0].id(), "workspace:project%3Atwo:auditor");
+        assert_ne!(first.skills()[0].id(), second.skills()[0].id());
+        assert_eq!(first.skills()[0].revision(), second.skills()[0].revision());
     }
 
     #[test]
@@ -542,12 +522,12 @@ mod tests {
             .list_workspace("workspace", workspace.path())
             .unwrap();
 
-        assert_eq!(catalog.skills.len(), 2);
-        assert_ne!(catalog.skills[0].id, catalog.skills[1].id);
+        assert_eq!(catalog.skills().len(), 2);
+        assert_ne!(catalog.skills()[0].id(), catalog.skills()[1].id());
         assert!(catalog
-            .diagnostics
+            .diagnostics()
             .iter()
-            .any(|item| item.code == SkillDiagnosticCode::DuplicateName));
+            .any(|item| item.code() == SkillDiagnosticCode::DuplicateName));
     }
 
     #[test]
@@ -580,16 +560,16 @@ mod tests {
             .list_workspace("workspace", workspace.path())
             .unwrap();
         let codes = catalog
-            .diagnostics
+            .diagnostics()
             .iter()
-            .map(|diagnostic| diagnostic.code)
+            .map(SkillDiagnostic::code)
             .collect::<Vec<_>>();
 
         assert!(codes.contains(&SkillDiagnosticCode::MissingSkillFile));
         assert!(codes.contains(&SkillDiagnosticCode::InvalidUtf8));
         assert!(codes.contains(&SkillDiagnosticCode::NulByte));
         assert!(codes.contains(&SkillDiagnosticCode::SkillFileTooLarge));
-        assert!(catalog.skills.is_empty());
+        assert!(catalog.skills().is_empty());
     }
 
     #[test]
@@ -603,8 +583,8 @@ mod tests {
             .list_workspace("workspace", workspace.path())
             .unwrap();
 
-        assert_eq!(catalog.skills.len(), 1);
-        assert!(catalog.diagnostics.is_empty());
+        assert_eq!(catalog.skills().len(), 1);
+        assert!(catalog.diagnostics().is_empty());
     }
 
     #[test]
@@ -620,13 +600,13 @@ mod tests {
             .list_workspace("workspace", workspace.path())
             .unwrap();
 
-        assert_eq!(catalog.skills[0].name, "fallback-name");
+        assert_eq!(catalog.skills()[0].name(), "fallback-name");
         assert_eq!(
-            catalog.diagnostics[0].code,
+            catalog.diagnostics()[0].code(),
             SkillDiagnosticCode::DefaultedName
         );
         assert_eq!(
-            catalog.diagnostics[0].severity,
+            catalog.diagnostics()[0].severity(),
             SkillDiagnosticSeverity::Warning
         );
     }
@@ -644,10 +624,10 @@ mod tests {
             .list_workspace("workspace", workspace.path())
             .unwrap();
 
-        assert!(catalog.skills.is_empty());
-        assert_eq!(catalog.diagnostics.len(), 1);
+        assert!(catalog.skills().is_empty());
+        assert_eq!(catalog.diagnostics().len(), 1);
         assert_eq!(
-            catalog.diagnostics[0].code,
+            catalog.diagnostics()[0].code(),
             SkillDiagnosticCode::MissingInstructions
         );
     }
@@ -671,19 +651,19 @@ mod tests {
             .list_workspace("workspace", workspace.path())
             .unwrap();
 
-        assert!(catalog.skills.is_empty());
+        assert!(catalog.skills().is_empty());
         assert_eq!(
             catalog
-                .diagnostics
+                .diagnostics()
                 .iter()
-                .filter(|item| item.code == SkillDiagnosticCode::InvalidDirectoryName)
+                .filter(|item| item.code() == SkillDiagnosticCode::InvalidDirectoryName)
                 .count(),
             2
         );
         let diagnostic_paths = catalog
-            .diagnostics
+            .diagnostics()
             .iter()
-            .map(|item| item.path.as_str())
+            .map(SkillDiagnostic::path)
             .collect::<Vec<_>>();
         assert!(diagnostic_paths
             .iter()
@@ -722,19 +702,19 @@ mod tests {
             .list_workspace("workspace", workspace.path())
             .unwrap();
 
-        assert!(catalog.skills.is_empty());
+        assert!(catalog.skills().is_empty());
         assert_eq!(
             catalog
-                .diagnostics
+                .diagnostics()
                 .iter()
-                .filter(|item| item.code == SkillDiagnosticCode::SymlinkNotAllowed)
+                .filter(|item| item.code() == SkillDiagnosticCode::SymlinkNotAllowed)
                 .count(),
             2
         );
         assert!(!catalog
-            .diagnostics
+            .diagnostics()
             .iter()
-            .any(|item| item.message.contains("Must not be loaded")));
+            .any(|item| item.message().contains("Must not be loaded")));
     }
 
     #[cfg(unix)]
@@ -750,10 +730,10 @@ mod tests {
             .list_workspace("workspace", workspace.path())
             .unwrap();
 
-        assert!(catalog.skills.is_empty());
-        assert_eq!(catalog.diagnostics.len(), 1);
+        assert!(catalog.skills().is_empty());
+        assert_eq!(catalog.diagnostics().len(), 1);
         assert_eq!(
-            catalog.diagnostics[0].code,
+            catalog.diagnostics()[0].code(),
             SkillDiagnosticCode::SymlinkNotAllowed
         );
     }
@@ -773,10 +753,10 @@ mod tests {
             .list_workspace("workspace", workspace.path())
             .unwrap();
 
-        assert!(catalog.skills.is_empty());
-        assert_eq!(catalog.diagnostics.len(), 1);
+        assert!(catalog.skills().is_empty());
+        assert_eq!(catalog.diagnostics().len(), 1);
         assert_eq!(
-            catalog.diagnostics[0].code,
+            catalog.diagnostics()[0].code(),
             SkillDiagnosticCode::SymlinkNotAllowed
         );
     }
@@ -804,12 +784,12 @@ mod tests {
         let first_catalog = finalize_catalog(Vec::new(), vec![first_diagnostic.clone()], false);
         let second_catalog = finalize_catalog(Vec::new(), vec![second_diagnostic.clone()], false);
 
-        assert!(first_diagnostic.path.starts_with("unix-bytes:"));
-        assert!(second_diagnostic.path.starts_with("unix-bytes:"));
-        assert_ne!(first_diagnostic.path, second_diagnostic.path);
+        assert!(first_diagnostic.path().starts_with("unix-bytes:"));
+        assert!(second_diagnostic.path().starts_with("unix-bytes:"));
+        assert_ne!(first_diagnostic.path(), second_diagnostic.path());
         assert_ne!(
-            first_catalog.catalog_revision,
-            second_catalog.catalog_revision
+            first_catalog.catalog_revision(),
+            second_catalog.catalog_revision()
         );
     }
 

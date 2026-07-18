@@ -51,6 +51,7 @@ interface ChatConversationPageProps {
     custom: boolean
     full: boolean
   }
+  skillCatalogRefreshToken?: number
   showTokenUsageDetails: boolean
   scrollTargetMessageId?: string | null
 }
@@ -142,6 +143,7 @@ export function ChatConversationPage({
   onSubmitMessage,
   onMessageUiStateChange,
   permissionModeAvailability,
+  skillCatalogRefreshToken,
   showTokenUsageDetails,
   scrollTargetMessageId
 }: ChatConversationPageProps) {
@@ -291,6 +293,7 @@ export function ChatConversationPage({
             onSubmitMessage={onSubmitMessage}
             permissionModeAvailability={permissionModeAvailability}
             resetKey={conversation.id}
+            skillCatalogRefreshToken={skillCatalogRefreshToken}
           />
         )}
       </div>

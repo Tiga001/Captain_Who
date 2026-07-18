@@ -98,19 +98,25 @@ pub fn list_pending_actions(
     records
 }
 
-pub fn update_pending_action_status(
+/// Atomically replaces both lifecycle status and its persisted resume payload. Keeping these
+/// columns in one statement prevents a terminal row from becoming visible while it still carries
+/// the prior run-scoped payload.
+pub fn transition_pending_action(
     connection: &Connection,
     action_id: &str,
     status: &str,
+    agent_input_json: &str,
     updated_at: i64,
 ) -> rusqlite::Result<usize> {
     connection.execute(
         "
         UPDATE agent_pending_actions
-        SET status = ?2, updated_at = ?3
+        SET status = ?2,
+            agent_input_json = ?3,
+            updated_at = ?4
         WHERE action_id = ?1
         ",
-        params![action_id, status, updated_at],
+        params![action_id, status, agent_input_json, updated_at],
     )
 }
 
@@ -150,6 +156,7 @@ mod tests {
 
     #[test]
     fn upserts_lists_and_updates_pending_actions() {
+        const INSTRUCTION_MARKER: &str = "PERSISTED_SKILL_BODY_MUST_BE_REDACTED";
         let connection = Connection::open_in_memory().unwrap();
         migrations::run_migrations(&connection).unwrap();
 
@@ -163,7 +170,9 @@ mod tests {
             tool_call_id: Some("action-1".to_string()),
             status: "pending".to_string(),
             action_json: r#"{"type":"tool_call"}"#.to_string(),
-            agent_input_json: "{}".to_string(),
+            agent_input_json: format!(
+                r#"{{"skillActivation":{{"skills":[{{"instructions":"{INSTRUCTION_MARKER}"}}]}}}}"#
+            ),
             created_at: 1,
             updated_at: 1,
         };
@@ -173,7 +182,20 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].action_id, "action-1");
 
-        update_pending_action_status(&connection, "action-1", "completed", 2).unwrap();
+        let redacted_input = r#"{"skillActivation":{"activationRevision":"activation-1","skills":[{"id":"skill-1","name":"reviewer","revision":"revision-1","source":"bundled:application","instructions":""}]}}"#;
+        transition_pending_action(&connection, "action-1", "completed", redacted_input, 2).unwrap();
         assert!(list_pending_actions(&connection).unwrap().is_empty());
+
+        let (status, agent_input_json, updated_at): (String, String, i64) = connection
+            .query_row(
+                "SELECT status, agent_input_json, updated_at FROM agent_pending_actions WHERE action_id = ?1",
+                ["action-1"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(agent_input_json, redacted_input);
+        assert!(!agent_input_json.contains(INSTRUCTION_MARKER));
+        assert_eq!(updated_at, 2);
     }
 }

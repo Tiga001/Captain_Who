@@ -1,106 +1,99 @@
-//! Resolve one discovered Skill into an immutable, revision-bound snapshot.
+//! Resolve one discovered Skill into an immutable, revision-bound package.
 
-use super::discovery::SkillsService;
+use super::digest::package_revision;
 use super::model::{
-    ResolvedSkill, ResolvedSkillMetadata, SkillDiagnosticCode, SkillProvenance, SkillResolveError,
-    SkillResolveRequest, SkillScope,
+    ResolvedSkillPackage, SkillActivationScope, SkillDescriptor, SkillDescriptorParts,
+    SkillDiagnosticCode, SkillId, SkillProvenance, SkillResolveError, SkillSelection,
+    SkillSourceKind, SkillTrust,
 };
 use super::parser::parse_skill_document;
+use super::source::WorkspaceSkillSource;
 use super::workspace::{
-    load_workspace_skill, percent_encode, resolve_workspace_skills_root, skill_revision,
-    validate_skill_directory_name, workspace_skill_id, ByteBudget, ScanBudget, WorkspaceRootError,
-    WorkspaceSkillRoots, WorkspaceSkillsRoot, WorkspaceSourceIssue, MAX_SKILL_FILE_BYTES,
-    MAX_SKILL_ROOT_ENTRIES, MAX_SKILL_SCAN_ENTRIES,
+    load_workspace_skill, percent_encode, resolve_workspace_skills_root,
+    validate_skill_directory_name, ByteBudget, ScanBudget, WorkspaceRootError, WorkspaceSkillRoots,
+    WorkspaceSkillsRoot, WorkspaceSourceIssue, MAX_SKILL_FILE_BYTES, MAX_SKILL_ROOT_ENTRIES,
+    MAX_SKILL_SCAN_ENTRIES,
 };
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-const MAX_SKILL_ID_BYTES: usize = 16 * 1024;
-const MAX_SKILL_REVISION_BYTES: usize = 256;
-
-impl SkillsService {
-    /// Resolve the exact bytes selected from a prior workspace catalog.
-    ///
-    /// This method performs no prompt injection and never loads sibling files,
-    /// references, assets, or scripts. A revision mismatch always fails closed.
-    pub fn resolve_workspace_skill(
-        &self,
-        workspace_id: &str,
-        workspace_root: &Path,
-        request: &SkillResolveRequest,
-    ) -> Result<ResolvedSkill, SkillResolveError> {
-        let reference = validate_reference(workspace_id, request)?;
-        let roots = match resolve_workspace_skills_root(workspace_root) {
-            Ok(WorkspaceSkillsRoot::Missing) => return Err(not_found(request)),
-            Ok(WorkspaceSkillsRoot::Ready(roots)) => roots,
-            Err(WorkspaceRootError::Discovery(error)) => {
-                return Err(SkillResolveError::Workspace(error));
-            }
-            Err(WorkspaceRootError::Invalid(issue)) => {
-                return Err(map_source_issue(request, issue));
-            }
-        };
-
-        let mut scan_budget = ScanBudget::new(MAX_SKILL_SCAN_ENTRIES);
-        let skill_directory =
-            find_selected_directory(&roots, workspace_id, &request.skill_id, &mut scan_budget)?
-                .ok_or_else(|| not_found(request))?;
-        let mut byte_budget = ByteBudget::new(MAX_SKILL_FILE_BYTES.saturating_add(1));
-        let loaded =
-            load_workspace_skill(&roots, &skill_directory, &mut scan_budget, &mut byte_budget)
-                .map_err(|issue| map_source_issue(request, issue))?;
-
-        if loaded.directory_name != reference.directory_name {
-            return Err(SkillResolveError::Unavailable {
-                skill_id: Some(request.skill_id.clone()),
-                reason: "the selected Skill directory changed during resolution".to_string(),
-            });
+pub(super) fn resolve_workspace_source(
+    source: &WorkspaceSkillSource,
+    request: &SkillSelection,
+) -> Result<ResolvedSkillPackage, SkillResolveError> {
+    let reference = validate_reference(source, request)?;
+    let roots = match resolve_workspace_skills_root(source.workspace_root()) {
+        Ok(WorkspaceSkillsRoot::Missing) => return Err(not_found(request)),
+        Ok(WorkspaceSkillsRoot::Ready(roots)) => roots,
+        Err(WorkspaceRootError::Discovery(error)) => {
+            return Err(SkillResolveError::Workspace(error));
         }
-
-        let actual_revision = skill_revision(&loaded.bytes);
-        if actual_revision != request.expected_revision {
-            return Err(SkillResolveError::Stale {
-                skill_id: request.skill_id.clone(),
-                expected_revision: request.expected_revision.clone(),
-                actual_revision,
-            });
+        Err(WorkspaceRootError::Invalid(issue)) => {
+            return Err(map_source_issue(request, issue));
         }
+    };
 
-        if loaded.bytes.contains(&0) {
-            return Err(invalid_skill(
-                request,
-                SkillDiagnosticCode::NulByte,
-                "SKILL.md contains a NUL byte.",
-            ));
-        }
-        let source_text = String::from_utf8(loaded.bytes).map_err(|_| {
-            invalid_skill(
-                request,
-                SkillDiagnosticCode::InvalidUtf8,
-                "SKILL.md must be valid UTF-8.",
-            )
-        })?;
-        let document = parse_skill_document(&source_text, &loaded.directory_name)
-            .map_err(|error| invalid_skill(request, error.diagnostic_code(), error.to_string()))?;
-        let source_text: Arc<str> = Arc::from(source_text);
+    let mut scan_budget = ScanBudget::new(MAX_SKILL_SCAN_ENTRIES);
+    let skill_directory = find_selected_directory(&roots, request, &mut scan_budget)?
+        .ok_or_else(|| not_found(request))?;
+    let mut byte_budget = ByteBudget::new(MAX_SKILL_FILE_BYTES.saturating_add(1));
+    let loaded = load_workspace_skill(&roots, &skill_directory, &mut scan_budget, &mut byte_budget)
+        .map_err(|issue| map_source_issue(request, issue))?;
 
-        Ok(ResolvedSkill::new(
-            ResolvedSkillMetadata {
-                id: request.skill_id.clone(),
-                name: document.metadata.name,
-                description: document.metadata.description,
-                scope: SkillScope::Workspace,
-                revision: actual_revision,
-                provenance: SkillProvenance::Workspace {
-                    workspace_id: workspace_id.to_owned(),
-                    relative_path: loaded.relative_path,
-                },
-            },
-            source_text,
-            document.instructions_range,
-        ))
+    if loaded.directory_name != reference.directory_name {
+        return Err(SkillResolveError::Unavailable {
+            skill_id: Some(request.skill_id().clone()),
+            reason: "the selected Skill directory changed during resolution".to_string(),
+        });
     }
+
+    let actual_revision = package_revision(&loaded.bytes);
+    if &actual_revision != request.expected_revision() {
+        return Err(SkillResolveError::Stale {
+            skill_id: request.skill_id().clone(),
+            expected_revision: request.expected_revision().clone(),
+            actual_revision,
+        });
+    }
+
+    if loaded.bytes.contains(&0) {
+        return Err(invalid_skill(
+            request,
+            SkillDiagnosticCode::NulByte,
+            "SKILL.md contains a NUL byte.",
+        ));
+    }
+    let source_text = String::from_utf8(loaded.bytes).map_err(|_| {
+        invalid_skill(
+            request,
+            SkillDiagnosticCode::InvalidUtf8,
+            "SKILL.md must be valid UTF-8.",
+        )
+    })?;
+    let document = parse_skill_document(&source_text, &loaded.directory_name)
+        .map_err(|error| invalid_skill(request, error.diagnostic_code(), error.to_string()))?;
+    let source_text: Arc<str> = Arc::from(source_text);
+    let descriptor = SkillDescriptor::new(SkillDescriptorParts {
+        id: request.skill_id().clone(),
+        name: document.metadata.name,
+        description: document.metadata.description,
+        source_kind: SkillSourceKind::Workspace,
+        trust: SkillTrust::Untrusted,
+        activation_scope: SkillActivationScope::Run,
+        revision: actual_revision,
+        provenance: SkillProvenance::Workspace {
+            workspace_id: source.workspace_id().to_owned(),
+            relative_path: loaded.relative_path,
+        },
+    });
+
+    ResolvedSkillPackage::new(descriptor, source_text, document.instructions_range).map_err(
+        |error| SkillResolveError::Unavailable {
+            skill_id: Some(request.skill_id().clone()),
+            reason: format!("failed to construct the verified Skill snapshot: {error}"),
+        },
+    )
 }
 
 struct ValidatedReference {
@@ -108,65 +101,21 @@ struct ValidatedReference {
 }
 
 fn validate_reference(
-    workspace_id: &str,
-    request: &SkillResolveRequest,
+    source: &WorkspaceSkillSource,
+    request: &SkillSelection,
 ) -> Result<ValidatedReference, SkillResolveError> {
-    if request.skill_id.is_empty() {
-        return Err(invalid_reference("skill_id must not be empty"));
-    }
-    if request.skill_id.len() > MAX_SKILL_ID_BYTES {
-        return Err(invalid_reference(format!(
-            "skill_id exceeds {MAX_SKILL_ID_BYTES} bytes"
-        )));
-    }
-    if request.expected_revision.is_empty() {
-        return Err(invalid_reference("expected_revision must not be empty"));
-    }
-    if request.expected_revision.len() > MAX_SKILL_REVISION_BYTES {
-        return Err(invalid_reference(format!(
-            "expected_revision exceeds {MAX_SKILL_REVISION_BYTES} bytes"
-        )));
-    }
-    if !request
-        .expected_revision
-        .bytes()
-        .all(|byte| byte.is_ascii_graphic())
-    {
-        return Err(invalid_reference(
-            "expected_revision must contain only printable ASCII without whitespace",
-        ));
-    }
-
-    let encoded = request
-        .skill_id
-        .strip_prefix("workspace:")
-        .ok_or_else(|| invalid_reference("skill_id has an unsupported scope"))?;
-    let (encoded_workspace_id, encoded_directory_name) = encoded
-        .split_once(':')
-        .ok_or_else(|| invalid_reference("skill_id is missing its directory component"))?;
-    if encoded_directory_name.contains(':') {
-        return Err(invalid_reference("skill_id has too many components"));
-    }
-
-    let decoded_workspace_id = decode_canonical_component(encoded_workspace_id, "workspace")?;
-    let decoded_workspace_id = std::str::from_utf8(&decoded_workspace_id)
-        .map_err(|_| invalid_reference("skill_id contains a non-UTF-8 workspace component"))?;
-    if decoded_workspace_id != workspace_id {
+    if request.skill_id().source_id() != source.source_id() {
         return Err(invalid_reference(
             "skill_id belongs to a different workspace",
         ));
     }
 
+    let encoded_directory_name = request.skill_id().local_id();
     let decoded_directory_name = decode_canonical_component(encoded_directory_name, "directory")?;
     let directory_name = String::from_utf8(decoded_directory_name)
         .map_err(|_| invalid_reference("skill_id contains a non-UTF-8 directory component"))?;
-    if directory_name.is_empty() {
-        return Err(invalid_reference(
-            "skill_id has an empty directory component",
-        ));
-    }
     validate_skill_directory_name(&directory_name).map_err(invalid_reference)?;
-    if workspace_skill_id(workspace_id, &directory_name) != request.skill_id {
+    if percent_encode(directory_name.as_bytes()) != encoded_directory_name {
         return Err(invalid_reference("skill_id is not canonically encoded"));
     }
 
@@ -223,13 +172,13 @@ enum LocatedDirectory {
 
 fn find_selected_directory(
     roots: &WorkspaceSkillRoots,
-    workspace_id: &str,
-    skill_id: &str,
+    request: &SkillSelection,
     scan_budget: &mut ScanBudget,
 ) -> Result<Option<PathBuf>, SkillResolveError> {
+    let skill_id = request.skill_id();
     let entries =
         fs::read_dir(&roots.skills_root).map_err(|error| SkillResolveError::Unavailable {
-            skill_id: Some(skill_id.to_owned()),
+            skill_id: Some(skill_id.clone()),
             reason: format!("cannot read workspace Skill root: {error}"),
         })?;
     let mut observed_entries = 0usize;
@@ -266,7 +215,7 @@ fn find_selected_directory(
             continue;
         };
         if directory_name.starts_with('.')
-            || workspace_skill_id(workspace_id, &directory_name) != skill_id
+            || percent_encode(directory_name.as_bytes()) != skill_id.local_id()
         {
             continue;
         }
@@ -274,7 +223,7 @@ fn find_selected_directory(
         let file_type = entry
             .file_type()
             .map_err(|error| SkillResolveError::Unavailable {
-                skill_id: Some(skill_id.to_owned()),
+                skill_id: Some(skill_id.clone()),
                 reason: format!("cannot inspect the selected Skill directory: {error}"),
             })?;
         located = Some(if file_type.is_symlink() {
@@ -296,7 +245,7 @@ fn find_selected_directory(
         Some(LocatedDirectory::NotDirectory) => Ok(None),
         None => match unreadable_entry {
             Some(reason) => Err(SkillResolveError::Unavailable {
-                skill_id: Some(skill_id.to_owned()),
+                skill_id: Some(skill_id.clone()),
                 reason: format!("cannot inspect an entry in the workspace Skill root: {reason}"),
             }),
             None => Ok(None),
@@ -304,15 +253,12 @@ fn find_selected_directory(
     }
 }
 
-fn map_source_issue(
-    request: &SkillResolveRequest,
-    issue: WorkspaceSourceIssue,
-) -> SkillResolveError {
+fn map_source_issue(request: &SkillSelection, issue: WorkspaceSourceIssue) -> SkillResolveError {
     match issue.code {
         SkillDiagnosticCode::MissingSkillFile => not_found(request),
         SkillDiagnosticCode::UnreadableEntry | SkillDiagnosticCode::PathChangedDuringRead => {
             SkillResolveError::Unavailable {
-                skill_id: Some(request.skill_id.clone()),
+                skill_id: Some(request.skill_id().clone()),
                 reason: issue.message,
             }
         }
@@ -326,27 +272,27 @@ fn invalid_reference(reason: impl Into<String>) -> SkillResolveError {
     }
 }
 
-fn not_found(request: &SkillResolveRequest) -> SkillResolveError {
+fn not_found(request: &SkillSelection) -> SkillResolveError {
     SkillResolveError::NotFound {
-        skill_id: request.skill_id.clone(),
+        skill_id: request.skill_id().clone(),
     }
 }
 
 fn invalid_skill(
-    request: &SkillResolveRequest,
+    request: &SkillSelection,
     code: SkillDiagnosticCode,
     reason: impl Into<String>,
 ) -> SkillResolveError {
-    invalid_skill_id(&request.skill_id, code, reason)
+    invalid_skill_id(request.skill_id(), code, reason)
 }
 
 fn invalid_skill_id(
-    skill_id: &str,
+    skill_id: &SkillId,
     code: SkillDiagnosticCode,
     reason: impl Into<String>,
 ) -> SkillResolveError {
     SkillResolveError::InvalidSkill {
-        skill_id: skill_id.to_owned(),
+        skill_id: skill_id.clone(),
         code,
         reason: reason.into(),
     }
@@ -354,9 +300,13 @@ fn invalid_skill_id(
 
 #[cfg(test)]
 mod tests {
-    use super::super::model::SkillDiscoveryError;
+    use super::super::model::{
+        ResolvedSkill, SkillDiscoveryError, SkillResolveRequest, SkillRevision,
+    };
     use super::*;
+    use crate::skills::SkillsService;
     use std::fs;
+    use std::path::Path;
     use tempfile::tempdir;
 
     fn skill_document(name: &str, description: &str, instructions: &str) -> String {
@@ -382,21 +332,27 @@ mod tests {
     ) -> SkillResolveRequest {
         let catalog = service.list_workspace(workspace_id, workspace).unwrap();
         let descriptor = catalog
-            .skills
+            .skills()
             .iter()
-            .find(|skill| skill.id == workspace_skill_id(workspace_id, directory))
+            .find(|skill| skill.id() == &workspace_skill_id(workspace_id, directory))
             .unwrap();
-        SkillResolveRequest {
-            skill_id: descriptor.id.clone(),
-            expected_revision: descriptor.revision.clone(),
-        }
+        descriptor.selection()
     }
 
     fn direct_request(workspace_id: &str, directory: &str, contents: &[u8]) -> SkillResolveRequest {
-        SkillResolveRequest {
-            skill_id: workspace_skill_id(workspace_id, directory),
-            expected_revision: skill_revision(contents),
-        }
+        SkillResolveRequest::new(
+            workspace_skill_id(workspace_id, directory),
+            package_revision(contents),
+        )
+    }
+
+    fn workspace_skill_id(workspace_id: &str, directory: &str) -> SkillId {
+        let source = WorkspaceSkillSource::new(workspace_id, Path::new("unused")).unwrap();
+        SkillId::from_parts(
+            source.source_id().clone(),
+            &percent_encode(directory.as_bytes()),
+        )
+        .unwrap()
     }
 
     fn workspace_provenance(resolved: &ResolvedSkill) -> (&str, &str) {
@@ -404,7 +360,8 @@ mod tests {
             SkillProvenance::Workspace {
                 workspace_id,
                 relative_path,
-            } => (workspace_id, relative_path),
+            } => (workspace_id.as_str(), relative_path.as_str()),
+            _ => panic!("expected workspace provenance"),
         }
     }
 
@@ -421,28 +378,41 @@ mod tests {
         let descriptor = service
             .list_workspace("fixture-workspace", &workspace)
             .unwrap()
-            .skills
-            .into_iter()
-            .next()
-            .unwrap();
+            .skills()
+            .first()
+            .unwrap()
+            .clone();
 
         let resolved = service
             .resolve_workspace_skill("fixture-workspace", &workspace, &request)
             .unwrap();
-        let source = fs::read_to_string(&descriptor.path).unwrap();
+        let source = fs::read_to_string(
+            workspace
+                .join(super::super::workspace::AGENTS_DIRECTORY)
+                .join(super::super::workspace::SKILLS_DIRECTORY)
+                .join("repository-evidence-auditor")
+                .join(super::super::workspace::SKILL_FILE_NAME),
+        )
+        .unwrap();
 
-        assert_eq!(resolved.id(), descriptor.id);
-        assert_eq!(resolved.name(), descriptor.name);
-        assert_eq!(resolved.description(), descriptor.description);
-        assert_eq!(resolved.scope(), descriptor.scope);
-        assert_eq!(resolved.revision(), descriptor.revision);
+        assert_eq!(resolved.id(), descriptor.id());
+        assert_eq!(resolved.name(), descriptor.name());
+        assert_eq!(resolved.description(), descriptor.description());
+        assert_eq!(resolved.source_kind(), descriptor.source_kind());
+        assert_eq!(resolved.revision(), descriptor.revision());
         let (workspace_id, relative_path) = workspace_provenance(&resolved);
         assert_eq!(workspace_id, "fixture-workspace");
-        assert_eq!(relative_path, descriptor.relative_path);
+        assert!(matches!(
+            descriptor.provenance(),
+            SkillProvenance::Workspace {
+                relative_path: expected,
+                ..
+            } if relative_path == expected
+        ));
         assert_eq!(resolved.source_text(), source);
         assert!(resolved.instructions().contains("SKILL_FIXTURE_V1"));
         assert_eq!(
-            skill_revision(resolved.source_text().as_bytes()),
+            &package_revision(resolved.source_text().as_bytes()),
             resolved.revision()
         );
     }
@@ -489,9 +459,9 @@ mod tests {
         assert_eq!(
             error,
             SkillResolveError::Stale {
-                skill_id: old_request.skill_id,
-                expected_revision: old_request.expected_revision,
-                actual_revision: new_request.expected_revision.clone(),
+                skill_id: old_request.skill_id().clone(),
+                expected_revision: old_request.expected_revision().clone(),
+                actual_revision: new_request.expected_revision().clone(),
             }
         );
         let resolved = service
@@ -516,9 +486,9 @@ mod tests {
         assert_eq!(
             stale,
             SkillResolveError::Stale {
-                skill_id: old_request.skill_id.clone(),
-                expected_revision: old_request.expected_revision,
-                actual_revision: skill_revision(&invalid),
+                skill_id: old_request.skill_id().clone(),
+                expected_revision: old_request.expected_revision().clone(),
+                actual_revision: package_revision(&invalid),
             }
         );
 
@@ -568,12 +538,13 @@ mod tests {
         let resolved = service
             .resolve_workspace_skill("project:一", workspace.path(), &request)
             .unwrap();
-        assert_eq!(resolved.id(), workspace_skill_id("project:一", directory));
+        assert_eq!(resolved.id(), &workspace_skill_id("project:一", directory));
 
-        let non_canonical = SkillResolveRequest {
-            skill_id: request.skill_id.replace("%3A", "%3a"),
-            expected_revision: request.expected_revision,
-        };
+        let non_canonical = SkillResolveRequest::parse(
+            request.skill_id().as_str().replace("%3A", "%3a"),
+            request.expected_revision().as_str(),
+        )
+        .unwrap();
         assert!(matches!(
             service.resolve_workspace_skill("project:一", workspace.path(), &non_canonical),
             Err(SkillResolveError::InvalidReference { .. })
@@ -600,48 +571,32 @@ mod tests {
         ];
 
         for skill_id in invalid_ids {
-            let request = SkillResolveRequest {
-                skill_id: skill_id.to_string(),
-                expected_revision: "revision".to_string(),
-            };
-            assert!(
-                matches!(
-                    service.resolve_workspace_skill("workspace", workspace.path(), &request),
-                    Err(SkillResolveError::InvalidReference { .. })
-                ),
-                "unexpected result for {skill_id}"
-            );
+            if let Ok(request) = SkillResolveRequest::parse(skill_id, "revision") {
+                assert!(
+                    matches!(
+                        service.resolve_workspace_skill("workspace", workspace.path(), &request),
+                        Err(SkillResolveError::InvalidReference { .. })
+                    ),
+                    "unexpected result for {skill_id}"
+                );
+            }
         }
     }
 
     #[test]
     fn validates_request_bounds_without_scanning_the_workspace() {
-        let workspace = tempdir().unwrap();
-        let service = SkillsService::new();
         let requests = [
-            SkillResolveRequest {
-                skill_id: "x".repeat(MAX_SKILL_ID_BYTES + 1),
-                expected_revision: "revision".to_string(),
-            },
-            SkillResolveRequest {
-                skill_id: "workspace:workspace:auditor".to_string(),
-                expected_revision: String::new(),
-            },
-            SkillResolveRequest {
-                skill_id: "workspace:workspace:auditor".to_string(),
-                expected_revision: "x".repeat(MAX_SKILL_REVISION_BYTES + 1),
-            },
-            SkillResolveRequest {
-                skill_id: "workspace:workspace:auditor".to_string(),
-                expected_revision: "bad revision".to_string(),
-            },
+            ("x".repeat(16 * 1024 + 1), "revision".to_string()),
+            ("workspace:workspace:auditor".to_string(), String::new()),
+            ("workspace:workspace:auditor".to_string(), "x".repeat(257)),
+            (
+                "workspace:workspace:auditor".to_string(),
+                "bad revision".to_string(),
+            ),
         ];
 
-        for request in requests {
-            assert!(matches!(
-                service.resolve_workspace_skill("workspace", workspace.path(), &request),
-                Err(SkillResolveError::InvalidReference { .. })
-            ));
+        for (skill_id, revision) in requests {
+            assert!(SkillResolveRequest::parse(skill_id, revision).is_err());
         }
     }
 
@@ -743,7 +698,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(resolved.source_text().len(), MAX_SKILL_FILE_BYTES);
-        assert_eq!(resolved.revision(), skill_revision(&contents));
+        assert_eq!(resolved.revision(), &package_revision(&contents));
     }
 
     #[test]
@@ -846,10 +801,10 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let outside = tempdir().unwrap();
-        let request = SkillResolveRequest {
-            skill_id: workspace_skill_id("workspace", "auditor"),
-            expected_revision: "revision".to_string(),
-        };
+        let request = SkillResolveRequest::new(
+            workspace_skill_id("workspace", "auditor"),
+            SkillRevision::parse("revision").unwrap(),
+        );
         let service = SkillsService::new();
 
         let linked_agents_workspace = tempdir().unwrap();

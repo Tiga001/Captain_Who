@@ -231,6 +231,8 @@ impl ContextBudgetReport {
             safety_margin_tokens: self.safety_margin_tokens,
             durable_capacity_tokens,
             durable_input_tokens,
+            run_transient_input_tokens: self.usage.breakdown.run_transient.input_tokens,
+            request_input_tokens: self.usage.request_input_tokens(),
             remaining_durable_tokens,
             persistent_revision: format!("{:016x}", self.usage.persistent_revision),
         }

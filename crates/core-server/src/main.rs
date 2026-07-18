@@ -1,13 +1,14 @@
 mod agent;
 mod agent_support;
 mod git_dispatcher;
+mod skills_adapter;
 mod skills_dispatcher;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agent::{AgentConversationTurnInput, AgentService};
+use agent::{AgentConversationTurnInput, AgentService, AgentServiceError};
 use git_dispatcher::{GitDispatcher, GitJobPriority};
 use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
 use mycopilot_core::skills::SkillsService;
@@ -19,32 +20,33 @@ use mycopilot_core::storage::models::{
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{AgentUsageClearInput, AgentUsageSummaryInput};
 use mycopilot_protocol_rs::{
-    error, success, AgentActionIdRequest, AgentCancelRunRequest, AgentCancelRunResponse,
-    AgentFileDraftReadRequest, AgentRejectActionRequest, CorePingRequest, CorePingResponse,
-    CoreShutdownResponse, GitRepositoryInspectRequest, GitReviewFileContentRequest,
-    GitReviewFileDiffRequest, GitReviewFileMutationRequest, GitReviewSummaryRequest, JsonRpcId,
-    JsonRpcRequest, SkillsListRequest, AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_ACTION_METHOD,
-    AGENT_CANCEL_RUN_METHOD, AGENT_CLEAR_USAGE_RECORDS_METHOD,
-    AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD, AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
-    AGENT_GET_FILE_WRITE_DIFF_METHOD, AGENT_GET_USAGE_SUMMARY_METHOD,
-    AGENT_LIST_PENDING_ACTIONS_METHOD, AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD,
-    AGENT_START_CONVERSATION_TURN_METHOD, CORE_PING_METHOD, CORE_SHUTDOWN_METHOD,
-    GIT_GET_REVIEW_FILE_CONTENT_METHOD, GIT_GET_REVIEW_FILE_DIFF_METHOD,
-    GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD, GIT_MUTATE_REVIEW_FILE_METHOD,
-    SEARCH_SEARCH_CHATS_METHOD, SKILLS_LIST_METHOD, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
-    STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
-    STORAGE_FORK_CONVERSATION_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
-    STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD, STORAGE_LOAD_COMPOSER_DRAFTS_METHOD,
-    STORAGE_LOAD_CONVERSATIONS_METHOD, STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD,
-    STORAGE_LOAD_MODEL_SETTINGS_METHOD, STORAGE_LOAD_PROJECTS_METHOD,
-    STORAGE_LOAD_UI_PREFERENCES_METHOD, STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD,
-    STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD, STORAGE_SAVE_COMPOSER_DRAFT_METHOD,
-    STORAGE_SAVE_CONVERSATION_META_METHOD, STORAGE_SAVE_MODEL_SETTINGS_METHOD,
-    STORAGE_SAVE_PROJECT_METHOD, STORAGE_SAVE_UI_PREFERENCES_METHOD,
-    STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
+    error, error_with_data, success, AgentActionIdRequest, AgentCancelRunRequest,
+    AgentCancelRunResponse, AgentFileDraftReadRequest, AgentRejectActionRequest, CorePingRequest,
+    CorePingResponse, CoreShutdownResponse, GitRepositoryInspectRequest,
+    GitReviewFileContentRequest, GitReviewFileDiffRequest, GitReviewFileMutationRequest,
+    GitReviewSummaryRequest, JsonRpcId, JsonRpcRequest, SkillsListRequest,
+    AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD,
+    AGENT_CLEAR_USAGE_RECORDS_METHOD, AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD,
+    AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD, AGENT_GET_FILE_WRITE_DIFF_METHOD,
+    AGENT_GET_USAGE_SUMMARY_METHOD, AGENT_LIST_PENDING_ACTIONS_METHOD,
+    AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
+    CORE_PING_METHOD, CORE_SHUTDOWN_METHOD, GIT_GET_REVIEW_FILE_CONTENT_METHOD,
+    GIT_GET_REVIEW_FILE_DIFF_METHOD, GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD,
+    GIT_MUTATE_REVIEW_FILE_METHOD, SEARCH_SEARCH_CHATS_METHOD, SKILLS_LIST_METHOD,
+    STORAGE_DELETE_CHAT_MESSAGES_METHOD, STORAGE_DELETE_CONVERSATION_METHOD,
+    STORAGE_DELETE_PROJECT_METHOD, STORAGE_FORK_CONVERSATION_METHOD,
+    STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
+    STORAGE_LOAD_COMPOSER_DRAFTS_METHOD, STORAGE_LOAD_CONVERSATIONS_METHOD,
+    STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD, STORAGE_LOAD_MODEL_SETTINGS_METHOD,
+    STORAGE_LOAD_PROJECTS_METHOD, STORAGE_LOAD_UI_PREFERENCES_METHOD,
+    STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD,
+    STORAGE_SAVE_COMPOSER_DRAFT_METHOD, STORAGE_SAVE_CONVERSATION_META_METHOD,
+    STORAGE_SAVE_MODEL_SETTINGS_METHOD, STORAGE_SAVE_PROJECT_METHOD,
+    STORAGE_SAVE_UI_PREFERENCES_METHOD, STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use skills_adapter::catalog_response;
 use skills_dispatcher::SkillsDispatcher;
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
@@ -55,9 +57,14 @@ async fn main() -> io::Result<()> {
         StorageService::open(&database_path())
             .map_err(|error| io::Error::other(format!("failed to initialize storage: {error}")))?,
     );
-    let agent_service = AgentService::new(storage.clone());
     let git_review_service = Arc::new(GitReviewService::new());
-    let skills_service = Arc::new(SkillsService::new());
+    let skills_service = Arc::new(
+        SkillsService::new()
+            .with_bundled_source()
+            .map_err(|error| io::Error::other(format!("failed to initialize Skills: {error}")))?,
+    );
+    let agent_service =
+        AgentService::new(storage.clone()).with_skills_service(Arc::clone(&skills_service));
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
     let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
     let writer = tokio::spawn(run_outbound_writer(
@@ -293,7 +300,7 @@ fn handle_request(
             };
             match agent_service.get_context_window_snapshot(input) {
                 Ok(output) => response_success(request.id, output),
-                Err(message) => response_error(Some(request.id), -32000, message),
+                Err(error) => agent_service_error_response(request.id, error),
             }
         }
         AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD => {
@@ -533,10 +540,10 @@ fn handle_skills_request(
     };
     let result = resolve_project_path(storage, &input.project_id).and_then(|workspace| {
         skills_service
-            .list_workspace(&input.project_id, &workspace)
+            .list_with_workspace(&input.project_id, &workspace)
             .map_err(|error| error.to_string())
     });
-    match result {
+    match result.and_then(|catalog| catalog_response(&catalog)) {
         Ok(catalog) => response_success(request.id, catalog),
         Err(message) => response_error(Some(request.id), -32000, message),
     }
@@ -658,7 +665,7 @@ fn handle_agent_start_conversation_turn(
 
     match agent_service.start_conversation_turn(input, notification_tx) {
         Ok(output) => response_success(id, output),
-        Err(message) => response_error(Some(id), -32000, message),
+        Err(error) => agent_service_error_response(id, error),
     }
 }
 
@@ -783,6 +790,19 @@ fn response_error(id: Option<JsonRpcId>, code: i64, message: impl Into<String>) 
     serde_json::to_value(error(id, code, message)).expect("JSON-RPC error response must serialize")
 }
 
+fn agent_service_error_response(id: JsonRpcId, error: AgentServiceError) -> Value {
+    match error.skill_activation() {
+        Some(data) => serde_json::to_value(error_with_data(
+            Some(id),
+            -32000,
+            error.message(),
+            serde_json::to_value(data).expect("Skill activation error data must serialize"),
+        ))
+        .expect("JSON-RPC error response must serialize"),
+        None => response_error(Some(id), -32000, error.message()),
+    }
+}
+
 fn storage_response<T>(id: JsonRpcId, result: Result<T, String>) -> Value
 where
     T: Serialize,
@@ -894,6 +914,19 @@ mod server_tests {
     use tokio::io::AsyncReadExt;
 
     #[test]
+    fn agent_skill_failures_preserve_structured_json_rpc_recovery_data() {
+        let response = agent_service_error_response(
+            JsonRpcId::Number(9),
+            AgentServiceError::from(skills_adapter::missing_workspace_failure()),
+        );
+
+        assert_eq!(response["error"]["code"], -32000);
+        assert_eq!(response["error"]["data"]["type"], "skillActivation");
+        assert_eq!(response["error"]["data"]["code"], "invalidSelection");
+        assert_eq!(response["error"]["data"]["recovery"], "rejectSelection");
+    }
+
+    #[test]
     fn skills_list_resolves_the_project_and_returns_camel_case_catalog() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
@@ -930,7 +963,7 @@ mod server_tests {
                 pinned_at: None,
             })
             .unwrap();
-        let skills_service = SkillsService::new();
+        let skills_service = SkillsService::new().with_bundled_source().unwrap();
         let request = serde_json::from_value::<JsonRpcRequest>(json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -942,25 +975,40 @@ mod server_tests {
         let response = handle_skills_request(&storage, &skills_service, request);
 
         assert_eq!(response["id"], 1);
-        assert_eq!(response["result"]["skills"].as_array().unwrap().len(), 1);
+        let skills = response["result"]["skills"].as_array().unwrap();
+        assert_eq!(skills.len(), 2);
+        assert_eq!(response["result"]["schemaVersion"], 3);
+        let workspace_skill = skills
+            .iter()
+            .find(|skill| skill["id"] == "workspace:project-1:repository-evidence-auditor")
+            .unwrap();
+        let bundled_skill = skills
+            .iter()
+            .find(|skill| skill["id"] == "bundled:application:repository-evidence-auditor")
+            .unwrap();
+        assert_eq!(workspace_skill["source"]["kind"], "workspace");
+        assert_eq!(workspace_skill["source"]["id"], "workspace:project-1");
+        assert_eq!(workspace_skill["trust"], "untrusted");
+        assert_eq!(workspace_skill["activationScope"], "run");
         assert_eq!(
-            response["result"]["skills"][0]["id"],
-            "workspace:project-1:repository-evidence-auditor"
-        );
-        assert_eq!(response["result"]["skills"][0]["scope"], "workspace");
-        assert_eq!(
-            response["result"]["skills"][0]["description"],
+            workspace_skill["description"],
             "Inspect a repository using source evidence."
         );
         assert_eq!(
-            PathBuf::from(response["result"]["skills"][0]["path"].as_str().unwrap()),
-            skill_directory.join("SKILL.md").canonicalize().unwrap()
-        );
-        assert_eq!(
-            response["result"]["skills"][0]["relativePath"],
+            workspace_skill["location"],
             ".agents/skills/repository-evidence-auditor/SKILL.md"
         );
-        assert!(response["result"]["skills"][0]["revision"].is_string());
+        assert!(workspace_skill.get("path").is_none());
+        assert!(workspace_skill["revision"].is_string());
+        assert_eq!(bundled_skill["source"]["kind"], "bundled");
+        assert_eq!(bundled_skill["source"]["id"], "bundled:application");
+        assert_eq!(bundled_skill["trust"], "application");
+        assert_eq!(bundled_skill["activationScope"], "run");
+        assert_eq!(
+            bundled_skill["location"],
+            "repository-evidence-auditor/SKILL.md"
+        );
+        assert!(bundled_skill["revision"].is_string());
         assert!(response["result"]["catalogRevision"].is_string());
         assert_eq!(response["result"]["truncated"], false);
         assert_eq!(
@@ -969,7 +1017,7 @@ mod server_tests {
         );
         assert_eq!(response["result"]["diagnostics"][0]["severity"], "error");
         assert!(response["result"]["diagnostics"][0]["message"].is_string());
-        assert!(response["result"]["diagnostics"][0]["path"].is_string());
+        assert!(response["result"]["diagnostics"][0]["location"].is_string());
     }
 
     #[test]

@@ -11,7 +11,9 @@ import type {
   AgentToolCall,
   AgentToolDefinition,
   AgentToolResult,
-  AgentUsage
+  AgentUsage,
+  ActivatedSkillSummary,
+  SkillSelection
 } from '@mycopilot/protocol'
 
 export interface ChatWebSearchSource {
@@ -101,6 +103,8 @@ export interface ChatAgentRunView {
   error?: string
   usage?: AgentUsage
   finishReason?: string
+  activatedSkills?: ActivatedSkillSummary[]
+  skillActivationRevision?: string
 }
 
 export interface ChatMessageUiState {
@@ -139,6 +143,7 @@ export interface ChatComposerDraft {
   modelId: string
   projectId: string | null
   attachments: AgentInputAttachment[]
+  skills: SkillSelection[]
   updatedAt: number
 }
 
@@ -147,6 +152,7 @@ export interface ChatSubmitOptions {
   permissionMode: ChatPermissionMode
   projectId: string | null
   attachments?: AgentInputAttachment[]
+  skills: SkillSelection[]
 }
 
 export interface ChatConversation {

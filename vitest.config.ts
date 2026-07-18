@@ -10,6 +10,7 @@ const workspaceFilesTests = 'src/main/workspaceFiles'
 const terminalMainTests = 'src/main/terminal'
 const terminalPreloadTests = 'src/preload'
 const terminalRendererTests = 'src/renderer/src/features/terminal/__tests__'
+const skillsTests = 'src/renderer/src/features/skills/__tests__'
 const appTests = 'src/renderer/src/app/__tests__'
 
 export default defineConfig({
@@ -49,7 +50,8 @@ export default defineConfig({
             `${workspaceFilesTests}/**/*.test.ts`,
             `${terminalMainTests}/**/*.test.ts`,
             `${terminalPreloadTests}/**/*.test.ts`,
-            `${terminalRendererTests}/**/*.test.ts`
+            `${terminalRendererTests}/**/*.test.ts`,
+            `${skillsTests}/**/*.test.ts`
           ],
           name: 'unit'
         }

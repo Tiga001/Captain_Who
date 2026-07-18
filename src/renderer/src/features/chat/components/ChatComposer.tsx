@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import type { AgentContextWindowSnapshot } from '@mycopilot/protocol'
+import type { AgentContextWindowSnapshot, SkillDescriptor } from '@mycopilot/protocol'
 import type { LucideIcon } from 'lucide-react'
 import {
   ArrowUp,
@@ -10,6 +10,7 @@ import {
   Paperclip,
   Plus,
   Search,
+  Sparkles,
   ShieldAlert,
   ShieldCheck,
   ShieldPlus,
@@ -35,7 +36,16 @@ import {
   getAttachmentTypeLabel
 } from '../attachmentDisplay'
 import type { ChatComposerDraft, ChatPermissionMode, ChatSubmitOptions } from '../chatTypes'
+import {
+  filterSkillDescriptors,
+  matchSkillSelection,
+  removeSkillSelection,
+  toggleSkillSelection,
+  updateSkillSelectionRevision
+} from '../../skills/skillSelection'
+import { useSkillCatalog } from '../../skills/useSkillCatalog'
 import { ContextWindowIndicator } from './ContextWindowIndicator'
+import { ComposerSelectedSkills, ComposerSkillPicker } from './ComposerSkillPicker'
 import { useImagePreview } from './ImagePreview'
 import './ChatComposer.css'
 
@@ -67,6 +77,7 @@ interface ChatComposerProps {
     full: boolean
   }
   resetKey?: string
+  skillCatalogRefreshToken?: number
   showProjectSelector?: boolean
 }
 
@@ -81,6 +92,7 @@ export function ChatComposer({
   onStopGenerating,
   permissionModeAvailability = { custom: true, full: true },
   resetKey,
+  skillCatalogRefreshToken = 0,
   showProjectSelector = false
 }: ChatComposerProps) {
   const { t } = useFrontendConfig()
@@ -93,16 +105,20 @@ export function ChatComposer({
   const isComposingRef = useRef(false)
   const lastCompositionEndAtRef = useRef(0)
   const attachmentPickerRef = useRef<HTMLDivElement>(null)
+  const attachmentTriggerRef = useRef<HTMLButtonElement>(null)
   const permissionPickerRef = useRef<HTMLDivElement>(null)
   const modelPickerRef = useRef<HTMLDivElement>(null)
   const projectPickerRef = useRef<HTMLDivElement>(null)
   const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false)
+  const [isSkillMenuOpen, setIsSkillMenuOpen] = useState(false)
   const [isPermissionMenuOpen, setIsPermissionMenuOpen] = useState(false)
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false)
   const [isFileDragActive, setIsFileDragActive] = useState(false)
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const [projectSearch, setProjectSearch] = useState('')
+  const [skillSearch, setSkillSearch] = useState('')
+  const previousSkillScopeRef = useRef({ projectId: draft.projectId, resetKey })
   const message = draft.message
   const permissionOptions = useMemo(
     () =>
@@ -130,13 +146,51 @@ export function ChatComposer({
     return enabledModels.find((model) => model.id === selectedModelId) ?? enabledModels[0]
   }, [enabledModels, selectedModelId])
   const selectedProject = projects.find((project) => project.id === selectedProjectId)
+  const skillCatalogEnabled =
+    Boolean(selectedProjectId) && (isSkillMenuOpen || draft.skills.length > 0)
+  const skillCatalogRefreshKey = `${skillCatalogRefreshToken}\u0002${
+    isSkillMenuOpen
+      ? 'picker-open'
+      : draft.skills.map((selection) => `${selection.id}\u0000${selection.revision}`).join('\u0001')
+  }`
+  const { refresh: refreshSkillCatalog, state: skillCatalogState } = useSkillCatalog(
+    selectedProjectId,
+    skillCatalogEnabled,
+    skillCatalogRefreshKey
+  )
+  const skillCatalog =
+    skillCatalogState.status === 'ready' && skillCatalogState.projectId === selectedProjectId
+      ? skillCatalogState.output
+      : undefined
+  const skillCatalogDescriptors = skillCatalog
+    ? filterSkillDescriptors(skillCatalog.skills, '')
+    : []
+  const hasStaleSkillSelection = Boolean(
+    skillCatalog &&
+    draft.skills.some(
+      (selection) => matchSkillSelection(selection, skillCatalogDescriptors).status === 'stale'
+    )
+  )
+  const hasUnavailableSkillSelection = Boolean(
+    skillCatalog &&
+    !skillCatalog.truncated &&
+    draft.skills.some(
+      (selection) =>
+        matchSkillSelection(selection, skillCatalogDescriptors).status === 'unavailable'
+    )
+  )
   const filteredProjects = projects.filter((project) =>
     project.name.toLowerCase().includes(projectSearch.trim().toLowerCase())
   )
   const hasImageAttachment = attachments.some((attachment) => attachment.kind === 'image')
   const hasUnsupportedImageAttachment = hasImageAttachment && !selectedModel?.supportsImage
   const hasSendableContent = message.trim().length > 0 || attachments.length > 0
-  const canSend = hasSendableContent && !hasUnsupportedImageAttachment && Boolean(selectedModel)
+  const hasInvalidSkillSelection = hasStaleSkillSelection || hasUnavailableSkillSelection
+  const canSend =
+    hasSendableContent &&
+    !hasUnsupportedImageAttachment &&
+    !hasInvalidSkillSelection &&
+    Boolean(selectedModel)
   const submitButtonState = isGenerating ? 'stop' : canSend ? 'ready' : 'disabled'
   const isConfirmingImeInput = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const nativeEvent = event.nativeEvent
@@ -149,8 +203,13 @@ export function ChatComposer({
     )
   }
 
-  useDismissOnOutsidePointer(attachmentPickerRef, isAttachmentMenuOpen, () =>
-    setIsAttachmentMenuOpen(false)
+  useDismissOnOutsidePointer(
+    attachmentPickerRef,
+    isAttachmentMenuOpen || isSkillMenuOpen,
+    useCallback(() => {
+      setIsAttachmentMenuOpen(false)
+      setIsSkillMenuOpen(false)
+    }, [])
   )
   useDismissOnOutsidePointer(permissionPickerRef, isPermissionMenuOpen, () =>
     setIsPermissionMenuOpen(false)
@@ -165,6 +224,8 @@ export function ChatComposer({
   useEffect(() => {
     setAttachmentError(null)
     setIsAttachmentMenuOpen(false)
+    setIsSkillMenuOpen(false)
+    setSkillSearch('')
     setIsFileDragActive(false)
   }, [resetKey])
 
@@ -190,6 +251,18 @@ export function ChatComposer({
     }
   }, [draft.permissionMode, permissionMode, updateDraft])
 
+  useEffect(() => {
+    const previousScope = previousSkillScopeRef.current
+    previousSkillScopeRef.current = { projectId: draft.projectId, resetKey }
+
+    const scopeChanged = previousScope.resetKey !== resetKey
+    if (scopeChanged || previousScope.projectId === draft.projectId || draft.skills.length === 0) {
+      return
+    }
+
+    updateDraft({ skills: [] })
+  }, [draft.projectId, draft.skills.length, resetKey, updateDraft])
+
   const appendAttachments = (nextAttachments: ComposerAttachment[]) => {
     if (nextAttachments.length === 0) return
 
@@ -200,13 +273,13 @@ export function ChatComposer({
 
   useEffect(() => {
     if (showProjectSelector && defaultProjectId !== null && defaultProjectId !== draft.projectId) {
-      updateDraft({ projectId: defaultProjectId })
+      updateDraft({ projectId: defaultProjectId, skills: [] })
     }
   }, [defaultProjectId, draft.projectId, showProjectSelector, updateDraft])
 
   useEffect(() => {
     if (draft.projectId && !projects.some((project) => project.id === draft.projectId)) {
-      updateDraft({ projectId: null })
+      updateDraft({ projectId: null, skills: [] })
     }
   }, [draft.projectId, projects, updateDraft])
 
@@ -246,16 +319,19 @@ export function ChatComposer({
       attachments: inputAttachments,
       modelId: selectedModel?.id ?? selectedModelId,
       permissionMode,
-      projectId: selectedProject?.id ?? null
+      projectId: selectedProject?.id ?? null,
+      skills: [...draftRef.current.skills]
     })
     updateDraft({
       message: '',
       attachments: [],
+      skills: [],
       modelId: selectedModel?.id ?? selectedModelId,
       permissionMode,
       projectId: selectedProject?.id ?? null
     })
     setIsAttachmentMenuOpen(false)
+    setIsSkillMenuOpen(false)
     setIsPermissionMenuOpen(false)
     setIsModelMenuOpen(false)
     setIsProjectMenuOpen(false)
@@ -266,6 +342,24 @@ export function ChatComposer({
       attachments: draftRef.current.attachments.filter(
         (attachment) => attachment.id !== attachmentId
       )
+    })
+  }
+
+  const removeSkill = (skillId: string) => {
+    updateDraft({
+      skills: removeSkillSelection(draftRef.current.skills, skillId)
+    })
+  }
+
+  const toggleSkill = (skill: SkillDescriptor) => {
+    updateDraft({
+      skills: toggleSkillSelection(draftRef.current.skills, skill)
+    })
+  }
+
+  const useLatestSkill = (skill: SkillDescriptor) => {
+    updateDraft({
+      skills: updateSkillSelectionRevision(draftRef.current.skills, skill)
     })
   }
 
@@ -306,7 +400,10 @@ export function ChatComposer({
     const project = await selectProjectDirectory()
     if (!project) return
 
-    updateDraft({ projectId: project.id })
+    updateDraft({
+      projectId: project.id,
+      skills: draftRef.current.projectId === project.id ? draftRef.current.skills : []
+    })
     setProjectSearch('')
     setIsProjectMenuOpen(false)
   }
@@ -404,6 +501,12 @@ export function ChatComposer({
         </div>
       )}
 
+      <ComposerSelectedSkills
+        catalog={skillCatalog}
+        onRemove={removeSkill}
+        selections={draft.skills}
+      />
+
       <textarea
         ref={textareaRef}
         value={message}
@@ -432,18 +535,30 @@ export function ChatComposer({
         <p className="chat-composer__warning">{t('chat.unsupportedImageWarning')}</p>
       )}
       {attachmentError && <p className="chat-composer__warning">{attachmentError}</p>}
+      {hasStaleSkillSelection && (
+        <p className="chat-composer__warning" role="alert">
+          {t('chat.skillStaleDescription')}
+        </p>
+      )}
+      {hasUnavailableSkillSelection && (
+        <p className="chat-composer__warning" role="alert">
+          {t('chat.skillUnavailableDescription')}
+        </p>
+      )}
 
       <div className="chat-composer__toolbar">
         <div className="composer-add-picker" ref={attachmentPickerRef}>
           <button
+            ref={attachmentTriggerRef}
             type="button"
             className="composer-icon-button"
-            aria-haspopup="menu"
-            aria-expanded={isAttachmentMenuOpen}
+            aria-haspopup={isSkillMenuOpen ? 'dialog' : 'menu'}
+            aria-expanded={isAttachmentMenuOpen || isSkillMenuOpen}
             aria-label={t('chat.addContext')}
             onClick={() => {
               setAttachmentError(null)
               setIsAttachmentMenuOpen((open) => !open)
+              setIsSkillMenuOpen(false)
               setIsPermissionMenuOpen(false)
               setIsModelMenuOpen(false)
               setIsProjectMenuOpen(false)
@@ -463,7 +578,37 @@ export function ChatComposer({
                 <ImageIcon aria-hidden="true" />
                 <span>{t('chat.addImage')}</span>
               </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setIsAttachmentMenuOpen(false)
+                  setIsSkillMenuOpen(true)
+                  setSkillSearch('')
+                }}
+              >
+                <Sparkles aria-hidden="true" />
+                <span>{t('chat.skills')}</span>
+              </button>
             </div>
+          )}
+
+          {isSkillMenuOpen && (
+            <ComposerSkillPicker
+              catalogState={skillCatalogState}
+              projectId={selectedProjectId}
+              search={skillSearch}
+              selections={draft.skills}
+              onClose={() => {
+                setIsSkillMenuOpen(false)
+                setSkillSearch('')
+                window.requestAnimationFrame(() => attachmentTriggerRef.current?.focus())
+              }}
+              onRefresh={refreshSkillCatalog}
+              onSearchChange={setSkillSearch}
+              onToggle={toggleSkill}
+              onUseLatest={useLatestSkill}
+            />
           )}
         </div>
 
@@ -477,6 +622,7 @@ export function ChatComposer({
             aria-label={`${t('chat.permission')}：${t(selectedPermission.labelKey)}`}
             onClick={() => {
               setIsAttachmentMenuOpen(false)
+              setIsSkillMenuOpen(false)
               setIsModelMenuOpen(false)
               setIsPermissionMenuOpen((open) => !open)
             }}
@@ -542,6 +688,7 @@ export function ChatComposer({
             aria-label={t('chat.selectModel')}
             onClick={() => {
               setIsAttachmentMenuOpen(false)
+              setIsSkillMenuOpen(false)
               setIsPermissionMenuOpen(false)
               setIsModelMenuOpen((open) => !open)
             }}
@@ -625,6 +772,7 @@ export function ChatComposer({
               aria-expanded={isProjectMenuOpen}
               onClick={() => {
                 setIsAttachmentMenuOpen(false)
+                setIsSkillMenuOpen(false)
                 setIsPermissionMenuOpen(false)
                 setIsModelMenuOpen(false)
                 setIsProjectMenuOpen((open) => !open)
@@ -662,7 +810,13 @@ export function ChatComposer({
                         aria-selected={isSelected}
                         key={project.id}
                         onClick={() => {
-                          updateDraft({ projectId: project.id })
+                          updateDraft({
+                            projectId: project.id,
+                            skills:
+                              draftRef.current.projectId === project.id
+                                ? draftRef.current.skills
+                                : []
+                          })
                           setProjectSearch('')
                           setIsProjectMenuOpen(false)
                         }}
@@ -692,7 +846,7 @@ export function ChatComposer({
                   className="composer-project-command"
                   type="button"
                   onClick={() => {
-                    updateDraft({ projectId: null })
+                    updateDraft({ projectId: null, skills: [] })
                     setProjectSearch('')
                     setIsProjectMenuOpen(false)
                   }}

@@ -1096,6 +1096,7 @@ mod tests {
             system_prompt: "System rules".to_string(),
             compaction_summary: None,
             messages: vec![timestamped_history, timestamped_answer, timestamped_current],
+            skill_activation: None,
             attachments: ContextAttachments::default(),
         })
         .unwrap();
@@ -1198,6 +1199,7 @@ mod tests {
                 traced_chat_message("The file is valid."),
                 chat_message("user", "What did you inspect?"),
             ],
+            skill_activation: None,
             attachments: ContextAttachments::default(),
         })
         .unwrap();

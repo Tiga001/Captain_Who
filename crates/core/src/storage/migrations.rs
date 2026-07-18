@@ -285,6 +285,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             model_id TEXT,
             project_id TEXT,
             attachments_json TEXT NOT NULL,
+            skills_json TEXT NOT NULL DEFAULT '[]',
             updated_at INTEGER NOT NULL
         );
 
@@ -536,6 +537,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "ui_preferences",
         "custom_permission_enabled",
         "INTEGER NOT NULL DEFAULT 1",
+    )?;
+    add_column_if_missing(
+        connection,
+        "composer_drafts",
+        "skills_json",
+        "TEXT NOT NULL DEFAULT '[]'",
     )?;
     run_one_time_maintenance(connection)?;
 
@@ -922,6 +929,40 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adds_empty_skill_selection_to_existing_composer_drafts() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE composer_drafts (
+                    scope_id TEXT PRIMARY KEY,
+                    message TEXT NOT NULL,
+                    permission_mode TEXT NOT NULL,
+                    model_id TEXT,
+                    project_id TEXT,
+                    attachments_json TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO composer_drafts VALUES (
+                    'conversation-1', 'draft', 'default', NULL, NULL, '[]', 1
+                );
+                ",
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        let skills_json = connection
+            .query_row(
+                "SELECT skills_json FROM composer_drafts WHERE scope_id = 'conversation-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(skills_json, "[]");
+    }
 
     #[test]
     fn adds_nullable_context_window_to_existing_model_tables() {

@@ -15,6 +15,7 @@ import type {
   AgentUsageSummaryInput,
   AgentUsageSummaryOutput
 } from '@mycopilot/protocol'
+import { unwrapHostInvocation } from '@mycopilot/host-api'
 import { hostClient } from '../../host/hostClient'
 
 export type StartConversationTurnInput = AgentConversationTurnInput
@@ -23,13 +24,13 @@ export type StartConversationTurnOutput = AgentConversationTurnOutput
 export async function startConversationTurn(
   input: StartConversationTurnInput
 ): Promise<StartConversationTurnOutput> {
-  return hostClient.agent.startConversationTurn(input)
+  return unwrapHostInvocation(await hostClient.agent.startConversationTurn(input))
 }
 
 export async function getContextWindowSnapshot(
   input: AgentContextWindowSnapshotInput
 ): Promise<AgentContextWindowSnapshotOutput> {
-  return hostClient.agent.getContextWindowSnapshot(input)
+  return unwrapHostInvocation(await hostClient.agent.getContextWindowSnapshot(input))
 }
 
 export async function getContextCompactionAudit(

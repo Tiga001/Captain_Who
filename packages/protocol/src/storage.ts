@@ -106,6 +106,7 @@ export interface StorageComposerDraftRecord {
   modelId?: string | null
   projectId?: string | null
   attachmentsJson: string
+  skillsJson: string
   updatedAt: number
 }
 

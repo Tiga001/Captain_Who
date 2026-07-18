@@ -4,7 +4,11 @@ use super::{
     ConversationTraceRenderer,
 };
 use crate::llm::{LlmImage, LlmMessage, LlmMessageRole};
-use crate::protocol::{AgentChatMessage, AgentError, AgentResult};
+use crate::protocol::{
+    AgentActivatedSkill, AgentChatMessage, AgentError, AgentResult, AgentSkillActivation,
+};
+use serde_json::json;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContextAttachments {
@@ -16,6 +20,7 @@ pub(crate) struct ContextAssemblyInput {
     pub(crate) system_prompt: String,
     pub(crate) compaction_summary: Option<ContextCompactionSummary>,
     pub(crate) messages: Vec<AgentChatMessage>,
+    pub(crate) skill_activation: Option<AgentSkillActivation>,
     pub(crate) attachments: ContextAttachments,
 }
 
@@ -70,7 +75,6 @@ impl ContextAssembler {
             ));
         }
 
-        let mut attachment_images = Some(input.attachments.images);
         let mut timing = ConversationTimingTracker::default();
         for (index, message) in normalized.into_iter().enumerate() {
             let role = role_from_str(&message.role)?;
@@ -111,30 +115,107 @@ impl ContextAssembler {
             if !llm_message.content.trim().is_empty() {
                 items.push(ContextItem::new(llm_message, metadata));
             }
-            if is_current_turn && (has_attachment_text || has_attachment_images) {
-                let mut attachment_message =
-                    LlmMessage::text(LlmMessageRole::User, input.attachments.text.clone());
-                attachment_message
-                    .images
-                    .extend(attachment_images.take().unwrap_or_default());
-                items.push(ContextItem::new(
-                    attachment_message,
-                    ContextMetadata::new(
-                        ContextSource::InputAttachment,
-                        ContextScope::Run,
-                        ContextRetention::Retained,
-                    ),
-                ));
-            }
             if let Some(trace) = trace {
                 items.extend(trace.terminal_item);
             }
+        }
+
+        append_skill_context(&mut items, input.skill_activation.as_ref())?;
+        if current_turn_index.is_some() && (has_attachment_text || has_attachment_images) {
+            let mut attachment_message =
+                LlmMessage::text(LlmMessageRole::User, input.attachments.text);
+            attachment_message.images.extend(input.attachments.images);
+            items.push(ContextItem::new(
+                attachment_message,
+                ContextMetadata::new(
+                    ContextSource::InputAttachment,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                ),
+            ));
         }
 
         let frame = ContextFrame::new(items);
         frame.validate_complete_tool_protocol()?;
         Ok(AssembledContext { frame, timing })
     }
+
+    /// Appends the immutable, run-scoped Skill overlay to an already assembled durable baseline.
+    /// Keeping this operation separate prevents a shared conversation baseline from absorbing a
+    /// run's Skill selection.
+    pub(crate) fn append_skill_activation(
+        frame: &mut ContextFrame,
+        activation: Option<&AgentSkillActivation>,
+    ) -> AgentResult<()> {
+        let mut items = Vec::new();
+        append_skill_context(&mut items, activation)?;
+        for item in items {
+            frame.push(item);
+        }
+        Ok(())
+    }
+}
+
+fn append_skill_context(
+    items: &mut Vec<ContextItem>,
+    activation: Option<&AgentSkillActivation>,
+) -> AgentResult<()> {
+    let Some(activation) = activation.filter(|activation| !activation.skills.is_empty()) else {
+        return Ok(());
+    };
+    if activation.activation_revision.trim().is_empty() {
+        return Err(AgentError::new("Skill activation revision 不能为空。"));
+    }
+
+    let mut skill_ids = BTreeSet::new();
+    for skill in &activation.skills {
+        validate_activated_skill(skill, &mut skill_ids)?;
+        let metadata = serde_json::to_string(&json!({
+            "activationRevision": activation.activation_revision,
+            "id": skill.id,
+            "name": skill.name,
+            "revision": skill.revision,
+            "source": skill.source,
+        }))
+        .map_err(|error| AgentError::new(format!("无法渲染 Skill 上下文元数据：{error}")))?;
+        let content = format!(
+            "<backend_activated_skill>\nmetadata: {metadata}\n<skill_instructions>\n{}\n</skill_instructions>\n</backend_activated_skill>",
+            skill.instructions
+        );
+        items.push(ContextItem::new(
+            LlmMessage::text(LlmMessageRole::User, content),
+            ContextMetadata::new(
+                ContextSource::SkillInstructions,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_origin(ContextOrigin::skill(skill.id.clone())),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_activated_skill(
+    skill: &AgentActivatedSkill,
+    skill_ids: &mut BTreeSet<String>,
+) -> AgentResult<()> {
+    if skill.id.trim().is_empty()
+        || skill.name.trim().is_empty()
+        || skill.revision.trim().is_empty()
+        || skill.source.trim().is_empty()
+        || skill.instructions.trim().is_empty()
+    {
+        return Err(AgentError::new(
+            "激活的 Skill 必须包含非空 id、name、revision、source 和 instructions。",
+        ));
+    }
+    if !skill_ids.insert(skill.id.clone()) {
+        return Err(AgentError::new(format!(
+            "Skill activation 包含重复 id：`{}`。",
+            skill.id
+        )));
+    }
+    Ok(())
 }
 
 fn role_from_str(role: &str) -> AgentResult<LlmMessageRole> {
@@ -295,6 +376,7 @@ mod tests {
                 message("assistant", "old answer"),
                 message("user", "current question"),
             ],
+            skill_activation: None,
             attachments: ContextAttachments {
                 text: "attachment body".to_string(),
                 images: vec![LlmImage {
@@ -330,6 +412,58 @@ mod tests {
     }
 
     #[test]
+    fn places_each_activated_skill_after_current_user_and_before_attachments() {
+        let activation = AgentSkillActivation {
+            activation_revision: "activation-sha256-v1:ordered".to_string(),
+            skills: vec![
+                AgentActivatedSkill {
+                    id: "workspace:w:first".to_string(),
+                    name: "first".to_string(),
+                    revision: "skill-sha256-v1:first".to_string(),
+                    source: "workspace".to_string(),
+                    instructions: "FIRST_SKILL_MARKER".to_string(),
+                },
+                AgentActivatedSkill {
+                    id: "workspace:w:second".to_string(),
+                    name: "second".to_string(),
+                    revision: "skill-sha256-v1:second".to_string(),
+                    source: "workspace".to_string(),
+                    instructions: "SECOND_SKILL_MARKER".to_string(),
+                },
+            ],
+        };
+        let frame = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "rules".to_string(),
+            compaction_summary: None,
+            messages: vec![message("user", "current question")],
+            skill_activation: Some(activation),
+            attachments: ContextAttachments {
+                text: "ATTACHMENT_MARKER".to_string(),
+                images: Vec::new(),
+            },
+        })
+        .unwrap();
+
+        let messages = frame.to_messages();
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[1].content, "current question");
+        assert!(messages[2].content.contains("FIRST_SKILL_MARKER"));
+        assert!(messages[3].content.contains("SECOND_SKILL_MARKER"));
+        assert_eq!(messages[4].content, "ATTACHMENT_MARKER");
+        assert!(messages[2].content.contains("\"source\":\"workspace\""));
+        assert!(!messages[2].content.contains("description"));
+
+        let manifest = frame.manifest();
+        for (index, id) in [(2, "workspace:w:first"), (3, "workspace:w:second")] {
+            assert_eq!(manifest.entries[index].sources, vec!["skill_instructions"]);
+            assert_eq!(manifest.entries[index].scope, "run");
+            assert_eq!(manifest.entries[index].retention, "retained");
+            assert_eq!(manifest.entries[index].origin_kind, Some("skill"));
+            assert_eq!(manifest.entries[index].origin_id, Some(id));
+        }
+    }
+
+    #[test]
     fn renders_timing_on_user_messages_without_decorating_assistant_history() {
         let mut first_user = message("user", "historical question");
         first_user.created_at = Some(0);
@@ -341,6 +475,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             messages: vec![first_user, historical_assistant, current_user],
+            skill_activation: None,
             attachments: ContextAttachments::default(),
         })
         .unwrap();
@@ -376,6 +511,7 @@ mod tests {
                 message("assistant", " "),
                 message("system", "history rules"),
             ],
+            skill_activation: None,
             attachments: ContextAttachments::default(),
         })
         .unwrap();
@@ -388,6 +524,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             messages: vec![message("tool", "result")],
+            skill_activation: None,
             attachments: ContextAttachments::default(),
         })
         .unwrap_err();
@@ -404,6 +541,7 @@ mod tests {
                 traced_assistant("Created src/new.rs."),
                 message("user", "what changed?"),
             ],
+            skill_activation: None,
             attachments: ContextAttachments::default(),
         })
         .unwrap();
@@ -461,6 +599,7 @@ mod tests {
                 historical_assistant,
                 message("user", "continue"),
             ],
+            skill_activation: None,
             attachments: ContextAttachments::default(),
         })
         .unwrap();
@@ -491,6 +630,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: Some(compaction_summary()),
             messages: vec![message("user", "continue from the summary")],
+            skill_activation: None,
             attachments: ContextAttachments::default(),
         })
         .unwrap();
@@ -520,6 +660,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: Some(compaction_summary()),
             messages: Vec::new(),
+            skill_activation: None,
             attachments: ContextAttachments::default(),
         })
         .unwrap();
