@@ -1,12 +1,17 @@
-// Renderer skills management UI: presents source selection and frozen installation previews.
+// Renderer skills management UI: resolves public URLs and presents frozen installation previews.
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
-import { AlertTriangle, FolderOpen, GitFork, LoaderCircle, X } from 'lucide-react'
+import { AlertTriangle, ChevronRight, FolderOpen, GitFork, LoaderCircle, X } from 'lucide-react'
 import { createPortal } from 'react-dom'
-import type { SkillGitHubReference, SkillInstallationPreview } from '@mycopilot/protocol'
+import type {
+  SkillGitHubReference,
+  SkillInstallationPreview,
+  SkillSourceResolutionCandidate
+} from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
-import { SettingsSelect } from '../../settings/components/SettingsSelect'
-import type { GitHubReferenceKind } from './skillInstallationSource'
-import type { useSkillInstallationWorkflow } from './useSkillInstallationWorkflow'
+import type {
+  SkillInstallationWorkflowState,
+  useSkillInstallationWorkflow
+} from './useSkillInstallationWorkflow'
 import './SkillInstallationDialog.css'
 
 interface SkillInstallationDialogProps {
@@ -19,13 +24,22 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
   const dialogRef = useRef<HTMLElement>(null)
   const titleId = useId()
   const descriptionId = useId()
+  const githubUrlInputId = useId()
+  const githubUrlHintId = useId()
   const [now, setNow] = useState(0)
   const isOpen = state.status !== 'idle'
-  const isBusy = state.status === 'inspecting' || state.status === 'committing'
+  const isBusy =
+    state.status === 'resolving' || state.status === 'inspecting' || state.status === 'committing'
   const isCommitting = state.status === 'committing'
 
   useEffect(() => {
-    if (state.status !== 'preview' && state.status !== 'committing') return undefined
+    if (
+      state.status !== 'candidates' &&
+      state.status !== 'preview' &&
+      state.status !== 'committing'
+    ) {
+      return undefined
+    }
     setNow(Date.now())
     const interval = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(interval)
@@ -33,29 +47,24 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
 
   useEffect(() => {
     if (!isOpen) return undefined
-    const previousFocus =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null
     const frame = window.requestAnimationFrame(() => {
       getFocusableElements(dialogRef.current)[0]?.focus({ preventScroll: true })
     })
     return () => {
       window.cancelAnimationFrame(frame)
-      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true })
     }
   }, [isOpen])
 
   if (state.status === 'idle') return null
 
+  const context = getDialogContext(state)
   const operationLabel =
-    state.context.operation === 'install'
-      ? t('skills.installOperation')
-      : t('skills.updateOperation')
+    context.operation === 'install' ? t('skills.installOperation') : t('skills.updateOperation')
   const title =
-    state.context.operation === 'install'
+    context.operation === 'install'
       ? t('skills.installDialogTitle')
-      : replaceTokens(t('skills.updateDialogTitle'), {
-          name: state.context.entry.name
-        })
+      : replaceTokens(t('skills.updateDialogTitle'), { name: context.entry.name })
+  const description = getDialogDescription(state, t)
 
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key === 'Escape' && !isCommitting) {
@@ -87,7 +96,7 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
     >
       <section
         aria-busy={isBusy || undefined}
-        aria-describedby={descriptionId}
+        aria-describedby={description ? descriptionId : undefined}
         aria-labelledby={titleId}
         aria-modal="true"
         className="skill-install-dialog"
@@ -98,7 +107,7 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
         <header className="skill-install-dialog__header">
           <div>
             <h2 id={titleId}>{title}</h2>
-            <p id={descriptionId}>{t('skills.installDialogDescription')}</p>
+            {description && <p id={descriptionId}>{description}</p>}
           </div>
           <button
             aria-label={t('skills.closeDialog')}
@@ -113,117 +122,69 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
 
         <div className="skill-install-dialog__body">
           {state.status === 'choosingSource' && (
-            <div className="skill-source-options">
-              <button type="button" onClick={() => void workflow.chooseLocalDirectory()}>
-                <FolderOpen aria-hidden="true" />
-                <span>
-                  <strong>{t('skills.installLocal')}</strong>
-                  <small>{t('skills.installLocalDescription')}</small>
-                </span>
-              </button>
-              <button type="button" onClick={workflow.chooseGitHub}>
-                <GitFork aria-hidden="true" />
-                <span>
-                  <strong>{t('skills.installGitHub')}</strong>
-                  <small>{t('skills.installGitHubDescription')}</small>
-                </span>
-              </button>
-            </div>
+            <SkillSourceChoice
+              localError={state.localError}
+              onChooseGitHub={workflow.chooseGitHubSource}
+              onChooseLocal={() => void workflow.chooseLocalDirectory()}
+            />
           )}
 
-          {state.status === 'githubSource' && (
+          {state.status === 'urlInput' && (
             <form
-              className="skill-github-form"
+              className="skill-url-form"
               onSubmit={(event) => {
                 event.preventDefault()
-                void workflow.inspectGitHub()
+                void workflow.submitUrl()
               }}
             >
-              <label>
-                <span>{t('skills.githubRepository')}</span>
-                <input
-                  aria-invalid={state.fieldError === 'repository' || undefined}
-                  autoFocus
-                  onChange={(event) =>
-                    workflow.updateGitHubForm({ repository: event.target.value })
-                  }
-                  placeholder={t('skills.githubRepositoryPlaceholder')}
-                  value={state.form.repository}
-                />
-                {state.fieldError === 'repository' && (
-                  <small className="skill-form-error">{t('skills.invalidGitHubRepository')}</small>
-                )}
-              </label>
-              <div className="skill-github-form__field">
-                <span>{t('skills.githubReferenceType')}</span>
-                <SettingsSelect<GitHubReferenceKind>
-                  ariaLabel={t('skills.githubReferenceType')}
-                  className="skill-github-reference-select"
-                  onChange={(referenceKind) =>
-                    workflow.updateGitHubForm({
-                      referenceKind,
-                      referenceValue: ''
-                    })
-                  }
-                  options={[
-                    { label: t('skills.githubDefaultBranch'), value: 'defaultBranch' },
-                    { label: t('skills.githubNamedReference'), value: 'named' },
-                    { label: t('skills.githubCommit'), value: 'commit' }
-                  ]}
-                  value={state.form.referenceKind}
-                />
-              </div>
-              {state.form.referenceKind !== 'defaultBranch' && (
-                <label>
-                  <span>{t('skills.githubReferenceValue')}</span>
-                  <input
-                    aria-invalid={state.fieldError === 'reference' || undefined}
-                    onChange={(event) =>
-                      workflow.updateGitHubForm({ referenceValue: event.target.value })
-                    }
-                    placeholder={
-                      state.form.referenceKind === 'commit'
-                        ? t('skills.githubCommitPlaceholder')
-                        : t('skills.githubNamedReferencePlaceholder')
-                    }
-                    value={state.form.referenceValue}
-                  />
-                  {state.fieldError === 'reference' && (
-                    <small className="skill-form-error">{t('skills.invalidGitHubReference')}</small>
-                  )}
+              <div className="skill-url-form__field">
+                <label className="sr-only" htmlFor={githubUrlInputId}>
+                  {t('skills.githubUrl')}
                 </label>
-              )}
-              <label>
-                <span>{t('skills.githubSubdirectory')}</span>
+                <small className="skill-url-form__hint" id={githubUrlHintId}>
+                  {t('skills.githubUrlDescription')}
+                </small>
                 <input
-                  onChange={(event) =>
-                    workflow.updateGitHubForm({ subdirectory: event.target.value })
-                  }
-                  placeholder={t('skills.githubSubdirectoryPlaceholder')}
-                  value={state.form.subdirectory}
+                  aria-describedby={githubUrlHintId}
+                  aria-invalid={state.fieldError || undefined}
+                  autoFocus
+                  id={githubUrlInputId}
+                  onChange={(event) => workflow.updateUrl(event.target.value)}
+                  placeholder={t('skills.githubUrlPlaceholder')}
+                  type="url"
+                  value={state.url}
                 />
-              </label>
+                {state.fieldError && (
+                  <small className="skill-form-error">{t('skills.githubUrlRequired')}</small>
+                )}
+              </div>
               <DialogActions>
                 <button
                   className="skill-dialog-button"
-                  onClick={workflow.backToSource}
+                  onClick={workflow.returnToSourceChoice}
                   type="button"
                 >
                   {t('skills.back')}
                 </button>
                 <button className="skill-dialog-button skill-dialog-button--primary" type="submit">
-                  {t('skills.inspect')}
+                  {t('skills.continue')}
                 </button>
               </DialogActions>
             </form>
           )}
 
-          {state.status === 'inspecting' && (
-            <div className="skill-dialog-progress" role="status">
-              <LoaderCircle aria-hidden="true" />
-              <span>{t('skills.inspecting')}</span>
-            </div>
+          {state.status === 'resolving' && <Progress label={t('skills.resolvingSource')} />}
+
+          {state.status === 'candidates' && (
+            <SkillCandidateSelection
+              candidates={state.output.candidates}
+              expired={now >= state.output.expiresAtUnixMs}
+              onBack={workflow.returnToPreviousStep}
+              onChoose={(candidate) => void workflow.chooseCandidate(candidate)}
+            />
           )}
+
+          {state.status === 'inspecting' && <Progress label={t('skills.inspecting')} />}
 
           {(state.status === 'preview' || state.status === 'committing') && (
             <SkillPreview
@@ -232,7 +193,7 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
               errorMessage={state.status === 'preview' ? state.errorMessage : null}
               now={now}
               operationLabel={operationLabel}
-              onBack={workflow.backToSource}
+              onBack={workflow.returnToPreviousStep}
               onCommit={() => void workflow.commit()}
               onToggleAcknowledgement={workflow.toggleAcknowledgement}
               preview={state.preview}
@@ -240,38 +201,120 @@ export function SkillInstallationDialog({ workflow }: SkillInstallationDialogPro
           )}
 
           {state.status === 'error' && (
-            <div className="skill-dialog-error" role="alert">
-              <AlertTriangle aria-hidden="true" />
-              <div>
-                <strong>
-                  {state.expired ? t('skills.previewExpiredTitle') : t('skills.operationFailed')}
-                </strong>
-                <p>{state.expired ? t('skills.previewExpiredDescription') : state.message}</p>
-              </div>
-              <DialogActions>
-                <button className="skill-dialog-button" onClick={workflow.close} type="button">
-                  {t('skills.cancel')}
-                </button>
-                <button
-                  className="skill-dialog-button skill-dialog-button--primary"
-                  onClick={
-                    state.retry ? () => void workflow.retryInspection() : workflow.backToSource
-                  }
-                  type="button"
-                >
-                  {state.retry
-                    ? state.expired
-                      ? t('skills.inspectAgain')
-                      : t('skills.retryInspection')
-                    : t('skills.chooseSourceAgain')}
-                </button>
-              </DialogActions>
-            </div>
+            <SkillWorkflowError
+              message={state.message}
+              onCancel={workflow.close}
+              onRecover={() => void workflow.recover()}
+              recovery={state.details.recovery}
+            />
           )}
         </div>
       </section>
     </div>,
     document.body
+  )
+}
+
+function SkillSourceChoice({
+  localError,
+  onChooseGitHub,
+  onChooseLocal
+}: {
+  localError: boolean
+  onChooseGitHub: () => void
+  onChooseLocal: () => void
+}) {
+  const { t } = useFrontendConfig()
+  return (
+    <div className="skill-source-choice">
+      <div className="skill-source-choice__list">
+        <button className="skill-source-choice__option" onClick={onChooseGitHub} type="button">
+          <span className="skill-source-choice__icon">
+            <GitFork aria-hidden="true" />
+          </span>
+          <span className="skill-source-choice__copy">
+            <strong>{t('skills.installFromGitHub')}</strong>
+            <small>{t('skills.installFromGitHubDescription')}</small>
+          </span>
+          <ChevronRight aria-hidden="true" className="skill-source-choice__chevron" />
+        </button>
+        <button className="skill-source-choice__option" onClick={onChooseLocal} type="button">
+          <span className="skill-source-choice__icon">
+            <FolderOpen aria-hidden="true" />
+          </span>
+          <span className="skill-source-choice__copy">
+            <strong>{t('skills.installLocal')}</strong>
+            <small>{t('skills.installLocalDescription')}</small>
+          </span>
+          <ChevronRight aria-hidden="true" className="skill-source-choice__chevron" />
+        </button>
+      </div>
+      {localError && (
+        <p className="skill-form-error" role="alert">
+          {t('skills.localSelectionFailed')}
+        </p>
+      )}
+    </div>
+  )
+}
+
+function SkillCandidateSelection({
+  candidates,
+  expired,
+  onBack,
+  onChoose
+}: {
+  candidates: readonly SkillSourceResolutionCandidate[]
+  expired: boolean
+  onBack: () => void
+  onChoose: (candidate: SkillSourceResolutionCandidate) => void
+}) {
+  const { t } = useFrontendConfig()
+  return (
+    <div className="skill-candidate-selection">
+      <div>
+        <h3>{t('skills.chooseCandidateTitle')}</h3>
+        <p>{t('skills.chooseCandidateDescription')}</p>
+      </div>
+      <div className="skill-candidate-list">
+        {candidates.map((candidate) => (
+          <button
+            aria-label={replaceTokens(t('skills.chooseCandidateNamed'), {
+              name: candidate.package.name
+            })}
+            className="skill-candidate-card"
+            disabled={expired}
+            key={candidate.candidateId}
+            onClick={() => onChoose(candidate)}
+            type="button"
+          >
+            <span className="skill-candidate-card__identity">
+              <strong>{candidate.package.name}</strong>
+              <small>{candidate.package.description}</small>
+            </span>
+            <span className="skill-candidate-card__source">
+              {formatResolvedSource(candidate, t)}
+            </span>
+            <span className="skill-candidate-card__facts">
+              {replaceTokens(t('skills.candidateFacts'), {
+                count: candidate.package.fileCount,
+                size: formatBytes(candidate.package.totalBytes)
+              })}
+            </span>
+          </button>
+        ))}
+      </div>
+      {expired && (
+        <p className="skill-preview-expired" role="alert">
+          {t('skills.candidateExpired')}
+        </p>
+      )}
+      <DialogActions>
+        <button className="skill-dialog-button" onClick={onBack} type="button">
+          {expired ? t('skills.resolveAgain') : t('skills.back')}
+        </button>
+      </DialogActions>
+    </div>
   )
 }
 
@@ -404,8 +447,92 @@ function SkillPreview({
   )
 }
 
-function DialogActions({ children }: { children: ReactNode }) {
-  return <div className="skill-install-dialog__actions">{children}</div>
+function SkillWorkflowError({
+  message,
+  onCancel,
+  onRecover,
+  recovery
+}: {
+  message: string | null
+  onCancel: () => void
+  onRecover: () => void
+  recovery?: string
+}) {
+  const { t } = useFrontendConfig()
+  const isCapacity = recovery === 'freeCapacity'
+  const isSupport = recovery === 'contactSupport'
+  const canRecover = Boolean(recovery && !isCapacity && !isSupport)
+  const description = isCapacity
+    ? t('skills.freeCapacityDescription')
+    : isSupport
+      ? t('skills.contactSupportDescription')
+      : (message ?? t('skills.localOperationFailed'))
+
+  return (
+    <div className="skill-dialog-error" role="alert">
+      <AlertTriangle aria-hidden="true" />
+      <div>
+        <strong>
+          {isCapacity
+            ? t('skills.capacityTitle')
+            : isSupport
+              ? t('skills.contactSupportTitle')
+              : t('skills.operationFailed')}
+        </strong>
+        <p>{description}</p>
+      </div>
+      <DialogActions>
+        <button className="skill-dialog-button" onClick={onCancel} type="button">
+          {t('skills.cancel')}
+        </button>
+        {canRecover && (
+          <button
+            className="skill-dialog-button skill-dialog-button--primary"
+            onClick={onRecover}
+            type="button"
+          >
+            {recoveryLabel(recovery ?? '', t)}
+          </button>
+        )}
+      </DialogActions>
+    </div>
+  )
+}
+
+function Progress({ label }: { label: string }) {
+  return (
+    <div className="skill-dialog-progress" role="status">
+      <LoaderCircle aria-hidden="true" />
+      <span>{label}</span>
+    </div>
+  )
+}
+
+function DialogActions({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return <div className={`skill-install-dialog__actions ${className}`.trim()}>{children}</div>
+}
+
+function getDialogContext(state: Exclude<SkillInstallationWorkflowState, { status: 'idle' }>) {
+  if (state.status === 'inspecting') return state.inspection.context
+  if (state.status === 'preview' || state.status === 'committing') return state.inspection.context
+  return state.context
+}
+
+function getDialogDescription(
+  state: Exclude<SkillInstallationWorkflowState, { status: 'idle' }>,
+  t: ReturnType<typeof useFrontendConfig>['t']
+): string | null {
+  if (state.status === 'choosingSource') return t('skills.installSourceDescription')
+  if (
+    state.status === 'urlInput' ||
+    state.status === 'resolving' ||
+    state.status === 'candidates'
+  ) {
+    return null
+  }
+  return getDialogContext(state).operation === 'update'
+    ? t('skills.updateDialogDescription')
+    : t('skills.installReviewDescription')
 }
 
 function formatPreviewSource(
@@ -413,9 +540,18 @@ function formatPreviewSource(
   t: ReturnType<typeof useFrontendConfig>['t']
 ): string {
   const source = preview.source
-  if (source.kind === 'localDirectory' || source.kind === 'installedSource') {
-    return source.displayName
-  }
+  if (source.kind === 'localDirectory') return t('skills.previewLocalSource')
+  if (source.kind === 'installedSource') return source.displayName
+  return `${source.owner}/${source.repository} · ${formatGitHubReference(source.reference, t)}${
+    source.subdirectory ? ` · ${source.subdirectory}` : ''
+  }`
+}
+
+function formatResolvedSource(
+  candidate: SkillSourceResolutionCandidate,
+  t: ReturnType<typeof useFrontendConfig>['t']
+): string {
+  const source = candidate.source
   return `${source.owner}/${source.repository} · ${formatGitHubReference(source.reference, t)}${
     source.subdirectory ? ` · ${source.subdirectory}` : ''
   }`
@@ -426,8 +562,29 @@ function formatGitHubReference(
   t: ReturnType<typeof useFrontendConfig>['t']
 ): string {
   if (reference.kind === 'defaultBranch') return t('skills.githubDefaultBranch')
-  if (reference.kind === 'commit') return reference.sha
+  if (reference.kind === 'commit') return reference.sha.slice(0, 12)
   return reference.value
+}
+
+function recoveryLabel(recovery: string, t: ReturnType<typeof useFrontendConfig>['t']): string {
+  if (recovery === 'refreshManagement') return t('skills.refresh')
+  if (
+    recovery === 'startNewResolution' ||
+    recovery === 'resolveAgain' ||
+    recovery === 'inspectAgain' ||
+    recovery === 'newInstallationIdentity'
+  ) {
+    return t('skills.inspectAgain')
+  }
+  if (
+    recovery === 'fixLocator' ||
+    recovery === 'narrowLocator' ||
+    recovery === 'chooseDifferentSource' ||
+    recovery === 'fixSource'
+  ) {
+    return t('skills.editUrl')
+  }
+  return t('skills.retry')
 }
 
 function formatBytes(bytes: number): string {
@@ -447,7 +604,7 @@ function getFocusableElements(container: HTMLElement | null): HTMLElement[] {
   if (!container) return []
   return Array.from(
     container.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
     )
   )
 }

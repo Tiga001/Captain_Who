@@ -5,10 +5,14 @@ import type {
   SkillInstallationPreview,
   SkillMutationOutput,
   SkillPreparationCancellationOutput,
+  SkillsCancelSourceResolutionInput,
+  SkillsCancelSourceResolutionOutput,
   SkillsCancelPreparationInput,
   SkillsCommitInstallationInput,
   SkillsInspectInstallationInput,
   SkillsListManagementOutput,
+  SkillsResolveInstallationSourceInput,
+  SkillsResolveInstallationSourceOutput,
   SkillsSetEnabledInput,
   SkillsSetEnabledOutput,
   SkillsUninstallInput
@@ -23,6 +27,22 @@ export async function listManagedSkills(): Promise<SkillsListManagementOutput> {
 
 export function selectSkillInstallationDirectory(): Promise<string | null> {
   return hostClient.skills.selectInstallationDirectory()
+}
+
+export async function resolveSkillInstallationSource(
+  input: SkillsResolveInstallationSourceInput
+): Promise<SkillsResolveInstallationSourceOutput> {
+  const result = await hostClient.skills.resolveInstallationSource(input)
+  if (!result.ok) throw new HostInvocationError(result.error)
+  return result.value
+}
+
+export async function cancelSkillSourceResolution(
+  input: SkillsCancelSourceResolutionInput
+): Promise<SkillsCancelSourceResolutionOutput> {
+  const result = await hostClient.skills.cancelSourceResolution(input)
+  if (!result.ok) throw new HostInvocationError(result.error)
+  return result.value
 }
 
 export async function inspectSkillInstallation(

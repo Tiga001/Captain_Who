@@ -1,6 +1,6 @@
 // Renderer settings page: manages globally bundled and installed Agent Skills through Host API.
 import { AlertTriangle, LoaderCircle, RefreshCw, WandSparkles } from 'lucide-react'
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { SkillManagementEntry } from '@mycopilot/protocol'
 import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useToast } from '../../../components/toast/ToastContext'
@@ -9,7 +9,8 @@ import { SkillInstallationDialog } from '../../skills/management/SkillInstallati
 import { SkillManagementList } from '../../skills/management/SkillManagementList'
 import {
   getSkillOperationErrorDetails,
-  shouldRefreshSkillsAfterError
+  shouldRefreshSkillsAfterError,
+  type SkillOperationErrorDetails
 } from '../../skills/management/skillManagementErrors'
 import { useSkillInstallationWorkflow } from '../../skills/management/useSkillInstallationWorkflow'
 import { useSkillManagement } from '../../skills/management/useSkillManagement'
@@ -24,14 +25,34 @@ export function SkillsSettingsPage() {
   const handleCommitted = useCallback(async () => {
     await refresh()
   }, [refresh])
-  const handleCommitMayHaveSucceeded = useCallback(async () => {
-    await refresh()
-    showToast(t('skills.operationNeedsConfirmation'), { durationMs: 3200 })
-  }, [refresh, showToast, t])
+  const handleCommitIndeterminate = useCallback(
+    async (details: SkillOperationErrorDetails) => {
+      const output = await refresh()
+      const confirmed = Boolean(
+        details.skillId &&
+        details.intendedInstallationRevision &&
+        output?.skills.some(
+          (entry) =>
+            entry.id === details.skillId &&
+            entry.installationRevision === details.intendedInstallationRevision
+        )
+      )
+      showToast(
+        confirmed ? t('skills.commitConfirmedByInventory') : t('skills.operationNeedsConfirmation'),
+        { durationMs: 3200 }
+      )
+    },
+    [refresh, showToast, t]
+  )
   const installation = useSkillInstallationWorkflow({
-    onCommitMayHaveSucceeded: handleCommitMayHaveSucceeded,
-    onCommitted: handleCommitted
+    onCommitIndeterminate: handleCommitIndeterminate,
+    onCommitted: handleCommitted,
+    onRefreshManagement: handleCommitted
   })
+  const visiblePendingOperations = useMemo(() => {
+    if (!installation.activeUpdateSkillId) return pendingOperations
+    return new Map(pendingOperations).set(installation.activeUpdateSkillId, 'update' as const)
+  }, [installation.activeUpdateSkillId, pendingOperations])
 
   const changeEnabled = async (entry: SkillManagementEntry, enabled: boolean) => {
     try {
@@ -79,7 +100,11 @@ export function SkillsSettingsPage() {
           <h1>{t('settings.page.skills')}</h1>
           <p className="settings-list-page__description">{t('skills.pageDescription')}</p>
         </div>
-        <button className="skills-install-button" onClick={installation.startInstall} type="button">
+        <button
+          className="skills-install-button"
+          onClick={(event) => installation.startInstall(event.currentTarget)}
+          type="button"
+        >
           <WandSparkles aria-hidden="true" />
           <span>{t('skills.install')}</span>
         </button>
@@ -146,15 +171,15 @@ export function SkillsSettingsPage() {
               entries={output.skills}
               onSetEnabled={(entry, enabled) => void changeEnabled(entry, enabled)}
               onUninstall={setPendingUninstall}
-              onUpdate={(entry) => {
+              onUpdate={(entry, trigger) => {
                 if (!entry.installationRevision) {
                   showToast(t('skills.protocolStateIncomplete'))
                   void refresh()
                   return
                 }
-                installation.startUpdate(entry)
+                installation.startUpdate(entry, trigger)
               }}
-              pendingOperations={pendingOperations}
+              pendingOperations={visiblePendingOperations}
             />
           )}
         </>

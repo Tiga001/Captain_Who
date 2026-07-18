@@ -1,14 +1,18 @@
 // Renderer skills management errors: tolerantly classifies structured protocol failures for UI.
 import { HostInvocationError } from '@mycopilot/host-api'
 
-export type SkillOperationErrorKind = 'inspection' | 'management' | 'installation' | 'unknown'
+export type SkillOperationErrorKind =
+  'sourceResolution' | 'inspection' | 'management' | 'installation' | 'unknown'
 
 export interface SkillOperationErrorDetails {
   code?: string
   commitMayHaveSucceeded: boolean
   kind: SkillOperationErrorKind
   message: string
+  phase?: string
   recovery?: string
+  intendedInstallationRevision?: string
+  skillId?: string
 }
 
 export function getSkillOperationErrorDetails(error: unknown): SkillOperationErrorDetails {
@@ -22,33 +26,35 @@ export function getSkillOperationErrorDetails(error: unknown): SkillOperationErr
   const recovery = typeof data.recovery === 'string' ? data.recovery : undefined
   const structuredMessage = typeof data.message === 'string' ? data.message : message
   const commitMayHaveSucceeded = data.commitMayHaveSucceeded === true
+  const phase = typeof data.phase === 'string' ? data.phase : undefined
+  const skillId = typeof data.skillId === 'string' ? data.skillId : undefined
+  const intendedInstallationRevision =
+    typeof data.intendedInstallationRevision === 'string'
+      ? data.intendedInstallationRevision
+      : undefined
+
+  const shared = {
+    code,
+    commitMayHaveSucceeded,
+    intendedInstallationRevision,
+    message: structuredMessage,
+    phase,
+    recovery,
+    skillId
+  }
+
+  if (data.type === 'skillSourceResolution') {
+    return { ...shared, kind: 'sourceResolution' }
+  }
 
   if (data.type === 'skillInspection') {
-    return {
-      code,
-      commitMayHaveSucceeded,
-      kind: 'inspection',
-      message: structuredMessage,
-      recovery
-    }
+    return { ...shared, kind: 'inspection' }
   }
   if (data.type === 'skillManagement') {
-    return {
-      code,
-      commitMayHaveSucceeded,
-      kind: 'management',
-      message: structuredMessage,
-      recovery
-    }
+    return { ...shared, kind: 'management' }
   }
   if (data.type === 'skillInstallation') {
-    return {
-      code,
-      commitMayHaveSucceeded,
-      kind: 'installation',
-      message: structuredMessage,
-      recovery
-    }
+    return { ...shared, kind: 'installation' }
   }
 
   return { commitMayHaveSucceeded, kind: 'unknown', message }

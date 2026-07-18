@@ -1,358 +1,659 @@
-// Renderer skills installation state machine: owns source selection, frozen preview, and commit.
+// Renderer skills installation state machine: preserves backend resolution and preview authority.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
-  SkillAcquisitionSource,
   SkillInstallationCommitOutput,
   SkillInstallationPreview,
-  SkillManagementEntry
+  SkillManagementEntry,
+  SkillSourceResolutionCandidate,
+  SkillsCommitInstallationInput,
+  SkillsInspectInstallationInput,
+  SkillsResolveInstallationSourceOutput
 } from '@mycopilot/protocol'
 import {
-  EMPTY_GITHUB_INSTALLATION_FORM,
-  parseGitHubInstallationSource,
-  type GitHubInstallationFormValue
-} from './skillInstallationSource'
-import { getSkillOperationErrorDetails, isExpiredSkillPreviewError } from './skillManagementErrors'
+  getSkillOperationErrorDetails,
+  type SkillOperationErrorDetails
+} from './skillManagementErrors'
 import {
   cancelSkillPreparation,
+  cancelSkillSourceResolution,
   commitSkillInstallation,
   inspectSkillInstallation,
+  resolveSkillInstallationSource,
   selectSkillInstallationDirectory
 } from './skillsManagementClient'
 
 export type SkillInstallationContext =
   { operation: 'install' } | { operation: 'update'; entry: SkillManagementEntry }
 
+interface ResolutionTransaction {
+  frozenUrl: string
+  resolutionId: string
+}
+
+type InspectionOrigin =
+  ({ kind: 'url' } & ResolutionTransaction) | { kind: 'local' } | { kind: 'installedSource' }
+
+interface InspectionTransaction {
+  context: SkillInstallationContext
+  input: SkillsInspectInstallationInput
+  origin: InspectionOrigin
+}
+
+interface PreviewSession {
+  acceptedIssueIds: readonly string[]
+  errorMessage: string | null
+  inspection: InspectionTransaction
+  preview: SkillInstallationPreview
+}
+
+interface WorkflowErrorState {
+  context: SkillInstallationContext
+  details: SkillOperationErrorDetails
+  inspection?: InspectionTransaction
+  message: string | null
+  phase: 'resolve' | 'inspect' | 'commit'
+  previewSession?: PreviewSession
+  resolution?: ResolutionTransaction
+  status: 'error'
+}
+
 export type SkillInstallationWorkflowState =
   | { status: 'idle' }
-  | { context: SkillInstallationContext; status: 'choosingSource' }
   | {
-      context: SkillInstallationContext
-      fieldError: 'repository' | 'reference' | null
-      form: GitHubInstallationFormValue
-      status: 'githubSource'
+      context: Extract<SkillInstallationContext, { operation: 'install' }>
+      localError: boolean
+      status: 'choosingSource'
     }
   | {
-      context: SkillInstallationContext
-      preparationId: string
-      source: SkillAcquisitionSource
-      status: 'inspecting'
+      context: Extract<SkillInstallationContext, { operation: 'install' }>
+      fieldError: boolean
+      status: 'urlInput'
+      url: string
     }
   | {
-      acceptedIssueIds: readonly string[]
-      acquisitionSource: SkillAcquisitionSource
-      context: SkillInstallationContext
-      errorMessage: string | null
-      preview: SkillInstallationPreview
-      status: 'preview'
+      context: Extract<SkillInstallationContext, { operation: 'install' }>
+      resolution: ResolutionTransaction
+      status: 'resolving'
     }
   | {
-      acceptedIssueIds: readonly string[]
-      acquisitionSource: SkillAcquisitionSource
-      context: SkillInstallationContext
-      preview: SkillInstallationPreview
-      status: 'committing'
+      context: Extract<SkillInstallationContext, { operation: 'install' }>
+      output: SkillsResolveInstallationSourceOutput
+      resolution: ResolutionTransaction
+      status: 'candidates'
     }
-  | {
-      context: SkillInstallationContext
-      expired: boolean
-      message: string
-      preparationId?: string
-      retry?: {
-        mode: 'samePreparation' | 'newPreparation'
-        source: SkillAcquisitionSource
-      }
-      status: 'error'
-    }
+  | { inspection: InspectionTransaction; status: 'inspecting' }
+  | ({ status: 'preview' } & PreviewSession)
+  | ({ status: 'committing' } & PreviewSession)
+  | WorkflowErrorState
 
 interface UseSkillInstallationWorkflowOptions {
   onCommitted: (output: SkillInstallationCommitOutput) => void | Promise<void>
-  onCommitMayHaveSucceeded: () => void | Promise<void>
+  onCommitIndeterminate: (details: SkillOperationErrorDetails) => void | Promise<void>
+  onRefreshManagement: () => void | Promise<void>
 }
 
 const IDLE_STATE: SkillInstallationWorkflowState = { status: 'idle' }
 
 export function useSkillInstallationWorkflow({
   onCommitted,
-  onCommitMayHaveSucceeded
+  onCommitIndeterminate,
+  onRefreshManagement
 }: UseSkillInstallationWorkflowOptions) {
   const [state, setState] = useState<SkillInstallationWorkflowState>(IDLE_STATE)
-  const stateRef = useRef(state)
+  const stateRef = useRef<SkillInstallationWorkflowState>(IDLE_STATE)
   const mountedRef = useRef(true)
-  const operationSequenceRef = useRef(0)
+  const operationEpochRef = useRef(0)
+  const returnFocusRef = useRef<HTMLElement | null>(null)
 
-  useEffect(() => {
-    stateRef.current = state
-  }, [state])
+  const publish = useCallback((next: SkillInstallationWorkflowState) => {
+    stateRef.current = next
+    if (mountedRef.current) setState(next)
+  }, [])
+
+  const restoreTriggerFocus = useCallback(() => {
+    const target = returnFocusRef.current
+    returnFocusRef.current = null
+    if (!target?.isConnected) return
+    window.requestAnimationFrame(() => target.focus({ preventScroll: true }))
+  }, [])
 
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
-      operationSequenceRef.current += 1
-      const preparationId = getPreparationId(stateRef.current)
-      if (preparationId) cancelPreparationBestEffort(preparationId)
+      operationEpochRef.current += 1
+      releaseStateAuthorities(stateRef.current)
     }
   }, [])
 
-  const startInstall = useCallback(() => {
-    operationSequenceRef.current += 1
-    setState({ context: { operation: 'install' }, status: 'choosingSource' })
-  }, [])
-
-  const startUpdate = useCallback((entry: SkillManagementEntry) => {
-    operationSequenceRef.current += 1
-    setState({ context: { entry, operation: 'update' }, status: 'choosingSource' })
-  }, [])
-
-  const inspectSource = useCallback(
-    async (
-      context: SkillInstallationContext,
-      source: SkillAcquisitionSource,
-      preparationId: string = crypto.randomUUID()
-    ) => {
-      const operationSequence = operationSequenceRef.current + 1
-      operationSequenceRef.current = operationSequence
-      setState({ context, preparationId, source, status: 'inspecting' })
+  const inspect = useCallback(
+    async (inspection: InspectionTransaction) => {
+      const epoch = ++operationEpochRef.current
+      publish({ inspection, status: 'inspecting' })
 
       try {
-        const preview = await inspectSkillInstallation({
-          preparationId,
-          intent:
-            context.operation === 'install'
-              ? { operation: 'install' }
-              : {
-                  operation: 'update',
-                  skillId: context.entry.id,
-                  expectedInstallationRevision: requireInstallationRevision(context.entry)
-                },
-          source
-        })
-        if (!mountedRef.current || operationSequenceRef.current !== operationSequence) {
-          cancelPreparationBestEffort(preparationId)
+        const preview = await inspectSkillInstallation(inspection.input)
+        if (!mountedRef.current || operationEpochRef.current !== epoch) {
+          cancelPreparationBestEffort(inspection.input.preparationId)
           return
         }
-        setState({
+        publish({
           acceptedIssueIds: [],
-          acquisitionSource: source,
-          context,
           errorMessage: null,
+          inspection,
           preview,
           status: 'preview'
         })
       } catch (error) {
-        if (!mountedRef.current || operationSequenceRef.current !== operationSequence) return
+        if (!mountedRef.current || operationEpochRef.current !== epoch) return
         const details = getSkillOperationErrorDetails(error)
-        const expired = isExpiredSkillPreviewError(details)
-        const retrySamePreparation =
-          details.recovery === 'retrySamePreparation' || details.recovery === 'retryLater'
-        setState({
-          context,
-          expired,
-          message: details.message,
-          preparationId,
-          ...(retrySamePreparation || expired
-            ? {
-                retry: {
-                  mode: retrySamePreparation
-                    ? ('samePreparation' as const)
-                    : ('newPreparation' as const),
-                  source
-                }
-              }
-            : {}),
+        publish({
+          context: inspection.context,
+          details,
+          inspection,
+          message: publicErrorMessage(inspection.origin, details.message),
+          phase: 'inspect',
           status: 'error'
         })
       }
     },
-    []
+    [publish]
+  )
+
+  const resolveUrl = useCallback(
+    async (
+      context: Extract<SkillInstallationContext, { operation: 'install' }>,
+      resolution: ResolutionTransaction
+    ) => {
+      const epoch = ++operationEpochRef.current
+      publish({ context, resolution, status: 'resolving' })
+
+      try {
+        const output = await resolveSkillInstallationSource({
+          locator: { kind: 'url', url: resolution.frozenUrl },
+          resolutionId: resolution.resolutionId
+        })
+        if (!mountedRef.current || operationEpochRef.current !== epoch) {
+          cancelResolutionBestEffort(resolution.resolutionId)
+          return
+        }
+        if (output.outcome === 'resolved') {
+          const candidate = output.candidates[0]
+          await inspect({
+            context,
+            input: {
+              intent: { operation: 'install' },
+              preparationId: crypto.randomUUID(),
+              // The candidate authority is opaque and one-time. Never rebuild it from source.
+              source: candidate.acquisition
+            },
+            origin: { ...resolution, kind: 'url' }
+          })
+          return
+        }
+        publish({ context, output, resolution, status: 'candidates' })
+      } catch (error) {
+        if (!mountedRef.current || operationEpochRef.current !== epoch) return
+        const details = getSkillOperationErrorDetails(error)
+        publish({
+          context,
+          details,
+          message: details.message,
+          phase: 'resolve',
+          resolution,
+          status: 'error'
+        })
+      }
+    },
+    [inspect, publish]
+  )
+
+  const startInstall = useCallback(
+    (trigger?: HTMLElement) => {
+      returnFocusRef.current =
+        trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+      operationEpochRef.current += 1
+      releaseStateAuthorities(stateRef.current)
+      publish({
+        context: { operation: 'install' },
+        localError: false,
+        status: 'choosingSource'
+      })
+    },
+    [publish]
+  )
+
+  const startUpdate = useCallback(
+    (entry: SkillManagementEntry, trigger?: HTMLElement) => {
+      if (!entry.installationRevision) return
+      returnFocusRef.current =
+        trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+      operationEpochRef.current += 1
+      releaseStateAuthorities(stateRef.current)
+      const context: SkillInstallationContext = { entry, operation: 'update' }
+      void inspect({
+        context,
+        input: {
+          intent: {
+            expectedInstallationRevision: entry.installationRevision,
+            operation: 'update',
+            skillId: entry.id
+          },
+          preparationId: crypto.randomUUID(),
+          source: { kind: 'installedSource' }
+        },
+        origin: { kind: 'installedSource' }
+      })
+    },
+    [inspect]
+  )
+
+  const chooseGitHubSource = useCallback(() => {
+    const current = stateRef.current
+    if (current.status !== 'choosingSource') return
+    publish({
+      context: current.context,
+      fieldError: false,
+      status: 'urlInput',
+      url: ''
+    })
+  }, [publish])
+
+  const updateUrl = useCallback(
+    (url: string) => {
+    const current = stateRef.current
+    if (current.status !== 'urlInput') return
+    publish({ ...current, fieldError: false, url })
+    },
+    [publish]
+  )
+
+  const submitUrl = useCallback(async () => {
+    const current = stateRef.current
+    if (current.status !== 'urlInput') return
+    const frozenUrl = current.url.trim()
+    if (!frozenUrl) {
+      publish({ ...current, fieldError: true })
+      return
+    }
+    await resolveUrl(current.context, {
+      frozenUrl,
+      resolutionId: crypto.randomUUID()
+    })
+  }, [publish, resolveUrl])
+
+  const chooseCandidate = useCallback(
+    async (candidate: SkillSourceResolutionCandidate) => {
+      const current = stateRef.current
+      if (current.status !== 'candidates') return
+      await inspect({
+        context: current.context,
+        input: {
+          intent: { operation: 'install' },
+          preparationId: crypto.randomUUID(),
+          // candidateId and resolutionId remain opaque; acquisition crosses the boundary intact.
+          source: candidate.acquisition
+        },
+        origin: { ...current.resolution, kind: 'url' }
+      })
+    },
+    [inspect]
   )
 
   const chooseLocalDirectory = useCallback(async () => {
     const current = stateRef.current
     if (current.status !== 'choosingSource') return
+    const pickerEpoch = ++operationEpochRef.current
     try {
       const directory = await selectSkillInstallationDirectory()
-      if (!directory || !mountedRef.current || stateRef.current !== current) return
-      await inspectSource(current.context, { directory, kind: 'localDirectory' })
-    } catch (error) {
-      if (!mountedRef.current || stateRef.current !== current) return
-      setState({
+      if (!mountedRef.current || operationEpochRef.current !== pickerEpoch || !directory) return
+      await inspect({
         context: current.context,
-        expired: false,
-        message: getSkillOperationErrorDetails(error).message,
-        status: 'error'
+        input: {
+          intent: { operation: 'install' },
+          preparationId: crypto.randomUUID(),
+          source: { directory, kind: 'localDirectory' }
+        },
+        origin: { kind: 'local' }
       })
+    } catch {
+      if (!mountedRef.current || operationEpochRef.current !== pickerEpoch) return
+      // Native paths are intentionally excluded from UI errors and logs.
+      publish({ ...current, localError: true })
     }
-  }, [inspectSource])
+  }, [inspect, publish])
 
-  const chooseGitHub = useCallback(() => {
-    const current = stateRef.current
-    if (current.status !== 'choosingSource') return
-    setState({
-      context: current.context,
-      fieldError: null,
-      form: EMPTY_GITHUB_INSTALLATION_FORM,
-      status: 'githubSource'
-    })
-  }, [])
-
-  const updateGitHubForm = useCallback((patch: Partial<GitHubInstallationFormValue>) => {
-    setState((current) =>
-      current.status === 'githubSource'
-        ? { ...current, fieldError: null, form: { ...current.form, ...patch } }
-        : current
-    )
-  }, [])
-
-  const inspectGitHub = useCallback(async () => {
-    const current = stateRef.current
-    if (current.status !== 'githubSource') return
-    const parsed = parseGitHubInstallationSource(current.form)
-    if (!parsed.ok) {
-      setState({ ...current, fieldError: parsed.field })
-      return
-    }
-    await inspectSource(current.context, parsed.source)
-  }, [inspectSource])
-
-  const toggleAcknowledgement = useCallback((issueId: string) => {
-    setState((current) => {
-      if (current.status !== 'preview') return current
+  const toggleAcknowledgement = useCallback(
+    (issueId: string) => {
+      const current = stateRef.current
+      if (current.status !== 'preview') return
       const accepted = new Set(current.acceptedIssueIds)
       if (accepted.has(issueId)) accepted.delete(issueId)
       else accepted.add(issueId)
-      return { ...current, acceptedIssueIds: [...accepted], errorMessage: null }
-    })
-  }, [])
+      publish({ ...current, acceptedIssueIds: [...accepted], errorMessage: null })
+    },
+    [publish]
+  )
+
+  const commitSession = useCallback(
+    async (session: PreviewSession) => {
+      const requiredIssueIds = session.preview.compatibility.issues
+        .filter((issue) => issue.requiresAcknowledgement)
+        .map((issue) => issue.id)
+      if (
+        Date.now() >= session.preview.expiresAtUnixMs ||
+        session.preview.compatibility.status === 'incompatible' ||
+        !requiredIssueIds.every((issueId) => session.acceptedIssueIds.includes(issueId))
+      ) {
+        return
+      }
+
+      const input: SkillsCommitInstallationInput = {
+        acceptedIssueIds: requiredIssueIds,
+        preparationId: session.preview.preparationId,
+        previewRevision: session.preview.previewRevision
+      }
+      const epoch = ++operationEpochRef.current
+      publish({ ...session, errorMessage: null, status: 'committing' })
+
+      try {
+        const output = await commitSkillInstallation(input)
+        if (!mountedRef.current || operationEpochRef.current !== epoch) return
+        publish(IDLE_STATE)
+        restoreTriggerFocus()
+        await onCommitted(output)
+      } catch (error) {
+        if (!mountedRef.current || operationEpochRef.current !== epoch) return
+        const details = getSkillOperationErrorDetails(error)
+        if (details.code === 'commitIndeterminate' || details.commitMayHaveSucceeded) {
+          // A commit may already be visible. Never replay it; authoritative inventory decides.
+          publish(IDLE_STATE)
+          restoreTriggerFocus()
+          await onCommitIndeterminate(details)
+          return
+        }
+        if (details.recovery === 'acknowledgeWarnings') {
+          publish({ ...session, errorMessage: details.message, status: 'preview' })
+          return
+        }
+        publish({
+          context: session.inspection.context,
+          details,
+          inspection: session.inspection,
+          message: publicErrorMessage(session.inspection.origin, details.message),
+          phase: 'commit',
+          previewSession: session,
+          status: 'error'
+        })
+      }
+    },
+    [onCommitIndeterminate, onCommitted, publish, restoreTriggerFocus]
+  )
 
   const commit = useCallback(async () => {
     const current = stateRef.current
     if (current.status !== 'preview') return
-    if (Date.now() >= current.preview.expiresAtUnixMs) {
-      setState({
-        context: current.context,
-        expired: true,
-        message: 'previewExpired',
-        preparationId: current.preview.preparationId,
-        retry: { mode: 'newPreparation', source: current.acquisitionSource },
-        status: 'error'
-      })
-      return
-    }
-    const requiredIssueIds = current.preview.compatibility.issues
-      .filter((issue) => issue.requiresAcknowledgement)
-      .map((issue) => issue.id)
-    if (!requiredIssueIds.every((issueId) => current.acceptedIssueIds.includes(issueId))) return
+    await commitSession(current)
+  }, [commitSession])
 
-    const operationSequence = operationSequenceRef.current + 1
-    operationSequenceRef.current = operationSequence
-    setState({ ...current, status: 'committing' })
-    let output: SkillInstallationCommitOutput
-    try {
-      output = await commitSkillInstallation({
-        acceptedIssueIds: [...current.acceptedIssueIds],
-        preparationId: current.preview.preparationId,
-        previewRevision: current.preview.previewRevision
-      })
-    } catch (error) {
-      if (!mountedRef.current || operationSequenceRef.current !== operationSequence) return
-      const details = getSkillOperationErrorDetails(error)
-      if (details.commitMayHaveSucceeded) {
-        // The preview may already have been consumed. Never offer the same commit again; refresh
-        // from authoritative server state and let the user confirm the resulting inventory.
-        setState(IDLE_STATE)
-        await onCommitMayHaveSucceeded()
-        return
-      }
-      if (isExpiredSkillPreviewError(details)) {
-        setState({
-          context: current.context,
-          expired: true,
-          message: details.message,
-          preparationId: current.preview.preparationId,
-          retry: { mode: 'newPreparation', source: current.acquisitionSource },
-          status: 'error'
-        })
-        return
-      }
-      setState({ ...current, errorMessage: details.message, status: 'preview' })
-      return
-    }
-
-    if (!mountedRef.current || operationSequenceRef.current !== operationSequence) return
-
-    // A successful commit consumes the frozen preview. Close it before refreshing the list so a
-    // UI refresh failure can never expose a stale preview that would invite a duplicate commit.
-    setState(IDLE_STATE)
-    await onCommitted(output)
-  }, [onCommitMayHaveSucceeded, onCommitted])
-
-  const backToSource = useCallback(() => {
+  const returnToPreviousStep = useCallback(() => {
     const current = stateRef.current
     if (current.status === 'idle' || current.status === 'committing') return
-    operationSequenceRef.current += 1
-    const preparationId = getPreparationId(current)
-    if (preparationId) cancelPreparationBestEffort(preparationId)
-    setState({ context: current.context, status: 'choosingSource' })
-  }, [])
-
-  const retryInspection = useCallback(async () => {
-    const current = stateRef.current
-    if (current.status !== 'error' || !current.retry || !current.preparationId) return
-    if (current.retry.mode === 'newPreparation') {
-      cancelPreparationBestEffort(current.preparationId)
+    const url = getFrozenUrl(current) ?? ''
+    operationEpochRef.current += 1
+    releaseStateAuthorities(current)
+    if (getContext(current).operation === 'update') {
+      publish(IDLE_STATE)
+      restoreTriggerFocus()
+      return
     }
-    await inspectSource(
-      current.context,
-      current.retry.source,
-      current.retry.mode === 'samePreparation' ? current.preparationId : undefined
-    )
-  }, [inspectSource])
+    if (!url) {
+      publish({
+        context: { operation: 'install' },
+        localError: false,
+        status: 'choosingSource'
+      })
+      return
+    }
+    publish({
+      context: { operation: 'install' },
+      fieldError: false,
+      status: 'urlInput',
+      url
+    })
+  }, [publish, restoreTriggerFocus])
+
+  const returnToSourceChoice = useCallback(() => {
+    const current = stateRef.current
+    if (current.status !== 'urlInput') return
+    operationEpochRef.current += 1
+    publish({
+      context: current.context,
+      localError: false,
+      status: 'choosingSource'
+    })
+  }, [publish])
+
+  const restartResolution = useCallback(
+    async (current: WorkflowErrorState) => {
+      const resolution = current.resolution ?? resolutionFromInspection(current.inspection)
+      if (!resolution || current.context.operation !== 'install') {
+        returnToPreviousStep()
+        return
+      }
+      operationEpochRef.current += 1
+      releaseStateAuthorities(current)
+      await resolveUrl(current.context, {
+        frozenUrl: resolution.frozenUrl,
+        resolutionId: crypto.randomUUID()
+      })
+    },
+    [resolveUrl, returnToPreviousStep]
+  )
+
+  const inspectAgain = useCallback(
+    async (current: WorkflowErrorState) => {
+      const inspection = current.inspection ?? current.previewSession?.inspection
+      if (!inspection) {
+        returnToPreviousStep()
+        return
+      }
+      if (inspection.origin.kind === 'url') {
+        await restartResolution(current)
+        return
+      }
+      operationEpochRef.current += 1
+      releaseStateAuthorities(current)
+      await inspect({
+        ...inspection,
+        input: { ...inspection.input, preparationId: crypto.randomUUID() }
+      })
+    },
+    [inspect, restartResolution, returnToPreviousStep]
+  )
+
+  const recover = useCallback(async () => {
+    const current = stateRef.current
+    if (current.status !== 'error') return
+    const recovery = current.details.recovery
+
+    if (
+      (recovery === 'retrySameResolution' || recovery === 'retryLater') &&
+      current.phase === 'resolve' &&
+      current.resolution &&
+      current.context.operation === 'install'
+    ) {
+      await resolveUrl(current.context, current.resolution)
+      return
+    }
+    if (
+      (recovery === 'retrySamePreparation' || recovery === 'retryLater') &&
+      current.phase === 'inspect' &&
+      current.inspection
+    ) {
+      await inspect(current.inspection)
+      return
+    }
+    if (
+      (recovery === 'retrySamePreparation' || recovery === 'retryLater') &&
+      current.phase === 'commit' &&
+      current.previewSession
+    ) {
+      await commitSession(current.previewSession)
+      return
+    }
+    if (recovery === 'startNewResolution' || recovery === 'resolveAgain') {
+      await restartResolution(current)
+      return
+    }
+    if (recovery === 'inspectAgain' || recovery === 'newInstallationIdentity') {
+      await inspectAgain(current)
+      return
+    }
+    if (recovery === 'refreshManagement') {
+      operationEpochRef.current += 1
+      releaseStateAuthorities(current)
+      publish(IDLE_STATE)
+      restoreTriggerFocus()
+      await onRefreshManagement()
+      return
+    }
+    if (recovery === 'acknowledgeWarnings' && current.previewSession) {
+      publish({ ...current.previewSession, errorMessage: current.message, status: 'preview' })
+      return
+    }
+    returnToPreviousStep()
+  }, [
+    commitSession,
+    inspect,
+    inspectAgain,
+    onRefreshManagement,
+    publish,
+    resolveUrl,
+    restartResolution,
+    restoreTriggerFocus,
+    returnToPreviousStep
+  ])
 
   const close = useCallback(() => {
     const current = stateRef.current
-    if (current.status === 'idle' || current.status === 'committing') {
-      return
-    }
-    operationSequenceRef.current += 1
-    const preparationId = getPreparationId(current)
-    if (preparationId) cancelPreparationBestEffort(preparationId)
-    setState(IDLE_STATE)
-  }, [])
+    if (current.status === 'idle' || current.status === 'committing') return
+    operationEpochRef.current += 1
+    releaseStateAuthorities(current)
+    publish(IDLE_STATE)
+    restoreTriggerFocus()
+  }, [publish, restoreTriggerFocus])
+
+  const activeUpdateSkillId = getActiveUpdateSkillId(state)
 
   return {
-    backToSource,
-    chooseGitHub,
+    activeUpdateSkillId,
+    chooseCandidate,
+    chooseGitHubSource,
     chooseLocalDirectory,
     close,
     commit,
-    inspectGitHub,
-    retryInspection,
+    recover,
+    returnToPreviousStep,
+    returnToSourceChoice,
     startInstall,
     startUpdate,
     state,
+    submitUrl,
     toggleAcknowledgement,
-    updateGitHubForm
+    updateUrl
   }
 }
 
-function requireInstallationRevision(entry: SkillManagementEntry): string {
-  if (!entry.installationRevision) {
-    throw new Error('Managed Skill is missing its installation revision')
-  }
-  return entry.installationRevision
+function getContext(state: Exclude<SkillInstallationWorkflowState, { status: 'idle' }>) {
+  if (state.status === 'inspecting') return state.inspection.context
+  if (state.status === 'preview' || state.status === 'committing') return state.inspection.context
+  return state.context
 }
 
-function getPreparationId(state: SkillInstallationWorkflowState): string | undefined {
-  if (state.status === 'inspecting' || state.status === 'error') return state.preparationId
+function getActiveUpdateSkillId(state: SkillInstallationWorkflowState): string | null {
+  if (
+    state.status === 'idle' ||
+    state.status === 'choosingSource' ||
+    state.status === 'urlInput' ||
+    state.status === 'resolving' ||
+    state.status === 'candidates'
+  ) {
+    return null
+  }
+  const context = getContext(state)
+  return context.operation === 'update' ? context.entry.id : null
+}
+
+function getFrozenUrl(state: SkillInstallationWorkflowState): string | undefined {
+  if (state.status === 'urlInput') return state.url
+  if (state.status === 'resolving' || state.status === 'candidates') {
+    return state.resolution.frozenUrl
+  }
+  if (state.status === 'inspecting') return resolutionFromInspection(state.inspection)?.frozenUrl
   if (state.status === 'preview' || state.status === 'committing') {
-    return state.preview.preparationId
+    return resolutionFromInspection(state.inspection)?.frozenUrl
+  }
+  if (state.status === 'error') {
+    return state.resolution?.frozenUrl ?? resolutionFromInspection(state.inspection)?.frozenUrl
   }
   return undefined
 }
 
+function resolutionFromInspection(
+  inspection: InspectionTransaction | undefined
+): ResolutionTransaction | undefined {
+  if (inspection?.origin.kind !== 'url') return undefined
+  return {
+    frozenUrl: inspection.origin.frozenUrl,
+    resolutionId: inspection.origin.resolutionId
+  }
+}
+
+function getResolutionId(state: SkillInstallationWorkflowState): string | undefined {
+  if (state.status === 'resolving' || state.status === 'candidates') {
+    return state.resolution.resolutionId
+  }
+  if (state.status === 'inspecting') return resolutionFromInspection(state.inspection)?.resolutionId
+  if (state.status === 'preview' || state.status === 'committing') {
+    return resolutionFromInspection(state.inspection)?.resolutionId
+  }
+  if (state.status === 'error') {
+    return (
+      state.resolution?.resolutionId ??
+      resolutionFromInspection(state.inspection)?.resolutionId ??
+      resolutionFromInspection(state.previewSession?.inspection)?.resolutionId
+    )
+  }
+  return undefined
+}
+
+function getPreparationId(state: SkillInstallationWorkflowState): string | undefined {
+  if (state.status === 'inspecting') return state.inspection.input.preparationId
+  if (state.status === 'preview' || state.status === 'committing') {
+    return state.preview.preparationId
+  }
+  if (state.status === 'error') {
+    return state.previewSession?.preview.preparationId ?? state.inspection?.input.preparationId
+  }
+  return undefined
+}
+
+function releaseStateAuthorities(state: SkillInstallationWorkflowState): void {
+  const resolutionId = getResolutionId(state)
+  const preparationId = getPreparationId(state)
+  if (resolutionId) cancelResolutionBestEffort(resolutionId)
+  if (preparationId) cancelPreparationBestEffort(preparationId)
+}
+
+function cancelResolutionBestEffort(resolutionId: string): void {
+  void cancelSkillSourceResolution({ resolutionId }).catch(() => undefined)
+}
+
 function cancelPreparationBestEffort(preparationId: string): void {
-  void cancelSkillPreparation({ preparationId }).catch((error: unknown) => {
-    console.warn('Failed to cancel Skill installation preparation', error)
-  })
+  void cancelSkillPreparation({ preparationId }).catch(() => undefined)
+}
+
+function publicErrorMessage(origin: InspectionOrigin, message: string): string | null {
+  return origin.kind === 'local' ? null : message
 }

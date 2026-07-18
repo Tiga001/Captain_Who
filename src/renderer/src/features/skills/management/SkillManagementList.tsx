@@ -8,7 +8,7 @@ interface SkillManagementListProps {
   entries: readonly SkillManagementEntry[]
   onSetEnabled: (entry: SkillManagementEntry, enabled: boolean) => void
   onUninstall: (entry: SkillManagementEntry) => void
-  onUpdate: (entry: SkillManagementEntry) => void
+  onUpdate: (entry: SkillManagementEntry, trigger: HTMLButtonElement) => void
   pendingOperations: ReadonlyMap<string, SkillRowPendingOperation>
 }
 
@@ -74,7 +74,7 @@ export function SkillManagementList({
                     aria-label={replaceTokens(t('skills.updateNamed'), { name: entry.name })}
                     className="skill-row-action"
                     disabled={Boolean(pendingOperation) || missingUpdateRevision}
-                    onClick={() => onUpdate(entry)}
+                    onClick={(event) => onUpdate(entry, event.currentTarget)}
                     type="button"
                   >
                     <RefreshCw aria-hidden="true" />
@@ -99,7 +99,9 @@ export function SkillManagementList({
                   aria-label={
                     pendingOperation === 'enablement'
                       ? t('skills.savingEnablement')
-                      : t('skills.uninstalling')
+                      : pendingOperation === 'update'
+                        ? t('skills.updating')
+                        : t('skills.uninstalling')
                   }
                   className="skill-row-pending"
                   role="status"

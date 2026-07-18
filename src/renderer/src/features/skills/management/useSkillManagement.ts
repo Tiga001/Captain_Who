@@ -32,7 +32,7 @@ export interface SkillManagementViewState {
   status: 'loading' | 'ready' | 'error'
 }
 
-export type SkillRowPendingOperation = 'enablement' | 'uninstall'
+export type SkillRowPendingOperation = 'enablement' | 'uninstall' | 'update'
 
 const INITIAL_STATE: SkillManagementViewState = {
   errorMessage: null,
@@ -95,7 +95,7 @@ export function useSkillManagement() {
     }
   }, [])
 
-  const refresh = useCallback((): Promise<void> => {
+  const refresh = useCallback(async (): Promise<SkillsListManagementOutput | null> => {
     requestedRefreshRef.current += 1
     if (!refreshLoopRef.current) {
       const loop = runRefreshLoop().finally(() => {
@@ -103,7 +103,8 @@ export function useSkillManagement() {
       })
       refreshLoopRef.current = loop
     }
-    return refreshLoopRef.current
+    await refreshLoopRef.current
+    return outputRef.current
   }, [runRefreshLoop])
 
   useEffect(() => {
