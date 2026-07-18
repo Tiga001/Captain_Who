@@ -3576,6 +3576,7 @@ fn agent_input_project_id(input: &AgentChatInput) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills_test_support::write_installed_skill;
     use mycopilot_core::storage::models::{
         ChatConversationRecord, ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord,
         ProjectRecord,
@@ -3987,6 +3988,101 @@ mod tests {
         assert!(!serde_json::to_string(&persisted)
             .unwrap()
             .contains(BUNDLED_INSTRUCTION_MARKER));
+    }
+
+    #[test]
+    fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leakage() {
+        const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b334";
+        const INSTRUCTION_MARKER: &str = "INSTALLED_SKILL_AGENT_RUNTIME_MARKER";
+        const DESCRIPTION_MARKER: &str = "INSTALLED_SKILL_DESCRIPTION_ONLY_MARKER";
+        let fixture = tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let store_root = fixture.path().join("skills");
+        let source_text = format!(
+            concat!(
+                "---\n",
+                "name: installed-runtime-auditor\n",
+                "description: {}\n",
+                "---\n",
+                "# Instructions\n",
+                "{}\n"
+            ),
+            DESCRIPTION_MARKER, INSTRUCTION_MARKER
+        );
+        write_installed_skill(&store_root, INSTALLATION_ID, &source_text);
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage.save_model_settings(test_model_settings()).unwrap();
+        storage
+            .save_project(ProjectRecord {
+                id: "project-installed-skill".to_string(),
+                name: "Installed Skill workspace".to_string(),
+                path: Some(workspace.to_string_lossy().into_owned()),
+                created_at: 1,
+                pinned_at: None,
+            })
+            .unwrap();
+
+        let skills = SkillsService::new()
+            .with_installed_source(&store_root)
+            .unwrap();
+        let catalog = skills
+            .list_with_workspace("project-installed-skill", &workspace)
+            .unwrap();
+        let descriptor = catalog
+            .skills()
+            .iter()
+            .find(|skill| skill.source_kind() == mycopilot_core::skills::SkillSourceKind::Installed)
+            .expect("production catalog must expose the installed Skill");
+        let selection = mycopilot_protocol_rs::SkillSelectionDto {
+            id: descriptor.id().as_str().to_string(),
+            revision: descriptor.revision().as_str().to_string(),
+        };
+
+        let prepared = prepare_conversation_turn(
+            &storage,
+            &skills,
+            skill_turn_input(
+                "project-installed-skill",
+                selection,
+                "conversation-installed-skill",
+            ),
+            "run-installed-skill",
+        )
+        .unwrap();
+
+        let activation = prepared.agent_input.skill_activation.as_ref().unwrap();
+        assert_eq!(activation.skills.len(), 1);
+        assert_eq!(
+            activation.skills[0].id,
+            format!("installed:user:{INSTALLATION_ID}")
+        );
+        assert_eq!(activation.skills[0].source, "installed:user");
+        assert!(activation.skills[0]
+            .instructions
+            .contains(INSTRUCTION_MARKER));
+        assert!(!activation.skills[0]
+            .instructions
+            .contains(DESCRIPTION_MARKER));
+        assert_eq!(prepared.output.activated_skills.len(), 1);
+        assert_eq!(
+            prepared.output.activated_skills[0].source.kind,
+            mycopilot_protocol_rs::SkillSourceKindDto::Installed
+        );
+
+        let public_output = serde_json::to_string(&prepared.output).unwrap();
+        assert!(!public_output.contains(INSTRUCTION_MARKER));
+        assert!(!public_output.contains(DESCRIPTION_MARKER));
+        assert!(!public_output.contains(&source_text));
+        let persisted = storage
+            .load_conversation("conversation-installed-skill")
+            .unwrap()
+            .unwrap();
+        let persisted_json = serde_json::to_string(&persisted).unwrap();
+        assert!(!persisted_json.contains(INSTRUCTION_MARKER));
+        assert!(!persisted_json.contains(DESCRIPTION_MARKER));
+        assert!(!persisted_json.contains(&source_text));
     }
 
     #[test]

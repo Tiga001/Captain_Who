@@ -152,7 +152,7 @@ pub struct SkillsListRequest {
     pub project_id: String,
 }
 
-pub const SKILL_CATALOG_SCHEMA_VERSION: u32 = 3;
+pub const SKILL_CATALOG_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -173,6 +173,7 @@ pub struct SkillSourceDto {
 pub enum SkillSourceKindDto {
     Workspace,
     Bundled,
+    Installed,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -317,22 +318,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skill_catalog_v3_serializes_explicit_source_and_trust_unions() {
+    fn skill_catalog_v4_serializes_explicit_source_and_trust_unions() {
         let response = SkillsListResponse {
             schema_version: SKILL_CATALOG_SCHEMA_VERSION,
             catalog_revision: "catalog-revision".to_string(),
             skills: vec![SkillDescriptorDto {
-                id: "bundled:application:repository-evidence-auditor".to_string(),
+                id: "installed:user:0190b0f2-7c50-7cc0-8b25-3bb80f08b334".to_string(),
                 name: "repository-evidence-auditor".to_string(),
                 description: "Audit repository claims using evidence.".to_string(),
                 source: SkillSourceDto {
-                    kind: SkillSourceKindDto::Bundled,
-                    id: "bundled:application".to_string(),
+                    kind: SkillSourceKindDto::Installed,
+                    id: "installed:user".to_string(),
                 },
-                trust: SkillTrustDto::Application,
+                trust: SkillTrustDto::Untrusted,
                 activation_scope: "run".to_string(),
-                revision: "skill-sha256-v1:revision".to_string(),
-                location: Some("skills/repository-evidence-auditor/SKILL.md".to_string()),
+                revision: concat!(
+                    "skill-package-sha256-v1:",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                )
+                .to_string(),
+                location: Some(
+                    concat!(
+                        "packages/v1/",
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+                        "SKILL.md"
+                    )
+                    .to_string(),
+                ),
             }],
             diagnostics: Vec::new(),
             truncated: false,
@@ -340,13 +352,18 @@ mod tests {
 
         let value = serde_json::to_value(response).unwrap();
 
-        assert_eq!(value["schemaVersion"], 3);
-        assert_eq!(value["skills"][0]["source"]["kind"], "bundled");
-        assert_eq!(value["skills"][0]["trust"], "application");
+        assert_eq!(value["schemaVersion"], 4);
+        assert_eq!(value["skills"][0]["source"]["kind"], "installed");
+        assert_eq!(value["skills"][0]["source"]["id"], "installed:user");
+        assert_eq!(value["skills"][0]["trust"], "untrusted");
     }
 
     #[test]
-    fn skill_catalog_v3_source_and_trust_enums_reject_unknown_values() {
+    fn skill_catalog_v4_accepts_installed_and_rejects_unknown_enum_values() {
+        assert_eq!(
+            serde_json::from_str::<SkillSourceKindDto>("\"installed\"").unwrap(),
+            SkillSourceKindDto::Installed
+        );
         assert!(serde_json::from_str::<SkillSourceKindDto>("\"remote\"").is_err());
         assert!(serde_json::from_str::<SkillTrustDto>("\"userApproved\"").is_err());
     }

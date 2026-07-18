@@ -113,12 +113,24 @@ const bundledAuditorSkill: SkillDescriptor = {
   trust: 'application'
 }
 
+const installedAuditorSkill: SkillDescriptor = {
+  activationScope: 'run',
+  description: 'Audits installed dependencies against repository evidence.',
+  id: 'installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d',
+  location: 'packages/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/SKILL.md',
+  name: 'Installed dependency auditor',
+  revision:
+    'skill-package-sha256-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  source: { id: 'installed:user', kind: 'installed' },
+  trust: 'untrusted'
+}
+
 function catalog(
   skills: SkillDescriptor[] = [auditorSkill, testSkill],
   overrides: Partial<SkillsListOutput> = {}
 ): SkillsListOutput {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     catalogRevision: 'catalog-1',
     diagnostics: [],
     skills,
@@ -167,7 +179,9 @@ beforeEach(() => {
 describe('Skill selection invariants', () => {
   it('fails closed for unsupported source and trust contracts', () => {
     expect(() =>
-      skillCatalog.assertSupportedSkillCatalog(catalog([auditorSkill, bundledAuditorSkill]))
+      skillCatalog.assertSupportedSkillCatalog(
+        catalog([auditorSkill, bundledAuditorSkill, installedAuditorSkill])
+      )
     ).not.toThrow()
 
     const mismatchedTrust = {
@@ -178,12 +192,24 @@ describe('Skill selection invariants', () => {
       ...bundledAuditorSkill,
       source: { id: 'remote:catalog', kind: 'remote' }
     } as unknown as SkillDescriptor
+    const trustedInstalled = {
+      ...installedAuditorSkill,
+      trust: 'application'
+    } as unknown as SkillDescriptor
 
     expect(() => skillCatalog.assertSupportedSkillCatalog(catalog([mismatchedTrust]))).toThrow(
       'bundled/untrusted/run'
     )
     expect(() => skillCatalog.assertSupportedSkillCatalog(catalog([unknownSource]))).toThrow(
       'remote/application/run'
+    )
+    expect(() => skillCatalog.assertSupportedSkillCatalog(catalog([trustedInstalled]))).toThrow(
+      'installed/application/run'
+    )
+
+    const previousSchema = { ...catalog(), schemaVersion: 3 } as unknown as SkillsListOutput
+    expect(() => skillCatalog.assertSupportedSkillCatalog(previousSchema)).toThrow(
+      'Unsupported Skill catalog schema: 3'
     )
   })
 
@@ -389,14 +415,17 @@ describe('ChatComposer Skill picker', () => {
       .toBe(0)
   })
 
-  it('displays bundled source and trust metadata and submits its opaque selection', async () => {
-    listSkillsSpy.mockResolvedValue(catalog([auditorSkill, testSkill, bundledAuditorSkill]))
+  it('displays registered source and trust metadata and submits opaque selections', async () => {
+    listSkillsSpy.mockResolvedValue(
+      catalog([auditorSkill, testSkill, bundledAuditorSkill, installedAuditorSkill])
+    )
     const screen = await render(<TestComposer />)
 
     await screen.getByRole('button', { name: 'chat.addContext' }).click()
     await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
 
     await expect.element(screen.getByText(/chat\.bundledSkill/)).toBeVisible()
+    await expect.element(screen.getByText(/chat\.installedSkill/)).toBeVisible()
     await expect.element(screen.getByText(/chat\.skillTrustApplication/)).toBeVisible()
     expect(screen.container.textContent).toContain('chat.workspaceSkill')
     expect(screen.container.textContent).toContain('chat.skillTrustUntrusted')
@@ -416,7 +445,13 @@ describe('ChatComposer Skill picker', () => {
       ...bundledAuditorSkill,
       name: auditorSkill.name
     }
-    listSkillsSpy.mockResolvedValue(catalog([auditorSkill, sameNamedBundledSkill]))
+    const sameNamedInstalledSkill = {
+      ...installedAuditorSkill,
+      name: auditorSkill.name
+    }
+    listSkillsSpy.mockResolvedValue(
+      catalog([auditorSkill, sameNamedBundledSkill, sameNamedInstalledSkill])
+    )
     const screen = await render(
       <TestComposer
         initialDraft={createComposerDraft({
@@ -424,7 +459,8 @@ describe('ChatComposer Skill picker', () => {
           projectId: 'project-a',
           skills: [
             { id: auditorSkill.id, revision: auditorSkill.revision },
-            { id: sameNamedBundledSkill.id, revision: sameNamedBundledSkill.revision }
+            { id: sameNamedBundledSkill.id, revision: sameNamedBundledSkill.revision },
+            { id: sameNamedInstalledSkill.id, revision: sameNamedInstalledSkill.revision }
           ]
         })}
       />
@@ -432,22 +468,34 @@ describe('ChatComposer Skill picker', () => {
 
     await expect
       .poll(() => screen.container.querySelectorAll('.composer-skill-chip').length)
-      .toBe(2)
+      .toBe(3)
     const workspaceChip = screen.container.querySelector(
       '.composer-skill-chip[data-source-kind="workspace"][data-trust="untrusted"]'
     )
     const bundledChip = screen.container.querySelector(
       '.composer-skill-chip[data-source-kind="bundled"][data-trust="application"]'
     )
+    const installedChip = screen.container.querySelector(
+      '.composer-skill-chip[data-source-kind="installed"][data-trust="untrusted"]'
+    )
 
     expect(workspaceChip?.textContent).toContain(auditorSkill.name)
     expect(workspaceChip?.textContent).toContain('chat.workspaceSkill · chat.skillTrustUntrusted')
     expect(bundledChip?.textContent).toContain(auditorSkill.name)
     expect(bundledChip?.textContent).toContain('chat.bundledSkill · chat.skillTrustApplication')
+    expect(installedChip?.textContent).toContain(auditorSkill.name)
+    expect(installedChip?.textContent).toContain('chat.installedSkill · chat.skillTrustUntrusted')
     await expect
       .element(
         screen.getByRole('button', {
           name: 'chat.removeSkill Repository auditor · chat.workspaceSkill · chat.skillTrustUntrusted'
+        })
+      )
+      .toBeVisible()
+    await expect
+      .element(
+        screen.getByRole('button', {
+          name: 'chat.removeSkill Repository auditor · chat.installedSkill · chat.skillTrustUntrusted'
         })
       )
       .toBeVisible()

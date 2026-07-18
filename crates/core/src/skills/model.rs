@@ -4,6 +4,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub const SKILL_PACKAGE_FORMAT_VERSION: u32 = 1;
 pub const DEFAULT_MAX_ACTIVATED_SKILLS: usize = 8;
@@ -59,6 +60,72 @@ impl fmt::Display for SkillSourceId {
 }
 
 impl FromStr for SkillSourceId {
+    type Err = SkillReferenceError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+/// Stable application-generated identity of one managed Skill installation.
+///
+/// The identity is deliberately independent from the package revision so an
+/// installation can move to a new immutable package without changing its
+/// source-qualified [`SkillId`].
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SkillInstallationId(String);
+
+impl SkillInstallationId {
+    /// Generates a stable id for an installation request. Callers should keep
+    /// and retry the same request if commit acknowledgement is uncertain.
+    pub fn new() -> Self {
+        Self(Uuid::new_v4().hyphenated().to_string())
+    }
+
+    pub fn parse(value: impl Into<String>) -> Result<Self, SkillReferenceError> {
+        let value = value.into();
+        let uuid = Uuid::parse_str(&value)
+            .map_err(|_| SkillReferenceError::new("installation id must be a UUID"))?;
+        if uuid.is_nil() {
+            return Err(SkillReferenceError::new(
+                "installation id must not be the nil UUID",
+            ));
+        }
+        if uuid.hyphenated().to_string() != value {
+            return Err(SkillReferenceError::new(
+                "installation id must use canonical lowercase hyphenated UUID form",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for SkillInstallationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for SkillInstallationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("SkillInstallationId")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+impl fmt::Display for SkillInstallationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for SkillInstallationId {
     type Err = SkillReferenceError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
@@ -304,6 +371,7 @@ fn validate_opaque_ascii(
 pub enum SkillSourceKind {
     Workspace,
     Bundled,
+    Installed,
 }
 
 impl SkillSourceKind {
@@ -311,6 +379,7 @@ impl SkillSourceKind {
         match self {
             Self::Workspace => "workspace",
             Self::Bundled => "bundled",
+            Self::Installed => "installed",
         }
     }
 }
@@ -357,6 +426,11 @@ pub enum SkillProvenance {
     },
     Bundled {
         source_id: SkillSourceId,
+        relative_path: String,
+    },
+    Installed {
+        source_id: SkillSourceId,
+        installation_id: SkillInstallationId,
         relative_path: String,
     },
     Other {
@@ -746,6 +820,9 @@ pub enum SkillDiagnosticCode {
     DuplicateName,
     SourceUnavailable,
     SourceContractViolation,
+    InvalidInstallationReceipt,
+    PackageRevisionMismatch,
+    UnexpectedPackageEntry,
 }
 
 impl SkillDiagnosticCode {
@@ -775,6 +852,9 @@ impl SkillDiagnosticCode {
             Self::DuplicateName => "duplicateName",
             Self::SourceUnavailable => "sourceUnavailable",
             Self::SourceContractViolation => "sourceContractViolation",
+            Self::InvalidInstallationReceipt => "invalidInstallationReceipt",
+            Self::PackageRevisionMismatch => "packageRevisionMismatch",
+            Self::UnexpectedPackageEntry => "unexpectedPackageEntry",
         }
     }
 }

@@ -14,7 +14,8 @@ export function assertSupportedSkillCatalog(output: SkillsListOutput): void {
     const trust: unknown = descriptor.trust
     const supportedCombination =
       (sourceKind === 'workspace' && trust === 'untrusted') ||
-      (sourceKind === 'bundled' && trust === 'application')
+      (sourceKind === 'bundled' && trust === 'application') ||
+      (sourceKind === 'installed' && trust === 'untrusted')
 
     if (!supportedCombination || descriptor.activationScope !== 'run') {
       throw new Error(

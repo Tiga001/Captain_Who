@@ -403,6 +403,7 @@ export const zhCNTranslations = {
   'chat.skills': '技能',
   'chat.workspaceSkill': '工作区技能',
   'chat.bundledSkill': '内置技能',
+  'chat.installedSkill': '已安装技能',
   'chat.skillTrustUntrusted': '不受信任的指令',
   'chat.skillTrustApplication': '应用提供的指令',
   'chat.selectedSkills': '已选择的技能',

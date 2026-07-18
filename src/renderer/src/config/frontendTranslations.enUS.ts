@@ -417,6 +417,7 @@ export const enUSTranslations = {
   'chat.skills': 'Skills',
   'chat.workspaceSkill': 'Workspace skill',
   'chat.bundledSkill': 'Built-in skill',
+  'chat.installedSkill': 'Installed skill',
   'chat.skillTrustUntrusted': 'Untrusted instructions',
   'chat.skillTrustApplication': 'Application-provided instructions',
   'chat.selectedSkills': 'Selected skills',

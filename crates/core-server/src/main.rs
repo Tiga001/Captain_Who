@@ -3,6 +3,8 @@ mod agent_support;
 mod git_dispatcher;
 mod skills_adapter;
 mod skills_dispatcher;
+#[cfg(test)]
+mod skills_test_support;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -53,14 +55,17 @@ use tokio::sync::{mpsc, oneshot};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    let database_path = absolute_path(database_path())?;
+    let skill_store_root = skill_store_root(&database_path);
     let storage = Arc::new(
-        StorageService::open(&database_path())
+        StorageService::open(&database_path)
             .map_err(|error| io::Error::other(format!("failed to initialize storage: {error}")))?,
     );
     let git_review_service = Arc::new(GitReviewService::new());
     let skills_service = Arc::new(
         SkillsService::new()
             .with_bundled_source()
+            .and_then(|service| service.with_installed_source(skill_store_root))
             .map_err(|error| io::Error::other(format!("failed to initialize Skills: {error}")))?,
     );
     let agent_service =
@@ -900,6 +905,21 @@ fn database_path() -> PathBuf {
         .join("storage.sqlite")
 }
 
+fn skill_store_root(database_path: &std::path::Path) -> PathBuf {
+    database_path
+        .parent()
+        .map(|parent| parent.join("skills"))
+        .unwrap_or_else(|| PathBuf::from("skills"))
+}
+
+fn absolute_path(path: PathBuf) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        std::env::current_dir().map(|current_directory| current_directory.join(path))
+    }
+}
+
 fn home_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
@@ -909,9 +929,33 @@ fn home_dir() -> PathBuf {
 #[cfg(test)]
 mod server_tests {
     use super::*;
+    use crate::skills_test_support::write_installed_skill;
     use std::fs;
     use std::sync::mpsc as std_mpsc;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn installed_skill_store_is_a_sibling_of_the_effective_database() {
+        assert_eq!(
+            skill_store_root(std::path::Path::new("profile/storage.sqlite")),
+            std::path::Path::new("profile/skills")
+        );
+    }
+
+    #[test]
+    fn relative_database_override_is_absolutized_before_source_registration() {
+        let current_directory = std::env::current_dir().unwrap();
+        let database_path = absolute_path(PathBuf::from("profile/storage.sqlite")).unwrap();
+
+        assert_eq!(
+            database_path,
+            current_directory.join("profile/storage.sqlite")
+        );
+        assert_eq!(
+            skill_store_root(&database_path),
+            current_directory.join("profile/skills")
+        );
+    }
 
     #[test]
     fn agent_skill_failures_preserve_structured_json_rpc_recovery_data() {
@@ -963,7 +1007,32 @@ mod server_tests {
                 pinned_at: None,
             })
             .unwrap();
-        let skills_service = SkillsService::new().with_bundled_source().unwrap();
+        let installed_store_root = temp.path().join("skills");
+        let skills_service = SkillsService::new()
+            .with_bundled_source()
+            .and_then(|service| service.with_installed_source(&installed_store_root))
+            .unwrap();
+        assert!(
+            !installed_store_root.exists(),
+            "registering the read-only source must not create its store"
+        );
+        let empty_installed_catalog = skills_service.list().unwrap();
+        assert_eq!(empty_installed_catalog.skills().len(), 1);
+        assert!(empty_installed_catalog.diagnostics().is_empty());
+        assert!(!installed_store_root.exists());
+        const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b334";
+        write_installed_skill(
+            &installed_store_root,
+            INSTALLATION_ID,
+            concat!(
+                "---\n",
+                "name: installed-repository-auditor\n",
+                "description: Inspect a repository using an installed Skill.\n",
+                "---\n",
+                "# Instructions\n",
+                "Audit repository evidence.\n"
+            ),
+        );
         let request = serde_json::from_value::<JsonRpcRequest>(json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -976,8 +1045,8 @@ mod server_tests {
 
         assert_eq!(response["id"], 1);
         let skills = response["result"]["skills"].as_array().unwrap();
-        assert_eq!(skills.len(), 2);
-        assert_eq!(response["result"]["schemaVersion"], 3);
+        assert_eq!(skills.len(), 3);
+        assert_eq!(response["result"]["schemaVersion"], 4);
         let workspace_skill = skills
             .iter()
             .find(|skill| skill["id"] == "workspace:project-1:repository-evidence-auditor")
@@ -985,6 +1054,10 @@ mod server_tests {
         let bundled_skill = skills
             .iter()
             .find(|skill| skill["id"] == "bundled:application:repository-evidence-auditor")
+            .unwrap();
+        let installed_skill = skills
+            .iter()
+            .find(|skill| skill["id"] == format!("installed:user:{INSTALLATION_ID}"))
             .unwrap();
         assert_eq!(workspace_skill["source"]["kind"], "workspace");
         assert_eq!(workspace_skill["source"]["id"], "workspace:project-1");
@@ -1009,6 +1082,16 @@ mod server_tests {
             "repository-evidence-auditor/SKILL.md"
         );
         assert!(bundled_skill["revision"].is_string());
+        assert_eq!(installed_skill["source"]["kind"], "installed");
+        assert_eq!(installed_skill["source"]["id"], "installed:user");
+        assert_eq!(installed_skill["trust"], "untrusted");
+        assert_eq!(installed_skill["activationScope"], "run");
+        assert!(installed_skill["location"]
+            .as_str()
+            .is_some_and(
+                |location| location.starts_with("packages/v1/") && location.ends_with("/SKILL.md")
+            ));
+        assert!(installed_skill["revision"].is_string());
         assert!(response["result"]["catalogRevision"].is_string());
         assert_eq!(response["result"]["truncated"], false);
         assert_eq!(

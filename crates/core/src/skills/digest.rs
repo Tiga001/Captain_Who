@@ -8,6 +8,7 @@ use std::fmt::Write;
 const PACKAGE_DOMAIN: &[u8] = b"mycopilot.skill.package\0";
 const ACTIVATION_DOMAIN: &[u8] = b"mycopilot.skill.activation\0";
 const CATALOG_DOMAIN: &[u8] = b"mycopilot.skill.catalog\0";
+pub(super) const PACKAGE_REVISION_PREFIX: &str = "skill-package-sha256-v1:";
 
 pub(super) fn package_revision(source_bytes: &[u8]) -> SkillRevision {
     // This collision-resistant content token detects changes; it is not an
@@ -19,7 +20,7 @@ pub(super) fn package_revision(source_bytes: &[u8]) -> SkillRevision {
     // Package format v1 reserves an explicit resource index but intentionally
     // loads no sibling resources.
     digest.update(0_u64.to_be_bytes());
-    SkillRevision::trusted(format_digest("skill-package-sha256-v1:", digest.finalize()))
+    SkillRevision::trusted(format_digest(PACKAGE_REVISION_PREFIX, digest.finalize()))
 }
 
 pub(super) fn activation_revision<'a>(
@@ -89,6 +90,16 @@ fn update_provenance(digest: &mut Sha256, provenance: &SkillProvenance) {
         } => {
             update_bytes(digest, b"bundled");
             update_bytes(digest, source_id.as_str().as_bytes());
+            update_bytes(digest, relative_path.as_bytes());
+        }
+        SkillProvenance::Installed {
+            source_id,
+            installation_id,
+            relative_path,
+        } => {
+            update_bytes(digest, b"installed");
+            update_bytes(digest, source_id.as_str().as_bytes());
+            update_bytes(digest, installation_id.as_str().as_bytes());
             update_bytes(digest, relative_path.as_bytes());
         }
         SkillProvenance::Other {

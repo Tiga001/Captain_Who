@@ -181,9 +181,10 @@ fn source_dto(descriptor: &SkillDescriptor) -> Result<SkillSourceDto, String> {
     let kind = match descriptor.source_kind() {
         SkillSourceKind::Workspace => SkillSourceKindDto::Workspace,
         SkillSourceKind::Bundled => SkillSourceKindDto::Bundled,
+        SkillSourceKind::Installed => SkillSourceKindDto::Installed,
         unsupported => {
             return Err(format!(
-                "Skill `{}` uses unsupported source kind `{}` for catalog schema v3",
+                "Skill `{}` uses unsupported source kind `{}` for catalog schema v4",
                 descriptor.id(),
                 unsupported.stable_name()
             ));
@@ -200,7 +201,7 @@ fn trust_dto(trust: SkillTrust) -> Result<SkillTrustDto, String> {
         SkillTrust::Untrusted => Ok(SkillTrustDto::Untrusted),
         SkillTrust::Application => Ok(SkillTrustDto::Application),
         unsupported => Err(format!(
-            "unsupported Skill trust `{}` for catalog schema v3",
+            "unsupported Skill trust `{}` for catalog schema v4",
             unsupported.stable_name()
         )),
     }
@@ -210,7 +211,7 @@ fn activation_scope_name(scope: SkillActivationScope) -> Result<&'static str, St
     match scope {
         SkillActivationScope::Run => Ok("run"),
         unsupported => Err(format!(
-            "unsupported Skill activation scope `{}` for catalog schema v3",
+            "unsupported Skill activation scope `{}` for catalog schema v4",
             unsupported.stable_name()
         )),
     }
@@ -224,14 +225,10 @@ fn validate_protocol_descriptor(
     let trust = trust_dto(descriptor.trust())?;
     activation_scope_name(descriptor.activation_scope())?;
 
-    let supported_contract = matches!(
-        (source_kind, trust),
-        (SkillSourceKindDto::Workspace, SkillTrustDto::Untrusted)
-            | (SkillSourceKindDto::Bundled, SkillTrustDto::Application)
-    );
+    let supported_contract = supports_protocol_contract(source_kind, trust);
     if !supported_contract {
         return Err(format!(
-            "Skill `{}` cannot cross catalog schema v3 with source `{}` and trust `{}`",
+            "Skill `{}` cannot cross catalog schema v4 with source `{}` and trust `{}`",
             descriptor.id(),
             descriptor.source_kind().stable_name(),
             descriptor.trust().stable_name()
@@ -263,15 +260,38 @@ fn validate_protocol_descriptor(
             "Skill `{}` has bundled provenance incompatible with its source",
             descriptor.id()
         )),
+        SkillProvenance::Installed {
+            source_id,
+            installation_id,
+            relative_path,
+        } if source_kind == SkillSourceKindDto::Installed
+            && source_id == descriptor.id().source_id()
+            && descriptor.id().as_str() == format!("{source_id}:{}", installation_id.as_str()) =>
+        {
+            Ok(Some(relative_path.clone()))
+        }
+        SkillProvenance::Installed { .. } => Err(format!(
+            "Skill `{}` has installed provenance incompatible with its source or installation",
+            descriptor.id()
+        )),
         SkillProvenance::Other { .. } => Err(format!(
-            "Skill `{}` uses unsupported provenance for catalog schema v3",
+            "Skill `{}` uses unsupported provenance for catalog schema v4",
             descriptor.id()
         )),
         _ => Err(format!(
-            "Skill `{}` uses unknown provenance for catalog schema v3",
+            "Skill `{}` uses unknown provenance for catalog schema v4",
             descriptor.id()
         )),
     }
+}
+
+fn supports_protocol_contract(source_kind: SkillSourceKindDto, trust: SkillTrustDto) -> bool {
+    matches!(
+        (source_kind, trust),
+        (SkillSourceKindDto::Workspace, SkillTrustDto::Untrusted)
+            | (SkillSourceKindDto::Bundled, SkillTrustDto::Application)
+            | (SkillSourceKindDto::Installed, SkillTrustDto::Untrusted)
+    )
 }
 
 fn activation_failure(error: SkillActivationError) -> SkillActivationFailure {
@@ -318,9 +338,10 @@ fn non_empty(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skills_test_support::write_installed_skill;
 
     #[test]
-    fn bundled_activation_crosses_schema_v3_as_an_opaque_selection() {
+    fn bundled_activation_crosses_schema_v4_as_an_opaque_selection() {
         let workspace = tempfile::tempdir().unwrap();
         let service = SkillsService::new().with_bundled_source().unwrap();
         let descriptor = service.list().unwrap().skills()[0].clone();
@@ -347,10 +368,84 @@ mod tests {
     }
 
     #[test]
-    fn schema_v3_rejects_domain_trust_not_represented_by_the_protocol() {
+    fn installed_activation_crosses_schema_v4_as_untrusted_opaque_selection() {
+        const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b334";
+        const INSTRUCTION_MARKER: &str = "INSTALLED_SKILL_RUNTIME_MARKER";
+        let fixture = tempfile::tempdir().unwrap();
+        let store_root = fixture.path().join("skills");
+        let source_text = format!(
+            concat!(
+                "---\n",
+                "name: installed-auditor\n",
+                "description: Audit a repository from an installed package.\n",
+                "---\n",
+                "# Instructions\n",
+                "{}\n"
+            ),
+            INSTRUCTION_MARKER
+        );
+        let revision = write_installed_skill(&store_root, INSTALLATION_ID, &source_text);
+        let service = SkillsService::new()
+            .with_installed_source(&store_root)
+            .unwrap();
+        let catalog = service.list().unwrap();
+        assert!(catalog.diagnostics().is_empty());
+        let descriptor = catalog.skills().first().unwrap();
+        assert_eq!(
+            descriptor.id().as_str(),
+            format!("installed:user:{INSTALLATION_ID}")
+        );
+        assert_eq!(descriptor.revision().as_str(), revision);
+
+        let response = catalog_response(&catalog).unwrap();
+        assert_eq!(response.schema_version, 4);
+        assert_eq!(
+            response.skills[0].source.kind,
+            SkillSourceKindDto::Installed
+        );
+        assert_eq!(response.skills[0].source.id, "installed:user");
+        assert_eq!(response.skills[0].trust, SkillTrustDto::Untrusted);
+
+        let prepared = activate_workspace(
+            &service,
+            "project-1",
+            fixture.path(),
+            &[SkillSelectionDto {
+                id: descriptor.id().as_str().to_string(),
+                revision,
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(prepared.summaries.len(), 1);
+        assert_eq!(
+            prepared.summaries[0].source.kind,
+            SkillSourceKindDto::Installed
+        );
+        assert_eq!(prepared.summaries[0].source.id, "installed:user");
+        let runtime = prepared.runtime.unwrap();
+        assert_eq!(runtime.skills.len(), 1);
+        assert_eq!(runtime.skills[0].source, "installed:user");
+        assert!(runtime.skills[0].instructions.contains(INSTRUCTION_MARKER));
+    }
+
+    #[test]
+    fn schema_v4_rejects_domain_trust_not_represented_by_the_protocol() {
         let error = trust_dto(SkillTrust::UserApproved).unwrap_err();
 
         assert!(error.contains("userApproved"));
-        assert!(error.contains("schema v3"));
+        assert!(error.contains("schema v4"));
+    }
+
+    #[test]
+    fn schema_v4_does_not_treat_installation_as_application_trust() {
+        assert!(supports_protocol_contract(
+            SkillSourceKindDto::Installed,
+            SkillTrustDto::Untrusted
+        ));
+        assert!(!supports_protocol_contract(
+            SkillSourceKindDto::Installed,
+            SkillTrustDto::Application
+        ));
     }
 }

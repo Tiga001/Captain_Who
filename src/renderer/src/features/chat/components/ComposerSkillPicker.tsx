@@ -23,6 +23,20 @@ interface SkillDisplayProvenance {
   trust: SkillTrust
 }
 
+function getSkillSourceLabel(
+  sourceKind: SkillSourceKind,
+  t: ReturnType<typeof useFrontendConfig>['t']
+) {
+  switch (sourceKind) {
+    case 'workspace':
+      return t('chat.workspaceSkill')
+    case 'bundled':
+      return t('chat.bundledSkill')
+    case 'installed':
+      return t('chat.installedSkill')
+  }
+}
+
 function getSkillDisplayProvenance(
   skillId: string,
   descriptor?: SkillDescriptor
@@ -35,12 +49,15 @@ function getSkillDisplayProvenance(
   }
 
   // A selection intentionally stores only the opaque id and revision. The source prefix remains
-  // sufficient to keep supported schema-v3 provenance visible while a catalog is loading.
+  // sufficient to keep supported schema-v4 provenance visible while a catalog is loading.
   if (skillId.startsWith('workspace:')) {
     return { sourceKind: 'workspace', trust: 'untrusted' }
   }
   if (skillId.startsWith('bundled:')) {
     return { sourceKind: 'bundled', trust: 'application' }
+  }
+  if (skillId.startsWith('installed:')) {
+    return { sourceKind: 'installed', trust: 'untrusted' }
   }
   return undefined
 }
@@ -63,11 +80,7 @@ export function ComposerSelectedSkills({
           catalog?.truncated && catalogMatch?.status === 'unavailable' ? undefined : catalogMatch
         const name = match?.descriptor?.name ?? getSkillFallbackName(selection.id)
         const provenance = getSkillDisplayProvenance(selection.id, match?.descriptor)
-        const sourceLabel = provenance
-          ? provenance.sourceKind === 'workspace'
-            ? t('chat.workspaceSkill')
-            : t('chat.bundledSkill')
-          : undefined
+        const sourceLabel = provenance ? getSkillSourceLabel(provenance.sourceKind, t) : undefined
         const trustLabel = provenance
           ? provenance.trust === 'untrusted'
             ? t('chat.skillTrustUntrusted')
@@ -303,9 +316,7 @@ export function ComposerSkillPicker({
                             <strong>{skill.name}</strong>
                             <span>{skill.description}</span>
                             <small title={skill.location}>
-                              {skill.source.kind === 'workspace'
-                                ? t('chat.workspaceSkill')
-                                : t('chat.bundledSkill')}
+                              {getSkillSourceLabel(skill.source.kind, t)}
                               {' · '}
                               {skill.trust === 'untrusted'
                                 ? t('chat.skillTrustUntrusted')

@@ -1,6 +1,6 @@
-export const SKILL_CATALOG_SCHEMA_VERSION = 3 as const
+export const SKILL_CATALOG_SCHEMA_VERSION = 4 as const
 
-export type SkillSourceKind = 'workspace' | 'bundled'
+export type SkillSourceKind = 'workspace' | 'bundled' | 'installed'
 
 export type SkillSourceDescriptor =
   | {
@@ -11,6 +11,11 @@ export type SkillSourceDescriptor =
   | {
       kind: 'bundled'
       /** Opaque identity of the application-owned bundle. */
+      id: string
+    }
+  | {
+      kind: 'installed'
+      /** Opaque identity of an application-managed installation source. */
       id: string
     }
 
@@ -52,6 +57,9 @@ export type SkillDiagnosticCode =
   | 'missingInstructions'
   | 'defaultedName'
   | 'duplicateName'
+  | 'invalidInstallationReceipt'
+  | 'packageRevisionMismatch'
+  | 'unexpectedPackageEntry'
   | 'sourceUnavailable'
   | 'sourceContractViolation'
 

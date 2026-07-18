@@ -938,6 +938,7 @@ dependencies = [
  "mycopilot-protocol-rs",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
 ]

@@ -25,8 +25,8 @@ use windows_sys::Win32::{
     Foundation::HANDLE,
     Storage::FileSystem::{
         FileIdInfo, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_NAME_NORMALIZED, SECURITY_IDENTIFICATION,
-        VOLUME_NAME_DOS,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+        FILE_NAME_NORMALIZED, SECURITY_IDENTIFICATION, VOLUME_NAME_DOS,
     },
 };
 
@@ -216,7 +216,7 @@ pub(super) fn resolve_workspace_skills_root(
     }))
 }
 
-fn verify_plain_directory(
+pub(super) fn verify_plain_directory(
     lexical_path: &Path,
     expected_canonical_path: &Path,
     changed_message: &str,
@@ -228,7 +228,7 @@ fn verify_plain_directory(
             format!("{changed_message} Cannot inspect it again: {error}"),
         )
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if is_symlink_or_reparse(&metadata) || !metadata.is_dir() {
         return Err(WorkspaceSourceIssue::error(
             lexical_path,
             SkillDiagnosticCode::PathChangedDuringRead,
@@ -250,6 +250,20 @@ fn verify_plain_directory(
         ));
     }
     Ok(())
+}
+
+pub(super) fn is_symlink_or_reparse(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 #[derive(Debug)]
@@ -585,7 +599,7 @@ fn open_skill_file(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(unix)]
-fn verify_opened_file_identity(
+pub(super) fn verify_opened_file_identity(
     _file: &File,
     expected: &fs::Metadata,
     opened: &fs::Metadata,
@@ -599,10 +613,10 @@ fn verify_opened_file_identity(
 }
 
 #[cfg(windows)]
-fn verify_opened_file_identity(
+pub(super) fn verify_opened_file_identity(
     file: &File,
     _expected: &fs::Metadata,
-    _opened: &fs::Metadata,
+    opened: &fs::Metadata,
     expected_canonical_path: &Path,
 ) -> Result<(), String> {
     let opened_identity = windows_file_identity(file)
@@ -613,7 +627,7 @@ fn verify_opened_file_identity(
         return Err("the opened handle resolves outside the checked workspace path".to_string());
     }
 
-    let expected_file = open_skill_file(expected_canonical_path)
+    let expected_file = open_windows_identity_path(expected_canonical_path, opened.is_dir())
         .map_err(|error| format!("cannot reopen the checked canonical path: {error}"))?;
     let expected_identity = windows_file_identity(&expected_file)
         .map_err(|error| format!("cannot identify the checked canonical file: {error}"))?;
@@ -621,6 +635,21 @@ fn verify_opened_file_identity(
         return Err("the opened file is not the file that was checked".to_string());
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn open_windows_identity_path(path: &Path, is_directory: bool) -> io::Result<File> {
+    let mut flags = FILE_FLAG_OPEN_REPARSE_POINT;
+    if is_directory {
+        // Windows requires BACKUP_SEMANTICS when opening a directory handle.
+        flags |= FILE_FLAG_BACKUP_SEMANTICS;
+    }
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(flags)
+        .security_qos_flags(SECURITY_IDENTIFICATION);
+    options.open(path)
 }
 
 #[cfg(windows)]
@@ -721,7 +750,7 @@ pub(super) fn normalize_windows_path_units(mut units: Vec<u16>) -> Vec<u16> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn verify_opened_file_identity(
+pub(super) fn verify_opened_file_identity(
     _file: &File,
     _expected: &fs::Metadata,
     _opened: &fs::Metadata,
@@ -826,5 +855,17 @@ mod tests {
         let issue = verify_plain_directory(&lexical, &expected, "changed").unwrap_err();
 
         assert_eq!(issue.code, SkillDiagnosticCode::PathChangedDuringRead);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn identity_verification_can_reopen_a_directory_handle() {
+        let root = tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let expected = fs::symlink_metadata(root.path()).unwrap();
+        let directory = open_windows_identity_path(root.path(), true).unwrap();
+        let opened = directory.metadata().unwrap();
+
+        verify_opened_file_identity(&directory, &expected, &opened, &canonical).unwrap();
     }
 }

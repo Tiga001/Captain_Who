@@ -1,5 +1,7 @@
 use super::bundled::BundledSkillSource;
 use super::digest::{activation_revision, catalog_revision, package_revision};
+use super::installed::InstalledSkillSource;
+use super::managed_store::managed_package_relative_path;
 use super::model::{
     ActivatedSkillSet, ResolvedSkillPackage, SkillActivationError, SkillActivationPolicy,
     SkillCatalog, SkillDescriptor, SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity,
@@ -50,6 +52,21 @@ impl SkillsService {
     /// Register the application-owned, compile-time embedded Skill source.
     pub fn with_bundled_source(mut self) -> Result<Self, SkillRegistrationError> {
         let source = Arc::new(BundledSkillSource::new()?);
+        self.register_source(source)?;
+        Ok(self)
+    }
+
+    /// Register the read-only user-installed source backed by an
+    /// application-managed, content-addressed store.
+    ///
+    /// `managed_root` must be absolute. Registration records configuration
+    /// only and never creates directories; a missing root lists as an empty
+    /// installed catalog until a future installer atomically publishes it.
+    pub fn with_installed_source(
+        mut self,
+        managed_root: impl Into<PathBuf>,
+    ) -> Result<Self, SkillRegistrationError> {
+        let source = Arc::new(InstalledSkillSource::new(managed_root)?);
         self.register_source(source)?;
         Ok(self)
     }
@@ -369,6 +386,40 @@ fn validate_descriptor_contract(
                 ));
             }
         }
+        (
+            SkillSourceKind::Installed,
+            SkillProvenance::Installed {
+                source_id,
+                installation_id,
+                relative_path,
+            },
+        ) if source_id == source.id() => {
+            if descriptor.id().local_id() != installation_id.as_str() {
+                return Err(format!(
+                    "descriptor `{}` is not bound to installation `{installation_id}`",
+                    descriptor.id()
+                ));
+            }
+            if !is_canonical_display_path(relative_path) {
+                return Err(format!(
+                    "descriptor `{}` has a non-canonical installed package path `{relative_path}`",
+                    descriptor.id()
+                ));
+            }
+            let expected =
+                managed_package_relative_path(descriptor.revision()).map_err(|reason| {
+                    format!(
+                        "descriptor `{}` has an invalid managed package revision: {reason}",
+                        descriptor.id()
+                    )
+                })?;
+            if relative_path != &expected {
+                return Err(format!(
+                    "descriptor `{}` has installed package path `{relative_path}` instead of `{expected}`",
+                    descriptor.id()
+                ));
+            }
+        }
         _ => {
             return Err(format!(
                 "descriptor `{}` has provenance incompatible with source kind `{}`",
@@ -452,6 +503,9 @@ fn validate_resolved_contract(
             })?
         }
         SkillProvenance::Bundled { .. } => package.id().local_id(),
+        SkillProvenance::Installed {
+            installation_id, ..
+        } => installation_id.as_str(),
         SkillProvenance::Other { .. } => {
             return Err(format!(
                 "resolved package `{}` has unsupported provenance",
@@ -465,9 +519,13 @@ fn validate_resolved_contract(
             package.id()
         )
     })?;
-    if source.kind() == SkillSourceKind::Bundled && parsed.metadata.name_was_defaulted {
+    if matches!(
+        source.kind(),
+        SkillSourceKind::Bundled | SkillSourceKind::Installed
+    ) && parsed.metadata.name_was_defaulted
+    {
         return Err(format!(
-            "resolved bundled package `{}` must declare an explicit name",
+            "resolved non-workspace package `{}` must declare an explicit name",
             package.id()
         ));
     }

@@ -4,21 +4,23 @@ import { describe, expect, it, vi } from 'vitest'
 import { createSkillsIpcBridge } from './SkillsIpcBridge'
 
 describe('Skills IPC bridge', () => {
-  it('round-trips a schema-v3 dual-source catalog without changing opaque identities', async () => {
+  it('round-trips a schema-v4 installed catalog without changing opaque identities', async () => {
     const catalog = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       catalogRevision: 'catalog-revision',
       diagnostics: [],
       skills: [
         {
           activationScope: 'run',
           description: 'Audit repository claims using evidence.',
-          id: 'bundled:application:repository-evidence-auditor',
-          location: 'repository-evidence-auditor/SKILL.md',
-          name: 'repository-evidence-auditor',
-          revision: 'skill-sha256-v1:revision',
-          source: { id: 'bundled:application', kind: 'bundled' },
-          trust: 'application'
+          id: 'installed:user:018f7f31-7a6d-7a21-9e51-ff4b6fa4e38d',
+          location:
+            'packages/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/SKILL.md',
+          name: 'installed-auditor',
+          revision:
+            'skill-package-sha256-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          source: { id: 'installed:user', kind: 'installed' },
+          trust: 'untrusted'
         }
       ],
       truncated: false
@@ -33,8 +35,8 @@ describe('Skills IPC bridge', () => {
     expect(invoke).toHaveBeenCalledWith('host:skills.list', { projectId: 'project-1' })
     expect(result).toBe(catalog)
     expect(result.skills[0]?.source).toEqual({
-      id: 'bundled:application',
-      kind: 'bundled'
+      id: 'installed:user',
+      kind: 'installed'
     })
   })
 })
