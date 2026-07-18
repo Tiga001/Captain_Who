@@ -72,7 +72,13 @@ button {
 }
 
 .app-shell[data-settings-open='true'] {
-  visibility: hidden;
+  /*
+   * Keep the workspace mounted, but remove its entire compositing group immediately.
+   * `visibility` is inherited and the side panels deliberately delay that property for
+   * collapse animations, which allowed their text to leak through a translucent settings
+   * sidebar for 120ms. Parent opacity cannot be overridden by a descendant transition.
+   */
+  opacity: 0;
   pointer-events: none;
 }
 

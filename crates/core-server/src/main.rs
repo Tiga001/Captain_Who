@@ -77,55 +77,95 @@ use skills_dispatcher::{mutation_admission_error_response, SkillMutationTarget, 
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
-#[tokio::main]
-async fn main() -> io::Result<()> {
-    let database_path = absolute_path(database_path())?;
-    let skill_store_root = skill_store_root(&database_path);
-    let storage = Arc::new(
-        StorageService::open(&database_path)
-            .map_err(|error| io::Error::other(format!("failed to initialize storage: {error}")))?,
-    );
-    let git_review_service = Arc::new(GitReviewService::new());
-    let skills_service = Arc::new(
-        SkillsService::new()
-            .with_bundled_source()
-            .and_then(|service| service.with_installed_source(skill_store_root.clone()))
-            .map_err(|error| io::Error::other(format!("failed to initialize Skills: {error}")))?,
-    );
-    let skill_installation_service = Arc::new(
-        SkillInstallationService::new(skill_store_root.clone()).map_err(|error| {
-            io::Error::other(format!(
-                "failed to initialize Skill installation service: {error}"
-            ))
-        })?,
-    );
-    let mut skill_installation_workflow = SkillInstallationWorkflow::new(
-        SkillInstallationService::new(skill_store_root).map_err(|error| {
-            io::Error::other(format!(
-                "failed to initialize Skill installation workflow: {error}"
-            ))
-        })?,
-    );
-    let github_acquisition =
-        GitHubWorkflowAcquisitionAdapter::public_github().map_err(|error| {
-            io::Error::other(format!(
-                "failed to initialize public GitHub Skill acquisition: {error}"
-            ))
-        })?;
-    skill_installation_workflow
-        .register_adapter(Arc::new(github_acquisition))
+fn main() -> io::Result<()> {
+    // The production GitHub adapter owns reqwest's blocking client. Build and retain every
+    // blocking dependency outside Tokio: reqwest deliberately panics when its blocking client is
+    // constructed inside an async runtime, and its final drop joins an internal runtime thread.
+    let bootstrap = CoreServerBootstrap::initialize()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
         .map_err(|error| {
-            io::Error::other(format!(
-                "failed to register GitHub Skill acquisition: {error}"
-            ))
+            io::Error::other(format!("failed to initialize async runtime: {error}"))
         })?;
-    let agent_service =
-        AgentService::new(storage.clone()).with_skills_service(Arc::clone(&skills_service));
-    let skill_services = SkillServices {
-        catalog: skills_service,
-        installations: skill_installation_service,
-        workflow: Arc::new(skill_installation_workflow),
-    };
+    let result = runtime.block_on(run_core_server(&bootstrap));
+
+    // Keep the bootstrap owner alive until after Tokio has stopped so the blocking GitHub client
+    // is also destroyed in a synchronous context. Runtime is declared after bootstrap, but the
+    // explicit order documents and protects this lifecycle invariant.
+    drop(runtime);
+    drop(bootstrap);
+    result
+}
+
+struct CoreServerBootstrap {
+    storage: Arc<StorageService>,
+    agent_service: AgentService,
+    skill_services: SkillServices,
+    git_review_service: Arc<GitReviewService>,
+}
+
+impl CoreServerBootstrap {
+    fn initialize() -> io::Result<Self> {
+        let database_path = absolute_path(database_path())?;
+        let skill_store_root = skill_store_root(&database_path);
+        let storage =
+            Arc::new(StorageService::open(&database_path).map_err(|error| {
+                io::Error::other(format!("failed to initialize storage: {error}"))
+            })?);
+        let git_review_service = Arc::new(GitReviewService::new());
+        let skills_service = Arc::new(
+            SkillsService::new()
+                .with_bundled_source()
+                .and_then(|service| service.with_installed_source(skill_store_root.clone()))
+                .map_err(|error| {
+                    io::Error::other(format!("failed to initialize Skills: {error}"))
+                })?,
+        );
+        let skill_installation_service = Arc::new(
+            SkillInstallationService::new(skill_store_root.clone()).map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize Skill installation service: {error}"
+                ))
+            })?,
+        );
+        let mut skill_installation_workflow = SkillInstallationWorkflow::new(
+            SkillInstallationService::new(skill_store_root).map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize Skill installation workflow: {error}"
+                ))
+            })?,
+        );
+        let github_acquisition =
+            GitHubWorkflowAcquisitionAdapter::public_github().map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize public GitHub Skill acquisition: {error}"
+                ))
+            })?;
+        skill_installation_workflow
+            .register_adapter(Arc::new(github_acquisition))
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "failed to register GitHub Skill acquisition: {error}"
+                ))
+            })?;
+        let agent_service =
+            AgentService::new(storage.clone()).with_skills_service(Arc::clone(&skills_service));
+        let skill_services = SkillServices {
+            catalog: skills_service,
+            installations: skill_installation_service,
+            workflow: Arc::new(skill_installation_workflow),
+        };
+        Ok(Self {
+            storage,
+            agent_service,
+            skill_services,
+            git_review_service,
+        })
+    }
+}
+
+async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Result<()> {
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
     let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
     let writer = tokio::spawn(run_outbound_writer(
@@ -144,10 +184,10 @@ async fn main() -> io::Result<()> {
 
     let input_result = run_request_loop(
         BufReader::new(io::stdin()),
-        storage,
-        &agent_service,
-        skill_services,
-        git_review_service,
+        Arc::clone(&bootstrap.storage),
+        &bootstrap.agent_service,
+        bootstrap.skill_services.clone(),
+        Arc::clone(&bootstrap.git_review_service),
         &request_dispatchers,
         &outbound_tx,
     )
@@ -165,7 +205,9 @@ async fn main() -> io::Result<()> {
         git_dispatcher.shutdown(),
         skill_dispatcher.shutdown(),
         skill_acquisition_dispatcher.shutdown(),
-        agent_service.shutdown_active_runs(Duration::from_secs(2))
+        bootstrap
+            .agent_service
+            .shutdown_active_runs(Duration::from_secs(2))
     );
 
     let mut outbound_error = None;
@@ -208,6 +250,7 @@ struct RequestDispatchers<'a> {
     skill_acquisition: &'a SkillsDispatcher,
 }
 
+#[derive(Clone)]
 struct SkillServices {
     catalog: Arc<SkillsService>,
     installations: Arc<SkillInstallationService>,

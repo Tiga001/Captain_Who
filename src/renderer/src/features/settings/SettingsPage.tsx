@@ -10,7 +10,8 @@ import {
   Settings,
   Shield,
   Sun,
-  UserCircle
+  UserCircle,
+  WandSparkles
 } from 'lucide-react'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { isMacOS } from '../../lib/platform'
@@ -26,6 +27,7 @@ import { EnvironmentSettingsPage } from './pages/EnvironmentSettingsPage'
 import { GeneralSettingsPage } from './pages/GeneralSettingsPage'
 import { PersonalizationSettingsPage } from './pages/PersonalizationSettingsPage'
 import { ProfileSettingsPage } from './pages/ProfileSettingsPage'
+import { SkillsSettingsPage } from './pages/SkillsSettingsPage'
 import { UsageBillingSettingsPage } from './pages/UsageBillingSettingsPage'
 import './SettingsPage.css'
 
@@ -51,6 +53,7 @@ export type SettingsPageId =
   | 'configuration'
   | 'personalization'
   | 'usageBilling'
+  | 'skills'
   | 'environment'
   | 'archivedConversations'
 
@@ -74,7 +77,10 @@ const SETTINGS_GROUPS: Array<{ titleKey: TranslationKey; items: SettingsNavItem[
   },
   {
     titleKey: 'settings.group.coding',
-    items: [{ id: 'environment', labelKey: 'settings.page.environment', icon: Monitor }]
+    items: [
+      { id: 'skills', labelKey: 'settings.page.skills', icon: WandSparkles },
+      { id: 'environment', labelKey: 'settings.page.environment', icon: Monitor }
+    ]
   },
   {
     titleKey: 'settings.group.archived',
@@ -142,6 +148,10 @@ function SettingsContent({
         onUiPreferencesChange={onUiPreferencesChange}
       />
     )
+  }
+
+  if (activePage === 'skills') {
+    return <SkillsSettingsPage />
   }
 
   if (activePage === 'environment') {

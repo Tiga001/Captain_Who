@@ -6,7 +6,7 @@ import { AppShellWorkspace } from '../AppShellWorkspace'
 import '../../styles/global.css'
 
 describe('AppShellWorkspace', () => {
-  it('makes covered content inert without unmounting it or losing local state', async () => {
+  it('removes covered content from painting without unmounting it or losing local state', async () => {
     const lifecycleSpy = vi.fn()
     const renderWorkspace = (settingsOpen: boolean) => (
       <AppShellWorkspace className="app-shell" data-testid="workspace" settingsOpen={settingsOpen}>
@@ -26,7 +26,8 @@ describe('AppShellWorkspace', () => {
     expect(coveredWorkspace?.dataset.settingsOpen).toBe('true')
     expect(coveredWorkspace?.inert).toBe(true)
     expect(coveredWorkspace?.getAttribute('aria-hidden')).toBe('true')
-    expect(coveredWorkspace && getComputedStyle(coveredWorkspace).visibility).toBe('hidden')
+    expect(coveredWorkspace && getComputedStyle(coveredWorkspace).opacity).toBe('0')
+    expect(coveredWorkspace && getComputedStyle(coveredWorkspace).visibility).toBe('visible')
     expect(screen.container.querySelector('button')?.textContent).toBe('count 1')
     expect(lifecycleSpy.mock.calls).toEqual([['mount']])
 
@@ -38,6 +39,7 @@ describe('AppShellWorkspace', () => {
     expect(restoredWorkspace?.hasAttribute('data-settings-open')).toBe(false)
     expect(restoredWorkspace?.inert).toBe(false)
     expect(restoredWorkspace?.hasAttribute('aria-hidden')).toBe(false)
+    expect(restoredWorkspace && getComputedStyle(restoredWorkspace).opacity).toBe('1')
     expect(restoredWorkspace && getComputedStyle(restoredWorkspace).visibility).toBe('visible')
     expect(screen.container.querySelector('button')?.textContent).toBe('count 1')
     expect(lifecycleSpy.mock.calls).toEqual([['mount']])

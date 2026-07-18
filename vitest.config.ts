@@ -68,6 +68,7 @@ export default defineConfig({
           },
           include: [
             `${appTests}/**/*.browser.test.tsx`,
+            `${skillsTests}/**/*.browser.test.tsx`,
             `${gitReviewTests}/**/*.browser.test.tsx`,
             `${rightSidebarTests}/**/*.browser.test.tsx`,
             `${filesTests}/**/*.browser.test.tsx`
