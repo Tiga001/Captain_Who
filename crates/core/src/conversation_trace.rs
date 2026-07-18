@@ -652,6 +652,7 @@ pub(crate) fn render_tool_observation(result: &AgentToolResult) -> String {
             "tool": result.tool,
             "callId": result.call_id,
             "ok": false,
+            "result": result.result,
             "error": result.error,
         })
     };
@@ -845,6 +846,51 @@ mod tests {
             "[binary/base64 omitted]"
         );
         assert_eq!(result.result.as_ref().unwrap()["note"], "keep me");
+    }
+
+    #[test]
+    fn failed_tool_observation_preserves_sanitized_structured_result_for_model() {
+        let result = canonical_tool_result_for_context(&AgentToolResult {
+            call_id: "call-command".to_string(),
+            tool: "run_command".to_string(),
+            ok: false,
+            result: Some(json!({
+                "exitCode": 1,
+                "stdout": "partial output\n",
+                "stderr": "ModuleNotFoundError: No module named 'openpyxl'\n",
+                "timedOut": false,
+                "cancelled": false,
+                "diagnosticBase64": "c2VjcmV0",
+            })),
+            error: Some("命令执行失败。".to_string()),
+        });
+
+        let observation = render_tool_observation(&result);
+
+        assert!(observation.contains("\"ok\": false"));
+        assert!(observation.contains("\"exitCode\": 1"));
+        assert!(observation.contains("partial output\\n"));
+        assert!(observation.contains("ModuleNotFoundError"));
+        assert!(observation.contains("\"timedOut\": false"));
+        assert!(observation.contains("\"cancelled\": false"));
+        assert!(observation.contains("[binary/base64 omitted]"));
+        assert!(!observation.contains("c2VjcmV0"));
+        assert!(observation.contains("命令执行失败。"));
+    }
+
+    #[test]
+    fn failed_tool_observation_without_structured_result_is_still_well_formed() {
+        let observation = render_tool_observation(&AgentToolResult {
+            call_id: "call-failed-before-execution".to_string(),
+            tool: "run_command".to_string(),
+            ok: false,
+            result: None,
+            error: Some("命令未执行。".to_string()),
+        });
+
+        assert!(observation.contains("\"ok\": false"));
+        assert!(observation.contains("\"result\": null"));
+        assert!(observation.contains("命令未执行。"));
     }
 
     #[test]

@@ -156,9 +156,7 @@ export function RunCommandToolActivity({
   const commandOutput = getCommandOutput(commandResult)
   const commandFailed = result?.ok === false
   const status = getRunCommandStatus({ cancelled, call, result, settledStatus })
-  const hasDetails = Boolean(
-    details.reason || command || rejectedMessage || result?.error || commandResult
-  )
+  const hasDetails = Boolean(command || rejectedMessage || result?.error || commandResult)
   const isPending = status === 'running'
   const iconBadge = (() => {
     if (rejected) {
@@ -181,21 +179,16 @@ export function RunCommandToolActivity({
     }
     return null
   })()
-  const label = (() => {
+  const statusLabel = (() => {
     if (rejected) return t('agent.command.rejected')
     if (commandResult) {
-      return formatTranslation(
-        t,
-        result?.ok === false ? 'agent.command.failed' : 'agent.command.completed',
-        {
-          command
-        }
-      )
+      return t(result?.ok === false ? 'agent.command.failed' : 'agent.command.completed')
     }
-    if (status === 'completed') return formatTranslation(t, 'agent.command.completed', { command })
-    if (status === 'failed') return formatTranslation(t, 'agent.command.failed', { command })
+    if (status === 'completed') return t('agent.command.completed')
+    if (status === 'failed') return t('agent.command.failed')
     return getToolCallLabel(call, result, t, { cancelled, settledStatus })
   })()
+  const label = details.reason ? `${statusLabel} ${details.reason}` : statusLabel
 
   return (
     <AgentActivityDisclosure
@@ -210,28 +203,22 @@ export function RunCommandToolActivity({
       {hasDetails && (
         <div className="agent-activity__details run-command-activity__details">
           {commandResult ? (
-            <>
-              {details.reason && <p className="run-command-activity__reason">{details.reason}</p>}
-              <div className="run-command-shell" role="group" aria-label={t('agent.command.shell')}>
-                <div className="run-command-shell__title">{t('agent.command.shell')}</div>
-                {command && <pre className="run-command-shell__command">$ {command}</pre>}
-                <pre className="run-command-shell__output">
-                  {commandOutput || t('agent.command.noOutput')}
-                </pre>
-                <div
-                  className="run-command-shell__status"
-                  data-status={commandFailed ? 'failed' : 'succeeded'}
-                >
-                  <span aria-hidden="true">{commandFailed ? '×' : '✓'}</span>
-                  <span>{getCommandStatus(commandResult, result?.ok, t)}</span>
-                </div>
+            <div className="run-command-shell" role="group" aria-label={t('agent.command.shell')}>
+              <div className="run-command-shell__title">{t('agent.command.shell')}</div>
+              {command && <pre className="run-command-shell__command">$ {command}</pre>}
+              <pre className="run-command-shell__output">
+                {commandOutput || t('agent.command.noOutput')}
+              </pre>
+              <div
+                className="run-command-shell__status"
+                data-status={commandFailed ? 'failed' : 'succeeded'}
+              >
+                <span aria-hidden="true">{commandFailed ? '×' : '✓'}</span>
+                <span>{getCommandStatus(commandResult, result?.ok, t)}</span>
               </div>
-            </>
+            </div>
           ) : (
-            <>
-              {details.reason && <p className="run-command-activity__reason">{details.reason}</p>}
-              {command && <pre>{command}</pre>}
-            </>
+            command && <pre>{command}</pre>
           )}
           {rejectedMessage && (
             <>

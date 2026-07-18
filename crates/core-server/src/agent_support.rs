@@ -1361,3 +1361,41 @@ pub(super) fn serialize_json<T: Serialize>(value: &T) -> String {
         .to_string()
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_command_tool_result_keeps_the_complete_execution_observation() {
+        let execution = AgentCommandExecutionResult {
+            command: "python3 -c 'import openpyxl'".to_string(),
+            cwd: ".".to_string(),
+            exit_code: Some(1),
+            stdout: "dependency check started".to_string(),
+            stderr: "ModuleNotFoundError: No module named 'openpyxl'".to_string(),
+            timed_out: false,
+            cancelled: false,
+            duration_ms: 25,
+            stdout_truncated: false,
+            stderr_truncated: true,
+            error: None,
+        };
+
+        let result = command_tool_result("command-1", false, &execution);
+        let observation = result.result.expect("structured command observation");
+
+        assert!(!result.ok);
+        assert_eq!(result.error.as_deref(), Some("命令执行失败。"));
+        assert_eq!(observation["exitCode"], 1);
+        assert_eq!(observation["stdout"], "dependency check started");
+        assert_eq!(
+            observation["stderr"],
+            "ModuleNotFoundError: No module named 'openpyxl'"
+        );
+        assert_eq!(observation["timedOut"], false);
+        assert_eq!(observation["cancelled"], false);
+        assert_eq!(observation["stdoutTruncated"], false);
+        assert_eq!(observation["stderrTruncated"], true);
+    }
+}

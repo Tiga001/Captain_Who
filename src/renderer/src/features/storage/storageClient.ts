@@ -52,6 +52,7 @@ type SidebarSectionOrder = 'projects_first' | 'conversations_first'
 export const MIN_TRANSLUCENT_SIDEBAR_TRANSPARENCY = 50
 export const MAX_TRANSLUCENT_SIDEBAR_TRANSPARENCY = 100
 const DEFAULT_TRANSLUCENT_SIDEBAR_TRANSPARENCY = 54
+const TRANSLUCENT_SIDEBAR_THEME_TINT_FLOOR = 32
 
 export interface UiPreferencesSnapshot {
   profileAvatarDataUrl: string | null
@@ -514,7 +515,16 @@ export function normalizeTranslucentSidebarTransparency(value: unknown): number 
 }
 
 export function getTranslucentSidebarOpacityPercent(transparency: unknown): string {
-  return `${100 - normalizeTranslucentSidebarTransparency(transparency)}%`
+  const requestedTintOpacity = 100 - normalizeTranslucentSidebarTransparency(transparency)
+
+  // Native macOS vibrancy is deliberately visible beneath the sidebar, but it only knows the
+  // system light/dark appearance, not the selected MyCopilot palette. Compose the adjustable
+  // tint over a small theme-owned floor so high transparency never drops back to native gray.
+  const effectiveTintOpacity =
+    TRANSLUCENT_SIDEBAR_THEME_TINT_FLOOR +
+    requestedTintOpacity * (1 - TRANSLUCENT_SIDEBAR_THEME_TINT_FLOOR / 100)
+
+  return `${Math.round(effectiveTintOpacity)}%`
 }
 
 function parseDraftAttachments(value: string): AgentInputAttachment[] {

@@ -92,7 +92,7 @@ impl ConversationTraceRenderer {
                         call_id: exchange.wire_call_id.clone(),
                         tool: tool.clone(),
                         ok: *success,
-                        result: success.then(|| observation.clone()),
+                        result: Some(observation.clone()),
                         error: error.clone(),
                     };
                     let content = render_tool_observation(&result);
@@ -297,15 +297,29 @@ mod tests {
         let mut trace = trace();
         trace.terminal_status = ConversationTurnTraceTerminalStatus::Failed;
         trace.terminal_error = Some("read failed".to_string());
+        let ConversationTurnTraceItem::ToolCall {
+            tool, operation, ..
+        } = &mut trace.items[1]
+        else {
+            panic!("expected tool call");
+        };
+        *tool = "run_command".to_string();
+        *operation = json!({ "command": "python3 -c 'import openpyxl'" });
         trace.items[2] = ConversationTurnTraceItem::ToolResult {
             sequence: 5,
             call_id: "provider-call-1".to_string(),
-            tool: "read_file".to_string(),
+            tool: "run_command".to_string(),
             status: ConversationTraceToolResultStatus::Failed,
             success: false,
-            observation: json!({ "path": "src/lib.rs" }),
+            observation: json!({
+                "exitCode": 1,
+                "stdout": "partial output",
+                "stderr": "permission denied",
+                "timedOut": false,
+                "cancelled": false,
+            }),
             approval_status: AgentApprovalStatus::NotRequired,
-            error: Some("permission denied".to_string()),
+            error: Some("command failed".to_string()),
             truncated: false,
         };
 
@@ -317,7 +331,10 @@ mod tests {
 
         let messages = frame.to_messages();
         assert!(messages[2].is_error);
+        assert!(messages[2].content.contains("command failed"));
         assert!(messages[2].content.contains("permission denied"));
+        assert!(messages[2].content.contains("partial output"));
+        assert!(messages[2].content.contains("\"exitCode\": 1"));
         assert!(messages[2].content.contains("\"ok\": false"));
         assert!(messages[3]
             .content

@@ -517,10 +517,6 @@
   margin: 0;
 }
 
-.run-command-activity__reason {
-  color: var(--mc-color-text-muted);
-}
-
 .run-command-shell {
   position: relative;
   display: grid;

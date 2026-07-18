@@ -387,6 +387,77 @@ mod tests {
     }
 
     #[test]
+    fn approval_resume_preserves_failed_command_observation_for_the_model() {
+        let pending = LlmToolCall {
+            id: "command-1".to_string(),
+            name: "run_command".to_string(),
+            args: json!({ "command": "python3 -c 'import openpyxl'" }),
+        };
+        let context = ContextFrame::new(vec![ContextItem::assistant(
+            "",
+            vec![pending.clone()],
+            ContextMetadata::new(
+                ContextSource::ModelResponse,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            )
+            .with_group(ContextGroup::tool_exchange("command-exchange")),
+        )]);
+        let batch = ToolCallBatch::default();
+        let trace = ConversationTraceRecorder::default();
+        let checkpoint = create_run_checkpoint(
+            "run-command",
+            RunCheckpointState {
+                context: &context,
+                next_model_request_index: 1,
+                tool_batch: &batch,
+                extension_snapshots: Vec::new(),
+                model_visible_trace_item_count: 0,
+                pending_tool_call_id: &pending.id,
+                conversation_trace: &trace,
+            },
+        )
+        .unwrap();
+        let continuation = AgentToolContinuation {
+            call: AgentToolCall {
+                id: pending.id.clone(),
+                tool: pending.name.clone(),
+                args: pending.args.clone(),
+                approval_status: AgentApprovalStatus::Approved,
+                reason: None,
+            },
+            result: AgentToolResult {
+                call_id: pending.id,
+                tool: pending.name,
+                ok: false,
+                result: Some(json!({
+                    "exitCode": 1,
+                    "stdout": "dependency check started",
+                    "stderr": "ModuleNotFoundError: No module named 'openpyxl'",
+                    "timedOut": false,
+                    "cancelled": false,
+                    "stdoutTruncated": false,
+                    "stderrTruncated": false,
+                })),
+                error: Some("命令执行失败。".to_string()),
+            },
+        };
+
+        let restored = restore_run_checkpoint(checkpoint, "run-command", &continuation).unwrap();
+
+        restored.context.validate_complete_tool_protocol().unwrap();
+        let messages = restored.context.to_messages();
+        let observation = messages.last().expect("restored tool observation");
+        assert_eq!(observation.role, LlmMessageRole::Tool);
+        assert!(observation.is_error);
+        assert!(observation.content.contains("\"exitCode\": 1"));
+        assert!(observation.content.contains("dependency check started"));
+        assert!(observation.content.contains("ModuleNotFoundError"));
+        assert!(observation.content.contains("\"stdoutTruncated\": false"));
+        assert!(observation.content.contains("\"stderrTruncated\": false"));
+    }
+
+    #[test]
     fn approval_resume_preserves_compacted_context_without_restoring_raw_history() {
         let pending = LlmToolCall {
             id: "write-after-compaction".to_string(),
