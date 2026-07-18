@@ -60,6 +60,56 @@ describe('Skill installation directory selection', () => {
 })
 
 describe('Skill management IPC registration', () => {
+  beforeEach(() => {
+    ipcMainHandle.mockReset()
+  })
+
+  it('preserves structured source resolution errors returned by CoreServer', async () => {
+    const input = {
+      locator: {
+        kind: 'url',
+        url: 'https://github.com/openai/example-skills'
+      }
+    }
+    const data = {
+      type: 'skillSourceResolution',
+      phase: 'resolve',
+      code: 'rateLimited',
+      recovery: 'retryLater',
+      message: 'GitHub temporarily refused the resolution request.',
+      provider: 'github',
+      retryAfterMs: 60_000
+    }
+    const resolveSkillInstallationSource = vi.fn().mockRejectedValue(
+      Object.assign(new Error(data.message), {
+        code: -32013,
+        data
+      })
+    )
+    const coreServer = {
+      onAgentEvent: vi.fn(),
+      onSkillsChanged: vi.fn(),
+      resolveSkillInstallationSource
+    }
+    registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
+    const registration = ipcMainHandle.mock.calls.find(
+      ([channel]) => channel === 'host:skills.resolveInstallationSource'
+    )
+    const handler = registration?.[1] as
+      ((event: IpcMainInvokeEvent, input: unknown) => Promise<unknown>) | undefined
+
+    expect(handler).toBeTypeOf('function')
+    await expect(handler?.(event, input)).resolves.toEqual({
+      ok: false,
+      error: {
+        message: data.message,
+        code: -32013,
+        data
+      }
+    })
+    expect(resolveSkillInstallationSource).toHaveBeenCalledWith(input)
+  })
+
   it('preserves structured uninstall errors returned by CoreServer', async () => {
     const input = {
       skillId: 'installed:user:skill-1',

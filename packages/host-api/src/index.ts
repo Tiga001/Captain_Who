@@ -50,6 +50,8 @@ import type {
   SkillsListManagementInput,
   SkillsListManagementOutput,
   SkillsListOutput,
+  SkillsResolveInstallationSourceInput,
+  SkillsResolveInstallationSourceOutput,
   SkillsSetEnabledInput,
   SkillsSetEnabledOutput,
   SkillsUninstallInput,
@@ -136,6 +138,10 @@ export interface SkillsHostApi {
   list(input: SkillsListInput): Promise<SkillsListOutput>
   /** Opens a native single-directory picker. Cancellation is not an error. */
   selectInstallationDirectory(): Promise<string | null>
+  /** Resolves a user-facing locator into one or more immutable, inspected acquisition sources. */
+  resolveInstallationSource(
+    input: SkillsResolveInstallationSourceInput
+  ): Promise<HostInvocationResult<SkillsResolveInstallationSourceOutput>>
   inspectInstallation(
     input: SkillsInspectInstallationInput
   ): Promise<HostInvocationResult<SkillInstallationPreview>>

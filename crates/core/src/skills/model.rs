@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 pub const SKILL_PACKAGE_FORMAT_VERSION: u32 = 1;
 pub const SKILL_PACKAGE_FORMAT_VERSION_V2: u32 = 2;
+pub const SKILL_PACKAGE_FORMAT_VERSION_V3: u32 = 3;
 pub const DEFAULT_MAX_ACTIVATED_SKILLS: usize = 8;
 pub const DEFAULT_MAX_ACTIVATED_SKILL_BYTES: usize = 512 * 1024;
 
@@ -546,6 +547,9 @@ pub enum SkillResourceKind {
     Reference,
     Asset,
     Script,
+    /// A revision-bound package file outside the conventional
+    /// `references/`, `assets/`, and `scripts/` trees.
+    Other,
 }
 
 impl SkillResourceKind {
@@ -554,6 +558,7 @@ impl SkillResourceKind {
             Self::Reference => "reference",
             Self::Asset => "asset",
             Self::Script => "script",
+            Self::Other => "other",
         }
     }
 }
@@ -707,11 +712,29 @@ impl ResolvedSkillPackage {
         }
         if !matches!(
             format_version,
-            SKILL_PACKAGE_FORMAT_VERSION | SKILL_PACKAGE_FORMAT_VERSION_V2
+            SKILL_PACKAGE_FORMAT_VERSION
+                | SKILL_PACKAGE_FORMAT_VERSION_V2
+                | SKILL_PACKAGE_FORMAT_VERSION_V3
         ) {
             return Err(SkillPackageInvariantError::new(format!(
                 "unsupported Skill package format version {format_version}"
             )));
+        }
+        let contains_other = resources
+            .entries()
+            .iter()
+            .any(|resource| resource.kind() == SkillResourceKind::Other);
+        if format_version == SKILL_PACKAGE_FORMAT_VERSION_V2
+            && (resources.is_empty() || contains_other)
+        {
+            return Err(SkillPackageInvariantError::new(
+                "Skill package format v2 requires only conventional sibling resources",
+            ));
+        }
+        if format_version == SKILL_PACKAGE_FORMAT_VERSION_V3 && !contains_other {
+            return Err(SkillPackageInvariantError::new(
+                "Skill package format v3 requires at least one generic sibling resource",
+            ));
         }
         let mut previous = None;
         for resource in resources.entries() {

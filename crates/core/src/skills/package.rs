@@ -1,21 +1,21 @@
-//! Canonical logical file trees for managed Skill package format v2.
+//! Canonical logical file trees for managed Skill package formats v2 and v3.
 //!
-//! A v2 package is content, not a filesystem snapshot: permissions,
+//! A package is content, not a filesystem snapshot: permissions,
 //! timestamps, extended attributes, and empty directories are deliberately
 //! excluded. Every acquisition adapter must produce the same canonical file
 //! set before installation.
 
-use super::digest::{package_file_digest, package_revision_v2};
+use super::digest::{package_file_digest, package_revision_v2, package_revision_v3};
 use super::model::{
     SkillDiagnosticCode, SkillResourceDescriptor, SkillResourceIndex, SkillResourceKind,
-    SkillRevision, SKILL_PACKAGE_FORMAT_VERSION_V2,
+    SkillRevision, SKILL_PACKAGE_FORMAT_VERSION_V2, SKILL_PACKAGE_FORMAT_VERSION_V3,
 };
 use super::workspace::{MAX_SKILL_FILE_BYTES, SKILL_FILE_NAME};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) const PACKAGE_V2_MANIFEST_FILE: &str = ".mycopilot-package.json";
-pub(super) const PACKAGE_V2_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub(super) const PACKAGE_MANIFEST_FILE: &str = ".mycopilot-package.json";
+pub(super) const PACKAGE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub(super) const MAX_SKILL_PACKAGE_FILES: usize = 1_024;
 pub(super) const MAX_SKILL_PACKAGE_DIRECTORIES: usize = 256;
 pub(super) const MAX_SKILL_PACKAGE_DEPTH: usize = 16;
@@ -63,24 +63,11 @@ impl SkillPackagePath {
             validate_component(component)?;
         }
 
-        if value != SKILL_FILE_NAME {
-            let Some(root) = components.first().copied() else {
-                return Err(package_error(
-                    SkillDiagnosticCode::InvalidResourcePath,
-                    "Skill resource path is empty.",
-                ));
-            };
-            if components.len() < 2
-                || !matches!(
-                    root,
-                    REFERENCES_DIRECTORY | ASSETS_DIRECTORY | SCRIPTS_DIRECTORY
-                )
-            {
-                return Err(package_error(
-                    SkillDiagnosticCode::UnexpectedPackageEntry,
-                    "Package v2 permits resources only below exact-case references/, assets/, or scripts/ directories.",
-                ));
-            }
+        if value != SKILL_FILE_NAME && value.eq_ignore_ascii_case(SKILL_FILE_NAME) {
+            return Err(package_error(
+                SkillDiagnosticCode::UnexpectedPackageEntry,
+                "Skill package entrypoint must use the exact-case name SKILL.md.",
+            ));
         }
         Ok(Self(value))
     }
@@ -90,7 +77,10 @@ impl SkillPackagePath {
     }
 
     pub fn resource_kind(&self) -> Option<SkillResourceKind> {
-        match self.0.split('/').next() {
+        let mut components = self.0.split('/');
+        let root = components.next();
+        components.next()?;
+        match root {
             Some(REFERENCES_DIRECTORY) => Some(SkillResourceKind::Reference),
             Some(ASSETS_DIRECTORY) => Some(SkillResourceKind::Asset),
             Some(SCRIPTS_DIRECTORY) => Some(SkillResourceKind::Script),
@@ -112,8 +102,8 @@ fn validate_component(component: &str) -> Result<(), PackageValidationError> {
         || component.len() > MAX_SKILL_PACKAGE_COMPONENT_BYTES
         || component.chars().any(char::is_control)
         || component.ends_with(['.', ' '])
-        || component.contains(':')
-        || component.eq_ignore_ascii_case(PACKAGE_V2_MANIFEST_FILE)
+        || component.contains(['<', '>', '"', ':', '|', '?', '*'])
+        || component.eq_ignore_ascii_case(PACKAGE_MANIFEST_FILE)
     {
         return Err(package_error(
             SkillDiagnosticCode::InvalidResourcePath,
@@ -146,15 +136,20 @@ pub(super) enum PackageFileKind {
     Reference,
     Asset,
     Script,
+    Other,
 }
 
 impl PackageFileKind {
     fn from_path(path: &SkillPackagePath) -> Self {
+        if path.as_str() == SKILL_FILE_NAME {
+            return Self::Entrypoint;
+        }
         match path.resource_kind() {
-            None => Self::Entrypoint,
+            None => Self::Other,
             Some(SkillResourceKind::Reference) => Self::Reference,
             Some(SkillResourceKind::Asset) => Self::Asset,
             Some(SkillResourceKind::Script) => Self::Script,
+            Some(SkillResourceKind::Other) => Self::Other,
         }
     }
 
@@ -164,6 +159,7 @@ impl PackageFileKind {
             Self::Reference => "reference",
             Self::Asset => "asset",
             Self::Script => "script",
+            Self::Other => "other",
         }
     }
 
@@ -173,6 +169,7 @@ impl PackageFileKind {
             Self::Reference => Some(SkillResourceKind::Reference),
             Self::Asset => Some(SkillResourceKind::Asset),
             Self::Script => Some(SkillResourceKind::Script),
+            Self::Other => Some(SkillResourceKind::Other),
         }
     }
 }
@@ -258,9 +255,17 @@ pub(super) struct PackageManifest {
 impl PackageManifest {
     pub fn new(mut files: Vec<PackageManifestEntry>) -> Result<Self, PackageValidationError> {
         files.sort_by(|left, right| left.path.cmp(&right.path));
+        let package_format_version = if files
+            .iter()
+            .any(|entry| entry.kind == PackageFileKind::Other)
+        {
+            SKILL_PACKAGE_FORMAT_VERSION_V3
+        } else {
+            SKILL_PACKAGE_FORMAT_VERSION_V2
+        };
         let manifest = Self {
-            schema_version: PACKAGE_V2_MANIFEST_SCHEMA_VERSION,
-            package_format_version: SKILL_PACKAGE_FORMAT_VERSION_V2,
+            schema_version: PACKAGE_MANIFEST_SCHEMA_VERSION,
+            package_format_version,
             entrypoint: SKILL_FILE_NAME.to_string(),
             files,
         };
@@ -324,7 +329,15 @@ impl PackageManifest {
     }
 
     pub fn revision(&self) -> SkillRevision {
-        package_revision_v2(&self.files)
+        match self.package_format_version {
+            SKILL_PACKAGE_FORMAT_VERSION_V2 => package_revision_v2(&self.files),
+            SKILL_PACKAGE_FORMAT_VERSION_V3 => package_revision_v3(&self.files),
+            _ => unreachable!("validated package manifest format"),
+        }
+    }
+
+    pub fn format_version(&self) -> u32 {
+        self.package_format_version
     }
 
     pub fn files(&self) -> &[PackageManifestEntry] {
@@ -346,8 +359,11 @@ impl PackageManifest {
     }
 
     fn validate(&self) -> Result<(), PackageValidationError> {
-        if self.schema_version != PACKAGE_V2_MANIFEST_SCHEMA_VERSION
-            || self.package_format_version != SKILL_PACKAGE_FORMAT_VERSION_V2
+        if self.schema_version != PACKAGE_MANIFEST_SCHEMA_VERSION
+            || !matches!(
+                self.package_format_version,
+                SKILL_PACKAGE_FORMAT_VERSION_V2 | SKILL_PACKAGE_FORMAT_VERSION_V3
+            )
             || self.entrypoint != SKILL_FILE_NAME
         {
             return Err(package_error(
@@ -359,8 +375,21 @@ impl PackageManifest {
             return Err(package_error(
                 SkillDiagnosticCode::TooManyEntries,
                 format!(
-                    "Package v2 must contain SKILL.md and at least one resource, with at most {MAX_SKILL_PACKAGE_FILES} files."
+                    "Package must contain SKILL.md and at least one resource, with at most {MAX_SKILL_PACKAGE_FILES} files."
                 ),
+            ));
+        }
+
+        let contains_other = self
+            .files
+            .iter()
+            .any(|entry| entry.kind == PackageFileKind::Other);
+        if (self.package_format_version == SKILL_PACKAGE_FORMAT_VERSION_V2 && contains_other)
+            || (self.package_format_version == SKILL_PACKAGE_FORMAT_VERSION_V3 && !contains_other)
+        {
+            return Err(package_error(
+                SkillDiagnosticCode::InvalidPackageManifest,
+                "Package format v2 is reserved for conventional resource trees; format v3 requires at least one other resource.",
             ));
         }
 
@@ -573,15 +602,35 @@ mod tests {
     }
 
     #[test]
-    fn canonical_paths_accept_only_the_v2_layout() {
+    fn canonical_paths_accept_safe_generic_resources_without_remapping() {
         assert!(SkillPackagePath::parse("SKILL.md").is_ok());
         assert!(SkillPackagePath::parse("references/deep/guide.md").is_ok());
         assert!(SkillPackagePath::parse("assets/icon.png").is_ok());
         assert!(SkillPackagePath::parse("scripts/check.sh").is_ok());
+        assert!(SkillPackagePath::parse("README.md").is_ok());
+        assert!(SkillPackagePath::parse("agents/openai.yaml").is_ok());
+        assert!(SkillPackagePath::parse("templates/report.md").is_ok());
+        assert_eq!(
+            PackageFileKind::from_path(
+                &SkillPackagePath::parse("references/deep/guide.md").unwrap()
+            ),
+            PackageFileKind::Reference
+        );
+        assert_eq!(
+            PackageFileKind::from_path(&SkillPackagePath::parse("README.md").unwrap()),
+            PackageFileKind::Other
+        );
+        assert_eq!(
+            PackageFileKind::from_path(
+                &SkillPackagePath::parse("References/deep/guide.md").unwrap()
+            ),
+            PackageFileKind::Other
+        );
         for invalid in [
-            "README.md",
-            "References/guide.md",
-            "references",
+            "skill.md",
+            "assets/report?.md",
+            "templates/<draft>.md",
+            "agents/openai|legacy.yaml",
             "references/../secret",
             "references\\secret",
             "/references/secret",
@@ -613,6 +662,7 @@ mod tests {
         );
         let bytes = manifest.encode().unwrap();
         assert_eq!(PackageManifest::decode(&bytes).unwrap(), manifest);
+        assert_eq!(manifest.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V2);
 
         let mut changed = manifest.clone();
         changed.files[1].digest = package_file_digest(b"changed");
@@ -621,6 +671,50 @@ mod tests {
         let mut value = serde_json::to_value(&manifest).unwrap();
         value["unknown"] = serde_json::json!(true);
         assert!(PackageManifest::decode(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn v3_manifest_roundtrips_generic_resources_and_preserves_v2_identity() {
+        let v2 = PackageManifest::new(vec![
+            entry("SKILL.md", b"skill"),
+            entry("references/guide.md", b"guide"),
+        ])
+        .unwrap();
+        let v3 = PackageManifest::new(vec![
+            entry("SKILL.md", b"skill"),
+            entry("references/guide.md", b"guide"),
+            entry("README.md", b"readme"),
+            entry("agents/openai.yaml", b"interface: chat"),
+        ])
+        .unwrap();
+
+        assert_eq!(v2.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V2);
+        assert_eq!(v3.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V3);
+        assert!(v2
+            .revision()
+            .as_str()
+            .starts_with("skill-package-sha256-v2:"));
+        assert!(v3
+            .revision()
+            .as_str()
+            .starts_with("skill-package-sha256-v3:"));
+        assert_eq!(PackageManifest::decode(&v3.encode().unwrap()).unwrap(), v3);
+        assert_eq!(
+            v3.resource_descriptors()
+                .iter()
+                .find(|resource| resource.path() == "agents/openai.yaml")
+                .unwrap()
+                .kind(),
+            SkillResourceKind::Other
+        );
+
+        let mut falsely_v2 = serde_json::to_value(&v3).unwrap();
+        falsely_v2["packageFormatVersion"] = serde_json::json!(2);
+        assert!(PackageManifest::decode(&serde_json::to_vec(&falsely_v2).unwrap()).is_err());
+
+        let mut falsely_v3 = serde_json::to_value(&v2).unwrap();
+        falsely_v3["packageFormatVersion"] = serde_json::json!(3);
+        assert!(PackageManifest::decode(&serde_json::to_vec(&falsely_v3).unwrap()).is_err());
     }
 
     #[test]

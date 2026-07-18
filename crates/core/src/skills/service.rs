@@ -7,7 +7,7 @@ use super::model::{
     SkillCatalog, SkillDescriptor, SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity,
     SkillDiscoveryError, SkillProvenance, SkillRegistrationError, SkillResolveError,
     SkillResolveRequest, SkillSelection, SkillSourceId, SkillSourceKind,
-    SKILL_PACKAGE_FORMAT_VERSION, SKILL_PACKAGE_FORMAT_VERSION_V2,
+    SKILL_PACKAGE_FORMAT_VERSION, SKILL_PACKAGE_FORMAT_VERSION_V2, SKILL_PACKAGE_FORMAT_VERSION_V3,
 };
 use super::package::PackageManifest;
 use super::parser::parse_skill_document;
@@ -489,16 +489,27 @@ fn validate_resolved_contract(
     }
     let actual_revision = match package.format_version() {
         SKILL_PACKAGE_FORMAT_VERSION => package_revision(package.source_text().as_bytes()),
-        SKILL_PACKAGE_FORMAT_VERSION_V2 => {
-            PackageManifest::from_resolved(package.source_text().as_bytes(), package.resources())
-                .map_err(|error| {
-                    format!(
-                        "resolved package `{}` has an invalid resource index: {}",
-                        package.id(),
-                        error.message
-                    )
-                })?
-                .revision()
+        SKILL_PACKAGE_FORMAT_VERSION_V2 | SKILL_PACKAGE_FORMAT_VERSION_V3 => {
+            let manifest = PackageManifest::from_resolved(
+                package.source_text().as_bytes(),
+                package.resources(),
+            )
+            .map_err(|error| {
+                format!(
+                    "resolved package `{}` has an invalid resource index: {}",
+                    package.id(),
+                    error.message
+                )
+            })?;
+            if manifest.format_version() != package.format_version() {
+                return Err(format!(
+                    "resolved package `{}` declares format {}, but its resource index requires format {}",
+                    package.id(),
+                    package.format_version(),
+                    manifest.format_version()
+                ));
+            }
+            manifest.revision()
         }
         version => {
             return Err(format!(

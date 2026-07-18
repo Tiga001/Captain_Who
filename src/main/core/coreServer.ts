@@ -48,6 +48,8 @@ import type {
   SkillsListManagementInput,
   SkillsListManagementOutput,
   SkillsListOutput,
+  SkillsResolveInstallationSourceInput,
+  SkillsResolveInstallationSourceOutput,
   SkillsSetEnabledInput,
   SkillsSetEnabledOutput,
   SkillsUninstallInput,
@@ -74,8 +76,10 @@ import {
   parseSkillManagementErrorData,
   parseSkillMutationOutput,
   parseSkillPreparationCancellationOutput,
+  parseSkillSourceResolutionErrorData,
   parseSkillsChangedNotification,
   parseSkillsListManagementOutput,
+  parseSkillsResolveInstallationSourceOutput,
   parseSkillsSetEnabledOutput,
   SKILLS_CANCEL_PREPARATION_METHOD,
   SKILLS_CHANGED_NOTIFICATION_METHOD,
@@ -85,7 +89,9 @@ import {
   SKILL_INSPECTION_ERROR_CODE,
   SKILL_MANAGEMENT_ERROR_CODE,
   SKILLS_LIST_MANAGEMENT_METHOD,
+  SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD,
   SKILLS_SET_ENABLED_METHOD,
+  SKILL_SOURCE_RESOLUTION_ERROR_CODE,
   SKILLS_UNINSTALL_METHOD,
   SKILLS_UPDATE_LOCAL_METHOD
 } from '@mycopilot/protocol'
@@ -171,6 +177,14 @@ function rethrowValidatedSkillManagementError(error: unknown): never {
     error,
     SKILL_MANAGEMENT_ERROR_CODE,
     parseSkillManagementErrorData
+  )
+}
+
+function rethrowValidatedSkillSourceResolutionError(error: unknown): never {
+  return rethrowValidatedSkillError(
+    error,
+    SKILL_SOURCE_RESOLUTION_ERROR_CODE,
+    parseSkillSourceResolutionErrorData
   )
 }
 
@@ -307,6 +321,18 @@ export class CoreServer {
 
   listSkills(input: SkillsListInput): Promise<SkillsListOutput> {
     return this.rpc.request<SkillsListOutput, SkillsListInput>(SKILLS_LIST_METHOD, input)
+  }
+
+  resolveSkillInstallationSource(
+    input: SkillsResolveInstallationSourceInput
+  ): Promise<SkillsResolveInstallationSourceOutput> {
+    return this.rpc
+      .request<unknown, SkillsResolveInstallationSourceInput>(
+        SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD,
+        input
+      )
+      .then(parseSkillsResolveInstallationSourceOutput)
+      .catch(rethrowValidatedSkillSourceResolutionError)
   }
 
   inspectSkillInstallation(

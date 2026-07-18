@@ -411,6 +411,7 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
             workflow: Arc::new(SkillInstallationWorkflow::new(
                 SkillInstallationService::new(&store_root).unwrap(),
             )),
+            source_resolution: Arc::new(SkillSourceResolutionService::new()),
         },
         Arc::new(GitReviewService::new()),
         &dispatchers,
@@ -492,6 +493,7 @@ async fn two_phase_rpc_runs_install_update_activation_and_uninstall_end_to_end()
             catalog: Arc::clone(&catalog),
             installations,
             workflow,
+            source_resolution: Arc::new(SkillSourceResolutionService::new()),
         },
         Arc::new(GitReviewService::new()),
         &dispatchers,
@@ -528,6 +530,10 @@ async fn two_phase_rpc_runs_install_update_activation_and_uninstall_end_to_end()
         );
         assert_eq!(
             install_preview["result"]["compatibility"]["issues"][0]["id"],
+            "resourcesNotExposed"
+        );
+        assert_eq!(
+            install_preview["result"]["compatibility"]["issues"][1]["id"],
             "containsScripts"
         );
 

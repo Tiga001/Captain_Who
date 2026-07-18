@@ -603,12 +603,14 @@ impl fmt::Debug for SkillInstallationPreparationRequest {
 #[non_exhaustive]
 pub enum SkillInstallationWarningCode {
     ContainsScripts,
+    ResourcesNotExposed,
 }
 
 impl SkillInstallationWarningCode {
     pub fn stable_name(self) -> &'static str {
         match self {
             Self::ContainsScripts => "containsScripts",
+            Self::ResourcesNotExposed => "resourcesNotExposed",
         }
     }
 }
@@ -1587,18 +1589,29 @@ fn build_preview(
             SkillResourceKind::Reference => resources.reference_count += 1,
             SkillResourceKind::Asset => resources.asset_count += 1,
             SkillResourceKind::Script => resources.script_count += 1,
+            SkillResourceKind::Other => {
+                // Generic resources remain visible in the total count and byte
+                // size; unlike scripts they do not introduce a special warning.
+            }
         }
     }
-    let warnings = if resources.script_count == 0 {
-        Vec::new()
-    } else {
-        vec![SkillInstallationWarning {
+    let mut warnings = Vec::new();
+    if resources.resource_count > 0 {
+        warnings.push(SkillInstallationWarning {
+            code: SkillInstallationWarningCode::ResourcesNotExposed,
+            message: "This version preserves sibling Skill files but does not yet expose them to the agent runtime. Instructions that depend on those files may not work."
+                .to_string(),
+            acknowledgement_required: false,
+        });
+    }
+    if resources.script_count > 0 {
+        warnings.push(SkillInstallationWarning {
             code: SkillInstallationWarningCode::ContainsScripts,
             message: "This Skill contains script files. They are installed as inert resources and are never executed automatically."
                 .to_string(),
             acknowledgement_required: true,
-        }]
-    };
+        });
+    }
     let package_preview = SkillInstallationPackagePreview {
         name: package.name().to_string(),
         description: package.description().to_string(),
@@ -2310,9 +2323,13 @@ mod tests {
         assert_eq!(preview.package().resources().reference_count(), 1);
         assert_eq!(preview.package().resources().asset_count(), 1);
         assert_eq!(preview.package().resources().script_count(), 1);
-        assert_eq!(preview.warnings().len(), 1);
+        assert_eq!(preview.warnings().len(), 2);
         assert_eq!(
             preview.warnings()[0].code(),
+            SkillInstallationWarningCode::ResourcesNotExposed
+        );
+        assert_eq!(
+            preview.warnings()[1].code(),
             SkillInstallationWarningCode::ContainsScripts
         );
 

@@ -355,6 +355,9 @@ export function registerHostIpc(
   ipcMain.handle('host:skills.selectInstallationDirectory', (event) =>
     selectInstallationDirectory(event)
   )
+  ipcMain.handle('host:skills.resolveInstallationSource', (_event, input) =>
+    captureHostInvocation(() => coreServer.resolveSkillInstallationSource(input))
+  )
   ipcMain.handle('host:skills.inspectInstallation', (_event, input) =>
     captureHostInvocation(() => coreServer.inspectSkillInstallation(input))
   )

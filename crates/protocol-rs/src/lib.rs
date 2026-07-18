@@ -27,6 +27,7 @@ pub const SKILLS_CANCEL_PREPARATION_METHOD: &str = "skills.cancelPreparation";
 pub const SKILLS_LIST_MANAGEMENT_METHOD: &str = "skills.listManagement";
 pub const SKILLS_SET_ENABLED_METHOD: &str = "skills.setEnabled";
 pub const SKILLS_CHANGED_NOTIFICATION_METHOD: &str = "skills.changed";
+pub const SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD: &str = "skills.resolveInstallationSource";
 pub const GIT_INSPECT_REPOSITORY_METHOD: &str = "git.inspectRepository";
 pub const GIT_GET_REVIEW_SUMMARY_METHOD: &str = "git.getReviewSummary";
 pub const GIT_GET_REVIEW_FILE_DIFF_METHOD: &str = "git.getReviewFileDiff";
@@ -166,9 +167,11 @@ pub const SKILL_CATALOG_SCHEMA_VERSION: u32 = 4;
 pub const SKILL_MUTATION_SCHEMA_VERSION: u32 = 1;
 pub const SKILL_INSTALLATION_WORKFLOW_SCHEMA_VERSION: u32 = 1;
 pub const SKILL_MANAGEMENT_SCHEMA_VERSION: u32 = 1;
+pub const SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION: u32 = 1;
 pub const SKILL_INSTALLATION_ERROR_CODE: i64 = -32010;
 pub const SKILL_INSPECTION_ERROR_CODE: i64 = -32011;
 pub const SKILL_MANAGEMENT_ERROR_CODE: i64 = -32012;
+pub const SKILL_SOURCE_RESOLUTION_ERROR_CODE: i64 = -32013;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -273,6 +276,303 @@ pub struct SkillPackagePreviewDto {
     pub description: String,
     pub file_count: u64,
     pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillsResolveInstallationSourceRequest {
+    pub locator: SkillInstallationSourceLocatorDto,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SkillInstallationSourceLocatorDto {
+    #[serde(rename = "url")]
+    Url { url: String },
+}
+
+/// A canonical, lower-case, complete Git commit SHA.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SkillResolvedGithubCommitShaDto(String);
+
+impl SkillResolvedGithubCommitShaDto {
+    pub fn parse(value: impl Into<String>) -> Result<Self, &'static str> {
+        let value = value.into();
+        let is_full_lowercase_sha = value.len() == 40
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !is_full_lowercase_sha {
+            return Err("expected a lower-case 40-character hexadecimal SHA");
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl Serialize for SkillResolvedGithubCommitShaDto {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SkillResolvedGithubCommitShaDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillSourceResolutionProviderDto {
+    Github,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillSourceResolutionOutcomeDto {
+    Resolved,
+    SelectionRequired,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SkillResolvedAcquisitionSourceDto {
+    #[serde(rename = "githubRepository", rename_all = "camelCase")]
+    GithubRepository {
+        owner: String,
+        repository: String,
+        reference: SkillResolvedGithubReferenceDto,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subdirectory: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum SkillResolvedGithubReferenceDto {
+    #[serde(rename = "commit")]
+    Commit {
+        sha: SkillResolvedGithubCommitShaDto,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillSourceResolutionCandidateDto {
+    pub candidate_id: String,
+    pub source: SkillResolvedAcquisitionSourceDto,
+    pub package: SkillPackagePreviewDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillsResolveInstallationSourceResponse {
+    pub schema_version: u32,
+    pub canonical_url: String,
+    pub provider: SkillSourceResolutionProviderDto,
+    pub resolved_commit: SkillResolvedGithubCommitShaDto,
+    pub outcome: SkillSourceResolutionOutcomeDto,
+    pub candidates: Vec<SkillSourceResolutionCandidateDto>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SkillsResolveInstallationSourceResponseWire {
+    schema_version: u32,
+    canonical_url: String,
+    provider: SkillSourceResolutionProviderDto,
+    resolved_commit: SkillResolvedGithubCommitShaDto,
+    outcome: SkillSourceResolutionOutcomeDto,
+    candidates: Vec<SkillSourceResolutionCandidateDto>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillsResolveInstallationSourceResponseWireRef<'a> {
+    schema_version: u32,
+    canonical_url: &'a str,
+    provider: SkillSourceResolutionProviderDto,
+    resolved_commit: &'a SkillResolvedGithubCommitShaDto,
+    outcome: SkillSourceResolutionOutcomeDto,
+    candidates: &'a [SkillSourceResolutionCandidateDto],
+}
+
+impl Serialize for SkillsResolveInstallationSourceResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        SkillsResolveInstallationSourceResponseWireRef {
+            schema_version: self.schema_version,
+            canonical_url: &self.canonical_url,
+            provider: self.provider,
+            resolved_commit: &self.resolved_commit,
+            outcome: self.outcome,
+            candidates: &self.candidates,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SkillsResolveInstallationSourceResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = SkillsResolveInstallationSourceResponseWire::deserialize(deserializer)?;
+        let response = Self {
+            schema_version: wire.schema_version,
+            canonical_url: wire.canonical_url,
+            provider: wire.provider,
+            resolved_commit: wire.resolved_commit,
+            outcome: wire.outcome,
+            candidates: wire.candidates,
+        };
+        response.validate().map_err(serde::de::Error::custom)?;
+        Ok(response)
+    }
+}
+
+impl SkillsResolveInstallationSourceResponse {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported Skill source resolution schema version {}",
+                self.schema_version
+            ));
+        }
+        if self.canonical_url.trim().is_empty() {
+            return Err("canonicalUrl must be non-empty".to_string());
+        }
+        match self.outcome {
+            SkillSourceResolutionOutcomeDto::Resolved if self.candidates.len() != 1 => {
+                return Err("resolved outcome requires exactly one candidate".to_string());
+            }
+            SkillSourceResolutionOutcomeDto::SelectionRequired if self.candidates.len() < 2 => {
+                return Err(
+                    "selectionRequired outcome requires at least two candidates".to_string()
+                );
+            }
+            _ => {}
+        }
+
+        let mut candidate_ids = std::collections::HashSet::new();
+        for candidate in &self.candidates {
+            if candidate.candidate_id.trim().is_empty() {
+                return Err("candidateId must be non-empty".to_string());
+            }
+            if !candidate_ids.insert(candidate.candidate_id.as_str()) {
+                return Err("candidateId values must be unique".to_string());
+            }
+            if candidate.package.format_version == 0
+                || candidate.package.package_revision.trim().is_empty()
+                || candidate.package.name.trim().is_empty()
+                || candidate.package.description.trim().is_empty()
+                || candidate.package.file_count == 0
+                || candidate.package.total_bytes == 0
+            {
+                return Err("candidate package preview is invalid".to_string());
+            }
+            match &candidate.source {
+                SkillResolvedAcquisitionSourceDto::GithubRepository {
+                    owner,
+                    repository,
+                    reference,
+                    subdirectory,
+                } => {
+                    if owner.trim().is_empty() || repository.trim().is_empty() {
+                        return Err("candidate GitHub repository identity is invalid".to_string());
+                    }
+                    if matches!(subdirectory, Some(value) if value.trim().is_empty()) {
+                        return Err(
+                            "candidate subdirectory must be non-empty when present".to_string()
+                        );
+                    }
+                    let SkillResolvedGithubReferenceDto::Commit { sha } = reference;
+                    if sha != &self.resolved_commit {
+                        return Err(
+                            "candidate commit SHA must match response.resolvedCommit".to_string()
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillSourceResolutionPhaseDto {
+    Parse,
+    Resolve,
+    Discover,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillSourceResolutionErrorCodeDto {
+    InvalidLocator,
+    UnsupportedLocator,
+    UnsupportedHost,
+    UnsupportedUrlShape,
+    RepositoryNotFound,
+    ReferenceNotFound,
+    PathNotFound,
+    AmbiguousReference,
+    NoSkillsFound,
+    TooManySkills,
+    NetworkUnavailable,
+    RateLimited,
+    RepositoryTooLarge,
+    UnsafePackage,
+    InvalidPackage,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillSourceResolutionRecoveryDto {
+    FixLocator,
+    RetryLater,
+    NarrowLocator,
+    ChooseDifferentSource,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillSourceResolutionErrorData {
+    #[serde(rename = "type")]
+    pub error_type: SkillSourceResolutionErrorTypeDto,
+    pub phase: SkillSourceResolutionPhaseDto,
+    pub code: SkillSourceResolutionErrorCodeDto,
+    pub recovery: SkillSourceResolutionRecoveryDto,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<SkillSourceResolutionProviderDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillSourceResolutionErrorTypeDto {
+    SkillSourceResolution,
 }
 
 /// A presentation-safe source summary. Authority-bearing local paths and
@@ -1243,6 +1543,154 @@ mod tests {
         assert_wire_round_trip::<SkillInspectionErrorData>(&golden["inspectionError"]);
         for error in golden["managementErrors"].as_array().unwrap() {
             assert_wire_round_trip::<SkillManagementErrorData>(error);
+        }
+    }
+
+    #[test]
+    fn skill_source_resolution_v1_matches_the_shared_wire_golden() {
+        let golden: Value = serde_json::from_str(include_str!(
+            "../../../packages/protocol/fixtures/skill-source-resolution-v1.json"
+        ))
+        .unwrap();
+
+        assert_eq!(
+            golden["schemaVersion"],
+            SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION
+        );
+        assert_eq!(golden["method"], SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD);
+        assert_eq!(SKILL_SOURCE_RESOLUTION_ERROR_CODE, -32013);
+        for case in golden["cases"].as_array().unwrap() {
+            assert_wire_round_trip::<SkillsResolveInstallationSourceRequest>(&case["request"]);
+            assert_wire_round_trip::<SkillsResolveInstallationSourceResponse>(&case["response"]);
+        }
+        for error in golden["errors"].as_array().unwrap() {
+            assert_wire_round_trip::<SkillSourceResolutionErrorData>(error);
+        }
+    }
+
+    #[test]
+    fn skill_source_resolution_boundaries_are_strict_and_immutable() {
+        let golden: Value = serde_json::from_str(include_str!(
+            "../../../packages/protocol/fixtures/skill-source-resolution-v1.json"
+        ))
+        .unwrap();
+
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceRequest>(serde_json::json!({
+                "locator": {
+                    "kind": "url",
+                    "url": "https://github.com/openai/example-skills",
+                    "credential": "must-not-cross-the-boundary"
+                }
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceRequest>(serde_json::json!({
+                "locator": {
+                    "kind": "git",
+                    "url": "https://github.com/openai/example-skills"
+                }
+            }))
+            .is_err()
+        );
+
+        let mut short_commit = golden["cases"][0]["response"].clone();
+        short_commit["resolvedCommit"] = serde_json::json!("abc123");
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(short_commit)
+                .is_err()
+        );
+        let mut uppercase_commit = golden["cases"][0]["response"].clone();
+        uppercase_commit["resolvedCommit"] =
+            serde_json::json!("ABCDEF0123456789ABCDEF0123456789ABCDEF01");
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(uppercase_commit)
+                .is_err()
+        );
+
+        let mut mutable_reference = golden["cases"][0]["response"].clone();
+        mutable_reference["candidates"][0]["source"]["reference"] =
+            serde_json::json!({ "kind": "defaultBranch" });
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(mutable_reference)
+                .is_err()
+        );
+
+        let mut mismatched_commit = golden["cases"][0]["response"].clone();
+        mismatched_commit["candidates"][0]["source"]["reference"]["sha"] =
+            serde_json::json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(mismatched_commit)
+                .is_err()
+        );
+
+        let mut invalid_cardinality = golden["cases"][1]["response"].clone();
+        invalid_cardinality["outcome"] = serde_json::json!("resolved");
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(invalid_cardinality)
+                .is_err()
+        );
+        let mut invalid_output: SkillsResolveInstallationSourceResponse =
+            serde_json::from_value(golden["cases"][0]["response"].clone()).unwrap();
+        invalid_output.outcome = SkillSourceResolutionOutcomeDto::SelectionRequired;
+        assert!(serde_json::to_value(invalid_output).is_err());
+
+        let mut duplicate_candidate_ids = golden["cases"][1]["response"].clone();
+        let first_candidate_id = duplicate_candidate_ids["candidates"][0]["candidateId"].clone();
+        duplicate_candidate_ids["candidates"][1]["candidateId"] = first_candidate_id;
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(
+                duplicate_candidate_ids
+            )
+            .is_err()
+        );
+
+        let mut unknown_response_field = golden["cases"][0]["response"].clone();
+        unknown_response_field
+            .as_object_mut()
+            .unwrap()
+            .insert("credential".to_string(), serde_json::json!("secret"));
+        assert!(
+            serde_json::from_value::<SkillsResolveInstallationSourceResponse>(
+                unknown_response_field
+            )
+            .is_err()
+        );
+        for (field, value) in [
+            ("schemaVersion", serde_json::json!(2)),
+            ("provider", serde_json::json!("gitlab")),
+            ("outcome", serde_json::json!("installed")),
+        ] {
+            let mut response = golden["cases"][0]["response"].clone();
+            response[field] = value;
+            assert!(
+                serde_json::from_value::<SkillsResolveInstallationSourceResponse>(response)
+                    .is_err()
+            );
+        }
+
+        let mut unknown_error_code = golden["errors"][0].clone();
+        unknown_error_code["code"] = serde_json::json!("repositoryMoved");
+        assert!(
+            serde_json::from_value::<SkillSourceResolutionErrorData>(unknown_error_code).is_err()
+        );
+        let mut unknown_error_field = golden["errors"][0].clone();
+        unknown_error_field
+            .as_object_mut()
+            .unwrap()
+            .insert("internalUrl".to_string(), serde_json::json!("secret"));
+        assert!(
+            serde_json::from_value::<SkillSourceResolutionErrorData>(unknown_error_field).is_err()
+        );
+        for (field, value) in [
+            ("phase", "install"),
+            ("recovery", "retrySamePreparation"),
+            ("provider", "gitlab"),
+        ] {
+            let mut error = golden["errors"][1].clone();
+            error[field] = serde_json::json!(value);
+            assert!(serde_json::from_value::<SkillSourceResolutionErrorData>(error).is_err());
         }
     }
 

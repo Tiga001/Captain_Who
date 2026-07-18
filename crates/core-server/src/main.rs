@@ -2,6 +2,7 @@ mod agent;
 mod agent_support;
 mod git_dispatcher;
 mod skill_installation_workflow_adapter;
+mod skill_source_resolution_adapter;
 mod skills_adapter;
 mod skills_dispatcher;
 #[cfg(test)]
@@ -17,10 +18,12 @@ use agent::{AgentConversationTurnInput, AgentService, AgentServiceError};
 use git_dispatcher::{GitDispatcher, GitJobPriority};
 use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
 use mycopilot_core::skills::{
-    GitHubWorkflowAcquisitionAdapter, LocalSkillInstallRequest, LocalSkillUpdateRequest, SkillId,
-    SkillInstallationId, SkillInstallationMutation, SkillInstallationOperation,
-    SkillInstallationService, SkillInstallationServiceError, SkillInstallationWorkflow,
-    SkillRevision, SkillUninstallRequest as CoreSkillUninstallRequest, SkillsService,
+    GitHubAcquisitionTransport, GitHubInstallationSourceResolver, GitHubSkillAcquirer,
+    GitHubWorkflowAcquisitionAdapter, LocalSkillInstallRequest, LocalSkillUpdateRequest,
+    ReqwestGitHubTransport, SkillId, SkillInstallationId, SkillInstallationMutation,
+    SkillInstallationOperation, SkillInstallationService, SkillInstallationServiceError,
+    SkillInstallationWorkflow, SkillRevision, SkillSourceResolutionService,
+    SkillUninstallRequest as CoreSkillUninstallRequest, SkillsService,
 };
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationMetaRecord, ChatMessageRecord,
@@ -37,30 +40,32 @@ use mycopilot_protocol_rs::{
     GitReviewSummaryRequest, JsonRpcId, JsonRpcRequest, SkillsCancelPreparationRequest,
     SkillsChangedNotification, SkillsChangedReasonDto, SkillsCommitInstallationRequest,
     SkillsInspectInstallationRequest, SkillsInstallLocalRequest, SkillsListManagementRequest,
-    SkillsListRequest, SkillsSetEnabledRequest, SkillsUninstallRequest, SkillsUpdateLocalRequest,
-    AGENT_APPROVE_ACTION_METHOD, AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD,
-    AGENT_CLEAR_USAGE_RECORDS_METHOD, AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD,
-    AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD, AGENT_GET_FILE_WRITE_DIFF_METHOD,
-    AGENT_GET_USAGE_SUMMARY_METHOD, AGENT_LIST_PENDING_ACTIONS_METHOD,
-    AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
-    CORE_PING_METHOD, CORE_SHUTDOWN_METHOD, GIT_GET_REVIEW_FILE_CONTENT_METHOD,
-    GIT_GET_REVIEW_FILE_DIFF_METHOD, GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD,
-    GIT_MUTATE_REVIEW_FILE_METHOD, SEARCH_SEARCH_CHATS_METHOD, SKILLS_CANCEL_PREPARATION_METHOD,
+    SkillsListRequest, SkillsResolveInstallationSourceRequest, SkillsSetEnabledRequest,
+    SkillsUninstallRequest, SkillsUpdateLocalRequest, AGENT_APPROVE_ACTION_METHOD,
+    AGENT_CANCEL_ACTION_METHOD, AGENT_CANCEL_RUN_METHOD, AGENT_CLEAR_USAGE_RECORDS_METHOD,
+    AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD, AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
+    AGENT_GET_FILE_WRITE_DIFF_METHOD, AGENT_GET_USAGE_SUMMARY_METHOD,
+    AGENT_LIST_PENDING_ACTIONS_METHOD, AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD,
+    AGENT_START_CONVERSATION_TURN_METHOD, CORE_PING_METHOD, CORE_SHUTDOWN_METHOD,
+    GIT_GET_REVIEW_FILE_CONTENT_METHOD, GIT_GET_REVIEW_FILE_DIFF_METHOD,
+    GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD, GIT_MUTATE_REVIEW_FILE_METHOD,
+    SEARCH_SEARCH_CHATS_METHOD, SKILLS_CANCEL_PREPARATION_METHOD,
     SKILLS_CHANGED_NOTIFICATION_METHOD, SKILLS_COMMIT_INSTALLATION_METHOD,
     SKILLS_INSPECT_INSTALLATION_METHOD, SKILLS_INSTALL_LOCAL_METHOD, SKILLS_LIST_MANAGEMENT_METHOD,
-    SKILLS_LIST_METHOD, SKILLS_SET_ENABLED_METHOD, SKILLS_UNINSTALL_METHOD,
-    SKILLS_UPDATE_LOCAL_METHOD, SKILL_INSPECTION_ERROR_CODE, SKILL_INSTALLATION_ERROR_CODE,
-    SKILL_MANAGEMENT_ERROR_CODE, SKILL_MANAGEMENT_SCHEMA_VERSION,
-    STORAGE_DELETE_CHAT_MESSAGES_METHOD, STORAGE_DELETE_CONVERSATION_METHOD,
-    STORAGE_DELETE_PROJECT_METHOD, STORAGE_FORK_CONVERSATION_METHOD,
-    STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD,
-    STORAGE_LOAD_COMPOSER_DRAFTS_METHOD, STORAGE_LOAD_CONVERSATIONS_METHOD,
-    STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD, STORAGE_LOAD_MODEL_SETTINGS_METHOD,
-    STORAGE_LOAD_PROJECTS_METHOD, STORAGE_LOAD_UI_PREFERENCES_METHOD,
-    STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD, STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD,
-    STORAGE_SAVE_COMPOSER_DRAFT_METHOD, STORAGE_SAVE_CONVERSATION_META_METHOD,
-    STORAGE_SAVE_MODEL_SETTINGS_METHOD, STORAGE_SAVE_PROJECT_METHOD,
-    STORAGE_SAVE_UI_PREFERENCES_METHOD, STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
+    SKILLS_LIST_METHOD, SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD, SKILLS_SET_ENABLED_METHOD,
+    SKILLS_UNINSTALL_METHOD, SKILLS_UPDATE_LOCAL_METHOD, SKILL_INSPECTION_ERROR_CODE,
+    SKILL_INSTALLATION_ERROR_CODE, SKILL_MANAGEMENT_ERROR_CODE, SKILL_MANAGEMENT_SCHEMA_VERSION,
+    SKILL_SOURCE_RESOLUTION_ERROR_CODE, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
+    STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
+    STORAGE_FORK_CONVERSATION_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
+    STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD, STORAGE_LOAD_COMPOSER_DRAFTS_METHOD,
+    STORAGE_LOAD_CONVERSATIONS_METHOD, STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD,
+    STORAGE_LOAD_MODEL_SETTINGS_METHOD, STORAGE_LOAD_PROJECTS_METHOD,
+    STORAGE_LOAD_UI_PREFERENCES_METHOD, STORAGE_SAVE_AGENT_PROMPT_PREFERENCES_METHOD,
+    STORAGE_SAVE_CHAT_MESSAGE_STATE_METHOD, STORAGE_SAVE_COMPOSER_DRAFT_METHOD,
+    STORAGE_SAVE_CONVERSATION_META_METHOD, STORAGE_SAVE_MODEL_SETTINGS_METHOD,
+    STORAGE_SAVE_PROJECT_METHOD, STORAGE_SAVE_UI_PREFERENCES_METHOD,
+    STORAGE_UPSERT_CHAT_MESSAGES_METHOD,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -68,6 +73,10 @@ use skill_installation_workflow_adapter::{
     absent_cancellation_response, cancellation_preparation_id, cancellation_response,
     commit_request, commit_response, dispatch_failure, is_missing_preparation, preparation_request,
     preview_response, workflow_failure, SkillInspectionFailure,
+};
+use skill_source_resolution_adapter::{
+    resolution_dispatch_failure, resolution_failure, resolution_response, source_locator,
+    SkillSourceResolutionFailure,
 };
 use skills_adapter::{
     enabled_catalog_response, installation_failure, management_response, mutation_response,
@@ -136,17 +145,37 @@ impl CoreServerBootstrap {
                 ))
             })?,
         );
-        let github_acquisition =
-            GitHubWorkflowAcquisitionAdapter::public_github().map_err(|error| {
+        let github_acquisition_transport: Arc<dyn GitHubAcquisitionTransport> =
+            Arc::new(ReqwestGitHubTransport::new().map_err(|error| {
                 io::Error::other(format!(
-                    "failed to initialize public GitHub Skill acquisition: {error}"
+                    "failed to initialize public GitHub Skill transport: {error}"
                 ))
-            })?;
+            })?);
+        let github_acquisition = GitHubWorkflowAcquisitionAdapter::new(Arc::new(
+            GitHubSkillAcquirer::with_transport(github_acquisition_transport),
+        ));
         skill_installation_workflow
             .register_adapter(Arc::new(github_acquisition))
             .map_err(|error| {
                 io::Error::other(format!(
                     "failed to register GitHub Skill acquisition: {error}"
+                ))
+            })?;
+        let mut skill_source_resolution = SkillSourceResolutionService::new();
+        let github_resolution_transport: Arc<dyn GitHubAcquisitionTransport> = Arc::new(
+            ReqwestGitHubTransport::new_for_source_resolution().map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize GitHub Skill source resolution transport: {error}"
+                ))
+            })?,
+        );
+        skill_source_resolution
+            .register_resolver(Arc::new(GitHubInstallationSourceResolver::new(
+                github_resolution_transport,
+            )))
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "failed to register GitHub Skill source resolver: {error}"
                 ))
             })?;
         let agent_service =
@@ -155,6 +184,7 @@ impl CoreServerBootstrap {
             catalog: skills_service,
             installations: skill_installation_service,
             workflow: Arc::new(skill_installation_workflow),
+            source_resolution: Arc::new(skill_source_resolution),
         };
         Ok(Self {
             storage,
@@ -255,6 +285,7 @@ struct SkillServices {
     catalog: Arc<SkillsService>,
     installations: Arc<SkillInstallationService>,
     workflow: Arc<SkillInstallationWorkflow>,
+    source_resolution: Arc<SkillSourceResolutionService>,
 }
 
 async fn run_request_loop<R>(
@@ -327,8 +358,10 @@ where
                 let request_catalog = Arc::clone(&skill_services.catalog);
                 let request_installations = Arc::clone(&skill_services.installations);
                 let request_workflow = Arc::clone(&skill_services.workflow);
+                let request_source_resolution = Arc::clone(&skill_services.source_resolution);
                 let request_outbound = outbound.clone();
-                let acquisition_inspection = request.is_acquisition_inspection();
+                let acquisition_lane = request.uses_acquisition_lane();
+                let source_resolution_request = request.is_source_resolution();
                 let workflow_metadata = request.workflow_metadata();
                 let mutation_metadata = request.mutation_metadata();
                 let submit_result = match mutation_metadata.clone() {
@@ -342,12 +375,13 @@ where
                                 &request_catalog,
                                 &request_installations,
                                 Some(&request_workflow),
+                                Some(&request_source_resolution),
                                 Some(&request_outbound),
                                 request,
                             )
                         },
                     ),
-                    None if acquisition_inspection => {
+                    None if acquisition_lane => {
                         dispatchers
                             .skill_acquisition
                             .try_submit(request_id.clone(), move || {
@@ -356,6 +390,7 @@ where
                                     &request_catalog,
                                     &request_installations,
                                     Some(&request_workflow),
+                                    Some(&request_source_resolution),
                                     Some(&request_outbound),
                                     request,
                                 )
@@ -367,6 +402,7 @@ where
                             &request_catalog,
                             &request_installations,
                             Some(&request_workflow),
+                            Some(&request_source_resolution),
                             Some(&request_outbound),
                             request,
                         )
@@ -383,6 +419,12 @@ where
                             skill_inspection_error_response(
                                 request_id,
                                 dispatch_failure(phase, preparation_id, error.message()),
+                            )
+                        }
+                        None if source_resolution_request => {
+                            skill_source_resolution_error_response(
+                                request_id,
+                                resolution_dispatch_failure(error.message()),
                             )
                         }
                         None => response_error(Some(request_id), error.code(), error.message()),
@@ -462,6 +504,7 @@ fn is_skills_method(method: &str) -> bool {
         method,
         SKILLS_LIST_METHOD
             | SKILLS_INSPECT_INSTALLATION_METHOD
+            | SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD
             | SKILLS_COMMIT_INSTALLATION_METHOD
             | SKILLS_CANCEL_PREPARATION_METHOD
             | SKILLS_INSTALL_LOCAL_METHOD
@@ -730,6 +773,7 @@ enum ParsedSkillsOperation {
     ListManagement(SkillsListManagementRequest),
     SetEnabled(SkillsSetEnabledRequest),
     InspectInstallation(SkillsInspectInstallationRequest),
+    ResolveInstallationSource(SkillsResolveInstallationSourceRequest),
     CommitInstallation(SkillsCommitInstallationRequest),
     CancelPreparation(SkillsCancelPreparationRequest),
     InstallLocal(LocalSkillInstallRequest),
@@ -738,10 +782,18 @@ enum ParsedSkillsOperation {
 }
 
 impl ParsedSkillsRequest {
-    fn is_acquisition_inspection(&self) -> bool {
+    fn uses_acquisition_lane(&self) -> bool {
         matches!(
             self.operation,
             ParsedSkillsOperation::InspectInstallation(_)
+                | ParsedSkillsOperation::ResolveInstallationSource(_)
+        )
+    }
+
+    fn is_source_resolution(&self) -> bool {
+        matches!(
+            self.operation,
+            ParsedSkillsOperation::ResolveInstallationSource(_)
         )
     }
 
@@ -771,6 +823,7 @@ impl ParsedSkillsRequest {
             | ParsedSkillsOperation::ListManagement(_)
             | ParsedSkillsOperation::SetEnabled(_)
             | ParsedSkillsOperation::InspectInstallation(_)
+            | ParsedSkillsOperation::ResolveInstallationSource(_)
             | ParsedSkillsOperation::CommitInstallation(_)
             | ParsedSkillsOperation::CancelPreparation(_) => None,
             ParsedSkillsOperation::InstallLocal(request) => Some((
@@ -812,6 +865,12 @@ fn parse_skills_request(request: JsonRpcRequest) -> Result<ParsedSkillsRequest, 
             parse_params::<SkillsInspectInstallationRequest>(request.params)
                 .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
         ),
+        SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD => {
+            ParsedSkillsOperation::ResolveInstallationSource(
+                parse_params::<SkillsResolveInstallationSourceRequest>(request.params)
+                    .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
+            )
+        }
         SKILLS_COMMIT_INSTALLATION_METHOD => ParsedSkillsOperation::CommitInstallation(
             parse_params::<SkillsCommitInstallationRequest>(request.params)
                 .map_err(|message| response_error(Some(id.clone()), -32602, message))?,
@@ -895,6 +954,7 @@ fn handle_skills_request(
             skill_installation_service,
             None,
             None,
+            None,
             request,
         ),
         Err(response) => response,
@@ -906,6 +966,7 @@ fn handle_parsed_skills_request(
     skills_service: &SkillsService,
     skill_installation_service: &SkillInstallationService,
     skill_installation_workflow: Option<&SkillInstallationWorkflow>,
+    skill_source_resolution: Option<&SkillSourceResolutionService>,
     notification_tx: Option<&mpsc::UnboundedSender<Value>>,
     request: ParsedSkillsRequest,
 ) -> Value {
@@ -981,6 +1042,21 @@ fn handle_parsed_skills_request(
             match result {
                 Ok(preview) => response_success(request.id, preview),
                 Err(error) => skill_inspection_error_response(request.id, error),
+            }
+        }
+        ParsedSkillsOperation::ResolveInstallationSource(input) => {
+            let Some(service) = skill_source_resolution else {
+                return skill_source_resolution_error_response(
+                    request.id,
+                    resolution_dispatch_failure("Skill source resolution is unavailable."),
+                );
+            };
+            let result = source_locator(input)
+                .and_then(|locator| service.resolve(&locator).map_err(resolution_failure))
+                .and_then(|resolution| resolution_response(&resolution));
+            match result {
+                Ok(response) => response_success(request.id, response),
+                Err(error) => skill_source_resolution_error_response(request.id, error),
             }
         }
         ParsedSkillsOperation::CommitInstallation(input) => {
@@ -1198,6 +1274,21 @@ fn skill_inspection_error_response(id: JsonRpcId, failure: SkillInspectionFailur
             .expect("Skill inspection error data must serialize"),
     ))
     .expect("JSON-RPC Skill inspection error response must serialize")
+}
+
+fn skill_source_resolution_error_response(
+    id: JsonRpcId,
+    failure: SkillSourceResolutionFailure,
+) -> Value {
+    let message = failure.to_string();
+    serde_json::to_value(error_with_data(
+        Some(id),
+        SKILL_SOURCE_RESOLUTION_ERROR_CODE,
+        message,
+        serde_json::to_value(failure.into_data())
+            .expect("Skill source resolution error data must serialize"),
+    ))
+    .expect("JSON-RPC Skill source resolution error response must serialize")
 }
 
 fn handle_git_request(
@@ -1576,9 +1667,55 @@ fn home_dir() -> PathBuf {
 mod server_tests {
     use super::*;
     use crate::skills_test_support::write_installed_skill;
+    use mycopilot_core::skills::{
+        ResolvedSkillPackagePreview, ResolvedSkillSource, SkillInstallationSourceLocator,
+        SkillInstallationSourceResolver, SkillSourceResolution, SkillSourceResolutionCandidate,
+        SkillSourceResolutionError, SkillSourceResolverId,
+    };
     use std::fs;
     use std::sync::mpsc as std_mpsc;
     use tokio::io::AsyncReadExt;
+
+    struct StaticGitHubSourceResolver;
+
+    impl SkillInstallationSourceResolver for StaticGitHubSourceResolver {
+        fn id(&self) -> SkillSourceResolverId {
+            SkillSourceResolverId::parse("github").unwrap()
+        }
+
+        fn supported_hosts(&self) -> Vec<String> {
+            vec!["github.com".to_string()]
+        }
+
+        fn resolve(
+            &self,
+            _locator: &SkillInstallationSourceLocator,
+        ) -> Result<SkillSourceResolution, SkillSourceResolutionError> {
+            let commit = "0123456789abcdef0123456789abcdef01234567";
+            SkillSourceResolution::new(
+                "https://github.com/example/skills/tree/main/skills/auditor",
+                self.id(),
+                commit,
+                vec![SkillSourceResolutionCandidate::new(
+                    "candidate-auditor",
+                    ResolvedSkillSource::GitHub {
+                        owner: "example".to_string(),
+                        repository: "skills".to_string(),
+                        resolved_commit: commit.to_string(),
+                        subdirectory: Some("skills/auditor".to_string()),
+                    },
+                    ResolvedSkillPackagePreview::new(
+                        1,
+                        SkillRevision::parse(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                        "auditor",
+                        "Audit a repository.",
+                        1,
+                        128,
+                    ),
+                )],
+            )
+        }
+    }
 
     #[test]
     fn installed_skill_store_is_a_sibling_of_the_effective_database() {
@@ -2011,6 +2148,117 @@ mod server_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_loop_resolves_a_url_on_the_read_only_acquisition_lane() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+        let agent_service = AgentService::new(Arc::clone(&storage));
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
+        let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+        let acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+        let dispatchers = RequestDispatchers {
+            git: &git_dispatcher,
+            skills: &skills_dispatcher,
+            skill_acquisition: &acquisition_dispatcher,
+        };
+        let mut source_resolution = SkillSourceResolutionService::new();
+        source_resolution
+            .register_resolver(Arc::new(StaticGitHubSourceResolver))
+            .unwrap();
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":71,",
+            "\"method\":\"skills.resolveInstallationSource\",",
+            "\"params\":{\"locator\":{\"kind\":\"url\",",
+            "\"url\":\"https://github.com/example/skills\"}}}\n"
+        );
+
+        let shutdown_id = run_request_loop(
+            BufReader::new(input.as_bytes()),
+            Arc::clone(&storage),
+            &agent_service,
+            SkillServices {
+                catalog: Arc::new(SkillsService::new()),
+                installations: Arc::new(
+                    SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+                ),
+                workflow: Arc::new(SkillInstallationWorkflow::new(
+                    SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+                )),
+                source_resolution: Arc::new(source_resolution),
+            },
+            Arc::new(GitReviewService::new()),
+            &dispatchers,
+            &outbound_tx,
+        )
+        .await
+        .unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+            .await
+            .expect("source resolution must complete")
+            .expect("source resolution must produce a response");
+
+        assert!(shutdown_id.is_none());
+        assert_eq!(response["id"], 71);
+        assert_eq!(response["result"]["outcome"], "resolved");
+        assert_eq!(
+            response["result"]["candidates"][0]["source"]["reference"]["kind"],
+            "commit"
+        );
+        assert_eq!(
+            response["result"]["candidates"][0]["source"]["reference"]["sha"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+
+        git_dispatcher.shutdown().await.unwrap();
+        skills_dispatcher.shutdown().await.unwrap();
+        acquisition_dispatcher.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn source_resolution_rejects_unknown_hosts_with_structured_recovery_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = StorageService::open(&temp.path().join("storage.sqlite")).unwrap();
+        let installations = SkillInstallationService::new(temp.path().join("skills")).unwrap();
+        let service = SkillSourceResolutionService::new();
+        let request = serde_json::from_value::<JsonRpcRequest>(json!({
+            "jsonrpc": "2.0",
+            "id": 72,
+            "method": SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD,
+            "params": {
+                "locator": {
+                    "kind": "url",
+                    "url": "https://untrusted.example/private?token=secret"
+                }
+            }
+        }))
+        .unwrap();
+        let parsed = parse_skills_request(request).unwrap();
+
+        let response = handle_parsed_skills_request(
+            &storage,
+            &SkillsService::new(),
+            &installations,
+            None,
+            Some(&service),
+            None,
+            parsed,
+        );
+
+        assert_eq!(
+            response["error"]["code"],
+            SKILL_SOURCE_RESOLUTION_ERROR_CODE
+        );
+        assert_eq!(response["error"]["data"]["type"], "skillSourceResolution");
+        assert_eq!(response["error"]["data"]["phase"], "parse");
+        assert_eq!(response["error"]["data"]["code"], "unsupportedHost");
+        assert_eq!(
+            response["error"]["data"]["recovery"],
+            "chooseDifferentSource"
+        );
+        assert!(!response.to_string().contains("token=secret"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn request_loop_routes_skills_list_through_the_bounded_dispatcher() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
@@ -2057,6 +2305,7 @@ mod server_tests {
                 workflow: Arc::new(SkillInstallationWorkflow::new(
                     SkillInstallationService::new(temp.path().join("skills")).unwrap(),
                 )),
+                source_resolution: Arc::new(SkillSourceResolutionService::new()),
             },
             Arc::new(GitReviewService::new()),
             &dispatchers,
@@ -2121,6 +2370,7 @@ mod server_tests {
                 workflow: Arc::new(SkillInstallationWorkflow::new(
                     SkillInstallationService::new(temp.path().join("skills")).unwrap(),
                 )),
+                source_resolution: Arc::new(SkillSourceResolutionService::new()),
             },
             Arc::new(GitReviewService::new()),
             &dispatchers,
@@ -2253,6 +2503,7 @@ mod server_tests {
                 workflow: Arc::new(SkillInstallationWorkflow::new(
                     SkillInstallationService::new(temp.path().join("skills")).unwrap(),
                 )),
+                source_resolution: Arc::new(SkillSourceResolutionService::new()),
             },
             git_review_service,
             &request_dispatchers,

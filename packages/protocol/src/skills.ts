@@ -2,9 +2,11 @@ export const SKILL_CATALOG_SCHEMA_VERSION = 4 as const
 export const SKILL_MUTATION_SCHEMA_VERSION = 1 as const
 export const SKILL_INSTALLATION_WORKFLOW_SCHEMA_VERSION = 1 as const
 export const SKILL_MANAGEMENT_SCHEMA_VERSION = 1 as const
+export const SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION = 1 as const
 export const SKILL_INSTALLATION_ERROR_CODE = -32010 as const
 export const SKILL_INSPECTION_ERROR_CODE = -32011 as const
 export const SKILL_MANAGEMENT_ERROR_CODE = -32012 as const
+export const SKILL_SOURCE_RESOLUTION_ERROR_CODE = -32013 as const
 
 export const SKILLS_INSTALL_LOCAL_METHOD = 'skills.installLocal' as const
 export const SKILLS_UPDATE_LOCAL_METHOD = 'skills.updateLocal' as const
@@ -15,6 +17,7 @@ export const SKILLS_CANCEL_PREPARATION_METHOD = 'skills.cancelPreparation' as co
 export const SKILLS_LIST_MANAGEMENT_METHOD = 'skills.listManagement' as const
 export const SKILLS_SET_ENABLED_METHOD = 'skills.setEnabled' as const
 export const SKILLS_CHANGED_NOTIFICATION_METHOD = 'skills.changed' as const
+export const SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD = 'skills.resolveInstallationSource' as const
 
 export type SkillSourceKind = 'workspace' | 'bundled' | 'installed'
 
@@ -150,6 +153,90 @@ export interface SkillPackagePreview {
   description: string
   fileCount: number
   totalBytes: number
+}
+
+/** A user-provided locator. Resolving it is read-only and never installs a Skill. */
+export type SkillInstallationSourceLocator = { kind: 'url'; url: string }
+
+export interface SkillsResolveInstallationSourceInput {
+  locator: SkillInstallationSourceLocator
+}
+
+/**
+ * The immutable subset of a GitHub acquisition source returned by source resolution.
+ * A resolved candidate can be passed directly to skills.inspectInstallation.
+ */
+export interface SkillResolvedGitHubRepositorySource {
+  kind: 'githubRepository'
+  owner: string
+  repository: string
+  reference: { kind: 'commit'; sha: string }
+  subdirectory?: string
+}
+
+export interface SkillSourceResolutionCandidate {
+  /** Opaque stable identity. Clients must not derive meaning from this value. */
+  candidateId: string
+  source: SkillResolvedGitHubRepositorySource
+  package: SkillPackagePreview
+}
+
+export type SkillSourceResolutionProvider = 'github'
+export type SkillSourceResolutionOutcome = 'resolved' | 'selectionRequired'
+
+interface SkillsResolveInstallationSourceOutputBase {
+  schemaVersion: typeof SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION
+  canonicalUrl: string
+  provider: SkillSourceResolutionProvider
+  /** Canonical, lower-case, complete 40-character commit SHA. */
+  resolvedCommit: string
+}
+
+export type SkillsResolveInstallationSourceOutput =
+  | (SkillsResolveInstallationSourceOutputBase & {
+      outcome: 'resolved'
+      candidates: [SkillSourceResolutionCandidate]
+    })
+  | (SkillsResolveInstallationSourceOutputBase & {
+      outcome: 'selectionRequired'
+      candidates: [
+        SkillSourceResolutionCandidate,
+        SkillSourceResolutionCandidate,
+        ...SkillSourceResolutionCandidate[]
+      ]
+    })
+
+export type SkillSourceResolutionPhase = 'parse' | 'resolve' | 'discover'
+
+export type SkillSourceResolutionErrorCode =
+  | 'invalidLocator'
+  | 'unsupportedLocator'
+  | 'unsupportedHost'
+  | 'unsupportedUrlShape'
+  | 'repositoryNotFound'
+  | 'referenceNotFound'
+  | 'pathNotFound'
+  | 'ambiguousReference'
+  | 'noSkillsFound'
+  | 'tooManySkills'
+  | 'networkUnavailable'
+  | 'rateLimited'
+  | 'repositoryTooLarge'
+  | 'unsafePackage'
+  | 'invalidPackage'
+  | 'unavailable'
+
+export type SkillSourceResolutionRecovery =
+  'fixLocator' | 'retryLater' | 'narrowLocator' | 'chooseDifferentSource'
+
+export interface SkillSourceResolutionErrorData {
+  type: 'skillSourceResolution'
+  phase: SkillSourceResolutionPhase
+  code: SkillSourceResolutionErrorCode
+  recovery: SkillSourceResolutionRecovery
+  message: string
+  provider?: SkillSourceResolutionProvider
+  retryAfterMs?: number
 }
 
 /** Presentation-safe source metadata; this union never carries authority-bearing local paths. */
@@ -492,6 +579,147 @@ function invalidSkillMutationOutput(reason: string): Error {
   return new Error(`Invalid Skill mutation response: ${reason}`)
 }
 
+/** Validates the untrusted boundary input for read-only source resolution. */
+export function parseSkillsResolveInstallationSourceInput(
+  value: unknown
+): SkillsResolveInstallationSourceInput {
+  const record = expectRecord(value, 'Skill source resolution request')
+  expectOnlyKeys(record, ['locator'] as const, 'Skill source resolution request')
+  const locator = expectRecord(record.locator, 'Skill source resolution request.locator')
+  expectOnlyKeys(locator, ['kind', 'url'] as const, 'Skill source resolution request.locator')
+  if (locator.kind !== 'url') {
+    throw invalidProtocolValue(
+      'Skill source resolution request.locator',
+      `unknown kind ${String(locator.kind)}`
+    )
+  }
+  return {
+    locator: {
+      kind: 'url',
+      url: expectString(locator.url, 'Skill source resolution request.locator.url')
+    }
+  }
+}
+
+/** Validates a resolved, immutable acquisition source before installation inspection. */
+export function parseSkillsResolveInstallationSourceOutput(
+  value: unknown
+): SkillsResolveInstallationSourceOutput {
+  const context = 'Skill source resolution response'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    [
+      'schemaVersion',
+      'canonicalUrl',
+      'provider',
+      'resolvedCommit',
+      'outcome',
+      'candidates'
+    ] as const,
+    context
+  )
+  expectSchemaVersion(record, SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION, context)
+  const resolvedCommit = expectFullGitCommitSha(record.resolvedCommit, `${context}.resolvedCommit`)
+  const candidates = expectArray(record.candidates, `${context}.candidates`).map((candidate) =>
+    parseSkillSourceResolutionCandidate(candidate, resolvedCommit)
+  )
+  const candidateIds = new Set(candidates.map((candidate) => candidate.candidateId))
+  if (candidateIds.size !== candidates.length) {
+    throw invalidProtocolValue(context, 'candidateId values must be unique')
+  }
+
+  const base = {
+    schemaVersion: SKILL_SOURCE_RESOLUTION_SCHEMA_VERSION,
+    canonicalUrl: expectNonEmptyString(record.canonicalUrl, `${context}.canonicalUrl`),
+    provider: expectEnum(record.provider, ['github'] as const, `${context}.provider`),
+    resolvedCommit
+  }
+  const outcome = expectEnum(
+    record.outcome,
+    ['resolved', 'selectionRequired'] as const,
+    `${context}.outcome`
+  )
+  if (outcome === 'resolved') {
+    const candidate = candidates[0]
+    if (candidates.length !== 1 || candidate === undefined) {
+      throw invalidProtocolValue(context, 'resolved outcome requires exactly one candidate')
+    }
+    return { ...base, outcome, candidates: [candidate] }
+  }
+
+  const firstCandidate = candidates[0]
+  const secondCandidate = candidates[1]
+  if (firstCandidate === undefined || secondCandidate === undefined) {
+    throw invalidProtocolValue(
+      context,
+      'selectionRequired outcome requires at least two candidates'
+    )
+  }
+  return {
+    ...base,
+    outcome,
+    candidates: [firstCandidate, secondCandidate, ...candidates.slice(2)]
+  }
+}
+
+export function parseSkillSourceResolutionErrorData(
+  value: unknown
+): SkillSourceResolutionErrorData {
+  const context = 'Skill source resolution error data'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    ['type', 'phase', 'code', 'recovery', 'message', 'provider', 'retryAfterMs'] as const,
+    context
+  )
+  if (record.type !== 'skillSourceResolution') {
+    throw invalidProtocolValue(context, 'type must be skillSourceResolution')
+  }
+  const provider =
+    record.provider === undefined
+      ? undefined
+      : expectEnum(record.provider, ['github'] as const, `${context}.provider`)
+  const retryAfterMs =
+    record.retryAfterMs === undefined
+      ? undefined
+      : expectSafeInteger(record.retryAfterMs, `${context}.retryAfterMs`, 0)
+  return {
+    type: 'skillSourceResolution',
+    phase: expectEnum(record.phase, ['parse', 'resolve', 'discover'] as const, `${context}.phase`),
+    code: expectEnum(
+      record.code,
+      [
+        'invalidLocator',
+        'unsupportedLocator',
+        'unsupportedHost',
+        'unsupportedUrlShape',
+        'repositoryNotFound',
+        'referenceNotFound',
+        'pathNotFound',
+        'ambiguousReference',
+        'noSkillsFound',
+        'tooManySkills',
+        'networkUnavailable',
+        'rateLimited',
+        'repositoryTooLarge',
+        'unsafePackage',
+        'invalidPackage',
+        'unavailable'
+      ] as const,
+      `${context}.code`
+    ),
+    recovery: expectEnum(
+      record.recovery,
+      ['fixLocator', 'retryLater', 'narrowLocator', 'chooseDifferentSource'] as const,
+      `${context}.recovery`
+    ),
+    message: expectNonEmptyString(record.message, `${context}.message`),
+    ...(provider === undefined ? {} : { provider }),
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs })
+  }
+}
+
 /** Validates a persisted installation preview before UI code may present or commit it. */
 export function parseSkillInstallationPreview(value: unknown): SkillInstallationPreview {
   const record = expectRecord(value, 'Skill installation preview')
@@ -787,6 +1015,65 @@ function parseSkillPackagePreview(value: unknown): SkillPackagePreview {
   }
 }
 
+function parseSkillSourceResolutionCandidate(
+  value: unknown,
+  resolvedCommit: string
+): SkillSourceResolutionCandidate {
+  const context = 'Skill source resolution candidate'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['candidateId', 'source', 'package'] as const, context)
+  return {
+    candidateId: expectNonEmptyString(record.candidateId, `${context}.candidateId`),
+    source: parseSkillResolvedGitHubRepositorySource(record.source, resolvedCommit),
+    package: parseSkillSourceResolutionPackagePreview(record.package)
+  }
+}
+
+function parseSkillResolvedGitHubRepositorySource(
+  value: unknown,
+  resolvedCommit: string
+): SkillResolvedGitHubRepositorySource {
+  const context = 'Skill source resolution candidate.source'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    ['kind', 'owner', 'repository', 'reference', 'subdirectory'] as const,
+    context
+  )
+  if (record.kind !== 'githubRepository') {
+    throw invalidProtocolValue(context, 'kind must be githubRepository')
+  }
+  const referenceContext = `${context}.reference`
+  const reference = expectRecord(record.reference, referenceContext)
+  expectOnlyKeys(reference, ['kind', 'sha'] as const, referenceContext)
+  if (reference.kind !== 'commit') {
+    throw invalidProtocolValue(referenceContext, 'kind must be commit')
+  }
+  const sha = expectFullGitCommitSha(reference.sha, `${referenceContext}.sha`)
+  if (sha !== resolvedCommit) {
+    throw invalidProtocolValue(referenceContext, 'sha must match response.resolvedCommit')
+  }
+  const subdirectory = optionalNonEmptyString(record.subdirectory, `${context}.subdirectory`)
+  return {
+    kind: 'githubRepository',
+    owner: expectNonEmptyString(record.owner, `${context}.owner`),
+    repository: expectNonEmptyString(record.repository, `${context}.repository`),
+    reference: { kind: 'commit', sha },
+    ...(subdirectory === undefined ? {} : { subdirectory })
+  }
+}
+
+function parseSkillSourceResolutionPackagePreview(value: unknown): SkillPackagePreview {
+  const context = 'Skill source resolution candidate.package'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    ['formatVersion', 'packageRevision', 'name', 'description', 'fileCount', 'totalBytes'] as const,
+    context
+  )
+  return parseSkillPackagePreview(record)
+}
+
 function parseSkillPreviewSource(value: unknown): SkillPreviewSource {
   const record = expectRecord(value, 'Skill preview source')
   switch (record.kind) {
@@ -992,6 +1279,19 @@ function expectArray(value: unknown, context: string): unknown[] {
 function expectNonEmptyString(value: unknown, context: string): string {
   if (!isNonEmptyString(value)) throw invalidProtocolValue(context, 'expected a non-empty string')
   return value
+}
+
+function expectString(value: unknown, context: string): string {
+  if (typeof value !== 'string') throw invalidProtocolValue(context, 'expected a string')
+  return value
+}
+
+function expectFullGitCommitSha(value: unknown, context: string): string {
+  const sha = expectNonEmptyString(value, context)
+  if (!/^[0-9a-f]{40}$/.test(sha)) {
+    throw invalidProtocolValue(context, 'expected a lower-case 40-character hexadecimal SHA')
+  }
+  return sha
 }
 
 function optionalNonEmptyString(value: unknown, context: string): string | undefined {

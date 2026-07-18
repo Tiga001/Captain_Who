@@ -12,6 +12,7 @@ const ACTIVATION_DOMAIN: &[u8] = b"mycopilot.skill.activation\0";
 const CATALOG_DOMAIN: &[u8] = b"mycopilot.skill.catalog\0";
 pub(super) const PACKAGE_REVISION_PREFIX: &str = "skill-package-sha256-v1:";
 pub(super) const PACKAGE_REVISION_V2_PREFIX: &str = "skill-package-sha256-v2:";
+pub(super) const PACKAGE_REVISION_V3_PREFIX: &str = "skill-package-sha256-v3:";
 pub(super) const PACKAGE_FILE_DIGEST_PREFIX: &str = "skill-file-sha256-v1:";
 
 pub(super) fn package_revision(source_bytes: &[u8]) -> SkillRevision {
@@ -36,9 +37,21 @@ pub(super) fn package_file_digest(bytes: &[u8]) -> String {
 }
 
 pub(super) fn package_revision_v2(entries: &[PackageManifestEntry]) -> SkillRevision {
+    package_tree_revision(2, PACKAGE_REVISION_V2_PREFIX, entries)
+}
+
+pub(super) fn package_revision_v3(entries: &[PackageManifestEntry]) -> SkillRevision {
+    package_tree_revision(3, PACKAGE_REVISION_V3_PREFIX, entries)
+}
+
+fn package_tree_revision(
+    format_version: u32,
+    prefix: &str,
+    entries: &[PackageManifestEntry],
+) -> SkillRevision {
     let mut digest = Sha256::new();
     digest.update(PACKAGE_DOMAIN);
-    digest.update(2_u32.to_be_bytes());
+    digest.update(format_version.to_be_bytes());
     digest.update((entries.len() as u64).to_be_bytes());
     for entry in entries {
         update_bytes(&mut digest, entry.path().as_bytes());
@@ -46,7 +59,7 @@ pub(super) fn package_revision_v2(entries: &[PackageManifestEntry]) -> SkillRevi
         digest.update(entry.byte_length().to_be_bytes());
         update_bytes(&mut digest, entry.digest().as_bytes());
     }
-    SkillRevision::trusted(format_digest(PACKAGE_REVISION_V2_PREFIX, digest.finalize()))
+    SkillRevision::trusted(format_digest(prefix, digest.finalize()))
 }
 
 pub(super) fn activation_revision<'a>(
@@ -202,6 +215,28 @@ mod tests {
             manifest.revision().as_str(),
             "skill-package-sha256-v2:c786b51c62a834cc561c3fa158288444b270e3974d1b06796207bcae1e8c1900"
         );
+    }
+
+    #[test]
+    fn package_v3_digest_is_domain_separated_from_v2() {
+        let manifest = PackageManifest::new(vec![
+            PackageManifestEntry::from_bytes(
+                SkillPackagePath::parse("README.md").unwrap(),
+                b"readme",
+            ),
+            PackageManifestEntry::from_bytes(
+                SkillPackagePath::parse("SKILL.md").unwrap(),
+                b"skill",
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(manifest.format_version(), 3);
+        assert!(manifest
+            .revision()
+            .as_str()
+            .starts_with(PACKAGE_REVISION_V3_PREFIX));
+        assert_ne!(manifest.revision(), package_revision_v2(manifest.files()));
     }
 
     #[test]

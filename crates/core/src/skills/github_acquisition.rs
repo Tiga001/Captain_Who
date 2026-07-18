@@ -33,8 +33,12 @@ pub const GITHUB_SKILL_ORIGIN_PROVIDER: &str = "github";
 const GITHUB_USER_AGENT: &str = "MyCopilot-Skill-Acquisition/1";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_API_BODY_BYTES: usize = 256 * 1024;
-const MAX_GITHUB_ZIP_BYTES: usize = 32 * 1024 * 1024;
-const MAX_GITHUB_ARCHIVE_ENTRIES: usize = 20_000;
+const GITHUB_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const GITHUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const GITHUB_RESOLUTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const GITHUB_RESOLUTION_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const MAX_GITHUB_ZIP_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_GITHUB_ARCHIVE_ENTRIES: usize = 20_000;
 const MAX_GITHUB_ARCHIVE_PATH_BYTES: usize = 4 * 1024;
 const MAX_GITHUB_ARCHIVE_PATH_COMPONENTS: usize = 256;
 const MAX_GITHUB_ARCHIVE_PATH_COMPONENT_BYTES: usize = 255;
@@ -244,6 +248,14 @@ pub struct GitHubResolveRequest {
 }
 
 impl GitHubResolveRequest {
+    /// Creates a transport request from validated repository and reference values.
+    pub fn new(repository: GitHubRepository, reference: GitHubReference) -> Self {
+        Self {
+            repository,
+            reference,
+        }
+    }
+
     pub fn repository(&self) -> &GitHubRepository {
         &self.repository
     }
@@ -260,6 +272,11 @@ pub struct GitHubArchiveRequest {
 }
 
 impl GitHubArchiveRequest {
+    /// Creates a transport request pinned to a validated immutable commit.
+    pub fn new(repository: GitHubRepository, commit: GitHubCommit) -> Self {
+        Self { repository, commit }
+    }
+
     pub fn repository(&self) -> &GitHubRepository {
         &self.repository
     }
@@ -288,6 +305,7 @@ pub trait GitHubAcquisitionTransport: Send + Sync {
 /// hosts. Redirects and credentials are deliberately unsupported.
 pub struct ReqwestGitHubTransport {
     client: Client,
+    archive_timeout: Duration,
 }
 
 impl fmt::Debug for ReqwestGitHubTransport {
@@ -300,14 +318,34 @@ impl fmt::Debug for ReqwestGitHubTransport {
 
 impl ReqwestGitHubTransport {
     pub fn new() -> Result<Self, GitHubTransportError> {
+        Self::with_timeouts(GITHUB_REQUEST_TIMEOUT, GITHUB_REQUEST_TIMEOUT)
+    }
+
+    /// Builds the bounded transport used by human-facing URL resolution. Ambiguous GitHub URLs
+    /// may require several ref probes, so this profile uses shorter per-request deadlines than
+    /// the immutable acquisition transaction.
+    pub fn new_for_source_resolution() -> Result<Self, GitHubTransportError> {
+        Self::with_timeouts(
+            GITHUB_RESOLUTION_REQUEST_TIMEOUT,
+            GITHUB_RESOLUTION_ARCHIVE_TIMEOUT,
+        )
+    }
+
+    fn with_timeouts(
+        request_timeout: Duration,
+        archive_timeout: Duration,
+    ) -> Result<Self, GitHubTransportError> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
+            .connect_timeout(GITHUB_CONNECT_TIMEOUT)
+            .timeout(request_timeout)
             .user_agent(GITHUB_USER_AGENT)
             .build()
             .map_err(|_| GitHubTransportError::Unavailable)?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            archive_timeout,
+        })
     }
 
     fn resolve_ref(
@@ -366,6 +404,7 @@ impl GitHubAcquisitionTransport for ReqwestGitHubTransport {
         let response = self
             .client
             .get(url)
+            .timeout(self.archive_timeout)
             .header(ACCEPT, "application/zip")
             .send()
             .map_err(|_| GitHubTransportError::Unavailable)?;
@@ -428,18 +467,23 @@ impl GitHubSkillAcquirer {
         &self,
         location: GitHubSkillLocation,
     ) -> Result<AcquiredGitHubSkill, GitHubAcquisitionError> {
-        let resolve_request = GitHubResolveRequest {
-            repository: location.repository.clone(),
-            reference: location.reference.clone(),
-        };
+        let resolve_request =
+            GitHubResolveRequest::new(location.repository.clone(), location.reference.clone());
         let commit = self
             .transport
             .resolve_commit(&resolve_request)
             .map_err(map_transport_error)?;
-        let archive_request = GitHubArchiveRequest {
-            repository: location.repository.clone(),
-            commit: commit.clone(),
-        };
+        if matches!(
+            &location.reference,
+            GitHubReference::Commit(expected) if expected != &commit
+        ) {
+            return Err(acquisition_error(
+                GitHubAcquisitionErrorCode::ResolvedCommitMismatch,
+                "GitHub returned a different commit than the immutable acquisition request.",
+            ));
+        }
+        let archive_request =
+            GitHubArchiveRequest::new(location.repository.clone(), commit.clone());
         let archive = self
             .transport
             .download_archive(&archive_request)
@@ -747,6 +791,7 @@ pub enum GitHubAcquisitionErrorCode {
     InvalidRepository,
     InvalidReference,
     InvalidCommit,
+    ResolvedCommitMismatch,
     InvalidSubdirectory,
     InvalidWorkflowRequest,
     NotFound,
@@ -925,7 +970,21 @@ struct SelectedArchiveEntry {
     size: usize,
 }
 
-fn extract_selected_skill(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveEntryScope {
+    Unrelated,
+    SelectedAncestor,
+    SelectedRoot,
+    SelectedDescendant,
+}
+
+impl ArchiveEntryScope {
+    fn requires_strict_audit(self) -> bool {
+        !matches!(self, Self::Unrelated)
+    }
+}
+
+pub(super) fn extract_selected_skill(
     archive_bytes: &[u8],
     subdirectory: &GitHubSubdirectory,
 ) -> Result<Vec<(String, Vec<u8>)>, GitHubAcquisitionError> {
@@ -939,19 +998,19 @@ fn extract_selected_skill(
     }
 
     let mut top_root: Option<String> = None;
-    let mut portable_entries = BTreeMap::<String, String>::new();
-    let mut portable_files = BTreeMap::<String, String>::new();
-    let mut portable_directories = BTreeMap::<String, String>::new();
-    let mut archive_uncompressed_bytes = 0_u64;
+    let mut selected_portable_entries = BTreeMap::<String, String>::new();
+    let mut selected_portable_files = BTreeMap::<String, String>::new();
+    let mut selected_portable_directories = BTreeMap::<String, String>::new();
+    let mut selected_archive_uncompressed_bytes = 0_u64;
     let mut selected_bytes = 0usize;
     let mut selected = Vec::new();
 
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|_| invalid_archive())?;
-        let components = validate_archive_entry(&entry)?;
-        let root = components.first().expect("validated archive path");
+        let path = validate_archive_entry_path(&entry)?;
+        let root = path.wrapper_root();
         match &top_root {
-            None => top_root = Some(root.clone()),
+            None => top_root = Some(root.to_string()),
             Some(expected) if expected == root => {}
             Some(_) => {
                 return Err(acquisition_error(
@@ -960,9 +1019,23 @@ fn extract_selected_skill(
                 ));
             }
         }
+
+        // The repository is untrusted, but only the selected subtree can cross the package
+        // boundary. Unrelated entries still need canonical paths so membership and the codeload
+        // wrapper are unambiguous; their file modes and compressed contents are never consumed.
+        let scope = path.classify(subdirectory);
+        if !scope.requires_strict_audit() {
+            continue;
+        }
+
+        validate_strict_archive_entry(&entry)?;
+        let components = path.strict_utf8_components()?;
+        let repository_relative = &components[1..];
         let canonical_path = components.join("/");
         let collision_key = canonical_path.to_lowercase();
-        if let Some(previous) = portable_entries.insert(collision_key, canonical_path.clone()) {
+        if let Some(previous) =
+            selected_portable_entries.insert(collision_key, canonical_path.clone())
+        {
             let collision = if previous == canonical_path {
                 "duplicate paths"
             } else {
@@ -976,54 +1049,62 @@ fn extract_selected_skill(
         validate_portable_archive_tree(
             &components,
             entry.is_dir(),
-            &mut portable_files,
-            &mut portable_directories,
+            &mut selected_portable_files,
+            &mut selected_portable_directories,
         )?;
 
         let size = entry.size();
         if size > MAX_GITHUB_ARCHIVE_ENTRY_BYTES {
             return Err(acquisition_error(
                 GitHubAcquisitionErrorCode::ArchiveBudgetExceeded,
-                "A GitHub archive entry exceeds the uncompressed entry limit.",
+                "A selected GitHub archive entry exceeds the uncompressed entry limit.",
             ));
         }
-        archive_uncompressed_bytes =
-            archive_uncompressed_bytes
-                .checked_add(size)
-                .ok_or_else(|| {
-                    acquisition_error(
-                        GitHubAcquisitionErrorCode::ArchiveBudgetExceeded,
-                        "GitHub archive size accounting overflowed.",
-                    )
-                })?;
-        if archive_uncompressed_bytes > MAX_GITHUB_ARCHIVE_UNCOMPRESSED_BYTES {
+        selected_archive_uncompressed_bytes = selected_archive_uncompressed_bytes
+            .checked_add(size)
+            .ok_or_else(|| {
+                acquisition_error(
+                    GitHubAcquisitionErrorCode::ArchiveBudgetExceeded,
+                    "Selected GitHub archive size accounting overflowed.",
+                )
+            })?;
+        if selected_archive_uncompressed_bytes > MAX_GITHUB_ARCHIVE_UNCOMPRESSED_BYTES {
             return Err(acquisition_error(
                 GitHubAcquisitionErrorCode::ArchiveBudgetExceeded,
-                "GitHub archive exceeds the total uncompressed acquisition limit.",
+                "Selected GitHub archive entries exceed the total uncompressed acquisition limit.",
             ));
         }
         if suspicious_expansion(size, entry.compressed_size()) {
             return Err(acquisition_error(
                 GitHubAcquisitionErrorCode::ArchiveBudgetExceeded,
-                "GitHub archive contains an entry with an unsafe compression expansion ratio.",
+                "Selected GitHub archive entries contain an unsafe compression expansion ratio.",
             ));
         }
 
-        let repository_relative = &components[1..];
-        let Some(logical_components) = repository_relative.strip_prefix(subdirectory.components())
-        else {
-            continue;
-        };
-        if logical_components.is_empty() {
-            if entry.is_dir() {
-                continue;
+        match scope {
+            ArchiveEntryScope::SelectedAncestor if !entry.is_dir() => {
+                return Err(acquisition_error(
+                    GitHubAcquisitionErrorCode::UnsafeArchiveEntry,
+                    "An ancestor of the selected Skill directory resolves to a file.",
+                ));
             }
-            return Err(acquisition_error(
-                GitHubAcquisitionErrorCode::UnsafeArchiveEntry,
-                "The selected Skill directory resolves to a file.",
-            ));
+            ArchiveEntryScope::SelectedRoot if !entry.is_dir() => {
+                return Err(acquisition_error(
+                    GitHubAcquisitionErrorCode::UnsafeArchiveEntry,
+                    "The selected Skill directory resolves to a file.",
+                ));
+            }
+            ArchiveEntryScope::SelectedAncestor | ArchiveEntryScope::SelectedRoot => continue,
+            ArchiveEntryScope::SelectedDescendant => {}
+            ArchiveEntryScope::Unrelated => {
+                unreachable!("unrelated entries do not enter strict archive auditing")
+            }
         }
-        validate_selected_package_path(logical_components, entry.is_dir())?;
+
+        let logical_components = repository_relative
+            .strip_prefix(subdirectory.components())
+            .expect("selected descendants have the selected directory prefix");
+        debug_assert!(!logical_components.is_empty());
         if entry.is_dir() {
             continue;
         }
@@ -1115,51 +1196,138 @@ fn extract_selected_skill(
     Ok(files)
 }
 
-fn validate_archive_entry(
-    entry: &zip::read::ZipFile<'_>,
-) -> Result<Vec<String>, GitHubAcquisitionError> {
-    let raw_name = std::str::from_utf8(entry.name_raw()).map_err(|_| {
-        acquisition_error(
-            GitHubAcquisitionErrorCode::UnsafeArchiveEntry,
-            "GitHub archive contains a non-UTF-8 entry name.",
+#[derive(Debug)]
+pub(super) struct ValidatedArchiveEntryPath {
+    wrapper_root: String,
+    repository_relative: Vec<Vec<u8>>,
+    repository_relative_utf8: Option<Vec<String>>,
+}
+
+impl ValidatedArchiveEntryPath {
+    pub(super) fn wrapper_root(&self) -> &str {
+        &self.wrapper_root
+    }
+
+    pub(super) fn repository_relative_utf8(&self) -> Option<&[String]> {
+        self.repository_relative_utf8.as_deref()
+    }
+
+    pub(super) fn is_within(&self, subdirectory: &GitHubSubdirectory) -> bool {
+        matches!(
+            self.classify(subdirectory),
+            ArchiveEntryScope::SelectedRoot | ArchiveEntryScope::SelectedDescendant
         )
-    })?;
-    if raw_name != entry.name()
-        || raw_name.is_empty()
+    }
+
+    fn classify(&self, subdirectory: &GitHubSubdirectory) -> ArchiveEntryScope {
+        let selected = subdirectory
+            .components()
+            .iter()
+            .map(|component| component.as_bytes())
+            .collect::<Vec<_>>();
+        let candidate = self
+            .repository_relative
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        if candidate == selected {
+            ArchiveEntryScope::SelectedRoot
+        } else if selected.starts_with(&candidate) {
+            ArchiveEntryScope::SelectedAncestor
+        } else if candidate.starts_with(&selected) {
+            ArchiveEntryScope::SelectedDescendant
+        } else {
+            ArchiveEntryScope::Unrelated
+        }
+    }
+
+    fn strict_utf8_components(&self) -> Result<Vec<String>, GitHubAcquisitionError> {
+        let relative = self.repository_relative_utf8.as_ref().ok_or_else(|| {
+            acquisition_error(
+                GitHubAcquisitionErrorCode::UnsafeArchiveEntry,
+                "The selected GitHub Skill contains a non-UTF-8 path.",
+            )
+        })?;
+        if relative
+            .iter()
+            .any(|component| component.contains(':') || component.chars().any(char::is_control))
+        {
+            return Err(unsafe_archive_path());
+        }
+        let mut components = Vec::with_capacity(relative.len().saturating_add(1));
+        components.push(self.wrapper_root.clone());
+        components.extend(relative.iter().cloned());
+        Ok(components)
+    }
+}
+
+pub(super) fn validate_archive_entry_path(
+    entry: &zip::read::ZipFile<'_>,
+) -> Result<ValidatedArchiveEntryPath, GitHubAcquisitionError> {
+    let raw_name = entry.name_raw();
+    if raw_name.is_empty()
         || raw_name.len() > MAX_GITHUB_ARCHIVE_PATH_BYTES
-        || raw_name.starts_with('/')
-        || raw_name.contains(['\\', '\0'])
+        || raw_name.starts_with(b"/")
+        || raw_name.contains(&b'\\')
+        || raw_name.contains(&b'\0')
     {
         return Err(unsafe_archive_path());
     }
     let directory = entry.is_dir();
     let path = if directory {
-        raw_name.strip_suffix('/').ok_or_else(unsafe_archive_path)?
+        raw_name
+            .strip_suffix(b"/")
+            .ok_or_else(unsafe_archive_path)?
     } else {
-        if raw_name.ends_with('/') {
+        if raw_name.ends_with(b"/") {
             return Err(unsafe_archive_path());
         }
         raw_name
     };
-    let components = path.split('/').map(str::to_string).collect::<Vec<_>>();
+    let components = path
+        .split(|byte| *byte == b'/')
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
     if components.is_empty()
         || components.len() > MAX_GITHUB_ARCHIVE_PATH_COMPONENTS
         || components.iter().any(|component| {
             component.is_empty()
-                || matches!(component.as_str(), "." | "..")
+                || matches!(component.as_slice(), b"." | b"..")
                 || component.len() > MAX_GITHUB_ARCHIVE_PATH_COMPONENT_BYTES
-                || component.contains(':')
-                || component.chars().any(char::is_control)
         })
     {
         return Err(unsafe_archive_path());
     }
+    let wrapper_root = std::str::from_utf8(&components[0])
+        .ok()
+        .filter(|root| {
+            !root.is_empty() && !root.contains(':') && !root.chars().any(char::is_control)
+        })
+        .ok_or_else(unsafe_archive_path)?
+        .to_string();
+    let repository_relative = components[1..].to_vec();
+    let repository_relative_utf8 = repository_relative
+        .iter()
+        .map(|component| std::str::from_utf8(component).map(str::to_string))
+        .collect::<Result<Vec<_>, _>>()
+        .ok();
+    Ok(ValidatedArchiveEntryPath {
+        wrapper_root,
+        repository_relative,
+        repository_relative_utf8,
+    })
+}
+
+fn validate_strict_archive_entry(
+    entry: &zip::read::ZipFile<'_>,
+) -> Result<(), GitHubAcquisitionError> {
     if entry.encrypted() || !is_supported_compression(entry.compression()) {
         return Err(acquisition_error(
             GitHubAcquisitionErrorCode::UnsafeArchiveEntry,
             "GitHub archive contains an encrypted or unsupported entry.",
         ));
     }
+    let directory = entry.is_dir();
     let mode_kind = entry.unix_mode().map(|mode| mode & 0o170000).unwrap_or(0);
     let valid_kind = if directory {
         matches!(mode_kind, 0 | 0o040000)
@@ -1172,7 +1340,7 @@ fn validate_archive_entry(
             "GitHub archive contains a symlink or special filesystem entry.",
         ));
     }
-    Ok(components)
+    Ok(())
 }
 
 fn validate_portable_archive_tree(
@@ -1241,27 +1409,6 @@ fn is_supported_compression(method: CompressionMethod) -> bool {
         method,
         CompressionMethod::Stored | CompressionMethod::Deflated
     )
-}
-
-fn validate_selected_package_path(
-    components: &[String],
-    directory: bool,
-) -> Result<(), GitHubAcquisitionError> {
-    let first = components.first().map(String::as_str);
-    let supported_resource_root = matches!(first, Some("references" | "assets" | "scripts"));
-    let accepted = if directory {
-        supported_resource_root
-    } else {
-        (components.len() == 1 && first == Some(SKILL_FILE_NAME))
-            || (components.len() >= 2 && supported_resource_root)
-    };
-    if !accepted {
-        return Err(acquisition_error(
-            GitHubAcquisitionErrorCode::UnsafeArchiveEntry,
-            "The selected Skill directory contains an unsupported package entry.",
-        ));
-    }
-    Ok(())
 }
 
 fn suspicious_expansion(uncompressed: u64, compressed: u64) -> bool {
@@ -1386,6 +1533,7 @@ fn map_acquisition_to_workflow_error(
         }
         GitHubAcquisitionErrorCode::TransportRejected
         | GitHubAcquisitionErrorCode::Unavailable
+        | GitHubAcquisitionErrorCode::ResolvedCommitMismatch
         | GitHubAcquisitionErrorCode::InvalidOrigin => {
             SkillAcquisitionAdapterError::unavailable(reason)
         }
@@ -1453,6 +1601,7 @@ mod tests {
     use zip::ZipWriter;
 
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+    const OTHER_COMMIT: &str = "89abcdef0123456789abcdef0123456789abcdef";
     const SKILL: &[u8] = b"---\nname: github-skill\ndescription: Acquired from GitHub.\n---\n\nFollow the GitHub workflow.\n";
 
     #[derive(Default)]
@@ -1544,6 +1693,28 @@ mod tests {
     }
 
     #[test]
+    fn immutable_commit_requests_reject_a_transport_mismatch_before_download() {
+        let transport = Arc::new(FakeTransport::new(write_zip(
+            &[("repo-root/SKILL.md", SKILL)],
+            CompressionMethod::Stored,
+        )));
+        let acquirer = GitHubSkillAcquirer::with_transport(transport.clone());
+        let location = GitHubSkillLocation::new(
+            GitHubRepository::parse("openai", "skills").unwrap(),
+            GitHubReference::commit(OTHER_COMMIT).unwrap(),
+            GitHubSubdirectory::root(),
+        );
+
+        let error = acquirer.acquire(location).unwrap_err();
+
+        assert_eq!(
+            error.code(),
+            GitHubAcquisitionErrorCode::ResolvedCommitMismatch
+        );
+        assert!(transport.state.lock().unwrap().archive_requests.is_empty());
+    }
+
+    #[test]
     fn workflow_adapter_owns_strict_protocol_wire_and_inspects_a_fake_transport_package() {
         let archive = write_zip(
             &[("repo-root/skills/a/SKILL.md", SKILL)],
@@ -1626,6 +1797,20 @@ mod tests {
     }
 
     #[test]
+    fn transport_requests_are_constructed_from_validated_coordinates() {
+        let repository = GitHubRepository::parse("owner", "repo").unwrap();
+        let reference = GitHubReference::named("release/v1").unwrap();
+        let resolve = GitHubResolveRequest::new(repository.clone(), reference.clone());
+        assert_eq!(resolve.repository(), &repository);
+        assert_eq!(resolve.reference(), &reference);
+
+        let commit = GitHubCommit::parse(COMMIT).unwrap();
+        let archive = GitHubArchiveRequest::new(repository.clone(), commit.clone());
+        assert_eq!(archive.repository(), &repository);
+        assert_eq!(archive.commit(), &commit);
+    }
+
+    #[test]
     fn structured_coordinates_reject_urls_partial_commits_and_unsafe_subdirectories() {
         assert!(GitHubRepository::parse("https://github.com/openai", "skills").is_err());
         assert!(GitHubRepository::parse("openai", "skills.git/other").is_err());
@@ -1703,6 +1888,115 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_repository_symlink_does_not_block_a_selected_skill() {
+        let archive = write_zip_with_symlink(
+            &[("root/skills/a/SKILL.md", SKILL)],
+            "root/CLAUDE.md",
+            "AGENTS.md",
+        );
+
+        let files =
+            extract_selected_skill(&archive, &GitHubSubdirectory::parse("skills/a").unwrap())
+                .unwrap();
+
+        assert_eq!(files, vec![(SKILL_FILE_NAME.to_string(), SKILL.to_vec())]);
+    }
+
+    #[test]
+    fn symlinks_at_or_below_the_selected_boundary_are_rejected() {
+        for link in ["root/skills", "root/skills/a", "root/skills/a/assets/link"] {
+            let archive =
+                write_zip_with_symlink(&[("root/skills/a/SKILL.md", SKILL)], link, "../../outside");
+
+            assert_eq!(
+                extract_selected_skill(&archive, &GitHubSubdirectory::parse("skills/a").unwrap(),)
+                    .unwrap_err()
+                    .code(),
+                GitHubAcquisitionErrorCode::UnsafeArchiveEntry,
+                "selected boundary symlink: {link}",
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_collisions_and_declared_sizes_do_not_affect_selected_skill() {
+        let mut archive = write_zip(
+            &[
+                ("root/skills/a/SKILL.md", SKILL),
+                ("root/unrelated/Guide.md", b"first"),
+                ("root/unrelated/guide.md", b"second"),
+                ("root/unrelated/large.bin", b"small"),
+            ],
+            CompressionMethod::Stored,
+        );
+        set_central_uncompressed_size(
+            &mut archive,
+            "root/unrelated/large.bin",
+            u32::try_from(MAX_GITHUB_ARCHIVE_ENTRY_BYTES + 1).unwrap(),
+        );
+
+        let files =
+            extract_selected_skill(&archive, &GitHubSubdirectory::parse("skills/a").unwrap())
+                .unwrap();
+
+        assert_eq!(files, vec![(SKILL_FILE_NAME.to_string(), SKILL.to_vec())]);
+    }
+
+    #[test]
+    fn selected_collisions_and_declared_sizes_remain_rejected() {
+        let collision = write_zip(
+            &[
+                ("root/skills/a/SKILL.md", SKILL),
+                ("root/skills/a/assets/Guide.md", b"first"),
+                ("root/skills/a/assets/guide.md", b"second"),
+            ],
+            CompressionMethod::Stored,
+        );
+        assert_eq!(
+            extract_selected_skill(&collision, &GitHubSubdirectory::parse("skills/a").unwrap(),)
+                .unwrap_err()
+                .code(),
+            GitHubAcquisitionErrorCode::UnsafeArchiveEntry,
+        );
+
+        let mut oversized = write_zip(
+            &[
+                ("root/skills/a/SKILL.md", SKILL),
+                ("root/skills/a/assets/large.bin", b"small"),
+            ],
+            CompressionMethod::Stored,
+        );
+        set_central_uncompressed_size(
+            &mut oversized,
+            "root/skills/a/assets/large.bin",
+            u32::try_from(MAX_GITHUB_ARCHIVE_ENTRY_BYTES + 1).unwrap(),
+        );
+        assert_eq!(
+            extract_selected_skill(&oversized, &GitHubSubdirectory::parse("skills/a").unwrap(),)
+                .unwrap_err()
+                .code(),
+            GitHubAcquisitionErrorCode::ArchiveBudgetExceeded,
+        );
+    }
+
+    #[test]
+    fn compression_expansion_is_scoped_to_selected_entries() {
+        let highly_compressible = vec![0_u8; 4 * 1024 * 1024];
+        let archive = write_zip(
+            &[
+                ("root/skills/a/SKILL.md", SKILL),
+                ("root/unrelated/bomb.bin", &highly_compressible),
+            ],
+            CompressionMethod::Deflated,
+        );
+
+        assert!(
+            extract_selected_skill(&archive, &GitHubSubdirectory::parse("skills/a").unwrap(),)
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn archive_security_corpus_rejects_invalid_utf8_and_zip_bombs_before_extraction() {
         let mut invalid_utf8 = write_zip(
             &[("root/SKILL.md", SKILL), ("root/assets/bad.bin", b"bad")],
@@ -1730,7 +2024,44 @@ mod tests {
     }
 
     #[test]
-    fn selected_directory_rejects_unexpected_sibling_files() {
+    fn unrelated_nonportable_names_do_not_block_a_selected_skill() {
+        let mut archive = write_zip(
+            &[
+                ("root/skills/a/SKILL.md", SKILL),
+                ("root/unrelated/unique-name.bin", b"outside"),
+                ("root/unrelated/legacy:name.txt", b"outside"),
+            ],
+            CompressionMethod::Stored,
+        );
+        replace_all(&mut archive, b"unique-name.bin", b"unique-nam\xff.bin");
+
+        let files =
+            extract_selected_skill(&archive, &GitHubSubdirectory::parse("skills/a").unwrap())
+                .unwrap();
+
+        assert_eq!(files, vec![(SKILL_FILE_NAME.to_string(), SKILL.to_vec())]);
+    }
+
+    #[test]
+    fn selected_nonportable_names_remain_rejected() {
+        let archive = write_zip(
+            &[
+                ("root/skills/a/SKILL.md", SKILL),
+                ("root/skills/a/assets/legacy:name.txt", b"selected"),
+            ],
+            CompressionMethod::Stored,
+        );
+
+        assert_eq!(
+            extract_selected_skill(&archive, &GitHubSubdirectory::parse("skills/a").unwrap())
+                .unwrap_err()
+                .code(),
+            GitHubAcquisitionErrorCode::UnsafeArchiveEntry
+        );
+    }
+
+    #[test]
+    fn selected_directory_preserves_safe_generic_sibling_files() {
         let archive = write_zip(
             &[
                 ("root/SKILL.md", SKILL),
@@ -1739,10 +2070,11 @@ mod tests {
             CompressionMethod::Stored,
         );
         assert_eq!(
-            extract_selected_skill(&archive, &GitHubSubdirectory::root())
-                .unwrap_err()
-                .code(),
-            GitHubAcquisitionErrorCode::UnsafeArchiveEntry
+            extract_selected_skill(&archive, &GitHubSubdirectory::root()).unwrap(),
+            vec![
+                (SKILL_FILE_NAME.to_string(), SKILL.to_vec()),
+                ("README.md".to_string(), b"not a package resource".to_vec()),
+            ]
         );
     }
 
@@ -1759,16 +2091,28 @@ mod tests {
         writer.finish().unwrap().into_inner()
     }
 
-    fn write_symlink_zip() -> Vec<u8> {
+    fn write_zip_with_symlink(
+        entries: &[(&str, &[u8])],
+        symlink_name: &str,
+        target: &str,
+    ) -> Vec<u8> {
         let cursor = Cursor::new(Vec::new());
         let mut writer = ZipWriter::new(cursor);
         let options = SimpleFileOptions::default().unix_permissions(0o644);
-        writer.start_file("root/SKILL.md", options).unwrap();
-        writer.write_all(SKILL).unwrap();
-        writer
-            .add_symlink("root/assets/link", "../../outside", options)
-            .unwrap();
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.add_symlink(symlink_name, target, options).unwrap();
         writer.finish().unwrap().into_inner()
+    }
+
+    fn write_symlink_zip() -> Vec<u8> {
+        write_zip_with_symlink(
+            &[("root/SKILL.md", SKILL)],
+            "root/assets/link",
+            "../../outside",
+        )
     }
 
     fn replace_all(bytes: &mut [u8], needle: &[u8], replacement: &[u8]) {
@@ -1804,6 +2148,26 @@ mod tests {
             if bytes.get(name_start..name_end) == Some(entry_name.as_bytes()) {
                 bytes[start + 5] = 3;
                 bytes[start + 38..start + 42].copy_from_slice(&(mode << 16).to_le_bytes());
+                return;
+            }
+            offset = name_end;
+        }
+        panic!("central entry not found");
+    }
+
+    fn set_central_uncompressed_size(bytes: &mut [u8], entry_name: &str, size: u32) {
+        const CENTRAL_SIGNATURE: &[u8] = b"PK\x01\x02";
+        let mut offset = 0;
+        while let Some(relative) = bytes[offset..]
+            .windows(CENTRAL_SIGNATURE.len())
+            .position(|window| window == CENTRAL_SIGNATURE)
+        {
+            let start = offset + relative;
+            let name_length = u16::from_le_bytes([bytes[start + 28], bytes[start + 29]]) as usize;
+            let name_start = start + 46;
+            let name_end = name_start + name_length;
+            if bytes.get(name_start..name_end) == Some(entry_name.as_bytes()) {
+                bytes[start + 24..start + 28].copy_from_slice(&size.to_le_bytes());
                 return;
             }
             offset = name_end;

@@ -16,13 +16,13 @@ use super::managed_store::{
     encode_receipt, InstalledPackageRef, InstalledSkillReceipt, ManagedSkillStore,
     ManagedStoreLoadError, INSTALLATIONS_DIRECTORY, MAX_INSTALLATION_DIRECTORY_ENTRIES,
     MAX_LIVE_INSTALLATIONS, MAX_MANAGED_DIRECTORY_ENTRIES, PACKAGES_DIRECTORY,
-    PACKAGE_V1_DIRECTORY, PACKAGE_V2_DIRECTORY,
+    PACKAGE_V1_DIRECTORY, PACKAGE_V2_DIRECTORY, PACKAGE_V3_DIRECTORY,
 };
 use super::model::{
     SkillInstallationId, SkillRevision, SKILL_PACKAGE_FORMAT_VERSION,
-    SKILL_PACKAGE_FORMAT_VERSION_V2,
+    SKILL_PACKAGE_FORMAT_VERSION_V2, SKILL_PACKAGE_FORMAT_VERSION_V3,
 };
-use super::package::PACKAGE_V2_MANIFEST_FILE;
+use super::package::PACKAGE_MANIFEST_FILE;
 use super::prepared::PreparedSkillPackage;
 use super::workspace::{
     is_symlink_or_reparse, metadata_if_present, verify_opened_file_identity, SKILL_FILE_NAME,
@@ -241,11 +241,13 @@ impl ManagedSkillInstaller {
         let packages = ensure_exact_directory(&root, PACKAGES_DIRECTORY)?;
         let package_v1 = ensure_exact_directory(&packages, PACKAGE_V1_DIRECTORY)?;
         let package_v2 = ensure_exact_directory(&packages, PACKAGE_V2_DIRECTORY)?;
+        let package_v3 = ensure_exact_directory(&packages, PACKAGE_V3_DIRECTORY)?;
         let layout = ManagedStoreLayout {
             root,
             installations,
             package_v1,
             package_v2,
+            package_v3,
         };
         cleanup_stale_transaction_entries(&layout)?;
         let store = ManagedSkillStore::new(layout.root.clone())
@@ -649,14 +651,17 @@ impl ManagedStoreTransaction<'_> {
     ) -> Result<(), ManagedSkillInstallerError> {
         self.write_staged_file(&staging_root.join(SKILL_FILE_NAME), package.source_bytes())?;
         let mut directories = BTreeSet::new();
-        if package.format_version() == SKILL_PACKAGE_FORMAT_VERSION_V2 {
+        if matches!(
+            package.format_version(),
+            SKILL_PACKAGE_FORMAT_VERSION_V2 | SKILL_PACKAGE_FORMAT_VERSION_V3
+        ) {
             for resource in package.resources() {
                 let relative = Path::new(resource.descriptor().path());
                 let parent =
                     relative
                         .parent()
                         .ok_or_else(|| ManagedSkillInstallerError::StoreCorrupt {
-                            reason: "prepared v2 resource has no parent directory".to_string(),
+                            reason: "prepared package resource has no parent directory".to_string(),
                         })?;
                 let mut current = PathBuf::new();
                 for component in parent.components() {
@@ -671,10 +676,10 @@ impl ManagedStoreTransaction<'_> {
             }
             let manifest = package.manifest_bytes().ok_or_else(|| {
                 ManagedSkillInstallerError::StoreCorrupt {
-                    reason: "prepared v2 package has no manifest bytes".to_string(),
+                    reason: "prepared package has no manifest bytes".to_string(),
                 }
             })?;
-            self.write_staged_file(&staging_root.join(PACKAGE_V2_MANIFEST_FILE), manifest)?;
+            self.write_staged_file(&staging_root.join(PACKAGE_MANIFEST_FILE), manifest)?;
         }
 
         let mut directories = directories.into_iter().collect::<Vec<_>>();
@@ -879,6 +884,7 @@ struct ManagedStoreLayout {
     installations: PathBuf,
     package_v1: PathBuf,
     package_v2: PathBuf,
+    package_v3: PathBuf,
 }
 
 impl ManagedStoreLayout {
@@ -886,6 +892,7 @@ impl ManagedStoreLayout {
         match format_version {
             SKILL_PACKAGE_FORMAT_VERSION => &self.package_v1,
             SKILL_PACKAGE_FORMAT_VERSION_V2 => &self.package_v2,
+            SKILL_PACKAGE_FORMAT_VERSION_V3 => &self.package_v3,
             _ => unreachable!("PreparedSkillPackage validates format version"),
         }
     }
@@ -1545,7 +1552,9 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::digest::{PACKAGE_REVISION_PREFIX, PACKAGE_REVISION_V2_PREFIX};
+    use crate::skills::digest::{
+        PACKAGE_REVISION_PREFIX, PACKAGE_REVISION_V2_PREFIX, PACKAGE_REVISION_V3_PREFIX,
+    };
     use crate::skills::{
         SkillPackageOrigin, SkillSourceKind, SkillsService, USER_INSTALLED_SKILL_SOURCE_ID,
     };
@@ -1582,6 +1591,28 @@ mod tests {
                 ),
                 ("references/guide.md".to_string(), resource.to_vec()),
                 ("assets/data.bin".to_string(), vec![0, 1, 2, 255]),
+            ],
+            SkillPackageOrigin::new("local-directory", format!("fixture:{name}")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn package_v3(name: &str, marker: &str) -> PreparedSkillPackage {
+        PreparedSkillPackage::from_files(
+            vec![
+                (
+                    SKILL_FILE_NAME.to_string(),
+                    format!(
+                        "---\nname: {name}\ndescription: Managed fixture {name}.\n---\n# Instructions\n{marker}\n"
+                    )
+                    .into_bytes(),
+                ),
+                ("README.md".to_string(), b"ROOT_RESOURCE".to_vec()),
+                (
+                    "agents/openai.yaml".to_string(),
+                    b"interface: chat".to_vec(),
+                ),
+                ("references/guide.md".to_string(), b"GUIDE".to_vec()),
             ],
             SkillPackageOrigin::new("local-directory", format!("fixture:{name}")).unwrap(),
         )
@@ -1757,7 +1788,7 @@ mod tests {
             fs::read(v2_root.join("references/guide.md")).unwrap(),
             b"GUIDE_V2"
         );
-        assert!(v2_root.join(PACKAGE_V2_MANIFEST_FILE).is_file());
+        assert!(v2_root.join(PACKAGE_MANIFEST_FILE).is_file());
 
         let service = SkillsService::new().with_installed_source(&root).unwrap();
         let catalog = service.list().unwrap();
@@ -1789,6 +1820,132 @@ mod tests {
         let resolved = service.resolve(&catalog.skills()[0].selection()).unwrap();
         assert_eq!(resolved.format_version(), SKILL_PACKAGE_FORMAT_VERSION);
         assert!(resolved.resources().is_empty());
+    }
+
+    #[test]
+    fn v3_install_roundtrips_generic_resources_through_the_managed_store() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("store");
+        let installer = ManagedSkillInstaller::new(&root).unwrap();
+        let package = package_v3("portable", "USE_ALL_FILES");
+        assert_eq!(package.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V3);
+        assert!(package
+            .revision()
+            .as_str()
+            .starts_with(PACKAGE_REVISION_V3_PREFIX));
+        let request = install_request(INSTALLATION_ID, package.clone());
+
+        assert_eq!(
+            installer.install(&request).unwrap(),
+            ManagedSkillInstallOutcome::Installed
+        );
+        assert_eq!(
+            installer.install(&request).unwrap(),
+            ManagedSkillInstallOutcome::AlreadyInstalled
+        );
+
+        let digest = package
+            .revision()
+            .as_str()
+            .strip_prefix(PACKAGE_REVISION_V3_PREFIX)
+            .unwrap();
+        let package_root = root
+            .join(PACKAGES_DIRECTORY)
+            .join(PACKAGE_V3_DIRECTORY)
+            .join(digest);
+        assert_eq!(
+            fs::read(package_root.join("README.md")).unwrap(),
+            b"ROOT_RESOURCE"
+        );
+        assert_eq!(
+            fs::read(package_root.join("agents/openai.yaml")).unwrap(),
+            b"interface: chat"
+        );
+        assert!(package_root.join(PACKAGE_MANIFEST_FILE).is_file());
+
+        let service = SkillsService::new().with_installed_source(&root).unwrap();
+        let catalog = service.list().unwrap();
+        let resolved = service.resolve(&catalog.skills()[0].selection()).unwrap();
+        assert_eq!(resolved.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V3);
+        assert_eq!(resolved.resources(), &package.resource_index());
+        assert_eq!(
+            resolved.resources().get("README.md").unwrap().kind(),
+            crate::skills::SkillResourceKind::Other
+        );
+
+        let package_ref = InstalledPackageRef::from_format_and_revision(
+            package.format_version(),
+            package.revision().clone(),
+        )
+        .unwrap();
+        let snapshot = ManagedSkillStore::new(root)
+            .unwrap()
+            .load_complete_package(&package_ref)
+            .unwrap();
+        assert_eq!(
+            snapshot.resource_bytes,
+            vec![
+                ("README.md".to_string(), b"ROOT_RESOURCE".to_vec()),
+                (
+                    "agents/openai.yaml".to_string(),
+                    b"interface: chat".to_vec()
+                ),
+                ("references/guide.md".to_string(), b"GUIDE".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn updates_can_cross_v2_and_v3_format_boundaries_without_changing_identity() {
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("store");
+        let installer = ManagedSkillInstaller::new(&root).unwrap();
+        let v2 = package_v2("portable", "V2", b"V2_GUIDE");
+        let v2_revision = v2.revision().clone();
+        let install = install_request(INSTALLATION_ID, v2);
+        installer.install(&install).unwrap();
+
+        let v3 = package_v3("portable", "V3");
+        let v3_revision = v3.revision().clone();
+        let upgrade =
+            ManagedSkillUpdateRequest::new(install.installation_id().clone(), v2_revision, v3);
+        assert_eq!(
+            installer.update(&upgrade).unwrap(),
+            ManagedSkillUpdateOutcome::Updated
+        );
+        let service = SkillsService::new().with_installed_source(&root).unwrap();
+        let catalog = service.list().unwrap();
+        let skill_id = catalog.skills()[0].id().clone();
+        assert_eq!(catalog.skills()[0].revision(), &v3_revision);
+        assert_eq!(
+            service
+                .resolve(&catalog.skills()[0].selection())
+                .unwrap()
+                .format_version(),
+            SKILL_PACKAGE_FORMAT_VERSION_V3
+        );
+
+        let v2_again = package_v2("portable", "V2_AGAIN", b"UPDATED_GUIDE");
+        let v2_again_revision = v2_again.revision().clone();
+        let downgrade = ManagedSkillUpdateRequest::new(
+            install.installation_id().clone(),
+            v3_revision,
+            v2_again,
+        );
+        assert_eq!(
+            installer.update(&downgrade).unwrap(),
+            ManagedSkillUpdateOutcome::Updated
+        );
+        let catalog = service.list().unwrap();
+        assert_eq!(catalog.skills()[0].id(), &skill_id);
+        assert_eq!(catalog.skills()[0].revision(), &v2_again_revision);
+        assert_eq!(
+            service
+                .resolve(&catalog.skills()[0].selection())
+                .unwrap()
+                .format_version(),
+            SKILL_PACKAGE_FORMAT_VERSION_V2
+        );
     }
 
     #[test]
@@ -1917,7 +2074,7 @@ mod tests {
             .join(PACKAGES_DIRECTORY)
             .join(PACKAGE_V2_DIRECTORY)
             .join(digest)
-            .join(PACKAGE_V2_MANIFEST_FILE);
+            .join(PACKAGE_MANIFEST_FILE);
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         manifest["unexpected"] = serde_json::json!(true);
@@ -2512,6 +2669,7 @@ mod tests {
             installations: installations.clone(),
             package_v1: package_version,
             package_v2: fixture.path().join("unused-v2"),
+            package_v3: fixture.path().join("unused-v3"),
         };
         let stale = installations.join(format!(
             ".receipt-{}-{}.tmp",

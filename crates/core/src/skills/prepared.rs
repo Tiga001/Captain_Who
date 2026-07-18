@@ -8,7 +8,7 @@
 use super::digest::package_revision;
 use super::model::{
     SkillDiagnosticCode, SkillResourceDescriptor, SkillResourceIndex, SkillRevision,
-    SKILL_PACKAGE_FORMAT_VERSION, SKILL_PACKAGE_FORMAT_VERSION_V2,
+    SKILL_PACKAGE_FORMAT_VERSION, SKILL_PACKAGE_FORMAT_VERSION_V2, SKILL_PACKAGE_FORMAT_VERSION_V3,
 };
 use super::origin::SkillPackageOrigin;
 use super::package::{
@@ -120,7 +120,8 @@ impl PreparedSkillPackage {
     /// Constructs a fully validated package snapshot from an acquisition
     /// adapter's owned file bytes. Paths are logical, forward-slash relative
     /// paths. A package containing only SKILL.md retains format-v1 identity;
-    /// the presence of any supported sibling resource selects format v2.
+    /// conventional references/assets/scripts resources select format v2,
+    /// while any other safe sibling resource selects format v3.
     pub fn from_files(
         files: Vec<(String, Vec<u8>)>,
         origin: SkillPackageOrigin,
@@ -170,6 +171,11 @@ impl PreparedSkillPackage {
         )
         .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
         let revision = manifest.revision();
+        let format_version = manifest.format_version();
+        debug_assert!(matches!(
+            format_version,
+            SKILL_PACKAGE_FORMAT_VERSION_V2 | SKILL_PACKAGE_FORMAT_VERSION_V3
+        ));
         let manifest_bytes = manifest
             .encode()
             .map_err(|error| SkillPackagePreparationError::new(error.code, error.message))?;
@@ -192,7 +198,7 @@ impl PreparedSkillPackage {
             })
             .collect::<Vec<_>>();
         Ok(Self {
-            format_version: SKILL_PACKAGE_FORMAT_VERSION_V2,
+            format_version,
             source: validated.source,
             resources: resources.into(),
             manifest_bytes: Some(manifest_bytes.into()),
@@ -788,6 +794,78 @@ mod tests {
     }
 
     #[test]
+    fn generic_resources_select_v3_and_preserve_relative_paths_and_bytes() {
+        let source = document(Some("portable"), "READ_ALL_RESOURCES").into_bytes();
+        let package = PreparedSkillPackage::from_files(
+            vec![
+                (SKILL_FILE_NAME.to_string(), source),
+                ("README.md".to_string(), b"ROOT_README".to_vec()),
+                (
+                    "agents/openai.yaml".to_string(),
+                    b"interface: chat".to_vec(),
+                ),
+                ("references/guide.md".to_string(), b"GUIDE".to_vec()),
+            ],
+            origin(),
+        )
+        .unwrap();
+
+        assert_eq!(package.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V3);
+        assert!(package
+            .revision()
+            .as_str()
+            .starts_with("skill-package-sha256-v3:"));
+        assert_eq!(
+            package.resource_index().get("README.md").unwrap().kind(),
+            super::super::model::SkillResourceKind::Other
+        );
+        assert_eq!(
+            package
+                .resources()
+                .iter()
+                .find(|resource| resource.descriptor().path() == "agents/openai.yaml")
+                .unwrap()
+                .bytes(),
+            b"interface: chat"
+        );
+        assert_eq!(
+            package
+                .resource_index()
+                .get("references/guide.md")
+                .unwrap()
+                .kind(),
+            super::super::model::SkillResourceKind::Reference
+        );
+    }
+
+    #[test]
+    fn local_directory_imports_generic_resources_as_v3() {
+        let fixture = tempdir().unwrap();
+        let directory = fixture.path().join("portable");
+        fs::create_dir_all(directory.join("agents")).unwrap();
+        fs::write(
+            directory.join(SKILL_FILE_NAME),
+            document(Some("portable"), "USE_AGENT_METADATA"),
+        )
+        .unwrap();
+        fs::write(directory.join("README.md"), "README").unwrap();
+        fs::write(directory.join("agents/openai.yaml"), "interface: chat").unwrap();
+
+        let package = PreparedSkillPackage::from_local_directory(&directory, "fixture").unwrap();
+
+        assert_eq!(package.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V3);
+        assert_eq!(package.resources().len(), 2);
+        assert_eq!(
+            package
+                .resources()
+                .iter()
+                .map(|resource| resource.descriptor().path())
+                .collect::<Vec<_>>(),
+            vec!["README.md", "agents/openai.yaml"]
+        );
+    }
+
+    #[test]
     fn v2_preparation_rejects_collisions_and_resource_budget_overflow() {
         let source = document(Some("bounded-v2"), "INSTRUCTIONS").into_bytes();
         let collision = PreparedSkillPackage::from_files(
@@ -878,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn local_directory_rejects_siblings_wrong_case_and_relative_paths() {
+    fn local_directory_rejects_wrong_case_entrypoints_and_relative_paths() {
         let fixture = tempdir().unwrap();
         let directory = fixture.path().join("skill");
         fs::create_dir(&directory).unwrap();
@@ -896,11 +974,6 @@ mod tests {
             document(Some("skill"), "X"),
         )
         .unwrap();
-        fs::write(directory.join("reference.md"), "sibling").unwrap();
-        let sibling =
-            PreparedSkillPackage::from_local_directory(&directory, "fixture").unwrap_err();
-        assert_eq!(sibling.code(), SkillDiagnosticCode::UnexpectedPackageEntry);
-
         let relative = PreparedSkillPackage::from_local_directory(Path::new("relative"), "fixture")
             .unwrap_err();
         assert_eq!(relative.code(), SkillDiagnosticCode::InvalidRoot);
