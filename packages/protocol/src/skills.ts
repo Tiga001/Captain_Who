@@ -21,6 +21,8 @@ export type SkillDiagnosticCode =
   | 'missingDescription'
   | 'invalidName'
   | 'invalidDescription'
+  | 'invalidDirectoryName'
+  | 'missingInstructions'
   | 'defaultedName'
   | 'duplicateName'
 

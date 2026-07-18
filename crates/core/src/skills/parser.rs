@@ -2,6 +2,7 @@ use super::model::SkillDiagnosticCode;
 use serde::Deserialize;
 use std::error::Error;
 use std::fmt;
+use std::ops::Range;
 
 pub(super) const MAX_SKILL_NAME_CHARS: usize = 64;
 pub(super) const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
@@ -23,12 +24,19 @@ pub(super) struct ParsedSkillMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ParsedSkillDocument {
+    pub metadata: ParsedSkillMetadata,
+    pub instructions_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SkillParseError {
     MissingFrontmatter,
     InvalidFrontmatter(String),
     MissingDescription,
     InvalidName(String),
     InvalidDescription(String),
+    MissingInstructions,
 }
 
 impl SkillParseError {
@@ -39,6 +47,7 @@ impl SkillParseError {
             Self::MissingDescription => SkillDiagnosticCode::MissingDescription,
             Self::InvalidName(_) => SkillDiagnosticCode::InvalidName,
             Self::InvalidDescription(_) => SkillDiagnosticCode::InvalidDescription,
+            Self::MissingInstructions => SkillDiagnosticCode::MissingInstructions,
         }
     }
 }
@@ -57,18 +66,45 @@ impl fmt::Display for SkillParseError {
             Self::InvalidDescription(reason) => {
                 write!(formatter, "invalid description: {reason}")
             }
+            Self::MissingInstructions => {
+                formatter.write_str("missing non-whitespace Markdown instructions")
+            }
         }
     }
 }
 
 impl Error for SkillParseError {}
 
+#[cfg(test)]
 pub(super) fn parse_skill_metadata(
     contents: &str,
     default_name: &str,
 ) -> Result<ParsedSkillMetadata, SkillParseError> {
-    let frontmatter = extract_frontmatter(contents)?;
-    let parsed = parse_frontmatter_yaml(&frontmatter)?;
+    let split = split_skill_document(contents)?;
+    parse_metadata_frontmatter(split.frontmatter, default_name)
+}
+
+pub(super) fn parse_skill_document(
+    contents: &str,
+    default_name: &str,
+) -> Result<ParsedSkillDocument, SkillParseError> {
+    let split = split_skill_document(contents)?;
+    let metadata = parse_metadata_frontmatter(split.frontmatter, default_name)?;
+    if contents[split.instructions_range.clone()].trim().is_empty() {
+        return Err(SkillParseError::MissingInstructions);
+    }
+
+    Ok(ParsedSkillDocument {
+        metadata,
+        instructions_range: split.instructions_range,
+    })
+}
+
+fn parse_metadata_frontmatter(
+    frontmatter: &str,
+    default_name: &str,
+) -> Result<ParsedSkillMetadata, SkillParseError> {
+    let parsed = parse_frontmatter_yaml(frontmatter)?;
 
     let explicit_name = match parsed.name.as_deref() {
         Some(value) => {
@@ -138,8 +174,17 @@ fn parse_frontmatter_yaml(frontmatter: &str) -> Result<SkillFrontmatter, SkillPa
     }
 }
 
-fn extract_frontmatter(contents: &str) -> Result<String, SkillParseError> {
-    let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
+struct SplitSkillDocument<'a> {
+    frontmatter: &'a str,
+    instructions_range: Range<usize>,
+}
+
+fn split_skill_document(contents: &str) -> Result<SplitSkillDocument<'_>, SkillParseError> {
+    let (contents_without_bom, source_offset) = match contents.strip_prefix('\u{feff}') {
+        Some(contents_without_bom) => (contents_without_bom, '\u{feff}'.len_utf8()),
+        None => (contents, 0),
+    };
+    let contents = contents_without_bom;
     let (opening_line, mut offset) = line_at(contents, 0);
     if !is_frontmatter_delimiter(opening_line) {
         return Err(SkillParseError::MissingFrontmatter);
@@ -157,7 +202,10 @@ fn extract_frontmatter(contents: &str) -> Result<String, SkillParseError> {
             if frontmatter_bytes > MAX_SKILL_FRONTMATTER_BYTES {
                 return Err(frontmatter_too_large());
             }
-            return Ok(contents[frontmatter_start..line_start].to_string());
+            return Ok(SplitSkillDocument {
+                frontmatter: &contents[frontmatter_start..line_start],
+                instructions_range: source_offset + next_offset..source_offset + contents.len(),
+            });
         }
 
         let frontmatter_bytes = next_offset.saturating_sub(frontmatter_start);
@@ -406,6 +454,39 @@ mod tests {
             "Inspect repositories and cite source evidence."
         );
         assert!(!metadata.name_was_defaulted);
+    }
+
+    #[test]
+    fn returns_an_exact_body_range_without_bom_frontmatter_or_normalization() {
+        let contents = concat!(
+            "\u{feff}---\r\n",
+            "name: exact\r\n",
+            "description: Preserve the body.\r\n",
+            "---\t\r\n",
+            "\r\n",
+            "# Instructions\r\n",
+            "  Keep spacing.  \r\n",
+            "---\r\n"
+        );
+
+        let document = parse_skill_document(contents, "fallback").unwrap();
+
+        assert_eq!(
+            &contents[document.instructions_range],
+            "\r\n# Instructions\r\n  Keep spacing.  \r\n---\r\n"
+        );
+    }
+
+    #[test]
+    fn rejects_a_whitespace_only_instruction_body() {
+        assert_eq!(
+            parse_skill_document(
+                "---\nname: empty\ndescription: Empty body.\n---\n \t\r\n",
+                "fallback"
+            )
+            .unwrap_err(),
+            SkillParseError::MissingInstructions
+        );
     }
 
     #[test]

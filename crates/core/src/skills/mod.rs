@@ -1,9 +1,12 @@
 mod discovery;
 mod model;
 mod parser;
+mod resolver;
+mod workspace;
 
 pub use discovery::SkillsService;
 pub use model::{
-    SkillCatalog, SkillDescriptor, SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity,
-    SkillDiscoveryError, SkillScope,
+    ResolvedSkill, SkillCatalog, SkillDescriptor, SkillDiagnostic, SkillDiagnosticCode,
+    SkillDiagnosticSeverity, SkillDiscoveryError, SkillProvenance, SkillResolveError,
+    SkillResolveRequest, SkillScope,
 };

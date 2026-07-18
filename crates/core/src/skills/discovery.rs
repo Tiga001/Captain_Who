@@ -2,42 +2,25 @@ use super::model::{
     SkillCatalog, SkillDescriptor, SkillDiagnostic, SkillDiagnosticCode, SkillDiagnosticSeverity,
     SkillDiscoveryError, SkillScope,
 };
-use super::parser::parse_skill_metadata;
+use super::parser::parse_skill_document;
+use super::workspace::{
+    load_workspace_skill, percent_encode, resolve_workspace_skills_root, skill_revision,
+    workspace_skill_id, ByteBudget, ScanBudget, WorkspaceRootError, WorkspaceSkillsRoot,
+    MAX_SKILL_CATALOG_BYTES, MAX_SKILL_ROOT_ENTRIES, MAX_SKILL_SCAN_ENTRIES,
+};
 use crate::content_revision;
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read};
-use std::path::{Component, Path, PathBuf};
+use std::fs;
+use std::path::{Path, PathBuf};
 
-#[cfg(windows)]
-use std::ffi::OsString;
-#[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-#[cfg(windows)]
-use std::os::windows::{
-    ffi::{OsStrExt, OsStringExt},
-    fs::OpenOptionsExt,
-    io::AsRawHandle,
+#[cfg(test)]
+use super::workspace::{
+    find_exact_skill_file, normalize_windows_path_units, read_bounded_verified,
+    read_open_file_bounded, BoundedReadError, ExactSkillFile, AGENTS_DIRECTORY,
+    MAX_SKILL_FILE_BYTES, SKILLS_DIRECTORY, SKILL_FILE_NAME,
 };
-#[cfg(windows)]
-use windows_sys::Win32::{
-    Foundation::HANDLE,
-    Storage::FileSystem::{
-        FileIdInfo, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_NAME_NORMALIZED, SECURITY_IDENTIFICATION,
-        VOLUME_NAME_DOS,
-    },
-};
-
-const SKILLS_DIRECTORY: &str = "skills";
-const AGENTS_DIRECTORY: &str = ".agents";
-const SKILL_FILE_NAME: &str = "SKILL.md";
-const MAX_SKILL_FILE_BYTES: usize = 256 * 1024;
-const MAX_SKILL_ROOT_ENTRIES: usize = 2_000;
-const MAX_SKILL_DIRECTORY_ENTRIES: usize = 1_024;
-const MAX_SKILL_SCAN_ENTRIES: usize = 10_000;
-const MAX_SKILL_CATALOG_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(test)]
+use std::fs::File;
 
 #[derive(Debug, Default)]
 pub struct SkillsService;
@@ -52,89 +35,25 @@ impl SkillsService {
         workspace_id: &str,
         workspace_root: &Path,
     ) -> Result<SkillCatalog, SkillDiscoveryError> {
-        let workspace_root = workspace_root.canonicalize().map_err(|error| {
-            SkillDiscoveryError::WorkspaceUnavailable {
-                path: workspace_root.to_path_buf(),
-                reason: error.to_string(),
+        let roots = match resolve_workspace_skills_root(workspace_root) {
+            Ok(WorkspaceSkillsRoot::Missing) => {
+                return Ok(finalize_catalog(Vec::new(), Vec::new(), false));
             }
-        })?;
-        if !workspace_root.is_dir() {
-            return Err(SkillDiscoveryError::WorkspaceNotDirectory {
-                path: workspace_root,
-            });
-        }
-
-        let agents_root = workspace_root.join(AGENTS_DIRECTORY);
-        let Some(agents_metadata) = metadata_if_present(&agents_root).map_err(|error| {
-            SkillDiscoveryError::WorkspaceUnavailable {
-                path: agents_root.clone(),
-                reason: error.to_string(),
-            }
-        })?
-        else {
-            return Ok(finalize_catalog(Vec::new(), Vec::new(), false));
-        };
-        if agents_metadata.file_type().is_symlink() {
-            return Ok(catalog_with_root_diagnostic(
-                &agents_root,
-                SkillDiagnosticCode::SymlinkNotAllowed,
-                "Workspace Skill discovery does not follow a symlinked .agents directory.",
-            ));
-        }
-        if !agents_metadata.is_dir() {
-            return Ok(catalog_with_root_diagnostic(
-                &agents_root,
-                SkillDiagnosticCode::InvalidRoot,
-                "The workspace .agents path is not a directory.",
-            ));
-        }
-
-        let skills_root = agents_root.join(SKILLS_DIRECTORY);
-        let Some(skills_metadata) = metadata_if_present(&skills_root).map_err(|error| {
-            SkillDiscoveryError::WorkspaceUnavailable {
-                path: skills_root.clone(),
-                reason: error.to_string(),
-            }
-        })?
-        else {
-            return Ok(finalize_catalog(Vec::new(), Vec::new(), false));
-        };
-        if skills_metadata.file_type().is_symlink() {
-            return Ok(catalog_with_root_diagnostic(
-                &skills_root,
-                SkillDiagnosticCode::SymlinkNotAllowed,
-                "Workspace Skill discovery does not follow a symlinked skills directory.",
-            ));
-        }
-        if !skills_metadata.is_dir() {
-            return Ok(catalog_with_root_diagnostic(
-                &skills_root,
-                SkillDiagnosticCode::InvalidRoot,
-                "The workspace Skill root is not a directory.",
-            ));
-        }
-
-        let canonical_skills_root = match skills_root.canonicalize() {
-            Ok(root) if root.starts_with(&workspace_root) => root,
-            Ok(_) => {
+            Ok(WorkspaceSkillsRoot::Ready(roots)) => roots,
+            Err(WorkspaceRootError::Discovery(error)) => return Err(error),
+            Err(WorkspaceRootError::Invalid(issue)) => {
                 return Ok(catalog_with_root_diagnostic(
-                    &skills_root,
-                    SkillDiagnosticCode::RootEscapesWorkspace,
-                    "The workspace Skill root resolves outside the workspace.",
-                ));
-            }
-            Err(error) => {
-                return Ok(catalog_with_root_diagnostic(
-                    &skills_root,
-                    SkillDiagnosticCode::InvalidRoot,
-                    format!("Cannot resolve the workspace Skill root: {error}"),
+                    &issue.path,
+                    issue.code,
+                    issue.message,
                 ));
             }
         };
+        let canonical_skills_root = &roots.skills_root;
 
         let mut scan_budget = ScanBudget::new(MAX_SKILL_SCAN_ENTRIES);
         let (candidates, mut diagnostics, root_truncated) =
-            collect_skill_directories(&canonical_skills_root, &mut scan_budget);
+            collect_skill_directories(canonical_skills_root, &mut scan_budget);
         if root_truncated {
             return Ok(finalize_catalog(Vec::new(), diagnostics, true));
         }
@@ -143,210 +62,46 @@ impl SkillsService {
         let mut byte_budget = ByteBudget::new(MAX_SKILL_CATALOG_BYTES);
         let mut catalog_truncated = false;
         for skill_directory in candidates {
-            let directory_name = match skill_directory.file_name().and_then(OsStr::to_str) {
-                Some(name) if !name.is_empty() => name,
-                _ => {
-                    diagnostics.push(diagnostic(
-                        &skill_directory,
-                        SkillDiagnosticCode::UnsupportedPathEncoding,
-                        SkillDiagnosticSeverity::Error,
-                        "Skill directory names must be valid UTF-8.",
-                    ));
-                    continue;
-                }
-            };
-
-            let skill_file = match find_exact_skill_file(&skill_directory, &mut scan_budget) {
-                Ok(ExactSkillFile::Found(path)) => path,
-                Ok(ExactSkillFile::Missing) => {
-                    diagnostics.push(diagnostic(
-                        &skill_directory,
-                        SkillDiagnosticCode::MissingSkillFile,
-                        SkillDiagnosticSeverity::Error,
-                        "Skill directory does not contain an exact-case SKILL.md file.",
-                    ));
-                    continue;
-                }
-                Ok(ExactSkillFile::TooManyEntries) => {
-                    diagnostics.push(diagnostic(
-                        &skill_directory,
-                        SkillDiagnosticCode::TooManyEntries,
-                        SkillDiagnosticSeverity::Error,
-                        format!(
-                            "Skill directory contains more than {MAX_SKILL_DIRECTORY_ENTRIES} entries."
-                        ),
-                    ));
-                    continue;
-                }
-                Ok(ExactSkillFile::ScanBudgetExceeded) => {
-                    diagnostics.push(diagnostic(
-                        &canonical_skills_root,
-                        SkillDiagnosticCode::ScanBudgetExceeded,
-                        SkillDiagnosticSeverity::Warning,
-                        format!(
-                            "Workspace Skill discovery exceeded its {MAX_SKILL_SCAN_ENTRIES}-entry scan budget."
-                        ),
-                    ));
-                    catalog_truncated = true;
-                    break;
-                }
-                Err(error) => {
-                    diagnostics.push(diagnostic(
-                        &skill_directory,
-                        SkillDiagnosticCode::UnreadableEntry,
-                        SkillDiagnosticSeverity::Error,
-                        format!("Cannot inspect Skill directory: {error}"),
-                    ));
-                    continue;
-                }
-            };
-
-            let file_metadata = match fs::symlink_metadata(&skill_file) {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    diagnostics.push(diagnostic(
-                        &skill_file,
-                        SkillDiagnosticCode::UnreadableEntry,
-                        SkillDiagnosticSeverity::Error,
-                        format!("Cannot inspect SKILL.md: {error}"),
-                    ));
-                    continue;
-                }
-            };
-            if file_metadata.file_type().is_symlink() {
-                diagnostics.push(diagnostic(
-                    &skill_file,
-                    SkillDiagnosticCode::SymlinkNotAllowed,
-                    SkillDiagnosticSeverity::Error,
-                    "Workspace Skill discovery does not follow a symlinked SKILL.md.",
-                ));
-                continue;
-            }
-            if !file_metadata.is_file() {
-                diagnostics.push(diagnostic(
-                    &skill_file,
-                    SkillDiagnosticCode::MissingSkillFile,
-                    SkillDiagnosticSeverity::Error,
-                    "SKILL.md is not a regular file.",
-                ));
-                continue;
-            }
-
-            let canonical_skill_directory = match skill_directory.canonicalize() {
-                Ok(path) if path.starts_with(&canonical_skills_root) => path,
-                Ok(_) => {
-                    diagnostics.push(diagnostic(
-                        &skill_directory,
-                        SkillDiagnosticCode::RootEscapesWorkspace,
-                        SkillDiagnosticSeverity::Error,
-                        "Skill directory resolves outside the workspace Skill root.",
-                    ));
-                    continue;
-                }
-                Err(error) => {
-                    diagnostics.push(diagnostic(
-                        &skill_directory,
-                        SkillDiagnosticCode::UnreadableEntry,
-                        SkillDiagnosticSeverity::Error,
-                        format!("Cannot resolve Skill directory: {error}"),
-                    ));
-                    continue;
-                }
-            };
-            let canonical_skill_file = match skill_file.canonicalize() {
-                Ok(path)
-                    if path.starts_with(&canonical_skill_directory)
-                        && path.starts_with(&workspace_root) =>
-                {
-                    path
-                }
-                Ok(_) => {
-                    diagnostics.push(diagnostic(
-                        &skill_file,
-                        SkillDiagnosticCode::RootEscapesWorkspace,
-                        SkillDiagnosticSeverity::Error,
-                        "SKILL.md resolves outside its Skill directory.",
-                    ));
-                    continue;
-                }
-                Err(error) => {
-                    diagnostics.push(diagnostic(
-                        &skill_file,
-                        SkillDiagnosticCode::UnreadableEntry,
-                        SkillDiagnosticSeverity::Error,
-                        format!("Cannot resolve SKILL.md: {error}"),
-                    ));
-                    continue;
-                }
-            };
-
-            let bytes = match read_bounded_verified(
-                &skill_file,
-                &canonical_skill_file,
-                &file_metadata,
-                &canonical_skill_directory,
-                &workspace_root,
-                MAX_SKILL_FILE_BYTES,
+            let loaded = match load_workspace_skill(
+                &roots,
+                &skill_directory,
+                &mut scan_budget,
                 &mut byte_budget,
             ) {
-                Ok(bytes) => bytes,
-                Err(BoundedReadError::CatalogBudgetExceeded) => {
+                Ok(loaded) => loaded,
+                Err(issue) => {
+                    let truncates_catalog = issue.truncates_catalog();
                     diagnostics.push(diagnostic(
-                        &canonical_skills_root,
-                        SkillDiagnosticCode::CatalogTooLarge,
-                        SkillDiagnosticSeverity::Warning,
-                        format!(
-                            "Workspace Skill catalog exceeds the {MAX_SKILL_CATALOG_BYTES}-byte scan budget."
-                        ),
+                        &issue.path,
+                        issue.code,
+                        issue.severity,
+                        issue.message,
                     ));
-                    catalog_truncated = true;
-                    break;
-                }
-                Err(BoundedReadError::TooLarge) => {
-                    diagnostics.push(diagnostic(
-                        &canonical_skill_file,
-                        SkillDiagnosticCode::SkillFileTooLarge,
-                        SkillDiagnosticSeverity::Error,
-                        format!("SKILL.md exceeds {MAX_SKILL_FILE_BYTES} bytes."),
-                    ));
-                    continue;
-                }
-                Err(BoundedReadError::Io(error)) => {
-                    diagnostics.push(diagnostic(
-                        &canonical_skill_file,
-                        SkillDiagnosticCode::UnreadableEntry,
-                        SkillDiagnosticSeverity::Error,
-                        format!("Cannot read SKILL.md: {error}"),
-                    ));
-                    continue;
-                }
-                Err(BoundedReadError::PathChanged(reason)) => {
-                    diagnostics.push(diagnostic(
-                        &skill_file,
-                        SkillDiagnosticCode::PathChangedDuringRead,
-                        SkillDiagnosticSeverity::Error,
-                        format!(
-                            "SKILL.md changed or became unsafe while it was inspected: {reason}"
-                        ),
-                    ));
+                    if truncates_catalog {
+                        catalog_truncated = true;
+                        break;
+                    }
                     continue;
                 }
             };
+            let directory_name = loaded.directory_name.as_str();
+            let canonical_skill_file = &loaded.canonical_path;
+            let bytes = &loaded.bytes;
 
             if bytes.contains(&0) {
                 diagnostics.push(diagnostic(
-                    &canonical_skill_file,
+                    canonical_skill_file,
                     SkillDiagnosticCode::NulByte,
                     SkillDiagnosticSeverity::Error,
                     "SKILL.md contains a NUL byte.",
                 ));
                 continue;
             }
-            let contents = match std::str::from_utf8(&bytes) {
+            let contents = match std::str::from_utf8(bytes) {
                 Ok(contents) => contents,
                 Err(_) => {
                     diagnostics.push(diagnostic(
-                        &canonical_skill_file,
+                        canonical_skill_file,
                         SkillDiagnosticCode::InvalidUtf8,
                         SkillDiagnosticSeverity::Error,
                         "SKILL.md must be valid UTF-8.",
@@ -354,11 +109,11 @@ impl SkillsService {
                     continue;
                 }
             };
-            let metadata = match parse_skill_metadata(contents, directory_name) {
-                Ok(metadata) => metadata,
+            let document = match parse_skill_document(contents, directory_name) {
+                Ok(document) => document,
                 Err(error) => {
                     diagnostics.push(diagnostic(
-                        &canonical_skill_file,
+                        canonical_skill_file,
                         error.diagnostic_code(),
                         SkillDiagnosticSeverity::Error,
                         error.to_string(),
@@ -366,9 +121,10 @@ impl SkillsService {
                     continue;
                 }
             };
+            let metadata = document.metadata;
             if metadata.name_was_defaulted {
                 diagnostics.push(diagnostic(
-                    &canonical_skill_file,
+                    canonical_skill_file,
                     SkillDiagnosticCode::DefaultedName,
                     SkillDiagnosticSeverity::Warning,
                     format!(
@@ -379,26 +135,21 @@ impl SkillsService {
 
             let Some(path) = canonical_skill_file.to_str() else {
                 diagnostics.push(diagnostic(
-                    &canonical_skill_file,
+                    canonical_skill_file,
                     SkillDiagnosticCode::UnsupportedPathEncoding,
                     SkillDiagnosticSeverity::Error,
                     "The canonical SKILL.md path cannot be represented as UTF-8.",
                 ));
                 continue;
             };
-            let relative_path = relative_display(&workspace_root, &canonical_skill_file);
             skills.push(SkillDescriptor {
-                id: format!(
-                    "workspace:{}:{}",
-                    percent_encode(workspace_id.as_bytes()),
-                    percent_encode(directory_name.as_bytes())
-                ),
+                id: workspace_skill_id(workspace_id, directory_name),
                 name: metadata.name,
                 description: metadata.description,
                 scope: SkillScope::Workspace,
                 path: path.to_owned(),
-                relative_path,
-                revision: content_revision(&bytes),
+                relative_path: loaded.relative_path,
+                revision: skill_revision(bytes),
             });
         }
 
@@ -407,30 +158,9 @@ impl SkillsService {
                 .cmp(&right.name)
                 .then_with(|| left.id.cmp(&right.id))
         });
-        append_duplicate_name_diagnostics(&skills, &canonical_skills_root, &mut diagnostics);
+        append_duplicate_name_diagnostics(&skills, canonical_skills_root, &mut diagnostics);
 
         Ok(finalize_catalog(skills, diagnostics, catalog_truncated))
-    }
-}
-
-#[derive(Debug)]
-struct ScanBudget {
-    remaining_entries: usize,
-}
-
-impl ScanBudget {
-    fn new(max_entries: usize) -> Self {
-        Self {
-            remaining_entries: max_entries,
-        }
-    }
-
-    fn consume_entry(&mut self) -> bool {
-        if self.remaining_entries == 0 {
-            return false;
-        }
-        self.remaining_entries -= 1;
-        true
     }
 }
 
@@ -530,290 +260,6 @@ fn collect_skill_directories(
     (candidates, diagnostics, false)
 }
 
-enum ExactSkillFile {
-    Found(PathBuf),
-    Missing,
-    TooManyEntries,
-    ScanBudgetExceeded,
-}
-
-fn find_exact_skill_file(
-    skill_directory: &Path,
-    scan_budget: &mut ScanBudget,
-) -> io::Result<ExactSkillFile> {
-    let entries = fs::read_dir(skill_directory)?;
-    let mut exact_skill_file = None;
-    let mut observed_entries = 0usize;
-    for entry in entries {
-        if !scan_budget.consume_entry() {
-            return Ok(ExactSkillFile::ScanBudgetExceeded);
-        }
-        observed_entries = observed_entries.saturating_add(1);
-        if observed_entries > MAX_SKILL_DIRECTORY_ENTRIES {
-            return Ok(ExactSkillFile::TooManyEntries);
-        }
-        let entry = entry?;
-        if entry.file_name() == OsStr::new(SKILL_FILE_NAME) {
-            exact_skill_file = Some(entry.path());
-        }
-    }
-    Ok(exact_skill_file
-        .map(ExactSkillFile::Found)
-        .unwrap_or(ExactSkillFile::Missing))
-}
-
-enum BoundedReadError {
-    Io(io::Error),
-    TooLarge,
-    CatalogBudgetExceeded,
-    PathChanged(String),
-}
-
-#[derive(Debug)]
-struct ByteBudget {
-    remaining_bytes: usize,
-}
-
-impl ByteBudget {
-    fn new(max_bytes: usize) -> Self {
-        Self {
-            remaining_bytes: max_bytes,
-        }
-    }
-
-    fn consume(&mut self, bytes: usize) {
-        self.remaining_bytes = self.remaining_bytes.saturating_sub(bytes);
-    }
-}
-
-fn read_bounded_verified(
-    lexical_path: &Path,
-    expected_canonical_path: &Path,
-    expected_metadata: &fs::Metadata,
-    canonical_skill_directory: &Path,
-    canonical_workspace_root: &Path,
-    max_bytes: usize,
-    byte_budget: &mut ByteBudget,
-) -> Result<Vec<u8>, BoundedReadError> {
-    let file = open_skill_file(lexical_path).map_err(|error| {
-        BoundedReadError::PathChanged(format!("cannot safely open the checked path: {error}"))
-    })?;
-    let opened_metadata = file.metadata().map_err(|error| {
-        BoundedReadError::PathChanged(format!("cannot inspect the opened file: {error}"))
-    })?;
-    if !opened_metadata.is_file() {
-        return Err(BoundedReadError::PathChanged(
-            "the opened object is not a regular file".to_string(),
-        ));
-    }
-    verify_opened_file_identity(
-        &file,
-        expected_metadata,
-        &opened_metadata,
-        expected_canonical_path,
-    )
-    .map_err(BoundedReadError::PathChanged)?;
-
-    let resolved_path = lexical_path.canonicalize().map_err(|error| {
-        BoundedReadError::PathChanged(format!("cannot re-resolve the opened path: {error}"))
-    })?;
-    if resolved_path != expected_canonical_path
-        || !resolved_path.starts_with(canonical_skill_directory)
-        || !resolved_path.starts_with(canonical_workspace_root)
-    {
-        return Err(BoundedReadError::PathChanged(
-            "the opened path no longer resolves to the checked workspace file".to_string(),
-        ));
-    }
-
-    read_open_file_bounded(file, max_bytes, byte_budget)
-}
-
-fn open_skill_file(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    #[cfg(windows)]
-    options
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .security_qos_flags(SECURITY_IDENTIFICATION);
-    options.open(path)
-}
-
-#[cfg(unix)]
-fn verify_opened_file_identity(
-    _file: &File,
-    expected: &fs::Metadata,
-    opened: &fs::Metadata,
-    _expected_canonical_path: &Path,
-) -> Result<(), String> {
-    if expected.dev() == opened.dev() && expected.ino() == opened.ino() {
-        Ok(())
-    } else {
-        Err("the opened file is not the file that was checked".to_string())
-    }
-}
-
-#[cfg(windows)]
-fn verify_opened_file_identity(
-    file: &File,
-    _expected: &fs::Metadata,
-    _opened: &fs::Metadata,
-    expected_canonical_path: &Path,
-) -> Result<(), String> {
-    let opened_identity = windows_file_identity(file)
-        .map_err(|error| format!("cannot identify the opened file: {error}"))?;
-    let opened_path = windows_final_path(file)
-        .map_err(|error| format!("cannot resolve the opened file handle: {error}"))?;
-    if !windows_paths_equivalent(&opened_path, expected_canonical_path) {
-        return Err("the opened handle resolves outside the checked workspace path".to_string());
-    }
-
-    let expected_file = open_skill_file(expected_canonical_path)
-        .map_err(|error| format!("cannot reopen the checked canonical path: {error}"))?;
-    let expected_identity = windows_file_identity(&expected_file)
-        .map_err(|error| format!("cannot identify the checked canonical file: {error}"))?;
-    if opened_identity != expected_identity {
-        return Err("the opened file is not the file that was checked".to_string());
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-#[derive(Debug, PartialEq, Eq)]
-struct WindowsFileIdentity {
-    volume_serial_number: u64,
-    file_id: [u8; 16],
-}
-
-#[cfg(windows)]
-fn windows_file_identity(file: &File) -> io::Result<WindowsFileIdentity> {
-    let mut information = FILE_ID_INFO::default();
-    // SAFETY: `file` keeps the HANDLE valid for the call, and `information` is a writable
-    // FILE_ID_INFO buffer whose exact byte size is supplied to Windows.
-    let result = unsafe {
-        GetFileInformationByHandleEx(
-            file.as_raw_handle() as HANDLE,
-            FileIdInfo,
-            (&raw mut information).cast(),
-            u32::try_from(std::mem::size_of::<FILE_ID_INFO>()).unwrap_or(u32::MAX),
-        )
-    };
-    if result == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(WindowsFileIdentity {
-        volume_serial_number: information.VolumeSerialNumber,
-        file_id: information.FileId.Identifier,
-    })
-}
-
-#[cfg(windows)]
-fn windows_final_path(file: &File) -> io::Result<PathBuf> {
-    let mut buffer = vec![0u16; 512];
-    loop {
-        let capacity = u32::try_from(buffer.len())
-            .map_err(|_| io::Error::other("Windows path buffer exceeds u32"))?;
-        // SAFETY: `file` keeps the HANDLE valid and `buffer` exposes `capacity` writable u16s.
-        // Windows reports either the number written or the larger capacity required.
-        let written = unsafe {
-            GetFinalPathNameByHandleW(
-                file.as_raw_handle() as HANDLE,
-                buffer.as_mut_ptr(),
-                capacity,
-                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
-            )
-        };
-        if written == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let written = usize::try_from(written)
-            .map_err(|_| io::Error::other("Windows path length exceeds usize"))?;
-        if written < buffer.len() {
-            buffer.truncate(written);
-            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
-        }
-        buffer.resize(written.saturating_add(1), 0);
-    }
-}
-
-#[cfg(windows)]
-fn windows_paths_equivalent(left: &Path, right: &Path) -> bool {
-    windows_path_key(left) == windows_path_key(right)
-}
-
-#[cfg(windows)]
-fn windows_path_key(path: &Path) -> Vec<u16> {
-    normalize_windows_path_units(path.as_os_str().encode_wide().collect())
-}
-
-#[cfg(any(windows, test))]
-fn normalize_windows_path_units(mut units: Vec<u16>) -> Vec<u16> {
-    const BACKSLASH: u16 = b'\\' as u16;
-    let verbatim_prefix = [BACKSLASH, BACKSLASH, b'?' as u16, BACKSLASH];
-    let verbatim_unc_prefix = [
-        BACKSLASH,
-        BACKSLASH,
-        b'?' as u16,
-        BACKSLASH,
-        b'U' as u16,
-        b'N' as u16,
-        b'C' as u16,
-        BACKSLASH,
-    ];
-    if units.starts_with(&verbatim_unc_prefix) {
-        units.splice(..verbatim_unc_prefix.len(), [BACKSLASH, BACKSLASH]);
-    } else if units.starts_with(&verbatim_prefix) {
-        units.drain(..verbatim_prefix.len());
-    }
-    for unit in &mut units {
-        if *unit == b'/' as u16 {
-            *unit = BACKSLASH;
-        } else if (b'A' as u16..=b'Z' as u16).contains(unit) {
-            *unit += u16::from(b'a' - b'A');
-        }
-    }
-    units
-}
-
-#[cfg(not(any(unix, windows)))]
-fn verify_opened_file_identity(
-    _file: &File,
-    _expected: &fs::Metadata,
-    _opened: &fs::Metadata,
-    _expected_canonical_path: &Path,
-) -> Result<(), String> {
-    Err("secure Skill file identity checks are unavailable on this platform".to_string())
-}
-
-fn read_open_file_bounded(
-    file: File,
-    max_bytes: usize,
-    byte_budget: &mut ByteBudget,
-) -> Result<Vec<u8>, BoundedReadError> {
-    let remaining_catalog_bytes = byte_budget.remaining_bytes;
-    if remaining_catalog_bytes == 0 {
-        return Err(BoundedReadError::CatalogBudgetExceeded);
-    }
-    let read_limit = max_bytes
-        .saturating_add(1)
-        .min(remaining_catalog_bytes.saturating_add(1));
-    let limit = u64::try_from(read_limit).unwrap_or(u64::MAX);
-    let mut bytes = Vec::with_capacity(max_bytes.min(16 * 1024));
-    let read_result = file.take(limit).read_to_end(&mut bytes);
-    byte_budget.consume(bytes.len());
-    if bytes.len() > remaining_catalog_bytes {
-        return Err(BoundedReadError::CatalogBudgetExceeded);
-    }
-    read_result.map_err(BoundedReadError::Io)?;
-    if bytes.len() > max_bytes {
-        Err(BoundedReadError::TooLarge)
-    } else {
-        Ok(bytes)
-    }
-}
-
 fn append_duplicate_name_diagnostics(
     skills: &[SkillDescriptor],
     skills_root: &Path,
@@ -839,14 +285,6 @@ fn append_duplicate_name_diagnostics(
                 paths.join(", ")
             ),
         ));
-    }
-}
-
-fn metadata_if_present(path: &Path) -> io::Result<Option<fs::Metadata>> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
     }
 }
 
@@ -883,20 +321,22 @@ fn diagnostic(
 
 fn diagnostic_path(path: &Path) -> String {
     if let Some(path) = path.to_str() {
-        return path.to_owned();
+        if !path.chars().any(char::is_control) {
+            return path.to_owned();
+        }
     }
-    diagnostic_path_non_utf8(path)
+    diagnostic_path_encoded(path)
 }
 
 #[cfg(unix)]
-fn diagnostic_path_non_utf8(path: &Path) -> String {
+fn diagnostic_path_encoded(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
 
     format!("unix-bytes:{}", percent_encode(path.as_os_str().as_bytes()))
 }
 
 #[cfg(windows)]
-fn diagnostic_path_non_utf8(path: &Path) -> String {
+fn diagnostic_path_encoded(path: &Path) -> String {
     use std::fmt::Write;
     use std::os::windows::ffi::OsStrExt;
 
@@ -908,7 +348,7 @@ fn diagnostic_path_non_utf8(path: &Path) -> String {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn diagnostic_path_non_utf8(path: &Path) -> String {
+fn diagnostic_path_encoded(path: &Path) -> String {
     format!("platform-path:{:?}", path.as_os_str())
 }
 
@@ -931,31 +371,6 @@ fn finalize_catalog(
         diagnostics,
         truncated,
     }
-}
-
-fn relative_display(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn percent_encode(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len());
-    for byte in bytes {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(char::from(*byte));
-        } else {
-            use std::fmt::Write;
-            write!(&mut encoded, "%{byte:02X}").expect("writing to a String cannot fail");
-        }
-    }
-    encoded
 }
 
 #[cfg(test)]
@@ -1198,7 +613,7 @@ mod tests {
         write_skill(
             workspace.path(),
             "fallback-name",
-            b"---\ndescription: Uses its directory name.\n---\n",
+            b"---\ndescription: Uses its directory name.\n---\n# Instructions\n",
         );
 
         let catalog = SkillsService::new()
@@ -1214,6 +629,69 @@ mod tests {
             catalog.diagnostics[0].severity,
             SkillDiagnosticSeverity::Warning
         );
+    }
+
+    #[test]
+    fn excludes_metadata_only_files_that_have_no_instructions() {
+        let workspace = tempdir().unwrap();
+        write_skill(
+            workspace.path(),
+            "metadata-only",
+            b"---\nname: metadata-only\ndescription: Has no body.\n---\n \t\n",
+        );
+
+        let catalog = SkillsService::new()
+            .list_workspace("workspace", workspace.path())
+            .unwrap();
+
+        assert!(catalog.skills.is_empty());
+        assert_eq!(catalog.diagnostics.len(), 1);
+        assert_eq!(
+            catalog.diagnostics[0].code,
+            SkillDiagnosticCode::MissingInstructions
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn excludes_non_portable_skill_directory_names() {
+        let workspace = tempdir().unwrap();
+        write_skill(
+            workspace.path(),
+            "back\\slash",
+            valid_skill("backslash", "Invalid directory.").as_bytes(),
+        );
+        write_skill(
+            workspace.path(),
+            "line\nbreak",
+            valid_skill("control", "Invalid directory.").as_bytes(),
+        );
+
+        let catalog = SkillsService::new()
+            .list_workspace("workspace", workspace.path())
+            .unwrap();
+
+        assert!(catalog.skills.is_empty());
+        assert_eq!(
+            catalog
+                .diagnostics
+                .iter()
+                .filter(|item| item.code == SkillDiagnosticCode::InvalidDirectoryName)
+                .count(),
+            2
+        );
+        let diagnostic_paths = catalog
+            .diagnostics
+            .iter()
+            .map(|item| item.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(diagnostic_paths
+            .iter()
+            .all(|path| !path.chars().any(char::is_control)));
+        assert!(diagnostic_paths
+            .iter()
+            .any(|path| path.starts_with("unix-bytes:")));
+        assert_ne!(diagnostic_paths[0], diagnostic_paths[1]);
     }
 
     #[cfg(unix)]

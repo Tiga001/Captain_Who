@@ -1020,7 +1020,7 @@ mod server_tests {
         fs::create_dir_all(&skill_directory).unwrap();
         fs::write(
             skill_directory.join("SKILL.md"),
-            "---\nname: auditor\ndescription: Audit a repository.\n---\n",
+            "---\nname: auditor\ndescription: Audit a repository.\n---\n# Instructions\n",
         )
         .unwrap();
         let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
