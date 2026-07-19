@@ -1,0 +1,228 @@
+use super::*;
+
+pub fn agent_event_notification(event: AgentEvent) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": AGENT_EVENT_NOTIFICATION_METHOD,
+        "params": event
+    })
+}
+
+pub(crate) fn resolve_project(
+    storage: &StorageService,
+    project_id: Option<&str>,
+) -> Result<Option<ProjectRecord>, String> {
+    let Some(project_id) = project_id else {
+        return Ok(None);
+    };
+
+    let project = storage
+        .load_projects()?
+        .into_iter()
+        .find(|project| project.id == project_id)
+        .ok_or_else(|| format!("未找到项目：{project_id}"))?;
+    if project
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .is_none()
+    {
+        return Err(format!(
+            "项目「{}」没有绑定本地 workspace 路径，请重新选择项目目录。",
+            project.name
+        ));
+    }
+    Ok(Some(project))
+}
+
+/// Existing conversation history is bound to the workspace that produced it. A normal turn may
+/// omit that project id, but it may not migrate the conversation to another project implicitly.
+/// Project migration needs a dedicated operation that can validate and update every dependent
+/// artifact atomically.
+pub(crate) fn resolve_conversation_project_id(
+    existing: Option<&ChatConversationRecord>,
+    requested_project_id: Option<String>,
+) -> Result<Option<String>, String> {
+    let Some(existing) = existing else {
+        return Ok(requested_project_id);
+    };
+    let stored_project_id = normalized_optional(existing.project_id.as_deref());
+    if requested_project_id.is_some() && requested_project_id != stored_project_id {
+        return Err(format!(
+            "会话 `{}` 已绑定到另一个项目；普通消息不能迁移会话项目。",
+            existing.id
+        ));
+    }
+    Ok(stored_project_id)
+}
+
+pub(crate) fn message_attachments_from_input(
+    attachments: &[AgentInputAttachment],
+    created_at: i64,
+) -> Vec<ChatMessageAttachmentRecord> {
+    attachments
+        .iter()
+        .map(|attachment| {
+            let preview_data = if attachment.kind == AgentInputAttachmentKind::Image
+                && attachment.encoding == AgentInputAttachmentEncoding::Base64
+                && attachment
+                    .mime_type
+                    .as_deref()
+                    .is_some_and(|mime_type| mime_type.starts_with("image/"))
+            {
+                Some(attachment.data.clone())
+            } else {
+                None
+            };
+
+            ChatMessageAttachmentRecord {
+                id: safe_path_component(&attachment.id, "attachment"),
+                kind: input_attachment_kind_label(attachment.kind).to_string(),
+                name: attachment.name.clone(),
+                mime_type: attachment.mime_type.clone(),
+                size_bytes: attachment.size_bytes,
+                preview_mime_type: preview_data.as_ref().and(attachment.mime_type.clone()),
+                preview_data,
+                created_at,
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn agent_prompt_preferences_from_record(
+    record: AgentPromptPreferencesRecord,
+) -> AgentPromptPreferences {
+    AgentPromptPreferences {
+        work_mode: Some(match record.work_mode.as_str() {
+            "general" => AgentPromptWorkMode::General,
+            _ => AgentPromptWorkMode::Coding,
+        }),
+        tone: Some(match record.tone.as_str() {
+            "friendly" => AgentPromptTone::Friendly,
+            _ => AgentPromptTone::Pragmatic,
+        }),
+        detail_level: Some(match record.detail_level.as_str() {
+            "low" => AgentPromptDetailLevel::Low,
+            "high" => AgentPromptDetailLevel::High,
+            _ => AgentPromptDetailLevel::Medium,
+        }),
+        custom_instructions: normalized_optional(Some(&record.custom_instructions)),
+        updated_at: Some(record.updated_at),
+    }
+}
+
+pub(crate) fn input_attachment_kind_label(kind: AgentInputAttachmentKind) -> &'static str {
+    match kind {
+        AgentInputAttachmentKind::File => "file",
+        AgentInputAttachmentKind::Image => "image",
+    }
+}
+
+pub(crate) fn search_mode_from_storage(value: &str) -> AgentSearchMode {
+    match value {
+        "disabled" => AgentSearchMode::Disabled,
+        "tavily" => AgentSearchMode::Tavily,
+        _ => AgentSearchMode::Auto,
+    }
+}
+
+pub(crate) fn normalized_optional(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+pub(crate) fn non_empty(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+pub(crate) fn upsert_message(messages: &mut Vec<ChatMessageRecord>, next: ChatMessageRecord) {
+    if let Some(existing) = messages.iter_mut().find(|message| message.id == next.id) {
+        *existing = next;
+    } else {
+        messages.push(next);
+    }
+}
+
+pub(crate) fn status_for_run(status: AgentRunStatus) -> Option<&'static str> {
+    match status {
+        AgentRunStatus::Completed | AgentRunStatus::Cancelled => Some("sent"),
+        AgentRunStatus::WaitingForApproval | AgentRunStatus::Running | AgentRunStatus::Idle => {
+            Some("pending")
+        }
+        AgentRunStatus::Failed => Some("error"),
+    }
+}
+
+pub(crate) fn run_status_label(status: AgentRunStatus) -> &'static str {
+    match status {
+        AgentRunStatus::Idle => "idle",
+        AgentRunStatus::Running => "running",
+        AgentRunStatus::WaitingForApproval => "waiting_for_approval",
+        AgentRunStatus::Completed => "completed",
+        AgentRunStatus::Failed => "failed",
+        AgentRunStatus::Cancelled => "cancelled",
+    }
+}
+
+pub(crate) fn is_terminal_run_status(status: AgentRunStatus) -> bool {
+    matches!(
+        status,
+        AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
+    )
+}
+
+pub(crate) fn merge_usage(total: &mut Option<AgentUsage>, next: Option<AgentUsage>) {
+    let Some(next) = next else {
+        return;
+    };
+    let total_usage = total.get_or_insert(AgentUsage {
+        input_tokens: None,
+        output_tokens: None,
+        output_thinking_tokens: None,
+        total_tokens: None,
+        cached_input_tokens: None,
+        cache_creation_input_tokens: None,
+        billable_request_count: None,
+    });
+
+    total_usage.input_tokens = add_optional(total_usage.input_tokens, next.input_tokens);
+    total_usage.output_tokens = add_optional(total_usage.output_tokens, next.output_tokens);
+    total_usage.output_thinking_tokens = add_optional(
+        total_usage.output_thinking_tokens,
+        next.output_thinking_tokens,
+    );
+    total_usage.total_tokens = add_optional(total_usage.total_tokens, next.total_tokens);
+    total_usage.cached_input_tokens =
+        add_optional(total_usage.cached_input_tokens, next.cached_input_tokens);
+    total_usage.cache_creation_input_tokens = add_optional(
+        total_usage.cache_creation_input_tokens,
+        next.cache_creation_input_tokens,
+    );
+    total_usage.billable_request_count = add_optional(
+        total_usage.billable_request_count,
+        next.billable_request_count.or_else(|| {
+            (next.input_tokens.is_some()
+                || next.output_tokens.is_some()
+                || next.output_thinking_tokens.is_some()
+                || next.total_tokens.is_some())
+            .then_some(1)
+        }),
+    );
+}
+
+pub(crate) fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
