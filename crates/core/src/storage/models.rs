@@ -11,10 +11,10 @@ pub struct ModelConnectionConfig {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelConfigRecord {
+    /// Opaque identifier sent verbatim as the provider API's `model` value.
     pub id: String,
+    /// User-facing label only; it never participates in provider routing.
     pub display_name: String,
-    pub short_name: Option<String>,
-    pub provider_path: Option<String>,
     #[serde(default)]
     pub api_url_override: Option<String>,
     #[serde(default)]
@@ -114,8 +114,6 @@ mod model_connection_tests {
         ModelConfigRecord {
             id: "model-a".to_string(),
             display_name: "Model A".to_string(),
-            short_name: None,
-            provider_path: None,
             api_url_override: api_url_override.map(ToString::to_string),
             api_token_override: api_token_override.map(ToString::to_string),
             supports_image: false,
@@ -304,17 +302,36 @@ pub struct ChatSearchResult {
     pub updated_at: i64,
 }
 
+/// Permission choices persisted before this version predate the current `full` semantics and
+/// must not be interpreted as an explicit opt-in to those broader privileges.
+pub const CURRENT_COMPOSER_PERMISSION_MODE_VERSION: i64 = 1;
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ComposerDraftRecord {
     pub scope_id: String,
     pub message: String,
     pub permission_mode: String,
+    #[serde(default)]
+    pub permission_mode_version: i64,
     pub model_id: Option<String>,
     pub project_id: Option<String>,
     pub attachments_json: String,
     pub skills_json: String,
     pub updated_at: i64,
+}
+
+impl ComposerDraftRecord {
+    /// Fails closed when a persisted `full` choice was made under different or unknown
+    /// semantics. Other modes do not gain authority from this version marker.
+    pub fn normalize_permission_mode(mut self) -> Self {
+        if self.permission_mode == "full"
+            && self.permission_mode_version != CURRENT_COMPOSER_PERMISSION_MODE_VERSION
+        {
+            self.permission_mode = "default".to_string();
+        }
+        self
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -357,7 +374,6 @@ pub struct AgentUsageRecordInsert {
     pub project_id: Option<String>,
     pub model_id: String,
     pub model_name: String,
-    pub provider_path: Option<String>,
     pub started_at: Option<i64>,
     pub completed_at: Option<i64>,
     pub status: Option<String>,
@@ -400,7 +416,7 @@ pub struct AgentActionAuditRecord {
     pub decision_source: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentPendingActionRecord {
     pub action_id: String,
     pub run_id: String,
@@ -410,6 +426,12 @@ pub struct AgentPendingActionRecord {
     pub tool_name: String,
     pub tool_call_id: Option<String>,
     pub status: String,
+    /// Durable write-ahead outcome produced by the action executor.
+    ///
+    /// This is intentionally independent from the assistant continuation run status: a failed
+    /// action may still be followed by a successfully persisted assistant explanation. Startup
+    /// reconciliation uses this value when a crash occurs before the lifecycle CAS is committed.
+    pub target_status: Option<String>,
     pub action_json: String,
     pub agent_input_json: String,
     pub created_at: i64,

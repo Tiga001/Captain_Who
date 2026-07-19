@@ -4,7 +4,7 @@ use rusqlite::{params, Connection};
 pub fn list_composer_drafts(connection: &Connection) -> rusqlite::Result<Vec<ComposerDraftRecord>> {
     let mut statement = connection.prepare(
         "
-        SELECT scope_id, message, permission_mode, model_id, project_id, attachments_json, skills_json, updated_at
+        SELECT scope_id, message, permission_mode, permission_mode_version, model_id, project_id, attachments_json, skills_json, updated_at
         FROM composer_drafts
         ORDER BY updated_at DESC
         ",
@@ -16,11 +16,12 @@ pub fn list_composer_drafts(connection: &Connection) -> rusqlite::Result<Vec<Com
                 scope_id: row.get(0)?,
                 message: row.get(1)?,
                 permission_mode: row.get(2)?,
-                model_id: row.get(3)?,
-                project_id: row.get(4)?,
-                attachments_json: row.get(5)?,
-                skills_json: row.get(6)?,
-                updated_at: row.get(7)?,
+                permission_mode_version: row.get(3)?,
+                model_id: row.get(4)?,
+                project_id: row.get(5)?,
+                attachments_json: row.get(6)?,
+                skills_json: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         })?
         .collect();
@@ -38,16 +39,18 @@ pub fn save_composer_draft(
             scope_id,
             message,
             permission_mode,
+            permission_mode_version,
             model_id,
             project_id,
             attachments_json,
             skills_json,
             updated_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ON CONFLICT(scope_id) DO UPDATE SET
             message = excluded.message,
             permission_mode = excluded.permission_mode,
+            permission_mode_version = excluded.permission_mode_version,
             model_id = excluded.model_id,
             project_id = excluded.project_id,
             attachments_json = excluded.attachments_json,
@@ -58,6 +61,7 @@ pub fn save_composer_draft(
             &draft.scope_id,
             &draft.message,
             &draft.permission_mode,
+            draft.permission_mode_version,
             &draft.model_id,
             &draft.project_id,
             &draft.attachments_json,

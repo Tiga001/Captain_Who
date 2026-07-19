@@ -8,6 +8,9 @@ mod tool_flow;
 mod tool_input_stream;
 
 use crate::cancellation::AgentCancellationToken;
+use crate::command::{
+    evaluate_command_policy_with_context, CommandAuthorizationSource, CommandPolicyDecision,
+};
 use crate::context::{
     AgentContextBaseline, AgentConversationContextState, ContextAssembler, ContextAssemblyInput,
     ContextAttachments, ContextBudgetReport, ContextCapacityDetector, ContextCompactionPlan,
@@ -26,9 +29,10 @@ use crate::model_request_observation::{
 use crate::prompts::build_system_prompt;
 use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
-    AgentContextCompactionEventOutcome, AgentContextWindowPhase, AgentContextWindowSnapshot,
-    AgentError, AgentEvent, AgentExtensionSnapshot, AgentPatchPermission, AgentPromptPreferences,
-    AgentProposedAction, AgentResult, AgentRunContext, AgentRunStatus, AgentSkillActivation,
+    AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowPhase,
+    AgentContextWindowSnapshot, AgentError, AgentEvent, AgentExtensionSnapshot,
+    AgentPatchPermission, AgentPermissions, AgentPromptPreferences, AgentProposedAction,
+    AgentResult, AgentRunContext, AgentRunStatus, AgentSkillActivation, AgentToolApprovalMode,
     AgentToolCall, AgentToolDefinition, AgentToolResult,
 };
 use crate::revision::content_revision;
@@ -49,6 +53,7 @@ use file_transactions::{
     FileTransactionRunGuard, FileTransactionState, MAX_RESPONSE_FENCE_CORRECTIONS,
 };
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -110,6 +115,8 @@ struct PreparedRuntimeCapabilities {
     tool_registry: Arc<ToolRegistry>,
     tool_definitions: Vec<AgentToolDefinition>,
     command_auto_approve: bool,
+    command_permissions: AgentPermissions,
+    command_workspace_root: Option<PathBuf>,
     patch_auto_approve: bool,
 }
 
@@ -434,6 +441,8 @@ impl AgentRuntime {
             tool_registry,
             tool_definitions,
             command_auto_approve,
+            command_permissions,
+            command_workspace_root,
             patch_auto_approve,
         } = prepare_runtime_capabilities(
             &input,
@@ -1012,32 +1021,76 @@ impl AgentRuntime {
                         .with_group(tool_exchange_group.clone()),
                     ));
                     let tool_request = queued_tool_call.call;
-                    let tool_name = tool_request.name;
-                    let tool_args = tool_request.args;
-                    let reason = extract_reason_from_args(&tool_args);
-                    let definition_requires_approval =
-                        tool_registry.requires_approval_for_call(&tool_name, &tool_args);
-                    let auto_execute_command = tool_name == "run_command" && command_auto_approve;
-                    let auto_execute_patch = (tool_name == "apply_patch"
-                        || tool_name == "write_file")
-                        && patch_auto_approve
-                        && definition_requires_approval;
-                    let auto_execute_host_action = auto_execute_command || auto_execute_patch;
-                    let requires_approval =
-                        definition_requires_approval && !auto_execute_host_action;
-                    let call = AgentToolCall {
+                    let reason = extract_reason_from_args(&tool_request.args);
+                    let definition_requires_approval = tool_registry
+                        .requires_approval_for_call(&tool_request.name, &tool_request.args);
+                    let mut call = AgentToolCall {
                         id: tool_request.id,
-                        tool: tool_name,
-                        args: tool_args,
-                        approval_status: if auto_execute_host_action {
-                            AgentApprovalStatus::Approved
-                        } else if requires_approval {
+                        tool: tool_request.name,
+                        args: tool_request.args,
+                        approval_status: if definition_requires_approval {
                             AgentApprovalStatus::Required
                         } else {
                             AgentApprovalStatus::NotRequired
                         },
                         reason: reason.or_else(|| Some("agent requested tool call".to_string())),
                     };
+                    let mut prepared_command_action = None;
+                    let mut command_preflight_failure = None;
+                    let mut auto_execute_command = false;
+                    let mut requires_approval = definition_requires_approval;
+
+                    if call.tool == "run_command" {
+                        match tool_registry.proposed_action(&tool_context, &call) {
+                            Ok(action) => match prepare_command_dispatch(
+                                &call,
+                                action,
+                                command_permissions,
+                                command_workspace_root.as_deref(),
+                                command_auto_approve,
+                            ) {
+                                CommandDispatch::ExecuteAutomatically(action) => {
+                                    prepared_command_action = Some(action);
+                                    auto_execute_command = true;
+                                    requires_approval = false;
+                                    call.approval_status = AgentApprovalStatus::Approved;
+                                }
+                                CommandDispatch::RequireApproval(action) => {
+                                    prepared_command_action = Some(action);
+                                    requires_approval = true;
+                                    call.approval_status = AgentApprovalStatus::Required;
+                                }
+                                CommandDispatch::Reject(result) => {
+                                    command_preflight_failure = Some(result);
+                                    requires_approval = false;
+                                    call.approval_status = AgentApprovalStatus::NotRequired;
+                                }
+                            },
+                            Err(error) => {
+                                command_preflight_failure =
+                                    Some(failed_tool_call_result(&call, error));
+                                requires_approval = false;
+                                call.approval_status = AgentApprovalStatus::NotRequired;
+                            }
+                        }
+                    }
+
+                    let auto_execute_patch = (call.tool == "apply_patch"
+                        || call.tool == "write_file")
+                        && patch_auto_approve
+                        && definition_requires_approval;
+                    let auto_execute_host_action = auto_execute_command || auto_execute_patch;
+                    if call.tool != "run_command" {
+                        requires_approval =
+                            definition_requires_approval && !auto_execute_host_action;
+                        call.approval_status = if auto_execute_host_action {
+                            AgentApprovalStatus::Approved
+                        } else if requires_approval {
+                            AgentApprovalStatus::Required
+                        } else {
+                            AgentApprovalStatus::NotRequired
+                        };
+                    }
                     conversation_trace
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
@@ -1060,7 +1113,14 @@ impl AgentRuntime {
                     }
 
                     if requires_approval {
-                        let action = match tool_registry.proposed_action(&tool_context, &call) {
+                        let action_result = if call.tool == "run_command" {
+                            prepared_command_action.take().ok_or_else(|| {
+                                AgentError::new("run_command 在审批前丢失了已验证的命令快照。")
+                            })
+                        } else {
+                            tool_registry.proposed_action(&tool_context, &call)
+                        };
+                        let action = match action_result {
                             Ok(action) => {
                                 conversation_trace
                                     .lock()
@@ -1170,8 +1230,17 @@ impl AgentRuntime {
                         });
                     }
 
-                    let result_result = if auto_execute_host_action {
-                        match tool_registry.proposed_action(&tool_context, &call) {
+                    let result_result = if let Some(result) = command_preflight_failure {
+                        Ok(result)
+                    } else if auto_execute_host_action {
+                        let action_result = if call.tool == "run_command" {
+                            prepared_command_action.take().ok_or_else(|| {
+                                AgentError::new("run_command 在自动执行前丢失了已验证的命令快照。")
+                            })
+                        } else {
+                            tool_registry.proposed_action(&tool_context, &call)
+                        };
+                        match action_result {
                             Ok(action) => {
                                 let action = approve_proposed_action(action);
                                 conversation_trace
@@ -1613,6 +1682,73 @@ fn context_diagnostics_enabled() -> bool {
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
 }
 
+#[derive(Debug)]
+enum CommandDispatch {
+    ExecuteAutomatically(AgentProposedAction),
+    RequireApproval(AgentProposedAction),
+    Reject(AgentToolResult),
+}
+
+/// Applies the command safety policy to the exact host-action snapshot that will either be
+/// executed or persisted for approval.
+///
+/// Keeping policy evaluation and dispatch selection in one place prevents the runtime from
+/// validating one command string and later recreating a different action for execution.
+fn prepare_command_dispatch(
+    call: &AgentToolCall,
+    action: AgentProposedAction,
+    permissions: AgentPermissions,
+    workspace_root: Option<&Path>,
+    auto_approve: bool,
+) -> CommandDispatch {
+    let AgentProposedAction::Command { command } = &action else {
+        return CommandDispatch::Reject(failed_tool_call_result(
+            call,
+            AgentError::new("run_command 未生成结构化命令操作，已拒绝执行。"),
+        ));
+    };
+    let policy_cwd = command_policy_cwd(workspace_root, command.cwd.as_deref());
+    let evaluation = evaluate_command_policy_with_context(
+        &command.command,
+        permissions,
+        CommandAuthorizationSource::Automatic,
+        workspace_root,
+        policy_cwd.as_deref(),
+    );
+    match evaluation.decision {
+        CommandPolicyDecision::Deny => CommandDispatch::Reject(AgentToolResult {
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: false,
+            result: Some(json!({
+                "type": "command_policy",
+                "decision": evaluation.decision,
+                "code": evaluation.code,
+                "reason": evaluation.reason,
+                "riskLevel": evaluation.risk_level,
+                "findings": evaluation.findings,
+            })),
+            error: Some("命令已被不可绕过的安全策略拒绝。".to_string()),
+        }),
+        CommandPolicyDecision::RequireExplicitApproval => CommandDispatch::RequireApproval(action),
+        CommandPolicyDecision::Allow if auto_approve => {
+            CommandDispatch::ExecuteAutomatically(action)
+        }
+        CommandPolicyDecision::Allow => CommandDispatch::RequireApproval(action),
+    }
+}
+
+fn command_policy_cwd(
+    workspace_root: Option<&Path>,
+    requested_cwd: Option<&str>,
+) -> Option<PathBuf> {
+    match requested_cwd.map(Path::new) {
+        None => workspace_root.map(Path::to_path_buf),
+        Some(cwd) if cwd.is_absolute() => Some(cwd.to_path_buf()),
+        Some(cwd) => workspace_root.map(|root| root.join(cwd)),
+    }
+}
+
 fn prepare_runtime_capabilities(
     input: &AgentChatInput,
     run_id: &str,
@@ -1635,6 +1771,15 @@ fn prepare_runtime_capabilities(
         .unwrap_or(AgentCommandPermission::RequireApproval);
     let command_auto_approve =
         command_permission == AgentCommandPermission::AutoApprove && host_actions_available;
+    let command_permissions = context
+        .map(|context| context.permissions)
+        .unwrap_or_default();
+    let command_workspace_root = context
+        .and_then(|context| context.workspace.as_ref())
+        .and_then(|workspace| workspace.root_path.as_deref())
+        .filter(|root| !root.trim().is_empty())
+        .map(PathBuf::from);
+    let command_safety = command_permissions.command_safety;
     let patch_auto_approve = context
         .map(|context| {
             context.permissions.patch == AgentPatchPermission::AutoApprove
@@ -1651,7 +1796,14 @@ fn prepare_runtime_capabilities(
             .find(|definition| definition.name == "run_command")
         {
             definition.requires_approval = false;
-            definition.description = "Run a validated shell command through the host execution layer. The current permission policy automatically approves this command request.".to_string();
+            definition.approval_mode = match command_safety {
+                AgentCommandSafetyPolicy::Guarded => AgentToolApprovalMode::Dynamic,
+                AgentCommandSafetyPolicy::FullAccess => AgentToolApprovalMode::Never,
+            };
+            definition.description = match command_safety {
+                AgentCommandSafetyPolicy::Guarded => "Run a validated shell command through the host execution layer. Low-risk commands are automatically authorized; high-impact commands are routed to explicit user approval.".to_string(),
+                AgentCommandSafetyPolicy::FullAccess => "Run a validated shell command through the host execution layer. Commands are automatically authorized except operations that are always denied or unsupported.".to_string(),
+            };
         }
     }
     if patch_auto_approve {
@@ -1670,6 +1822,8 @@ fn prepare_runtime_capabilities(
         tool_registry: Arc::new(tool_registry),
         tool_definitions,
         command_auto_approve,
+        command_permissions,
+        command_workspace_root,
         patch_auto_approve,
     })
 }

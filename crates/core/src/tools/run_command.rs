@@ -1,7 +1,8 @@
 use super::{clean_relative_path, AgentTool, ToolExecutionContext};
+use crate::command::{classify_command_risk, MAX_COMMAND_CHARS};
 use crate::protocol::{
-    AgentApprovalStatus, AgentCommandRequest, AgentCommandRiskLevel, AgentError,
-    AgentProposedAction, AgentResult, AgentToolCall, AgentToolDefinition, AgentToolSafety,
+    AgentApprovalStatus, AgentCommandRequest, AgentError, AgentProposedAction, AgentResult,
+    AgentToolCall, AgentToolDefinition, AgentToolSafety,
 };
 use crate::system_paths::expand_system_path;
 use serde::Deserialize;
@@ -9,7 +10,6 @@ use serde_json::{json, Value};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
-const MAX_COMMAND_CHARS: usize = 2_000;
 
 pub(super) struct RunCommandTool;
 
@@ -17,11 +17,11 @@ impl AgentTool for RunCommandTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "run_command".to_string(),
-            description: "Run one single-line shell command through the host for builds, tests, queries, or program execution. Never use this tool to create, update, or delete files; use apply_patch instead. Approval behavior follows the current command permission. The command must not contain literal newlines or null characters.".to_string(),
+            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "command": { "type": "string", "description": "A single-line build, test, query, or program-execution command without literal newline or null characters. Do not use shell redirection, printf, echo, cat, tee, sed -i, or scripts to write file content." },
+                    "command": { "type": "string", "description": "A single-line, non-interactive shell command without literal newline or null characters. Side effects and every compound shell segment are evaluated by the host policy." },
                     "cwd": { "type": "string", "description": "Working directory. May be workspace-relative, absolute, or @home/@desktop/@documents/@downloads when permissions allow. Required when no workspace exists." },
                     "timeoutMs": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS },
                     "reason": { "type": "string", "description": "Why this command is needed and what result is expected." }
@@ -102,7 +102,7 @@ fn sanitize_command(command: &str) -> AgentResult<String> {
     }
     if command.contains('\0') || command.contains('\n') || command.contains('\r') {
         return Err(AgentError::new(
-            "run_command.command 不能包含空字符或换行符。请改成单行命令；文件创建、编辑或删除必须使用 apply_patch。",
+            "run_command.command 不能包含空字符或换行符。请改成单行命令；可审查的源代码编辑应优先使用 apply_patch。",
         ));
     }
 
@@ -170,155 +170,12 @@ fn sanitize_cwd(
     ))
 }
 
-fn classify_command_risk(command: &str) -> AgentCommandRiskLevel {
-    let normalized = command.trim().to_ascii_lowercase();
-    let program = normalized
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .trim_matches(|character| matches!(character, '"' | '\''));
-    let has_shell_operators = [
-        " > ", ">>", " 2>", " | ", " && ", " || ", ";", "`", "$(", "<(",
-    ]
-    .iter()
-    .any(|operator| normalized.contains(operator));
-
-    if has_destructive_pattern(&normalized, program) {
-        return AgentCommandRiskLevel::Destructive;
-    }
-    if has_network_pattern(&normalized, program) {
-        return AgentCommandRiskLevel::Network;
-    }
-    if has_write_pattern(&normalized, program) || has_shell_operators {
-        return AgentCommandRiskLevel::WritesWorkspace;
-    }
-    if matches!(
-        program,
-        "pwd"
-            | "ls"
-            | "find"
-            | "rg"
-            | "grep"
-            | "cat"
-            | "head"
-            | "tail"
-            | "wc"
-            | "git"
-            | "cargo"
-            | "npm"
-            | "pnpm"
-            | "yarn"
-            | "python"
-            | "python3"
-            | "node"
-    ) {
-        return classify_known_program(&normalized, program);
-    }
-
-    AgentCommandRiskLevel::Unknown
-}
-
-fn classify_known_program(command: &str, program: &str) -> AgentCommandRiskLevel {
-    match program {
-        "git" => {
-            if command.starts_with("git status")
-                || command.starts_with("git diff")
-                || command.starts_with("git log")
-                || command.starts_with("git show")
-                || command == "git branch"
-                || command.starts_with("git branch --show-current")
-                || command.starts_with("git branch --list")
-                || command.starts_with("git branch -a")
-            {
-                AgentCommandRiskLevel::ReadOnly
-            } else {
-                AgentCommandRiskLevel::WritesWorkspace
-            }
-        }
-        "cargo" => {
-            if command.starts_with("cargo install") {
-                AgentCommandRiskLevel::Network
-            } else if command.starts_with("cargo test")
-                || command.starts_with("cargo check")
-                || command.starts_with("cargo build")
-            {
-                AgentCommandRiskLevel::WritesWorkspace
-            } else {
-                AgentCommandRiskLevel::Unknown
-            }
-        }
-        "npm" | "pnpm" | "yarn" => {
-            if command.contains(" install")
-                || command.contains(" add")
-                || command.contains(" remove")
-                || command.contains(" upgrade")
-                || command.contains(" update")
-            {
-                AgentCommandRiskLevel::Network
-            } else if command.contains(" test")
-                || command.contains(" build")
-                || command.contains(" lint")
-                || command.contains(" typecheck")
-            {
-                AgentCommandRiskLevel::WritesWorkspace
-            } else {
-                AgentCommandRiskLevel::Unknown
-            }
-        }
-        "python" | "python3" | "node" => AgentCommandRiskLevel::Unknown,
-        _ => AgentCommandRiskLevel::ReadOnly,
-    }
-}
-
-fn has_destructive_pattern(command: &str, program: &str) -> bool {
-    command.contains(" -delete")
-        || matches!(
-            program,
-            "rm" | "mv"
-                | "cp"
-                | "chmod"
-                | "chown"
-                | "ln"
-                | "truncate"
-                | "dd"
-                | "mkfs"
-                | "kill"
-                | "pkill"
-                | "git"
-        ) && (program != "git"
-            || command.contains(" reset")
-            || command.contains(" checkout")
-            || command.contains(" clean")
-            || command.contains(" merge")
-            || command.contains(" rebase")
-            || command.contains(" commit")
-            || command.contains(" push"))
-}
-
-fn has_network_pattern(command: &str, program: &str) -> bool {
-    matches!(
-        program,
-        "curl" | "wget" | "ssh" | "scp" | "rsync" | "brew" | "uv" | "pip" | "pip3"
-    ) || command.contains(" npm install")
-        || command.contains(" pnpm install")
-        || command.contains(" yarn install")
-        || command.contains(" cargo install")
-}
-
-fn has_write_pattern(command: &str, program: &str) -> bool {
-    matches!(program, "touch" | "mkdir" | "tee" | "sed" | "perl" | "make")
-        || command.contains(" --fix")
-        || command.contains(" -w")
-        || command.contains(" --write")
-        || command.contains(" --watch")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocol::{
-        AgentApprovalStatus, AgentPermissions, AgentRunContext, AgentToolCall,
-        AgentWorkspaceContext, AgentWritePermission,
+        AgentApprovalStatus, AgentCommandRiskLevel, AgentPermissions, AgentRunContext,
+        AgentToolCall, AgentWorkspaceContext, AgentWritePermission,
     };
     use serde_json::json;
 
@@ -416,6 +273,14 @@ mod tests {
     fn classifies_common_risk_levels() {
         assert_eq!(
             classify_command_risk("git diff"),
+            AgentCommandRiskLevel::Unknown
+        );
+        assert_eq!(
+            classify_command_risk("git status"),
+            AgentCommandRiskLevel::Unknown
+        );
+        assert_eq!(
+            classify_command_risk("git remote -v"),
             AgentCommandRiskLevel::ReadOnly
         );
         assert_eq!(

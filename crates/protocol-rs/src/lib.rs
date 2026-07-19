@@ -141,12 +141,14 @@ pub struct AgentCancelRunResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentActionIdRequest {
+    pub run_id: String,
     pub action_id: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRejectActionRequest {
+    pub run_id: String,
     pub action_id: String,
     pub message: Option<String>,
 }
@@ -2282,5 +2284,29 @@ mod tests {
         assert_eq!(value["commitMayHaveSucceeded"], true);
         assert!(value.get("directory").is_none());
         assert!(value.get("actualRevision").is_none());
+    }
+
+    #[test]
+    fn action_decision_requests_require_run_scoped_identity() {
+        let action: AgentActionIdRequest = serde_json::from_value(serde_json::json!({
+            "runId": "run-1",
+            "actionId": "call-1"
+        }))
+        .unwrap();
+        assert_eq!(action.run_id, "run-1");
+        assert_eq!(action.action_id, "call-1");
+        assert!(
+            serde_json::from_value::<AgentActionIdRequest>(serde_json::json!({
+                "actionId": "call-1"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<AgentRejectActionRequest>(serde_json::json!({
+                "actionId": "call-1",
+                "message": "no"
+            }))
+            .is_err()
+        );
     }
 }

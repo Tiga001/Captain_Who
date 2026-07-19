@@ -96,6 +96,7 @@ import {
   SUPPORTS_NATIVE_FONT_SMOOTHING
 } from './AppShellSupport'
 import type { PendingMessageDelta, PendingMessageSave } from './AppShellSupport'
+import { applyAuthoritativePendingActionDecision } from './pendingActionDecision'
 
 type PendingMessageUpsert = {
   messages: ChatMessage[]
@@ -269,11 +270,9 @@ export function AppShell() {
     [activeDraftSelectedModel, activeRunModelId, models]
   )
   const activeContextWindowKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
-  const contextWindowModelProviderPath = contextWindowModel
-    ? (contextWindowModel.providerPath ?? contextWindowModel.id)
-    : null
-  const activeContextWindowSnapshotKey = contextWindowModelProviderPath
-    ? getContextWindowSnapshotKey(activeContextWindowKey, contextWindowModelProviderPath)
+  const contextWindowModelId = contextWindowModel?.id ?? null
+  const activeContextWindowSnapshotKey = contextWindowModelId
+    ? getContextWindowSnapshotKey(activeContextWindowKey, contextWindowModelId)
     : null
   const contextWindowIndicatorEnabled =
     featureFlags.contextWindowIndicator && uiPreferences.showContextWindowUsage
@@ -363,14 +362,14 @@ export function AppShell() {
   }, [activeConversationId])
 
   useEffect(() => {
-    if (!contextWindowIndicatorEnabled || !contextWindowModel || !contextWindowModelProviderPath) {
+    if (!contextWindowIndicatorEnabled || !contextWindowModel || !contextWindowModelId) {
       return undefined
     }
 
     const requestSequence = contextWindowRequestSeqRef.current + 1
     contextWindowRequestSeqRef.current = requestSequence
     const scopeKey = activeConversation?.id ?? NEW_CONVERSATION_DRAFT_ID
-    const snapshotKey = getContextWindowSnapshotKey(scopeKey, contextWindowModelProviderPath)
+    const snapshotKey = getContextWindowSnapshotKey(scopeKey, contextWindowModelId)
     const eventSequenceAtRequest = contextWindowEventSeqRef.current.get(snapshotKey) ?? 0
     let cancelled = false
 
@@ -391,7 +390,7 @@ export function AppShell() {
           return
         }
         setContextWindowSnapshots((current) => {
-          if (snapshot?.model === contextWindowModelProviderPath) {
+          if (snapshot?.model === contextWindowModelId) {
             return { ...current, [snapshotKey]: snapshot }
           }
           if (!(snapshotKey in current)) return current
@@ -414,7 +413,7 @@ export function AppShell() {
     activeDraft.projectId,
     contextWindowSkills,
     contextWindowModel,
-    contextWindowModelProviderPath,
+    contextWindowModelId,
     contextWindowIndicatorEnabled,
     uiPreferences.customPermissions
   ])
@@ -1470,7 +1469,7 @@ export function AppShell() {
       )
       const conversationIds = new Set(projectConversations.map((conversation) => conversation.id))
       const runIds = new Set<string>()
-      const actionIds = new Set<string>()
+      const pendingActions = new Map<string, { runId: string; actionId: string }>()
 
       editSubmissionSeqRef.current += 1
       for (const conversation of projectConversations) {
@@ -1478,10 +1477,15 @@ export function AppShell() {
           if (message.role !== 'assistant' || message.status !== 'pending') continue
 
           cancelledPendingMessageIdsRef.current.add(message.id)
-          if (message.agentRun?.runId) runIds.add(message.agentRun.runId)
+          const pendingRunId = message.agentRun?.runId
+          if (pendingRunId) runIds.add(pendingRunId)
           for (const action of message.agentRun?.approvals ?? []) {
-            if (getAgentActionApprovalStatus(action) === 'required') {
-              actionIds.add(getAgentActionId(action))
+            if (pendingRunId && getAgentActionApprovalStatus(action) === 'required') {
+              const actionId = getAgentActionId(action)
+              pendingActions.set(`${pendingRunId}\u0000${actionId}`, {
+                runId: pendingRunId,
+                actionId
+              })
             }
           }
         }
@@ -1496,7 +1500,9 @@ export function AppShell() {
       })
       await Promise.allSettled([
         ...[...runIds].map((runId) => cancelAgentRun(runId)),
-        ...[...actionIds].map((actionId) => cancelAgentAction(actionId)),
+        ...[...pendingActions.values()].map(({ runId, actionId }) =>
+          cancelAgentAction(runId, actionId)
+        ),
         ...[...conversationIds].map(async (conversationId) => {
           await waitForConversationSaves(conversationId)
           await waitForMessageUpserts(conversationId)
@@ -1679,24 +1685,27 @@ export function AppShell() {
       if (!activeConversationId) return
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
-      void approveAgentAction(actionId)
-        .then((execution) => {
+      const runId = conversationsRef.current
+        .find((conversation) => conversation.id === conversationId)
+        ?.messages.find((message) => message.id === messageId)?.agentRun?.runId
+      void applyAuthoritativePendingActionDecision({
+        runId,
+        invoke: (authoritativeRunId) => approveAgentAction(authoritativeRunId, actionId),
+        apply: (execution) => {
           updateAssistantMessage(
             conversationId,
             messageId,
             (message) => applyAgentActionExecutionToChatMessage(message, execution),
             { touchConversation: true }
           )
-        })
-        .catch((error) => {
+        },
+        onError: (error) => {
           console.error('Failed to approve agent action', error)
-        })
-      updateAssistantMessage(
-        conversationId,
-        messageId,
-        (message) => applyAgentActionDecisionToChatMessage(message, action, 'approved'),
-        { touchConversation: true }
-      )
+        },
+        onMissingRunId: () => {
+          console.warn('Cannot approve agent action without a run id', { actionId, messageId })
+        }
+      })
     },
     [activeConversationId, updateAssistantMessage]
   )
@@ -1706,25 +1715,27 @@ export function AppShell() {
       if (!activeConversationId) return
       const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
-      void rejectAgentAction(actionId, message)
-        .then((execution) => {
+      const runId = conversationsRef.current
+        .find((conversation) => conversation.id === conversationId)
+        ?.messages.find((currentMessage) => currentMessage.id === messageId)?.agentRun?.runId
+      void applyAuthoritativePendingActionDecision({
+        runId,
+        invoke: (authoritativeRunId) => rejectAgentAction(authoritativeRunId, actionId, message),
+        apply: (execution) => {
           updateAssistantMessage(
             conversationId,
             messageId,
             (currentMessage) => applyAgentActionExecutionToChatMessage(currentMessage, execution),
             { touchConversation: true }
           )
-        })
-        .catch((error) => {
+        },
+        onError: (error) => {
           console.error('Failed to reject agent action', error)
-        })
-      updateAssistantMessage(
-        conversationId,
-        messageId,
-        (currentMessage) =>
-          applyAgentActionDecisionToChatMessage(currentMessage, action, 'rejected', message),
-        { touchConversation: true }
-      )
+        },
+        onMissingRunId: () => {
+          console.warn('Cannot reject agent action without a run id', { actionId, messageId })
+        }
+      })
     },
     [activeConversationId, updateAssistantMessage]
   )
@@ -1732,16 +1743,33 @@ export function AppShell() {
   const handleCancelAgentAction = useCallback(
     (messageId: string, action: AgentProposedAction) => {
       if (!activeConversationId) return
+      const conversationId = activeConversationId
       const actionId = getAgentActionId(action)
-      void cancelAgentAction(actionId).catch((error) => {
-        console.error('Failed to cancel agent action', error)
+      const runId = conversationsRef.current
+        .find((conversation) => conversation.id === conversationId)
+        ?.messages.find((message) => message.id === messageId)?.agentRun?.runId
+      void applyAuthoritativePendingActionDecision({
+        runId,
+        invoke: (authoritativeRunId) => cancelAgentAction(authoritativeRunId, actionId),
+        isAccepted: (cancelled) => cancelled,
+        apply: () => {
+          updateAssistantMessage(
+            conversationId,
+            messageId,
+            (message) => applyAgentActionDecisionToChatMessage(message, action, 'rejected'),
+            { touchConversation: true }
+          )
+        },
+        onError: (error) => {
+          console.error('Failed to cancel agent action', error)
+        },
+        onMissingRunId: () => {
+          console.warn('Cannot cancel agent action without a run id', { actionId, messageId })
+        },
+        onNotAccepted: () => {
+          console.warn('Agent action cancellation was not accepted', { actionId, runId })
+        }
       })
-      updateAssistantMessage(
-        activeConversationId,
-        messageId,
-        (message) => applyAgentActionDecisionToChatMessage(message, action, 'rejected'),
-        { touchConversation: true }
-      )
     },
     [activeConversationId, updateAssistantMessage]
   )

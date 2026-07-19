@@ -11,16 +11,20 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mycopilot_core::command::{run_approved_command, AgentCommandExecutionResult, CommandRunState};
+use mycopilot_core::command::{
+    run_authorized_command, AgentCommandExecutionResult, CommandAuthorizationSource,
+    CommandExecutionError, CommandRunGuard, CommandRunState,
+};
 use mycopilot_core::file_write::{file_draft_snapshot, file_write_diff};
 use mycopilot_core::skills::SkillsService;
 use mycopilot_core::storage::models::{
     AgentActionAuditRecord, AgentPendingActionRecord, AgentUsageRecordInsert,
 };
+use mycopilot_core::storage::pending_action_repository::PendingActionStoreOutcome;
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
@@ -112,8 +116,17 @@ fn should_defer_until_terminal_commit(event: &AgentEvent) -> bool {
         AgentEvent::Done { status, .. } => {
             !matches!(status, Some(AgentRunStatus::WaitingForApproval))
         }
+        AgentEvent::Error { recoverable, .. } => !recoverable,
         _ => false,
     }
+}
+
+fn pending_terminal_commit_is_publishable(
+    assistant_persisted: bool,
+    pending_transitioned: bool,
+    terminal: bool,
+) -> bool {
+    assistant_persisted && pending_transitioned && terminal
 }
 
 fn terminal_done_event(output: &AgentChatOutput) -> AgentEvent {
@@ -156,6 +169,14 @@ fn emit_pending_transition_error(
     }));
 }
 
+fn pending_action_persistence_error(error: String) -> AgentError {
+    AgentError::structured(
+        "pending_action_persistence_failed",
+        format!("待审批操作无法持久化，运行已安全终止：{error}"),
+        serde_json::json!({ "cause": error }),
+    )
+}
+
 struct ConversationContextStateEntry {
     state: AgentConversationContextState,
     configuration_revision: String,
@@ -187,9 +208,12 @@ pub struct AgentService {
 }
 
 impl AgentService {
-    pub fn new(storage: Arc<StorageService>) -> Self {
-        let pending_actions = load_persisted_pending_actions(&storage);
-        Self {
+    pub fn try_new(storage: Arc<StorageService>) -> Result<Self, String> {
+        storage
+            .reconcile_interrupted_pending_agent_actions(now_ms())
+            .map_err(|error| format!("failed to reconcile interrupted pending actions: {error}"))?;
+        let pending_actions = load_persisted_pending_actions(&storage)?;
+        Ok(Self {
             storage,
             skills: Arc::new(SkillsService::new()),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
@@ -201,7 +225,12 @@ impl AgentService {
             context_compaction_summary_generator: None,
             command_runs: CommandRunState::default(),
             deleting_projects: Arc::new(Mutex::new(HashSet::new())),
-        }
+        })
+    }
+
+    #[cfg(test)]
+    pub fn new(storage: Arc<StorageService>) -> Self {
+        Self::try_new(storage).expect("agent service test fixture must initialize")
     }
 
     pub fn with_skills_service(mut self, skills: Arc<SkillsService>) -> Self {
@@ -262,6 +291,8 @@ impl AgentService {
             let emitter_agent_input = pending_agent_input.clone();
             let terminal_event_gate = Arc::new(AgentTerminalEventGate::default());
             let emitter_terminal_event_gate = terminal_event_gate.clone();
+            let pending_store_failure = Arc::new(Mutex::new(None::<String>));
+            let emitter_pending_store_failure = Arc::clone(&pending_store_failure);
             let emitter: AgentEventEmitter = Arc::new(move |event| {
                 if let AgentEvent::ApprovalRequired {
                     run_id,
@@ -271,13 +302,30 @@ impl AgentService {
                 {
                     let agent_input =
                         agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
-                    emitter_service.store_pending_action(
+                    match emitter_service.store_pending_action(
                         run_id,
                         &emitter_conversation_id,
                         &emitter_assistant_message_id,
                         action.clone(),
                         agent_input,
-                    );
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => return,
+                        Err(error) => {
+                            emitter_terminal_event_gate.discard();
+                            *emitter_pending_store_failure
+                                .lock()
+                                .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
+                            return;
+                        }
+                    }
+                }
+                if emitter_pending_store_failure
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .is_some()
+                {
+                    return;
                 }
                 if let Some(event) = emitter_terminal_event_gate.route(event) {
                     let _ = emitter_notifications.send(agent_event_notification(event));
@@ -323,6 +371,17 @@ impl AgentService {
                 host_services,
             )
             .await;
+            let result = match pending_store_failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+            {
+                Some(error) => {
+                    terminal_event_gate.discard();
+                    Err(pending_action_persistence_error(error))
+                }
+                None => result,
+            };
             let keep_trace_snapshot = matches!(
                 &result,
                 Ok(output) if output.status == AgentRunStatus::WaitingForApproval
@@ -372,7 +431,7 @@ impl AgentService {
                             details: None,
                         }));
                     }
-                    if committed_durable_context {
+                    if persisted.is_ok() && committed_durable_context {
                         emit_terminal_events_after_persistence(
                             &notifications,
                             &terminal_event_gate,
@@ -411,7 +470,7 @@ impl AgentService {
                             &worker_assistant_message_id,
                             &message,
                         );
-                    } else if let Err(error) = persisted {
+                    } else if let Err(error) = &persisted {
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(worker_run_id.clone()),
                             message: format!(
@@ -422,22 +481,24 @@ impl AgentService {
                             details: None,
                         }));
                     }
-                    let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                        run_id: Some(worker_run_id.clone()),
-                        message: message.clone(),
-                        recoverable: false,
-                        code,
-                        details,
-                    }));
-                    let _ = notifications.send(agent_event_notification(AgentEvent::Done {
-                        run_id: worker_run_id.clone(),
-                        success: false,
-                        status: Some(AgentRunStatus::Failed),
-                        content: Some(message),
-                        usage,
-                        finish_reason: None,
-                        proposed_actions: Vec::new(),
-                    }));
+                    if persisted.is_ok() {
+                        let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                            run_id: Some(worker_run_id.clone()),
+                            message: message.clone(),
+                            recoverable: false,
+                            code,
+                            details,
+                        }));
+                        let _ = notifications.send(agent_event_notification(AgentEvent::Done {
+                            run_id: worker_run_id.clone(),
+                            success: false,
+                            status: Some(AgentRunStatus::Failed),
+                            content: Some(message),
+                            usage,
+                            finish_reason: None,
+                            proposed_actions: Vec::new(),
+                        }));
+                    }
                 }
             }
 
@@ -612,24 +673,28 @@ impl AgentService {
                 &context.assistant_message_id,
                 REASON,
             );
-            let persisted = self.storage.finalize_chat_message_with_conversation_trace(
-                &context.conversation_id,
-                &context.assistant_message_id,
-                "",
-                status_for_run(AgentRunStatus::Cancelled),
-                run_status_label(AgentRunStatus::Cancelled),
-                &trace,
-                context.started_at,
-                completed_at,
+            let usage_record = self.prepare_run_usage_record(
+                &context.run_id,
+                AgentRunStatus::Cancelled,
+                None,
+                Some(REASON.to_string()),
             );
-            if persisted.is_ok() {
-                self.invalidate_conversation_context_state(&context.conversation_id);
-                let _ = self.persist_run_usage(
-                    &context.run_id,
-                    AgentRunStatus::Cancelled,
-                    None,
-                    Some(REASON.to_string()),
+            let persisted = self
+                .storage
+                .finalize_chat_message_with_conversation_trace_and_usage(
+                    &context.conversation_id,
+                    &context.assistant_message_id,
+                    "",
+                    status_for_run(AgentRunStatus::Cancelled),
+                    run_status_label(AgentRunStatus::Cancelled),
+                    &trace,
+                    context.started_at,
+                    completed_at,
+                    usage_record.as_ref(),
                 );
+            if persisted.is_ok() {
+                self.finish_persisted_run_usage(&context.run_id, AgentRunStatus::Cancelled);
+                self.invalidate_conversation_context_state(&context.conversation_id);
             } else if let Err(error) = persisted {
                 eprintln!("failed to persist forced cancelled conversation trace: {error}");
             }
@@ -705,14 +770,18 @@ impl AgentService {
                 let workspace_root = workspace_root_optional(&agent_input);
                 let permissions = permissions_from_input(&agent_input);
                 let command_for_error = command.clone();
-                let command_result = run_approved_command(
+                let command_result = run_authorized_command(
                     workspace_root.as_deref(),
                     &command,
                     permissions,
+                    CommandAuthorizationSource::Automatic,
                     cancellation_token.clone(),
                     None,
                 )
-                .unwrap_or_else(|error| failed_command_result(&command_for_error, error));
+                .unwrap_or_else(|error| {
+                    let policy_evaluation = error.policy_evaluation().cloned();
+                    failed_command_result(&command_for_error, error.to_string(), policy_evaluation)
+                });
                 let deleting_projects = self
                     .deleting_projects
                     .lock()
@@ -853,12 +922,13 @@ impl AgentService {
 
     pub fn approve_action(
         &self,
+        run_id: &str,
         action_id: &str,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
         self.queue_action_continuation(
+            run_id,
             action_id,
-            PendingActionStatus::Approved,
             AgentApprovalDecisionStatus::Approved,
             None,
             notifications,
@@ -867,20 +937,21 @@ impl AgentService {
 
     pub fn reject_action(
         &self,
+        run_id: &str,
         action_id: &str,
         message: Option<String>,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
         self.queue_action_continuation(
+            run_id,
             action_id,
-            PendingActionStatus::Rejected,
             AgentApprovalDecisionStatus::Rejected,
             message,
             notifications,
         )
     }
 
-    pub fn cancel_action(&self, action_id: &str) -> Result<bool, String> {
+    pub fn cancel_action(&self, run_id: &str, action_id: &str) -> Result<bool, String> {
         let deleting_projects = self
             .deleting_projects
             .lock()
@@ -889,9 +960,14 @@ impl AgentService {
             .pending_actions
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let Some(record) = pending_actions.get_mut(action_id) else {
+        let Some(storage_id) =
+            resolve_pending_action_storage_id(&pending_actions, run_id, action_id)
+        else {
             return Ok(false);
         };
+        let record = pending_actions
+            .get_mut(&storage_id)
+            .expect("resolved pending action exists");
         if agent_input_project_id(&record.agent_input)
             .is_some_and(|project_id| deleting_projects.contains(project_id))
         {
@@ -900,20 +976,26 @@ impl AgentService {
         if record.snapshot.status == PendingActionStatus::Approved
             && matches!(record.snapshot.action, AgentProposedAction::Command { .. })
         {
-            let cancelled = self.command_runs.cancel(action_id);
+            let cancelled = self.command_runs.cancel(&record.storage_id);
             if cancelled {
-                self.persist_pending_status(record, PendingActionStatus::Cancelled)?;
-                record.snapshot.status = PendingActionStatus::Cancelled;
+                if let Some(token) = self
+                    .cancellations
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(&record.snapshot.run_id)
+                {
+                    token.cancel();
+                }
                 self.record_action_audit(
                     record,
                     Some("cancelled"),
-                    "cancelled",
+                    "cancellation_requested",
                     None,
                     None,
                     None,
                     Some("Command execution was cancelled by the user."),
                     Some(now_ms()),
-                    Some(now_ms()),
+                    None,
                 );
             }
             return Ok(cancelled);
@@ -921,21 +1003,54 @@ impl AgentService {
         if record.snapshot.status != PendingActionStatus::Pending {
             return Ok(false);
         }
-        self.persist_pending_status(record, PendingActionStatus::Cancelled)?;
-        record.snapshot.status = PendingActionStatus::Cancelled;
+        self.persist_pending_status(
+            record,
+            PendingActionStatus::Pending,
+            PendingActionStatus::Executing,
+        )?;
+        record.snapshot.status = PendingActionStatus::Executing;
+        if let Err(error) = self.storage.set_pending_agent_action_target_status(
+            &record.storage_id,
+            pending_status_label(PendingActionStatus::Executing),
+            pending_status_label(PendingActionStatus::Cancelled),
+            now_ms(),
+        ) {
+            let rollback = self.persist_pending_status(
+                record,
+                PendingActionStatus::Executing,
+                PendingActionStatus::Pending,
+            );
+            if rollback.is_ok() {
+                record.snapshot.status = PendingActionStatus::Pending;
+            }
+            return match rollback {
+                Ok(()) => Err(format!(
+                    "待审批操作无法写入 cancelled 目标终态，已安全回滚为 pending：{error}"
+                )),
+                Err(rollback_error) => Err(format!(
+                    "待审批操作无法写入 cancelled 目标终态：{error}；且无法回滚 executing 状态：{rollback_error}"
+                )),
+            };
+        }
         let record = record.clone();
         drop(pending_actions);
         drop(deleting_projects);
         if let Err(error) = self.finalize_cancelled_pending_action(&record) {
+            if cancelled_file_write_outcome_is_durable_or_unknown(&self.storage, &record) {
+                return Err(format!(
+                    "{error} 文件草稿的拒绝结果已经持久化或无法安全判定；待审批操作保持 executing 并保留 cancelled 目标终态，等待启动对账，禁止重新执行。"
+                ));
+            }
             if let Err(rollback_error) =
                 self.transition_pending_status(&record, PendingActionStatus::Pending)
             {
                 return Err(format!(
-                    "{error} 此外，待审批操作无法回滚为 pending；已保持 cancelled 状态以避免内存与数据库分歧：{rollback_error}"
+                    "{error} 此外，待审批操作无法回滚为 pending；已保持 executing 状态并保留 cancelled 目标终态，等待启动对账：{rollback_error}"
                 ));
             }
             return Err(error);
         }
+        self.transition_pending_status(&record, PendingActionStatus::Cancelled)?;
         Ok(true)
     }
 
@@ -954,6 +1069,41 @@ impl AgentService {
             Some(REASON),
         );
         let completed_at = now_ms();
+        if let (Some(conversation_id), Some(assistant_message_id), Some(checkpoint)) = (
+            record.snapshot.conversation_id.as_deref(),
+            record.snapshot.assistant_message_id.as_deref(),
+            record.agent_input.resume_checkpoint.as_ref(),
+        ) {
+            let trace = cancelled_conversation_trace_from_checkpoint(
+                checkpoint,
+                conversation_id,
+                assistant_message_id,
+                &call,
+                &execution.tool_result,
+                REASON,
+            );
+            let usage_record = self.prepare_run_usage_record(
+                &record.snapshot.run_id,
+                AgentRunStatus::Cancelled,
+                None,
+                Some(REASON.to_string()),
+            );
+            self.storage
+                .finalize_chat_message_with_conversation_trace_and_usage(
+                    conversation_id,
+                    assistant_message_id,
+                    "",
+                    status_for_run(AgentRunStatus::Cancelled),
+                    run_status_label(AgentRunStatus::Cancelled),
+                    &trace,
+                    completed_at,
+                    completed_at,
+                    usage_record.as_ref(),
+                )?;
+            self.finish_persisted_run_usage(&record.snapshot.run_id, AgentRunStatus::Cancelled);
+            self.invalidate_conversation_context_state(conversation_id);
+            self.discard_trace_snapshot(&record.snapshot.run_id);
+        }
         self.record_action_audit(
             record,
             Some("cancelled"),
@@ -965,47 +1115,13 @@ impl AgentService {
             Some(completed_at),
             Some(completed_at),
         );
-
-        let (Some(conversation_id), Some(assistant_message_id), Some(checkpoint)) = (
-            record.snapshot.conversation_id.as_deref(),
-            record.snapshot.assistant_message_id.as_deref(),
-            record.agent_input.resume_checkpoint.as_ref(),
-        ) else {
-            return Ok(());
-        };
-        let trace = cancelled_conversation_trace_from_checkpoint(
-            checkpoint,
-            conversation_id,
-            assistant_message_id,
-            &call,
-            &execution.tool_result,
-            REASON,
-        );
-        self.storage.finalize_chat_message_with_conversation_trace(
-            conversation_id,
-            assistant_message_id,
-            "",
-            status_for_run(AgentRunStatus::Cancelled),
-            run_status_label(AgentRunStatus::Cancelled),
-            &trace,
-            completed_at,
-            completed_at,
-        )?;
-        self.persist_run_usage(
-            &record.snapshot.run_id,
-            AgentRunStatus::Cancelled,
-            None,
-            Some(REASON.to_string()),
-        )?;
-        self.invalidate_conversation_context_state(conversation_id);
-        self.discard_trace_snapshot(&record.snapshot.run_id);
         Ok(())
     }
 
     fn queue_action_continuation(
         &self,
+        run_id: &str,
         action_id: &str,
-        pending_status: PendingActionStatus,
         decision_status: AgentApprovalDecisionStatus,
         message: Option<String>,
         notifications: CoreServerNotificationSender,
@@ -1014,14 +1130,21 @@ impl AgentService {
             .deleting_projects
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let record = {
+        let (record, approved_command_guard) = {
             let mut pending_actions = self
                 .pending_actions
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let Some(record) = pending_actions.get_mut(action_id) else {
-                return Err(format!("未找到待审批操作：{action_id}"));
+            let Some(storage_id) =
+                resolve_pending_action_storage_id(&pending_actions, run_id, action_id)
+            else {
+                return Err(format!(
+                    "未找到待审批操作：runId={run_id}, actionId={action_id}"
+                ));
             };
+            let record = pending_actions
+                .get_mut(&storage_id)
+                .expect("resolved pending action exists");
             if record.snapshot.status != PendingActionStatus::Pending {
                 return Err(format!("待审批操作已经处理：{action_id}"));
             }
@@ -1030,9 +1153,20 @@ impl AgentService {
             {
                 return Err("项目正在移除，无法处理待审批操作。".to_string());
             }
-            self.persist_pending_status(record, pending_status)?;
-            record.snapshot.status = pending_status;
-            record.clone()
+            let is_approved_command = decision_status == AgentApprovalDecisionStatus::Approved
+                && matches!(record.snapshot.action, AgentProposedAction::Command { .. });
+            let approved_command_guard = is_approved_command.then(|| {
+                self.command_runs
+                    .register(&record.storage_id, &record.snapshot.run_id)
+            });
+            let execution_status = if is_approved_command {
+                PendingActionStatus::Approved
+            } else {
+                PendingActionStatus::Executing
+            };
+            self.persist_pending_status(record, PendingActionStatus::Pending, execution_status)?;
+            record.snapshot.status = execution_status;
+            (record.clone(), approved_command_guard)
         };
 
         let mut call = tool_call_for_action(&record.snapshot.action);
@@ -1056,7 +1190,12 @@ impl AgentService {
                 None,
             );
             drop(deleting_projects);
-            return self.queue_command_execution(record, call, notifications);
+            return self.queue_command_execution(
+                record,
+                call,
+                approved_command_guard.expect("approved command registered under pending lock"),
+                notifications,
+            );
         }
 
         let execution = action_execution_for_decision(
@@ -1083,6 +1222,7 @@ impl AgentService {
             Some(now_ms()),
         );
         drop(deleting_projects);
+        self.persist_pending_target_status(&record, final_pending_status)?;
 
         let mut agent_input = record.agent_input.clone();
         agent_input.approval_decision = Some(AgentApprovalDecision {
@@ -1163,6 +1303,7 @@ impl AgentService {
         &self,
         record: PendingActionRecord,
         call: AgentToolCall,
+        guard: CommandRunGuard,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentActionExecutionOutput, String> {
         let run_id = record.snapshot.run_id.clone();
@@ -1170,7 +1311,7 @@ impl AgentService {
         let command_record = record.clone();
         tokio::spawn(async move {
             service
-                .run_command_execution(command_record, call, notifications)
+                .run_command_execution(command_record, call, guard, notifications)
                 .await;
         });
 
@@ -1202,6 +1343,7 @@ impl AgentService {
         &self,
         record: PendingActionRecord,
         call: AgentToolCall,
+        guard: CommandRunGuard,
         notifications: CoreServerNotificationSender,
     ) {
         let run_id = record.snapshot.run_id.clone();
@@ -1215,6 +1357,17 @@ impl AgentService {
             return;
         }
         let AgentProposedAction::Command { command } = record.snapshot.action.clone() else {
+            if let Err(error) =
+                self.persist_pending_target_status(&record, PendingActionStatus::Failed)
+            {
+                emit_pending_transition_error(
+                    &notifications,
+                    &run_id,
+                    PendingActionStatus::Failed,
+                    &error,
+                );
+                return;
+            }
             if let Err(error) = self.transition_pending_status(&record, PendingActionStatus::Failed)
             {
                 emit_pending_transition_error(
@@ -1236,27 +1389,43 @@ impl AgentService {
             return;
         }
 
-        let guard = self.command_runs.register(&action_id, &run_id);
         let cancel_flag = guard.cancel_flag();
+        let post_execution_cancel_flag = Arc::clone(&cancel_flag);
         let run_cancellation_token = cancellation_token.clone();
-        let workspace_root = workspace_root_optional(&record.agent_input);
-        let permissions = permissions_from_input(&record.agent_input);
         let command_for_error = command.clone();
-        let command_result = tokio::task::spawn_blocking(move || {
+        let command_for_execution = command.clone();
+        let execution_record = record.clone();
+        let mut command_result = match tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            run_approved_command(
-                workspace_root.as_deref(),
-                &command,
-                permissions,
-                cancellation_token,
-                Some(cancel_flag),
-            )
+            if cancel_flag.load(Ordering::SeqCst) || cancellation_token.is_cancelled() {
+                Ok(cancelled_command_result(&command_for_execution))
+            } else {
+                run_explicitly_approved_command_from_snapshot(
+                    &execution_record,
+                    cancellation_token,
+                    Some(cancel_flag),
+                )
+            }
         })
         .await
-        .map_err(|error| format!("命令执行任务失败：{error}"))
-        .and_then(|result| result)
-        .unwrap_or_else(|error| failed_command_result(&command_for_error, error));
-        let run_was_cancelled = run_cancellation_token.is_cancelled();
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                let policy_evaluation = error.policy_evaluation().cloned();
+                failed_command_result(&command_for_error, error.to_string(), policy_evaluation)
+            }
+            Err(error) => failed_command_result(
+                &command_for_error,
+                format!("命令执行任务失败：{error}"),
+                None,
+            ),
+        };
+        let execution_was_cancelled = run_cancellation_token.is_cancelled()
+            || post_execution_cancel_flag.load(Ordering::SeqCst)
+            || command_result.cancelled;
+        if execution_was_cancelled {
+            command_result.cancelled = true;
+        }
 
         let (agent_input, final_pending_status) = {
             let deleting_projects = self
@@ -1271,11 +1440,12 @@ impl AgentService {
                 return;
             }
 
-            let command_succeeded = command_result.error.is_none()
+            let command_succeeded = !execution_was_cancelled
+                && command_result.error.is_none()
                 && !command_result.timed_out
                 && !command_result.cancelled
                 && command_result.exit_code == Some(0);
-            let final_pending_status = if command_result.cancelled {
+            let final_pending_status = if execution_was_cancelled {
                 PendingActionStatus::Cancelled
             } else if command_succeeded {
                 PendingActionStatus::Completed
@@ -1307,19 +1477,20 @@ impl AgentService {
             });
             (agent_input, final_pending_status)
         };
+        if let Err(error) = self.persist_pending_target_status(&record, final_pending_status) {
+            self.unregister_cancellation(&run_id);
+            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                run_id: Some(run_id),
+                message: format!("命令目标终态无法持久化，已停止续跑：{error}"),
+                recoverable: true,
+                code: Some("pending_action_target_persistence_failed".to_string()),
+                details: None,
+            }));
+            return;
+        }
         if let Err(error) =
             self.commit_trace_snapshot_with_continuation(&record, &agent_input, &notifications)
         {
-            if let Err(transition_error) =
-                self.transition_pending_status(&record, PendingActionStatus::Failed)
-            {
-                emit_pending_transition_error(
-                    &notifications,
-                    &run_id,
-                    PendingActionStatus::Failed,
-                    &transition_error,
-                );
-            }
             self.unregister_cancellation(&run_id);
             let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                 run_id: Some(run_id),
@@ -1337,7 +1508,7 @@ impl AgentService {
             }));
         }
 
-        if run_was_cancelled {
+        if execution_was_cancelled {
             const REASON: &str =
                 "Agent run was cancelled while the approved command was executing.";
             let persisted = if let (
@@ -1376,16 +1547,6 @@ impl AgentService {
                 Err("cancelled command is missing its conversation trace checkpoint".to_string())
             };
             if let Err(error) = persisted {
-                if let Err(transition_error) =
-                    self.transition_pending_status(&record, PendingActionStatus::Failed)
-                {
-                    emit_pending_transition_error(
-                        &notifications,
-                        &run_id,
-                        PendingActionStatus::Failed,
-                        &transition_error,
-                    );
-                }
                 self.unregister_cancellation(&run_id);
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                     run_id: Some(run_id),
@@ -1464,6 +1625,8 @@ impl AgentService {
         let emitter_agent_input = record.agent_input.clone();
         let terminal_event_gate = Arc::new(AgentTerminalEventGate::default());
         let emitter_terminal_event_gate = terminal_event_gate.clone();
+        let pending_store_failure = Arc::new(Mutex::new(None::<String>));
+        let emitter_pending_store_failure = Arc::clone(&pending_store_failure);
         let emitter: AgentEventEmitter = Arc::new(move |event| {
             if let AgentEvent::ApprovalRequired {
                 run_id,
@@ -1472,13 +1635,30 @@ impl AgentService {
             } = &event
             {
                 let agent_input = agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
-                emitter_service.store_pending_action(
+                match emitter_service.store_pending_action(
                     run_id,
                     emitter_conversation_id.as_deref().unwrap_or_default(),
                     emitter_assistant_message_id.as_deref().unwrap_or_default(),
                     action.clone(),
                     agent_input,
-                );
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        emitter_terminal_event_gate.discard();
+                        *emitter_pending_store_failure
+                            .lock()
+                            .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
+                        return;
+                    }
+                }
+            }
+            if emitter_pending_store_failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some()
+            {
+                return;
             }
             if let Some(event) = emitter_terminal_event_gate.route(event) {
                 let _ = emitter_notifications.send(agent_event_notification(event));
@@ -1531,6 +1711,17 @@ impl AgentService {
             host_services,
         )
         .await;
+        let result = match pending_store_failure
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            Some(error) => {
+                terminal_event_gate.discard();
+                Err(pending_action_persistence_error(error))
+            }
+            None => result,
+        };
         let keep_trace_snapshot = matches!(
             &result,
             Ok(output) if output.status == AgentRunStatus::WaitingForApproval
@@ -1552,28 +1743,39 @@ impl AgentService {
         match result {
             Ok(agent_output) => {
                 let committed_durable_context = is_terminal_run_status(agent_output.status);
-                let pending_transition = self
-                    .transition_pending_status(&record, final_pending_status)
-                    .inspect_err(|error| {
-                        terminal_event_gate.discard();
-                        emit_pending_transition_error(
-                            &notifications,
-                            &run_id,
-                            final_pending_status,
-                            error,
-                        );
-                    });
-                if let (Some(conversation_id), Some(assistant_message_id)) = (
+                let owner_ids = (
                     record.snapshot.conversation_id.as_deref(),
                     record.snapshot.assistant_message_id.as_deref(),
-                ) {
-                    let persisted = self.persist_final_assistant_output(
-                        conversation_id,
-                        assistant_message_id,
-                        &agent_output,
+                );
+                let persisted = match owner_ids {
+                    (Some(conversation_id), Some(assistant_message_id)) => self
+                        .persist_final_assistant_output(
+                            conversation_id,
+                            assistant_message_id,
+                            &agent_output,
+                        ),
+                    _ => Err("审批续跑缺少 assistant 持久化身份。".to_string()),
+                };
+                let pending_transition = if persisted.is_ok() {
+                    self.transition_pending_status(&record, final_pending_status)
+                } else {
+                    Err("assistant 终态未持久化，已保留非终态 pending 记录供启动对账。".to_string())
+                }
+                .inspect_err(|error| {
+                    terminal_event_gate.discard();
+                    emit_pending_transition_error(
+                        &notifications,
+                        &run_id,
+                        final_pending_status,
+                        error,
                     );
-                    if persisted.is_ok() && pending_transition.is_ok() && committed_durable_context
-                    {
+                });
+                if let (Some(conversation_id), Some(assistant_message_id)) = owner_ids {
+                    if pending_terminal_commit_is_publishable(
+                        persisted.is_ok(),
+                        pending_transition.is_ok(),
+                        committed_durable_context,
+                    ) {
                         self.emit_terminal_context_window_snapshot(
                             &notifications,
                             &record.agent_input,
@@ -1596,7 +1798,11 @@ impl AgentService {
                             details: None,
                         }));
                     }
-                    if pending_transition.is_ok() && committed_durable_context {
+                    if pending_terminal_commit_is_publishable(
+                        persisted.is_ok(),
+                        pending_transition.is_ok(),
+                        committed_durable_context,
+                    ) {
                         emit_terminal_events_after_persistence(
                             &notifications,
                             &terminal_event_gate,
@@ -1607,16 +1813,6 @@ impl AgentService {
             }
             Err(error) => {
                 terminal_event_gate.discard();
-                let pending_transition = self
-                    .transition_pending_status(&record, PendingActionStatus::Failed)
-                    .inspect_err(|transition_error| {
-                        emit_pending_transition_error(
-                            &notifications,
-                            &run_id,
-                            PendingActionStatus::Failed,
-                            transition_error,
-                        );
-                    });
                 let usage = error.usage().cloned();
                 let code = error.code().map(ToString::to_string);
                 let details = error.details().cloned();
@@ -1637,7 +1833,7 @@ impl AgentService {
                     }
                     _ => None,
                 };
-                if let (Some(conversation_id), Some(assistant_message_id)) = (
+                let persisted = if let (Some(conversation_id), Some(assistant_message_id)) = (
                     record.snapshot.conversation_id.as_deref(),
                     record.snapshot.assistant_message_id.as_deref(),
                 ) {
@@ -1650,16 +1846,7 @@ impl AgentService {
                             .as_ref()
                             .expect("trace exists when conversation and assistant ids exist"),
                     );
-                    if persisted.is_ok() && pending_transition.is_ok() {
-                        self.emit_terminal_context_window_snapshot(
-                            &notifications,
-                            &record.agent_input,
-                            &run_id,
-                            conversation_id,
-                            assistant_message_id,
-                            &message,
-                        );
-                    } else if let Err(error) = persisted {
+                    if let Err(error) = &persisted {
                         let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                             run_id: Some(run_id.clone()),
                             message: format!(
@@ -1670,15 +1857,52 @@ impl AgentService {
                             details: None,
                         }));
                     }
+                    persisted
+                } else {
+                    Err("审批续跑缺少 assistant 持久化身份。".to_string())
+                };
+                let pending_transition = if persisted.is_ok() {
+                    self.transition_pending_status(&record, final_pending_status)
+                } else {
+                    Err(
+                        "assistant 失败终态未持久化，已保留非终态 pending 记录供启动对账。"
+                            .to_string(),
+                    )
                 }
-                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                    run_id: Some(run_id.clone()),
-                    message: message.clone(),
-                    recoverable: false,
-                    code,
-                    details,
-                }));
-                if pending_transition.is_ok() {
+                .inspect_err(|transition_error| {
+                    emit_pending_transition_error(
+                        &notifications,
+                        &run_id,
+                        final_pending_status,
+                        transition_error,
+                    );
+                });
+                let terminal_commit_published = pending_terminal_commit_is_publishable(
+                    persisted.is_ok(),
+                    pending_transition.is_ok(),
+                    true,
+                );
+                if terminal_commit_published {
+                    if let (Some(conversation_id), Some(assistant_message_id)) = (
+                        record.snapshot.conversation_id.as_deref(),
+                        record.snapshot.assistant_message_id.as_deref(),
+                    ) {
+                        self.emit_terminal_context_window_snapshot(
+                            &notifications,
+                            &record.agent_input,
+                            &run_id,
+                            conversation_id,
+                            assistant_message_id,
+                            &message,
+                        );
+                    }
+                    let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                        run_id: Some(run_id.clone()),
+                        message: message.clone(),
+                        recoverable: false,
+                        code,
+                        details,
+                    }));
                     let _ = notifications.send(agent_event_notification(AgentEvent::Done {
                         run_id: run_id.clone(),
                         success: false,
@@ -1706,7 +1930,7 @@ impl AgentService {
         assistant_message_id: &str,
         action: AgentProposedAction,
         agent_input: AgentChatInput,
-    ) {
+    ) -> Result<bool, String> {
         let deleting_projects = self
             .deleting_projects
             .lock()
@@ -1714,10 +1938,12 @@ impl AgentService {
         if agent_input_project_id(&agent_input)
             .is_some_and(|project_id| deleting_projects.contains(project_id))
         {
-            return;
+            return Err("项目正在移除，无法发布待审批操作。".to_string());
         }
         let action_id = action_id_for_action(&action);
+        let storage_id = pending_action_storage_id(run_id, &action_id);
         let pending_record = PendingActionRecord {
+            storage_id: storage_id.clone(),
             snapshot: PendingAgentActionSnapshot {
                 action_id: action_id.clone(),
                 run_id: run_id.to_string(),
@@ -1734,27 +1960,54 @@ impl AgentService {
         };
 
         {
+            let pending_actions = self
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(existing) = pending_actions.get(&storage_id) {
+                if !same_pending_action_identity(existing, &pending_record) {
+                    return Err(format!(
+                        "待审批操作 actionId={action_id} 与内存中的冻结快照冲突（existingRunId={}，candidateRunId={}）。",
+                        existing.snapshot.run_id, pending_record.snapshot.run_id
+                    ));
+                }
+            }
+        }
+        let storage_outcome = self.persist_pending_action(&pending_record)?;
+        let should_publish = {
             let mut pending_actions = self
                 .pending_actions
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            pending_actions.insert(action_id, pending_record.clone());
+            match pending_actions.get(&storage_id) {
+                Some(existing) if same_pending_action_identity(existing, &pending_record) => false,
+                Some(existing) => {
+                    return Err(format!(
+                        "待审批操作 actionId={action_id} 与内存中的冻结快照冲突（existingRunId={}，candidateRunId={}）。",
+                        existing.snapshot.run_id, pending_record.snapshot.run_id
+                    ));
+                }
+                None => {
+                    pending_actions.insert(storage_id, pending_record.clone());
+                    true
+                }
+            }
+        };
+        if matches!(storage_outcome, PendingActionStoreOutcome::Inserted) {
+            self.record_action_audit(
+                &pending_record,
+                None,
+                "pending",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
         }
-        if let Err(error) = self.persist_pending_action(&pending_record) {
-            eprintln!("failed to persist pending agent action: {error}");
-        }
-        self.record_action_audit(
-            &pending_record,
-            None,
-            "pending",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
         drop(deleting_projects);
+        Ok(should_publish)
     }
 
     fn transition_pending_status(
@@ -1762,7 +2015,7 @@ impl AgentService {
         record: &PendingActionRecord,
         status: PendingActionStatus,
     ) -> Result<(), String> {
-        let action_id = &record.snapshot.action_id;
+        let action_id = &record.storage_id;
         let mut pending_actions = self
             .pending_actions
             .lock()
@@ -1770,25 +2023,67 @@ impl AgentService {
         let pending = pending_actions
             .get_mut(action_id)
             .ok_or_else(|| format!("待审批操作的内存状态不存在：{action_id}"))?;
-        self.persist_pending_status(pending, status)?;
+        let current = pending.snapshot.status;
+        if current == status {
+            return Ok(());
+        }
+        ensure_pending_status_transition(current, status)?;
+        self.persist_pending_status(pending, current, status)?;
         pending.snapshot.status = status;
         Ok(())
     }
 
-    fn persist_pending_action(&self, record: &PendingActionRecord) -> Result<(), String> {
+    fn persist_pending_action(
+        &self,
+        record: &PendingActionRecord,
+    ) -> Result<PendingActionStoreOutcome, String> {
         self.storage
-            .upsert_pending_agent_action(pending_storage_record(record, now_ms()))
+            .store_pending_agent_action(pending_storage_record(record, now_ms()))
     }
 
     fn persist_pending_status(
         &self,
         record: &PendingActionRecord,
+        expected_status: PendingActionStatus,
         status: PendingActionStatus,
     ) -> Result<(), String> {
         self.storage.transition_pending_agent_action(
-            &record.snapshot.action_id,
+            &record.storage_id,
+            pending_status_label(expected_status),
             pending_status_label(status),
             &persisted_pending_agent_input_json(&record.agent_input, status),
+            now_ms(),
+        )
+    }
+
+    fn persist_pending_target_status(
+        &self,
+        record: &PendingActionRecord,
+        target_status: PendingActionStatus,
+    ) -> Result<(), String> {
+        if !matches!(
+            target_status,
+            PendingActionStatus::Rejected
+                | PendingActionStatus::Cancelled
+                | PendingActionStatus::Completed
+                | PendingActionStatus::Failed
+        ) {
+            return Err(format!(
+                "待审批操作目标状态必须是终态：{}",
+                pending_status_label(target_status)
+            ));
+        }
+        let pending_actions = self
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let pending = pending_actions
+            .get(&record.storage_id)
+            .ok_or_else(|| format!("待审批操作的内存状态不存在：{}", record.storage_id))?;
+        self.storage.set_pending_agent_action_target_status(
+            &record.storage_id,
+            pending_status_label(pending.snapshot.status),
+            pending_status_label(target_status),
             now_ms(),
         )
     }
@@ -1807,7 +2102,7 @@ impl AgentService {
         completed_at: Option<i64>,
     ) {
         let audit = AgentActionAuditRecord {
-            action_id: record.snapshot.action_id.clone(),
+            action_id: record.storage_id.clone(),
             run_id: record.snapshot.run_id.clone(),
             conversation_id: record.snapshot.conversation_id.clone(),
             assistant_message_id: record.snapshot.assistant_message_id.clone(),
@@ -1862,8 +2157,9 @@ impl AgentService {
         created_at: i64,
         completed_at: i64,
     ) {
+        let provider_action_id = action_id_for_action(&action);
         let audit = AgentActionAuditRecord {
-            action_id: action_id_for_action(&action),
+            action_id: pending_action_storage_id(run_id, &provider_action_id),
             run_id: run_id.to_string(),
             conversation_id,
             assistant_message_id,
@@ -2575,15 +2871,28 @@ impl AgentService {
         usage: Option<AgentUsage>,
         error: Option<String>,
     ) -> Result<(), String> {
+        let Some(record) = self.prepare_run_usage_record(run_id, status, usage, error) else {
+            return Ok(());
+        };
+        self.storage.upsert_agent_usage(record)?;
+        self.finish_persisted_run_usage(run_id, status);
+        Ok(())
+    }
+
+    fn prepare_run_usage_record(
+        &self,
+        run_id: &str,
+        status: AgentRunStatus,
+        usage: Option<AgentUsage>,
+        error: Option<String>,
+    ) -> Option<AgentUsageRecordInsert> {
         let now = now_ms();
-        let (record, should_remove) = {
+        {
             let mut contexts = self
                 .usage_contexts
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let Some(state) = contexts.get_mut(run_id) else {
-                return Ok(());
-            };
+            let state = contexts.get_mut(run_id)?;
             merge_usage(&mut state.usage, usage);
             state.status = status;
             if let Some(error) = error {
@@ -2604,7 +2913,7 @@ impl AgentService {
                 state.context.output_price.as_deref().unwrap_or(""),
             );
 
-            let record = AgentUsageRecordInsert {
+            Some(AgentUsageRecordInsert {
                 id: format!("usage-{}", state.context.run_id),
                 conversation_id: state.context.conversation_id.clone(),
                 message_id: state.context.assistant_message_id.clone(),
@@ -2612,7 +2921,6 @@ impl AgentService {
                 project_id: state.context.project_id.clone(),
                 model_id: state.context.model_id.clone(),
                 model_name: state.context.model_name.clone(),
-                provider_path: state.context.provider_path.clone(),
                 started_at: Some(state.context.started_at),
                 completed_at: is_terminal_run_status(status).then_some(now),
                 status: Some(run_status_label(status).to_string()),
@@ -2632,19 +2940,18 @@ impl AgentService {
                 input_price: state.context.input_price.clone(),
                 output_price: state.context.output_price.clone(),
                 estimated_cost,
-            };
-            (record, is_terminal_run_status(status))
-        };
+            })
+        }
+    }
 
-        self.storage.upsert_agent_usage(record)?;
-        if should_remove {
+    fn finish_persisted_run_usage(&self, run_id: &str, status: AgentRunStatus) {
+        if is_terminal_run_status(status) {
             let mut contexts = self
                 .usage_contexts
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             contexts.remove(run_id);
         }
-        Ok(())
     }
 
     fn persist_final_assistant_output(
@@ -2688,26 +2995,30 @@ impl AgentService {
                         ),
                         _ => unreachable!(),
                     });
-            self.storage.finalize_chat_message_with_conversation_trace(
-                conversation_id,
-                assistant_message_id,
-                if output.status == AgentRunStatus::Cancelled {
-                    ""
-                } else {
-                    &output.content
-                },
-                status_for_run(output.status),
-                run_status_label(output.status),
-                &trace,
-                completed_at,
-                completed_at,
-            )?;
-            return self.persist_run_usage(
+            let usage_record = self.prepare_run_usage_record(
                 &output.run_id,
                 output.status,
                 output.usage.clone(),
                 output.finish_reason.clone(),
             );
+            self.storage
+                .finalize_chat_message_with_conversation_trace_and_usage(
+                    conversation_id,
+                    assistant_message_id,
+                    if output.status == AgentRunStatus::Cancelled {
+                        ""
+                    } else {
+                        &output.content
+                    },
+                    status_for_run(output.status),
+                    run_status_label(output.status),
+                    &trace,
+                    completed_at,
+                    completed_at,
+                    usage_record.as_ref(),
+                )?;
+            self.finish_persisted_run_usage(&output.run_id, output.status);
+            return Ok(());
         }
         self.persist_run_usage(
             &output.run_id,
@@ -2734,23 +3045,28 @@ impl AgentService {
     ) -> Result<(), String> {
         let run_id = self.find_usage_run_id(conversation_id, assistant_message_id);
         let completed_at = now_ms();
-        self.storage.finalize_chat_message_with_conversation_trace(
-            conversation_id,
-            assistant_message_id,
-            message,
-            Some("error"),
-            run_status_label(AgentRunStatus::Failed),
-            conversation_turn_trace,
-            completed_at,
-            completed_at,
-        )?;
-        if let Some(run_id) = run_id {
-            self.persist_run_usage(
-                &run_id,
+        let usage_record = run_id.as_deref().and_then(|run_id| {
+            self.prepare_run_usage_record(
+                run_id,
                 AgentRunStatus::Failed,
                 usage,
                 Some(message.to_string()),
+            )
+        });
+        self.storage
+            .finalize_chat_message_with_conversation_trace_and_usage(
+                conversation_id,
+                assistant_message_id,
+                message,
+                Some("error"),
+                run_status_label(AgentRunStatus::Failed),
+                conversation_turn_trace,
+                completed_at,
+                completed_at,
+                usage_record.as_ref(),
             )?;
+        if let Some(run_id) = run_id {
+            self.finish_persisted_run_usage(&run_id, AgentRunStatus::Failed);
         }
         Ok(())
     }
@@ -2848,7 +3164,7 @@ impl AgentService {
         let agent_input = AgentChatInput {
             api_url: connection.api_url,
             api_token: String::new(),
-            model: model_provider_path(&model),
+            model: model.id.clone(),
             api_style: None,
             context_window_tokens: model.context_window_tokens,
             context_window_indicator_enabled: true,
@@ -3311,40 +3627,40 @@ fn validate_compaction_model_visible_boundary(
 
 fn load_persisted_pending_actions(
     storage: &Arc<StorageService>,
-) -> HashMap<String, PendingActionRecord> {
-    let records = match storage.list_pending_agent_actions() {
-        Ok(records) => records,
-        Err(error) => {
-            eprintln!("failed to load persisted pending actions: {error}");
-            return HashMap::new();
-        }
-    };
+) -> Result<HashMap<String, PendingActionRecord>, String> {
+    let records = storage
+        .list_pending_agent_actions()
+        .map_err(|error| format!("failed to load persisted pending actions: {error}"))?;
 
     records
         .into_iter()
-        .filter_map(|record| {
-            let action = serde_json::from_str::<AgentProposedAction>(&record.action_json)
-                .map_err(|error| {
-                    eprintln!(
+        .map(|record| {
+            let action = serde_json::from_str::<AgentProposedAction>(&record.action_json).map_err(
+                |error| {
+                    format!(
                         "failed to parse persisted pending action {}: {error}",
                         record.action_id
-                    );
-                    error
-                })
-                .ok()?;
+                    )
+                },
+            )?;
             let agent_input = serde_json::from_str::<AgentChatInput>(&record.agent_input_json)
                 .map_err(|error| {
-                    eprintln!(
+                    format!(
                         "failed to parse persisted pending action input {}: {error}",
                         record.action_id
-                    );
-                    error
-                })
-                .ok()?;
+                    )
+                })?;
             let agent_input = restore_agent_input_secrets(storage, agent_input);
-            let status = pending_status_from_label(&record.status)?;
+            let status = pending_status_from_label(&record.status).ok_or_else(|| {
+                format!(
+                    "persisted pending action {} has unknown status {}",
+                    record.action_id, record.status
+                )
+            })?;
+            let action_id = action_id_for_action(&action);
+            let storage_id = record.action_id.clone();
             let snapshot = PendingAgentActionSnapshot {
-                action_id: record.action_id.clone(),
+                action_id,
                 action_type: record.action_type,
                 tool_name: record.tool_name,
                 tool_call_id: record.tool_call_id,
@@ -3355,15 +3671,31 @@ fn load_persisted_pending_actions(
                 created_at: record.created_at,
                 status,
             };
-            Some((
-                record.action_id,
+            Ok((
+                storage_id.clone(),
                 PendingActionRecord {
+                    storage_id,
                     snapshot,
                     agent_input,
                 },
             ))
         })
         .collect()
+}
+
+fn resolve_pending_action_storage_id(
+    pending_actions: &HashMap<String, PendingActionRecord>,
+    run_id: &str,
+    action_id: &str,
+) -> Option<String> {
+    let canonical = pending_action_storage_id(run_id, action_id);
+    if pending_actions.contains_key(&canonical) {
+        return Some(canonical);
+    }
+    pending_actions.iter().find_map(|(storage_id, record)| {
+        (record.snapshot.run_id == run_id && record.snapshot.action_id == action_id)
+            .then(|| storage_id.clone())
+    })
 }
 
 fn paginate_chars(
@@ -3386,7 +3718,7 @@ fn pending_storage_record(
     updated_at: i64,
 ) -> AgentPendingActionRecord {
     AgentPendingActionRecord {
-        action_id: record.snapshot.action_id.clone(),
+        action_id: record.storage_id.clone(),
         run_id: record.snapshot.run_id.clone(),
         conversation_id: record.snapshot.conversation_id.clone(),
         assistant_message_id: record.snapshot.assistant_message_id.clone(),
@@ -3394,6 +3726,7 @@ fn pending_storage_record(
         tool_name: record.snapshot.tool_name.clone(),
         tool_call_id: record.snapshot.tool_call_id.clone(),
         status: pending_status_label(record.snapshot.status).to_string(),
+        target_status: None,
         action_json: serialize_json(&record.snapshot.action),
         agent_input_json: persisted_pending_agent_input_json(
             &record.agent_input,
@@ -3402,6 +3735,24 @@ fn pending_storage_record(
         created_at: record.snapshot.created_at,
         updated_at,
     }
+}
+
+fn same_pending_action_identity(
+    existing: &PendingActionRecord,
+    candidate: &PendingActionRecord,
+) -> bool {
+    existing.storage_id == candidate.storage_id
+        && existing.snapshot.action_id == candidate.snapshot.action_id
+        && existing.snapshot.run_id == candidate.snapshot.run_id
+        && existing.snapshot.conversation_id == candidate.snapshot.conversation_id
+        && existing.snapshot.assistant_message_id == candidate.snapshot.assistant_message_id
+        && existing.snapshot.action_type == candidate.snapshot.action_type
+        && existing.snapshot.tool_name == candidate.snapshot.tool_name
+        && existing.snapshot.tool_call_id == candidate.snapshot.tool_call_id
+        && existing.snapshot.status == candidate.snapshot.status
+        && serialize_json(&existing.snapshot.action) == serialize_json(&candidate.snapshot.action)
+        && persisted_pending_agent_input_json(&existing.agent_input, existing.snapshot.status)
+            == persisted_pending_agent_input_json(&candidate.agent_input, candidate.snapshot.status)
 }
 
 fn persisted_pending_agent_input_json(
@@ -3440,7 +3791,9 @@ fn persisted_pending_agent_input_json(
 
 fn pending_status_redacts_run_scoped_input(status: PendingActionStatus) -> bool {
     match status {
-        PendingActionStatus::Pending | PendingActionStatus::Approved => false,
+        PendingActionStatus::Pending
+        | PendingActionStatus::Approved
+        | PendingActionStatus::Executing => false,
         PendingActionStatus::Rejected
         | PendingActionStatus::Cancelled
         | PendingActionStatus::Completed
@@ -3470,9 +3823,10 @@ fn restore_agent_input_secrets(
         .as_deref()
         .and_then(|model_id| settings.models.iter().find(|model| model.id == model_id))
         .or_else(|| {
-            settings.models.iter().find(|model| {
-                model.id == agent_input.model || model_provider_path(model) == agent_input.model
-            })
+            settings
+                .models
+                .iter()
+                .find(|model| model.id == agent_input.model)
         });
 
     // Pending actions deliberately persist without API tokens. On restoration, resolve the
@@ -3504,11 +3858,43 @@ fn pending_status_from_label(value: &str) -> Option<PendingActionStatus> {
     match value {
         "pending" => Some(PendingActionStatus::Pending),
         "approved" => Some(PendingActionStatus::Approved),
+        "executing" => Some(PendingActionStatus::Executing),
         "rejected" => Some(PendingActionStatus::Rejected),
         "cancelled" => Some(PendingActionStatus::Cancelled),
         "completed" => Some(PendingActionStatus::Completed),
         "failed" => Some(PendingActionStatus::Failed),
         _ => None,
+    }
+}
+
+fn ensure_pending_status_transition(
+    current: PendingActionStatus,
+    next: PendingActionStatus,
+) -> Result<(), String> {
+    let allowed = matches!(
+        (current, next),
+        (PendingActionStatus::Pending, PendingActionStatus::Approved)
+            | (PendingActionStatus::Pending, PendingActionStatus::Executing)
+            | (PendingActionStatus::Pending, PendingActionStatus::Cancelled)
+            | (PendingActionStatus::Approved, PendingActionStatus::Completed)
+            | (PendingActionStatus::Approved, PendingActionStatus::Failed)
+            | (PendingActionStatus::Approved, PendingActionStatus::Cancelled)
+            | (PendingActionStatus::Executing, PendingActionStatus::Completed)
+            | (PendingActionStatus::Executing, PendingActionStatus::Failed)
+            | (PendingActionStatus::Executing, PendingActionStatus::Rejected)
+            | (PendingActionStatus::Executing, PendingActionStatus::Cancelled)
+            // Compensating rollback: cancellation is not made visible unless its paired
+            // assistant/trace commit succeeds.
+            | (PendingActionStatus::Executing, PendingActionStatus::Pending)
+    );
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "非法待审批状态迁移：{} -> {}",
+            pending_status_label(current),
+            pending_status_label(next)
+        ))
     }
 }
 
@@ -3570,6 +3956,45 @@ fn agent_input_project_id(input: &AgentChatInput) -> Option<&str> {
         .and_then(|context| context.project_id.as_deref())
 }
 
+/// Executes only the command frozen in the backend-owned pending-action snapshot.
+///
+/// The approval endpoint accepts an action id rather than a replacement command. Keeping snapshot
+/// selection and the `ExplicitUser` authorization source together at this boundary prevents a
+/// caller from turning approval of one command into execution of another.
+fn run_explicitly_approved_command_from_snapshot(
+    record: &PendingActionRecord,
+    cancellation_token: AgentCancellationToken,
+    action_cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
+    let AgentProposedAction::Command { command } = &record.snapshot.action else {
+        return Err("待审批操作不包含可执行命令。".to_string().into());
+    };
+    let workspace_root = workspace_root_optional(&record.agent_input);
+    run_authorized_command(
+        workspace_root.as_deref(),
+        command,
+        permissions_from_input(&record.agent_input),
+        CommandAuthorizationSource::ExplicitUser,
+        cancellation_token,
+        action_cancel_flag,
+    )
+}
+
+fn cancelled_file_write_outcome_is_durable_or_unknown(
+    storage: &StorageService,
+    record: &PendingActionRecord,
+) -> bool {
+    let AgentProposedAction::FileWrite { file_write } = &record.snapshot.action else {
+        return false;
+    };
+    match storage.get_agent_file_draft(&file_write.draft_id) {
+        Ok(Some(draft)) => draft.status == "rejected",
+        Ok(None) => false,
+        // A storage read failure makes rollback unsafe: the rejection write may have committed.
+        Err(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3578,15 +4003,15 @@ mod tests {
         SkillInstallationService,
     };
     use mycopilot_core::storage::models::{
-        ChatConversationRecord, ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord,
-        ProjectRecord,
+        AgentFileDraftRecord, ChatConversationRecord, ChatMessageRecord, ModelConfigRecord,
+        ModelSettingsRecord, ProjectRecord,
     };
     use mycopilot_core::{
-        AgentActivatedSkill, AgentCommandRequest, AgentCommandRiskLevel, AgentPermissions,
-        AgentSkillActivation, AgentUsageSummaryRange, AgentWorkspaceContext,
-        ContextCompactionGeneration, ContextCompactionPrefix, ContextCompactionSourceItem,
-        ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
-        ConversationTraceToolResultStatus, ConversationTurnTraceItem,
+        AgentActivatedSkill, AgentCommandRequest, AgentCommandRiskLevel, AgentFileWriteMode,
+        AgentFileWriteProposal, AgentPermissions, AgentSkillActivation, AgentUsageSummaryRange,
+        AgentWorkspaceContext, ContextCompactionGeneration, ContextCompactionPrefix,
+        ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
+        ContextJournalCursor, ConversationTraceToolResultStatus, ConversationTurnTraceItem,
         ConversationTurnTraceTerminalStatus, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
         CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
@@ -3607,6 +4032,175 @@ mod tests {
             proposed_actions: Vec::new(),
             conversation_turn_trace: None,
         }
+    }
+
+    fn command_test_input(workspace: &Path) -> AgentChatInput {
+        let mut input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://should-not-be-called.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        input.context = Some(AgentRunContext {
+            conversation_id: Some("conversation-command-policy".to_string()),
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("command-policy-test".to_string()),
+                root_path: Some(workspace.to_string_lossy().into_owned()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions {
+                write: mycopilot_core::AgentWritePermission::WorkspaceOnly,
+                command: mycopilot_core::AgentCommandPermission::AutoApprove,
+                command_safety: mycopilot_core::AgentCommandSafetyPolicy::Guarded,
+                ..Default::default()
+            },
+        });
+        input
+    }
+
+    fn command_request(id: &str, command: &str) -> AgentCommandRequest {
+        AgentCommandRequest {
+            id: id.to_string(),
+            command: command.to_string(),
+            cwd: None,
+            timeout_ms: Some(5_000),
+            approval_status: AgentApprovalStatus::Required,
+            risk_level: Some(AgentCommandRiskLevel::ReadOnly),
+            reason: Some("exercise server authorization boundary".to_string()),
+        }
+    }
+
+    #[test]
+    fn automatic_and_explicit_user_server_paths_use_distinct_authorization_sources() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let service = AgentService::new(storage);
+        let input = command_test_input(fixture.path());
+
+        let automatic_request = command_request("automatic-command", "mkdir automatic-blocked");
+        let automatic_result = service
+            .execute_auto_approved_action(
+                input.clone(),
+                "run-automatic-command".to_string(),
+                None,
+                None,
+                AgentProposedAction::Command {
+                    command: automatic_request,
+                },
+                AgentCancellationToken::new(),
+            )
+            .unwrap();
+
+        assert!(!automatic_result.ok);
+        assert!(automatic_result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("command.explicit_approval_required")));
+        assert!(!fixture.path().join("automatic-blocked").exists());
+
+        let mut full_access_input = input.clone();
+        full_access_input
+            .context
+            .as_mut()
+            .expect("command test context")
+            .permissions
+            .command_safety = mycopilot_core::AgentCommandSafetyPolicy::FullAccess;
+        let full_access_request =
+            command_request("automatic-full-access", "mkdir automatic-full-access");
+        let full_access_result = service
+            .execute_auto_approved_action(
+                full_access_input,
+                "run-automatic-full-access".to_string(),
+                None,
+                None,
+                AgentProposedAction::Command {
+                    command: full_access_request,
+                },
+                AgentCancellationToken::new(),
+            )
+            .unwrap();
+
+        assert!(full_access_result.ok);
+        assert!(fixture.path().join("automatic-full-access").is_dir());
+
+        let explicit_request = command_request("explicit-command", "mkdir explicit-allowed");
+        let record = PendingActionRecord {
+            storage_id: pending_action_storage_id("run-explicit-command", &explicit_request.id),
+            snapshot: PendingAgentActionSnapshot {
+                action_id: explicit_request.id.clone(),
+                action_type: "command".to_string(),
+                tool_name: "run_command".to_string(),
+                tool_call_id: Some(explicit_request.id.clone()),
+                run_id: "run-explicit-command".to_string(),
+                conversation_id: Some("conversation-command-policy".to_string()),
+                assistant_message_id: Some("assistant-command-policy".to_string()),
+                action: AgentProposedAction::Command {
+                    command: explicit_request,
+                },
+                created_at: 1,
+                status: PendingActionStatus::Approved,
+            },
+            agent_input: input,
+        };
+        let explicit_result = run_explicitly_approved_command_from_snapshot(
+            &record,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(explicit_result.exit_code, Some(0));
+        assert!(fixture.path().join("explicit-allowed").is_dir());
+    }
+
+    #[test]
+    fn explicit_user_execution_is_bound_to_the_backend_action_snapshot() {
+        let fixture = tempdir().unwrap();
+        let frozen_request = command_request("frozen-command", "mkdir frozen-snapshot");
+        let record = PendingActionRecord {
+            storage_id: pending_action_storage_id("run-frozen-command", &frozen_request.id),
+            snapshot: PendingAgentActionSnapshot {
+                action_id: frozen_request.id.clone(),
+                action_type: "command".to_string(),
+                tool_name: "run_command".to_string(),
+                tool_call_id: Some(frozen_request.id.clone()),
+                run_id: "run-frozen-command".to_string(),
+                conversation_id: Some("conversation-frozen-command".to_string()),
+                assistant_message_id: Some("assistant-frozen-command".to_string()),
+                action: AgentProposedAction::Command {
+                    command: frozen_request,
+                },
+                created_at: 1,
+                status: PendingActionStatus::Approved,
+            },
+            agent_input: command_test_input(fixture.path()),
+        };
+        let untrusted_replacement_call = AgentToolCall {
+            id: "frozen-command".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({ "command": "mkdir untrusted-replacement" }),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: None,
+        };
+        assert_eq!(
+            untrusted_replacement_call.args["command"],
+            "mkdir untrusted-replacement"
+        );
+
+        let result = run_explicitly_approved_command_from_snapshot(
+            &record,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
+        assert!(fixture.path().join("frozen-snapshot").is_dir());
+        assert!(!fixture.path().join("untrusted-replacement").exists());
     }
 
     #[test]
@@ -3644,6 +4238,42 @@ mod tests {
     }
 
     #[test]
+    fn terminal_event_gate_never_exposes_a_nonrecoverable_error_before_commit() {
+        let gate = AgentTerminalEventGate::default();
+        assert!(gate
+            .route(AgentEvent::Error {
+                run_id: Some("run-terminal-error-gate".to_string()),
+                message: "terminal model failure".to_string(),
+                recoverable: false,
+                code: Some("terminal_model_failure".to_string()),
+                details: None,
+            })
+            .is_none());
+        assert!(matches!(
+            gate.route(AgentEvent::Error {
+                run_id: Some("run-terminal-error-gate".to_string()),
+                message: "retryable persistence failure".to_string(),
+                recoverable: true,
+                code: Some("persistence_failure".to_string()),
+                details: None,
+            }),
+            Some(AgentEvent::Error {
+                recoverable: true,
+                ..
+            })
+        ));
+        gate.discard();
+        let released = gate.take_after_persistence(&completed_output_for_terminal_gate());
+        assert!(released.iter().all(|event| !matches!(
+            event,
+            AgentEvent::Error {
+                recoverable: false,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn terminal_event_gate_does_not_delay_approval_waiting_done() {
         let gate = AgentTerminalEventGate::default();
         let routed = gate.route(AgentEvent::Done {
@@ -3663,6 +4293,19 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn assistant_persistence_failure_never_releases_pending_terminal_done() {
+        assert!(!pending_terminal_commit_is_publishable(false, true, true));
+        assert!(!pending_terminal_commit_is_publishable(true, false, true));
+        assert!(!pending_terminal_commit_is_publishable(true, true, false));
+        assert!(pending_terminal_commit_is_publishable(true, true, true));
+        assert!(ensure_pending_status_transition(
+            PendingActionStatus::Cancelled,
+            PendingActionStatus::Completed,
+        )
+        .is_err());
     }
 
     fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> ConversationTurnTrace {
@@ -3817,8 +4460,6 @@ mod tests {
             models: vec![ModelConfigRecord {
                 id: "model-1".to_string(),
                 display_name: "Model 1".to_string(),
-                short_name: None,
-                provider_path: None,
                 api_url_override: None,
                 api_token_override: None,
                 supports_image: false,
@@ -4925,8 +5566,6 @@ mod tests {
                 models: vec![ModelConfigRecord {
                     id: "model-1".to_string(),
                     display_name: "Model 1".to_string(),
-                    short_name: None,
-                    provider_path: None,
                     api_url_override: None,
                     api_token_override: None,
                     supports_image: false,
@@ -5925,7 +6564,6 @@ mod tests {
                 project_id: None,
                 model_id: "model-1".to_string(),
                 model_name: "Model 1".to_string(),
-                provider_path: None,
                 input_price: None,
                 output_price: None,
                 started_at: 1,
@@ -5979,7 +6617,6 @@ mod tests {
                 project_id: Some("project-1".to_string()),
                 model_id: "model-1".to_string(),
                 model_name: "Model 1".to_string(),
-                provider_path: None,
                 input_price: None,
                 output_price: None,
                 started_at: 1,
@@ -6070,13 +6707,15 @@ mod tests {
             },
         };
 
-        service.store_pending_action(
-            "run-checkpoint",
-            "conversation-checkpoint",
-            "assistant-checkpoint",
-            action,
-            checkpoint,
-        );
+        service
+            .store_pending_action(
+                "run-checkpoint",
+                "conversation-checkpoint",
+                "assistant-checkpoint",
+                action,
+                checkpoint,
+            )
+            .unwrap();
         assert!(base_input.resume_checkpoint.is_none());
 
         let reloaded = AgentService::new(storage);
@@ -6084,7 +6723,12 @@ mod tests {
             .pending_actions
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let record = pending.get("call-checkpoint").unwrap();
+        let record = pending
+            .get(&pending_action_storage_id(
+                "run-checkpoint",
+                "call-checkpoint",
+            ))
+            .unwrap();
         assert_eq!(
             record.agent_input.resume_checkpoint.as_ref(),
             Some(&run_checkpoint)
@@ -6093,6 +6737,234 @@ mod tests {
         assert!(record.agent_input.attachments.is_empty());
         assert!(record.agent_input.api_token.is_empty());
         assert_eq!(record.agent_input.context_window_tokens, Some(128_000));
+    }
+
+    #[test]
+    fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let service = AgentService::new(Arc::clone(&storage));
+        let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        let original = AgentProposedAction::ToolCall {
+            call: AgentToolCall {
+                id: "shared-action-id".to_string(),
+                tool: "first_tool".to_string(),
+                args: json!({ "value": "original" }),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            },
+        };
+        assert!(service
+            .store_pending_action(
+                "run-original",
+                "conversation-original",
+                "assistant-original",
+                original.clone(),
+                agent_input.clone(),
+            )
+            .unwrap());
+        assert!(!service
+            .store_pending_action(
+                "run-original",
+                "conversation-original",
+                "assistant-original",
+                original,
+                agent_input.clone(),
+            )
+            .unwrap());
+
+        let cross_run = AgentProposedAction::ToolCall {
+            call: AgentToolCall {
+                id: "shared-action-id".to_string(),
+                tool: "second_tool".to_string(),
+                args: json!({ "value": "replacement" }),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            },
+        };
+        assert!(service
+            .store_pending_action(
+                "run-second",
+                "conversation-second",
+                "assistant-second",
+                cross_run,
+                agent_input.clone(),
+            )
+            .unwrap());
+        let same_run_collision = AgentProposedAction::ToolCall {
+            call: AgentToolCall {
+                id: "shared-action-id".to_string(),
+                tool: "conflicting_tool".to_string(),
+                args: json!({ "value": "conflict" }),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            },
+        };
+        let error = service
+            .store_pending_action(
+                "run-original",
+                "conversation-original",
+                "assistant-original",
+                same_run_collision,
+                agent_input,
+            )
+            .unwrap_err();
+        assert!(error.contains("冻结快照冲突"));
+
+        let in_memory = service
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|lock_error| lock_error.into_inner());
+        let frozen = in_memory
+            .get(&pending_action_storage_id(
+                "run-original",
+                "shared-action-id",
+            ))
+            .unwrap();
+        assert_eq!(frozen.snapshot.run_id, "run-original");
+        assert_eq!(frozen.snapshot.tool_name, "first_tool");
+        drop(in_memory);
+        let durable = storage.list_pending_agent_actions().unwrap();
+        assert_eq!(durable.len(), 2);
+        assert!(durable.iter().any(|record| {
+            record.run_id == "run-original" && record.action_json.contains("first_tool")
+        }));
+        assert!(durable.iter().any(|record| {
+            record.run_id == "run-second" && record.action_json.contains("second_tool")
+        }));
+        assert!(durable
+            .iter()
+            .all(|record| !record.action_json.contains("conflicting_tool")));
+    }
+
+    #[test]
+    fn legacy_pending_row_keeps_raw_storage_key_but_is_resolved_by_run_identity() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        let action = AgentProposedAction::ToolCall {
+            call: AgentToolCall {
+                id: "legacy-call-id".to_string(),
+                tool: "legacy_tool".to_string(),
+                args: json!({}),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            },
+        };
+        let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        storage
+            .store_pending_agent_action(AgentPendingActionRecord {
+                action_id: "legacy-call-id".to_string(),
+                run_id: "legacy-run".to_string(),
+                conversation_id: None,
+                assistant_message_id: None,
+                action_type: "tool_call".to_string(),
+                tool_name: "legacy_tool".to_string(),
+                tool_call_id: Some("legacy-call-id".to_string()),
+                status: "pending".to_string(),
+                target_status: None,
+                action_json: serialize_json(&action),
+                agent_input_json: serialize_json(&agent_input),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let service = AgentService::new(storage);
+        assert!(service
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key("legacy-call-id"));
+        assert!(service
+            .cancel_action("legacy-run", "legacy-call-id")
+            .unwrap());
+    }
+
+    #[test]
+    fn startup_reconciliation_failure_prevents_agent_service_startup() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-bad-reconciliation".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "bad reconciliation".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "assistant-bad-reconciliation".to_string(),
+                    role: "assistant".to_string(),
+                    content: THINKING_PLACEHOLDER.to_string(),
+                    created_at: 1,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: Some("not-json".to_string()),
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let action = AgentProposedAction::ToolCall {
+            call: AgentToolCall {
+                id: "bad-reconciliation-call".to_string(),
+                tool: "approval_tool".to_string(),
+                args: json!({}),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            },
+        };
+        let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        storage
+            .store_pending_agent_action(AgentPendingActionRecord {
+                action_id: pending_action_storage_id(
+                    "bad-reconciliation-run",
+                    "bad-reconciliation-call",
+                ),
+                run_id: "bad-reconciliation-run".to_string(),
+                conversation_id: Some("conversation-bad-reconciliation".to_string()),
+                assistant_message_id: Some("assistant-bad-reconciliation".to_string()),
+                action_type: "tool_call".to_string(),
+                tool_name: "approval_tool".to_string(),
+                tool_call_id: Some("bad-reconciliation-call".to_string()),
+                status: "approved".to_string(),
+                target_status: None,
+                action_json: serialize_json(&action),
+                agent_input_json: serialize_json(&agent_input),
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let error = match AgentService::try_new(storage) {
+            Ok(_) => panic!("reconciliation failure must prevent startup"),
+            Err(error) => error,
+        };
+        assert!(error.contains("failed to reconcile interrupted pending actions"));
+        assert!(error.contains("无法解析中断操作"));
     }
 
     #[test]
@@ -6160,6 +7032,7 @@ mod tests {
             model_visible_trace_item_count: 0,
         });
         let mut record = PendingActionRecord {
+            storage_id: pending_action_storage_id("run-skill-redaction", "action-skill-redaction"),
             snapshot: PendingAgentActionSnapshot {
                 action_id: "action-skill-redaction".to_string(),
                 action_type: "tool_call".to_string(),
@@ -6183,7 +7056,11 @@ mod tests {
             agent_input,
         };
 
-        for status in [PendingActionStatus::Pending, PendingActionStatus::Approved] {
+        for status in [
+            PendingActionStatus::Pending,
+            PendingActionStatus::Approved,
+            PendingActionStatus::Executing,
+        ] {
             record.snapshot.status = status;
             let persisted = pending_storage_record(&record, 2);
             assert!(persisted.agent_input_json.contains(MARKER));
@@ -6264,13 +7141,15 @@ mod tests {
             approval_status: AgentApprovalStatus::Required,
             reason: None,
         };
-        service.store_pending_action(
-            "run-missing-transition-row",
-            "conversation-missing-transition-row",
-            "assistant-missing-transition-row",
-            AgentProposedAction::ToolCall { call: call.clone() },
-            agent_input,
-        );
+        service
+            .store_pending_action(
+                "run-missing-transition-row",
+                "conversation-missing-transition-row",
+                "assistant-missing-transition-row",
+                AgentProposedAction::ToolCall { call: call.clone() },
+                agent_input,
+            )
+            .unwrap();
         assert!(storage.list_pending_agent_actions().unwrap()[0]
             .agent_input_json
             .contains(MARKER));
@@ -6281,14 +7160,17 @@ mod tests {
             .delete_conversation("conversation-missing-transition-row")
             .unwrap();
         let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let error = service.approve_action(&call.id, notifications).unwrap_err();
+        let error = service
+            .approve_action("run-missing-transition-row", &call.id, notifications)
+            .unwrap_err();
         assert!(error.contains("实际更新 0 条"));
         assert!(receiver.try_recv().is_err());
         assert_eq!(
             service
                 .pending_actions
                 .lock()
-                .unwrap_or_else(|lock_error| lock_error.into_inner())[&call.id]
+                .unwrap_or_else(|lock_error| lock_error.into_inner())
+                [&pending_action_storage_id("run-missing-transition-row", &call.id)]
                 .snapshot
                 .status,
             PendingActionStatus::Pending
@@ -6352,15 +7234,19 @@ mod tests {
         });
         // These durable owner rows intentionally do not exist, forcing final trace persistence to
         // fail after the action has first transitioned to cancelled.
-        service.store_pending_action(
-            "run-cancel-rollback",
-            "conversation-cancel-rollback-missing",
-            "assistant-cancel-rollback-missing",
-            AgentProposedAction::ToolCall { call: call.clone() },
-            agent_input,
-        );
+        service
+            .store_pending_action(
+                "run-cancel-rollback",
+                "conversation-cancel-rollback-missing",
+                "assistant-cancel-rollback-missing",
+                AgentProposedAction::ToolCall { call: call.clone() },
+                agent_input,
+            )
+            .unwrap();
 
-        assert!(service.cancel_action(&call.id).is_err());
+        assert!(service
+            .cancel_action("run-cancel-rollback", &call.id)
+            .is_err());
         assert_eq!(
             service.list_pending_actions()[0].status,
             PendingActionStatus::Pending
@@ -6368,7 +7254,296 @@ mod tests {
         let persisted = storage.list_pending_agent_actions().unwrap();
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0].status, "pending");
+        assert_eq!(persisted[0].target_status, None);
         assert!(persisted[0].agent_input_json.contains(MARKER));
+
+        // The compensating transition must make the action reusable. A stale cancelled marker
+        // would make this second attempt fail before finalization and strand the row.
+        let second_error = service
+            .cancel_action("run-cancel-rollback", &call.id)
+            .unwrap_err();
+        assert!(!second_error.contains("无法写入 cancelled 目标终态"));
+        let persisted = storage.list_pending_agent_actions().unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].status, "pending");
+        assert_eq!(persisted[0].target_status, None);
+    }
+
+    #[test]
+    fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-cancel-usage-failure".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Cancel usage failure".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "assistant-cancel-usage-failure".to_string(),
+                    role: "assistant".to_string(),
+                    content: THINKING_PLACEHOLDER.to_string(),
+                    created_at: 1,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let service = AgentService::new(Arc::clone(&storage));
+        // The invalid usage owner is a deterministic fault injection: the usage insert violates
+        // its foreign key only after message and trace writes have run inside the transaction.
+        service.register_usage_context(
+            "run-cancel-usage-failure",
+            AgentRunUsageContext {
+                conversation_id: "missing-usage-conversation".to_string(),
+                assistant_message_id: "assistant-cancel-usage-failure".to_string(),
+                run_id: "run-cancel-usage-failure".to_string(),
+                project_id: None,
+                model_id: "model-1".to_string(),
+                model_name: "Model 1".to_string(),
+                input_price: None,
+                output_price: None,
+                started_at: 1,
+            },
+        );
+        let call = AgentToolCall {
+            id: "call-cancel-usage-failure".to_string(),
+            tool: "approval_tool".to_string(),
+            args: json!({}),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+            version: 2,
+            run_id: "run-cancel-usage-failure".to_string(),
+            context_items: Vec::new(),
+            next_model_request_index: 1,
+            queued_tool_calls: Vec::new(),
+            suppressed_narration: false,
+            extension_snapshots: Vec::new(),
+            pending_tool_call_id: call.id.clone(),
+            conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: call.id.clone(),
+                tool: call.tool.clone(),
+                operation: json!({}),
+                approval_status: AgentApprovalStatus::Required,
+                truncated: false,
+            }],
+            next_conversation_trace_sequence: 1,
+            conversation_trace_truncated: false,
+            model_visible_trace_item_count: 0,
+        });
+        service
+            .store_pending_action(
+                "run-cancel-usage-failure",
+                "conversation-cancel-usage-failure",
+                "assistant-cancel-usage-failure",
+                AgentProposedAction::ToolCall { call: call.clone() },
+                agent_input,
+            )
+            .unwrap();
+
+        assert!(service
+            .cancel_action("run-cancel-usage-failure", &call.id)
+            .is_err());
+        let pending = storage.list_pending_agent_actions().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status, "pending");
+        assert_eq!(pending[0].target_status, None);
+        assert!(storage
+            .get_conversation_turn_trace("assistant-cancel-usage-failure")
+            .unwrap()
+            .is_none());
+        let conversation = storage
+            .load_conversation("conversation-cancel-usage-failure")
+            .unwrap()
+            .unwrap();
+        assert_eq!(conversation.messages[0].content, THINKING_PLACEHOLDER);
+        assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
+        assert!(storage
+            .list_agent_tool_results_for_run("run-cancel-usage-failure", "approval_tool")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-file-write-cancel-failure".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "File write cancel failure".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "assistant-file-write-cancel-failure".to_string(),
+                    role: "assistant".to_string(),
+                    content: THINKING_PLACEHOLDER.to_string(),
+                    created_at: 1,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let service = AgentService::new(Arc::clone(&storage));
+        service.register_usage_context(
+            "run-file-write-cancel-failure",
+            AgentRunUsageContext {
+                conversation_id: "missing-file-write-usage-owner".to_string(),
+                assistant_message_id: "assistant-file-write-cancel-failure".to_string(),
+                run_id: "run-file-write-cancel-failure".to_string(),
+                project_id: None,
+                model_id: "model-1".to_string(),
+                model_name: "Model 1".to_string(),
+                input_price: None,
+                output_price: None,
+                started_at: 1,
+            },
+        );
+        let action_id = "file-write-cancel-failure";
+        storage
+            .create_agent_file_draft(AgentFileDraftRecord {
+                id: "draft-file-write-cancel-failure".to_string(),
+                conversation_id: "conversation-file-write-cancel-failure".to_string(),
+                project_id: None,
+                run_id: "run-file-write-cancel-failure".to_string(),
+                file_path: "cancelled.txt".to_string(),
+                mode: "create".to_string(),
+                status: "waiting_approval".to_string(),
+                base_revision: None,
+                base_content: String::new(),
+                content: "hello".to_string(),
+                additions: 1,
+                deletions: 0,
+                line_count: 1,
+                byte_count: 5,
+                chunk_count: 1,
+                next_chunk_index: 1,
+                stats_final: true,
+                summary: None,
+                final_action_id: Some(action_id.to_string()),
+                created_at: 1,
+                updated_at: 1,
+                expires_at: i64::MAX,
+            })
+            .unwrap();
+        let file_write = AgentFileWriteProposal {
+            id: action_id.to_string(),
+            draft_id: "draft-file-write-cancel-failure".to_string(),
+            mode: AgentFileWriteMode::Create,
+            file_path: "cancelled.txt".to_string(),
+            base_revision: None,
+            summary: None,
+            additions: 1,
+            deletions: 0,
+            line_count: 1,
+            byte_count: 5,
+            approval_status: AgentApprovalStatus::Required,
+        };
+        let call = tool_call_for_action(&AgentProposedAction::FileWrite {
+            file_write: file_write.clone(),
+        });
+        let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+            version: 2,
+            run_id: "run-file-write-cancel-failure".to_string(),
+            context_items: Vec::new(),
+            next_model_request_index: 1,
+            queued_tool_calls: Vec::new(),
+            suppressed_narration: false,
+            extension_snapshots: Vec::new(),
+            pending_tool_call_id: action_id.to_string(),
+            conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: action_id.to_string(),
+                tool: call.tool.clone(),
+                operation: call.args.clone(),
+                approval_status: AgentApprovalStatus::Required,
+                truncated: false,
+            }],
+            next_conversation_trace_sequence: 1,
+            conversation_trace_truncated: false,
+            model_visible_trace_item_count: 0,
+        });
+        service
+            .store_pending_action(
+                "run-file-write-cancel-failure",
+                "conversation-file-write-cancel-failure",
+                "assistant-file-write-cancel-failure",
+                AgentProposedAction::FileWrite { file_write },
+                agent_input,
+            )
+            .unwrap();
+
+        let error = service
+            .cancel_action("run-file-write-cancel-failure", action_id)
+            .unwrap_err();
+        assert!(error.contains("保持 executing"));
+        assert_eq!(
+            service
+                .pending_actions
+                .lock()
+                .unwrap_or_else(|lock_error| lock_error.into_inner())
+                [&pending_action_storage_id("run-file-write-cancel-failure", action_id,)]
+                .snapshot
+                .status,
+            PendingActionStatus::Executing
+        );
+        assert_eq!(
+            storage
+                .get_agent_file_draft("draft-file-write-cancel-failure")
+                .unwrap()
+                .unwrap()
+                .status,
+            "rejected"
+        );
+        assert!(storage
+            .get_conversation_turn_trace("assistant-file-write-cancel-failure")
+            .unwrap()
+            .is_none());
+        let conversation = storage
+            .load_conversation("conversation-file-write-cancel-failure")
+            .unwrap()
+            .unwrap();
+        assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
+        let interrupted = storage
+            .reconcile_interrupted_pending_agent_actions(42)
+            .unwrap();
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].status, "executing");
+        assert_eq!(interrupted[0].target_status.as_deref(), Some("cancelled"));
+        assert!(storage.list_pending_agent_actions().unwrap().is_empty());
     }
 
     #[test]
@@ -6409,7 +7584,6 @@ mod tests {
                 project_id: None,
                 model_id: "model-1".to_string(),
                 model_name: "Model 1".to_string(),
-                provider_path: None,
                 input_price: None,
                 output_price: None,
                 started_at: 1,
@@ -6450,15 +7624,17 @@ mod tests {
             conversation_trace_truncated: false,
             model_visible_trace_item_count: 0,
         });
-        service.store_pending_action(
-            "run-cancel",
-            "conversation-cancel",
-            "assistant-cancel",
-            AgentProposedAction::ToolCall { call: call.clone() },
-            agent_input,
-        );
+        service
+            .store_pending_action(
+                "run-cancel",
+                "conversation-cancel",
+                "assistant-cancel",
+                AgentProposedAction::ToolCall { call: call.clone() },
+                agent_input,
+            )
+            .unwrap();
 
-        assert!(service.cancel_action(&call.id).unwrap());
+        assert!(service.cancel_action("run-cancel", &call.id).unwrap());
 
         let trace = storage
             .get_conversation_turn_trace("assistant-cancel")
@@ -6526,7 +7702,6 @@ mod tests {
                 project_id: None,
                 model_id: "model-1".to_string(),
                 model_name: "Model 1".to_string(),
-                provider_path: None,
                 input_price: None,
                 output_price: None,
                 started_at: 1,
@@ -6658,6 +7833,135 @@ mod tests {
             .is_none());
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-cancel-before-spawn".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Cancel before spawn".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "assistant-cancel-before-spawn".to_string(),
+                    role: "assistant".to_string(),
+                    content: THINKING_PLACEHOLDER.to_string(),
+                    created_at: 1,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let service = AgentService::new(storage);
+        let command = AgentCommandRequest {
+            id: "command-cancel-before-spawn".to_string(),
+            command: "mkdir cancelled-before-spawn".to_string(),
+            cwd: None,
+            timeout_ms: Some(10_000),
+            approval_status: AgentApprovalStatus::Required,
+            risk_level: Some(AgentCommandRiskLevel::WritesWorkspace),
+            reason: Some("verify approval cancellation race".to_string()),
+        };
+        let call = command_tool_call(&command);
+        let checkpoint = AgentRunCheckpoint {
+            version: 2,
+            run_id: "run-cancel-before-spawn".to_string(),
+            context_items: Vec::new(),
+            next_model_request_index: 1,
+            queued_tool_calls: Vec::new(),
+            suppressed_narration: false,
+            extension_snapshots: Vec::new(),
+            pending_tool_call_id: call.id.clone(),
+            conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: call.id.clone(),
+                tool: call.tool.clone(),
+                operation: call.args.clone(),
+                approval_status: AgentApprovalStatus::Required,
+                truncated: false,
+            }],
+            next_conversation_trace_sequence: 1,
+            conversation_trace_truncated: false,
+            model_visible_trace_item_count: 0,
+        };
+        let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://must-not-be-called.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "test-model",
+            "messages": []
+        }))
+        .unwrap();
+        agent_input.context = Some(AgentRunContext {
+            conversation_id: Some("conversation-cancel-before-spawn".to_string()),
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("test".to_string()),
+                root_path: Some(fixture.path().to_string_lossy().into_owned()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions::default(),
+        });
+        agent_input.resume_checkpoint = Some(checkpoint);
+        service
+            .store_pending_action(
+                "run-cancel-before-spawn",
+                "conversation-cancel-before-spawn",
+                "assistant-cancel-before-spawn",
+                AgentProposedAction::Command {
+                    command: command.clone(),
+                },
+                agent_input,
+            )
+            .unwrap();
+
+        let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let approved = service
+            .approve_action("run-cancel-before-spawn", &command.id, notifications)
+            .unwrap();
+        assert_eq!(approved.status, "approved");
+        assert!(service
+            .cancel_action("run-cancel-before-spawn", &command.id)
+            .unwrap());
+        assert!(!fixture.path().join("cancelled-before-spawn").exists());
+
+        let mut saw_cancelled_done = false;
+        let mut saw_cancelled_tool_result = false;
+        for _ in 0..100 {
+            while let Ok(notification) = receiver.try_recv() {
+                if notification["params"]["type"] == "tool_result" {
+                    assert_eq!(notification["params"]["result"]["ok"], false);
+                    assert_eq!(
+                        notification["params"]["result"]["result"]["cancelled"],
+                        true
+                    );
+                    saw_cancelled_tool_result = true;
+                }
+                if notification["params"]["type"] == "done"
+                    && notification["params"]["status"] == "cancelled"
+                {
+                    saw_cancelled_done = true;
+                }
+            }
+            if saw_cancelled_done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(saw_cancelled_done);
+        assert!(saw_cancelled_tool_result);
+        assert!(!fixture.path().join("cancelled-before-spawn").exists());
+    }
+
     #[tokio::test]
     async fn cancelling_run_during_approved_command_finishes_cancelled_without_resuming_model() {
         let fixture = tempdir().unwrap();
@@ -6696,7 +8000,6 @@ mod tests {
                 project_id: None,
                 model_id: "model-1".to_string(),
                 model_name: "Model 1".to_string(),
-                provider_path: None,
                 input_price: None,
                 output_price: None,
                 started_at: 1,
@@ -6753,6 +8056,7 @@ mod tests {
         });
         agent_input.resume_checkpoint = Some(checkpoint);
         let record = PendingActionRecord {
+            storage_id: pending_action_storage_id("run-command-cancel", &command.id),
             snapshot: PendingAgentActionSnapshot {
                 action_id: command.id.clone(),
                 action_type: "command".to_string(),
@@ -6769,11 +8073,23 @@ mod tests {
             },
             agent_input,
         };
+        assert_eq!(
+            service.persist_pending_action(&record).unwrap(),
+            PendingActionStoreOutcome::Inserted
+        );
+        service
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(record.storage_id.clone(), record.clone());
         let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let guard = service
+            .command_runs
+            .register(&record.storage_id, &record.snapshot.run_id);
         let execution_service = service.clone();
         let task = tokio::spawn(async move {
             execution_service
-                .run_command_execution(record, call, notifications)
+                .run_command_execution(record, call, guard, notifications)
                 .await;
         });
 

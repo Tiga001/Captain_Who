@@ -56,7 +56,7 @@ export function createAssistantMessage(
 export function createComposerDraft(overrides: Partial<ChatComposerDraft> = {}): ChatComposerDraft {
   const draft = {
     message: '',
-    permissionMode: 'full',
+    permissionMode: 'default',
     modelId: modelConfig.defaults.selectedModelId,
     projectId: null,
     attachments: [],
@@ -69,9 +69,11 @@ export function createComposerDraft(overrides: Partial<ChatComposerDraft> = {}):
     ...draft,
     modelId: draft.modelId || modelConfig.defaults.selectedModelId,
     permissionMode:
-      draft.permissionMode === 'default' || draft.permissionMode === 'custom'
+      draft.permissionMode === 'default' ||
+      draft.permissionMode === 'custom' ||
+      draft.permissionMode === 'full'
         ? draft.permissionMode
-        : 'full',
+        : 'default',
     attachments: draft.attachments ?? [],
     skills: normalizeSkillSelections(draft.skills)
   }

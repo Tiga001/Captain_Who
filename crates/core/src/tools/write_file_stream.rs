@@ -286,6 +286,7 @@ mod tests {
                 read: AgentReadPermission::WorkspaceOnly,
                 write: AgentWritePermission::WorkspaceOnly,
                 command: AgentCommandPermission::RequireApproval,
+                command_safety: Default::default(),
                 patch: AgentPatchPermission::RequireApproval,
             },
         }))

@@ -312,14 +312,29 @@ pub enum AgentWritePermission {
 
 /// Controls whether approved command proposals require a human click.
 ///
-/// `AutoApprove` only skips the approval prompt. It still runs through the same command
-/// validation, cwd scope checks, timeout, cancellation, and dangerous-command blocking as manual
-/// approval.
+/// Approval and command safety are separate inputs. In guarded mode, `AutoApprove` applies only to
+/// commands the policy permits automatically; high-impact commands may still require an explicit
+/// user approval. Structural validation, cwd checks, timeout, cancellation, and always-denied
+/// operations apply to every path.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentCommandPermission {
     RequireApproval,
     AutoApprove,
+}
+
+/// Controls which command safety policy applies after a command has been authorized.
+///
+/// `Guarded` limits automatic execution and routes high-impact commands to explicit approval.
+/// `FullAccess` permits automatic high-impact commands except operations classified as always
+/// denied. This is intentionally independent from [`AgentCommandPermission`], which expresses the
+/// user's normal approval preference.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandSafetyPolicy {
+    #[default]
+    Guarded,
+    FullAccess,
 }
 
 /// Controls whether file edit proposals require a human click.
@@ -342,6 +357,8 @@ pub struct AgentPermissions {
     pub write: AgentWritePermission,
     pub command: AgentCommandPermission,
     #[serde(default)]
+    pub command_safety: AgentCommandSafetyPolicy,
+    #[serde(default)]
     pub patch: AgentPatchPermission,
 }
 
@@ -351,6 +368,7 @@ impl Default for AgentPermissions {
             read: AgentReadPermission::WorkspaceOnly,
             write: AgentWritePermission::Denied,
             command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::Guarded,
             patch: AgentPatchPermission::RequireApproval,
         }
     }
@@ -548,8 +566,6 @@ pub struct AgentUsageSummaryInput {
 pub struct AgentUsageModelSummary {
     pub model_id: String,
     pub model_name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_path: Option<String>,
     pub is_configured: bool,
     pub request_count: u64,
     pub message_count: u64,
@@ -1207,6 +1223,39 @@ impl From<&str> for AgentError {
 mod tests {
     use super::*;
     use crate::completed_conversation_trace_without_items;
+    use serde_json::json;
+
+    #[test]
+    fn command_safety_policy_defaults_to_guarded_for_legacy_permissions() {
+        let permissions: AgentPermissions = serde_json::from_value(json!({
+            "read": "all",
+            "write": "all",
+            "command": "auto_approve",
+            "patch": "auto_approve"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            permissions.command_safety,
+            AgentCommandSafetyPolicy::Guarded
+        );
+    }
+
+    #[test]
+    fn command_safety_policy_uses_stable_camel_case_field_and_wire_value() {
+        let permissions = AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            patch: AgentPatchPermission::AutoApprove,
+        };
+
+        let serialized = serde_json::to_value(permissions).unwrap();
+
+        assert_eq!(serialized["commandSafety"], "full_access");
+        assert!(serialized.get("command_safety").is_none());
+    }
 
     #[test]
     fn chat_message_serializes_conversation_trace_with_camel_case_protocol_names() {

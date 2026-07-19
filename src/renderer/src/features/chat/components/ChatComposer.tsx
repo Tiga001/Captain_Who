@@ -20,6 +20,7 @@ import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { useModelSettings } from '../../../config/ModelSettingsProvider'
 import { useProjectSettings } from '../../../config/ProjectSettingsProvider'
 import type { TranslationKey } from '../../../config/frontendTranslations'
+import { ConfirmationDialog } from '../../../components/dialog/ConfirmationDialog'
 import { useDismissOnOutsidePointer } from '../../../hooks/useDismissOnOutsidePointer'
 import {
   buildAgentInputAttachments,
@@ -112,6 +113,7 @@ export function ChatComposer({
   const [isAttachmentMenuOpen, setIsAttachmentMenuOpen] = useState(false)
   const [isSkillMenuOpen, setIsSkillMenuOpen] = useState(false)
   const [isPermissionMenuOpen, setIsPermissionMenuOpen] = useState(false)
+  const [isFullPermissionConfirmationOpen, setIsFullPermissionConfirmationOpen] = useState(false)
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false)
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false)
   const [isFileDragActive, setIsFileDragActive] = useState(false)
@@ -225,6 +227,7 @@ export function ChatComposer({
     setAttachmentError(null)
     setIsAttachmentMenuOpen(false)
     setIsSkillMenuOpen(false)
+    setIsFullPermissionConfirmationOpen(false)
     setSkillSearch('')
     setIsFileDragActive(false)
   }, [resetKey])
@@ -250,6 +253,12 @@ export function ChatComposer({
       updateDraft({ permissionMode })
     }
   }, [draft.permissionMode, permissionMode, updateDraft])
+
+  useEffect(() => {
+    if (!permissionModeAvailability.full || permissionMode === 'full') {
+      setIsFullPermissionConfirmationOpen(false)
+    }
+  }, [permissionMode, permissionModeAvailability.full])
 
   useEffect(() => {
     const previousScope = previousSkillScopeRef.current
@@ -349,6 +358,18 @@ export function ChatComposer({
     updateDraft({
       skills: removeSkillSelection(draftRef.current.skills, skillId)
     })
+  }
+
+  const selectPermissionMode = (nextPermissionMode: ChatPermissionMode) => {
+    setIsPermissionMenuOpen(false)
+    if (nextPermissionMode === permissionMode) return
+
+    if (nextPermissionMode === 'full') {
+      setIsFullPermissionConfirmationOpen(true)
+      return
+    }
+
+    updateDraft({ permissionMode: nextPermissionMode })
   }
 
   const toggleSkill = (skill: SkillDescriptor) => {
@@ -656,10 +677,7 @@ export function ChatComposer({
                     data-permission={option.id}
                     data-selected={isSelected || undefined}
                     key={option.id}
-                    onClick={() => {
-                      updateDraft({ permissionMode: option.id })
-                      setIsPermissionMenuOpen(false)
-                    }}
+                    onClick={() => selectPermissionMode(option.id)}
                   >
                     <OptionIcon aria-hidden="true" />
                     <span>{t(option.labelKey)}</span>
@@ -698,9 +716,7 @@ export function ChatComposer({
               }
             }}
           >
-            <span>
-              {selectedModel?.shortName ?? selectedModel?.displayName ?? t('chat.noEnabledModels')}
-            </span>
+            <span>{selectedModel?.displayName ?? t('chat.noEnabledModels')}</span>
             <ChevronDown aria-hidden="true" />
           </button>
 
@@ -725,9 +741,7 @@ export function ChatComposer({
                         setIsModelMenuOpen(false)
                       }}
                     >
-                      <span className="composer-model-option__name">
-                        {model.shortName ?? model.displayName}
-                      </span>
+                      <span className="composer-model-option__name">{model.displayName}</span>
                       <span
                         className="composer-model-option__capability"
                         data-supported={model.supportsImage || undefined}
@@ -858,6 +872,21 @@ export function ChatComposer({
             )}
           </div>
         </div>
+      )}
+      {isFullPermissionConfirmationOpen && (
+        <ConfirmationDialog
+          cancelLabel={t('chat.fullPermissionConfirmCancel')}
+          confirmLabel={t('chat.fullPermissionConfirmAction')}
+          description={t('chat.fullPermissionConfirmDescription')}
+          onCancel={() => setIsFullPermissionConfirmationOpen(false)}
+          onConfirm={() => {
+            if (permissionModeAvailability.full) {
+              updateDraft({ permissionMode: 'full' })
+            }
+            setIsFullPermissionConfirmationOpen(false)
+          }}
+          title={t('chat.fullPermissionConfirmTitle')}
+        />
       )}
     </form>
   )

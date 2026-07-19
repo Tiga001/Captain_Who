@@ -183,8 +183,11 @@ impl CoreServerBootstrap {
                     "failed to register GitHub Skill source resolver: {error}"
                 ))
             })?;
-        let agent_service =
-            AgentService::new(storage.clone()).with_skills_service(Arc::clone(&skills_service));
+        let agent_service = AgentService::try_new(storage.clone())
+            .map_err(|error| {
+                io::Error::other(format!("failed to initialize Agent service: {error}"))
+            })?
+            .with_skills_service(Arc::clone(&skills_service));
         let skill_services = SkillServices {
             catalog: skills_service,
             installations: skill_installation_service,
@@ -1682,7 +1685,7 @@ fn handle_agent_approve_action(
         Err(message) => return response_error(Some(id), -32602, message),
     };
 
-    match agent_service.approve_action(&input.action_id, notification_tx) {
+    match agent_service.approve_action(&input.run_id, &input.action_id, notification_tx) {
         Ok(output) => response_success(id, output),
         Err(message) => response_error(Some(id), -32000, message),
     }
@@ -1699,7 +1702,12 @@ fn handle_agent_reject_action(
         Err(message) => return response_error(Some(id), -32602, message),
     };
 
-    match agent_service.reject_action(&input.action_id, input.message, notification_tx) {
+    match agent_service.reject_action(
+        &input.run_id,
+        &input.action_id,
+        input.message,
+        notification_tx,
+    ) {
         Ok(output) => response_success(id, output),
         Err(message) => response_error(Some(id), -32000, message),
     }
@@ -1715,7 +1723,7 @@ fn handle_agent_cancel_action(
         Err(message) => return response_error(Some(id), -32602, message),
     };
 
-    match agent_service.cancel_action(&input.action_id) {
+    match agent_service.cancel_action(&input.run_id, &input.action_id) {
         Ok(cancelled) => response_success(id, cancelled),
         Err(message) => response_error(Some(id), -32000, message),
     }

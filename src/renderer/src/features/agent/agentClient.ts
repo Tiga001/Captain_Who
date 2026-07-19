@@ -43,19 +43,23 @@ export async function listPendingAgentActions(): Promise<PendingAgentActionSnaps
   return hostClient.agent.listPendingActions()
 }
 
-export async function approveAgentAction(actionId: string): Promise<AgentActionExecutionOutput> {
-  return hostClient.agent.approveAction({ actionId })
+export async function approveAgentAction(
+  runId: string,
+  actionId: string
+): Promise<AgentActionExecutionOutput> {
+  return hostClient.agent.approveAction({ runId, actionId })
 }
 
 export async function rejectAgentAction(
+  runId: string,
   actionId: string,
   message?: string
 ): Promise<AgentActionExecutionOutput> {
-  return hostClient.agent.rejectAction({ actionId, message })
+  return hostClient.agent.rejectAction({ runId, actionId, message })
 }
 
-export async function cancelAgentAction(actionId: string): Promise<boolean> {
-  return hostClient.agent.cancelAction({ actionId })
+export async function cancelAgentAction(runId: string, actionId: string): Promise<boolean> {
+  return hostClient.agent.cancelAction({ runId, actionId })
 }
 
 export async function cancelAgentRun(runId: string): Promise<boolean> {

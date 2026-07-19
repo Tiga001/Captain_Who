@@ -1,10 +1,9 @@
 import type { AgentInputAttachment, AgentPermissions, AgentPromptPreferences } from './agent'
 
 export interface StorageModelConfigRecord {
+  /** Opaque model identifier sent verbatim as the provider API's `model` value. */
   id: string
   displayName: string
-  shortName?: string | null
-  providerPath?: string | null
   /** A model-level connection override is valid only when URL and token are both present. */
   apiUrlOverride?: string | null
   apiTokenOverride?: string | null
@@ -103,6 +102,11 @@ export interface StorageComposerDraftRecord {
   scopeId: string
   message: string
   permissionMode: string
+  /**
+   * Version of the permission-mode semantics under which this choice was made.
+   * Missing/zero values are legacy records and must not grant upgraded privileges.
+   */
+  permissionModeVersion?: number
   modelId?: string | null
   projectId?: string | null
   attachmentsJson: string

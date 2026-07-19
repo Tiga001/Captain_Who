@@ -40,6 +40,158 @@ fn activated_skill(instructions: &str) -> AgentSkillActivation {
     }
 }
 
+fn command_dispatch_fixture(command: &str) -> (AgentToolCall, AgentProposedAction) {
+    let call = AgentToolCall {
+        id: "command-dispatch".to_string(),
+        tool: "run_command".to_string(),
+        args: json!({ "command": command }),
+        approval_status: AgentApprovalStatus::NotRequired,
+        reason: None,
+    };
+    let action = AgentProposedAction::Command {
+        command: crate::protocol::AgentCommandRequest {
+            id: call.id.clone(),
+            command: command.to_string(),
+            cwd: None,
+            timeout_ms: None,
+            approval_status: AgentApprovalStatus::NotRequired,
+            risk_level: None,
+            reason: None,
+        },
+    };
+    (call, action)
+}
+
+fn command_permissions(command_safety: AgentCommandSafetyPolicy) -> AgentPermissions {
+    AgentPermissions {
+        command_safety,
+        ..AgentPermissions::default()
+    }
+}
+
+#[test]
+fn command_dispatch_guarded_automatic_routes_high_impact_work_to_approval() {
+    let (call, action) = command_dispatch_fixture("python3 -m pip install openpyxl");
+
+    let dispatch = prepare_command_dispatch(
+        &call,
+        action,
+        command_permissions(AgentCommandSafetyPolicy::Guarded),
+        None,
+        true,
+    );
+
+    assert!(matches!(dispatch, CommandDispatch::RequireApproval(_)));
+}
+
+#[test]
+fn command_dispatch_applies_read_scope_before_automatic_execution() {
+    let (call, action) = command_dispatch_fixture("cat /etc/passwd");
+    let dispatch = prepare_command_dispatch(
+        &call,
+        action,
+        command_permissions(AgentCommandSafetyPolicy::Guarded),
+        None,
+        true,
+    );
+    assert!(matches!(dispatch, CommandDispatch::RequireApproval(_)));
+
+    let (call, action) = command_dispatch_fixture("cat /etc/passwd");
+    let dispatch = prepare_command_dispatch(
+        &call,
+        action,
+        AgentPermissions {
+            read: crate::protocol::AgentReadPermission::All,
+            command_safety: AgentCommandSafetyPolicy::Guarded,
+            ..AgentPermissions::default()
+        },
+        None,
+        true,
+    );
+    assert!(matches!(dispatch, CommandDispatch::ExecuteAutomatically(_)));
+}
+
+#[test]
+fn command_dispatch_routes_workspace_external_cwd_to_approval() {
+    let (call, mut action) = command_dispatch_fixture("cat local.txt");
+    let AgentProposedAction::Command { command } = &mut action else {
+        unreachable!("fixture always produces a command")
+    };
+    command.cwd = Some("/tmp".to_string());
+
+    let dispatch = prepare_command_dispatch(
+        &call,
+        action,
+        AgentPermissions {
+            read: crate::protocol::AgentReadPermission::WorkspaceOnly,
+            write: crate::protocol::AgentWritePermission::All,
+            command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::Guarded,
+            ..AgentPermissions::default()
+        },
+        Some(Path::new("/workspace")),
+        true,
+    );
+    assert!(matches!(dispatch, CommandDispatch::RequireApproval(_)));
+}
+
+#[test]
+fn command_dispatch_full_access_automatic_executes_high_impact_work() {
+    let (call, action) = command_dispatch_fixture("python3 -m pip install openpyxl");
+
+    let dispatch = prepare_command_dispatch(
+        &call,
+        action,
+        command_permissions(AgentCommandSafetyPolicy::FullAccess),
+        None,
+        true,
+    );
+
+    assert!(matches!(dispatch, CommandDispatch::ExecuteAutomatically(_)));
+}
+
+#[test]
+fn command_dispatch_full_access_returns_structured_rejection_for_catastrophic_command() {
+    let (call, action) = command_dispatch_fixture("sudo rm -rf /");
+
+    let dispatch = prepare_command_dispatch(
+        &call,
+        action,
+        command_permissions(AgentCommandSafetyPolicy::FullAccess),
+        None,
+        true,
+    );
+
+    let CommandDispatch::Reject(result) = dispatch else {
+        panic!("catastrophic command must be rejected");
+    };
+    assert!(!result.ok);
+    let payload = result.result.expect("policy rejection payload");
+    assert_eq!(payload["type"], "command_policy");
+    assert_eq!(payload["decision"], "deny");
+    assert!(payload["code"]
+        .as_str()
+        .is_some_and(|code| !code.is_empty()));
+    assert!(payload["findings"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+}
+
+#[test]
+fn command_dispatch_require_approval_never_auto_executes_an_allowed_command() {
+    let (call, action) = command_dispatch_fixture("git status --short");
+
+    let dispatch = prepare_command_dispatch(
+        &call,
+        action,
+        command_permissions(AgentCommandSafetyPolicy::FullAccess),
+        None,
+        false,
+    );
+
+    assert!(matches!(dispatch, CommandDispatch::RequireApproval(_)));
+}
+
 #[test]
 fn runtime_messages_add_backend_system_prompt() {
     let context = AgentRunContext {
@@ -248,6 +400,44 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         context_compaction_summary: None,
         skill_activation: None,
         messages,
+    }
+}
+
+#[test]
+fn runtime_command_definition_advertises_effective_approval_routing() {
+    for (safety, expected_mode) in [
+        (
+            AgentCommandSafetyPolicy::Guarded,
+            crate::protocol::AgentToolApprovalMode::Dynamic,
+        ),
+        (
+            AgentCommandSafetyPolicy::FullAccess,
+            crate::protocol::AgentToolApprovalMode::Never,
+        ),
+    ] {
+        let mut input = conversation_context_input(vec![message("user", "run a command")]);
+        input.context = Some(AgentRunContext {
+            conversation_id: None,
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: crate::protocol::AgentPermissions {
+                command: crate::protocol::AgentCommandPermission::AutoApprove,
+                command_safety: safety,
+                ..Default::default()
+            },
+        });
+
+        let capabilities =
+            prepare_runtime_capabilities(&input, "command-definition", &[], true).unwrap();
+        let definition = capabilities
+            .tool_definitions
+            .iter()
+            .find(|definition| definition.name == "run_command")
+            .expect("run_command definition");
+
+        assert!(!definition.requires_approval);
+        assert_eq!(definition.approval_mode, expected_mode);
     }
 }
 
@@ -1220,6 +1410,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
                 read: AgentReadPermission::WorkspaceOnly,
                 write: AgentWritePermission::WorkspaceOnly,
                 command: AgentCommandPermission::RequireApproval,
+                command_safety: Default::default(),
                 patch: AgentPatchPermission::RequireApproval,
             },
         }),
@@ -1474,6 +1665,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
                 read: AgentReadPermission::WorkspaceOnly,
                 write: AgentWritePermission::WorkspaceOnly,
                 command: AgentCommandPermission::RequireApproval,
+                command_safety: Default::default(),
                 patch: AgentPatchPermission::RequireApproval,
             },
         }),
@@ -1713,6 +1905,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
                 read: AgentReadPermission::WorkspaceOnly,
                 write: AgentWritePermission::WorkspaceOnly,
                 command: AgentCommandPermission::RequireApproval,
+                command_safety: Default::default(),
                 patch: AgentPatchPermission::RequireApproval,
             },
         }),

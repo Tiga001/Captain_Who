@@ -28,6 +28,10 @@ import type {
 } from '../chat/chatTypes'
 import { normalizeSkillSelections, parseStoredSkillSelections } from '../skills/skillSelection'
 import { hostClient } from '../../host/hostClient'
+import {
+  normalizeStoredComposerPermissionMode,
+  serializeComposerPermissionMode
+} from './composerPermissionModePersistence'
 
 export interface ModelSettingsSnapshot {
   apiUrl: string
@@ -263,6 +267,7 @@ export function defaultUiPreferences(): UiPreferencesSnapshot {
       read: 'workspace_only',
       write: 'workspace_only',
       command: 'require_approval',
+      commandSafety: 'guarded',
       patch: 'require_approval'
     },
     updatedAt: 0
@@ -293,8 +298,6 @@ function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
   return {
     id: model.id,
     displayName: model.displayName,
-    shortName: model.shortName ?? undefined,
-    providerPath: model.providerPath ?? undefined,
     apiUrlOverride: model.apiUrlOverride ?? undefined,
     apiTokenOverride: model.apiTokenOverride ?? undefined,
     supportsImage: model.supportsImage,
@@ -308,8 +311,6 @@ function mapModelFromStorage(model: StorageModelConfigRecord): ModelConfig {
 function mapModelToStorage(model: ModelConfig): StorageModelConfigRecord {
   return {
     ...model,
-    shortName: model.shortName ?? null,
-    providerPath: model.providerPath ?? null,
     apiUrlOverride: model.apiUrlOverride ?? null,
     apiTokenOverride: model.apiTokenOverride ?? null,
     contextWindowTokens: model.contextWindowTokens ?? null
@@ -427,10 +428,10 @@ function mapDraftsFromStorage(
 function mapDraftFromStorage(draft: StorageComposerDraftRecord): ChatComposerDraft {
   return {
     message: draft.message,
-    permissionMode:
-      draft.permissionMode === 'full' || draft.permissionMode === 'custom'
-        ? draft.permissionMode
-        : 'default',
+    permissionMode: normalizeStoredComposerPermissionMode(
+      draft.permissionMode,
+      draft.permissionModeVersion
+    ),
     modelId: draft.modelId ?? '',
     projectId: draft.projectId ?? null,
     attachments: parseDraftAttachments(draft.attachmentsJson),
@@ -443,7 +444,7 @@ function mapDraftToStorage(scopeId: string, draft: ChatComposerDraft): StorageCo
   return {
     scopeId,
     message: draft.message,
-    permissionMode: draft.permissionMode,
+    ...serializeComposerPermissionMode(draft.permissionMode),
     modelId: draft.modelId || null,
     projectId: draft.projectId,
     attachmentsJson: JSON.stringify(draft.attachments),
@@ -497,7 +498,8 @@ function normalizeUiPreferences(
     ),
     customPermissions: {
       ...defaultUiPreferences().customPermissions,
-      ...preferences?.customPermissions
+      ...preferences?.customPermissions,
+      commandSafety: 'guarded'
     },
     updatedAt: typeof preferences?.updatedAt === 'number' ? preferences.updatedAt : Date.now()
   }

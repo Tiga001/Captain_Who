@@ -660,6 +660,7 @@ mod tests {
                 read: AgentReadPermission::WorkspaceOnly,
                 write: AgentWritePermission::Denied,
                 command: AgentCommandPermission::RequireApproval,
+                command_safety: Default::default(),
                 patch: AgentPatchPermission::RequireApproval,
             },
         )
@@ -762,6 +763,7 @@ mod tests {
             read: AgentReadPermission::WorkspaceOnly,
             write: AgentWritePermission::WorkspaceOnly,
             command: AgentCommandPermission::RequireApproval,
+            command_safety: Default::default(),
             patch: AgentPatchPermission::RequireApproval,
         }
     }
@@ -771,6 +773,7 @@ mod tests {
             read: AgentReadPermission::All,
             write: AgentWritePermission::All,
             command: AgentCommandPermission::RequireApproval,
+            command_safety: Default::default(),
             patch: AgentPatchPermission::RequireApproval,
         }
     }

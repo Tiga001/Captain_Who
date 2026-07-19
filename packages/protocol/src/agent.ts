@@ -27,10 +27,21 @@ export type AgentWritePermission = 'denied' | 'workspace_only' | 'all'
 
 /**
  * Controls whether run_command requires a human click.
- * auto_approve only skips the prompt; backend command validation and dangerous-command blocking
- * still apply.
+ * Approval and command safety are separate inputs. In guarded mode, auto_approve applies only to
+ * commands the policy permits automatically; high-impact commands may still require explicit user
+ * approval.
  */
 export type AgentCommandPermission = 'require_approval' | 'auto_approve'
+
+/**
+ * Controls how broadly an authorized command may execute.
+ * - guarded: auto-run low-risk commands and route high-impact commands to explicit approval.
+ * - full_access: auto-run high-impact commands except operations that are always denied.
+ *
+ * This is independent from command approval: approval decides who authorizes a command, while
+ * commandSafety decides which policy applies after authorization.
+ */
+export type AgentCommandSafetyPolicy = 'guarded' | 'full_access'
 
 /**
  * Controls whether file-edit proposals from apply_patch and write_file require a human click.
@@ -42,6 +53,7 @@ export interface AgentPermissions {
   read: AgentReadPermission
   write: AgentWritePermission
   command: AgentCommandPermission
+  commandSafety: AgentCommandSafetyPolicy
   patch: AgentPatchPermission
 }
 
@@ -152,6 +164,40 @@ export type AgentCommandOutputStream = 'stdout' | 'stderr'
 
 export type AgentCommandRiskLevel =
   'read_only' | 'writes_workspace' | 'network' | 'destructive' | 'unknown'
+
+export type AgentCommandPolicyDecision = 'allow' | 'require_explicit_approval' | 'deny'
+
+export type AgentCommandRiskClass =
+  | 'read_only'
+  | 'safe_workspace_write'
+  | 'direct_write'
+  | 'network'
+  | 'package_management'
+  | 'high_impact'
+  | 'unknown'
+  | 'catastrophic'
+  | 'unsupported'
+  | 'external_read'
+
+export interface AgentCommandPolicyFinding {
+  segmentIndex: number
+  program: string
+  risk: AgentCommandRiskClass
+  /** Stable discriminator for UI routing and telemetry. */
+  code: string
+  /** Human-readable diagnostic; callers must not branch on this text. */
+  reason: string
+}
+
+export interface AgentCommandPolicyEvaluation {
+  decision: AgentCommandPolicyDecision
+  /** Stable summary discriminator for UI routing and telemetry. */
+  code: string
+  /** Human-readable diagnostic; callers must not branch on this text. */
+  reason: string
+  riskLevel: AgentCommandRiskLevel
+  findings: AgentCommandPolicyFinding[]
+}
 
 export interface AgentChatMessage {
   messageId?: string
@@ -287,7 +333,6 @@ export interface AgentUsageSummaryInput {
 export interface AgentUsageModelSummary {
   modelId: string
   modelName: string
-  providerPath?: string
   isConfigured: boolean
   requestCount: number
   messageCount: number
@@ -353,6 +398,8 @@ export interface AgentCommandExecutionResult {
   stdoutTruncated: boolean
   stderrTruncated: boolean
   error?: string
+  /** Present when execution was stopped by the authoritative backend command policy. */
+  policyEvaluation?: AgentCommandPolicyEvaluation
 }
 
 export interface AgentActionExecutionOutput {
@@ -640,16 +687,18 @@ export interface AgentCancelRunResponse {
 }
 
 export interface AgentActionIdRequest {
+  runId: string
   actionId: string
 }
 
 export interface AgentRejectActionRequest {
+  runId: string
   actionId: string
   message?: string
 }
 
 export type PendingAgentActionStatus =
-  'pending' | 'approved' | 'rejected' | 'cancelled' | 'completed' | 'failed'
+  'pending' | 'approved' | 'executing' | 'rejected' | 'cancelled' | 'completed' | 'failed'
 
 export interface PendingAgentActionSnapshot {
   actionId: string

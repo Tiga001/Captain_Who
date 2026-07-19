@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mycopilot_core::command::AgentCommandExecutionResult;
+use mycopilot_core::command::{AgentCommandExecutionResult, CommandPolicyEvaluation};
 use mycopilot_core::file_write::{apply_file_write, failed_file_write_result};
 use mycopilot_core::patch::apply_unified_diff_in_workspace;
 use mycopilot_core::skills::SkillsService;
 use mycopilot_core::storage::models::{
     AgentPromptPreferencesRecord, ChatConversationRecord, ChatMessageAttachmentRecord,
-    ChatMessageRecord, ModelConfigRecord, ProjectRecord,
+    ChatMessageRecord, ProjectRecord,
 };
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::{
@@ -35,6 +35,8 @@ use serde_json::{json, Value};
 
 #[derive(Clone)]
 pub(super) struct PendingActionRecord {
+    /// Backend-owned durable identity. Provider tool-call ids are only unique within a run.
+    pub(super) storage_id: String,
     pub(super) snapshot: PendingAgentActionSnapshot,
     pub(super) agent_input: AgentChatInput,
 }
@@ -58,7 +60,6 @@ pub(super) struct AgentRunUsageContext {
     pub(super) project_id: Option<String>,
     pub(super) model_id: String,
     pub(super) model_name: String,
-    pub(super) provider_path: Option<String>,
     pub(super) input_price: Option<String>,
     pub(super) output_price: Option<String>,
     pub(super) started_at: i64,
@@ -85,6 +86,7 @@ pub(super) struct ActionExecutionDecision {
 pub enum PendingActionStatus {
     Pending,
     Approved,
+    Executing,
     Rejected,
     Cancelled,
     Completed,
@@ -95,6 +97,7 @@ pub(super) fn pending_status_label(status: PendingActionStatus) -> &'static str 
     match status {
         PendingActionStatus::Pending => "pending",
         PendingActionStatus::Approved => "approved",
+        PendingActionStatus::Executing => "executing",
         PendingActionStatus::Rejected => "rejected",
         PendingActionStatus::Cancelled => "cancelled",
         PendingActionStatus::Completed => "completed",
@@ -438,7 +441,7 @@ pub(super) fn prepare_conversation_turn(
     let agent_input = AgentChatInput {
         api_url: connection.api_url,
         api_token: connection.api_token,
-        model: model_provider_path(&model),
+        model: model.id.clone(),
         api_style: None,
         context_window_tokens: model.context_window_tokens,
         context_window_indicator_enabled: input.context_window_indicator_enabled,
@@ -479,7 +482,6 @@ pub(super) fn prepare_conversation_turn(
             project_id: resolved_project_id.clone(),
             model_id: model.id.clone(),
             model_name: model.display_name.clone(),
-            provider_path: model.provider_path.clone(),
             input_price: Some(model.input_price.clone()),
             output_price: Some(model.output_price.clone()),
             started_at: timestamp,
@@ -720,16 +722,6 @@ pub(super) fn search_mode_from_storage(value: &str) -> AgentSearchMode {
     }
 }
 
-pub(super) fn model_provider_path(model: &ModelConfigRecord) -> String {
-    model
-        .provider_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(model.id.as_str())
-        .to_string()
-}
-
 pub(super) fn normalized_optional(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -837,6 +829,11 @@ pub(super) fn action_id_for_action(action: &AgentProposedAction) -> String {
         AgentProposedAction::FileWrite { file_write } => file_write.id.clone(),
         AgentProposedAction::Command { command } => command.id.clone(),
     }
+}
+
+/// Stable backend identity for a provider-scoped action id.
+pub(super) fn pending_action_storage_id(run_id: &str, action_id: &str) -> String {
+    format!("v2:{}:{run_id}:{action_id}", run_id.len())
 }
 
 pub(super) fn action_type_for_action(action: &AgentProposedAction) -> &'static str {
@@ -1272,6 +1269,7 @@ pub(super) fn command_tool_result(
 pub(super) fn failed_command_result(
     request: &AgentCommandRequest,
     error: String,
+    policy_evaluation: Option<CommandPolicyEvaluation>,
 ) -> AgentCommandExecutionResult {
     AgentCommandExecutionResult {
         command: request.command.clone(),
@@ -1285,6 +1283,26 @@ pub(super) fn failed_command_result(
         stdout_truncated: false,
         stderr_truncated: false,
         error: Some(error),
+        policy_evaluation,
+    }
+}
+
+pub(super) fn cancelled_command_result(
+    request: &AgentCommandRequest,
+) -> AgentCommandExecutionResult {
+    AgentCommandExecutionResult {
+        command: request.command.clone(),
+        cwd: request.cwd.clone().unwrap_or_else(|| ".".to_string()),
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: false,
+        cancelled: true,
+        duration_ms: 0,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        error: None,
+        policy_evaluation: None,
     }
 }
 
@@ -1380,6 +1398,7 @@ mod tests {
             stdout_truncated: false,
             stderr_truncated: true,
             error: None,
+            policy_evaluation: None,
         };
 
         let result = command_tool_result("command-1", false, &execution);
@@ -1397,5 +1416,47 @@ mod tests {
         assert_eq!(observation["cancelled"], false);
         assert_eq!(observation["stdoutTruncated"], false);
         assert_eq!(observation["stderrTruncated"], true);
+    }
+
+    #[test]
+    fn policy_rejection_keeps_stable_structured_diagnostics_in_tool_result() {
+        use mycopilot_core::command::{
+            evaluate_command_policy, CommandAuthorizationSource, CommandPolicyDecision,
+        };
+        use mycopilot_core::AgentCommandSafetyPolicy;
+
+        let request = AgentCommandRequest {
+            id: "command-policy-1".to_string(),
+            command: "rm -rf /".to_string(),
+            cwd: None,
+            timeout_ms: Some(5_000),
+            approval_status: mycopilot_core::AgentApprovalStatus::Approved,
+            risk_level: None,
+            reason: None,
+        };
+        let evaluation = evaluate_command_policy(
+            &request.command,
+            AgentCommandSafetyPolicy::FullAccess,
+            CommandAuthorizationSource::Automatic,
+        );
+        assert_eq!(evaluation.decision, CommandPolicyDecision::Deny);
+        let execution = failed_command_result(
+            &request,
+            "命令已被安全策略拒绝。".to_string(),
+            Some(evaluation),
+        );
+
+        let result = command_tool_result(&request.id, false, &execution);
+        let observation = result.result.expect("structured policy observation");
+
+        assert_eq!(observation["policyEvaluation"]["decision"], "deny");
+        assert_eq!(
+            observation["policyEvaluation"]["code"],
+            "command.catastrophic.filesystem_root"
+        );
+        assert_eq!(
+            observation["policyEvaluation"]["findings"][0]["risk"],
+            "catastrophic"
+        );
     }
 }

@@ -20,17 +20,86 @@ use crate::storage::{
     skill_enablement_repository, storage_error, usage_repository, StorageState,
 };
 use crate::{
-    AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachment,
-    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentToolResult, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    AgentAttachmentLibraryContext, AgentAttachmentReference, AgentChatInput, AgentInputAttachment,
+    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentProposedAction, AgentToolResult,
+    AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     ContextCompactionAuditBundle, ContextCompactionPrefix, ContextCompactionReceipt,
     ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
-    ConversationTurnTrace, ModelRequestObservation,
+    ConversationTurnTrace, ConversationTurnTraceItem, ModelRequestObservation,
 };
 use base64::Engine;
+use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
 const MAX_SKILL_ENABLEMENT_ID_BYTES: usize = 16 * 1024;
+
+fn is_valid_pending_successor(
+    interrupted: &AgentPendingActionRecord,
+    candidate: &AgentPendingActionRecord,
+) -> bool {
+    if !is_pending_successor_candidate(interrupted, candidate) {
+        return false;
+    }
+    let Ok(action) = serde_json::from_str::<AgentProposedAction>(&candidate.action_json) else {
+        return false;
+    };
+    let action_id = match &action {
+        AgentProposedAction::ToolCall { call } => call.id.as_str(),
+        AgentProposedAction::Diff { diff } => diff.id.as_str(),
+        AgentProposedAction::FileWrite { file_write } => file_write.id.as_str(),
+        AgentProposedAction::Command { command } => command.id.as_str(),
+    };
+    if candidate.tool_call_id.as_deref() != Some(action_id) {
+        return false;
+    }
+    let Ok(input) = serde_json::from_str::<AgentChatInput>(&candidate.agent_input_json) else {
+        return false;
+    };
+    let Some(checkpoint) = input.resume_checkpoint.as_ref() else {
+        return false;
+    };
+    if checkpoint.run_id != candidate.run_id || checkpoint.pending_tool_call_id != action_id {
+        return false;
+    }
+    let Some(parent_call_id) = interrupted.tool_call_id.as_deref() else {
+        return false;
+    };
+    let parent_result_sequence =
+        checkpoint
+            .conversation_trace_items
+            .iter()
+            .find_map(|item| match item {
+                ConversationTurnTraceItem::ToolResult {
+                    sequence, call_id, ..
+                } if call_id == parent_call_id => Some(*sequence),
+                _ => None,
+            });
+    let child_call_sequence =
+        checkpoint
+            .conversation_trace_items
+            .iter()
+            .find_map(|item| match item {
+                ConversationTurnTraceItem::ToolCall {
+                    sequence, call_id, ..
+                } if call_id == action_id => Some(*sequence),
+                _ => None,
+            });
+    matches!(
+        (parent_result_sequence, child_call_sequence),
+        (Some(parent), Some(child)) if parent < child
+    )
+}
+
+fn is_pending_successor_candidate(
+    interrupted: &AgentPendingActionRecord,
+    candidate: &AgentPendingActionRecord,
+) -> bool {
+    candidate.status == "pending"
+        && candidate.action_id != interrupted.action_id
+        && candidate.run_id == interrupted.run_id
+        && candidate.conversation_id == interrupted.conversation_id
+        && candidate.assistant_message_id == interrupted.assistant_message_id
+}
 
 pub struct StorageService {
     state: StorageState,
@@ -641,6 +710,37 @@ impl StorageService {
         trace_created_at: i64,
         completed_at: i64,
     ) -> Result<(), String> {
+        self.finalize_chat_message_with_conversation_trace_and_usage(
+            conversation_id,
+            message_id,
+            content,
+            message_status,
+            run_status,
+            trace,
+            trace_created_at,
+            completed_at,
+            None,
+        )
+    }
+
+    /// Atomically commits every durable fact that makes an agent run terminal.
+    ///
+    /// A terminal assistant message, its trace, and its usage row form one visibility boundary.
+    /// Keeping the optional usage write in this transaction prevents a retryable pending action
+    /// from being exposed after its assistant message has already become terminal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_chat_message_with_conversation_trace_and_usage(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        content: &str,
+        message_status: Option<&str>,
+        run_status: &str,
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        completed_at: i64,
+        usage: Option<&AgentUsageRecordInsert>,
+    ) -> Result<(), String> {
         let mut connection = self.state.connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         chat_repository::update_message_status_and_content(
@@ -668,6 +768,9 @@ impl StorageService {
             completed_at,
         )
         .map_err(storage_error)?;
+        if let Some(usage) = usage {
+            usage_repository::upsert_usage_record(&transaction, usage).map_err(storage_error)?;
+        }
         transaction.commit().map_err(storage_error)
     }
 
@@ -901,13 +1004,21 @@ impl StorageService {
 
     pub fn load_composer_drafts(&self) -> Result<Vec<ComposerDraftRecord>, String> {
         let connection = self.state.connection()?;
-        composer_draft_repository::list_composer_drafts(&connection).map_err(storage_error)
+        composer_draft_repository::list_composer_drafts(&connection)
+            .map(|drafts| {
+                drafts
+                    .into_iter()
+                    .map(ComposerDraftRecord::normalize_permission_mode)
+                    .collect()
+            })
+            .map_err(storage_error)
     }
 
     pub fn save_composer_draft(
         &self,
         draft: ComposerDraftRecord,
     ) -> Result<ComposerDraftRecord, String> {
+        let draft = draft.normalize_permission_mode();
         let connection = self.state.connection()?;
         ensure_project_reference_exists(&connection, draft.project_id.as_deref())?;
         composer_draft_repository::save_composer_draft(&connection, draft.clone())
@@ -1057,13 +1168,23 @@ impl StorageService {
             .map_err(storage_error)
     }
 
-    pub fn upsert_pending_agent_action(
+    pub fn store_pending_agent_action(
         &self,
         record: AgentPendingActionRecord,
-    ) -> Result<(), String> {
+    ) -> Result<pending_action_repository::PendingActionStoreOutcome, String> {
         let connection = self.state.connection()?;
-        pending_action_repository::upsert_pending_action(&connection, &record)
-            .map_err(storage_error)
+        let outcome = pending_action_repository::store_pending_action(&connection, &record)
+            .map_err(storage_error)?;
+        match outcome {
+            pending_action_repository::PendingActionStoreOutcome::Conflict {
+                ref existing_run_id,
+                ref existing_status,
+            } => Err(format!(
+                "待审批操作 actionId={} 已属于 runId={}（status={}）；拒绝覆盖冻结快照。",
+                record.action_id, existing_run_id, existing_status
+            )),
+            _ => Ok(outcome),
+        }
     }
 
     pub fn list_pending_agent_actions(&self) -> Result<Vec<AgentPendingActionRecord>, String> {
@@ -1071,9 +1192,238 @@ impl StorageService {
         pending_action_repository::list_pending_actions(&connection).map_err(storage_error)
     }
 
+    pub fn reconcile_interrupted_pending_agent_actions(
+        &self,
+        updated_at: i64,
+    ) -> Result<Vec<AgentPendingActionRecord>, String> {
+        const INTERRUPTION_REASON: &str =
+            "The application exited after approval; command outcome is unknown and was not replayed.";
+        let mut connection = self.state.connection()?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let interrupted = pending_action_repository::list_interrupted_actions(&transaction)
+            .map_err(storage_error)?;
+        let pending_successors =
+            pending_action_repository::list_pending_actions(&transaction).map_err(storage_error)?;
+        let mut retired_successors = HashSet::new();
+        let mut claimed_successors = HashSet::new();
+        for record in &interrupted {
+            let durable_run_status = match (
+                record.conversation_id.as_deref(),
+                record.assistant_message_id.as_deref(),
+            ) {
+                (Some(conversation_id), Some(message_id)) => {
+                    let raw = transaction
+                        .query_row(
+                            "SELECT agent_run_json FROM messages
+                         WHERE conversation_id = ?1 AND id = ?2",
+                            rusqlite::params![conversation_id, message_id],
+                            |row| row.get::<_, Option<String>>(0),
+                        )
+                        .optional()
+                        .map_err(storage_error)?
+                        .flatten();
+                    raw.map(|raw| {
+                        serde_json::from_str::<serde_json::Value>(&raw)
+                            .map_err(|error| {
+                                format!(
+                                    "无法解析中断操作 {} 的 agent run 状态：{error}",
+                                    record.action_id
+                                )
+                            })
+                            .map(|run| {
+                                run.get("status")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(ToString::to_string)
+                            })
+                    })
+                    .transpose()?
+                    .flatten()
+                }
+                _ => None,
+            };
+            let reconciled_status = match record.target_status.as_deref() {
+                Some(status @ ("completed" | "failed" | "rejected" | "cancelled")) => status,
+                None => {
+                    let affected = pending_action_repository::set_pending_action_target_status(
+                        &transaction,
+                        &record.action_id,
+                        &record.status,
+                        "failed",
+                        updated_at,
+                    )
+                    .map_err(storage_error)?;
+                    if affected != 1 {
+                        return Err(format!(
+                            "启动对账无法为旧待审批操作 {} 写入 failed 目标终态。",
+                            record.action_id
+                        ));
+                    }
+                    "failed"
+                }
+                Some(status) => {
+                    return Err(format!(
+                        "启动对账发现待审批操作 {} 的目标终态无效：{status}",
+                        record.action_id
+                    ));
+                }
+            };
+            let affected = pending_action_repository::transition_pending_action(
+                &transaction,
+                &record.action_id,
+                &record.status,
+                reconciled_status,
+                "{}",
+                updated_at,
+            )
+            .map_err(storage_error)?;
+            if affected != 1 {
+                return Err(format!(
+                    "启动对账无法以 CAS 迁移待审批操作 {}（expectedStatus={}）。",
+                    record.action_id, record.status
+                ));
+            }
+            let successor_candidates = pending_successors
+                .iter()
+                .filter(|candidate| {
+                    !retired_successors.contains(&candidate.action_id)
+                        && is_pending_successor_candidate(record, candidate)
+                })
+                .collect::<Vec<_>>();
+            let valid_successors = successor_candidates
+                .iter()
+                .copied()
+                .filter(|candidate| is_valid_pending_successor(record, candidate))
+                .collect::<Vec<_>>();
+            if valid_successors.len() > 1 {
+                return Err(format!(
+                    "启动对账发现 action {} 存在多个合法待审批后继。",
+                    record.action_id
+                ));
+            }
+            for candidate in successor_candidates
+                .iter()
+                .copied()
+                .filter(|candidate| !is_valid_pending_successor(record, candidate))
+            {
+                let target_affected = pending_action_repository::set_pending_action_target_status(
+                    &transaction,
+                    &candidate.action_id,
+                    "pending",
+                    "cancelled",
+                    updated_at,
+                )
+                .map_err(storage_error)?;
+                if target_affected != 1 {
+                    return Err(format!(
+                        "启动对账无法取消无效待审批后继 {}。",
+                        candidate.action_id
+                    ));
+                }
+                let transition_affected = pending_action_repository::transition_pending_action(
+                    &transaction,
+                    &candidate.action_id,
+                    "pending",
+                    "cancelled",
+                    "{}",
+                    updated_at,
+                )
+                .map_err(storage_error)?;
+                if transition_affected != 1 {
+                    return Err(format!(
+                        "启动对账无法终结无效待审批后继 {}。",
+                        candidate.action_id
+                    ));
+                }
+                retired_successors.insert(candidate.action_id.clone());
+            }
+            let valid_successor = valid_successors.first().copied();
+            if let Some(successor) = valid_successor {
+                if !claimed_successors.insert(successor.action_id.clone()) {
+                    return Err(format!(
+                        "启动对账发现待审批后继 {} 被多个父操作声明。",
+                        successor.action_id
+                    ));
+                }
+                if matches!(
+                    durable_run_status.as_deref(),
+                    Some("completed" | "failed" | "cancelled")
+                ) {
+                    return Err(format!(
+                        "启动对账发现 run {} 同时存在终态 assistant 与合法待审批后继。",
+                        record.run_id
+                    ));
+                }
+                if let (Some(conversation_id), Some(message_id)) = (
+                    record.conversation_id.as_deref(),
+                    record.assistant_message_id.as_deref(),
+                ) {
+                    chat_repository::update_message_run_waiting_state(
+                        &transaction,
+                        conversation_id,
+                        message_id,
+                        &record.run_id,
+                        updated_at,
+                    )
+                    .map_err(storage_error)?;
+                }
+                transaction
+                    .execute(
+                        "UPDATE agent_usage_records
+                         SET status = 'waiting_for_approval', error = NULL, completed_at = NULL
+                         WHERE run_id = ?1
+                           AND COALESCE(status, '') NOT IN ('completed', 'failed', 'cancelled')",
+                        [&record.run_id],
+                    )
+                    .map_err(storage_error)?;
+                continue;
+            }
+            if matches!(
+                durable_run_status.as_deref(),
+                Some("completed" | "failed" | "cancelled")
+            ) {
+                transaction
+                    .execute(
+                        "UPDATE agent_usage_records
+                         SET status = ?2, completed_at = COALESCE(completed_at, ?3)
+                         WHERE run_id = ?1
+                           AND COALESCE(status, '') NOT IN ('completed', 'failed', 'cancelled')",
+                        rusqlite::params![record.run_id, durable_run_status, updated_at],
+                    )
+                    .map_err(storage_error)?;
+                continue;
+            }
+            if let (Some(conversation_id), Some(message_id)) = (
+                record.conversation_id.as_deref(),
+                record.assistant_message_id.as_deref(),
+            ) {
+                chat_repository::update_message_run_terminal_state(
+                    &transaction,
+                    conversation_id,
+                    message_id,
+                    Some("error"),
+                    "failed",
+                    updated_at,
+                )
+                .map_err(storage_error)?;
+            }
+            transaction
+                .execute(
+                    "UPDATE agent_usage_records
+                     SET status = 'failed', error = ?2, completed_at = ?3
+                     WHERE run_id = ?1
+                       AND COALESCE(status, '') NOT IN ('completed', 'failed', 'cancelled')",
+                    rusqlite::params![record.run_id, INTERRUPTION_REASON, updated_at],
+                )
+                .map_err(storage_error)?;
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(interrupted)
+    }
+
     pub fn transition_pending_agent_action(
         &self,
         action_id: &str,
+        expected_status: &str,
         status: &str,
         agent_input_json: &str,
         updated_at: i64,
@@ -1082,6 +1432,7 @@ impl StorageService {
         let affected = pending_action_repository::transition_pending_action(
             &connection,
             action_id,
+            expected_status,
             status,
             agent_input_json,
             updated_at,
@@ -1090,6 +1441,30 @@ impl StorageService {
         if affected != 1 {
             return Err(format!(
                 "待审批操作状态迁移必须且只能更新一条记录，actionId={action_id}，实际更新 {affected} 条。"
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn set_pending_agent_action_target_status(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        target_status: &str,
+        updated_at: i64,
+    ) -> Result<(), String> {
+        let connection = self.state.connection()?;
+        let affected = pending_action_repository::set_pending_action_target_status(
+            &connection,
+            action_id,
+            expected_status,
+            target_status,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        if affected != 1 {
+            return Err(format!(
+                "待审批操作目标终态写入必须且只能更新一条记录，actionId={action_id}，expectedStatus={expected_status}，实际更新 {affected} 条。"
             ));
         }
         Ok(())
@@ -1619,8 +1994,6 @@ mod tests {
             models: vec![ModelConfigRecord {
                 id: "model-a".to_string(),
                 display_name: "Model A".to_string(),
-                short_name: None,
-                provider_path: None,
                 api_url_override: None,
                 api_token_override: None,
                 supports_image: false,
@@ -1653,8 +2026,6 @@ mod tests {
             models: vec![ModelConfigRecord {
                 id: "model-a".to_string(),
                 display_name: "Model A".to_string(),
-                short_name: None,
-                provider_path: None,
                 api_url_override: None,
                 api_token_override: None,
                 supports_image: false,
@@ -1686,8 +2057,6 @@ mod tests {
             models: vec![ModelConfigRecord {
                 id: "model-a".to_string(),
                 display_name: "Model A".to_string(),
-                short_name: None,
-                provider_path: None,
                 api_url_override: Some("https://model.example/v1".to_string()),
                 api_token_override: Some("model-token".to_string()),
                 supports_image: false,
@@ -2053,6 +2422,43 @@ mod tests {
     }
 
     #[test]
+    fn composer_drafts_only_preserve_full_for_current_permission_semantics() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+
+        let mut legacy = composer_draft("legacy", None, "legacy full");
+        legacy.permission_mode = "full".to_string();
+        legacy.permission_mode_version = 0;
+        let legacy = service.save_composer_draft(legacy).unwrap();
+        assert_eq!(legacy.permission_mode, "default");
+
+        let mut current = composer_draft("current", None, "current full");
+        current.permission_mode = "full".to_string();
+        current.permission_mode_version =
+            crate::storage::models::CURRENT_COMPOSER_PERMISSION_MODE_VERSION;
+        let current = service.save_composer_draft(current).unwrap();
+        assert_eq!(current.permission_mode, "full");
+
+        let stored = service.load_composer_drafts().unwrap();
+        assert_eq!(
+            stored
+                .iter()
+                .find(|draft| draft.scope_id == "legacy")
+                .unwrap()
+                .permission_mode,
+            "default"
+        );
+        assert_eq!(
+            stored
+                .iter()
+                .find(|draft| draft.scope_id == "current")
+                .unwrap()
+                .permission_mode,
+            "full"
+        );
+    }
+
+    #[test]
     fn stale_saves_cannot_recreate_deleted_project_data() {
         let fixture = StorageFixture::new();
         let service = fixture.service();
@@ -2112,7 +2518,7 @@ mod tests {
             .upsert_agent_usage(agent_usage_record("conversation-1", "message-1"))
             .unwrap();
         service
-            .upsert_pending_agent_action(pending_action("action-1", "conversation-1"))
+            .store_pending_agent_action(pending_action("action-1", "conversation-1"))
             .unwrap();
         service
             .upsert_agent_action_audit(action_audit("action-1", "conversation-1"))
@@ -2164,6 +2570,438 @@ mod tests {
         assert_eq!(rollup_count, 1);
         assert_eq!(pending_count, 0);
         assert_eq!(audit_count, 0);
+    }
+
+    #[test]
+    fn startup_reconciliation_marks_interrupted_action_message_and_usage_failed() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let mut interrupted_conversation = conversation(
+            "conversation-interrupted",
+            Some("project-1"),
+            "assistant-interrupted",
+        );
+        let message = &mut interrupted_conversation.messages[0];
+        message.role = "assistant".to_string();
+        message.status = Some("pending".to_string());
+        message.agent_run_json = Some(
+            serde_json::json!({
+                "status": "waiting_for_approval",
+                "state": {
+                    "status": "waiting_for_approval",
+                    "activeRunId": "run-1",
+                    "updatedAt": 1
+                }
+            })
+            .to_string(),
+        );
+        service.save_conversation(interrupted_conversation).unwrap();
+        let mut usage = agent_usage_record("conversation-interrupted", "assistant-interrupted");
+        usage.status = Some("running".to_string());
+        usage.completed_at = None;
+        service.upsert_agent_usage(usage).unwrap();
+        let mut pending = pending_action("action-interrupted", "conversation-interrupted");
+        pending.assistant_message_id = Some("assistant-interrupted".to_string());
+        pending.status = "approved".to_string();
+        pending.agent_input_json = "sensitive continuation".to_string();
+        service.store_pending_agent_action(pending).unwrap();
+
+        let reconciled = service
+            .reconcile_interrupted_pending_agent_actions(42)
+            .unwrap();
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].status, "approved");
+        assert!(service.list_pending_agent_actions().unwrap().is_empty());
+
+        let conversation = service
+            .load_conversation("conversation-interrupted")
+            .unwrap()
+            .unwrap();
+        let message = &conversation.messages[0];
+        assert_eq!(message.status.as_deref(), Some("error"));
+        let run: serde_json::Value =
+            serde_json::from_str(message.agent_run_json.as_deref().unwrap()).unwrap();
+        assert_eq!(run["status"], "failed");
+        assert_eq!(run["state"]["status"], "failed");
+        assert!(run["state"]["activeRunId"].is_null());
+
+        let connection = service.state.connection().unwrap();
+        let pending_row: (String, String) = connection
+            .query_row(
+                "SELECT status, agent_input_json FROM agent_pending_actions WHERE action_id = ?1",
+                ["action-interrupted"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(pending_row, ("failed".to_string(), "{}".to_string()));
+        let usage_row: (String, Option<String>, Option<i64>) = connection
+            .query_row(
+                "SELECT status, error, completed_at FROM agent_usage_records WHERE run_id = ?1",
+                ["run-1"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(usage_row.0, "failed");
+        assert!(usage_row.1.unwrap().contains("outcome is unknown"));
+        assert_eq!(usage_row.2, Some(42));
+    }
+
+    #[test]
+    fn startup_reconciliation_preserves_a_durable_terminal_assistant_commit() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let mut conversation = conversation(
+            "conversation-terminal",
+            Some("project-1"),
+            "assistant-terminal",
+        );
+        let message = &mut conversation.messages[0];
+        message.role = "assistant".to_string();
+        message.status = Some("sent".to_string());
+        message.agent_run_json = Some(
+            serde_json::json!({
+                "status": "completed",
+                "completedAt": 40,
+                "state": { "status": "completed", "activeRunId": null, "updatedAt": 40 }
+            })
+            .to_string(),
+        );
+        service.save_conversation(conversation).unwrap();
+        let mut usage = agent_usage_record("conversation-terminal", "assistant-terminal");
+        usage.status = Some("running".to_string());
+        usage.completed_at = None;
+        service.upsert_agent_usage(usage).unwrap();
+        let mut pending = pending_action("action-terminal", "conversation-terminal");
+        pending.assistant_message_id = Some("assistant-terminal".to_string());
+        pending.status = "approved".to_string();
+        pending.target_status = Some("completed".to_string());
+        service.store_pending_agent_action(pending).unwrap();
+
+        service
+            .reconcile_interrupted_pending_agent_actions(42)
+            .unwrap();
+
+        let connection = service.state.connection().unwrap();
+        let pending_status: String = connection
+            .query_row(
+                "SELECT status FROM agent_pending_actions WHERE action_id = 'action-terminal'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_status, "completed");
+        let usage_status: (String, Option<i64>) = connection
+            .query_row(
+                "SELECT status, completed_at FROM agent_usage_records WHERE run_id = 'run-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(usage_status, ("completed".to_string(), Some(42)));
+        drop(connection);
+        let conversation = service
+            .load_conversation("conversation-terminal")
+            .unwrap()
+            .unwrap();
+        assert_eq!(conversation.messages[0].status.as_deref(), Some("sent"));
+    }
+
+    #[test]
+    fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let mut conversation =
+            conversation("conversation-nested", Some("project-1"), "assistant-nested");
+        let message = &mut conversation.messages[0];
+        message.role = "assistant".to_string();
+        message.status = Some("pending".to_string());
+        message.agent_run_json = Some(
+            serde_json::json!({
+                "runId": "run-1",
+                "status": "running",
+                "state": { "status": "running", "activeRunId": "run-1", "updatedAt": 1 }
+            })
+            .to_string(),
+        );
+        service.save_conversation(conversation).unwrap();
+        let mut usage = agent_usage_record("conversation-nested", "assistant-nested");
+        usage.status = Some("running".to_string());
+        usage.completed_at = None;
+        service.upsert_agent_usage(usage).unwrap();
+
+        let mut parent = pending_action("parent-action", "conversation-nested");
+        parent.assistant_message_id = Some("assistant-nested".to_string());
+        parent.status = "executing".to_string();
+        parent.target_status = Some("completed".to_string());
+        service.store_pending_agent_action(parent).unwrap();
+
+        let mut child = pending_action("child-storage-id", "conversation-nested");
+        child.assistant_message_id = Some("assistant-nested".to_string());
+        child.action_type = "tool_call".to_string();
+        child.tool_name = "approval_tool".to_string();
+        child.tool_call_id = Some("child-call".to_string());
+        child.action_json = serde_json::json!({
+            "type": "tool_call",
+            "call": {
+                "id": "child-call",
+                "tool": "approval_tool",
+                "args": {},
+                "approvalStatus": "required"
+            }
+        })
+        .to_string();
+        child.agent_input_json = serde_json::json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "",
+            "model": "test-model",
+            "messages": [],
+            "resumeCheckpoint": {
+                "version": 2,
+                "runId": "run-1",
+                "contextItems": [],
+                "nextModelRequestIndex": 1,
+                "queuedToolCalls": [],
+                "suppressedNarration": false,
+                "extensionSnapshots": [],
+                "pendingToolCallId": "child-call",
+                "conversationTraceItems": [
+                    {
+                        "type": "tool_result",
+                        "sequence": 1,
+                        "callId": "parent-action",
+                        "tool": "run_command",
+                        "status": "succeeded",
+                        "success": true,
+                        "observation": {},
+                        "approvalStatus": "approved",
+                        "truncated": false
+                    },
+                    {
+                        "type": "tool_call",
+                        "sequence": 2,
+                        "callId": "child-call",
+                        "tool": "approval_tool",
+                        "operation": {},
+                        "approvalStatus": "required",
+                        "truncated": false
+                    }
+                ],
+                "nextConversationTraceSequence": 3,
+                "conversationTraceTruncated": false,
+                "modelVisibleTraceItemCount": 0
+            }
+        })
+        .to_string();
+        service.store_pending_agent_action(child).unwrap();
+
+        service
+            .reconcile_interrupted_pending_agent_actions(42)
+            .unwrap();
+
+        let pending = service.list_pending_agent_actions().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].action_id, "child-storage-id");
+        let connection = service.state.connection().unwrap();
+        let parent_status: String = connection
+            .query_row(
+                "SELECT status FROM agent_pending_actions WHERE action_id = 'parent-action'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent_status, "completed");
+        let usage_state: (String, Option<String>, Option<i64>) = connection
+            .query_row(
+                "SELECT status, error, completed_at FROM agent_usage_records WHERE run_id = 'run-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            usage_state,
+            ("waiting_for_approval".to_string(), None, None)
+        );
+        drop(connection);
+        let conversation = service
+            .load_conversation("conversation-nested")
+            .unwrap()
+            .unwrap();
+        let message = &conversation.messages[0];
+        assert_eq!(message.status.as_deref(), Some("pending"));
+        let run: serde_json::Value =
+            serde_json::from_str(message.agent_run_json.as_deref().unwrap()).unwrap();
+        assert_eq!(run["status"], "waiting_for_approval");
+        assert_eq!(run["state"]["status"], "waiting_for_approval");
+        assert_eq!(run["state"]["activeRunId"], "run-1");
+    }
+
+    #[test]
+    fn startup_reconciliation_retires_an_invalid_nested_pending_action() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let mut conversation = conversation(
+            "conversation-invalid-nested",
+            Some("project-1"),
+            "assistant-invalid-nested",
+        );
+        let message = &mut conversation.messages[0];
+        message.role = "assistant".to_string();
+        message.status = Some("pending".to_string());
+        message.agent_run_json = Some(
+            serde_json::json!({
+                "runId": "run-1",
+                "status": "waiting_for_approval",
+                "state": {
+                    "status": "waiting_for_approval",
+                    "activeRunId": "run-1",
+                    "updatedAt": 1
+                }
+            })
+            .to_string(),
+        );
+        service.save_conversation(conversation).unwrap();
+        let mut usage =
+            agent_usage_record("conversation-invalid-nested", "assistant-invalid-nested");
+        usage.status = Some("waiting_for_approval".to_string());
+        usage.completed_at = None;
+        service.upsert_agent_usage(usage).unwrap();
+
+        let mut parent = pending_action("invalid-parent", "conversation-invalid-nested");
+        parent.assistant_message_id = Some("assistant-invalid-nested".to_string());
+        parent.status = "executing".to_string();
+        service.store_pending_agent_action(parent).unwrap();
+
+        let mut child = pending_action("invalid-child", "conversation-invalid-nested");
+        child.assistant_message_id = Some("assistant-invalid-nested".to_string());
+        child.action_type = "tool_call".to_string();
+        child.tool_name = "approval_tool".to_string();
+        child.tool_call_id = Some("invalid-child-call".to_string());
+        child.action_json = serde_json::json!({
+            "type": "tool_call",
+            "call": {
+                "id": "invalid-child-call",
+                "tool": "approval_tool",
+                "args": {},
+                "approvalStatus": "required"
+            }
+        })
+        .to_string();
+        // A pending child without a run checkpoint is not a durable handoff and must never remain
+        // approvable after its interrupted parent has been failed.
+        child.agent_input_json = serde_json::json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "",
+            "model": "test-model",
+            "messages": []
+        })
+        .to_string();
+        service.store_pending_agent_action(child).unwrap();
+
+        service
+            .reconcile_interrupted_pending_agent_actions(42)
+            .unwrap();
+
+        assert!(service.list_pending_agent_actions().unwrap().is_empty());
+        let connection = service.state.connection().unwrap();
+        let statuses = connection
+            .prepare(
+                "SELECT action_id, status, target_status
+                 FROM agent_pending_actions
+                 WHERE action_id IN ('invalid-parent', 'invalid-child')
+                 ORDER BY action_id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            statuses,
+            vec![
+                (
+                    "invalid-child".to_string(),
+                    "cancelled".to_string(),
+                    Some("cancelled".to_string())
+                ),
+                (
+                    "invalid-parent".to_string(),
+                    "failed".to_string(),
+                    Some("failed".to_string())
+                )
+            ]
+        );
+        drop(connection);
+        let conversation = service
+            .load_conversation("conversation-invalid-nested")
+            .unwrap()
+            .unwrap();
+        assert_eq!(conversation.messages[0].status.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn startup_reconciliation_keeps_failed_action_outcome_when_assistant_commit_completed() {
+        let fixture = StorageFixture::new();
+        let service = fixture.service();
+        let mut conversation = conversation(
+            "conversation-failed-action",
+            Some("project-1"),
+            "assistant-failed-action",
+        );
+        let message = &mut conversation.messages[0];
+        message.role = "assistant".to_string();
+        message.status = Some("sent".to_string());
+        message.agent_run_json = Some(
+            serde_json::json!({
+                "status": "completed",
+                "completedAt": 40,
+                "state": { "status": "completed", "activeRunId": null, "updatedAt": 40 }
+            })
+            .to_string(),
+        );
+        service.save_conversation(conversation).unwrap();
+        let mut usage = agent_usage_record("conversation-failed-action", "assistant-failed-action");
+        usage.status = Some("completed".to_string());
+        usage.completed_at = Some(40);
+        service.upsert_agent_usage(usage).unwrap();
+        let mut pending = pending_action("action-failed", "conversation-failed-action");
+        pending.assistant_message_id = Some("assistant-failed-action".to_string());
+        pending.status = "approved".to_string();
+        pending.target_status = Some("failed".to_string());
+        service.store_pending_agent_action(pending).unwrap();
+
+        service
+            .reconcile_interrupted_pending_agent_actions(42)
+            .unwrap();
+
+        let connection = service.state.connection().unwrap();
+        let pending_status: String = connection
+            .query_row(
+                "SELECT status FROM agent_pending_actions WHERE action_id = 'action-failed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_status, "failed");
+        let usage_status: String = connection
+            .query_row(
+                "SELECT status FROM agent_usage_records WHERE run_id = 'run-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(usage_status, "completed");
+        drop(connection);
+        let conversation = service
+            .load_conversation("conversation-failed-action")
+            .unwrap()
+            .unwrap();
+        assert_eq!(conversation.messages[0].status.as_deref(), Some("sent"));
     }
 
     #[test]
@@ -2334,6 +3172,7 @@ mod tests {
             scope_id: scope_id.to_string(),
             message: message.to_string(),
             permission_mode: "workspace".to_string(),
+            permission_mode_version: 0,
             model_id: Some("model-1".to_string()),
             project_id: project_id.map(ToString::to_string),
             attachments_json: "[]".to_string(),
@@ -2351,7 +3190,6 @@ mod tests {
             project_id: Some("project-1".to_string()),
             model_id: "model-1".to_string(),
             model_name: "Model 1".to_string(),
-            provider_path: Some("provider/model-1".to_string()),
             started_at: Some(900),
             completed_at: Some(1_000),
             status: Some("completed".to_string()),
@@ -2380,6 +3218,7 @@ mod tests {
             tool_name: "run_command".to_string(),
             tool_call_id: Some(action_id.to_string()),
             status: "pending".to_string(),
+            target_status: None,
             action_json: "{}".to_string(),
             agent_input_json: "{}".to_string(),
             created_at: 1,

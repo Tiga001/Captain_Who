@@ -23,7 +23,6 @@ vi.mock('../../config/ModelSettingsProvider', () => ({
       {
         id: 'model-1',
         displayName: 'Model One',
-        shortName: 'Model 1',
         supportsImage: true,
         inputPrice: '0',
         outputPrice: '0',
@@ -284,6 +283,49 @@ describe('Skill selection invariants', () => {
       { id: 'workspace:project:submitted-b', revision: 'revision-b' },
       { id: 'workspace:project:new-draft', revision: 'revision-new' }
     ])
+  })
+})
+
+describe('Composer permission confirmation', () => {
+  it('keeps the current permission until full access is explicitly confirmed', async () => {
+    const screen = await render(<TestComposer />)
+
+    await screen.getByRole('button', { name: /chat\.permission/ }).click()
+    await screen.getByRole('option', { name: 'chat.fullPermission' }).click()
+
+    await expect
+      .element(screen.getByRole('heading', { name: 'chat.fullPermissionConfirmTitle' }))
+      .toBeVisible()
+    await expect
+      .element(screen.getByText('chat.fullPermissionConfirmDescription', { exact: true }))
+      .toBeVisible()
+    expect(
+      draftChangeSpy.mock.calls.some(([nextDraft]) => nextDraft.permissionMode === 'full')
+    ).toBe(false)
+
+    await screen
+      .getByRole('button', { name: 'chat.fullPermissionConfirmCancel', exact: true })
+      .nth(1)
+      .click()
+    await expect.poll(() => document.querySelector('[role="dialog"]')).toBeNull()
+    expect(
+      draftChangeSpy.mock.calls.some(([nextDraft]) => nextDraft.permissionMode === 'full')
+    ).toBe(false)
+
+    await screen.getByRole('button', { name: /chat\.permission/ }).click()
+    await screen.getByRole('option', { name: 'chat.fullPermission' }).click()
+    await screen
+      .getByRole('button', { name: 'chat.fullPermissionConfirmAction', exact: true })
+      .click()
+
+    await expect
+      .poll(() =>
+        draftChangeSpy.mock.calls.some(([nextDraft]) => nextDraft.permissionMode === 'full')
+      )
+      .toBe(true)
+    await expect
+      .element(screen.getByRole('button', { name: /chat\.permission.*chat\.fullPermission/ }))
+      .toBeVisible()
   })
 })
 
