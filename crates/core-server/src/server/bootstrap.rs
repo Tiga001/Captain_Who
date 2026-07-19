@@ -1,0 +1,230 @@
+use super::*;
+
+pub(crate) struct CoreServerBootstrap {
+    pub(crate) storage: Arc<StorageService>,
+    pub(crate) agent_service: AgentService,
+    pub(crate) skill_services: SkillServices,
+    pub(crate) git_review_service: Arc<GitReviewService>,
+}
+
+impl CoreServerBootstrap {
+    pub(crate) fn initialize() -> io::Result<Self> {
+        let database_path = absolute_path(database_path())?;
+        let skill_store_root = skill_store_root(&database_path);
+        let storage =
+            Arc::new(StorageService::open(&database_path).map_err(|error| {
+                io::Error::other(format!("failed to initialize storage: {error}"))
+            })?);
+        let git_review_service = Arc::new(GitReviewService::new());
+        let skills_service = Arc::new(
+            SkillsService::new()
+                .with_bundled_source()
+                .and_then(|service| service.with_installed_source(skill_store_root.clone()))
+                .map_err(|error| {
+                    io::Error::other(format!("failed to initialize Skills: {error}"))
+                })?,
+        );
+        let skill_installation_service = Arc::new(
+            SkillInstallationService::new(skill_store_root.clone()).map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize Skill installation service: {error}"
+                ))
+            })?,
+        );
+        let mut skill_installation_workflow = SkillInstallationWorkflow::new(
+            SkillInstallationService::new(skill_store_root).map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize Skill installation workflow: {error}"
+                ))
+            })?,
+        );
+        let github_acquisition_transport: Arc<dyn GitHubAcquisitionTransport> =
+            Arc::new(ReqwestGitHubTransport::new().map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize public GitHub Skill transport: {error}"
+                ))
+            })?);
+        let github_acquisition = GitHubWorkflowAcquisitionAdapter::new(Arc::new(
+            GitHubSkillAcquirer::with_transport(github_acquisition_transport),
+        ));
+        skill_installation_workflow
+            .register_adapter(Arc::new(github_acquisition))
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "failed to register GitHub Skill acquisition: {error}"
+                ))
+            })?;
+        let mut skill_source_resolution = SkillSourceResolutionService::with_session_store(
+            skill_installation_workflow.session_store(),
+        );
+        let github_resolution_transport: Arc<dyn GitHubAcquisitionTransport> = Arc::new(
+            ReqwestGitHubTransport::new_for_source_resolution().map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize GitHub Skill source resolution transport: {error}"
+                ))
+            })?,
+        );
+        skill_source_resolution
+            .register_resolver(Arc::new(GitHubInstallationSourceResolver::new(
+                github_resolution_transport,
+            )))
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "failed to register GitHub Skill source resolver: {error}"
+                ))
+            })?;
+        let agent_service = AgentService::try_new(storage.clone())
+            .map_err(|error| {
+                io::Error::other(format!("failed to initialize Agent service: {error}"))
+            })?
+            .with_skills_service(Arc::clone(&skills_service));
+        let skill_services = SkillServices {
+            catalog: skills_service,
+            installations: skill_installation_service,
+            workflow: Arc::new(skill_installation_workflow),
+            source_resolution: Arc::new(skill_source_resolution),
+        };
+        Ok(Self {
+            storage,
+            agent_service,
+            skill_services,
+            git_review_service,
+        })
+    }
+}
+
+pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Result<()> {
+    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
+    let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
+    let writer = tokio::spawn(run_outbound_writer(
+        io::stdout(),
+        outbound_rx,
+        finish_outbound_rx,
+    ));
+    let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
+    let skill_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let skill_acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let request_dispatchers = RequestDispatchers {
+        git: &git_dispatcher,
+        skills: &skill_dispatcher,
+        skill_acquisition: &skill_acquisition_dispatcher,
+    };
+
+    let input_result = run_request_loop(
+        BufReader::new(io::stdin()),
+        Arc::clone(&bootstrap.storage),
+        &bootstrap.agent_service,
+        bootstrap.skill_services.clone(),
+        Arc::clone(&bootstrap.git_review_service),
+        &request_dispatchers,
+        &outbound_tx,
+    )
+    .await;
+
+    // Admission has stopped. Settle accepted filesystem jobs while active agents are cancelled in
+    // parallel; queued jobs receive cancellation errors and running jobs get a bounded grace
+    // period. The outbound writer remains live for every final response and notification.
+    let (
+        git_dispatcher_result,
+        skill_dispatcher_result,
+        skill_acquisition_dispatcher_result,
+        (cancelled_runs, timed_out),
+    ) = tokio::join!(
+        git_dispatcher.shutdown(),
+        skill_dispatcher.shutdown(),
+        skill_acquisition_dispatcher.shutdown(),
+        bootstrap
+            .agent_service
+            .shutdown_active_runs(Duration::from_secs(2))
+    );
+
+    let mut outbound_error = None;
+    if let Ok(Some(shutdown_id)) = &input_result {
+        if let Err(error) = enqueue_outbound(
+            &outbound_tx,
+            response_success(
+                shutdown_id.clone(),
+                CoreShutdownResponse {
+                    cancelled_runs,
+                    timed_out,
+                },
+            ),
+        ) {
+            outbound_error = Some(error);
+        }
+    }
+    drop(outbound_tx);
+    // A timed-out agent may still own an outbound sender. Tell the writer to close its receiver
+    // and drain everything accepted so far instead of waiting for every producer clone to drop.
+    // The shutdown response above is therefore flushed, while late notifications are rejected.
+    let _ = finish_outbound_tx.send(());
+
+    let writer_result = writer
+        .await
+        .map_err(|error| io::Error::other(format!("outbound writer stopped: {error}")))?;
+    input_result?;
+    git_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
+    skill_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
+    skill_acquisition_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
+    if let Some(error) = outbound_error {
+        return Err(error);
+    }
+    writer_result
+}
+
+#[derive(Clone)]
+pub(crate) struct SkillServices {
+    pub(crate) catalog: Arc<SkillsService>,
+    pub(crate) installations: Arc<SkillInstallationService>,
+    pub(crate) workflow: Arc<SkillInstallationWorkflow>,
+    pub(crate) source_resolution: Arc<SkillSourceResolutionService>,
+}
+
+pub(crate) fn database_path() -> PathBuf {
+    if let Ok(path) = std::env::var("MYCOPILOT_STORAGE_DB") {
+        return PathBuf::from(path);
+    }
+
+    if cfg!(target_os = "macos") {
+        return home_dir()
+            .join("Library")
+            .join("Application Support")
+            .join("mycopilot-next")
+            .join("storage.sqlite");
+    }
+
+    if cfg!(target_os = "windows") {
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            return PathBuf::from(app_data)
+                .join("mycopilot-next")
+                .join("storage.sqlite");
+        }
+    }
+
+    std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home_dir().join(".local").join("share"))
+        .join("mycopilot-next")
+        .join("storage.sqlite")
+}
+
+pub(crate) fn skill_store_root(database_path: &std::path::Path) -> PathBuf {
+    database_path
+        .parent()
+        .map(|parent| parent.join("skills"))
+        .unwrap_or_else(|| PathBuf::from("skills"))
+}
+
+pub(crate) fn absolute_path(path: PathBuf) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        std::env::current_dir().map(|current_directory| current_directory.join(path))
+    }
+}
+
+pub(crate) fn home_dir() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+}

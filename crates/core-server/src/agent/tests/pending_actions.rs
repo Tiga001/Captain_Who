@@ -1,0 +1,800 @@
+use super::*;
+
+#[test]
+fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    let original = AgentProposedAction::ToolCall {
+        call: AgentToolCall {
+            id: "shared-action-id".to_string(),
+            tool: "first_tool".to_string(),
+            args: json!({ "value": "original" }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        },
+    };
+    assert!(service
+        .store_pending_action(
+            "run-original",
+            "conversation-original",
+            "assistant-original",
+            original.clone(),
+            agent_input.clone(),
+        )
+        .unwrap());
+    assert!(!service
+        .store_pending_action(
+            "run-original",
+            "conversation-original",
+            "assistant-original",
+            original,
+            agent_input.clone(),
+        )
+        .unwrap());
+
+    let cross_run = AgentProposedAction::ToolCall {
+        call: AgentToolCall {
+            id: "shared-action-id".to_string(),
+            tool: "second_tool".to_string(),
+            args: json!({ "value": "replacement" }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        },
+    };
+    assert!(service
+        .store_pending_action(
+            "run-second",
+            "conversation-second",
+            "assistant-second",
+            cross_run,
+            agent_input.clone(),
+        )
+        .unwrap());
+    let same_run_collision = AgentProposedAction::ToolCall {
+        call: AgentToolCall {
+            id: "shared-action-id".to_string(),
+            tool: "conflicting_tool".to_string(),
+            args: json!({ "value": "conflict" }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        },
+    };
+    let error = service
+        .store_pending_action(
+            "run-original",
+            "conversation-original",
+            "assistant-original",
+            same_run_collision,
+            agent_input,
+        )
+        .unwrap_err();
+    assert!(error.contains("冻结快照冲突"));
+
+    let in_memory = service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|lock_error| lock_error.into_inner());
+    let frozen = in_memory
+        .get(&pending_action_storage_id(
+            "run-original",
+            "shared-action-id",
+        ))
+        .unwrap();
+    assert_eq!(frozen.snapshot.run_id, "run-original");
+    assert_eq!(frozen.snapshot.tool_name, "first_tool");
+    drop(in_memory);
+    let durable = storage.list_pending_agent_actions().unwrap();
+    assert_eq!(durable.len(), 2);
+    assert!(durable.iter().any(|record| {
+        record.run_id == "run-original" && record.action_json.contains("first_tool")
+    }));
+    assert!(durable.iter().any(|record| {
+        record.run_id == "run-second" && record.action_json.contains("second_tool")
+    }));
+    assert!(durable
+        .iter()
+        .all(|record| !record.action_json.contains("conflicting_tool")));
+}
+
+#[test]
+fn legacy_pending_row_keeps_raw_storage_key_but_is_resolved_by_run_identity() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let action = AgentProposedAction::ToolCall {
+        call: AgentToolCall {
+            id: "legacy-call-id".to_string(),
+            tool: "legacy_tool".to_string(),
+            args: json!({}),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        },
+    };
+    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    storage
+        .store_pending_agent_action(AgentPendingActionRecord {
+            action_id: "legacy-call-id".to_string(),
+            run_id: "legacy-run".to_string(),
+            conversation_id: None,
+            assistant_message_id: None,
+            action_type: "tool_call".to_string(),
+            tool_name: "legacy_tool".to_string(),
+            tool_call_id: Some("legacy-call-id".to_string()),
+            status: "pending".to_string(),
+            target_status: None,
+            action_json: serialize_json(&action),
+            agent_input_json: serialize_json(&agent_input),
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+
+    let service = AgentService::new(storage);
+    assert!(service
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key("legacy-call-id"));
+    assert!(service
+        .cancel_action("legacy-run", "legacy-call-id")
+        .unwrap());
+}
+
+#[test]
+fn startup_reconciliation_failure_prevents_agent_service_startup() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-bad-reconciliation".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "bad reconciliation".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "assistant-bad-reconciliation".to_string(),
+                role: "assistant".to_string(),
+                content: THINKING_PLACEHOLDER.to_string(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: Some("not-json".to_string()),
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let action = AgentProposedAction::ToolCall {
+        call: AgentToolCall {
+            id: "bad-reconciliation-call".to_string(),
+            tool: "approval_tool".to_string(),
+            args: json!({}),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        },
+    };
+    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    storage
+        .store_pending_agent_action(AgentPendingActionRecord {
+            action_id: pending_action_storage_id(
+                "bad-reconciliation-run",
+                "bad-reconciliation-call",
+            ),
+            run_id: "bad-reconciliation-run".to_string(),
+            conversation_id: Some("conversation-bad-reconciliation".to_string()),
+            assistant_message_id: Some("assistant-bad-reconciliation".to_string()),
+            action_type: "tool_call".to_string(),
+            tool_name: "approval_tool".to_string(),
+            tool_call_id: Some("bad-reconciliation-call".to_string()),
+            status: "approved".to_string(),
+            target_status: None,
+            action_json: serialize_json(&action),
+            agent_input_json: serialize_json(&agent_input),
+            created_at: 1,
+            updated_at: 1,
+        })
+        .unwrap();
+
+    let error = match AgentService::try_new(storage) {
+        Ok(_) => panic!("reconciliation failure must prevent startup"),
+        Err(error) => error,
+    };
+    assert!(error.contains("failed to reconcile interrupted pending actions"));
+    assert!(error.contains("无法解析中断操作"));
+}
+
+#[test]
+fn terminal_pending_action_persistence_redacts_only_skill_instruction_bodies() {
+    const MARKER: &str = "PENDING_SKILL_INSTRUCTION_BODY_MUST_NOT_SURVIVE";
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    agent_input.skill_activation = Some(AgentSkillActivation {
+        activation_revision: "activation-revision".to_string(),
+        skills: vec![AgentActivatedSkill {
+            id: "bundled:application:repository-evidence-auditor".to_string(),
+            name: "repository-evidence-auditor".to_string(),
+            revision: "package-revision".to_string(),
+            source: "bundled:application".to_string(),
+            instructions: MARKER.to_string(),
+        }],
+    });
+    agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        version: 2,
+        run_id: "run-skill-redaction".to_string(),
+        context_items: vec![
+            mycopilot_core::AgentContextCheckpointItem {
+                role: "user".to_string(),
+                content: format!("<backend_activated_skill>{MARKER}</backend_activated_skill>"),
+                images: Vec::new(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+                sources: vec!["skill_instructions".to_string()],
+                scope: "run".to_string(),
+                retention: "retained".to_string(),
+                group: None,
+                origin: Some(mycopilot_core::AgentContextCheckpointOrigin {
+                    kind: "skill".to_string(),
+                    id: "bundled:application:repository-evidence-auditor".to_string(),
+                }),
+            },
+            mycopilot_core::AgentContextCheckpointItem {
+                role: "system".to_string(),
+                content: "NON_SKILL_CHECKPOINT_CONTENT".to_string(),
+                images: Vec::new(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+                sources: vec!["runtime_guard".to_string()],
+                scope: "run".to_string(),
+                retention: "retained".to_string(),
+                group: None,
+                origin: None,
+            },
+        ],
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        suppressed_narration: false,
+        extension_snapshots: Vec::new(),
+        pending_tool_call_id: "action-skill-redaction".to_string(),
+        conversation_trace_items: Vec::new(),
+        next_conversation_trace_sequence: 0,
+        conversation_trace_truncated: false,
+        model_visible_trace_item_count: 0,
+    });
+    let mut record = PendingActionRecord {
+        storage_id: pending_action_storage_id("run-skill-redaction", "action-skill-redaction"),
+        snapshot: PendingAgentActionSnapshot {
+            action_id: "action-skill-redaction".to_string(),
+            action_type: "tool_call".to_string(),
+            tool_name: "approval_tool".to_string(),
+            tool_call_id: Some("action-skill-redaction".to_string()),
+            run_id: "run-skill-redaction".to_string(),
+            conversation_id: Some("conversation-skill-redaction".to_string()),
+            assistant_message_id: Some("assistant-skill-redaction".to_string()),
+            action: AgentProposedAction::ToolCall {
+                call: AgentToolCall {
+                    id: "action-skill-redaction".to_string(),
+                    tool: "approval_tool".to_string(),
+                    args: json!({}),
+                    approval_status: AgentApprovalStatus::Required,
+                    reason: None,
+                },
+            },
+            created_at: 1,
+            status: PendingActionStatus::Pending,
+        },
+        agent_input,
+    };
+
+    for status in [
+        PendingActionStatus::Pending,
+        PendingActionStatus::Approved,
+        PendingActionStatus::Executing,
+    ] {
+        record.snapshot.status = status;
+        let persisted = pending_storage_record(&record, 2);
+        assert!(persisted.agent_input_json.contains(MARKER));
+    }
+
+    for status in [
+        PendingActionStatus::Completed,
+        PendingActionStatus::Rejected,
+        PendingActionStatus::Cancelled,
+        PendingActionStatus::Failed,
+    ] {
+        record.snapshot.status = status;
+        let persisted = pending_storage_record(&record, 3);
+        assert!(!persisted.agent_input_json.contains(MARKER));
+        assert!(!persisted.agent_input_json.contains("secret"));
+        let restored: AgentChatInput = serde_json::from_str(&persisted.agent_input_json).unwrap();
+        let activation = restored.skill_activation.unwrap();
+        assert_eq!(activation.activation_revision, "activation-revision");
+        assert_eq!(activation.skills.len(), 1);
+        assert_eq!(
+            activation.skills[0].id,
+            "bundled:application:repository-evidence-auditor"
+        );
+        assert_eq!(activation.skills[0].revision, "package-revision");
+        assert_eq!(activation.skills[0].source, "bundled:application");
+        assert!(activation.skills[0].instructions.is_empty());
+        let checkpoint = restored.resume_checkpoint.unwrap();
+        assert!(checkpoint.context_items[0].content.is_empty());
+        assert_eq!(
+            checkpoint.context_items[0].sources,
+            vec!["skill_instructions"]
+        );
+        assert_eq!(
+            checkpoint.context_items[0].origin.as_ref().unwrap().id,
+            "bundled:application:repository-evidence-auditor"
+        );
+        assert_eq!(
+            checkpoint.context_items[1].content,
+            "NON_SKILL_CHECKPOINT_CONTENT"
+        );
+    }
+
+    record.snapshot.status = PendingActionStatus::Pending;
+    assert!(pending_storage_record(&record, 4)
+        .agent_input_json
+        .contains(MARKER));
+}
+
+#[test]
+fn missing_pending_transition_row_fails_closed_without_terminal_success() {
+    const MARKER: &str = "MISSING_TRANSITION_SKILL_BODY";
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    agent_input.skill_activation = Some(AgentSkillActivation {
+        activation_revision: "activation-missing-row".to_string(),
+        skills: vec![AgentActivatedSkill {
+            id: "bundled:application/repository-evidence-auditor".to_string(),
+            name: "repository-evidence-auditor".to_string(),
+            revision: "package-missing-row".to_string(),
+            source: "bundled:application".to_string(),
+            instructions: MARKER.to_string(),
+        }],
+    });
+    let call = AgentToolCall {
+        id: "action-missing-transition-row".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    service
+        .store_pending_action(
+            "run-missing-transition-row",
+            "conversation-missing-transition-row",
+            "assistant-missing-transition-row",
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input,
+        )
+        .unwrap();
+    assert!(storage.list_pending_agent_actions().unwrap()[0]
+        .agent_input_json
+        .contains(MARKER));
+
+    // Reproduce a cross-boundary missing-row race: durable conversation deletion has removed
+    // the pending row while this service instance still owns its pre-deletion memory snapshot.
+    storage
+        .delete_conversation("conversation-missing-transition-row")
+        .unwrap();
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let error = service
+        .approve_action("run-missing-transition-row", &call.id, notifications)
+        .unwrap_err();
+    assert!(error.contains("实际更新 0 条"));
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(
+        service
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|lock_error| lock_error.into_inner())
+            [&pending_action_storage_id("run-missing-transition-row", &call.id)]
+            .snapshot
+            .status,
+        PendingActionStatus::Pending
+    );
+
+    let reloaded = AgentService::new(storage);
+    assert!(reloaded.list_pending_actions().is_empty());
+}
+
+#[test]
+fn cancel_finalize_failure_atomically_restores_pending_payload() {
+    const MARKER: &str = "CANCEL_ROLLBACK_SKILL_BODY";
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let call = AgentToolCall {
+        id: "action-cancel-rollback".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    agent_input.skill_activation = Some(AgentSkillActivation {
+        activation_revision: "activation-cancel-rollback".to_string(),
+        skills: vec![AgentActivatedSkill {
+            id: "bundled:application/repository-evidence-auditor".to_string(),
+            name: "repository-evidence-auditor".to_string(),
+            revision: "package-cancel-rollback".to_string(),
+            source: "bundled:application".to_string(),
+            instructions: MARKER.to_string(),
+        }],
+    });
+    agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        version: 2,
+        run_id: "run-cancel-rollback".to_string(),
+        context_items: Vec::new(),
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        suppressed_narration: false,
+        extension_snapshots: Vec::new(),
+        pending_tool_call_id: call.id.clone(),
+        conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            operation: json!({}),
+            approval_status: AgentApprovalStatus::Required,
+            truncated: false,
+        }],
+        next_conversation_trace_sequence: 1,
+        conversation_trace_truncated: false,
+        model_visible_trace_item_count: 0,
+    });
+    // These durable owner rows intentionally do not exist, forcing final trace persistence to
+    // fail after the action has first transitioned to cancelled.
+    service
+        .store_pending_action(
+            "run-cancel-rollback",
+            "conversation-cancel-rollback-missing",
+            "assistant-cancel-rollback-missing",
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input,
+        )
+        .unwrap();
+
+    assert!(service
+        .cancel_action("run-cancel-rollback", &call.id)
+        .is_err());
+    assert_eq!(
+        service.list_pending_actions()[0].status,
+        PendingActionStatus::Pending
+    );
+    let persisted = storage.list_pending_agent_actions().unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].status, "pending");
+    assert_eq!(persisted[0].target_status, None);
+    assert!(persisted[0].agent_input_json.contains(MARKER));
+
+    // The compensating transition must make the action reusable. A stale cancelled marker
+    // would make this second attempt fail before finalization and strand the row.
+    let second_error = service
+        .cancel_action("run-cancel-rollback", &call.id)
+        .unwrap_err();
+    assert!(!second_error.contains("无法写入 cancelled 目标终态"));
+    let persisted = storage.list_pending_agent_actions().unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].status, "pending");
+    assert_eq!(persisted[0].target_status, None);
+}
+
+#[test]
+fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-cancel-usage-failure".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Cancel usage failure".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "assistant-cancel-usage-failure".to_string(),
+                role: "assistant".to_string(),
+                content: THINKING_PLACEHOLDER.to_string(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let service = AgentService::new(Arc::clone(&storage));
+    // The invalid usage owner is a deterministic fault injection: the usage insert violates
+    // its foreign key only after message and trace writes have run inside the transaction.
+    service.register_usage_context(
+        "run-cancel-usage-failure",
+        AgentRunUsageContext {
+            conversation_id: "missing-usage-conversation".to_string(),
+            assistant_message_id: "assistant-cancel-usage-failure".to_string(),
+            run_id: "run-cancel-usage-failure".to_string(),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+    let call = AgentToolCall {
+        id: "call-cancel-usage-failure".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({}),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        version: 2,
+        run_id: "run-cancel-usage-failure".to_string(),
+        context_items: Vec::new(),
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        suppressed_narration: false,
+        extension_snapshots: Vec::new(),
+        pending_tool_call_id: call.id.clone(),
+        conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            operation: json!({}),
+            approval_status: AgentApprovalStatus::Required,
+            truncated: false,
+        }],
+        next_conversation_trace_sequence: 1,
+        conversation_trace_truncated: false,
+        model_visible_trace_item_count: 0,
+    });
+    service
+        .store_pending_action(
+            "run-cancel-usage-failure",
+            "conversation-cancel-usage-failure",
+            "assistant-cancel-usage-failure",
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input,
+        )
+        .unwrap();
+
+    assert!(service
+        .cancel_action("run-cancel-usage-failure", &call.id)
+        .is_err());
+    let pending = storage.list_pending_agent_actions().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].status, "pending");
+    assert_eq!(pending[0].target_status, None);
+    assert!(storage
+        .get_conversation_turn_trace("assistant-cancel-usage-failure")
+        .unwrap()
+        .is_none());
+    let conversation = storage
+        .load_conversation("conversation-cancel-usage-failure")
+        .unwrap()
+        .unwrap();
+    assert_eq!(conversation.messages[0].content, THINKING_PLACEHOLDER);
+    assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
+    assert!(storage
+        .list_agent_tool_results_for_run("run-cancel-usage-failure", "approval_tool")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-file-write-cancel-failure".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "File write cancel failure".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "assistant-file-write-cancel-failure".to_string(),
+                role: "assistant".to_string(),
+                content: THINKING_PLACEHOLDER.to_string(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let service = AgentService::new(Arc::clone(&storage));
+    service.register_usage_context(
+        "run-file-write-cancel-failure",
+        AgentRunUsageContext {
+            conversation_id: "missing-file-write-usage-owner".to_string(),
+            assistant_message_id: "assistant-file-write-cancel-failure".to_string(),
+            run_id: "run-file-write-cancel-failure".to_string(),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+    let action_id = "file-write-cancel-failure";
+    storage
+        .create_agent_file_draft(AgentFileDraftRecord {
+            id: "draft-file-write-cancel-failure".to_string(),
+            conversation_id: "conversation-file-write-cancel-failure".to_string(),
+            project_id: None,
+            run_id: "run-file-write-cancel-failure".to_string(),
+            file_path: "cancelled.txt".to_string(),
+            mode: "create".to_string(),
+            status: "waiting_approval".to_string(),
+            base_revision: None,
+            base_content: String::new(),
+            content: "hello".to_string(),
+            additions: 1,
+            deletions: 0,
+            line_count: 1,
+            byte_count: 5,
+            chunk_count: 1,
+            next_chunk_index: 1,
+            stats_final: true,
+            summary: None,
+            final_action_id: Some(action_id.to_string()),
+            created_at: 1,
+            updated_at: 1,
+            expires_at: i64::MAX,
+        })
+        .unwrap();
+    let file_write = AgentFileWriteProposal {
+        id: action_id.to_string(),
+        draft_id: "draft-file-write-cancel-failure".to_string(),
+        mode: AgentFileWriteMode::Create,
+        file_path: "cancelled.txt".to_string(),
+        base_revision: None,
+        summary: None,
+        additions: 1,
+        deletions: 0,
+        line_count: 1,
+        byte_count: 5,
+        approval_status: AgentApprovalStatus::Required,
+    };
+    let call = tool_call_for_action(&AgentProposedAction::FileWrite {
+        file_write: file_write.clone(),
+    });
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        version: 2,
+        run_id: "run-file-write-cancel-failure".to_string(),
+        context_items: Vec::new(),
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        suppressed_narration: false,
+        extension_snapshots: Vec::new(),
+        pending_tool_call_id: action_id.to_string(),
+        conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: action_id.to_string(),
+            tool: call.tool.clone(),
+            operation: call.args.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            truncated: false,
+        }],
+        next_conversation_trace_sequence: 1,
+        conversation_trace_truncated: false,
+        model_visible_trace_item_count: 0,
+    });
+    service
+        .store_pending_action(
+            "run-file-write-cancel-failure",
+            "conversation-file-write-cancel-failure",
+            "assistant-file-write-cancel-failure",
+            AgentProposedAction::FileWrite { file_write },
+            agent_input,
+        )
+        .unwrap();
+
+    let error = service
+        .cancel_action("run-file-write-cancel-failure", action_id)
+        .unwrap_err();
+    assert!(error.contains("保持 executing"));
+    assert_eq!(
+        service
+            .pending_actions
+            .lock()
+            .unwrap_or_else(|lock_error| lock_error.into_inner())
+            [&pending_action_storage_id("run-file-write-cancel-failure", action_id,)]
+            .snapshot
+            .status,
+        PendingActionStatus::Executing
+    );
+    assert_eq!(
+        storage
+            .get_agent_file_draft("draft-file-write-cancel-failure")
+            .unwrap()
+            .unwrap()
+            .status,
+        "rejected"
+    );
+    assert!(storage
+        .get_conversation_turn_trace("assistant-file-write-cancel-failure")
+        .unwrap()
+        .is_none());
+    let conversation = storage
+        .load_conversation("conversation-file-write-cancel-failure")
+        .unwrap()
+        .unwrap();
+    assert_eq!(conversation.messages[0].status.as_deref(), Some("pending"));
+    let interrupted = storage
+        .reconcile_interrupted_pending_agent_actions(42)
+        .unwrap();
+    assert_eq!(interrupted.len(), 1);
+    assert_eq!(interrupted[0].status, "executing");
+    assert_eq!(interrupted[0].target_status.as_deref(), Some("cancelled"));
+    assert!(storage.list_pending_agent_actions().unwrap().is_empty());
+}

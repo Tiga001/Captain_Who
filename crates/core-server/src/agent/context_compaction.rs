@@ -1,0 +1,714 @@
+use super::*;
+
+impl AgentService {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn trace_observer(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        created_at: i64,
+        agent_input: AgentChatInput,
+        notifications: CoreServerNotificationSender,
+    ) -> AgentConversationTraceObserver {
+        let service = self.clone();
+        let snapshots = self.trace_snapshots.clone();
+        let run_id = run_id.to_string();
+        let conversation_id = conversation_id.to_string();
+        let assistant_message_id = assistant_message_id.to_string();
+        let configuration_revision = conversation_context_configuration_revision(&agent_input)
+            .map_err(|error| error.to_string());
+        Arc::new(move |snapshot| {
+            snapshots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(run_id.clone(), snapshot.clone());
+            let configuration_revision = configuration_revision
+                .as_deref()
+                .map_err(|error| AgentError::new(format!("无法准备会话上下文状态：{error}")))?;
+            service
+                .persist_in_progress_trace_snapshot(
+                    &run_id,
+                    &conversation_id,
+                    &assistant_message_id,
+                    created_at,
+                    &agent_input,
+                    &notifications,
+                    &snapshot,
+                    configuration_revision,
+                )
+                .map_err(|error| AgentError::new(format!("无法增量持久化运行中会话轨迹：{error}")))
+        })
+    }
+
+    pub(super) fn model_request_observer(
+        &self,
+        expected_run_id: &str,
+        expected_conversation_id: &str,
+        expected_assistant_message_id: &str,
+    ) -> AgentModelRequestObserver {
+        let storage = self.storage.clone();
+        let expected_run_id = expected_run_id.to_string();
+        let expected_conversation_id = expected_conversation_id.to_string();
+        let expected_assistant_message_id = expected_assistant_message_id.to_string();
+        Arc::new(move |observation| {
+            let identity_matches = observation.run_id == expected_run_id
+                && observation.conversation_id.as_deref()
+                    == Some(expected_conversation_id.as_str())
+                && observation.assistant_message_id.as_deref()
+                    == Some(expected_assistant_message_id.as_str());
+            if !identity_matches {
+                eprintln!(
+                    "refused model request observation with mismatched run or conversation identity: {}",
+                    observation.id
+                );
+                return;
+            }
+            if let Err(error) = storage.save_model_request_observation(&observation) {
+                // A provider response may already be visible to the user. Diagnostics must never
+                // make the runtime replay that response and duplicate tool side effects.
+                eprintln!(
+                    "failed to persist model request observation {}: {error}",
+                    observation.id
+                );
+            }
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn context_compaction_services(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        agent_input: AgentChatInput,
+        notifications: CoreServerNotificationSender,
+    ) -> AgentContextCompactionServices {
+        let generator: ContextCompactionSummaryGenerator = self
+            .context_compaction_summary_generator
+            .clone()
+            .unwrap_or_else(|| {
+                let generator = AgentContextCompactionModelGenerator::from_chat_input(&agent_input);
+                Arc::new(move |request, cancellation| {
+                    let generator = generator.clone();
+                    Box::pin(async move { generator.generate(request, cancellation).await })
+                })
+            });
+        let run_id = run_id.to_string();
+        let conversation_id = conversation_id.to_string();
+        let assistant_message_id = assistant_message_id.to_string();
+
+        let prepare_service = self.clone();
+        let prepare_run_id = run_id.clone();
+        let prepare_conversation_id = conversation_id.clone();
+        let prepare_assistant_message_id = assistant_message_id.clone();
+        let prepare_agent_input = agent_input.clone();
+        let prepare_notifications = notifications.clone();
+
+        let commit_service = self.clone();
+        let commit_run_id = run_id.clone();
+        let commit_conversation_id = conversation_id.clone();
+        let commit_assistant_message_id = assistant_message_id.clone();
+        let commit_agent_input = agent_input;
+        let commit_notifications = notifications.clone();
+
+        let receipt_storage = self.storage.clone();
+        let receipt_run_id = run_id;
+        let receipt_conversation_id = conversation_id;
+        let receipt_assistant_message_id = assistant_message_id;
+
+        AgentContextCompactionServices::new(
+            move |request, cancellation| {
+                let service = prepare_service.clone();
+                let run_id = prepare_run_id.clone();
+                let conversation_id = prepare_conversation_id.clone();
+                let assistant_message_id = prepare_assistant_message_id.clone();
+                let agent_input = prepare_agent_input.clone();
+                let notifications = prepare_notifications.clone();
+                async move {
+                    cancellation.check()?;
+                    validate_compaction_request_identity(
+                        &request.run_id,
+                        &request.conversation_id,
+                        &request.assistant_message_id,
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                    )?;
+                    let active_trace = service
+                        .storage
+                        .get_conversation_turn_trace(&assistant_message_id)
+                        .map_err(AgentError::new)?;
+                    validate_compaction_model_visible_boundary(
+                        &request.covered_through,
+                        active_trace.as_ref(),
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                        request.visible_trace_item_count,
+                    )?;
+                    let prefix = service
+                        .storage
+                        .prepare_context_compaction_prefix_if_current(
+                            &conversation_id,
+                            &request.covered_through,
+                            request.expected_previous_summary_id.as_deref(),
+                        )
+                        .map_err(AgentError::new)?;
+                    match prefix {
+                        Some(prefix) => Ok(AgentContextCompactionPrepareOutcome::Ready(Arc::new(
+                            prefix,
+                        ))),
+                        None => service
+                            .rebuild_running_context_after_compaction(
+                                &agent_input,
+                                &run_id,
+                                &conversation_id,
+                                &assistant_message_id,
+                                request.visible_trace_item_count,
+                                &notifications,
+                            )
+                            .map(|baseline| {
+                                AgentContextCompactionPrepareOutcome::Refresh(Box::new(baseline))
+                            })
+                            .map_err(AgentError::new),
+                    }
+                }
+            },
+            move |request, cancellation| generator(request, cancellation),
+            move |request: AgentContextCompactionCommitRequest, cancellation| {
+                let service = commit_service.clone();
+                let run_id = commit_run_id.clone();
+                let conversation_id = commit_conversation_id.clone();
+                let assistant_message_id = commit_assistant_message_id.clone();
+                let agent_input = commit_agent_input.clone();
+                let notifications = commit_notifications.clone();
+                async move {
+                    cancellation.check()?;
+                    validate_compaction_request_identity(
+                        &request.run_id,
+                        &request.conversation_id,
+                        &request.assistant_message_id,
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                    )?;
+                    validate_compaction_request_identity(
+                        &request.receipt.run_id,
+                        &request.receipt.conversation_id,
+                        &request.receipt.assistant_message_id,
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                    )?;
+                    let active_trace = service
+                        .storage
+                        .get_conversation_turn_trace(&assistant_message_id)
+                        .map_err(AgentError::new)?;
+                    validate_compaction_model_visible_boundary(
+                        &request.prefix.covered_through,
+                        active_trace.as_ref(),
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                        request.visible_trace_item_count,
+                    )?;
+                    let committed = service
+                        .storage
+                        .commit_context_compaction_prefix_with_receipt_if_current(
+                            request.prefix.as_ref(),
+                            request.draft,
+                            &request.receipt,
+                            &request.observation,
+                        )
+                        .map_err(AgentError::new)?;
+                    service.invalidate_conversation_context_state(&conversation_id);
+                    let baseline = service.rebuild_running_context_after_compaction(
+                        &agent_input,
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                        request.visible_trace_item_count,
+                        &notifications,
+                    );
+                    match (committed, baseline) {
+                        (Some(summary), Ok(baseline)) => {
+                            Ok(AgentContextCompactionCommitOutcome::Applied {
+                                summary_id: summary.id,
+                                baseline: Box::new(baseline),
+                            })
+                        }
+                        (Some(summary), Err(error)) => Err(AgentError::structured(
+                            "context_compaction_applied_rebuild_failed",
+                            "上下文摘要已原子提交，但无法重建当前运行的上下文。",
+                            serde_json::json!({
+                                "summaryId": summary.id,
+                                "cause": error,
+                            }),
+                        )),
+                        (None, Ok(baseline)) => Ok(AgentContextCompactionCommitOutcome::Refresh(
+                            Box::new(baseline),
+                        )),
+                        (None, Err(error)) => Err(AgentError::new(error)),
+                    }
+                }
+            },
+            move |receipt, observation| {
+                let storage = receipt_storage.clone();
+                let run_id = receipt_run_id.clone();
+                let conversation_id = receipt_conversation_id.clone();
+                let assistant_message_id = receipt_assistant_message_id.clone();
+                async move {
+                    validate_compaction_request_identity(
+                        &receipt.run_id,
+                        &receipt.conversation_id,
+                        &receipt.assistant_message_id,
+                        &run_id,
+                        &conversation_id,
+                        &assistant_message_id,
+                    )?;
+                    storage
+                        .record_context_compaction_receipt(&receipt, observation.as_ref())
+                        .map_err(AgentError::new)
+                }
+            },
+        )
+    }
+
+    pub(super) fn rebuild_running_context_after_compaction(
+        &self,
+        agent_input: &AgentChatInput,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        visible_trace_item_count: usize,
+        notifications: &CoreServerNotificationSender,
+    ) -> Result<AgentContextBaseline, String> {
+        self.invalidate_conversation_context_state(conversation_id);
+        let conversation = self
+            .storage
+            .load_conversation(conversation_id)?
+            .ok_or_else(|| format!("未找到对话：{conversation_id}"))?;
+        let traces = self
+            .storage
+            .list_conversation_turn_traces(conversation_id)?;
+        let summary = self
+            .storage
+            .get_active_context_compaction_summary(conversation_id)?;
+        let active_trace = traces
+            .iter()
+            .find(|trace| trace.assistant_message_id == assistant_message_id);
+        if let Some(trace) = active_trace {
+            if trace.run_id != run_id
+                || trace.conversation_id != conversation_id
+                || trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress
+            {
+                return Err("压缩后重建上下文时，运行中 trace 身份或状态不一致。".to_string());
+            }
+            if visible_trace_item_count > trace.items.len() {
+                return Err("压缩后重建上下文时，模型可见 trace 游标超出日志末尾。".to_string());
+            }
+        } else if visible_trace_item_count != 0 {
+            return Err("压缩后重建上下文时，模型可见 trace 游标没有对应日志。".to_string());
+        }
+
+        // Build the runtime baseline at the model-visible cursor. The server cache is extended to
+        // the physical log tail below so the context indicator remains an immediate durable view.
+        let mut visible_traces = traces.clone();
+        if let Some(trace) = visible_traces
+            .iter_mut()
+            .find(|trace| trace.assistant_message_id == assistant_message_id)
+        {
+            trace.items.truncate(visible_trace_item_count);
+            trace.terminal_status = ConversationTurnTraceTerminalStatus::InProgress;
+            trace.terminal_error = None;
+            trace
+                .validate()
+                .map_err(|error| format!("压缩后重建上下文时，模型可见 trace 前缀无效：{error}"))?;
+        }
+
+        let mut preview_input = agent_input.clone();
+        preview_input.messages = conversation_history_messages_with_compaction(
+            &conversation,
+            &visible_traces,
+            summary.as_ref(),
+            &[],
+        );
+        preview_input.context_compaction_summary = summary;
+        preview_input.attachments.clear();
+        preview_input.approval_decision = None;
+        preview_input.tool_continuation = None;
+        preview_input.resume_checkpoint = None;
+        if let Some(context) = preview_input.context.as_mut() {
+            context.conversation_id = Some(conversation_id.to_string());
+            context.attachment_library = Some(self.storage.build_attachment_library_context(
+                conversation_id,
+                context.project_id.as_deref(),
+            )?);
+        }
+
+        let mut state =
+            create_conversation_context_state(preview_input).map_err(|error| error.to_string())?;
+        // Freeze the exact persistent prefix that the runtime may adopt without exposing a tool
+        // result to compaction before the main model has observed it once.
+        let runtime_baseline = state.shared_baseline().map_err(|error| error.to_string())?;
+        let committed_trace_items = match active_trace {
+            Some(trace) => state
+                .append_trace_items(trace, visible_trace_item_count)
+                .map_err(|error| error.to_string())?,
+            None => 0,
+        };
+        // Measure and freeze the appended trace chunk once for the conversation cache and circle.
+        state.shared_baseline().map_err(|error| error.to_string())?;
+        let snapshot = if agent_input.context_window_indicator_enabled {
+            Some(
+                state
+                    .snapshot_with_skill_activation(
+                        AgentContextWindowPhase::DurableCommit,
+                        agent_input.skill_activation.as_ref(),
+                    )
+                    .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
+        let entry = ConversationContextStateEntry {
+            configuration_revision: state.configuration_revision().to_string(),
+            state,
+            active_run_id: Some(run_id.to_string()),
+            active_assistant_message_id: Some(assistant_message_id.to_string()),
+            committed_trace_items,
+            terminal: false,
+            last_access: self.next_conversation_context_state_access(),
+        };
+        self.insert_conversation_context_state(conversation_id, entry);
+        self.emit_context_window_snapshot(notifications, run_id, conversation_id, snapshot);
+        Ok(runtime_baseline)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn persist_in_progress_trace_snapshot(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        created_at: i64,
+        agent_input: &AgentChatInput,
+        notifications: &CoreServerNotificationSender,
+        snapshot: &ConversationTraceSnapshot,
+        configuration_revision: &str,
+    ) -> Result<Option<AgentContextBaseline>, String> {
+        let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
+        let changed = self.storage.append_in_progress_conversation_turn_trace(
+            &trace,
+            created_at,
+            now_ms(),
+        )?;
+        let update = self.update_running_conversation_context_state(
+            agent_input,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            &trace,
+            configuration_revision,
+        )?;
+        if changed {
+            self.emit_context_window_snapshot(
+                notifications,
+                run_id,
+                conversation_id,
+                update.snapshot,
+            );
+        }
+        Ok(Some(update.baseline))
+    }
+
+    pub(super) fn update_running_conversation_context_state(
+        &self,
+        agent_input: &AgentChatInput,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        trace: &ConversationTurnTrace,
+        configuration_revision: &str,
+    ) -> Result<ConversationContextStateUpdate, String> {
+        let access = self.next_conversation_context_state_access();
+        let needs_rebuild;
+        {
+            let mut states = self
+                .conversation_context_states
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(entry) = states.get_mut(conversation_id) {
+                if entry.configuration_revision != configuration_revision {
+                    needs_rebuild = true;
+                } else {
+                    let update = if !entry.terminal
+                        && entry.active_run_id.as_deref() == Some(run_id)
+                        && entry.active_assistant_message_id.as_deref()
+                            == Some(assistant_message_id)
+                    {
+                        entry
+                            .state
+                            .append_trace_items(trace, entry.committed_trace_items)
+                    } else if entry.terminal
+                        && entry.active_assistant_message_id.as_deref()
+                            != Some(assistant_message_id)
+                    {
+                        let current_user = agent_input
+                            .messages
+                            .iter()
+                            .rev()
+                            .find(|message| message.role == "user")
+                            .map(|message| {
+                                (
+                                    message.message_id.as_deref(),
+                                    message.content.as_str(),
+                                    message.created_at,
+                                )
+                            })
+                            .unwrap_or((None, "", None));
+                        (|| {
+                            entry.state.append_user_message(
+                                current_user.0,
+                                current_user.1,
+                                current_user.2,
+                            )?;
+                            entry.active_run_id = Some(run_id.to_string());
+                            entry.active_assistant_message_id =
+                                Some(assistant_message_id.to_string());
+                            entry.committed_trace_items = 0;
+                            entry.terminal = false;
+                            entry.state.append_trace_items(trace, 0)
+                        })()
+                    } else {
+                        Err(AgentError::new("会话上下文状态与当前运行身份不一致。"))
+                    };
+                    match update {
+                        Ok(committed_trace_items) => {
+                            entry.active_run_id = Some(run_id.to_string());
+                            entry.committed_trace_items = committed_trace_items;
+                            entry.last_access = access;
+                            let baseline = entry
+                                .state
+                                .shared_baseline()
+                                .map_err(|error| error.to_string())?;
+                            let snapshot = if agent_input.context_window_indicator_enabled {
+                                Some(
+                                    entry
+                                        .state
+                                        .snapshot_with_skill_activation(
+                                            AgentContextWindowPhase::DurableCommit,
+                                            agent_input.skill_activation.as_ref(),
+                                        )
+                                        .map_err(|error| error.to_string())?,
+                                )
+                            } else {
+                                None
+                            };
+                            return Ok(ConversationContextStateUpdate { baseline, snapshot });
+                        }
+                        Err(_) => needs_rebuild = true,
+                    }
+                }
+            } else {
+                needs_rebuild = true;
+            }
+            if needs_rebuild {
+                states.remove(conversation_id);
+            }
+        }
+
+        self.rebuild_conversation_context_state(
+            agent_input,
+            conversation_id,
+            AgentContextWindowPhase::DurableCommit,
+            Some(run_id),
+            agent_input.skill_activation.as_ref(),
+        )
+    }
+
+    pub(super) fn seed_trace_snapshot_from_checkpoint(
+        &self,
+        run_id: &str,
+        checkpoint: Option<&AgentRunCheckpoint>,
+    ) {
+        let Some(checkpoint) = checkpoint else {
+            return;
+        };
+        self.trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(run_id.to_string())
+            .or_insert_with(|| ConversationTraceSnapshot {
+                items: checkpoint.conversation_trace_items.clone(),
+                next_sequence: checkpoint.next_conversation_trace_sequence,
+                truncated: checkpoint.conversation_trace_truncated,
+            });
+    }
+
+    pub(super) fn commit_trace_snapshot_with_continuation(
+        &self,
+        record: &PendingActionRecord,
+        agent_input: &AgentChatInput,
+        notifications: &CoreServerNotificationSender,
+    ) -> Result<(), String> {
+        let checkpoint = record
+            .agent_input
+            .resume_checkpoint
+            .as_ref()
+            .ok_or_else(|| "审批续跑缺少会话轨迹检查点。".to_string())?;
+        let continuation = agent_input
+            .tool_continuation
+            .as_ref()
+            .ok_or_else(|| "审批续跑缺少工具结果。".to_string())?;
+        let snapshot = conversation_trace_snapshot_from_checkpoint_and_continuation(
+            checkpoint,
+            &continuation.call,
+            &continuation.result,
+        );
+        let run_id = &record.snapshot.run_id;
+        let conversation_id = record
+            .snapshot
+            .conversation_id
+            .as_deref()
+            .ok_or_else(|| "审批续跑缺少 conversation id。".to_string())?;
+        let assistant_message_id = record
+            .snapshot
+            .assistant_message_id
+            .as_deref()
+            .ok_or_else(|| "审批续跑缺少 assistant message id。".to_string())?;
+        self.trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(run_id.to_string(), snapshot.clone());
+        let configuration_revision =
+            conversation_context_configuration_revision(&record.agent_input)
+                .map_err(|error| error.to_string())?;
+        self.persist_in_progress_trace_snapshot(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            record.snapshot.created_at,
+            &record.agent_input,
+            notifications,
+            &snapshot,
+            &configuration_revision,
+        )
+        .map(|_| ())
+    }
+
+    pub(super) fn discard_trace_snapshot(&self, run_id: &str) {
+        self.trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(run_id);
+    }
+}
+
+pub(super) fn validate_compaction_request_identity(
+    request_run_id: &str,
+    request_conversation_id: &str,
+    request_assistant_message_id: &str,
+    expected_run_id: &str,
+    expected_conversation_id: &str,
+    expected_assistant_message_id: &str,
+) -> AgentResult<()> {
+    if request_run_id == expected_run_id
+        && request_conversation_id == expected_conversation_id
+        && request_assistant_message_id == expected_assistant_message_id
+    {
+        return Ok(());
+    }
+    Err(AgentError::structured(
+        "context_compaction_identity_mismatch",
+        "上下文压缩请求与当前运行身份不一致。",
+        serde_json::json!({
+            "requestRunId": request_run_id,
+            "requestConversationId": request_conversation_id,
+            "requestAssistantMessageId": request_assistant_message_id,
+        }),
+    ))
+}
+
+pub(super) fn validate_compaction_model_visible_boundary(
+    covered_through: &ContextJournalCursor,
+    active_trace: Option<&ConversationTurnTrace>,
+    expected_run_id: &str,
+    expected_conversation_id: &str,
+    expected_assistant_message_id: &str,
+    visible_trace_item_count: usize,
+) -> AgentResult<()> {
+    let Some(trace) = active_trace else {
+        if visible_trace_item_count == 0
+            && !matches!(
+                covered_through,
+                ContextJournalCursor::TraceItem {
+                    assistant_message_id,
+                    ..
+                } if assistant_message_id == expected_assistant_message_id
+            )
+        {
+            return Ok(());
+        }
+        return Err(AgentError::structured(
+            "context_compaction_visibility_mismatch",
+            "上下文压缩请求缺少当前运行的会话轨迹。",
+            serde_json::json!({
+                "assistantMessageId": expected_assistant_message_id,
+                "visibleTraceItemCount": visible_trace_item_count,
+            }),
+        ));
+    };
+    if trace.run_id != expected_run_id
+        || trace.conversation_id != expected_conversation_id
+        || trace.assistant_message_id != expected_assistant_message_id
+        || trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress
+    {
+        return Err(AgentError::structured(
+            "context_compaction_visibility_mismatch",
+            "上下文压缩请求对应的运行中会话轨迹身份无效。",
+            serde_json::json!({
+                "runId": trace.run_id,
+                "conversationId": trace.conversation_id,
+                "assistantMessageId": trace.assistant_message_id,
+                "terminalStatus": trace.terminal_status,
+            }),
+        ));
+    }
+    if visible_trace_item_count > trace.items.len()
+        || visible_trace_item_count > 0
+            && !trace.items[visible_trace_item_count - 1].is_safe_compaction_boundary()
+    {
+        return Err(AgentError::structured(
+            "context_compaction_visibility_mismatch",
+            "上下文压缩请求的模型可见轨迹边界无效。",
+            serde_json::json!({
+                "visibleTraceItemCount": visible_trace_item_count,
+                "persistedTraceItemCount": trace.items.len(),
+            }),
+        ));
+    }
+    if let ContextJournalCursor::TraceItem {
+        assistant_message_id,
+        sequence,
+    } = covered_through
+    {
+        if assistant_message_id == expected_assistant_message_id
+            && !trace.items[..visible_trace_item_count]
+                .iter()
+                .any(|item| item.sequence() == *sequence)
+        {
+            return Err(AgentError::structured(
+                "context_compaction_unseen_trace_item",
+                "上下文压缩不能覆盖主模型尚未看过的工具轨迹。",
+                serde_json::json!({
+                    "assistantMessageId": assistant_message_id,
+                    "sequence": sequence,
+                    "visibleTraceItemCount": visible_trace_item_count,
+                }),
+            ));
+        }
+    }
+    Ok(())
+}

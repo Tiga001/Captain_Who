@@ -1,0 +1,282 @@
+use super::*;
+
+#[test]
+fn runs_simple_command_in_workspace() {
+    let workspace = TestWorkspace::new();
+    let result = run_authorized_command(
+        Some(&workspace.path),
+        &request("printf hello", Some(5_000)),
+        AgentPermissions {
+            read: AgentReadPermission::WorkspaceOnly,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::RequireApproval,
+            ..Default::default()
+        },
+        CommandAuthorizationSource::ExplicitUser,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(result.stdout, "hello");
+    assert_eq!(result.cwd, ".");
+    assert!(!result.cancelled);
+}
+
+#[test]
+fn runs_simple_command_outside_workspace_with_full_write() {
+    let workspace = TestWorkspace::new();
+    let outside = TestWorkspace::new();
+    let mut request = request("printf outside", Some(5_000));
+    request.cwd = Some(outside.path.to_string_lossy().to_string());
+
+    let result = run_authorized_command(
+        Some(&workspace.path),
+        &request,
+        AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::RequireApproval,
+            ..Default::default()
+        },
+        CommandAuthorizationSource::ExplicitUser,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result.exit_code, Some(0));
+    assert_eq!(result.stdout, "outside");
+    assert_eq!(result.cwd, outside.path.to_string_lossy());
+}
+
+#[test]
+fn executor_rechecks_workspace_only_read_scope_against_canonical_cwd() {
+    let workspace = TestWorkspace::new();
+    let outside = TestWorkspace::new();
+    std::fs::write(outside.path.join("local.txt"), "outside-secret").unwrap();
+    let mut command = request("cat local.txt", Some(5_000));
+    command.cwd = Some(outside.path.to_string_lossy().to_string());
+    let permissions = AgentPermissions {
+        read: AgentReadPermission::WorkspaceOnly,
+        write: AgentWritePermission::All,
+        command: AgentCommandPermission::AutoApprove,
+        command_safety: AgentCommandSafetyPolicy::Guarded,
+        ..Default::default()
+    };
+
+    let error = run_authorized_command(
+        Some(&workspace.path),
+        &command,
+        permissions,
+        CommandAuthorizationSource::Automatic,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error
+            .policy_evaluation()
+            .map(|evaluation| evaluation.decision),
+        Some(CommandPolicyDecision::RequireExplicitApproval)
+    );
+    assert!(error
+        .policy_evaluation()
+        .is_some_and(|evaluation| evaluation
+            .findings
+            .iter()
+            .any(|finding| finding.code == "command.scope.external_cwd")));
+
+    let result = run_authorized_command(
+        Some(&workspace.path),
+        &command,
+        permissions,
+        CommandAuthorizationSource::ExplicitUser,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.stdout, "outside-secret");
+}
+
+#[test]
+fn times_out_long_command() {
+    let workspace = TestWorkspace::new();
+    let result = run_authorized_command(
+        Some(&workspace.path),
+        &request("sleep 2", Some(50)),
+        AgentPermissions {
+            read: AgentReadPermission::WorkspaceOnly,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::RequireApproval,
+            ..Default::default()
+        },
+        CommandAuthorizationSource::ExplicitUser,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+
+    assert!(result.timed_out);
+}
+
+#[test]
+fn pre_start_action_cancellation_never_spawns_the_command() {
+    let workspace = TestWorkspace::new();
+    let cancel_flag = Arc::new(AtomicBool::new(true));
+    let result = run_shell_command(
+        &workspace.path,
+        Some(&workspace.path),
+        &request("mkdir must-not-exist", Some(5_000)),
+        AgentCancellationToken::new(),
+        Some(cancel_flag),
+    )
+    .unwrap();
+
+    assert!(result.cancelled);
+    assert_eq!(result.exit_code, None);
+    assert!(!workspace.path.join("must-not-exist").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn timeout_terminates_the_shell_process_group() {
+    let workspace = TestWorkspace::new();
+    let started = Instant::now();
+    let result = run_shell_command(
+        &workspace.path,
+        Some(&workspace.path),
+        &request("sleep 30 & wait", Some(50)),
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+
+    assert!(result.timed_out);
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(unix)]
+#[test]
+fn completed_shell_does_not_leave_a_descendant_holding_output_pipes() {
+    let workspace = TestWorkspace::new();
+    let started = Instant::now();
+    let result = run_shell_command(
+        &workspace.path,
+        Some(&workspace.path),
+        &request("sleep 30 &", Some(5_000)),
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result.exit_code, Some(0));
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[cfg(unix)]
+#[test]
+fn drains_and_bounds_large_stdout_and_stderr_without_deadlock() {
+    let workspace = TestWorkspace::new();
+    let result = run_shell_command(
+        &workspace.path,
+        Some(&workspace.path),
+        &request(
+            "head -c 200000 /dev/zero; head -c 200000 /dev/zero >&2",
+            Some(5_000),
+        ),
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result.exit_code, Some(0));
+    assert!(result.stdout_truncated);
+    assert!(result.stderr_truncated);
+    assert!(result.stdout.len() <= MAX_OUTPUT_BYTES + 32);
+    assert!(result.stderr.len() <= MAX_OUTPUT_BYTES + 32);
+}
+
+#[test]
+fn execution_recomputes_policy_instead_of_trusting_declared_risk() {
+    let workspace = TestWorkspace::new();
+    let mut command = request("printf trusted", Some(5_000));
+    command.risk_level = Some(AgentCommandRiskLevel::Destructive);
+
+    let result = run_authorized_command(
+        Some(&workspace.path),
+        &command,
+        AgentPermissions {
+            read: AgentReadPermission::WorkspaceOnly,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::Guarded,
+            ..Default::default()
+        },
+        CommandAuthorizationSource::Automatic,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result.stdout, "trusted");
+
+    let mut disguised_catastrophe = request("rm -rf /", Some(5_000));
+    disguised_catastrophe.risk_level = Some(AgentCommandRiskLevel::ReadOnly);
+    let error = run_authorized_command(
+        Some(&workspace.path),
+        &disguised_catastrophe,
+        AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            ..Default::default()
+        },
+        CommandAuthorizationSource::Automatic,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("command.catastrophic.filesystem_root"));
+    assert_eq!(
+        error
+            .policy_evaluation()
+            .map(|evaluation| evaluation.code.as_str()),
+        Some("command.catastrophic.filesystem_root")
+    );
+}
+
+#[test]
+fn executor_refuses_guarded_automatic_command_that_needs_approval() {
+    let workspace = TestWorkspace::new();
+    let error = run_authorized_command(
+        Some(&workspace.path),
+        &request("printf blocked > output.txt", Some(5_000)),
+        AgentPermissions {
+            read: AgentReadPermission::WorkspaceOnly,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::Guarded,
+            ..Default::default()
+        },
+        CommandAuthorizationSource::Automatic,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("command.explicit_approval_required"));
+    assert_eq!(
+        error
+            .policy_evaluation()
+            .map(|evaluation| evaluation.decision),
+        Some(CommandPolicyDecision::RequireExplicitApproval)
+    );
+    assert!(!workspace.path.join("output.txt").exists());
+}

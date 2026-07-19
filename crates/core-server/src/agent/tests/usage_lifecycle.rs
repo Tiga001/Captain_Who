@@ -1,0 +1,202 @@
+use super::*;
+
+#[test]
+fn persists_usage_for_failed_runs() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-1".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Usage test".to_string(),
+            messages: Vec::new(),
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let service = AgentService::new(storage);
+    service.register_usage_context(
+        "run-1",
+        AgentRunUsageContext {
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-1".to_string(),
+            run_id: "run-1".to_string(),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+
+    service
+        .persist_run_usage(
+            "run-1",
+            AgentRunStatus::Failed,
+            Some(AgentUsage {
+                input_tokens: Some(20),
+                output_tokens: Some(8),
+                output_thinking_tokens: None,
+                total_tokens: Some(28),
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                billable_request_count: Some(3),
+            }),
+            Some("invalid tool arguments".to_string()),
+        )
+        .unwrap();
+
+    let summary = service
+        .get_usage_summary(&AgentUsageSummaryInput {
+            range: AgentUsageSummaryRange::All,
+            from: None,
+            to: None,
+        })
+        .unwrap();
+    assert_eq!(summary.request_count, 3);
+    assert_eq!(summary.input_tokens, Some(20));
+    assert_eq!(summary.output_tokens, Some(8));
+    assert_eq!(summary.total_tokens, Some(28));
+}
+
+#[test]
+fn deleting_project_cancels_runs_and_discards_usage_contexts() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(storage);
+    let cancellation = AgentCancellationToken::new();
+    service.register_cancellation("run-1", cancellation.clone());
+    service.register_usage_context(
+        "run-1",
+        AgentRunUsageContext {
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-1".to_string(),
+            run_id: "run-1".to_string(),
+            project_id: Some("project-1".to_string()),
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+
+    service.delete_project("project-1").unwrap();
+
+    assert!(cancellation.is_cancelled());
+    assert!(service.is_project_deleting(Some("project-1")));
+    assert!(service
+        .usage_contexts
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_empty());
+}
+
+#[test]
+fn pending_approval_persists_full_run_checkpoint() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(storage.clone());
+    let base_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "contextWindowTokens": 128000,
+        "messages": []
+    }))
+    .unwrap();
+    let run_checkpoint = AgentRunCheckpoint {
+        version: 2,
+        run_id: "run-checkpoint".to_string(),
+        context_items: vec![
+            mycopilot_core::AgentContextCheckpointItem {
+                role: "system".to_string(),
+                content: "rules".to_string(),
+                images: Vec::new(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+                sources: vec!["backend_system_prompt".to_string()],
+                scope: "run".to_string(),
+                retention: "retained".to_string(),
+                group: None,
+                origin: None,
+            },
+            mycopilot_core::AgentContextCheckpointItem {
+                role: "assistant".to_string(),
+                content: String::new(),
+                images: Vec::new(),
+                tool_call_id: None,
+                tool_calls: vec![mycopilot_core::AgentContextCheckpointToolCall {
+                    id: "call-checkpoint".to_string(),
+                    name: "apply_patch".to_string(),
+                    args: json!({ "operation": "create", "filePath": "report.txt" }),
+                }],
+                is_error: false,
+                sources: vec!["model_response".to_string()],
+                scope: "run".to_string(),
+                retention: "retained".to_string(),
+                group: Some(mycopilot_core::AgentContextCheckpointGroup {
+                    id: "exchange-checkpoint".to_string(),
+                    kind: "tool_exchange".to_string(),
+                }),
+                origin: None,
+            },
+        ],
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        suppressed_narration: false,
+        extension_snapshots: Vec::new(),
+        pending_tool_call_id: "call-checkpoint".to_string(),
+        conversation_trace_items: Vec::new(),
+        next_conversation_trace_sequence: 0,
+        conversation_trace_truncated: false,
+        model_visible_trace_item_count: 0,
+    };
+    let checkpoint = agent_input_with_run_checkpoint(&base_input, &run_checkpoint);
+    let action = AgentProposedAction::ToolCall {
+        call: AgentToolCall {
+            id: "call-checkpoint".to_string(),
+            tool: "apply_patch".to_string(),
+            args: json!({ "operation": "create", "filePath": "report.txt" }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        },
+    };
+
+    service
+        .store_pending_action(
+            "run-checkpoint",
+            "conversation-checkpoint",
+            "assistant-checkpoint",
+            action,
+            checkpoint,
+        )
+        .unwrap();
+    assert!(base_input.resume_checkpoint.is_none());
+
+    let reloaded = AgentService::new(storage);
+    let pending = reloaded
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let record = pending
+        .get(&pending_action_storage_id(
+            "run-checkpoint",
+            "call-checkpoint",
+        ))
+        .unwrap();
+    assert_eq!(
+        record.agent_input.resume_checkpoint.as_ref(),
+        Some(&run_checkpoint)
+    );
+    assert!(record.agent_input.messages.is_empty());
+    assert!(record.agent_input.attachments.is_empty());
+    assert!(record.agent_input.api_token.is_empty());
+    assert_eq!(record.agent_input.context_window_tokens, Some(128_000));
+}

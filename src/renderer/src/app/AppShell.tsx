@@ -4,7 +4,6 @@ import type { AppWindowState } from '@mycopilot/host-api'
 import type {
   AgentContextWindowSnapshot,
   AgentEvent,
-  AgentInputAttachment,
   AgentProposedAction,
   SkillSelection
 } from '@mycopilot/protocol'
@@ -41,7 +40,6 @@ import {
   startConversationTurn
 } from '../features/agent/agentClient'
 import { resolveChatPermissions } from '../features/chat/chatPermissions'
-import { createAttachmentSummary } from '../features/chat/chatAttachments'
 import {
   planSkillActivationRecovery,
   reconcileSkillActivationSelections,
@@ -56,7 +54,6 @@ import {
   loadConversations,
   loadInputAttachments,
   loadUiPreferences,
-  saveChatMessageState,
   saveComposerDraft,
   saveConversationMeta,
   saveUiPreferences,
@@ -82,6 +79,15 @@ import {
   createUserMessage,
   mergeConversationMessageFromBackend
 } from './chatMessageFactory'
+import {
+  buildMessageContentWithAttachments,
+  DEFAULT_APP_WINDOW_STATE,
+  getActiveRunModelId,
+  getActiveRunSkillSelections,
+  getContextWindowSnapshotKey,
+  getEditableLastTurn
+} from './appShellConversationUtils'
+import { useConversationPersistence } from './useConversationPersistence'
 import { useShellLayout } from './useShellLayout'
 import { AppShellSettingsView } from './AppShellSettingsView'
 import { AppShellWorkspace } from './AppShellWorkspace'
@@ -95,88 +101,8 @@ import {
   STREAM_DELTA_MAX_BUFFER_CHARS,
   SUPPORTS_NATIVE_FONT_SMOOTHING
 } from './AppShellSupport'
-import type { PendingMessageDelta, PendingMessageSave } from './AppShellSupport'
+import type { PendingMessageDelta } from './AppShellSupport'
 import { applyAuthoritativePendingActionDecision } from './pendingActionDecision'
-
-type PendingMessageUpsert = {
-  messages: ChatMessage[]
-  positionOffset: number
-}
-
-function buildMessageContentWithAttachments(content: string, attachments: AgentInputAttachment[]) {
-  const trimmedContent = content.trim()
-  const attachmentSummary = createAttachmentSummary(attachments)
-  return [trimmedContent, attachmentSummary].filter(Boolean).join('\n\n')
-}
-
-function getEditableLastTurn(conversation: ChatConversation) {
-  const messages = conversation.messages
-  if (messages.length < 2) return null
-
-  const userIndex = messages.length - 2
-  const assistantIndex = messages.length - 1
-  const userMessage = messages[userIndex]
-  const assistantMessage = messages[assistantIndex]
-  if (userMessage?.role !== 'user' || assistantMessage?.role !== 'assistant') return null
-  if (assistantMessage.status !== 'sent') return null
-
-  const assistantRunStatus = assistantMessage.agentRun?.status
-  const assistantSettled =
-    !assistantRunStatus ||
-    assistantRunStatus === 'completed' ||
-    assistantRunStatus === 'failed' ||
-    assistantRunStatus === 'cancelled' ||
-    assistantRunStatus === 'idle'
-  if (!assistantSettled) return null
-
-  return {
-    assistantIndex,
-    assistantMessage,
-    userIndex,
-    userMessage
-  }
-}
-
-function getActiveRunModelId(conversation: ChatConversation | null) {
-  if (!conversation?.modelId) return null
-
-  const latestAssistantMessage = [...conversation.messages]
-    .reverse()
-    .find((message) => message.role === 'assistant')
-  if (!latestAssistantMessage) return null
-
-  const runStatus = latestAssistantMessage.agentRun?.status
-  const runIsActive =
-    latestAssistantMessage.status === 'pending' ||
-    runStatus === 'starting' ||
-    runStatus === 'running' ||
-    runStatus === 'waiting_for_approval'
-
-  return runIsActive ? conversation.modelId : null
-}
-
-function getActiveRunSkillSelections(conversation: ChatConversation | null): SkillSelection[] {
-  if (!conversation) return []
-
-  const latestAssistantMessage = [...conversation.messages]
-    .reverse()
-    .find((message) => message.role === 'assistant')
-  return (
-    latestAssistantMessage?.agentRun?.activatedSkills?.map((skill) => ({
-      id: skill.id,
-      revision: skill.revision
-    })) ?? []
-  )
-}
-
-function getContextWindowSnapshotKey(scopeId: string, model: string) {
-  return JSON.stringify([scopeId, model])
-}
-
-const DEFAULT_APP_WINDOW_STATE: AppWindowState = {
-  isFullScreen: false,
-  isMaximized: false
-}
 
 export function AppShell() {
   const { t } = useFrontendConfig()
@@ -216,12 +142,17 @@ export function AppShell() {
   const activeRunBindingsRef = useRef<Map<string, ActiveRunBinding>>(new Map())
   const bufferedAgentEventsRef = useRef<Map<string, AgentEvent[]>>(new Map())
   const pendingMessageDeltasRef = useRef<Map<string, PendingMessageDelta>>(new Map())
-  const conversationSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
-  const pendingConversationSavesRef = useRef<Map<string, ChatConversation>>(new Map())
-  const messageUpsertQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
-  const pendingMessageUpsertsRef = useRef<Map<string, PendingMessageUpsert[]>>(new Map())
-  const messageSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map())
-  const pendingMessageSavesRef = useRef<Map<string, PendingMessageSave>>(new Map())
+  const {
+    enqueueChatMessagesUpsert,
+    enqueueChatMessageStateSave,
+    enqueueConversationMetaSave,
+    pendingConversationSavesRef,
+    pendingMessageSavesRef,
+    pendingMessageUpsertsRef,
+    waitForConversationSaves,
+    waitForMessageStateSaves,
+    waitForMessageUpserts
+  } = useConversationPersistence()
   const pendingActionsHydratedRef = useRef(false)
   const cancelledPendingMessageIdsRef = useRef<Set<string>>(new Set())
   const cancelledRunIdsRef = useRef<Set<string>>(new Set())
@@ -556,140 +487,6 @@ export function AppShell() {
       console.error('Failed to cancel agent run', error)
     })
   }, [])
-
-  const waitForConversationSaves = useCallback(async (conversationId: string) => {
-    while (true) {
-      const pendingSave = conversationSaveQueuesRef.current.get(conversationId)
-      if (!pendingSave) return
-      await pendingSave
-    }
-  }, [])
-
-  const waitForMessageUpserts = useCallback(async (conversationId: string) => {
-    while (true) {
-      const pendingUpsert = messageUpsertQueuesRef.current.get(conversationId)
-      if (!pendingUpsert) return
-      await pendingUpsert
-    }
-  }, [])
-
-  const waitForMessageStateSaves = useCallback(async (conversationId: string) => {
-    while (true) {
-      const pendingSaves = [...messageSaveQueuesRef.current.entries()]
-        .filter(([key]) => key.startsWith(`${conversationId}:`))
-        .map(([, pendingSave]) => pendingSave)
-      if (pendingSaves.length === 0) return
-      await Promise.allSettled(pendingSaves)
-    }
-  }, [])
-
-  // Sending a message only needs conversation metadata here; full conversation saves delete and
-  // reinsert all messages, which can overwrite concurrent agent/tool message-state updates.
-  const enqueueConversationMetaSave = useCallback((conversation: ChatConversation) => {
-    const conversationId = conversation.id
-    pendingConversationSavesRef.current.set(conversationId, conversation)
-
-    if (conversationSaveQueuesRef.current.has(conversationId)) {
-      return
-    }
-
-    const drainSaves = async () => {
-      while (true) {
-        const payload = pendingConversationSavesRef.current.get(conversationId)
-        if (!payload) return
-
-        pendingConversationSavesRef.current.delete(conversationId)
-        try {
-          await saveConversationMeta(payload)
-        } catch (error) {
-          console.error('Failed to save conversation metadata to SQLite', error)
-        }
-      }
-    }
-
-    const nextSave = drainSaves().finally(() => {
-      conversationSaveQueuesRef.current.delete(conversationId)
-    })
-    conversationSaveQueuesRef.current.set(conversationId, nextSave)
-  }, [])
-
-  const enqueueChatMessagesUpsert = useCallback(
-    (conversationId: string, messages: ChatMessage[], positionOffset: number) => {
-      const pendingUpserts = pendingMessageUpsertsRef.current.get(conversationId) ?? []
-      pendingMessageUpsertsRef.current.set(conversationId, [
-        ...pendingUpserts,
-        {
-          messages,
-          positionOffset
-        }
-      ])
-
-      if (messageUpsertQueuesRef.current.has(conversationId)) {
-        return
-      }
-
-      const drainUpserts = async () => {
-        while (true) {
-          const pendingUpserts = pendingMessageUpsertsRef.current.get(conversationId) ?? []
-          const payload = pendingUpserts[0]
-          if (!payload) return
-
-          const remainingUpserts = pendingUpserts.slice(1)
-          if (remainingUpserts.length > 0) {
-            pendingMessageUpsertsRef.current.set(conversationId, remainingUpserts)
-          } else {
-            pendingMessageUpsertsRef.current.delete(conversationId)
-          }
-
-          try {
-            await waitForConversationSaves(conversationId)
-            await upsertChatMessages(conversationId, payload.messages, payload.positionOffset)
-          } catch (error) {
-            console.error('Failed to upsert chat messages to SQLite', error)
-          }
-        }
-      }
-
-      const nextUpsert = drainUpserts().finally(() => {
-        messageUpsertQueuesRef.current.delete(conversationId)
-      })
-      messageUpsertQueuesRef.current.set(conversationId, nextUpsert)
-    },
-    [waitForConversationSaves]
-  )
-
-  const enqueueChatMessageStateSave = useCallback(
-    (conversationId: string, message: ChatMessage) => {
-      const key = `${conversationId}:${message.id}`
-      pendingMessageSavesRef.current.set(key, { conversationId, message })
-
-      if (messageSaveQueuesRef.current.has(key)) {
-        return
-      }
-
-      const drainSaves = async () => {
-        while (true) {
-          const payload = pendingMessageSavesRef.current.get(key)
-          if (!payload) return
-
-          pendingMessageSavesRef.current.delete(key)
-          try {
-            await waitForConversationSaves(payload.conversationId)
-            await waitForMessageUpserts(payload.conversationId)
-            await saveChatMessageState(payload.conversationId, payload.message)
-          } catch (error) {
-            console.error('Failed to save chat message state to SQLite', error)
-          }
-        }
-      }
-
-      const nextSave = drainSaves().finally(() => {
-        messageSaveQueuesRef.current.delete(key)
-      })
-      messageSaveQueuesRef.current.set(key, nextSave)
-    },
-    [waitForConversationSaves, waitForMessageUpserts]
-  )
 
   const updateAssistantMessage = useCallback(
     (
@@ -1616,6 +1413,9 @@ export function AppShell() {
       cleanupRunBinding,
       deleteProject,
       enqueueChatMessageStateSave,
+      pendingConversationSavesRef,
+      pendingMessageSavesRef,
+      pendingMessageUpsertsRef,
       setConversationsWithRef,
       setDraftsWithRef,
       showToast,

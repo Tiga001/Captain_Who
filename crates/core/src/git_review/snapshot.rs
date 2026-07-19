@@ -1,0 +1,92 @@
+use super::*;
+
+#[derive(Debug, Clone)]
+pub(super) struct SnapshotFile {
+    pub(super) path: String,
+    pub(super) previous_path: Option<String>,
+    pub(super) status: GitReviewFileStatus,
+    pub(super) stamp: FileStamp,
+    pub(super) previous_stamp: Option<FileStamp>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct Snapshot {
+    pub(super) id: String,
+    pub(super) created_at: Instant,
+    pub(super) repository: RepositoryContext,
+    pub(super) scope: GitReviewScope,
+    pub(super) head_oid: String,
+    pub(super) index_stamp: FileStamp,
+    pub(super) files: HashMap<String, SnapshotFile>,
+}
+
+#[derive(Default)]
+pub(super) struct SnapshotCache {
+    entries: HashMap<String, Snapshot>,
+    order: VecDeque<String>,
+}
+
+impl SnapshotCache {
+    pub(super) fn insert(&mut self, snapshot: Snapshot) {
+        self.prune();
+        while self.order.len() >= MAX_SNAPSHOTS {
+            if let Some(id) = self.order.pop_front() {
+                self.entries.remove(&id);
+            }
+        }
+        self.order.push_back(snapshot.id.clone());
+        self.entries.insert(snapshot.id.clone(), snapshot);
+    }
+
+    pub(super) fn get(&mut self, snapshot_id: &str) -> Option<Snapshot> {
+        self.prune();
+        self.entries.get(snapshot_id).cloned()
+    }
+
+    fn prune(&mut self) {
+        let expired = self
+            .entries
+            .iter()
+            .filter(|(_, snapshot)| snapshot.created_at.elapsed() > SNAPSHOT_TTL)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in expired {
+            self.entries.remove(&id);
+            self.order.retain(|candidate| candidate != &id);
+        }
+    }
+}
+
+pub(super) fn read_head_oid(repository: &RepositoryContext) -> Result<String, String> {
+    let output = run_git(
+        &repository.root,
+        &[
+            "rev-parse".to_string(),
+            "--verify".to_string(),
+            "HEAD".to_string(),
+        ],
+        4096,
+    )?;
+    if output.status.success() {
+        String::from_utf8(trim_ascii(&output.stdout).to_vec())
+            .map_err(|_| "Git returned an invalid HEAD revision.".to_string())
+    } else {
+        Ok(String::new())
+    }
+}
+
+pub(super) fn snapshot_file_is_current(
+    snapshot: &Snapshot,
+    file: &SnapshotFile,
+) -> Result<bool, String> {
+    let previous_path_is_current = match (&file.previous_path, &file.previous_stamp) {
+        (Some(path), Some(stamp)) => file_stamp(&snapshot.repository.root.join(path)) == *stamp,
+        (None, None) => true,
+        _ => false,
+    };
+    Ok(read_head_oid(&snapshot.repository)? == snapshot.head_oid
+        && file_stamp(&snapshot.repository.git_dir.join("index")) == snapshot.index_stamp
+        && (snapshot.scope != GitReviewScope::Unstaged
+            || (file_stamp(&snapshot.repository.root.join(&file.path)) == file.stamp
+                && previous_path_is_current)))
+}
