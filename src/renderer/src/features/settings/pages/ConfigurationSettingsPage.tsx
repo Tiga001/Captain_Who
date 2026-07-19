@@ -41,9 +41,6 @@ export function ConfigurationSettingsPage() {
     const savedModel: ModelConfig = {
       id: values.id,
       displayName: values.displayName || values.id,
-      providerPath:
-        editingModel && editingModel.id === values.id ? editingModel.providerPath : undefined,
-      shortName: editingModel && editingModel.id === values.id ? editingModel.shortName : undefined,
       apiUrlOverride: values.apiUrlOverride || undefined,
       apiTokenOverride: values.apiTokenOverride || undefined,
       supportsImage: values.supportsImage,

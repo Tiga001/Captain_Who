@@ -321,63 +321,110 @@
 
 .skill-install-preview {
   display: grid;
-  gap: 18px;
-}
-
-.skill-install-preview__operation {
-  display: inline-block;
-  margin-bottom: 5px;
-  color: var(--mc-color-text-accent);
-  font-size: var(--mc-font-size-xs);
-  font-weight: var(--mc-font-weight-strong);
+  gap: 14px;
 }
 
 .skill-install-preview__identity h3 {
   font-size: var(--mc-font-size-settings-section-heading);
 }
 
-.skill-install-preview__facts {
+.skill-install-preview__source-summary {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin: 0;
-  overflow: hidden;
-  border: 1px solid var(--mc-color-border-subtle);
-  border-radius: var(--mc-radius-card);
-}
-
-.skill-install-preview__facts > div {
+  grid-template-columns: 38px minmax(0, 1fr);
   min-width: 0;
-  padding: 11px 13px;
-  border-bottom: 1px solid var(--mc-color-border-subtle);
+  padding: 13px 14px;
+  align-items: center;
+  gap: 12px;
+  background: var(--mc-color-surface-muted);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-row);
 }
 
-.skill-install-preview__facts > div:nth-child(odd) {
-  border-right: 1px solid var(--mc-color-border-subtle);
+.skill-install-preview__source-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  color: var(--mc-color-icon-default);
+  background: var(--mc-color-surface-card);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-row);
 }
 
-.skill-install-preview__facts > div:nth-last-child(-n + 2) {
-  border-bottom: 0;
+.skill-install-preview__source-icon svg {
+  width: var(--mc-icon-size-md);
+  height: var(--mc-icon-size-md);
 }
 
-.skill-install-preview__facts dt {
+.skill-install-preview__source-summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.skill-install-preview__source-summary span,
+.skill-install-preview__source-summary small {
   color: var(--settings-content-muted-color);
   font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-normal);
 }
 
-.skill-install-preview__facts dd {
-  margin: 4px 0 0;
-  overflow-wrap: anywhere;
+.skill-install-preview__source-summary strong {
+  overflow: hidden;
   color: var(--settings-content-text-color);
   font-size: var(--mc-font-size-sm);
+  line-height: var(--mc-line-height-normal);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-install-preview__result,
+.skill-compatibility {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  padding: 12px 14px;
+  align-items: start;
+  gap: 10px;
+  border-radius: var(--mc-radius-row);
+  font-size: var(--mc-font-size-sm);
+}
+
+.skill-install-preview__result {
+  color: var(--settings-content-text-color);
+  background: var(--mc-color-surface-muted);
+}
+
+.skill-install-preview__result > svg,
+.skill-compatibility > svg {
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+}
+
+.skill-install-preview__result > svg,
+.skill-compatibility[data-status='compatible'] > svg {
+  color: var(--mc-color-text-accent);
+}
+
+.skill-install-preview__result strong,
+.skill-compatibility strong {
+  color: var(--settings-content-text-color);
+  font-size: var(--mc-font-size-sm);
+  line-height: var(--mc-line-height-normal);
+}
+
+.skill-install-preview__result p,
+.skill-compatibility p {
+  margin: 3px 0 0;
+  color: var(--settings-content-muted-color);
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-normal);
 }
 
 .skill-compatibility {
-  display: grid;
-  padding: 12px 14px;
-  gap: 8px;
   background: var(--mc-color-surface-muted);
-  border-radius: var(--mc-radius-row);
-  font-size: var(--mc-font-size-sm);
 }
 
 .skill-compatibility[data-status='incompatible'],
@@ -388,7 +435,7 @@
 
 .skill-compatibility ul {
   display: grid;
-  margin: 0;
+  margin: 7px 0 0;
   padding: 0;
   gap: 8px;
   list-style: none;
@@ -410,6 +457,71 @@
 .skill-compatibility input {
   margin: 2px 0 0;
   accent-color: var(--mc-color-control-selected-background);
+}
+
+.skill-install-preview__technical {
+  display: grid;
+}
+
+.skill-install-preview__technical-toggle {
+  display: inline-flex;
+  width: max-content;
+  padding: 4px 0;
+  align-items: center;
+  gap: 4px;
+  color: var(--settings-content-muted-color);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--mc-font-size-xs);
+  font-weight: var(--mc-font-weight-medium);
+}
+
+.skill-install-preview__technical-toggle:hover {
+  color: var(--settings-content-text-color);
+}
+
+.skill-install-preview__technical-toggle svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 140ms ease;
+}
+
+.skill-install-preview__technical-toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+.skill-install-preview__technical-facts {
+  display: grid;
+  margin: 5px 0 0;
+  padding: 10px 12px;
+  gap: 9px;
+  background: var(--mc-color-surface-muted);
+  border-radius: var(--mc-radius-row);
+}
+
+.skill-install-preview__technical-facts > div {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.32fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.skill-install-preview__technical-facts dt,
+.skill-install-preview__technical-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--mc-font-size-xs);
+  line-height: var(--mc-line-height-normal);
+}
+
+.skill-install-preview__technical-facts dt {
+  color: var(--settings-content-muted-color);
+}
+
+.skill-install-preview__technical-facts dd {
+  color: var(--settings-content-text-color);
 }
 
 .skill-dialog-error {
@@ -484,7 +596,8 @@
 .skill-dialog-button:focus-visible,
 .skill-install-dialog__close:focus-visible,
 .skill-source-choice__option:focus-visible,
-.skill-candidate-card:focus-visible {
+.skill-candidate-card:focus-visible,
+.skill-install-preview__technical-toggle:focus-visible {
   outline: 2px solid var(--mc-color-focus-ring);
   outline-offset: 2px;
 }
@@ -500,10 +613,6 @@
     grid-template-columns: 1fr;
   }
 
-  .skill-install-preview__facts {
-    grid-template-columns: 1fr;
-  }
-
   .skill-candidate-card {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -513,20 +622,16 @@
     grid-row: auto;
   }
 
-  .skill-install-preview__facts > div,
-  .skill-install-preview__facts > div:nth-child(odd),
-  .skill-install-preview__facts > div:nth-last-child(-n + 2) {
-    border-right: 0;
-    border-bottom: 1px solid var(--mc-color-border-subtle);
-  }
-
-  .skill-install-preview__facts > div:last-child {
-    border-bottom: 0;
+  .skill-install-preview__technical-facts > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .skill-dialog-progress svg {
+  .skill-dialog-progress svg,
+  .skill-install-preview__technical-toggle svg {
     animation: none;
+    transition: none;
   }
 }

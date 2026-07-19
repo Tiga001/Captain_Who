@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import type { ClipboardEvent } from 'react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { SearchMode } from './configurationTypes'
+import { SecretInput } from './SecretInput'
 
 interface WebSearchSettingsProps {
   searchMode: SearchMode
@@ -20,9 +20,6 @@ export function WebSearchSettings({
   const [isApiKeyRequiredDialogOpen, setApiKeyRequiredDialogOpen] = useState(false)
   const hasTavilyApiKey = tavilyApiKey.trim().length > 0
   const isSearchAllowed = searchMode !== 'disabled' && hasTavilyApiKey
-  const preventClipboard = (event: ClipboardEvent<HTMLInputElement>) => {
-    event.preventDefault()
-  }
 
   const toggleWebSearch = () => {
     if (isSearchAllowed) {
@@ -76,21 +73,18 @@ export function WebSearchSettings({
             </button>
           </div>
 
-          <label className="configuration-field settings-list-row">
+          <div className="configuration-field settings-list-row">
             <span className="settings-list-row__text">
               <span className="settings-list-row__title">{t('configuration.tavilyApiKey')}</span>
             </span>
             <span className="settings-list-row__control">
-              <input
-                className="settings-list-control"
-                type="password"
+              <SecretInput
+                ariaLabel={t('configuration.tavilyApiKey')}
                 value={tavilyApiKey}
-                onChange={(event) => updateTavilyApiKey(event.target.value)}
-                onCopy={preventClipboard}
-                onCut={preventClipboard}
+                onChange={updateTavilyApiKey}
               />
             </span>
-          </label>
+          </div>
         </div>
       </div>
 

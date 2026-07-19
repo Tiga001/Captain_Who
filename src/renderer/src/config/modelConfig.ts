@@ -1,8 +1,8 @@
 export interface ModelConfig {
+  /** Opaque model identifier sent verbatim as the provider API's `model` value. */
   id: string
+  /** User-facing label. It never changes provider routing. */
   displayName: string
-  shortName?: string
-  providerPath?: string
   apiUrlOverride?: string
   apiTokenOverride?: string
   supportsImage: boolean
@@ -73,7 +73,6 @@ export const modelConfig = {
     {
       id: 'claude-opus-4-7',
       displayName: 'claude-opus-4-7',
-      shortName: 'opus-4.7',
       supportsImage: true,
       inputPrice: '0.028',
       outputPrice: '0.14',
@@ -82,7 +81,6 @@ export const modelConfig = {
     {
       id: 'claude-sonnet-4.6',
       displayName: 'claude-sonnet-4.6',
-      shortName: 'sonnet-4.6',
       supportsImage: true,
       inputPrice: '0.0168',
       outputPrice: '0.084',
@@ -91,37 +89,30 @@ export const modelConfig = {
     {
       id: 'gpt-5.5',
       displayName: 'gpt-5.5',
-      shortName: 'gpt-5.5',
       supportsImage: true,
       inputPrice: '0.021',
       outputPrice: '0.126',
       enabled: true
     },
     {
-      id: 'deepseek-v4-pro',
-      displayName: 'deepseek-v4-pro',
-      shortName: 'v4-pro',
-      providerPath: 'deepseek/deepseek-v4-pro',
+      id: 'deepseek/deepseek-v4-pro',
+      displayName: 'deepseek/deepseek-v4-pro',
       supportsImage: false,
       inputPrice: '0.012',
       outputPrice: '0.024',
       enabled: true
     },
     {
-      id: 'deepseek-v4-flash',
-      displayName: 'deepseek-v4-flash',
-      shortName: 'v4-flash',
-      providerPath: 'deepseek/deepseek-v4-flash',
+      id: 'deepseek/deepseek-v4-flash',
+      displayName: 'deepseek/deepseek-v4-flash',
       supportsImage: false,
       inputPrice: '0.00105',
       outputPrice: '0.0021',
       enabled: true
     },
     {
-      id: 'minimax-m2.5',
-      displayName: 'minimax-m2.5',
-      shortName: 'minimax-m2.5',
-      providerPath: 'minimax/minimax-m2.5',
+      id: 'minimax/minimax-m2.5',
+      displayName: 'minimax/minimax-m2.5',
       supportsImage: false,
       inputPrice: '0.001407',
       outputPrice: '0.005628',

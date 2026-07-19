@@ -330,6 +330,7 @@ describe('Skills settings navigation and management inventory', () => {
           customPermissionEnabled: true,
           customPermissions: {
             command: 'require_approval',
+            commandSafety: 'guarded',
             patch: 'require_approval',
             read: 'workspace_only',
             write: 'workspace_only'
@@ -563,7 +564,7 @@ describe('Skill installation and update workflow', () => {
       .element(screen.getByRole('heading', { level: 3, name: 'Repository auditor' }))
       .toBeVisible()
 
-    const commitButton = screen.getByRole('button', { name: 'skills.confirmInstallation' })
+    const commitButton = screen.getByRole('button', { name: 'skills.installOperation' })
     await expect.element(commitButton).toBeDisabled()
     await screen.getByRole('checkbox', { name: /This package contains scripts/ }).click()
     await expect.element(commitButton).toBeEnabled()
@@ -603,6 +604,70 @@ describe('Skill installation and update workflow', () => {
       preparationId: expect.any(String),
       source: { kind: 'installedSource' }
     })
+  })
+
+  it('presents a concise preview and keeps protocol metadata in technical details', async () => {
+    service.inspectInstallation.mockResolvedValueOnce(
+      installationPreview({
+        compatibility: { issues: [], status: 'compatible' },
+        source: {
+          kind: 'githubRepository',
+          owner: 'openai',
+          reference: { kind: 'named', value: 'main' },
+          refreshable: true,
+          repository: 'skills',
+          resolvedCommit: '0123456789abcdef0123456789abcdef01234567',
+          subdirectory: 'skills/reviewer'
+        }
+      })
+    )
+    const screen = await render(<SkillsSettingsPage />)
+    await expect.element(screen.getByText(installedSkill.name)).toBeVisible()
+    await screen.getByRole('button', { name: 'skills.install' }).click()
+    await screen.getByRole('button', { name: /skills.installLocal/ }).click()
+
+    await expect.element(screen.getByText('openai/skills')).toBeVisible()
+    await expect.element(screen.getByText('skills.previewContents')).toBeVisible()
+    await expect
+      .element(screen.getByText('skills.previewReadyToInstall', { exact: true }))
+      .toBeVisible()
+    await expect
+      .element(screen.getByText('skills.previewSafetyPassed', { exact: true }))
+      .toBeVisible()
+    expect(document.body.textContent).not.toContain('skills.previewExactSource')
+
+    await screen.getByRole('button', { name: 'skills.showTechnicalDetails' }).click()
+    await expect.element(screen.getByText('skills.previewExactSource')).toBeVisible()
+    await expect.element(screen.getByText('openai/skills · main · skills/reviewer')).toBeVisible()
+    await expect.element(screen.getByText('skills.previewFormat')).toBeVisible()
+    await expect.element(screen.getByText('skills.previewExpires')).toBeVisible()
+  })
+
+  it('treats an unchanged update as already current and does not offer a commit action', async () => {
+    service.inspectInstallation.mockResolvedValueOnce(
+      installationPreview({
+        changes: { content: 'unchanged', source: 'unchanged' },
+        compatibility: { issues: [], status: 'compatible' },
+        operation: 'update'
+      })
+    )
+    const screen = await render(<SkillsSettingsPage />)
+    await expect.element(screen.getByText(installedSkill.name)).toBeVisible()
+    const row = findSkillRow(screen.container, installedSkill.name)
+    row
+      .querySelector<HTMLButtonElement>('.skill-row-action:not(.skill-row-action--danger)')
+      ?.click()
+
+    await expect
+      .element(screen.getByText('skills.previewAlreadyCurrent', { exact: true }))
+      .toBeVisible()
+    await expect.element(screen.getByRole('button', { name: 'skills.done' })).toBeVisible()
+    expect(
+      Array.from(document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')).some(
+        (button) => button.textContent === 'skills.updateOperation'
+      )
+    ).toBe(false)
+    expect(service.commitInstallation).not.toHaveBeenCalled()
   })
 
   it('resolves a single URL candidate and passes its acquisition authority unchanged', async () => {
@@ -818,7 +883,7 @@ describe('Skill installation and update workflow', () => {
       .element(screen.getByText('Some resources are stored but not exposed.'))
       .toBeVisible()
     await expect
-      .element(screen.getByRole('button', { name: 'skills.confirmInstallation' }))
+      .element(screen.getByRole('button', { name: 'skills.installOperation' }))
       .toBeEnabled()
     expect(document.querySelector('[role="dialog"] input[type="checkbox"]')).toBeNull()
   })
@@ -831,7 +896,7 @@ describe('Skill installation and update workflow', () => {
     await screen.getByRole('button', { name: 'skills.install' }).click()
     await screen.getByRole('button', { name: /skills.installLocal/ }).click()
     await screen.getByRole('checkbox', { name: /This package contains scripts/ }).click()
-    await screen.getByRole('button', { name: 'skills.confirmInstallation' }).click()
+    await screen.getByRole('button', { name: 'skills.installOperation' }).click()
 
     const closeButton = document.querySelector<HTMLButtonElement>(
       '[aria-label="skills.closeDialog"]'
@@ -972,7 +1037,7 @@ describe('Skill installation and update workflow', () => {
     await screen.getByRole('button', { name: 'skills.install' }).click()
     await screen.getByRole('button', { name: /skills.installLocal/ }).click()
     await screen.getByRole('checkbox', { name: /This package contains scripts/ }).click()
-    await screen.getByRole('button', { name: 'skills.confirmInstallation' }).click()
+    await screen.getByRole('button', { name: 'skills.installOperation' }).click()
     await expect.element(screen.getByText('skills.localOperationFailed')).toBeVisible()
     const firstCommitInput = service.commitInstallation.mock.calls[0]?.[0]
 
@@ -1012,7 +1077,7 @@ describe('Skill installation and update workflow', () => {
     await screen.getByRole('button', { name: 'skills.install' }).click()
     await screen.getByRole('button', { name: /skills.installLocal/ }).click()
     await screen.getByRole('checkbox', { name: /This package contains scripts/ }).click()
-    await screen.getByRole('button', { name: 'skills.confirmInstallation' }).click()
+    await screen.getByRole('button', { name: 'skills.installOperation' }).click()
 
     await expect.poll(() => service.listManagement.mock.calls.length).toBeGreaterThanOrEqual(2)
     expect(service.commitInstallation).toHaveBeenCalledTimes(1)
@@ -1032,7 +1097,7 @@ describe('Skill installation and update workflow', () => {
     await screen.getByRole('button', { name: /skills.installLocal/ }).click()
     await screen.getByRole('checkbox', { name: /This package contains scripts/ }).click()
     await expect
-      .element(screen.getByRole('button', { name: 'skills.confirmInstallation' }))
+      .element(screen.getByRole('button', { name: 'skills.installOperation' }))
       .toBeDisabled()
     expect(service.commitInstallation).not.toHaveBeenCalled()
   })

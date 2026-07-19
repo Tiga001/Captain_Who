@@ -59,7 +59,6 @@ export function ModelManager({
           <div className="model-manager-table__row" role="row" key={model.id}>
             <span className="model-manager-table__model" role="cell">
               <strong>{model.displayName}</strong>
-              {model.providerPath && <small>{model.providerPath}</small>}
             </span>
             <span
               className="model-manager-table__context"

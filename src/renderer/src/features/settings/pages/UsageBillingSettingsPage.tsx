@@ -109,13 +109,12 @@ function formatMonthLabel(timestamp: number): string {
 }
 
 function getModelSubtitle(model: AgentUsageModelSummary): string {
-  if (model.providerPath && model.providerPath !== model.modelId) return model.providerPath
   if (model.modelId !== model.modelName) return model.modelId
   return ''
 }
 
 function getModelKey(model: AgentUsageModelSummary): string {
-  return `${model.modelId}::${model.providerPath ?? ''}`
+  return model.modelId
 }
 
 function getModelLabel(model: AgentUsageModelSummary, deletedLabel: string): string {
@@ -661,10 +660,7 @@ export function UsageBillingSettingsPage({
               {sortedModels.map((model) => {
                 const subtitle = getModelSubtitle(model)
                 return (
-                  <div
-                    className="usage-model-row"
-                    key={`${model.modelId}-${model.providerPath ?? ''}`}
-                  >
+                  <div className="usage-model-row" key={model.modelId}>
                     <div className="usage-model-row__name">
                       <strong>{model.modelName}</strong>
                       {subtitle && <span>{subtitle}</span>}

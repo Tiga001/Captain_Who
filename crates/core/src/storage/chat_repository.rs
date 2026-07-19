@@ -492,6 +492,62 @@ pub fn update_message_run_terminal_state(
     Ok(())
 }
 
+/// Repairs a non-terminal run whose next approval checkpoint is already durable.
+///
+/// The pending-action row remains the authority for the approval payload. This function only
+/// restores the message/run lifecycle fields and deliberately preserves every existing timeline,
+/// tool, and approval field in `agent_run_json`.
+pub fn update_message_run_waiting_state(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    run_id: &str,
+    updated_at: i64,
+) -> rusqlite::Result<()> {
+    let existing_agent_run_json = connection
+        .query_row(
+            "SELECT agent_run_json FROM messages WHERE conversation_id = ?1 AND id = ?2",
+            params![conversation_id, message_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let next_agent_run_json = existing_agent_run_json.map(|raw| {
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return raw;
+        };
+        let Some(run) = value.as_object_mut() else {
+            return raw;
+        };
+
+        run.insert("runId".to_string(), run_id.into());
+        run.insert("status".to_string(), "waiting_for_approval".into());
+        run.remove("completedAt");
+        if let Some(state) = run
+            .get_mut("state")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            state.insert("status".to_string(), "waiting_for_approval".into());
+            state.insert("activeRunId".to_string(), run_id.into());
+            state.insert("updatedAt".to_string(), updated_at.into());
+        }
+
+        serde_json::to_string(&value).unwrap_or(raw)
+    });
+
+    connection.execute(
+        "UPDATE messages
+         SET status = 'pending', agent_run_json = ?1
+         WHERE conversation_id = ?2 AND id = ?3",
+        params![next_agent_run_json, conversation_id, message_id],
+    )?;
+    connection.execute(
+        "UPDATE conversations SET updated_at = ?1 WHERE id = ?2",
+        params![updated_at, conversation_id],
+    )?;
+    Ok(())
+}
+
 pub fn update_message_state(
     connection: &Connection,
     conversation_id: &str,

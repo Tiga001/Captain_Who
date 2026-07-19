@@ -1,6 +1,16 @@
 // Renderer skills management UI: resolves public URLs and presents frozen installation previews.
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
-import { AlertTriangle, ChevronRight, FolderOpen, GitFork, LoaderCircle, X } from 'lucide-react'
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  FolderOpen,
+  GitFork,
+  LoaderCircle,
+  PackageOpen,
+  X
+} from 'lucide-react'
 import { createPortal } from 'react-dom'
 import type {
   SkillGitHubReference,
@@ -340,77 +350,150 @@ function SkillPreview({
   preview: SkillInstallationPreview
 }) {
   const { t } = useFrontendConfig()
+  const [technicalDetailsOpen, setTechnicalDetailsOpen] = useState(false)
   const expired = now >= preview.expiresAtUnixMs
   const requiredIssues = preview.compatibility.issues.filter(
     (issue) => issue.requiresAcknowledgement
   )
   const acknowledged = requiredIssues.every((issue) => acceptedIssueIds.includes(issue.id))
   const incompatible = preview.compatibility.status === 'incompatible'
+  const alreadyCurrent =
+    preview.operation === 'update' &&
+    preview.changes.content === 'unchanged' &&
+    preview.changes.source === 'unchanged'
+  const hasCompatibilityIssues = preview.compatibility.issues.length > 0
+  const friendlySource = formatFriendlyPreviewSource(preview, t)
 
   return (
     <div className="skill-install-preview">
       <div className="skill-install-preview__identity">
-        <span className="skill-install-preview__operation">{operationLabel}</span>
         <h3>{preview.package.name}</h3>
         <p>{preview.package.description}</p>
       </div>
 
-      <dl className="skill-install-preview__facts">
+      <div className="skill-install-preview__source-summary">
+        <span className="skill-install-preview__source-icon">
+          {preview.source.kind === 'githubRepository' ? (
+            <GitFork aria-hidden="true" />
+          ) : preview.source.kind === 'localDirectory' ? (
+            <FolderOpen aria-hidden="true" />
+          ) : (
+            <PackageOpen aria-hidden="true" />
+          )}
+        </span>
         <div>
-          <dt>{t('skills.previewSource')}</dt>
-          <dd>{formatPreviewSource(preview, t)}</dd>
-        </div>
-        <div>
-          <dt>{t('skills.previewFiles')}</dt>
-          <dd>
-            {replaceTokens(t('skills.previewFilesValue'), { count: preview.package.fileCount })}
-          </dd>
-        </div>
-        <div>
-          <dt>{t('skills.previewSize')}</dt>
-          <dd>{formatBytes(preview.package.totalBytes)}</dd>
-        </div>
-        <div>
-          <dt>{t('skills.previewFormat')}</dt>
-          <dd>v{preview.package.formatVersion}</dd>
-        </div>
-        <div>
-          <dt>{t('skills.previewChanges')}</dt>
-          <dd>
-            {replaceTokens(t('skills.previewChangesValue'), {
-              content: t(`skills.change.${preview.changes.content}`),
-              source: t(`skills.change.${preview.changes.source}`)
+          <span>{t('skills.previewSource')}</span>
+          <strong>{friendlySource}</strong>
+          <small>
+            {replaceTokens(t('skills.previewContents'), {
+              count: preview.package.fileCount,
+              size: formatBytes(preview.package.totalBytes)
             })}
-          </dd>
+          </small>
         </div>
+      </div>
+
+      <div
+        className="skill-install-preview__result"
+        data-state={alreadyCurrent ? 'current' : 'ready'}
+      >
+        <CheckCircle2 aria-hidden="true" />
         <div>
-          <dt>{t('skills.previewExpires')}</dt>
-          <dd>{new Date(preview.expiresAtUnixMs).toLocaleTimeString()}</dd>
+          <strong>
+            {alreadyCurrent
+              ? t('skills.previewAlreadyCurrent')
+              : preview.operation === 'update'
+                ? t('skills.previewUpdateAvailable')
+                : t('skills.previewReadyToInstall')}
+          </strong>
+          <p>
+            {alreadyCurrent
+              ? t('skills.previewAlreadyCurrentDescription')
+              : preview.operation === 'update'
+                ? t('skills.previewUpdateAvailableDescription')
+                : t('skills.previewReadyToInstallDescription')}
+          </p>
         </div>
-      </dl>
+      </div>
 
       <div className="skill-compatibility" data-status={preview.compatibility.status}>
-        <strong>{t(`skills.compatibility.${preview.compatibility.status}`)}</strong>
-        {preview.compatibility.issues.length > 0 && (
-          <ul>
-            {preview.compatibility.issues.map((issue) => (
-              <li key={issue.id} data-severity={issue.severity}>
-                {issue.requiresAcknowledgement ? (
-                  <label>
-                    <input
-                      checked={acceptedIssueIds.includes(issue.id)}
-                      disabled={committing}
-                      onChange={() => onToggleAcknowledgement(issue.id)}
-                      type="checkbox"
-                    />
-                    <span>{issue.message}</span>
-                  </label>
-                ) : (
-                  <span>{issue.message}</span>
-                )}
-              </li>
-            ))}
-          </ul>
+        {hasCompatibilityIssues || incompatible ? (
+          <AlertTriangle aria-hidden="true" />
+        ) : (
+          <CheckCircle2 aria-hidden="true" />
+        )}
+        <div>
+          <strong>
+            {!hasCompatibilityIssues && preview.compatibility.status === 'compatible'
+              ? t('skills.previewSafetyPassed')
+              : t(`skills.compatibility.${preview.compatibility.status}`)}
+          </strong>
+          {!hasCompatibilityIssues && preview.compatibility.status === 'compatible' ? (
+            <p>{t('skills.previewSafetyPassedDescription')}</p>
+          ) : (
+            preview.compatibility.issues.length > 0 && (
+              <ul>
+                {preview.compatibility.issues.map((issue) => (
+                  <li key={issue.id} data-severity={issue.severity}>
+                    {issue.requiresAcknowledgement ? (
+                      <label>
+                        <input
+                          checked={acceptedIssueIds.includes(issue.id)}
+                          disabled={committing}
+                          onChange={() => onToggleAcknowledgement(issue.id)}
+                          type="checkbox"
+                        />
+                        <span>{issue.message}</span>
+                      </label>
+                    ) : (
+                      <span>{issue.message}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )
+          )}
+        </div>
+      </div>
+
+      <div className="skill-install-preview__technical">
+        <button
+          aria-expanded={technicalDetailsOpen}
+          className="skill-install-preview__technical-toggle"
+          onClick={() => setTechnicalDetailsOpen((open) => !open)}
+          type="button"
+        >
+          <span>
+            {technicalDetailsOpen
+              ? t('skills.hideTechnicalDetails')
+              : t('skills.showTechnicalDetails')}
+          </span>
+          <ChevronDown aria-hidden="true" />
+        </button>
+        {technicalDetailsOpen && (
+          <dl className="skill-install-preview__technical-facts">
+            <div>
+              <dt>{t('skills.previewExactSource')}</dt>
+              <dd>{formatPreviewSource(preview, t)}</dd>
+            </div>
+            <div>
+              <dt>{t('skills.previewFormat')}</dt>
+              <dd>v{preview.package.formatVersion}</dd>
+            </div>
+            <div>
+              <dt>{t('skills.previewChanges')}</dt>
+              <dd>
+                {replaceTokens(t('skills.previewChangesValue'), {
+                  content: t(`skills.change.${preview.changes.content}`),
+                  source: t(`skills.change.${preview.changes.source}`)
+                })}
+              </dd>
+            </div>
+            <div>
+              <dt>{t('skills.previewExpires')}</dt>
+              <dd>{new Date(preview.expiresAtUnixMs).toLocaleTimeString()}</dd>
+            </div>
+          </dl>
         )}
       </div>
 
@@ -425,24 +508,37 @@ function SkillPreview({
         </p>
       )}
 
-      <DialogActions>
-        <button
-          className="skill-dialog-button"
-          disabled={committing}
-          onClick={onBack}
-          type="button"
-        >
-          {t('skills.back')}
-        </button>
-        <button
-          className="skill-dialog-button skill-dialog-button--primary"
-          disabled={committing || expired || incompatible || !acknowledged}
-          onClick={onCommit}
-          type="button"
-        >
-          {committing ? t('skills.committing') : t('skills.confirmInstallation')}
-        </button>
-      </DialogActions>
+      {alreadyCurrent ? (
+        <DialogActions>
+          <button
+            className="skill-dialog-button skill-dialog-button--primary"
+            disabled={committing}
+            onClick={onBack}
+            type="button"
+          >
+            {t('skills.done')}
+          </button>
+        </DialogActions>
+      ) : (
+        <DialogActions>
+          <button
+            className="skill-dialog-button"
+            disabled={committing}
+            onClick={onBack}
+            type="button"
+          >
+            {t('skills.back')}
+          </button>
+          <button
+            className="skill-dialog-button skill-dialog-button--primary"
+            disabled={committing || expired || incompatible || !acknowledged}
+            onClick={onCommit}
+            type="button"
+          >
+            {committing ? t('skills.committing') : operationLabel}
+          </button>
+        </DialogActions>
+      )}
     </div>
   )
 }
@@ -545,6 +641,16 @@ function formatPreviewSource(
   return `${source.owner}/${source.repository} · ${formatGitHubReference(source.reference, t)}${
     source.subdirectory ? ` · ${source.subdirectory}` : ''
   }`
+}
+
+function formatFriendlyPreviewSource(
+  preview: SkillInstallationPreview,
+  t: ReturnType<typeof useFrontendConfig>['t']
+): string {
+  const source = preview.source
+  if (source.kind === 'localDirectory') return t('skills.previewLocalSource')
+  if (source.kind === 'installedSource') return source.displayName
+  return `${source.owner}/${source.repository}`
 }
 
 function formatResolvedSource(

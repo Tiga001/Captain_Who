@@ -56,7 +56,6 @@ pub fn upsert_usage_record(
             project_id,
             model_id,
             model_name,
-            provider_path,
             started_at,
             completed_at,
             status,
@@ -73,13 +72,12 @@ pub fn upsert_usage_record(
             output_price,
             estimated_cost
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
         ON CONFLICT(conversation_id, message_id) DO UPDATE SET
             run_id = excluded.run_id,
             project_id = excluded.project_id,
             model_id = excluded.model_id,
             model_name = excluded.model_name,
-            provider_path = excluded.provider_path,
             started_at = excluded.started_at,
             completed_at = excluded.completed_at,
             status = excluded.status,
@@ -104,7 +102,6 @@ pub fn upsert_usage_record(
             &record.project_id,
             &record.model_id,
             &record.model_name,
-            &record.provider_path,
             record.started_at,
             record.completed_at,
             &record.status,
@@ -164,7 +161,6 @@ fn roll_up_deleted_usage(
             usage_day,
             model_id,
             model_name,
-            provider_path_key,
             request_count,
             message_count,
             unpriced_message_count,
@@ -182,7 +178,6 @@ fn roll_up_deleted_usage(
             CAST(created_at / ?2 AS INTEGER) * ?2,
             model_id,
             model_name,
-            COALESCE(provider_path, ''),
             COALESCE(SUM(billable_request_count), 0),
             COUNT(*),
             SUM(CASE
@@ -203,9 +198,8 @@ fn roll_up_deleted_usage(
         GROUP BY
             CAST(created_at / ?2 AS INTEGER) * ?2,
             model_id,
-            model_name,
-            COALESCE(provider_path, '')
-        ON CONFLICT(usage_day, model_id, model_name, provider_path_key) DO UPDATE SET
+            model_name
+        ON CONFLICT(usage_day, model_id, model_name) DO UPDATE SET
             {DELETED_USAGE_ROLLUP_UPDATE_SQL}
         "
     );
@@ -383,7 +377,6 @@ fn query_usage_models(
             SELECT
                 model_id,
                 model_name,
-                COALESCE(provider_path, '') AS provider_path_key,
                 created_at AS observed_at,
                 billable_request_count AS request_count,
                 1 AS message_count,
@@ -405,7 +398,6 @@ fn query_usage_models(
             SELECT
                 model_id,
                 model_name,
-                provider_path_key,
                 usage_day AS observed_at,
                 request_count,
                 message_count,
@@ -424,7 +416,6 @@ fn query_usage_models(
         aggregated AS (
             SELECT
                 model_id,
-                provider_path_key,
                 COALESCE(SUM(request_count), 0) AS request_count,
                 COALESCE(SUM(message_count), 0) AS message_count,
                 COALESCE(SUM(unpriced_message_count), 0) AS unpriced_message_count,
@@ -436,7 +427,7 @@ fn query_usage_models(
                 SUM(cache_creation_input_tokens) AS cache_creation_input_tokens,
                 SUM(estimated_cost) AS estimated_cost
             FROM usage_entries
-            GROUP BY model_id, provider_path_key
+            GROUP BY model_id
         )
         SELECT
             aggregated.model_id,
@@ -445,25 +436,21 @@ fn query_usage_models(
                     SELECT configured.display_name
                     FROM models AS configured
                     WHERE configured.id = aggregated.model_id
-                      AND COALESCE(configured.provider_path, '') = aggregated.provider_path_key
                     LIMIT 1
                 ), ''),
                 (
                     SELECT historical.model_name
                     FROM usage_entries AS historical
                     WHERE historical.model_id = aggregated.model_id
-                      AND historical.provider_path_key = aggregated.provider_path_key
                     ORDER BY historical.observed_at DESC, historical.model_name DESC
                     LIMIT 1
                 ),
                 aggregated.model_id
             ) AS model_name,
-            NULLIF(aggregated.provider_path_key, ''),
             EXISTS(
                 SELECT 1
                 FROM models AS configured
                 WHERE configured.id = aggregated.model_id
-                  AND COALESCE(configured.provider_path, '') = aggregated.provider_path_key
             ) AS is_configured,
             aggregated.request_count,
             aggregated.message_count,
@@ -485,18 +472,17 @@ fn query_usage_models(
             Ok(AgentUsageModelSummary {
                 model_id: row.get(0)?,
                 model_name: row.get(1)?,
-                provider_path: row.get(2)?,
-                is_configured: row.get(3)?,
-                request_count: i64_to_u64(row.get::<_, i64>(4)?),
-                message_count: i64_to_u64(row.get::<_, i64>(5)?),
-                unpriced_message_count: i64_to_u64(row.get::<_, i64>(6)?),
-                input_tokens: optional_i64_to_u64(row.get(7)?),
-                output_tokens: optional_i64_to_u64(row.get(8)?),
-                output_thinking_tokens: optional_i64_to_u64(row.get(9)?),
-                total_tokens: optional_i64_to_u64(row.get(10)?),
-                cached_input_tokens: optional_i64_to_u64(row.get(11)?),
-                cache_creation_input_tokens: optional_i64_to_u64(row.get(12)?),
-                estimated_cost: row.get(13)?,
+                is_configured: row.get(2)?,
+                request_count: i64_to_u64(row.get::<_, i64>(3)?),
+                message_count: i64_to_u64(row.get::<_, i64>(4)?),
+                unpriced_message_count: i64_to_u64(row.get::<_, i64>(5)?),
+                input_tokens: optional_i64_to_u64(row.get(6)?),
+                output_tokens: optional_i64_to_u64(row.get(7)?),
+                output_thinking_tokens: optional_i64_to_u64(row.get(8)?),
+                total_tokens: optional_i64_to_u64(row.get(9)?),
+                cached_input_tokens: optional_i64_to_u64(row.get(10)?),
+                cache_creation_input_tokens: optional_i64_to_u64(row.get(11)?),
+                estimated_cost: row.get(12)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -606,9 +592,8 @@ mod tests {
             message_id: message_id.to_string(),
             run_id: format!("run-{message_id}"),
             project_id: None,
-            model_id: "model-a".to_string(),
+            model_id: "provider/model-a".to_string(),
             model_name: model_name.to_string(),
-            provider_path: Some("provider/model-a".to_string()),
             started_at: Some(created_at - 1),
             completed_at: Some(created_at),
             status: Some("completed".to_string()),
@@ -640,9 +625,8 @@ mod tests {
                 message_id: "message-1".to_string(),
                 run_id: "run-1".to_string(),
                 project_id: Some("project-1".to_string()),
-                model_id: "model-a".to_string(),
+                model_id: "provider/model-a".to_string(),
                 model_name: "Model A".to_string(),
-                provider_path: Some("provider/model-a".to_string()),
                 started_at: Some(900),
                 completed_at: Some(1_000),
                 status: Some("completed".to_string()),
@@ -671,7 +655,6 @@ mod tests {
                 project_id: None,
                 model_id: "model-b".to_string(),
                 model_name: "Model B".to_string(),
-                provider_path: None,
                 started_at: Some(8_900),
                 completed_at: Some(9_000),
                 status: Some("completed".to_string()),
@@ -710,7 +693,7 @@ mod tests {
         assert_eq!(summary.cached_input_tokens, Some(100));
         assert_eq!(summary.cache_creation_input_tokens, None);
         assert_eq!(summary.models.len(), 1);
-        assert_eq!(summary.models[0].model_id, "model-a");
+        assert_eq!(summary.models[0].model_id, "provider/model-a");
     }
 
     #[test]
@@ -722,10 +705,10 @@ mod tests {
             .execute(
                 "
                 INSERT INTO models (
-                    id, display_name, short_name, provider_path, supports_image,
+                    id, display_name, supports_image,
                     input_price, output_price, enabled, position, created_at, updated_at
                 )
-                VALUES ('model-a', 'Current model name', NULL, 'provider/model-a', 0,
+                VALUES ('provider/model-a', 'Current model name', 0,
                         '0.03', '0.04', 1, 0, 0, 0)
                 ",
                 [],
@@ -789,10 +772,10 @@ mod tests {
             .execute(
                 "
                 INSERT INTO models (
-                    id, display_name, short_name, provider_path, supports_image,
+                    id, display_name, supports_image,
                     input_price, output_price, enabled, position, created_at, updated_at
                 )
-                VALUES ('model-a', 'Restored model', NULL, 'provider/model-a', 0,
+                VALUES ('provider/model-a', 'Restored model', 0,
                         '0.05', '0.06', 1, 0, 3_000, 3_000)
                 ",
                 [],
@@ -818,9 +801,8 @@ mod tests {
                 message_id: "message-1".to_string(),
                 run_id: "run-1".to_string(),
                 project_id: Some("project-1".to_string()),
-                model_id: "model-a".to_string(),
+                model_id: "provider/model-a".to_string(),
                 model_name: "Model A".to_string(),
-                provider_path: Some("provider/model-a".to_string()),
                 started_at: Some(DAY_MS + 900),
                 completed_at: Some(DAY_MS + 1_000),
                 status: Some("completed".to_string()),
@@ -847,9 +829,8 @@ mod tests {
                 message_id: "message-2".to_string(),
                 run_id: "run-2".to_string(),
                 project_id: Some("project-1".to_string()),
-                model_id: "model-a".to_string(),
+                model_id: "provider/model-a".to_string(),
                 model_name: "Model A".to_string(),
-                provider_path: Some("provider/model-a".to_string()),
                 started_at: Some(DAY_MS + 1_900),
                 completed_at: Some(DAY_MS + 2_000),
                 status: Some("completed".to_string()),
@@ -904,11 +885,6 @@ mod tests {
         assert_eq!(summary.cache_creation_input_tokens, Some(4));
         assert!((summary.estimated_cost.unwrap() - 0.3).abs() < f64::EPSILON);
         assert_eq!(summary.models.len(), 1);
-        assert_eq!(
-            summary.models[0].provider_path.as_deref(),
-            Some("provider/model-a")
-        );
-
         let deleted = clear_usage_records(
             &connection,
             &AgentUsageClearInput {
@@ -945,7 +921,6 @@ mod tests {
                         usage_day,
                         model_id,
                         model_name,
-                        provider_path_key,
                         request_count,
                         message_count,
                         input_tokens,
@@ -958,7 +933,7 @@ mod tests {
                         created_at,
                         updated_at
                     )
-                    VALUES (?1, 'model-a', 'Model A', '', 1, 1, ?2, 0, 0, ?2, NULL, NULL, ?3, 0, 0)
+                    VALUES (?1, 'model-a', 'Model A', 1, 1, ?2, 0, 0, ?2, NULL, NULL, ?3, 0, 0)
                     ",
                     params![usage_day, input_tokens, estimated_cost],
                 )
@@ -1011,7 +986,6 @@ mod tests {
                 project_id: None,
                 model_id: "model-a".to_string(),
                 model_name: "Model A".to_string(),
-                provider_path: None,
                 started_at: Some(900),
                 completed_at: Some(1_000),
                 status: Some("completed".to_string()),

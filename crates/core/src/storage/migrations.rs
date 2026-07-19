@@ -34,6 +34,332 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> rusql
     Ok(columns.iter().any(|candidate| candidate == column))
 }
 
+fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite::Result<()> {
+    let has_short_name = table_has_column(connection, "models", "short_name")?;
+    let has_model_provider_path = table_has_column(connection, "models", "provider_path")?;
+    let has_usage_provider_path =
+        table_has_column(connection, "agent_usage_records", "provider_path")?;
+    let has_rollup_provider_path = table_has_column(
+        connection,
+        "agent_deleted_usage_daily_rollups",
+        "provider_path_key",
+    )?;
+    if !has_short_name
+        && !has_model_provider_path
+        && !has_usage_provider_path
+        && !has_rollup_provider_path
+    {
+        return Ok(());
+    }
+
+    // Historical builds split one model identity across `id` (UI/storage) and
+    // `provider_path` (the actual API `model` value). Collapse that split atomically so every
+    // reference observes the same opaque model id and no usage totals are lost or duplicated.
+    let transaction = connection.unchecked_transaction()?;
+    if !has_model_provider_path {
+        transaction.execute("ALTER TABLE models ADD COLUMN provider_path TEXT", [])?;
+    }
+    if !has_usage_provider_path {
+        transaction.execute(
+            "ALTER TABLE agent_usage_records ADD COLUMN provider_path TEXT",
+            [],
+        )?;
+    }
+    if !has_rollup_provider_path {
+        transaction.execute(
+            "ALTER TABLE agent_deleted_usage_daily_rollups
+             ADD COLUMN provider_path_key TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    transaction.execute_batch(
+        "
+        CREATE TEMP TABLE canonical_model_identity_map (
+            old_id TEXT PRIMARY KEY,
+            canonical_id TEXT NOT NULL
+        );
+
+        INSERT INTO canonical_model_identity_map (old_id, canonical_id)
+        SELECT
+            id,
+            CASE
+                WHEN length(trim(COALESCE(provider_path, ''))) > 0 THEN trim(provider_path)
+                ELSE id
+            END
+        FROM models;
+
+        CREATE TABLE models_canonical_identity (
+            id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            api_url_override TEXT,
+            api_token_override TEXT,
+            supports_image INTEGER NOT NULL,
+            context_window_tokens INTEGER,
+            input_price TEXT NOT NULL,
+            output_price TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            position INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        INSERT INTO models_canonical_identity (
+            id,
+            display_name,
+            api_url_override,
+            api_token_override,
+            supports_image,
+            context_window_tokens,
+            input_price,
+            output_price,
+            enabled,
+            position,
+            created_at,
+            updated_at
+        )
+        SELECT
+            identity.canonical_id,
+            CASE
+                WHEN trim(model.display_name) = model.id THEN identity.canonical_id
+                ELSE model.display_name
+            END,
+            model.api_url_override,
+            model.api_token_override,
+            model.supports_image,
+            model.context_window_tokens,
+            model.input_price,
+            model.output_price,
+            model.enabled,
+            model.position,
+            model.created_at,
+            model.updated_at
+        FROM models AS model
+        JOIN canonical_model_identity_map AS identity ON identity.old_id = model.id
+        WHERE model.rowid = (
+            SELECT candidate.rowid
+            FROM models AS candidate
+            JOIN canonical_model_identity_map AS candidate_identity
+                ON candidate_identity.old_id = candidate.id
+            WHERE candidate_identity.canonical_id = identity.canonical_id
+            ORDER BY
+                CASE WHEN candidate.id = candidate_identity.canonical_id THEN 0 ELSE 1 END,
+                candidate.position ASC,
+                candidate.created_at ASC,
+                candidate.id ASC
+            LIMIT 1
+        )
+        ORDER BY model.position ASC, model.created_at ASC;
+
+        UPDATE conversations
+        SET model_id = (
+            SELECT identity.canonical_id
+            FROM canonical_model_identity_map AS identity
+            WHERE identity.old_id = conversations.model_id
+        )
+        WHERE model_id IN (SELECT old_id FROM canonical_model_identity_map);
+
+        UPDATE composer_drafts
+        SET model_id = (
+            SELECT identity.canonical_id
+            FROM canonical_model_identity_map AS identity
+            WHERE identity.old_id = composer_drafts.model_id
+        )
+        WHERE model_id IN (SELECT old_id FROM canonical_model_identity_map);
+
+        CREATE TABLE agent_usage_records_canonical_identity (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            project_id TEXT,
+            model_id TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            started_at INTEGER,
+            completed_at INTEGER,
+            status TEXT,
+            error TEXT,
+            created_at INTEGER NOT NULL,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            output_thinking_tokens INTEGER,
+            total_tokens INTEGER,
+            cached_input_tokens INTEGER,
+            cache_creation_input_tokens INTEGER,
+            billable_request_count INTEGER NOT NULL DEFAULT 1,
+            input_price TEXT,
+            output_price TEXT,
+            estimated_cost REAL,
+            UNIQUE(conversation_id, message_id),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        INSERT INTO agent_usage_records_canonical_identity (
+            id,
+            conversation_id,
+            message_id,
+            run_id,
+            project_id,
+            model_id,
+            model_name,
+            started_at,
+            completed_at,
+            status,
+            error,
+            created_at,
+            input_tokens,
+            output_tokens,
+            output_thinking_tokens,
+            total_tokens,
+            cached_input_tokens,
+            cache_creation_input_tokens,
+            billable_request_count,
+            input_price,
+            output_price,
+            estimated_cost
+        )
+        SELECT
+            usage.id,
+            usage.conversation_id,
+            usage.message_id,
+            usage.run_id,
+            usage.project_id,
+            CASE
+                WHEN length(trim(COALESCE(usage.provider_path, ''))) > 0
+                    THEN trim(usage.provider_path)
+                ELSE COALESCE(identity.canonical_id, usage.model_id)
+            END,
+            CASE
+                WHEN length(trim(COALESCE(usage.provider_path, ''))) > 0
+                     AND trim(usage.model_name) = usage.model_id
+                    THEN trim(usage.provider_path)
+                ELSE usage.model_name
+            END,
+            usage.started_at,
+            usage.completed_at,
+            usage.status,
+            usage.error,
+            usage.created_at,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.output_thinking_tokens,
+            usage.total_tokens,
+            usage.cached_input_tokens,
+            usage.cache_creation_input_tokens,
+            usage.billable_request_count,
+            usage.input_price,
+            usage.output_price,
+            usage.estimated_cost
+        FROM agent_usage_records AS usage
+        LEFT JOIN canonical_model_identity_map AS identity ON identity.old_id = usage.model_id;
+
+        ALTER TABLE agent_deleted_usage_daily_rollups
+            RENAME TO agent_deleted_usage_daily_rollups_legacy_model_identity;
+
+        CREATE TABLE agent_deleted_usage_daily_rollups (
+            usage_day INTEGER NOT NULL,
+            model_id TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            unpriced_message_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            output_thinking_tokens INTEGER,
+            total_tokens INTEGER,
+            cached_input_tokens INTEGER,
+            cache_creation_input_tokens INTEGER,
+            estimated_cost REAL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (usage_day, model_id, model_name)
+        );
+
+        INSERT INTO agent_deleted_usage_daily_rollups (
+            usage_day,
+            model_id,
+            model_name,
+            request_count,
+            message_count,
+            unpriced_message_count,
+            input_tokens,
+            output_tokens,
+            output_thinking_tokens,
+            total_tokens,
+            cached_input_tokens,
+            cache_creation_input_tokens,
+            estimated_cost,
+            created_at,
+            updated_at
+        )
+        WITH normalized AS (
+            SELECT
+                legacy.usage_day,
+                CASE
+                    WHEN length(trim(legacy.provider_path_key)) > 0
+                        THEN trim(legacy.provider_path_key)
+                    ELSE COALESCE(identity.canonical_id, legacy.model_id)
+                END AS canonical_model_id,
+                CASE
+                    WHEN length(trim(legacy.provider_path_key)) > 0
+                         AND trim(legacy.model_name) = legacy.model_id
+                        THEN trim(legacy.provider_path_key)
+                    ELSE legacy.model_name
+                END AS canonical_model_name,
+                legacy.request_count,
+                legacy.message_count,
+                legacy.unpriced_message_count,
+                legacy.input_tokens,
+                legacy.output_tokens,
+                legacy.output_thinking_tokens,
+                legacy.total_tokens,
+                legacy.cached_input_tokens,
+                legacy.cache_creation_input_tokens,
+                legacy.estimated_cost,
+                legacy.created_at,
+                legacy.updated_at
+            FROM agent_deleted_usage_daily_rollups_legacy_model_identity AS legacy
+            LEFT JOIN canonical_model_identity_map AS identity ON identity.old_id = legacy.model_id
+        )
+        SELECT
+            usage_day,
+            canonical_model_id,
+            canonical_model_name,
+            SUM(request_count),
+            SUM(message_count),
+            SUM(unpriced_message_count),
+            SUM(input_tokens),
+            SUM(output_tokens),
+            SUM(output_thinking_tokens),
+            SUM(total_tokens),
+            SUM(cached_input_tokens),
+            SUM(cache_creation_input_tokens),
+            SUM(estimated_cost),
+            MIN(created_at),
+            MAX(updated_at)
+        FROM normalized
+        GROUP BY usage_day, canonical_model_id, canonical_model_name;
+
+        DROP TABLE agent_deleted_usage_daily_rollups_legacy_model_identity;
+        DROP TABLE agent_usage_records;
+        ALTER TABLE agent_usage_records_canonical_identity RENAME TO agent_usage_records;
+        DROP TABLE models;
+        ALTER TABLE models_canonical_identity RENAME TO models;
+
+        CREATE INDEX idx_models_position ON models(position);
+        CREATE INDEX idx_agent_usage_records_created_at ON agent_usage_records(created_at);
+        CREATE INDEX idx_agent_usage_records_model_id ON agent_usage_records(model_id);
+        CREATE INDEX idx_agent_usage_records_project_id ON agent_usage_records(project_id);
+        CREATE INDEX idx_agent_deleted_usage_daily_rollups_usage_day
+            ON agent_deleted_usage_daily_rollups(usage_day);
+        CREATE INDEX idx_agent_deleted_usage_daily_rollups_model_id
+            ON agent_deleted_usage_daily_rollups(model_id);
+
+        DROP TABLE canonical_model_identity_map;
+        ",
+    )?;
+    transaction.commit()
+}
+
 fn upgrade_conversation_trace_commit_schema(connection: &Connection) -> rusqlite::Result<()> {
     if table_has_column(connection, "conversation_turn_traces", "updated_at")? {
         return Ok(());
@@ -229,8 +555,6 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS models (
             id TEXT PRIMARY KEY,
             display_name TEXT NOT NULL,
-            short_name TEXT,
-            provider_path TEXT,
             api_url_override TEXT,
             api_token_override TEXT,
             supports_image INTEGER NOT NULL,
@@ -282,6 +606,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             scope_id TEXT PRIMARY KEY,
             message TEXT NOT NULL,
             permission_mode TEXT NOT NULL,
+            permission_mode_version INTEGER NOT NULL DEFAULT 0 CHECK (permission_mode_version >= 0),
             model_id TEXT,
             project_id TEXT,
             attachments_json TEXT NOT NULL,
@@ -325,7 +650,6 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             project_id TEXT,
             model_id TEXT NOT NULL,
             model_name TEXT NOT NULL,
-            provider_path TEXT,
             started_at INTEGER,
             completed_at INTEGER,
             status TEXT,
@@ -349,7 +673,6 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             usage_day INTEGER NOT NULL,
             model_id TEXT NOT NULL,
             model_name TEXT NOT NULL,
-            provider_path_key TEXT NOT NULL,
             request_count INTEGER NOT NULL DEFAULT 0,
             message_count INTEGER NOT NULL DEFAULT 0,
             unpriced_message_count INTEGER NOT NULL DEFAULT 0,
@@ -362,7 +685,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             estimated_cost REAL,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
-            PRIMARY KEY (usage_day, model_id, model_name, provider_path_key)
+            PRIMARY KEY (usage_day, model_id, model_name)
         );
 
         CREATE TABLE IF NOT EXISTS agent_action_audit (
@@ -393,6 +716,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             tool_name TEXT NOT NULL,
             tool_call_id TEXT,
             status TEXT NOT NULL,
+            target_status TEXT,
             action_json TEXT NOT NULL,
             agent_input_json TEXT NOT NULL,
             created_at INTEGER NOT NULL,
@@ -560,6 +884,21 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         "composer_drafts",
         "skills_json",
         "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    add_column_if_missing(
+        connection,
+        "composer_drafts",
+        "permission_mode_version",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (permission_mode_version >= 0)",
+    )?;
+    // The meaning of `full` was broadened. A legacy, unversioned selection is not evidence that
+    // the user opted into the new semantics, so migrate it to the safe default exactly as the
+    // storage service does for legacy clients writing after this migration.
+    connection.execute(
+        "UPDATE composer_drafts
+         SET permission_mode = 'default'
+         WHERE permission_mode = 'full' AND permission_mode_version = 0",
+        [],
     )?;
     run_one_time_maintenance(connection)?;
 
@@ -939,6 +1278,9 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     )?;
     add_column_if_missing(connection, "agent_action_audit", "blocked_reason", "TEXT")?;
     add_column_if_missing(connection, "agent_action_audit", "decision_source", "TEXT")?;
+    add_column_if_missing(connection, "agent_pending_actions", "target_status", "TEXT")?;
+
+    upgrade_canonical_model_identity_schema(connection)?;
 
     Ok(())
 }
@@ -948,7 +1290,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn adds_empty_skill_selection_to_existing_composer_drafts() {
+    fn upgrades_existing_composer_drafts_without_granting_new_full_permissions() {
         let connection = Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
@@ -963,7 +1305,7 @@ mod tests {
                     updated_at INTEGER NOT NULL
                 );
                 INSERT INTO composer_drafts VALUES (
-                    'conversation-1', 'draft', 'default', NULL, NULL, '[]', 1
+                    'conversation-1', 'draft', 'full', NULL, NULL, '[]', 1
                 );
                 ",
             )
@@ -971,13 +1313,22 @@ mod tests {
 
         run_migrations(&connection).unwrap();
 
-        let skills_json = connection
+        let (permission_mode, permission_mode_version, skills_json) = connection
             .query_row(
-                "SELECT skills_json FROM composer_drafts WHERE scope_id = 'conversation-1'",
+                "SELECT permission_mode, permission_mode_version, skills_json
+                 FROM composer_drafts WHERE scope_id = 'conversation-1'",
                 [],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .unwrap();
+        assert_eq!(permission_mode, "default");
+        assert_eq!(permission_mode_version, 0);
         assert_eq!(skills_json, "[]");
     }
 
@@ -1026,6 +1377,150 @@ mod tests {
         assert_eq!(context_window, None);
         assert_eq!(api_url_override, None);
         assert_eq!(api_token_override, None);
+        assert!(!table_has_column(&connection, "models", "short_name").unwrap());
+        assert!(!table_has_column(&connection, "models", "provider_path").unwrap());
+    }
+
+    #[test]
+    fn canonicalizes_legacy_model_identity_without_losing_references_or_usage() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute_batch(
+                "
+                ALTER TABLE models ADD COLUMN short_name TEXT;
+                ALTER TABLE models ADD COLUMN provider_path TEXT;
+                ALTER TABLE agent_usage_records ADD COLUMN provider_path TEXT;
+                ALTER TABLE agent_deleted_usage_daily_rollups
+                    ADD COLUMN provider_path_key TEXT NOT NULL DEFAULT '';
+
+                INSERT INTO models (
+                    id, display_name, supports_image, input_price, output_price, enabled,
+                    position, created_at, updated_at, short_name, provider_path
+                ) VALUES (
+                    'model-a', 'model-a', 0, '0.01', '0.02', 1,
+                    0, 1, 1, 'A', 'provider/model-a'
+                );
+
+                INSERT INTO conversations (
+                    id, model_id, title, created_at, updated_at
+                ) VALUES ('conversation-1', 'model-a', 'Conversation', 1, 1);
+
+                INSERT INTO composer_drafts (
+                    scope_id, message, permission_mode, permission_mode_version, model_id,
+                    project_id, attachments_json, skills_json, updated_at
+                ) VALUES ('conversation-1', '', 'default', 1, 'model-a', NULL, '[]', '[]', 1);
+
+                INSERT INTO agent_usage_records (
+                    id, conversation_id, message_id, run_id, model_id, model_name,
+                    provider_path, created_at, input_tokens
+                ) VALUES (
+                    'usage-1', 'conversation-1', 'message-1', 'run-1',
+                    'model-a', 'model-a', 'provider/model-a', 1, 11
+                );
+
+                INSERT INTO agent_deleted_usage_daily_rollups (
+                    usage_day, model_id, model_name, provider_path_key,
+                    input_tokens, created_at, updated_at
+                ) VALUES
+                    (0, 'model-a', 'model-a', 'provider/model-a', 13, 1, 1),
+                    (0, 'provider/model-a', 'provider/model-a', '', 17, 2, 2);
+                ",
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        assert!(!table_has_column(&connection, "models", "short_name").unwrap());
+        assert!(!table_has_column(&connection, "models", "provider_path").unwrap());
+        assert!(!table_has_column(&connection, "agent_usage_records", "provider_path").unwrap());
+        assert!(!table_has_column(
+            &connection,
+            "agent_deleted_usage_daily_rollups",
+            "provider_path_key"
+        )
+        .unwrap());
+        let model = connection
+            .query_row("SELECT id, display_name FROM models", [], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap();
+        assert_eq!(
+            model,
+            (
+                "provider/model-a".to_string(),
+                "provider/model-a".to_string()
+            )
+        );
+
+        let conversation_model: String = connection
+            .query_row(
+                "SELECT model_id FROM conversations WHERE id = 'conversation-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let draft_model: String = connection
+            .query_row(
+                "SELECT model_id FROM composer_drafts WHERE scope_id = 'conversation-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(conversation_model, "provider/model-a");
+        assert_eq!(draft_model, "provider/model-a");
+
+        let usage = connection
+            .query_row(
+                "SELECT model_id, model_name, input_tokens
+                 FROM agent_usage_records WHERE id = 'usage-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            usage,
+            (
+                "provider/model-a".to_string(),
+                "provider/model-a".to_string(),
+                11,
+            )
+        );
+
+        let rollup = connection
+            .query_row(
+                "SELECT model_id, model_name, input_tokens
+                 FROM agent_deleted_usage_daily_rollups",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            rollup,
+            (
+                "provider/model-a".to_string(),
+                "provider/model-a".to_string(),
+                30,
+            )
+        );
+
+        run_migrations(&connection).unwrap();
+        let model_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM models", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(model_count, 1);
     }
 
     #[test]

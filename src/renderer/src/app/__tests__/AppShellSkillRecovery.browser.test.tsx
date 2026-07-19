@@ -24,7 +24,6 @@ const testState = vi.hoisted(() => ({
     {
       id: 'model-1',
       displayName: 'Model One',
-      shortName: 'Model 1',
       supportsImage: true,
       inputPrice: '0',
       outputPrice: '0',

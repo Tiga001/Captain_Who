@@ -1,8 +1,8 @@
-import type { ClipboardEvent } from 'react'
 import { Check } from 'lucide-react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import type { ModelConfig } from './configurationTypes'
 import { formatContextWindow } from './modelPresentation'
+import { SecretInput } from './SecretInput'
 
 interface ModelProviderSettingsProps {
   apiUrl: string
@@ -24,9 +24,6 @@ export function ModelProviderSettings({
   onToggleModel
 }: ModelProviderSettingsProps) {
   const { t } = useFrontendConfig()
-  const preventClipboard = (event: ClipboardEvent<HTMLInputElement>) => {
-    event.preventDefault()
-  }
 
   return (
     <section
@@ -53,21 +50,14 @@ export function ModelProviderSettings({
             </span>
           </label>
 
-          <label className="configuration-field settings-list-row">
+          <div className="configuration-field settings-list-row">
             <span className="settings-list-row__text">
               <span className="settings-list-row__title">API Token</span>
             </span>
             <span className="settings-list-row__control">
-              <input
-                className="settings-list-control"
-                type="password"
-                value={apiToken}
-                onChange={(event) => onApiTokenChange(event.target.value)}
-                onCopy={preventClipboard}
-                onCut={preventClipboard}
-              />
+              <SecretInput ariaLabel="API Token" value={apiToken} onChange={onApiTokenChange} />
             </span>
-          </label>
+          </div>
         </div>
       </div>
 

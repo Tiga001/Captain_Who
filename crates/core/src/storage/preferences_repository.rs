@@ -1,6 +1,6 @@
 use crate::protocol::{
-    AgentCommandPermission, AgentPatchPermission, AgentPermissions, AgentReadPermission,
-    AgentWritePermission,
+    AgentCommandPermission, AgentCommandSafetyPolicy, AgentPatchPermission, AgentPermissions,
+    AgentReadPermission, AgentWritePermission,
 };
 use crate::storage::models::UiPreferencesRecord;
 use crate::storage::now_ms;
@@ -64,6 +64,7 @@ pub fn load_ui_preferences(connection: &Connection) -> rusqlite::Result<UiPrefer
                         read: parse_read_permission(row.get::<_, String>(12)?.as_str()),
                         write: parse_write_permission(row.get::<_, String>(13)?.as_str()),
                         command: parse_command_permission(row.get::<_, String>(14)?.as_str()),
+                        command_safety: AgentCommandSafetyPolicy::Guarded,
                         patch: parse_patch_permission(row.get::<_, String>(15)?.as_str()),
                     },
                     full_permission_enabled: row.get::<_, i64>(16)? != 0,
@@ -199,6 +200,7 @@ fn default_ui_preferences() -> UiPreferencesRecord {
             read: AgentReadPermission::WorkspaceOnly,
             write: AgentWritePermission::WorkspaceOnly,
             command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::Guarded,
             patch: AgentPatchPermission::RequireApproval,
         },
         updated_at: 0,
@@ -239,7 +241,10 @@ fn normalize_preferences(preferences: UiPreferencesRecord) -> UiPreferencesRecor
         ),
         full_permission_enabled: preferences.full_permission_enabled,
         custom_permission_enabled: preferences.custom_permission_enabled,
-        custom_permissions: preferences.custom_permissions,
+        custom_permissions: AgentPermissions {
+            command_safety: AgentCommandSafetyPolicy::Guarded,
+            ..preferences.custom_permissions
+        },
         updated_at: preferences.updated_at,
     }
 }
@@ -376,6 +381,7 @@ mod tests {
                 read: AgentReadPermission::WorkspaceOnly,
                 write: AgentWritePermission::WorkspaceOnly,
                 command: AgentCommandPermission::RequireApproval,
+                command_safety: AgentCommandSafetyPolicy::Guarded,
                 patch: AgentPatchPermission::RequireApproval,
             }
         );
@@ -384,6 +390,7 @@ mod tests {
             read: AgentReadPermission::All,
             write: AgentWritePermission::Denied,
             command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
             patch: AgentPatchPermission::AutoApprove,
         };
         preferences.full_permission_enabled = false;
@@ -401,6 +408,7 @@ mod tests {
                 read: AgentReadPermission::All,
                 write: AgentWritePermission::Denied,
                 command: AgentCommandPermission::AutoApprove,
+                command_safety: AgentCommandSafetyPolicy::Guarded,
                 patch: AgentPatchPermission::AutoApprove,
             }
         );

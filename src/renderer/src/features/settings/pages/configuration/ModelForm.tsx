@@ -1,9 +1,9 @@
-import type { ClipboardEvent } from 'react'
 import { useMemo, useState } from 'react'
 import { ChevronDown } from 'lucide-react'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS } from '../../../../config/modelConfig'
 import type { ModelConfig, ModelFormValues } from './configurationTypes'
+import { SecretInput } from './SecretInput'
 
 interface ModelFormProps {
   model?: ModelConfig
@@ -73,9 +73,6 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
     isOutputPriceValid &&
     isConnectionPairComplete &&
     isOverrideUrlValid
-  const preventClipboard = (event: ClipboardEvent<HTMLInputElement>) => {
-    event.preventDefault()
-  }
 
   return (
     <form
@@ -102,10 +99,7 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
         {isEditing ? t('configuration.editModel') : t('configuration.newModel')}
       </h1>
 
-      <div
-        className="model-form-page__fields settings-list"
-        data-advanced-open={isAdvancedOpen}
-      >
+      <div className="model-form-page__fields settings-list" data-advanced-open={isAdvancedOpen}>
         <label className="configuration-field settings-list-row">
           <span className="settings-list-row__text">
             <span className="settings-list-row__title">{t('configuration.modelId')}</span>
@@ -231,7 +225,7 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
             type="button"
             aria-expanded={isAdvancedOpen}
             aria-controls="model-form-advanced-settings"
-            data-invalid={(!isConnectionPairComplete || !isOverrideUrlValid) || undefined}
+            data-invalid={!isConnectionPairComplete || !isOverrideUrlValid || undefined}
             onClick={() => setIsAdvancedOpen((isOpen) => !isOpen)}
           >
             {t('configuration.more')}
@@ -248,9 +242,7 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
           <div className="model-form-advanced__inner">
             <label className="configuration-field settings-list-row">
               <span className="settings-list-row__text">
-                <span className="settings-list-row__title">
-                  {t('configuration.modelApiUrl')}
-                </span>
+                <span className="settings-list-row__title">{t('configuration.modelApiUrl')}</span>
               </span>
               <span className="settings-list-row__control model-form-price-control">
                 <input
@@ -275,27 +267,22 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
               </span>
             </label>
 
-            <label className="configuration-field settings-list-row">
+            <div className="configuration-field settings-list-row">
               <span className="settings-list-row__text">
-                <span className="settings-list-row__title">
-                  {t('configuration.modelApiToken')}
-                </span>
+                <span className="settings-list-row__title">{t('configuration.modelApiToken')}</span>
               </span>
               <span className="settings-list-row__control model-form-price-control">
-                <input
-                  className="settings-list-control"
-                  type="password"
+                <SecretInput
+                  ariaLabel={t('configuration.modelApiToken')}
                   value={values.apiTokenOverride}
                   placeholder={t('configuration.modelApiTokenPlaceholder')}
                   tabIndex={isAdvancedOpen ? 0 : -1}
-                  onChange={(event) =>
+                  onChange={(value) =>
                     setValues((current) => ({
                       ...current,
-                      apiTokenOverride: event.target.value
+                      apiTokenOverride: value
                     }))
                   }
-                  onCopy={preventClipboard}
-                  onCut={preventClipboard}
                 />
                 {!isConnectionPairComplete && (
                   <small className="model-form-field-error">
@@ -303,7 +290,7 @@ export function ModelForm({ model, onCancel, onSave }: ModelFormProps) {
                   </small>
                 )}
               </span>
-            </label>
+            </div>
           </div>
         </div>
       </div>
