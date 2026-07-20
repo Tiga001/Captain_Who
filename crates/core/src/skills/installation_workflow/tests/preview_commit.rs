@@ -216,13 +216,9 @@ fn resource_summary_and_script_acknowledgement_gate_the_commit() {
     assert_eq!(preview.package().resources().reference_count(), 1);
     assert_eq!(preview.package().resources().asset_count(), 1);
     assert_eq!(preview.package().resources().script_count(), 1);
-    assert_eq!(preview.warnings().len(), 2);
+    assert_eq!(preview.warnings().len(), 1);
     assert_eq!(
         preview.warnings()[0].code(),
-        SkillInstallationWarningCode::ResourcesNotExposed
-    );
-    assert_eq!(
-        preview.warnings()[1].code(),
         SkillInstallationWarningCode::ContainsScripts
     );
 

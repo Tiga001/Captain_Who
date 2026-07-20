@@ -16,7 +16,7 @@ pub(crate) fn activate_workspace(
         .activate_workspace(workspace_id, workspace_root, &selections)
         .map_err(activation_failure)?;
 
-    prepare_activated_skills(activated, Some(workspace_id))
+    prepare_activated_skills(service, activated, Some(workspace_id))
 }
 
 /// Resolves one run's selected Skills while enforcing durable enablement at
@@ -81,7 +81,7 @@ pub(crate) fn activate_selected_skills(
             None,
         ),
     };
-    prepare_activated_skills(activated, expected_workspace_id)
+    prepare_activated_skills(service, activated, expected_workspace_id)
 }
 
 pub(super) fn parse_selections(
@@ -101,6 +101,7 @@ pub(super) fn parse_selections(
 }
 
 pub(super) fn prepare_activated_skills(
+    service: &SkillsService,
     activated: mycopilot_core::skills::ActivatedSkillSet,
     expected_workspace_id: Option<&str>,
 ) -> Result<PreparedSkillActivation, SkillActivationFailure> {
@@ -115,6 +116,12 @@ pub(super) fn prepare_activated_skills(
         )?;
     }
 
+    let resource_session = service.resource_session(&activated).map_err(|error| {
+        SkillActivationFailure::invalid_selection(
+            error.skill_id().map(|id| id.as_str().to_string()),
+            format!("Cannot prepare activated Skill resources: {error}"),
+        )
+    })?;
     let revision = activated.revision().as_str().to_string();
     let summaries = activated
         .skills()
@@ -134,18 +141,42 @@ pub(super) fn prepare_activated_skills(
         skills: activated
             .skills()
             .iter()
-            .map(|skill| AgentActivatedSkill {
-                id: skill.id().as_str().to_string(),
-                name: skill.name().to_string(),
-                revision: skill.revision().as_str().to_string(),
-                source: skill.id().source_id().as_str().to_string(),
-                instructions: skill.instructions().to_string(),
+            .map(|skill| {
+                let resources = (!skill.resources().is_empty()).then(|| {
+                    let mut kinds = skill
+                        .resources()
+                        .entries()
+                        .iter()
+                        .map(|resource| resource.kind().stable_name().to_string())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    kinds.shrink_to_fit();
+                    AgentActivatedSkillResources {
+                        root_uri: mycopilot_core::skills::SkillPackageUri::new(
+                            skill.id().clone(),
+                            skill.revision().clone(),
+                        )
+                        .to_string(),
+                        resource_count: u64::try_from(skill.resources().len()).unwrap_or(u64::MAX),
+                        kinds,
+                    }
+                });
+                AgentActivatedSkill {
+                    id: skill.id().as_str().to_string(),
+                    name: skill.name().to_string(),
+                    revision: skill.revision().as_str().to_string(),
+                    source: skill.id().source_id().as_str().to_string(),
+                    instructions: skill.instructions().to_string(),
+                    resources,
+                }
             })
             .collect(),
     };
 
     Ok(PreparedSkillActivation {
         runtime: Some(runtime),
+        resources: Some(std::sync::Arc::new(resource_session)),
         summaries,
         revision: Some(revision),
     })

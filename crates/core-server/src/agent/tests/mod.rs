@@ -1,7 +1,7 @@
 use super::*;
 use mycopilot_core::skills::{
-    LocalSkillInstallRequest, SkillInstallationId, SkillInstallationOutcome,
-    SkillInstallationService,
+    LocalSkillInstallRequest, LocalSkillUpdateRequest, SkillInstallationId,
+    SkillInstallationOutcome, SkillInstallationService, SkillUninstallRequest,
 };
 use mycopilot_core::storage::models::{
     AgentFileDraftRecord, ChatConversationRecord, ChatMessageRecord, ModelConfigRecord,
@@ -9,20 +9,23 @@ use mycopilot_core::storage::models::{
 };
 use mycopilot_core::{
     AgentActivatedSkill, AgentCommandRequest, AgentCommandRiskLevel, AgentFileWriteMode,
-    AgentFileWriteProposal, AgentPermissions, AgentSkillActivation, AgentUsageSummaryRange,
-    AgentWorkspaceContext, ContextCompactionGeneration, ContextCompactionPrefix,
+    AgentFileWriteProposal, AgentPermissions, AgentSkillActivation,
+    AgentSkillMaterializationRequest, AgentUsageSummaryRange, AgentWorkspaceContext,
+    AgentWritePermission, ContextCompactionGeneration, ContextCompactionPrefix,
     ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
     ContextJournalCursor, ConversationTraceToolResultStatus, ConversationTurnTraceItem,
     ConversationTurnTraceTerminalStatus, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
     CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use std::fs;
 use tempfile::tempdir;
 
 mod cancellation;
 mod context_history;
 mod context_runtime;
+mod file_write_permissions;
+mod office;
 mod pending_actions;
 mod skills;
 mod terminal_events;

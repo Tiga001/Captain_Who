@@ -7,6 +7,10 @@ use std::process::Command;
 pub(super) struct GitDiffTool;
 
 impl AgentTool for GitDiffTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "git_diff".to_string(),

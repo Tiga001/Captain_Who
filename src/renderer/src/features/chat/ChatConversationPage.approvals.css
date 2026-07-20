@@ -41,6 +41,14 @@
   white-space: nowrap;
 }
 
+.agent-approval-dialog__command[data-multiline='true'] {
+  max-height: 180px;
+  overflow: auto;
+  text-overflow: clip;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .agent-approval-dialog__policy {
   margin: 0;
   padding: 0 12px;

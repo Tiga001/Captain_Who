@@ -109,6 +109,34 @@ fn checkpoint_rejects_request_only_context() {
 }
 
 #[test]
+fn checkpoint_uses_durable_tool_projection_without_mutating_live_context() {
+    let frame = ContextFrame::new(vec![ContextItem::tool_result(
+        "read-skill-1",
+        "RESOURCE_SECRET_MARKER",
+        false,
+        ContextMetadata::new(
+            ContextSource::ToolResult,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ),
+    )
+    .with_checkpoint_tool_result(
+        "read-skill-1",
+        r#"{"contentOmittedFromHistory":true}"#,
+        false,
+    )]);
+
+    assert_eq!(frame.to_messages()[0].content, "RESOURCE_SECRET_MARKER");
+    let checkpoint = frame.checkpoint_items().unwrap();
+    assert!(!checkpoint[0].content.contains("RESOURCE_SECRET_MARKER"));
+    assert!(checkpoint[0].content.contains("contentOmittedFromHistory"));
+    let restored = ContextFrame::from_checkpoint_items(checkpoint).unwrap();
+    assert!(!restored.to_messages()[0]
+        .content
+        .contains("RESOURCE_SECRET_MARKER"));
+}
+
+#[test]
 fn persistent_replacement_keeps_run_overlay_and_discards_old_history() {
     let detector =
         ContextCapacityDetector::for_model("test-model", AgentApiStyle::OpenAiCompatible, &[]);

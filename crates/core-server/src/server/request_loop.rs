@@ -45,6 +45,27 @@ where
         }
 
         if request.jsonrpc == "2.0" {
+            if request.method == OFFICE_GET_STATUS_METHOD {
+                let request_outbound = outbound.clone();
+                let request_service = agent_service.clone();
+                tokio::spawn(async move {
+                    let request_id = request.id.clone();
+                    let response = match tokio::task::spawn_blocking(move || {
+                        handle_office_status_request(&request_service, request)
+                    })
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => response_error(
+                            Some(request_id),
+                            -32000,
+                            format!("Office status probe task failed: {error}"),
+                        ),
+                    };
+                    let _ = enqueue_outbound(&request_outbound, response);
+                });
+                continue;
+            }
             if let Some(priority) = git_request_priority(&request.method) {
                 let request_id = request.id.clone();
                 let request_storage = Arc::clone(&storage);

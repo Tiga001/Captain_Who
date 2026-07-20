@@ -2,7 +2,8 @@
 use super::*;
 use crate::protocol::{
     AgentActivatedSkill, AgentInputAttachment, AgentInputAttachmentEncoding,
-    AgentInputAttachmentKind, AgentRunContext, AgentSkillActivation, AgentWorkspaceContext,
+    AgentInputAttachmentKind, AgentPatchPermission, AgentRunContext, AgentSkillActivation,
+    AgentWorkspaceContext,
 };
 use crate::runtime::tool_flow::parse_tool_call_request;
 use crate::{
@@ -36,6 +37,7 @@ fn activated_skill(instructions: &str) -> AgentSkillActivation {
             revision: "skill-sha256-v1:test".to_string(),
             source: "workspace".to_string(),
             instructions: instructions.to_string(),
+            resources: None,
         }],
     }
 }
@@ -429,7 +431,7 @@ fn runtime_command_definition_advertises_effective_approval_routing() {
         });
 
         let capabilities =
-            prepare_runtime_capabilities(&input, "command-definition", &[], true).unwrap();
+            prepare_runtime_capabilities(&input, "command-definition", &[], true, None).unwrap();
         let definition = capabilities
             .tool_definitions
             .iter()
@@ -439,6 +441,331 @@ fn runtime_command_definition_advertises_effective_approval_routing() {
         assert!(!definition.requires_approval);
         assert_eq!(definition.approval_mode, expected_mode);
     }
+}
+
+#[test]
+fn runtime_structured_writers_share_the_file_edit_approval_policy() {
+    let definitions = |patch, host_actions_available| {
+        let mut input = conversation_context_input(vec![message("user", "edit a workbook")]);
+        input.context = Some(AgentRunContext {
+            conversation_id: None,
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("workspace".to_string()),
+                root_path: Some("/tmp/workspace".to_string()),
+            }),
+            attachment_library: None,
+            permissions: crate::protocol::AgentPermissions {
+                write: crate::protocol::AgentWritePermission::WorkspaceOnly,
+                patch,
+                ..Default::default()
+            },
+        });
+        let engine =
+            crate::office::resolve_office_engine(&crate::office::OfficeCliDiscoveryOptions::new());
+        prepare_runtime_capabilities(
+            &input,
+            "office-definition",
+            &[],
+            host_actions_available,
+            Some(engine),
+        )
+        .unwrap()
+        .tool_definitions
+    };
+
+    let manual = definitions(AgentPatchPermission::RequireApproval, true);
+    let automatic = definitions(AgentPatchPermission::AutoApprove, true);
+    let without_host = definitions(AgentPatchPermission::AutoApprove, false);
+
+    for name in [
+        "apply_patch",
+        "write_file",
+        "skills_materialize_resource",
+        "office_document",
+        "office_spreadsheet",
+        "office_presentation",
+    ] {
+        assert!(
+            manual
+                .iter()
+                .find(|definition| definition.name == name)
+                .unwrap()
+                .requires_approval
+        );
+        assert!(
+            !automatic
+                .iter()
+                .find(|definition| definition.name == name)
+                .unwrap()
+                .requires_approval
+        );
+        assert_eq!(
+            automatic
+                .iter()
+                .find(|definition| definition.name == name)
+                .unwrap()
+                .approval_mode,
+            crate::protocol::AgentToolApprovalMode::Never
+        );
+        assert!(
+            without_host
+                .iter()
+                .find(|definition| definition.name == name)
+                .unwrap()
+                .requires_approval
+        );
+    }
+}
+
+#[test]
+fn write_denied_hides_write_only_tools_but_keeps_office_reads_available() {
+    let mut input = conversation_context_input(vec![message("user", "inspect a workbook")]);
+    input.context = Some(AgentRunContext {
+        conversation_id: None,
+        project_id: None,
+        workspace: Some(AgentWorkspaceContext {
+            project_id: None,
+            display_name: Some("workspace".to_string()),
+            root_path: Some("/tmp/workspace".to_string()),
+        }),
+        attachment_library: None,
+        permissions: crate::protocol::AgentPermissions {
+            write: crate::protocol::AgentWritePermission::Denied,
+            patch: AgentPatchPermission::AutoApprove,
+            ..Default::default()
+        },
+    });
+    let engine =
+        crate::office::resolve_office_engine(&crate::office::OfficeCliDiscoveryOptions::new());
+    let definitions = prepare_runtime_capabilities(&input, "write-denied", &[], true, Some(engine))
+        .unwrap()
+        .tool_definitions;
+
+    for name in ["apply_patch", "write_file", "skills_materialize_resource"] {
+        assert!(!definitions.iter().any(|definition| definition.name == name));
+    }
+    for name in [
+        "office_document",
+        "office_spreadsheet",
+        "office_presentation",
+    ] {
+        assert!(definitions.iter().any(|definition| definition.name == name));
+    }
+}
+
+#[tokio::test]
+async fn effective_tool_definitions_are_also_the_execution_allowlist() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_http_body(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+        let mut expected_length = None;
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request completed");
+            request.extend_from_slice(&buffer[..read]);
+            if expected_length.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    expected_length = Some(header_end + 4 + content_length);
+                }
+            }
+            if expected_length.is_some_and(|length| request.len() >= length) {
+                let body_start = request
+                    .windows(4)
+                    .position(|part| part == b"\r\n\r\n")
+                    .unwrap()
+                    + 4;
+                return request[body_start..].to_vec();
+            }
+        }
+    }
+
+    async fn write_json_response(stream: &mut TcpStream, body: Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let second_request = Arc::new(Mutex::new(Vec::new()));
+    let captured_second_request = Arc::clone(&second_request);
+    let server = tokio::spawn(async move {
+        for request_index in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_http_body(&mut stream).await;
+            if request_index == 1 {
+                *captured_second_request.lock().unwrap() = request;
+            }
+            let response = if request_index == 0 {
+                json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "hidden-tool-call",
+                                "type": "function",
+                                "function": {
+                                    "name": "skills_preflight_script",
+                                    "arguments": "{}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+            } else {
+                json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": "done" },
+                        "finish_reason": "stop"
+                    }]
+                })
+            };
+            write_json_response(&mut stream, response).await;
+        }
+    });
+
+    let mut input = conversation_context_input(vec![message("user", "run the hidden tool")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    let output = AgentRuntime::default().send_chat(input).await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(output.content, "done");
+    let request = String::from_utf8(second_request.lock().unwrap().clone()).unwrap();
+    assert!(request.contains("agent.tool_not_available"));
+    assert!(request.contains("toolNotAvailable"));
+}
+
+#[test]
+fn runtime_skill_script_definition_respects_the_host_permission_matrix() {
+    use crate::protocol::{
+        AgentCommandPermission, AgentReadPermission, AgentToolApprovalMode, AgentWorkspaceContext,
+        AgentWritePermission,
+    };
+
+    let definitions = |write, command, command_safety, host_actions_available| {
+        let mut input = conversation_context_input(vec![message("user", "run a Skill script")]);
+        input.context = Some(AgentRunContext {
+            conversation_id: None,
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("workspace".to_string()),
+                root_path: Some("/tmp/workspace".to_string()),
+            }),
+            attachment_library: None,
+            permissions: crate::protocol::AgentPermissions {
+                read: if command_safety == AgentCommandSafetyPolicy::FullAccess {
+                    AgentReadPermission::All
+                } else {
+                    AgentReadPermission::WorkspaceOnly
+                },
+                write,
+                command,
+                command_safety,
+                ..Default::default()
+            },
+        });
+        prepare_runtime_capabilities(
+            &input,
+            "skill-script-definition",
+            &[],
+            host_actions_available,
+            None,
+        )
+        .unwrap()
+        .tool_definitions
+    };
+
+    let guarded = definitions(
+        AgentWritePermission::WorkspaceOnly,
+        AgentCommandPermission::RequireApproval,
+        AgentCommandSafetyPolicy::Guarded,
+        true,
+    );
+    assert!(!guarded
+        .iter()
+        .any(|definition| definition.name == "skills_run_script"));
+    assert!(!guarded
+        .iter()
+        .any(|definition| definition.name == "skills_preflight_script"));
+
+    let write_denied = definitions(
+        AgentWritePermission::Denied,
+        AgentCommandPermission::RequireApproval,
+        AgentCommandSafetyPolicy::FullAccess,
+        true,
+    );
+    assert!(!write_denied
+        .iter()
+        .any(|definition| definition.name == "skills_run_script"));
+    assert!(!write_denied
+        .iter()
+        .any(|definition| definition.name == "skills_preflight_script"));
+
+    let manual = definitions(
+        AgentWritePermission::All,
+        AgentCommandPermission::RequireApproval,
+        AgentCommandSafetyPolicy::FullAccess,
+        true,
+    );
+    assert!(manual
+        .iter()
+        .any(|definition| definition.name == "skills_preflight_script"));
+    let manual = manual
+        .iter()
+        .find(|definition| definition.name == "skills_run_script")
+        .unwrap();
+    assert!(manual.requires_approval);
+    assert_eq!(manual.approval_mode, AgentToolApprovalMode::Always);
+
+    let automatic = definitions(
+        AgentWritePermission::All,
+        AgentCommandPermission::AutoApprove,
+        AgentCommandSafetyPolicy::FullAccess,
+        true,
+    );
+    let automatic = automatic
+        .iter()
+        .find(|definition| definition.name == "skills_run_script")
+        .unwrap();
+    assert!(automatic.requires_approval);
+    assert_eq!(automatic.approval_mode, AgentToolApprovalMode::Always);
+
+    let without_host = definitions(
+        AgentWritePermission::All,
+        AgentCommandPermission::AutoApprove,
+        AgentCommandSafetyPolicy::FullAccess,
+        false,
+    );
+    let without_host = without_host
+        .iter()
+        .find(|definition| definition.name == "skills_run_script")
+        .unwrap();
+    assert!(without_host.requires_approval);
+    assert_eq!(without_host.approval_mode, AgentToolApprovalMode::Always);
 }
 
 fn conversation_context_trace(
@@ -574,7 +901,8 @@ fn runtime_shared_baseline_matches_full_context_assembly() {
         message("assistant", "First answer"),
         message("user", "Current question"),
     ]);
-    let capabilities = prepare_runtime_capabilities(&input, "baseline-test", &[], true).unwrap();
+    let capabilities =
+        prepare_runtime_capabilities(&input, "baseline-test", &[], true, None).unwrap();
     let full =
         build_llm_request(input.clone(), &capabilities.tool_definitions, None, None).unwrap();
     let mut durable_state = create_conversation_context_state(input.clone()).unwrap();
@@ -604,7 +932,8 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
         conversation_context_configuration_revision(&changed_selection).unwrap()
     );
 
-    let capabilities = prepare_runtime_capabilities(&input, "skill-overlay", &[], true).unwrap();
+    let capabilities =
+        prepare_runtime_capabilities(&input, "skill-overlay", &[], true, None).unwrap();
     let mut full =
         build_llm_request(input.clone(), &capabilities.tool_definitions, None, None).unwrap();
     let manifest = full.context.manifest();
@@ -815,7 +1144,7 @@ fn conversation_history_tool_is_registered_only_for_persisted_conversation_runs(
         permissions: Default::default(),
     });
     let capabilities =
-        prepare_runtime_capabilities(&input, "history-capability", &[], true).unwrap();
+        prepare_runtime_capabilities(&input, "history-capability", &[], true, None).unwrap();
     assert!(capabilities
         .tool_definitions
         .iter()
@@ -823,7 +1152,7 @@ fn conversation_history_tool_is_registered_only_for_persisted_conversation_runs(
 
     input.context = None;
     let capabilities =
-        prepare_runtime_capabilities(&input, "no-history-capability", &[], true).unwrap();
+        prepare_runtime_capabilities(&input, "no-history-capability", &[], true, None).unwrap();
     assert!(!capabilities
         .tool_definitions
         .iter()
@@ -2051,4 +2380,232 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             "tool result {call_id} should be retained exactly once"
         );
     }
+}
+
+#[tokio::test]
+async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_checkpoints() {
+    use crate::protocol::{
+        AgentActivatedSkillResources, AgentCommandPermission, AgentPatchPermission,
+        AgentPermissions, AgentReadPermission, AgentWritePermission,
+    };
+    use crate::skills::{
+        memory_resource_session_for_test, SkillId, SkillPackageUri, SkillResourceKind,
+        SkillResourcePath, SkillRevision, SkillSourceId,
+    };
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    const RESOURCE_MARKER: &str = "SKILL_RESOURCE_CHECKPOINT_SECRET_MARKER";
+
+    async fn read_json_request(stream: &mut TcpStream) -> Value {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let mut body_start = None;
+        let mut expected_len = None;
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buffer[..read]);
+            if body_start.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap();
+                    let start = header_end + 4;
+                    body_start = Some(start);
+                    expected_len = Some(start + content_length);
+                }
+            }
+            if expected_len.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        serde_json::from_slice(&request[body_start.unwrap()..expected_len.unwrap()]).unwrap()
+    }
+
+    async fn write_response(stream: &mut TcpStream, body: Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    }
+
+    fn native_tool_call(id: &str, name: &str, args: Value) -> Value {
+        json!({
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": serde_json::to_string(&args).unwrap()
+            }
+        })
+    }
+
+    let source_id = SkillSourceId::parse("installed:user").unwrap();
+    let skill_id = SkillId::parse("installed:user:31234567-89ab-4def-8123-456789abcdef").unwrap();
+    let revision =
+        SkillRevision::parse(format!("skill-package-sha256-v3:{}", "d".repeat(64))).unwrap();
+    let resource_path = SkillResourcePath::parse("references/guide.md").unwrap();
+    let bytes = RESOURCE_MARKER.as_bytes().to_vec();
+    let session = memory_resource_session_for_test(
+        skill_id.clone(),
+        revision.clone(),
+        source_id,
+        vec![(
+            resource_path.as_str().to_string(),
+            SkillResourceKind::Reference,
+            bytes,
+        )],
+    )
+    .unwrap();
+    let package = SkillPackageUri::new(skill_id.clone(), revision.clone());
+    let resource_uri = package.resource(resource_path);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let second_request = Arc::new(std::sync::Mutex::new(None::<Value>));
+    let captured_request = Arc::clone(&second_request);
+    let server = tokio::spawn(async move {
+        for request_index in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_json_request(&mut stream).await;
+            let response = if request_index == 0 {
+                json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [native_tool_call(
+                                "read-skill-resource",
+                                "skills_read_resource",
+                                json!({ "uri": resource_uri.as_str() })
+                            )]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+            } else {
+                *captured_request.lock().unwrap() = Some(request);
+                json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [native_tool_call(
+                                "materialize-after-read",
+                                "apply_patch",
+                                json!({
+                                    "operation": "create",
+                                    "filePath": "report.txt",
+                                    "content": "report"
+                                })
+                            )]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+            };
+            write_response(&mut stream, response).await;
+        }
+    });
+
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let input = AgentChatInput {
+        api_url: format!("http://{address}/v1/chat/completions"),
+        api_token: "test-token".to_string(),
+        model: "test-model".to_string(),
+        api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
+        context_window_tokens: Some(128_000),
+        context_window_indicator_enabled: true,
+        max_tokens: Some(1_000),
+        temperature: None,
+        stream: Some(false),
+        context: Some(AgentRunContext {
+            conversation_id: Some("conversation-skill-resource-checkpoint".to_string()),
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("workspace".to_string()),
+                root_path: Some(workspace.to_string_lossy().into_owned()),
+            }),
+            attachment_library: None,
+            permissions: AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                command: AgentCommandPermission::RequireApproval,
+                command_safety: Default::default(),
+                patch: AgentPatchPermission::RequireApproval,
+            },
+        }),
+        search_config: None,
+        prompt_preferences: None,
+        approval_decision: None,
+        tool_continuation: None,
+        attachments: Vec::new(),
+        resume_checkpoint: None,
+        assistant_message_id: Some("assistant-skill-resource-checkpoint".to_string()),
+        context_compaction_summary: None,
+        skill_activation: Some(AgentSkillActivation {
+            activation_revision: "activation-sha256-v1:resource-checkpoint".to_string(),
+            skills: vec![AgentActivatedSkill {
+                id: skill_id.as_str().to_string(),
+                name: "resource-checkpoint".to_string(),
+                revision: revision.as_str().to_string(),
+                source: "installed:user".to_string(),
+                instructions: "Read references progressively.".to_string(),
+                resources: Some(AgentActivatedSkillResources {
+                    root_uri: package.to_string(),
+                    resource_count: 1,
+                    kinds: vec!["reference".to_string()],
+                }),
+            }],
+        }),
+        messages: vec![message(
+            "user",
+            "Read the Skill reference, then prepare a report.",
+        )],
+    };
+
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some("run-skill-resource-checkpoint".to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(AgentRuntimeHostServices::new().with_skill_resources(Arc::new(session))),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(output.status, AgentRunStatus::WaitingForApproval);
+    let model_request = second_request.lock().unwrap().clone().unwrap();
+    assert!(model_request.to_string().contains(RESOURCE_MARKER));
+    let checkpoint = output
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ApprovalRequired { checkpoint, .. } => Some(checkpoint),
+            _ => None,
+        })
+        .unwrap();
+    let checkpoint_json = serde_json::to_string(checkpoint).unwrap();
+    assert!(!checkpoint_json.contains(RESOURCE_MARKER));
+    assert!(checkpoint_json.contains("contentOmittedFromHistory"));
+    assert!(!serde_json::to_string(&output.events)
+        .unwrap()
+        .contains(RESOURCE_MARKER));
 }

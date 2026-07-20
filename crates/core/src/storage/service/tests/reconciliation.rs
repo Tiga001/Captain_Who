@@ -1,5 +1,136 @@
 use super::*;
 
+fn in_progress_result_trace(
+    conversation_id: &str,
+    assistant_message_id: &str,
+) -> ConversationTurnTrace {
+    ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-1".to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: "action-atomic-result".to_string(),
+                tool: "office_spreadsheet".to_string(),
+                operation: serde_json::json!({ "operation": "set" }),
+                approval_status: crate::AgentApprovalStatus::Approved,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 1,
+                call_id: "action-atomic-result".to_string(),
+                tool: "office_spreadsheet".to_string(),
+                status: crate::ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: serde_json::json!({ "exitCode": 0 }),
+                approval_status: crate::AgentApprovalStatus::Approved,
+                error: None,
+                truncated: false,
+            },
+        ],
+    }
+}
+
+#[test]
+fn pending_target_and_paired_trace_commit_atomically() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut stored_conversation = conversation(
+        "conversation-atomic-result",
+        Some("project-1"),
+        "assistant-atomic-result",
+    );
+    stored_conversation.messages[0].role = "assistant".to_string();
+    service.save_conversation(stored_conversation).unwrap();
+    let mut pending = pending_action("action-atomic-result", "conversation-atomic-result");
+    pending.assistant_message_id = Some("assistant-atomic-result".to_string());
+    pending.status = "approved".to_string();
+    service.store_pending_agent_action(pending).unwrap();
+
+    let changed = service
+        .commit_pending_agent_action_result_trace(
+            "action-atomic-result",
+            "approved",
+            "completed",
+            &in_progress_result_trace("conversation-atomic-result", "assistant-atomic-result"),
+            1,
+            2,
+        )
+        .unwrap();
+    assert!(changed);
+
+    let target_status: Option<String> = service
+        .state
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT target_status FROM agent_pending_actions WHERE action_id = ?1",
+            ["action-atomic-result"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(target_status.as_deref(), Some("completed"));
+    let trace = service
+        .get_conversation_turn_trace("assistant-atomic-result")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        trace.items.last(),
+        Some(ConversationTurnTraceItem::ToolResult { call_id, .. })
+            if call_id == "action-atomic-result"
+    ));
+}
+
+#[test]
+fn invalid_trace_rolls_back_pending_target_status() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut stored_conversation = conversation(
+        "conversation-atomic-rollback",
+        Some("project-1"),
+        "assistant-atomic-rollback",
+    );
+    stored_conversation.messages[0].role = "assistant".to_string();
+    service.save_conversation(stored_conversation).unwrap();
+    let mut pending = pending_action("action-atomic-result", "conversation-atomic-rollback");
+    pending.assistant_message_id = Some("assistant-atomic-rollback".to_string());
+    pending.status = "approved".to_string();
+    service.store_pending_agent_action(pending).unwrap();
+
+    let error = service
+        .commit_pending_agent_action_result_trace(
+            "action-atomic-result",
+            "approved",
+            "completed",
+            &in_progress_result_trace("missing-conversation", "assistant-atomic-rollback"),
+            1,
+            2,
+        )
+        .unwrap_err();
+    assert!(error.contains("conversation trace assistant message does not exist"));
+
+    let target_status: Option<String> = service
+        .state
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT target_status FROM agent_pending_actions WHERE action_id = ?1",
+            ["action-atomic-result"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(target_status, None);
+    assert!(service
+        .get_conversation_turn_trace("assistant-atomic-rollback")
+        .unwrap()
+        .is_none());
+}
+
 #[test]
 fn startup_reconciliation_marks_interrupted_action_message_and_usage_failed() {
     let fixture = StorageFixture::new();

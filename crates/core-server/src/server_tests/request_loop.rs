@@ -1,5 +1,153 @@
 use super::*;
 
+#[derive(Debug)]
+struct SlowOfficeStatusEngine;
+
+impl mycopilot_core::office::OfficeEngine for SlowOfficeStatusEngine {
+    fn capabilities(&self) -> mycopilot_core::office::OfficeEngineCapabilities {
+        mycopilot_core::office::OfficeEngineCapabilities {
+            provider_id: "officecli".to_string(),
+            document_kinds: vec![
+                mycopilot_core::office::OfficeDocumentKind::Document,
+                mycopilot_core::office::OfficeDocumentKind::Spreadsheet,
+                mycopilot_core::office::OfficeDocumentKind::Presentation,
+            ],
+            operations: vec![
+                mycopilot_core::office::OfficeOperation::Create,
+                mycopilot_core::office::OfficeOperation::Validate,
+            ],
+            supports_rendering: true,
+            supports_validation: true,
+            supports_structured_output: true,
+        }
+    }
+
+    fn status(
+        &self,
+        _cancellation: mycopilot_core::AgentCancellationToken,
+    ) -> mycopilot_core::office::OfficeEngineStatus {
+        std::thread::sleep(Duration::from_millis(150));
+        mycopilot_core::office::OfficeEngineStatus {
+            schema_version: mycopilot_core::office::OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
+            provider_id: "officecli".to_string(),
+            availability: mycopilot_core::office::OfficeEngineAvailability::Available,
+            source: Some(mycopilot_core::office::OfficeEngineSource::PackagedComponent),
+            version: Some("OfficeCLI test".to_string()),
+            engine_revision: Some("office-engine-sha256-v1:test".to_string()),
+            capabilities: self.capabilities(),
+            error_code: None,
+            message: None,
+        }
+    }
+
+    fn prepare(
+        &self,
+        _context: &mycopilot_core::office::OfficeExecutionContext,
+        _request: &mycopilot_core::office::OfficeExecutionRequest,
+    ) -> Result<
+        mycopilot_core::office::OfficePreparedExecution,
+        mycopilot_core::office::OfficeEngineError,
+    > {
+        unreachable!("status test engine does not prepare operations")
+    }
+
+    fn execute_prepared(
+        &self,
+        _context: &mycopilot_core::office::OfficeExecutionContext,
+        _prepared: &mycopilot_core::office::OfficePreparedExecution,
+        _cancellation: mycopilot_core::AgentCancellationToken,
+        _action_cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<
+        mycopilot_core::office::OfficeExecutionResult,
+        mycopilot_core::office::OfficeEngineError,
+    > {
+        unreachable!("status test engine does not execute operations")
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn office_status_probe_runs_off_the_request_loop_and_returns_a_strict_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service = AgentService::new(Arc::clone(&storage))
+        .with_office_engine(Arc::new(SlowOfficeStatusEngine));
+    let installations =
+        Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
+    let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let dispatchers = RequestDispatchers {
+        git: &git_dispatcher,
+        skills: &skills_dispatcher,
+        skill_acquisition: &skills_dispatcher,
+    };
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"office.getStatus\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"core.ping\"}\n"
+    );
+
+    run_request_loop(
+        BufReader::new(input.as_bytes()),
+        storage,
+        &agent_service,
+        SkillServices {
+            catalog: Arc::new(SkillsService::new()),
+            installations,
+            workflow: Arc::new(SkillInstallationWorkflow::new(
+                SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+            )),
+            source_resolution: Arc::new(SkillSourceResolutionService::new()),
+        },
+        Arc::new(GitReviewService::new()),
+        &dispatchers,
+        &outbound_tx,
+    )
+    .await
+    .unwrap();
+
+    let first = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(2), outbound_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(first["id"], 2, "the status probe must not block core.ping");
+    assert_eq!(second["id"], 1);
+    assert_eq!(second["result"]["schemaVersion"], 1);
+    assert_eq!(second["result"]["availability"], "available");
+    assert_eq!(second["result"]["source"], "packagedComponent");
+    assert_eq!(
+        second["result"]["capabilities"]["documentKinds"][1],
+        "spreadsheet"
+    );
+    assert!(second["result"].get("executablePath").is_none());
+
+    git_dispatcher.shutdown().await.unwrap();
+    skills_dispatcher.shutdown().await.unwrap();
+}
+
+#[test]
+fn office_status_rejects_even_empty_parameter_objects() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service =
+        AgentService::new(storage).with_office_engine(Arc::new(SlowOfficeStatusEngine));
+    let request = serde_json::from_value::<JsonRpcRequest>(json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": OFFICE_GET_STATUS_METHOD,
+        "params": {}
+    }))
+    .unwrap();
+
+    let response = handle_office_status_request(&agent_service, request);
+
+    assert_eq!(response["error"]["code"], -32602);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_loop_routes_skills_list_through_the_bounded_dispatcher() {
     let temp = tempfile::tempdir().unwrap();

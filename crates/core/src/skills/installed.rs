@@ -1,8 +1,8 @@
 //! User-installed Skills backed by the read-only managed store.
 
 use super::managed_store::{
-    InstalledSkillReceipt, ManagedPackageSnapshot, ManagedSkillStore, ManagedStoreIssue,
-    ManagedStoreLoadError,
+    InstalledPackageRef, InstalledSkillReceipt, ManagedPackageSnapshot, ManagedSkillStore,
+    ManagedStoreIssue, ManagedStoreLoadError,
 };
 use super::model::{
     ResolvedSkillPackage, SkillActivationScope, SkillCatalog, SkillDescriptor,
@@ -12,11 +12,16 @@ use super::model::{
     SkillTrust,
 };
 use super::prepared::validate_installable_skill_bytes;
+use super::resource_runtime::{
+    SkillResourceError, SkillResourceReader, SkillResourceReaderRef, SkillResourceSessionBinding,
+    SkillResourceSourceError,
+};
 use super::service::finalize_catalog;
 use super::source::SkillSource;
 use super::workspace::ByteBudget;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub const USER_INSTALLED_SKILL_SOURCE_ID: &str = "installed:user";
 
@@ -191,6 +196,130 @@ impl SkillSource for InstalledSkillSource {
             },
         })
     }
+
+    fn open_resource_reader(
+        &self,
+        package: &ResolvedSkillPackage,
+    ) -> Result<Option<SkillResourceReaderRef>, SkillResourceError> {
+        if package.id().source_id() != &self.source_id {
+            return Err(SkillResourceError::SourceContractViolation {
+                source_id: self.source_id.clone(),
+                reason: format!(
+                    "Skill `{}` does not belong to this installed source",
+                    package.id()
+                ),
+            });
+        }
+        if package.resources().is_empty() {
+            return Ok(None);
+        }
+        let package_ref = InstalledPackageRef::from_format_and_revision(
+            package.format_version(),
+            package.revision().clone(),
+        )
+        .map_err(|reason| SkillResourceError::SourceContractViolation {
+            source_id: self.source_id.clone(),
+            reason,
+        })?;
+        Ok(Some(Arc::new(InstalledSkillResourceReader {
+            store: self.store.clone(),
+            package: package_ref,
+        })))
+    }
+
+    fn restore_resource_binding(
+        &self,
+        selection: &SkillSelection,
+    ) -> Result<SkillResourceSessionBinding, SkillResourceError> {
+        if selection.skill_id().source_id() != &self.source_id {
+            return Err(SkillResourceError::SourceContractViolation {
+                source_id: self.source_id.clone(),
+                reason: format!(
+                    "Skill `{}` does not belong to this installed source",
+                    selection.skill_id()
+                ),
+            });
+        }
+        SkillInstallationId::parse(selection.skill_id().local_id()).map_err(|error| {
+            SkillResourceError::SnapshotUnavailable {
+                skill_id: selection.skill_id().clone(),
+                revision: selection.expected_revision().clone(),
+                reason: format!("invalid installed Skill id: {error}"),
+            }
+        })?;
+        let package_ref = InstalledPackageRef::from_revision(selection.expected_revision().clone())
+            .map_err(|reason| SkillResourceError::SnapshotUnavailable {
+                skill_id: selection.skill_id().clone(),
+                revision: selection.expected_revision().clone(),
+                reason,
+            })?;
+        let snapshot = self
+            .store
+            .load_indexed_package(&package_ref)
+            .map_err(|error| restore_store_error(selection, error))?;
+        let reader = (!snapshot.resources.is_empty()).then(|| {
+            Arc::new(InstalledSkillResourceReader {
+                store: self.store.clone(),
+                package: package_ref,
+            }) as SkillResourceReaderRef
+        });
+        Ok(SkillResourceSessionBinding {
+            skill_id: selection.skill_id().clone(),
+            revision: selection.expected_revision().clone(),
+            source_id: self.source_id.clone(),
+            resources: snapshot.resources,
+            reader,
+        })
+    }
+}
+
+struct InstalledSkillResourceReader {
+    store: ManagedSkillStore,
+    package: InstalledPackageRef,
+}
+
+impl SkillResourceReader for InstalledSkillResourceReader {
+    fn read(
+        &self,
+        expected: &super::model::SkillResourceDescriptor,
+    ) -> Result<Vec<u8>, SkillResourceSourceError> {
+        self.store
+            .load_resource(&self.package, expected)
+            .map_err(|error| match error {
+                ManagedStoreLoadError::NotFound => SkillResourceSourceError::Unavailable(
+                    "the immutable package resource is no longer present".to_string(),
+                ),
+                ManagedStoreLoadError::Invalid(issue) => SkillResourceSourceError::Integrity(
+                    format!("{}: {}", issue.code.stable_name(), issue.message),
+                ),
+                ManagedStoreLoadError::Unavailable(issue) => {
+                    SkillResourceSourceError::Unavailable(issue.message)
+                }
+            })
+    }
+}
+
+fn restore_store_error(
+    selection: &SkillSelection,
+    error: ManagedStoreLoadError,
+) -> SkillResourceError {
+    match error {
+        ManagedStoreLoadError::NotFound => SkillResourceError::SnapshotUnavailable {
+            skill_id: selection.skill_id().clone(),
+            revision: selection.expected_revision().clone(),
+            reason: "the immutable managed package is no longer present".to_string(),
+        },
+        ManagedStoreLoadError::Invalid(issue) => SkillResourceError::SnapshotIntegrityMismatch {
+            skill_id: selection.skill_id().clone(),
+            revision: selection.expected_revision().clone(),
+            reason: format!("{}: {}", issue.code.stable_name(), issue.message),
+        },
+        ManagedStoreLoadError::Unavailable(issue) => SkillResourceError::SnapshotUnavailable {
+            skill_id: selection.skill_id().clone(),
+            revision: selection.expected_revision().clone(),
+            reason: issue.message,
+        },
+    }
 }
 
 fn build_resolved_package(
@@ -332,10 +461,19 @@ fn invalid_installed_source(error: SkillReferenceError) -> SkillRegistrationErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::digest::{package_revision, PACKAGE_REVISION_PREFIX};
+    use crate::skills::digest::{
+        package_revision, PACKAGE_REVISION_PREFIX, PACKAGE_REVISION_V2_PREFIX,
+        PACKAGE_REVISION_V3_PREFIX,
+    };
     use crate::skills::model::{SkillErrorCode, SkillRevision, SKILL_PACKAGE_FORMAT_VERSION};
+    use crate::skills::package::{
+        PackageManifest, PackageManifestEntry, SkillPackagePath, PACKAGE_MANIFEST_FILE,
+    };
     use crate::skills::workspace::{AGENTS_DIRECTORY, SKILLS_DIRECTORY, SKILL_FILE_NAME};
-    use crate::skills::SkillsService;
+    use crate::skills::{
+        SkillResourceErrorCode, SkillResourceListOptions, SkillResourcePath,
+        SkillResourceTextReadOptions, SkillsService,
+    };
     use serde_json::json;
     use std::fs;
     use std::path::Path;
@@ -363,11 +501,19 @@ mod tests {
     }
 
     fn receipt_json(installation_id: &str, revision: &SkillRevision) -> serde_json::Value {
+        receipt_json_with_format(installation_id, SKILL_PACKAGE_FORMAT_VERSION, revision)
+    }
+
+    fn receipt_json_with_format(
+        installation_id: &str,
+        format_version: u32,
+        revision: &SkillRevision,
+    ) -> serde_json::Value {
         json!({
             "schemaVersion": 1,
             "installationId": installation_id,
             "package": {
-                "formatVersion": 1,
+                "formatVersion": format_version,
                 "revision": revision.as_str(),
                 "entrypoint": "SKILL.md"
             },
@@ -414,6 +560,42 @@ mod tests {
                 .strip_prefix(PACKAGE_REVISION_PREFIX)
                 .unwrap(),
         )
+    }
+
+    fn write_manifest_package(
+        root: &Path,
+        source: &[u8],
+        resources: &[(&str, &[u8])],
+    ) -> (u32, SkillRevision, PathBuf) {
+        let mut entries = vec![PackageManifestEntry::from_bytes(
+            SkillPackagePath::parse(SKILL_FILE_NAME).unwrap(),
+            source,
+        )];
+        entries.extend(resources.iter().map(|(path, bytes)| {
+            PackageManifestEntry::from_bytes(SkillPackagePath::parse(*path).unwrap(), bytes)
+        }));
+        let manifest = PackageManifest::new(entries).unwrap();
+        let revision = manifest.revision();
+        let (version, prefix) = match manifest.format_version() {
+            2 => ("v2", PACKAGE_REVISION_V2_PREFIX),
+            3 => ("v3", PACKAGE_REVISION_V3_PREFIX),
+            other => panic!("unexpected manifest package format {other}"),
+        };
+        let digest = revision.as_str().strip_prefix(prefix).unwrap();
+        let package_root = root.join("packages").join(version).join(digest);
+        fs::create_dir_all(&package_root).unwrap();
+        fs::write(
+            package_root.join(PACKAGE_MANIFEST_FILE),
+            manifest.encode().unwrap(),
+        )
+        .unwrap();
+        fs::write(package_root.join(SKILL_FILE_NAME), source).unwrap();
+        for (path, bytes) in resources {
+            let destination = package_root.join(path);
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            fs::write(destination, bytes).unwrap();
+        }
+        (manifest.format_version(), revision, package_root)
     }
 
     #[test]
@@ -528,6 +710,124 @@ mod tests {
         assert_eq!(stale.actual_revision(), Some(&second_revision));
         assert!(frozen.instructions().contains("VERSION_ONE"));
         assert!(!frozen.source_text().contains("VERSION_TWO"));
+    }
+
+    #[test]
+    fn resource_sessions_and_restoration_stay_bound_to_old_packages_after_update_and_uninstall() {
+        let fixture = tempdir().unwrap();
+        let first_source = skill_document("resource-skill", "VERSION_ONE");
+        let old_guide = b"old revision guide\n";
+        let old_asset = b"old asset";
+        let (first_format, first_revision, first_root) = write_manifest_package(
+            fixture.path(),
+            first_source.as_bytes(),
+            &[
+                ("assets/data.txt", old_asset.as_slice()),
+                ("references/guide.md", old_guide.as_slice()),
+            ],
+        );
+        write_receipt_value(
+            fixture.path(),
+            INSTALLATION_ID,
+            &receipt_json_with_format(INSTALLATION_ID, first_format, &first_revision),
+        );
+        let service = SkillsService::new()
+            .with_installed_source(fixture.path())
+            .unwrap();
+        let selection = service.list().unwrap().skills()[0].selection();
+        let activated = service.activate(std::slice::from_ref(&selection)).unwrap();
+        let session = service.resource_session(&activated).unwrap();
+        let package = session.package_uris().remove(0);
+        let listing = session
+            .list(&package, &SkillResourceListOptions::default())
+            .unwrap();
+        assert_eq!(listing.entries().len(), 2);
+        let guide_uri = package.resource(SkillResourcePath::parse("references/guide.md").unwrap());
+
+        let second_source = skill_document("resource-skill", "VERSION_TWO");
+        let (second_format, second_revision, _) = write_manifest_package(
+            fixture.path(),
+            second_source.as_bytes(),
+            &[("references/guide.md", b"new revision guide\n")],
+        );
+        write_receipt_value(
+            fixture.path(),
+            INSTALLATION_ID,
+            &receipt_json_with_format(INSTALLATION_ID, second_format, &second_revision),
+        );
+
+        let frozen = session
+            .read_text(&guide_uri, SkillResourceTextReadOptions::default())
+            .unwrap();
+        assert_eq!(frozen.text(), "old revision guide\n");
+        let restored_after_update = service
+            .restore_resource_session(std::slice::from_ref(&selection))
+            .unwrap();
+        assert_eq!(
+            restored_after_update
+                .read_text(&guide_uri, SkillResourceTextReadOptions::default())
+                .unwrap()
+                .text(),
+            "old revision guide\n"
+        );
+
+        fs::remove_file(
+            fixture
+                .path()
+                .join("installations")
+                .join(format!("{INSTALLATION_ID}.json")),
+        )
+        .unwrap();
+        let restored_after_uninstall = service
+            .restore_resource_session(std::slice::from_ref(&selection))
+            .unwrap();
+        assert_eq!(
+            restored_after_uninstall
+                .read_text(&guide_uri, SkillResourceTextReadOptions::default())
+                .unwrap()
+                .text(),
+            "old revision guide\n"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let outside = tempdir().unwrap();
+            let guide_path = first_root.join("references/guide.md");
+            let outside_guide = outside.path().join("guide.md");
+            fs::rename(&guide_path, &outside_guide).unwrap();
+            symlink(&outside_guide, &guide_path).unwrap();
+            let linked = restored_after_uninstall
+                .read_text(&guide_uri, SkillResourceTextReadOptions::default())
+                .unwrap_err();
+            assert_eq!(linked.code(), SkillResourceErrorCode::IntegrityMismatch);
+            assert!(!linked
+                .message()
+                .contains(&outside.path().display().to_string()));
+            fs::remove_file(&guide_path).unwrap();
+            fs::rename(&outside_guide, &guide_path).unwrap();
+        }
+
+        // A single-resource read does not eagerly load unrelated bytes.
+        fs::write(
+            first_root.join("assets/data.txt"),
+            b"tampered unrelated asset",
+        )
+        .unwrap();
+        assert_eq!(
+            restored_after_uninstall
+                .read_text(&guide_uri, SkillResourceTextReadOptions::default())
+                .unwrap()
+                .text(),
+            "old revision guide\n"
+        );
+
+        fs::write(first_root.join("references/guide.md"), b"tampered guide").unwrap();
+        let tampered = restored_after_uninstall
+            .read_text(&guide_uri, SkillResourceTextReadOptions::default())
+            .unwrap_err();
+        assert_eq!(tampered.code(), SkillResourceErrorCode::IntegrityMismatch);
     }
 
     #[test]
@@ -1069,7 +1369,7 @@ mod tests {
             .list_with_workspace("workspace", &workspace)
             .unwrap();
 
-        assert_eq!(catalog.skills().len(), 3);
+        assert_eq!(catalog.skills().len(), 6);
         let selection = |kind| {
             catalog
                 .skills()

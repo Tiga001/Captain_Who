@@ -533,7 +533,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         .insert(record.storage_id.clone(), record.clone());
     let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
     let guard = service
-        .command_runs
+        .process_runs
         .register(&record.storage_id, &record.snapshot.run_id);
     let execution_service = service.clone();
     let task = tokio::spawn(async move {

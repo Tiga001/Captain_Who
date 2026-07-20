@@ -134,13 +134,12 @@ pub(super) async fn execute_host_action_on_blocking_thread(
 ) -> AgentResult<AgentToolResult> {
     let execution_token = cancellation_token.clone();
     let handle = tokio::task::spawn_blocking(move || executor(action, execution_token));
-    tokio::select! {
-        _ = cancellation_token.cancelled() => Err(AgentError::cancelled()),
-        result = handle => {
-            result
-                .map_err(|error| AgentError::new(format!("host 执行线程失败：{error}")))?
-        }
-    }
+    // A host action may have crossed its atomic commit boundary when cancellation arrives.
+    // Never detach a mutating blocking task and guess its outcome: the cancellation token is
+    // delivered to the executor, then we wait for its authoritative committed/cancelled result.
+    handle
+        .await
+        .map_err(|error| AgentError::new(format!("host 执行线程失败：{error}")))?
 }
 
 pub(super) fn approve_proposed_action(mut action: AgentProposedAction) -> AgentProposedAction {
@@ -157,16 +156,33 @@ pub(super) fn approve_proposed_action(mut action: AgentProposedAction) -> AgentP
         AgentProposedAction::ToolCall { call } => {
             call.approval_status = AgentApprovalStatus::Approved;
         }
+        AgentProposedAction::SkillMaterialization { materialization } => {
+            materialization.approval_status = AgentApprovalStatus::Approved;
+        }
+        AgentProposedAction::SkillScript { script } => {
+            script.approval_status = AgentApprovalStatus::Approved;
+        }
+        AgentProposedAction::OfficeOperation { office_operation } => {
+            office_operation.approval_status = AgentApprovalStatus::Approved;
+        }
     }
     action
 }
 
 pub(super) fn failed_tool_call_result(call: &AgentToolCall, error: AgentError) -> AgentToolResult {
+    let structured_result = error.details().cloned().map(|mut details| {
+        if let (Some(code), Some(object)) = (error.code(), details.as_object_mut()) {
+            object
+                .entry("errorCode".to_string())
+                .or_insert_with(|| json!(code));
+        }
+        details
+    });
     AgentToolResult {
         call_id: call.id.clone(),
         tool: call.tool.clone(),
         ok: false,
-        result: None,
+        result: structured_result,
         error: Some(error.to_string()),
     }
 }
@@ -347,4 +363,63 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn cancelling_a_host_action_waits_for_its_authoritative_result() {
+        let started = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let executor_started = Arc::clone(&started);
+        let executor_finished = Arc::clone(&finished);
+        let executor: AgentHostActionExecutor = Arc::new(move |_action, cancellation| {
+            executor_started.store(true, Ordering::SeqCst);
+            while !cancellation.is_cancelled() {
+                std::thread::yield_now();
+            }
+            executor_finished.store(true, Ordering::SeqCst);
+            Ok(AgentToolResult {
+                call_id: "write-1".to_string(),
+                tool: "write_file".to_string(),
+                ok: false,
+                result: Some(json!({ "cancelled": true })),
+                error: Some("cancelled before commit".to_string()),
+            })
+        });
+        let action = AgentProposedAction::ToolCall {
+            call: AgentToolCall {
+                id: "write-1".to_string(),
+                tool: "write_file".to_string(),
+                args: json!({}),
+                approval_status: AgentApprovalStatus::Approved,
+                reason: None,
+            },
+        };
+        let cancellation = AgentCancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            execute_host_action_on_blocking_thread(executor, action, task_cancellation).await
+        });
+
+        while !started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        cancellation.cancel();
+
+        let result = task.await.unwrap().unwrap();
+        assert!(finished.load(Ordering::SeqCst));
+        assert!(!result.ok);
+        assert_eq!(
+            result
+                .result
+                .as_ref()
+                .and_then(|value| value["cancelled"].as_bool()),
+            Some(true)
+        );
+    }
 }

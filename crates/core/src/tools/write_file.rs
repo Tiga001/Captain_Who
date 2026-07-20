@@ -1,6 +1,9 @@
 use super::apply_patch_paths::sanitize_file_path;
 use super::write_file_stream::WriteFileInputStreamObserver;
-use super::{AgentTool, ToolExecutionContext, ToolInputStreamObserver};
+use super::{
+    AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess, ToolExecutionContext,
+    ToolInputStreamObserver,
+};
 use crate::content_revision;
 use crate::protocol::{
     AgentApprovalStatus, AgentError, AgentFileDraftSnapshot, AgentFileDraftStatus,
@@ -51,6 +54,10 @@ impl AgentTool for WriteFileTool {
                 "write_file finish 必须通过文件写入提案执行。",
             )),
         }
+    }
+
+    fn permission_policy(&self) -> AgentToolPermissionPolicy {
+        AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::WriteOnly)
     }
 
     fn proposed_action(

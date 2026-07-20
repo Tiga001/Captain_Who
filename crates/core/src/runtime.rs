@@ -29,6 +29,7 @@ use crate::context::{
     ContextRetention, ContextScope, ContextSource,
 };
 use crate::conversation_trace::{canonical_tool_result_for_context, ConversationTraceRecorder};
+use crate::file_write::{file_write_approval_route, FileWriteApprovalRoute};
 use crate::llm::{
     complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessage,
     LlmMessageRole, LlmStreamEvent,
@@ -41,10 +42,10 @@ use crate::prompts::build_system_prompt;
 use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
     AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowPhase,
-    AgentContextWindowSnapshot, AgentError, AgentEvent, AgentExtensionSnapshot,
-    AgentPatchPermission, AgentPermissions, AgentPromptPreferences, AgentProposedAction,
-    AgentResult, AgentRunContext, AgentRunStatus, AgentSkillActivation, AgentToolApprovalMode,
-    AgentToolCall, AgentToolDefinition, AgentToolResult,
+    AgentContextWindowSnapshot, AgentError, AgentEvent, AgentExtensionSnapshot, AgentPermissions,
+    AgentPromptPreferences, AgentProposedAction, AgentReadPermission, AgentResult, AgentRunContext,
+    AgentRunStatus, AgentSkillActivation, AgentSkillScriptPreflightStatus, AgentToolApprovalMode,
+    AgentToolCall, AgentToolDefinition, AgentToolResult, AgentWritePermission,
 };
 use crate::revision::content_revision;
 use crate::storage::service::StorageService;
@@ -180,6 +181,8 @@ impl AgentRuntime {
             trace_observer,
             model_request_observer,
             context_compaction_services,
+            skill_resources,
+            office_engine,
         } = host_services.unwrap_or_default();
         let run_id = run_id.unwrap_or_else(generate_run_id);
         let context = input.context.clone();
@@ -226,6 +229,7 @@ impl AgentRuntime {
             &run_id,
             extension_snapshots,
             host_executor.is_some(),
+            office_engine,
         )
         .map_err(|error| {
             attach_failed_runtime_trace(
@@ -283,6 +287,7 @@ impl AgentRuntime {
         let tool_context = ToolExecutionContext::from_run_context(context.as_ref())
             .with_cancellation(cancellation_token.clone())
             .with_runtime_services(run_id.clone(), storage)
+            .with_skill_resources(skill_resources)
             .with_text_output_budget(tool_output_budget);
         event_stream.emit(state_event(
             &run_id,
@@ -799,8 +804,15 @@ impl AgentRuntime {
                     ));
                     let tool_request = queued_tool_call.call;
                     let reason = extract_reason_from_args(&tool_request.args);
-                    let definition_requires_approval = tool_registry
-                        .requires_approval_for_call(&tool_request.name, &tool_request.args);
+                    // The effective definitions are both the model contract and the execution
+                    // allowlist. The registry may retain tools hidden by the current permission
+                    // mode; a hallucinated or text-fallback call must not resurrect one.
+                    let tool_is_exposed = tool_definitions
+                        .iter()
+                        .any(|definition| definition.name == tool_request.name);
+                    let definition_requires_approval = tool_is_exposed
+                        && tool_registry
+                            .requires_approval_for_call(&tool_request.name, &tool_request.args);
                     let mut call = AgentToolCall {
                         id: tool_request.id,
                         tool: tool_request.name,
@@ -812,61 +824,123 @@ impl AgentRuntime {
                         },
                         reason: reason.or_else(|| Some("agent requested tool call".to_string())),
                     };
-                    let mut prepared_command_action = None;
-                    let mut command_preflight_failure = None;
-                    let mut auto_execute_command = false;
+                    let is_policy_process_tool =
+                        call.tool == "run_command" || call.tool == "skills_run_script";
+                    let mut prepared_policy_action = None;
+                    let mut policy_preflight_failure = None;
+                    let mut auto_execute_policy_action = false;
                     let mut requires_approval = definition_requires_approval;
 
-                    if call.tool == "run_command" {
+                    if !tool_is_exposed {
+                        policy_preflight_failure = Some(failed_tool_call_result(
+                            &call,
+                            AgentError::structured(
+                                "agent.tool_not_available",
+                                format!(
+                                    "Tool `{}` is not available under the current runtime capabilities.",
+                                    call.tool
+                                ),
+                                json!({
+                                    "type": "tool_policy",
+                                    "code": "toolNotAvailable",
+                                    "recovery": "changePermissionsOrCapabilities",
+                                }),
+                            ),
+                        ));
+                    }
+
+                    if is_policy_process_tool && tool_is_exposed {
                         match tool_registry.proposed_action(&tool_context, &call) {
-                            Ok(action) => match prepare_command_dispatch(
-                                &call,
-                                action,
-                                command_permissions,
-                                command_workspace_root.as_deref(),
-                                command_auto_approve,
-                            ) {
+                            Ok(action) => match if call.tool == "run_command" {
+                                prepare_command_dispatch(
+                                    &call,
+                                    action,
+                                    command_permissions,
+                                    command_workspace_root.as_deref(),
+                                    command_auto_approve,
+                                )
+                            } else {
+                                prepare_skill_script_dispatch(
+                                    &call,
+                                    action,
+                                    command_permissions,
+                                    command_workspace_root.as_deref(),
+                                    command_auto_approve,
+                                )
+                            } {
                                 CommandDispatch::ExecuteAutomatically(action) => {
-                                    prepared_command_action = Some(action);
-                                    auto_execute_command = true;
+                                    prepared_policy_action = Some(action);
+                                    auto_execute_policy_action = true;
                                     requires_approval = false;
                                     call.approval_status = AgentApprovalStatus::Approved;
                                 }
                                 CommandDispatch::RequireApproval(action) => {
-                                    prepared_command_action = Some(action);
+                                    prepared_policy_action = Some(action);
                                     requires_approval = true;
                                     call.approval_status = AgentApprovalStatus::Required;
                                 }
                                 CommandDispatch::Reject(result) => {
-                                    command_preflight_failure = Some(result);
+                                    policy_preflight_failure = Some(result);
                                     requires_approval = false;
                                     call.approval_status = AgentApprovalStatus::NotRequired;
                                 }
                             },
                             Err(error) => {
-                                command_preflight_failure =
-                                    Some(failed_tool_call_result(&call, error));
+                                policy_preflight_failure = Some(failed_tool_call_result(&call, error));
                                 requires_approval = false;
                                 call.approval_status = AgentApprovalStatus::NotRequired;
                             }
                         }
                     }
 
-                    let auto_execute_patch = (call.tool == "apply_patch"
-                        || call.tool == "write_file")
+                    let uses_file_write_policy = tool_registry
+                        .permission_policy(&call.tool)
+                        .uses_file_write_approval();
+                    if !is_policy_process_tool
+                        && policy_preflight_failure.is_none()
+                        && uses_file_write_policy
+                        && definition_requires_approval
+                        && file_write_approval_route(command_permissions)
+                            == FileWriteApprovalRoute::Denied
+                    {
+                        policy_preflight_failure = Some(failed_tool_call_result(
+                            &call,
+                            AgentError::structured(
+                                "agent.file_write_permission_denied",
+                                "The current permission policy does not allow file changes.",
+                                json!({
+                                    "type": "file_write_policy",
+                                    "code": "writePermissionDenied",
+                                    "recovery": "changePermissions",
+                                }),
+                            ),
+                        ));
+                        requires_approval = false;
+                    }
+                    let auto_execute_patch = policy_preflight_failure.is_none()
+                        && uses_file_write_policy
                         && patch_auto_approve
                         && definition_requires_approval;
-                    let auto_execute_host_action = auto_execute_command || auto_execute_patch;
-                    if call.tool != "run_command" {
-                        requires_approval =
-                            definition_requires_approval && !auto_execute_host_action;
-                        call.approval_status = if auto_execute_host_action {
-                            AgentApprovalStatus::Approved
-                        } else if requires_approval {
-                            AgentApprovalStatus::Required
+                    let auto_execute_host_action =
+                        auto_execute_policy_action || auto_execute_patch;
+                    if !is_policy_process_tool {
+                        if policy_preflight_failure.is_some() {
+                            // A rejected or unavailable call is terminal for this attempt. Never
+                            // turn a policy failure back into a pending approval merely because
+                            // the underlying tool normally writes files.
+                            requires_approval = false;
+                            call.approval_status = AgentApprovalStatus::NotRequired;
                         } else {
-                            AgentApprovalStatus::NotRequired
-                        };
+                            requires_approval =
+                                definition_requires_approval && !auto_execute_host_action;
+                            call.approval_status = if auto_execute_host_action {
+                                AgentApprovalStatus::Approved
+                            } else if requires_approval {
+                                AgentApprovalStatus::Required
+                            } else {
+                                AgentApprovalStatus::NotRequired
+                            };
+                        }
                     }
                     conversation_trace
                         .lock()
@@ -890,9 +964,12 @@ impl AgentRuntime {
                     }
 
                     if requires_approval {
-                        let action_result = if call.tool == "run_command" {
-                            prepared_command_action.take().ok_or_else(|| {
-                                AgentError::new("run_command 在审批前丢失了已验证的命令快照。")
+                        let action_result = if is_policy_process_tool {
+                            prepared_policy_action.take().ok_or_else(|| {
+                                AgentError::new(format!(
+                                    "{} lost its validated action snapshot before approval.",
+                                    call.tool
+                                ))
                             })
                         } else {
                             tool_registry.proposed_action(&tool_context, &call)
@@ -1007,12 +1084,15 @@ impl AgentRuntime {
                         });
                     }
 
-                    let result_result = if let Some(result) = command_preflight_failure {
+                    let result_result = if let Some(result) = policy_preflight_failure {
                         Ok(result)
                     } else if auto_execute_host_action {
-                        let action_result = if call.tool == "run_command" {
-                            prepared_command_action.take().ok_or_else(|| {
-                                AgentError::new("run_command 在自动执行前丢失了已验证的命令快照。")
+                        let action_result = if is_policy_process_tool {
+                            prepared_policy_action.take().ok_or_else(|| {
+                                AgentError::new(format!(
+                                    "{} lost its validated action snapshot before automatic execution.",
+                                    call.tool
+                                ))
                             })
                         } else {
                             tool_registry.proposed_action(&tool_context, &call)
@@ -1070,13 +1150,15 @@ impl AgentRuntime {
                         Err(error) => return Err(error),
                     };
                     let llm_result = canonical_tool_result_for_context(&result);
+                    let trace_result = tool_registry.trace_projection(&result);
+                    let checkpoint_result = tool_registry.checkpoint_projection(&result);
                     conversation_trace
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
-                        .record_tool_result(&call, &llm_result);
+                        .record_tool_result(&call, &trace_result);
                     pending_trace_baseline =
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
-                    if cancellation_token.is_cancelled()
+                    if (!auto_execute_host_action && cancellation_token.is_cancelled())
                         || result.error.as_deref() == Some("agent run 已取消。")
                     {
                         return Ok(cancelled_output(
@@ -1088,7 +1170,8 @@ impl AgentRuntime {
                             finish_reason,
                         ));
                     }
-                    let event_result = redact_tool_result_for_event(&result);
+                    let event_result =
+                        redact_tool_result_for_event(&tool_registry.event_projection(&result));
                     event_stream.emit(AgentEvent::ToolResult {
                         run_id: run_id.clone(),
                         result: event_result.clone(),
@@ -1107,17 +1190,24 @@ impl AgentRuntime {
                         }
                     }
 
-                    active_context.push(ContextItem::tool_result(
-                        call.id.clone(),
-                        build_tool_observation_message(&llm_result),
-                        !result.ok,
-                        ContextMetadata::new(
-                            ContextSource::ToolResult,
-                            ContextScope::Run,
-                            ContextRetention::Retained,
+                    active_context.push(
+                        ContextItem::tool_result(
+                            call.id.clone(),
+                            build_tool_observation_message(&llm_result),
+                            !result.ok,
+                            ContextMetadata::new(
+                                ContextSource::ToolResult,
+                                ContextScope::Run,
+                                ContextRetention::Retained,
+                            )
+                            .with_group(tool_exchange_group.clone()),
                         )
-                        .with_group(tool_exchange_group.clone()),
-                    ));
+                        .with_checkpoint_tool_result(
+                            call.id.clone(),
+                            build_tool_observation_message(&checkpoint_result),
+                            !result.ok,
+                        ),
+                    );
                     if let Some(image_message) = llm_image_message_from_tool_result(&result) {
                         active_context.push(ContextItem::new(
                             image_message,

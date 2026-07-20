@@ -5,9 +5,11 @@ pub(super) fn prepare_runtime_capabilities(
     run_id: &str,
     extension_snapshots: &[AgentExtensionSnapshot],
     host_actions_available: bool,
+    office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
 ) -> AgentResult<PreparedRuntimeCapabilities> {
     let runtime_extensions = RuntimeExtensions::for_run(run_id, extension_snapshots)?;
-    let mut tool_registry = ToolRegistry::defaults_with_search(input.search_config.as_ref());
+    let mut tool_registry =
+        ToolRegistry::defaults_with_search_and_office(input.search_config.as_ref(), office_engine);
     let context = input.context.as_ref();
     if context
         .and_then(|context| context.conversation_id.as_deref())
@@ -33,14 +35,13 @@ pub(super) fn prepare_runtime_capabilities(
     let command_safety = command_permissions.command_safety;
     let patch_auto_approve = context
         .map(|context| {
-            context.permissions.patch == AgentPatchPermission::AutoApprove
-                && context.permissions.write != crate::protocol::AgentWritePermission::Denied
+            file_write_approval_route(context.permissions) == FileWriteApprovalRoute::AutoApprove
         })
         .unwrap_or(false)
         && host_actions_available;
 
     let mut tool_definitions = tool_registry.definitions();
-    apply_permission_policy_to_tool_definitions(&mut tool_definitions, context);
+    apply_permission_policy_to_tool_definitions(&mut tool_definitions, context, &tool_registry);
     if command_auto_approve {
         if let Some(definition) = tool_definitions
             .iter_mut()
@@ -59,9 +60,12 @@ pub(super) fn prepare_runtime_capabilities(
     }
     if patch_auto_approve {
         for definition in tool_definitions.iter_mut().filter(|definition| {
-            definition.name == "apply_patch" || definition.name == "write_file"
+            tool_registry
+                .permission_policy(&definition.name)
+                .uses_file_write_approval()
         }) {
             definition.requires_approval = false;
+            definition.approval_mode = AgentToolApprovalMode::Never;
             definition.description.push_str(
                 " The current permission policy automatically approves the final validated file change.",
             );
@@ -263,6 +267,7 @@ pub(super) fn suppressed_narration_context_item() -> ContextItem {
 pub(super) fn apply_permission_policy_to_tool_definitions(
     definitions: &mut Vec<AgentToolDefinition>,
     context: Option<&AgentRunContext>,
+    tool_registry: &ToolRegistry,
 ) {
     let permissions = context
         .map(|context| context.permissions)
@@ -270,7 +275,22 @@ pub(super) fn apply_permission_policy_to_tool_definitions(
 
     if permissions.write == crate::protocol::AgentWritePermission::Denied {
         definitions.retain(|definition| {
-            definition.name != "apply_patch" && definition.name != "write_file"
+            tool_registry
+                .permission_policy(&definition.name)
+                .is_available_when_write_denied()
+                && definition.name != "skills_run_script"
+        });
+    }
+
+    // A cwd is not a filesystem or network sandbox. Until the host can enforce
+    // those boundaries, even dependency inspection remains an unrestricted
+    // host capability and every actual script execution stays manual.
+    if permissions.command_safety != AgentCommandSafetyPolicy::FullAccess
+        || permissions.read != crate::protocol::AgentReadPermission::All
+        || permissions.write != crate::protocol::AgentWritePermission::All
+    {
+        definitions.retain(|definition| {
+            definition.name != "skills_preflight_script" && definition.name != "skills_run_script"
         });
     }
 

@@ -13,6 +13,10 @@ const MAX_QUERY_CHARS: usize = 1_000;
 pub(super) struct ConversationHistoryTool;
 
 impl AgentTool for ConversationHistoryTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "conversation_history".to_string(),

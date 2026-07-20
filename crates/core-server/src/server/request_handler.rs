@@ -12,6 +12,7 @@ pub(crate) fn handle_request(
 
     match request.method.as_str() {
         CORE_PING_METHOD => handle_core_ping(request.id, request.params),
+        OFFICE_GET_STATUS_METHOD => handle_office_status_request(agent_service, request),
         AGENT_START_CONVERSATION_TURN_METHOD => handle_agent_start_conversation_turn(
             agent_service,
             notification_tx,

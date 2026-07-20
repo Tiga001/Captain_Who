@@ -19,8 +19,25 @@ use mycopilot_core::command::{
     run_authorized_command, AgentCommandExecutionResult, CommandAuthorizationSource,
     CommandExecutionError, CommandRunGuard, CommandRunState,
 };
-use mycopilot_core::file_write::{file_draft_snapshot, file_write_diff};
-use mycopilot_core::skills::SkillsService;
+use mycopilot_core::file_write::{
+    file_draft_snapshot, file_write_action_approval_status, file_write_approval_route,
+    file_write_authorized, file_write_diff, proposed_action_uses_file_write_policy,
+    FileWriteApprovalRoute, FileWriteAuthorizationSource,
+};
+use mycopilot_core::office::{
+    resolve_office_engine, OfficeCliDiscoveryOptions, OfficeEngine, OfficeEngineError,
+    OfficeExecutionResult,
+};
+use mycopilot_core::skills::{
+    execute_skill_python_script, SkillMaterializationDestination, SkillMaterializationError,
+    SkillMaterializationRequest, SkillMaterializationStatus, SkillPackageUri,
+    SkillResourceMaterializer, SkillResourcePath, SkillResourceSession, SkillResourceUri,
+    SkillScriptRuntimeError, SkillSelection, SkillTemplateTreeMaterializationRequest,
+    SkillsService,
+};
+use mycopilot_core::storage::agent_action_audit_repository::{
+    AgentActionAuditExecutionClaimOutcome, AgentActionAuditFinalizationOutcome,
+};
 use mycopilot_core::storage::models::{
     AgentActionAuditRecord, AgentPendingActionRecord, AgentUsageRecordInsert,
 };
@@ -41,9 +58,11 @@ use mycopilot_core::{
     AgentContextWindowSnapshot, AgentConversationContextState, AgentConversationTraceObserver,
     AgentError, AgentEvent, AgentEventEmitter, AgentHostActionExecutor, AgentModelRequestObserver,
     AgentPatchResult, AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext,
-    AgentRunStatus, AgentRuntimeHostServices, AgentSearchConfig, AgentToolCall,
-    AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
-    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
+    AgentRunStatus, AgentRuntimeHostServices, AgentSearchConfig, AgentSkillMaterializationRequest,
+    AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus,
+    AgentSkillScriptRequest, AgentSkillScriptResult, AgentToolCall, AgentToolContinuation,
+    AgentToolResult, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
+    AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
     ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
 };
 use serde_json::Value;
@@ -115,7 +134,8 @@ pub struct AgentService {
     conversation_context_states: Arc<Mutex<HashMap<String, ConversationContextStateEntry>>>,
     conversation_context_state_clock: Arc<AtomicU64>,
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
-    command_runs: CommandRunState,
+    office_engine: Arc<dyn OfficeEngine>,
+    process_runs: CommandRunState,
     deleting_projects: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -125,6 +145,7 @@ impl AgentService {
             .reconcile_interrupted_pending_agent_actions(now_ms())
             .map_err(|error| format!("failed to reconcile interrupted pending actions: {error}"))?;
         let pending_actions = load_persisted_pending_actions(&storage)?;
+        let office_engine = resolve_default_office_engine();
         Ok(Self {
             storage,
             skills: Arc::new(SkillsService::new()),
@@ -135,7 +156,8 @@ impl AgentService {
             conversation_context_states: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_state_clock: Arc::new(AtomicU64::new(1)),
             context_compaction_summary_generator: None,
-            command_runs: CommandRunState::default(),
+            office_engine,
+            process_runs: CommandRunState::default(),
             deleting_projects: Arc::new(Mutex::new(HashSet::new())),
         })
     }
@@ -150,6 +172,57 @@ impl AgentService {
         self
     }
 
+    /// Probes the same Office engine instance used by Agent tools and actions.
+    ///
+    /// The probe may launch the provider executable and must therefore be
+    /// called from a blocking worker when reached through an async server.
+    pub fn get_office_engine_status(&self) -> mycopilot_core::office::OfficeEngineStatus {
+        self.office_engine.status(AgentCancellationToken::new())
+    }
+
+    #[cfg(test)]
+    pub fn with_office_engine(mut self, office_engine: Arc<dyn OfficeEngine>) -> Self {
+        self.office_engine = office_engine;
+        self
+    }
+
+    /// Reopens the immutable resource revisions captured in persisted run
+    /// metadata. This is used after an approval continuation or process
+    /// restart; it never follows the current installation receipt.
+    fn restore_skill_resource_session(
+        &self,
+        input: &AgentChatInput,
+    ) -> AgentResult<Option<Arc<SkillResourceSession>>> {
+        let Some(activation) = input.skill_activation.as_ref() else {
+            return Ok(None);
+        };
+        let selections = activation
+            .skills
+            .iter()
+            .filter(|skill| skill.resources.is_some())
+            .map(|skill| {
+                SkillSelection::parse(skill.id.clone(), skill.revision.clone()).map_err(|error| {
+                    AgentError::new(format!(
+                        "cannot restore activated Skill resource identity `{}`: {error}",
+                        skill.id
+                    ))
+                })
+            })
+            .collect::<AgentResult<Vec<_>>>()?;
+        if selections.is_empty() {
+            return Ok(None);
+        }
+        self.skills
+            .restore_resource_session(&selections)
+            .map(Arc::new)
+            .map(Some)
+            .map_err(|error| {
+                AgentError::new(format!(
+                    "cannot restore activated Skill resource snapshot: {error}"
+                ))
+            })
+    }
+
     #[cfg(test)]
     fn with_context_compaction_summary_generator(
         mut self,
@@ -158,6 +231,17 @@ impl AgentService {
         self.context_compaction_summary_generator = Some(generator);
         self
     }
+}
+
+fn resolve_default_office_engine() -> Arc<dyn OfficeEngine> {
+    let options = if let Some(path) = std::env::var_os("MYCOPILOT_OFFICECLI_PATH") {
+        OfficeCliDiscoveryOptions::new().with_configured_executable(path)
+    } else if let Some(directory) = std::env::var_os("MYCOPILOT_OFFICE_COMPONENTS_DIR") {
+        OfficeCliDiscoveryOptions::new().with_application_resources_dir(directory)
+    } else {
+        OfficeCliDiscoveryOptions::new().allow_path_fallback(cfg!(debug_assertions))
+    };
+    resolve_office_engine(&options)
 }
 
 #[cfg(test)]

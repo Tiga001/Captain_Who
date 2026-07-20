@@ -1,5 +1,6 @@
 mod git;
 mod methods;
+mod office;
 mod rpc;
 mod skill_catalog;
 mod skill_installation;
@@ -8,6 +9,7 @@ mod skill_mutation;
 
 pub use git::*;
 pub use methods::*;
+pub use office::*;
 pub use rpc::*;
 pub use skill_catalog::*;
 pub use skill_installation::*;

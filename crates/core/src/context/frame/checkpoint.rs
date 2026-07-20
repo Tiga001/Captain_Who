@@ -2,7 +2,9 @@ use super::*;
 
 impl ContextItem {
     pub(super) fn same_context_content(&self, other: &Self) -> bool {
-        self.message == other.message && self.metadata == other.metadata
+        self.message == other.message
+            && self.checkpoint_message == other.checkpoint_message
+            && self.metadata == other.metadata
     }
 }
 
@@ -11,11 +13,20 @@ impl ContextItem {
         if self.metadata.retention() != ContextRetention::Retained {
             return Err(AgentError::new("运行检查点不能保存 request-only 上下文。"));
         }
+        let message = self.checkpoint_message.as_ref().unwrap_or(&self.message);
+        if message.role != self.message.role
+            || message.tool_call_id != self.message.tool_call_id
+            || message.is_error != self.message.is_error
+            || message.tool_calls != self.message.tool_calls
+        {
+            return Err(AgentError::new(
+                "运行检查点投影不能改变消息角色、工具身份或错误语义。",
+            ));
+        }
         Ok(AgentContextCheckpointItem {
-            role: self.message.role.as_str().to_string(),
-            content: self.message.content.clone(),
-            images: self
-                .message
+            role: message.role.as_str().to_string(),
+            content: message.content.clone(),
+            images: message
                 .images
                 .iter()
                 .map(|image| AgentContextCheckpointImage {
@@ -23,9 +34,8 @@ impl ContextItem {
                     data_base64: image.data_base64.clone(),
                 })
                 .collect(),
-            tool_call_id: self.message.tool_call_id.clone(),
-            tool_calls: self
-                .message
+            tool_call_id: message.tool_call_id.clone(),
+            tool_calls: message
                 .tool_calls
                 .iter()
                 .map(|call| AgentContextCheckpointToolCall {
@@ -34,7 +44,7 @@ impl ContextItem {
                     args: call.args.clone(),
                 })
                 .collect(),
-            is_error: self.message.is_error,
+            is_error: message.is_error,
             sources: self
                 .metadata
                 .sources()

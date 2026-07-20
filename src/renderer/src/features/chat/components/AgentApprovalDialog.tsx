@@ -24,6 +24,26 @@ function getApprovalFallbackTitle(action: AgentProposedAction, t: Translate) {
   if (action.type === 'command') return t('agent.approval.dialog.commandTitle')
   if (action.type === 'diff') return t('agent.approval.dialog.diffTitle')
   if (action.type === 'file_write') return t('agent.approval.dialog.fileWriteTitle')
+  if (action.type === 'skill_materialization')
+    return formatTranslation(t, 'agent.approval.dialog.toolTitle', {
+      tool: getToolDisplayName('skills_materialize_resource', t)
+    })
+  if (action.type === 'skill_script')
+    return formatTranslation(t, 'agent.approval.dialog.toolTitle', {
+      tool: getToolDisplayName('skills_run_script', t)
+    })
+  if (action.type === 'office_operation') {
+    const kind = action.officeOperation.prepared.request.documentKind
+    const tool =
+      kind === 'document'
+        ? 'office_document'
+        : kind === 'spreadsheet'
+          ? 'office_spreadsheet'
+          : 'office_presentation'
+    return formatTranslation(t, 'agent.approval.dialog.toolTitle', {
+      tool: getToolDisplayName(tool, t)
+    })
+  }
   return formatTranslation(t, 'agent.approval.dialog.toolTitle', {
     tool: getToolDisplayName(action.call.tool, t)
   })
@@ -34,6 +54,12 @@ function getApprovalRequest(action: AgentProposedAction, t: Translate) {
   if (action.type === 'file_write')
     return action.fileWrite.summary ?? getApprovalFallbackTitle(action, t)
   if (action.type === 'command') return action.command.reason ?? getApprovalFallbackTitle(action, t)
+  if (action.type === 'skill_materialization')
+    return action.materialization.reason ?? getApprovalFallbackTitle(action, t)
+  if (action.type === 'skill_script')
+    return action.script.reason ?? getApprovalFallbackTitle(action, t)
+  if (action.type === 'office_operation')
+    return action.officeOperation.reason ?? getApprovalFallbackTitle(action, t)
   return action.call.reason ?? formatToolDetails(action.call.args)
 }
 
@@ -41,6 +67,46 @@ function getApprovalCode(action: AgentProposedAction) {
   if (action.type === 'command') return action.command.command
   if (action.type === 'diff') return action.diff.filePath
   if (action.type === 'file_write') return action.fileWrite.filePath
+  if (action.type === 'skill_materialization') return action.materialization.destination
+  if (action.type === 'skill_script')
+    return JSON.stringify(
+      {
+        scriptUri: action.script.scriptUri,
+        skillId: action.script.skillId,
+        skillRevision: action.script.skillRevision,
+        resourcePath: action.script.resourcePath,
+        resourceDigest: action.script.resourceDigest,
+        interpreter: action.script.interpreter,
+        args: action.script.args,
+        requirements: action.script.requirements,
+        timeoutMs: action.script.timeoutMs,
+        preflight: action.script.preflight
+      },
+      null,
+      2
+    )
+  if (action.type === 'office_operation') {
+    const { prepared } = action.officeOperation
+    return JSON.stringify(
+      {
+        application: prepared.request.documentKind,
+        operation: prepared.request.operation,
+        provider: prepared.providerId,
+        engineRevision: prepared.engineRevision,
+        paths: prepared.paths.map((path) => ({
+          slot: path.slot,
+          purpose: path.purpose,
+          path: path.logicalPath,
+          resolvedPath: path.normalizedPath,
+          scope: path.scope,
+          outsideWorkspace: path.scope === 'external',
+          expectedChange: path.writeDisposition
+        }))
+      },
+      null,
+      2
+    )
+  }
   return action.call.tool
 }
 
@@ -48,6 +114,9 @@ function getApprovalPolicyHint(action: AgentProposedAction, t: Translate) {
   if (action.type === 'command') return t('agent.approval.dialog.commandPolicyHint')
   if (action.type === 'diff') return t('agent.approval.dialog.diffPolicyHint')
   if (action.type === 'file_write') return t('agent.approval.dialog.diffPolicyHint')
+  if (action.type === 'skill_materialization') return t('agent.approval.dialog.diffPolicyHint')
+  if (action.type === 'skill_script') return t('agent.approval.dialog.commandPolicyHint')
+  if (action.type === 'office_operation') return t('agent.approval.dialog.diffPolicyHint')
   return t('agent.approval.dialog.toolPolicyHint')
 }
 
@@ -95,7 +164,18 @@ export function AgentApprovalDialog({ target, onApprove, onReject }: AgentApprov
         {request || getApprovalFallbackTitle(action, t)}
       </h2>
 
-      {code ? <code className="agent-approval-dialog__command">{code}</code> : null}
+      {code ? (
+        <code
+          className="agent-approval-dialog__command"
+          data-multiline={
+            action.type === 'skill_script' || action.type === 'office_operation'
+              ? 'true'
+              : undefined
+          }
+        >
+          {code}
+        </code>
+      ) : null}
       <p className="agent-approval-dialog__policy">{policyHint}</p>
 
       <button

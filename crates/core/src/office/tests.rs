@@ -1,0 +1,1672 @@
+use super::discovery::discover_with_test_path;
+use super::execution::{install_commit_test_hook, CommitTestPhase};
+use super::*;
+use crate::{
+    AgentAttachmentLibraryContext, AgentAttachmentReference, AgentCancellationToken,
+    AgentInputAttachmentKind, AgentPermissions, AgentReadPermission, AgentWritePermission,
+};
+use std::ffi::OsString;
+use std::fs;
+use std::io::Write;
+use std::os::unix::fs::{symlink, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::Instant;
+
+struct Fixture {
+    workspace: tempfile::TempDir,
+    engine_dir: tempfile::TempDir,
+    engine: OfficeCliEngine,
+}
+
+impl Fixture {
+    fn new(script: &str) -> Self {
+        let workspace = tempfile::tempdir().unwrap();
+        let engine_dir = tempfile::tempdir().unwrap();
+        let executable = engine_dir.path().join("officecli");
+        write_executable(&executable, script);
+        let options = OfficeCliDiscoveryOptions::new()
+            .with_configured_executable(&executable)
+            .with_workspace_root(workspace.path());
+        let engine = OfficeCliEngine::discover(&options).unwrap();
+        Self {
+            workspace,
+            engine_dir,
+            engine,
+        }
+    }
+
+    fn request(&self, operation: OfficeOperation) -> OfficeExecutionRequest {
+        OfficeExecutionRequest {
+            document_kind: OfficeDocumentKind::Document,
+            operation,
+            document_path: Some("sample.docx".to_string()),
+            arguments: match operation {
+                OfficeOperation::Set => vec!["/body".to_string()],
+                _ => Vec::new(),
+            },
+            output_path: None,
+            destination_path: None,
+            timeout_ms: Some(10_000),
+        }
+    }
+}
+
+fn workspace_context(path: &Path) -> OfficeExecutionContext {
+    let permissions = AgentPermissions {
+        write: AgentWritePermission::WorkspaceOnly,
+        ..AgentPermissions::default()
+    };
+    OfficeExecutionContext::new(Some(path.to_path_buf()), permissions, None)
+}
+
+fn permission_context(
+    workspace: Option<&Path>,
+    read: AgentReadPermission,
+    write: AgentWritePermission,
+) -> OfficeExecutionContext {
+    let permissions = AgentPermissions {
+        read,
+        write,
+        ..AgentPermissions::default()
+    };
+    OfficeExecutionContext::new(workspace.map(Path::to_path_buf), permissions, None)
+}
+
+fn prepared_path<'a>(
+    prepared: &'a OfficePreparedExecution,
+    slot: &OfficePathSlot,
+) -> &'a OfficeFrozenPath {
+    prepared
+        .paths
+        .iter()
+        .find(|path| &path.slot == slot)
+        .expect("prepared Office path slot")
+}
+
+fn write_executable(path: &Path, source: &str) {
+    fs::write(path, source).unwrap();
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(path, permissions).unwrap();
+}
+
+fn basic_script() -> &'static str {
+    "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'OfficeCLI 1.2.3\\n'; exit 0; fi\nprintf 'stdout:%s:%s\\n' \"$1\" \"$2\"\nprintf 'stderr:%s\\n' \"$3\" >&2\nexit \"${OFFICECLI_TEST_EXIT:-0}\"\n"
+}
+
+fn write_docx(path: &Path, text: &str) {
+    let file = fs::File::create(path).unwrap();
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    archive.start_file("[Content_Types].xml", options).unwrap();
+    archive
+        .write_all(
+            b"<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>",
+        )
+        .unwrap();
+    archive.start_file("word/document.xml", options).unwrap();
+    archive.write_all(text.as_bytes()).unwrap();
+    archive.finish().unwrap();
+}
+
+#[test]
+fn configured_discovery_and_probe_are_structured() {
+    let fixture = Fixture::new(basic_script());
+    assert_eq!(fixture.engine.source(), OfficeEngineSource::Configured);
+    assert!(fixture.engine.executable_path().is_absolute());
+    let status = fixture.engine.status(AgentCancellationToken::new());
+    assert_eq!(status.availability, OfficeEngineAvailability::Available);
+    assert_eq!(status.version.as_deref(), Some("OfficeCLI 1.2.3"));
+    assert_eq!(
+        status.engine_revision.as_deref(),
+        Some(fixture.engine.engine_revision())
+    );
+    assert!(fixture
+        .engine
+        .engine_revision()
+        .starts_with("office-engine-sha256-v1:"));
+    assert_eq!(status.capabilities.document_kinds.len(), 3);
+}
+
+#[test]
+fn prepared_execution_freezes_engine_workspace_and_file_revisions() {
+    let fixture = Fixture::new(basic_script());
+    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let prepared = fixture
+        .engine
+        .prepare(
+            &workspace_context(fixture.workspace.path()),
+            &fixture.request(OfficeOperation::Validate),
+        )
+        .unwrap();
+    assert_eq!(
+        prepared.schema_version,
+        OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION
+    );
+    assert_eq!(prepared.engine_revision, fixture.engine.engine_revision());
+    assert!(prepared
+        .workspace_revision
+        .as_deref()
+        .unwrap()
+        .starts_with("office-workspace-sha256-v1:"));
+    assert!(prepared_path(&prepared, &OfficePathSlot::Document)
+        .content_revision
+        .as_deref()
+        .unwrap()
+        .starts_with("office-file-sha256-v1:"));
+    serde_json::to_string(&prepared).unwrap();
+}
+
+#[test]
+fn changed_engine_or_document_invalidates_prepared_execution() {
+    let fixture = Fixture::new(basic_script());
+    let document = fixture.workspace.path().join("sample.docx");
+    fs::write(&document, b"first").unwrap();
+    let request = fixture.request(OfficeOperation::Validate);
+    let prepared = fixture
+        .engine
+        .prepare(&workspace_context(fixture.workspace.path()), &request)
+        .unwrap();
+    fs::write(fixture.engine.executable_path(), "#!/bin/sh\nexit 0\n").unwrap();
+    let error = fixture
+        .engine
+        .execute_prepared(
+            &workspace_context(fixture.workspace.path()),
+            &prepared,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidConfiguration);
+
+    let fresh = Fixture::new(basic_script());
+    let document = fresh.workspace.path().join("sample.docx");
+    fs::write(&document, b"first").unwrap();
+    let prepared = fresh
+        .engine
+        .prepare(
+            &workspace_context(fresh.workspace.path()),
+            &fresh.request(OfficeOperation::Validate),
+        )
+        .unwrap();
+    fs::write(&document, b"second").unwrap();
+    let error = fresh
+        .engine
+        .execute_prepared(
+            &workspace_context(fresh.workspace.path()),
+            &prepared,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::PreconditionFailed);
+}
+
+#[test]
+fn packaged_component_layout_is_discovered_before_path() {
+    let workspace = tempfile::tempdir().unwrap();
+    let resources = tempfile::tempdir().unwrap();
+    let component = resources.path().join(office_cli_component_relative_path());
+    fs::create_dir_all(component.parent().unwrap()).unwrap();
+    write_executable(&component, basic_script());
+    let options = OfficeCliDiscoveryOptions::new()
+        .with_application_resources_dir(resources.path())
+        .with_workspace_root(workspace.path())
+        .allow_path_fallback(true);
+    let engine = discover_with_test_path(&options, Some(OsString::from("/missing"))).unwrap();
+    assert_eq!(engine.source(), OfficeEngineSource::PackagedComponent);
+    assert_eq!(engine.executable_path(), component.canonicalize().unwrap());
+}
+
+#[test]
+fn path_fallback_is_explicit_and_skips_relative_entries() {
+    let workspace = tempfile::tempdir().unwrap();
+    let path_dir = tempfile::tempdir().unwrap();
+    write_executable(&path_dir.path().join("officecli"), basic_script());
+    let options = OfficeCliDiscoveryOptions::new()
+        .with_workspace_root(workspace.path())
+        .allow_path_fallback(true);
+    let path = std::env::join_paths([PathBuf::from("."), path_dir.path().to_path_buf()]).unwrap();
+    let engine = discover_with_test_path(&options, Some(path)).unwrap();
+    assert_eq!(engine.source(), OfficeEngineSource::DevelopmentPath);
+}
+
+#[test]
+fn invalid_explicit_configuration_fails_closed() {
+    let resources = tempfile::tempdir().unwrap();
+    let component = resources.path().join(office_cli_component_relative_path());
+    fs::create_dir_all(component.parent().unwrap()).unwrap();
+    write_executable(&component, basic_script());
+    let options = OfficeCliDiscoveryOptions::new()
+        .with_configured_executable("relative/officecli")
+        .with_application_resources_dir(resources.path());
+    let error = OfficeCliEngine::discover(&options).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidConfiguration);
+}
+
+#[test]
+fn executable_inside_workspace_is_rejected() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executable = workspace.path().join("officecli");
+    write_executable(&executable, basic_script());
+    let options = OfficeCliDiscoveryOptions::new()
+        .with_configured_executable(executable)
+        .with_workspace_root(workspace.path());
+    let error = OfficeCliEngine::discover(&options).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidConfiguration);
+}
+
+#[test]
+fn execute_preserves_exit_stdout_and_stderr() {
+    let fixture = Fixture::new(
+        "#!/bin/sh\nprintf 'created:%s\\n' \"$2\"\nprintf 'warning:%s\\n' \"$3\" >&2\nexit 7\n",
+    );
+    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let mut request = fixture.request(OfficeOperation::Validate);
+    request.arguments = vec!["--json".to_string()];
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, Some(7));
+    assert!(result.stdout.starts_with("created:"));
+    assert!(result.stdout.ends_with("/sample.docx\n"));
+    assert_eq!(result.stderr, "warning:--json\n");
+    assert_eq!(result.error_code.as_deref(), Some("office.nonzero_exit"));
+}
+
+#[test]
+fn argv_is_not_interpreted_by_a_shell() {
+    let fixture = Fixture::new("#!/bin/sh\nprintf '%s\\n' \"$3\"\n");
+    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let marker = fixture.workspace.path().join("should-not-exist");
+    let mut request = fixture.request(OfficeOperation::Query);
+    request.arguments = vec![format!("$(touch {})", marker.display())];
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(result.stdout.contains("$(touch"));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn timeout_terminates_officecli() {
+    let fixture = Fixture::new("#!/bin/sh\n/bin/sleep 5\n");
+    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let mut request = fixture.request(OfficeOperation::Validate);
+    request.timeout_ms = Some(40);
+    let started = Instant::now();
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(result.timed_out);
+    assert_eq!(result.error_code.as_deref(), Some("office.timeout"));
+    assert!(started.elapsed().as_secs() < 2);
+}
+
+#[test]
+fn pre_cancelled_request_never_starts_process() {
+    let fixture = Fixture::new("#!/bin/sh\ntouch started\n");
+    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let cancellation = AgentCancellationToken::new();
+    cancellation.cancel();
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &fixture.request(OfficeOperation::Validate),
+            cancellation,
+            None,
+        )
+        .unwrap();
+    assert!(result.cancelled);
+    assert!(!fixture.workspace.path().join("started").exists());
+}
+
+#[test]
+fn managed_environment_disables_updates_and_resident_mode() {
+    let fixture = Fixture::new(
+        "#!/bin/sh\nprintf '%s:%s\\n' \"$OFFICECLI_SKIP_UPDATE\" \"$OFFICECLI_NO_AUTO_RESIDENT\"\n",
+    );
+    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &fixture.request(OfficeOperation::Validate),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "1:1\n");
+}
+
+#[test]
+fn read_only_operations_run_against_a_private_snapshot() {
+    let fixture = Fixture::new("#!/bin/sh\nprintf 'corrupt' > \"$2\"\n");
+    let document = fixture.workspace.path().join("sample.docx");
+    fs::write(&document, b"original").unwrap();
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &fixture.request(OfficeOperation::Validate),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(result.error_code.is_none());
+    assert_eq!(fs::read(document).unwrap(), b"original");
+}
+
+#[test]
+fn parallel_short_lived_office_process_groups_do_not_cross_signal() {
+    const WORKERS: usize = 6;
+    const RUNS_PER_WORKER: usize = 4;
+
+    let fixture = Fixture::new("#!/bin/sh\nexit 0\n");
+    fs::write(fixture.workspace.path().join("sample.docx"), b"original").unwrap();
+    let engine = Arc::new(fixture.engine.clone());
+    let workspace = Arc::new(fixture.workspace.path().to_path_buf());
+    let barrier = Arc::new(Barrier::new(WORKERS));
+    let handles = (0..WORKERS)
+        .map(|_| {
+            let engine = engine.clone();
+            let workspace = workspace.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..RUNS_PER_WORKER {
+                    let request = OfficeExecutionRequest {
+                        document_kind: OfficeDocumentKind::Document,
+                        operation: OfficeOperation::Validate,
+                        document_path: Some("sample.docx".to_string()),
+                        arguments: Vec::new(),
+                        output_path: None,
+                        destination_path: None,
+                        timeout_ms: Some(10_000),
+                    };
+                    let result = engine
+                        .execute(
+                            &workspace_context(workspace.as_path()),
+                            &request,
+                            AgentCancellationToken::new(),
+                            None,
+                        )
+                        .unwrap();
+                    assert_eq!(result.exit_code, Some(0), "{:?}", result.error);
+                    assert!(result.error_code.is_none(), "{:?}", result.error);
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+}
+
+#[test]
+fn document_writes_publish_valid_output_atomically() {
+    let replacement = tempfile::NamedTempFile::new().unwrap();
+    write_docx(replacement.path(), "replacement");
+    let script = format!(
+        "#!/bin/sh\n/bin/cp '{}' \"$2\"\n",
+        replacement.path().display()
+    );
+    let fixture = Fixture::new(&script);
+    let document = fixture.workspace.path().join("sample.docx");
+    write_docx(&document, "original");
+    let mut request = fixture.request(OfficeOperation::Set);
+    request.arguments = vec![
+        "/body/p[1]".to_string(),
+        "--prop".to_string(),
+        "text=updated".to_string(),
+    ];
+    let before = fs::read(&document).unwrap();
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    assert_ne!(fs::read(&document).unwrap(), before);
+    assert_eq!(result.engine_revision, fixture.engine.engine_revision());
+    assert!(fs::read_dir(fixture.workspace.path())
+        .unwrap()
+        .all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".mycopilot-office-")));
+}
+
+#[test]
+fn failed_or_timed_out_writes_never_change_the_target() {
+    let fixture = Fixture::new("#!/bin/sh\nprintf 'corrupt' > \"$2\"\nexit 9\n");
+    let document = fixture.workspace.path().join("sample.docx");
+    write_docx(&document, "original");
+    let original = fs::read(&document).unwrap();
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &fixture.request(OfficeOperation::Set),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, Some(9));
+    assert_eq!(fs::read(&document).unwrap(), original);
+
+    let fixture = Fixture::new("#!/bin/sh\nprintf 'corrupt' > \"$2\"\n/bin/sleep 5\n");
+    let document = fixture.workspace.path().join("sample.docx");
+    write_docx(&document, "original");
+    let original = fs::read(&document).unwrap();
+    let mut request = fixture.request(OfficeOperation::Set);
+    request.timeout_ms = Some(40);
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(result.timed_out);
+    assert_eq!(fs::read(&document).unwrap(), original);
+}
+
+#[test]
+fn invalid_output_or_concurrent_change_is_never_overwritten() {
+    let fixture = Fixture::new("#!/bin/sh\nprintf 'not-ooxml' > \"$2\"\n");
+    let document = fixture.workspace.path().join("sample.docx");
+    write_docx(&document, "original");
+    let original = fs::read(&document).unwrap();
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &fixture.request(OfficeOperation::Set),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(result.error_code.as_deref(), Some("office.invalid_output"));
+    assert_eq!(fs::read(&document).unwrap(), original);
+
+    let replacement = tempfile::NamedTempFile::new().unwrap();
+    write_docx(replacement.path(), "replacement");
+    let concurrent = tempfile::NamedTempFile::new().unwrap();
+    write_docx(concurrent.path(), "concurrent");
+    let fixture = Fixture::new(basic_script());
+    let document = fixture.workspace.path().join("sample.docx");
+    write_docx(&document, "original");
+    let concurrent_bytes = fs::read(concurrent.path()).unwrap();
+    let script = format!(
+        "#!/bin/sh\n/bin/cp '{}' \"$2\"\n/bin/cp '{}' '{}'\n",
+        replacement.path().display(),
+        concurrent.path().display(),
+        document.display()
+    );
+    write_executable(fixture.engine.executable_path(), &script);
+    // Rediscover after installing the final fake so the engine revision is frozen correctly.
+    let engine = OfficeCliEngine::discover(
+        &OfficeCliDiscoveryOptions::new()
+            .with_configured_executable(fixture.engine.executable_path())
+            .with_workspace_root(fixture.workspace.path()),
+    )
+    .unwrap();
+    let result = engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &fixture.request(OfficeOperation::Set),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        result.error_code.as_deref(),
+        Some("office.precondition_failed")
+    );
+    assert_eq!(fs::read(document).unwrap(), concurrent_bytes);
+}
+
+#[test]
+fn create_and_render_publish_only_the_valid_staged_artifact() {
+    let replacement = tempfile::NamedTempFile::new().unwrap();
+    write_docx(replacement.path(), "created");
+    let fixture = Fixture::new(&format!(
+        "#!/bin/sh\n/bin/cp '{}' \"$2\"\n",
+        replacement.path().display()
+    ));
+    let mut request = fixture.request(OfficeOperation::Create);
+    request.document_path = Some("created.docx".to_string());
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    assert_eq!(
+        fs::read(fixture.workspace.path().join("created.docx")).unwrap(),
+        fs::read(replacement.path()).unwrap()
+    );
+
+    let fixture = Fixture::new("#!/bin/sh\nprintf '\\211PNG\\r\\n\\032\\nbody' > \"$5\"\n");
+    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let mut request = fixture.request(OfficeOperation::View);
+    request.arguments = vec!["screenshot".to_string()];
+    request.output_path = Some("preview.png".to_string());
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    assert!(fixture.workspace.path().join("preview.png").is_file());
+}
+
+#[test]
+fn unavailable_engine_is_a_stable_null_object() {
+    let options = OfficeCliDiscoveryOptions::new();
+    let engine = resolve_office_engine(&options);
+    let status = engine.status(AgentCancellationToken::new());
+    assert_eq!(status.availability, OfficeEngineAvailability::Unavailable);
+    let error = engine
+        .prepare(
+            &workspace_context(tempfile::tempdir().unwrap().path()),
+            &OfficeExecutionRequest {
+                document_kind: OfficeDocumentKind::Document,
+                operation: OfficeOperation::Help,
+                document_path: None,
+                arguments: Vec::new(),
+                output_path: None,
+                destination_path: None,
+                timeout_ms: None,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::Unavailable);
+}
+
+#[test]
+fn dangerous_commands_and_flags_are_rejected() {
+    for command in ["install", "config", "watch", "raw-set", "batch", "mcp"] {
+        let error = OfficeOperation::parse_supported(command).unwrap_err();
+        assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
+    }
+
+    let fixture = Fixture::new(basic_script());
+    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let mut request = fixture.request(OfficeOperation::View);
+    request.arguments = vec!["text".to_string(), "--browser".to_string()];
+    let error = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
+}
+
+#[test]
+fn hidden_write_aliases_and_unknown_options_fail_closed() {
+    let fixture = Fixture::new(basic_script());
+    write_docx(&fixture.workspace.path().join("sample.docx"), "original");
+
+    for (operation, arguments) in [
+        (
+            OfficeOperation::Get,
+            vec![
+                "/picture[1]".to_string(),
+                "--save".to_string(),
+                "leak.bin".to_string(),
+            ],
+        ),
+        (
+            OfficeOperation::Get,
+            vec!["/picture[1]".to_string(), "--save=leak.bin".to_string()],
+        ),
+        (
+            OfficeOperation::Get,
+            vec!["/picture[1]".to_string(), "--SaVe=leak.bin".to_string()],
+        ),
+        (
+            OfficeOperation::View,
+            vec![
+                "text".to_string(),
+                "--out".to_string(),
+                "leak.txt".to_string(),
+            ],
+        ),
+        (
+            OfficeOperation::View,
+            vec!["text".to_string(), "--OUT=leak.txt".to_string()],
+        ),
+        (
+            OfficeOperation::View,
+            vec!["text".to_string(), "-oleak.txt".to_string()],
+        ),
+    ] {
+        let mut request = fixture.request(operation);
+        request.arguments = arguments;
+        let error = fixture
+            .engine
+            .prepare(&workspace_context(fixture.workspace.path()), &request)
+            .unwrap_err();
+        assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
+    }
+
+    for arguments in [
+        vec!["--future-option".to_string()],
+        vec!["--".to_string(), "--save".to_string()],
+    ] {
+        let mut request = fixture.request(OfficeOperation::Validate);
+        request.arguments = arguments;
+        let error = fixture
+            .engine
+            .prepare(&workspace_context(fixture.workspace.path()), &request)
+            .unwrap_err();
+        assert!(matches!(
+            error.code(),
+            OfficeEngineErrorCode::InvalidRequest | OfficeEngineErrorCode::UnsafeOperation
+        ));
+    }
+    for arguments in [
+        vec!["screenshot".to_string(), "--render=native".to_string()],
+        vec!["pdf".to_string()],
+    ] {
+        let mut request = fixture.request(OfficeOperation::View);
+        request.arguments = arguments;
+        let error = fixture
+            .engine
+            .prepare(&workspace_context(fixture.workspace.path()), &request)
+            .unwrap_err();
+        assert!(matches!(
+            error.code(),
+            OfficeEngineErrorCode::InvalidRequest | OfficeEngineErrorCode::UnsafeOperation
+        ));
+    }
+    assert!(!fixture.workspace.path().join("leak.bin").exists());
+    assert!(!fixture.workspace.path().join("leak.txt").exists());
+}
+
+#[test]
+fn managed_argument_profile_accepts_pinned_options_and_rejects_prop_equals() {
+    let fixture = Fixture::new(basic_script());
+    write_docx(&fixture.workspace.path().join("sample.docx"), "original");
+
+    let supported = [
+        (
+            OfficeOperation::Help,
+            vec!["docx".to_string(), "add".to_string(), "--json".to_string()],
+        ),
+        (
+            OfficeOperation::View,
+            vec![
+                "text".to_string(),
+                "--max-lines=20".to_string(),
+                "--json".to_string(),
+            ],
+        ),
+        (
+            OfficeOperation::Get,
+            vec![
+                "/body".to_string(),
+                "--depth=2".to_string(),
+                "--json".to_string(),
+            ],
+        ),
+        (
+            OfficeOperation::Query,
+            vec![
+                "*".to_string(),
+                "--compact".to_string(),
+                "--fields=x,y".to_string(),
+            ],
+        ),
+        (
+            OfficeOperation::Set,
+            vec![
+                "/body/p[1]".to_string(),
+                "--prop".to_string(),
+                "text=updated".to_string(),
+                "--force".to_string(),
+            ],
+        ),
+        (
+            OfficeOperation::Add,
+            vec!["/body".to_string(), "--type=paragraph".to_string()],
+        ),
+        (
+            OfficeOperation::Remove,
+            vec!["/body/p[1]".to_string(), "--json".to_string()],
+        ),
+        (
+            OfficeOperation::Move,
+            vec!["/body/p[1]".to_string(), "--index=0".to_string()],
+        ),
+        (
+            OfficeOperation::Swap,
+            vec!["/body/p[1]".to_string(), "/body/p[2]".to_string()],
+        ),
+        (OfficeOperation::Validate, vec!["--json".to_string()]),
+    ];
+    for (operation, arguments) in supported {
+        let mut request = fixture.request(operation);
+        request.document_path =
+            (operation != OfficeOperation::Help).then(|| "sample.docx".to_string());
+        request.arguments = arguments;
+        fixture
+            .engine
+            .prepare(&workspace_context(fixture.workspace.path()), &request)
+            .unwrap_or_else(|error| panic!("{}: {}", operation.cli_name(), error));
+    }
+
+    let mut request = fixture.request(OfficeOperation::Set);
+    request.arguments = vec!["/body/p[1]".to_string(), "--prop=text=updated".to_string()];
+    let error = fixture
+        .engine
+        .prepare(&workspace_context(fixture.workspace.path()), &request)
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+}
+
+#[test]
+fn workspace_paths_and_file_properties_are_contained() {
+    let fixture = Fixture::new(basic_script());
+    let mut request = fixture.request(OfficeOperation::Validate);
+    request.document_path = Some("../secret.docx".to_string());
+    let error = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+
+    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let mut request = fixture.request(OfficeOperation::Add);
+    request.arguments = vec![
+        "/body".to_string(),
+        "--prop".to_string(),
+        "src=/etc/passwd".to_string(),
+    ];
+    let error = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+}
+
+#[test]
+fn path_bearing_properties_are_frozen_and_snapshotted() {
+    let replacement = tempfile::NamedTempFile::new().unwrap();
+    write_docx(replacement.path(), "replacement");
+    let signal = tempfile::NamedTempFile::new().unwrap();
+    let signal_path = signal.path().to_path_buf();
+    drop(signal);
+    let script = format!(
+        "#!/bin/sh\nresource=''\nfor argument in \"$@\"; do case \"$argument\" in src=*) resource=${{argument#src=}} ;; esac; done\nprintf ready > '{}'\n/bin/sleep 0.15\n/bin/cat \"$resource\"\n/bin/cp '{}' \"$2\"\n",
+        signal_path.display(),
+        replacement.path().display()
+    );
+    let fixture = Fixture::new(&script);
+    let document = fixture.workspace.path().join("sample.docx");
+    let resource = fixture.workspace.path().join("asset.bin");
+    write_docx(&document, "original");
+    fs::write(&resource, b"approved-resource").unwrap();
+    let mut request = fixture.request(OfficeOperation::Add);
+    request.arguments = vec![
+        "/body".to_string(),
+        "--type=picture".to_string(),
+        "--prop".to_string(),
+        "src=asset.bin".to_string(),
+    ];
+    let prepared = fixture
+        .engine
+        .prepare(&workspace_context(fixture.workspace.path()), &request)
+        .unwrap();
+    let resource_plan = prepared_path(&prepared, &OfficePathSlot::Resource { index: 0 });
+    assert_eq!(resource_plan.logical_path, "asset.bin");
+    assert_eq!(resource_plan.purpose, OfficePathPurpose::ReadSource);
+
+    let workspace = fixture.workspace.path().to_path_buf();
+    let engine = fixture.engine.clone();
+    let execution = thread::spawn(move || {
+        engine
+            .execute_prepared(
+                &workspace_context(&workspace),
+                &prepared,
+                AgentCancellationToken::new(),
+                None,
+            )
+            .unwrap()
+    });
+    // A full workspace test run can briefly saturate process creation on CI. Keep the
+    // synchronization bounded, but do not mistake scheduler delay for a provider failure.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !signal_path.exists() && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        signal_path.exists(),
+        "the fixture provider did not reach its resource-read boundary"
+    );
+    fs::write(&resource, b"changed-after-provider-start").unwrap();
+    let result = execution.join().unwrap();
+    assert!(result.stdout.contains("approved-resource"));
+    assert!(!result.stdout.contains("changed-after-provider-start"));
+    assert_eq!(
+        result.error_code.as_deref(),
+        Some("office.precondition_failed")
+    );
+
+    for alias in ["path", "fallback", "poster", "preview", "imagefill"] {
+        let mut request = fixture.request(OfficeOperation::Add);
+        request.arguments = vec![
+            "/body".to_string(),
+            "--prop".to_string(),
+            format!("{alias}=/etc/passwd"),
+        ];
+        let error = fixture
+            .engine
+            .prepare(&workspace_context(fixture.workspace.path()), &request)
+            .unwrap_err();
+        assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+    }
+}
+
+#[test]
+fn composite_resources_and_browser_backed_diagrams_fail_closed() {
+    let fixture = Fixture::new(basic_script());
+    write_docx(&fixture.workspace.path().join("sample.docx"), "original");
+    fs::write(fixture.workspace.path().join("background.png"), b"png").unwrap();
+
+    let mut background = fixture.request(OfficeOperation::Set);
+    background.arguments = vec![
+        "/body".to_string(),
+        "--prop".to_string(),
+        "background=image:background.png".to_string(),
+    ];
+    let prepared = fixture
+        .engine
+        .prepare(&workspace_context(fixture.workspace.path()), &background)
+        .unwrap();
+    assert_eq!(
+        prepared_path(&prepared, &OfficePathSlot::Resource { index: 0 }).logical_path,
+        "background.png"
+    );
+
+    for property in ["background=image:/etc/passwd", "imagefill=/etc/passwd"] {
+        let mut request = fixture.request(OfficeOperation::Set);
+        request.arguments = vec![
+            "/body".to_string(),
+            "--prop".to_string(),
+            property.to_string(),
+        ];
+        let error = fixture
+            .engine
+            .prepare(&workspace_context(fixture.workspace.path()), &request)
+            .unwrap_err();
+        assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+    }
+
+    let mut data = fixture.request(OfficeOperation::Add);
+    data.arguments = vec![
+        "/body".to_string(),
+        "--type=table".to_string(),
+        "--prop".to_string(),
+        "data=/etc/passwd".to_string(),
+    ];
+    let error = fixture
+        .engine
+        .prepare(&workspace_context(fixture.workspace.path()), &data)
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
+
+    for render in [None, Some("auto"), Some("image")] {
+        let mut diagram = fixture.request(OfficeOperation::Add);
+        diagram.arguments = vec!["/body".to_string(), "--type=diagram".to_string()];
+        if let Some(render) = render {
+            diagram
+                .arguments
+                .extend(["--prop".to_string(), format!("render={render}")]);
+        }
+        let error = fixture
+            .engine
+            .prepare(&workspace_context(fixture.workspace.path()), &diagram)
+            .unwrap_err();
+        assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
+    }
+
+    let mut native_diagram = fixture.request(OfficeOperation::Add);
+    native_diagram.arguments = vec![
+        "/body".to_string(),
+        "--type=diagram".to_string(),
+        "--prop".to_string(),
+        "render=native".to_string(),
+    ];
+    fixture
+        .engine
+        .prepare(
+            &workspace_context(fixture.workspace.path()),
+            &native_diagram,
+        )
+        .unwrap();
+
+    for property in ["poster=true", "path=line"] {
+        let mut ambiguous_but_non_file = fixture.request(OfficeOperation::Add);
+        ambiguous_but_non_file.arguments = vec![
+            "/body".to_string(),
+            "--type=shape".to_string(),
+            "--prop".to_string(),
+            property.to_string(),
+        ];
+        ambiguous_but_non_file.arguments.push("--json".to_string());
+        fixture
+            .engine
+            .prepare(
+                &workspace_context(fixture.workspace.path()),
+                &ambiguous_but_non_file,
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn mutation_destination_is_a_separate_cas_protected_publish_target() {
+    let replacement = tempfile::NamedTempFile::new().unwrap();
+    write_docx(replacement.path(), "replacement");
+    let fixture = Fixture::new(&format!(
+        "#!/bin/sh\n/bin/cp '{}' \"$2\"\n",
+        replacement.path().display()
+    ));
+    let source = fixture.workspace.path().join("sample.docx");
+    let destination = fixture.workspace.path().join("copy.docx");
+    write_docx(&source, "source");
+    let source_before = fs::read(&source).unwrap();
+    let mut request = fixture.request(OfficeOperation::Set);
+    request.destination_path = Some("copy.docx".to_string());
+    let prepared = fixture
+        .engine
+        .prepare(&workspace_context(fixture.workspace.path()), &request)
+        .unwrap();
+    assert_eq!(
+        prepared_path(&prepared, &OfficePathSlot::Document).state,
+        OfficeFileState::Present
+    );
+    assert_eq!(
+        prepared_path(&prepared, &OfficePathSlot::Destination).state,
+        OfficeFileState::Missing
+    );
+    let result = fixture
+        .engine
+        .execute_prepared(
+            &workspace_context(fixture.workspace.path()),
+            &prepared,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    assert_eq!(fs::read(&source).unwrap(), source_before);
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        fs::read(replacement.path()).unwrap()
+    );
+
+    let second_destination = fixture.workspace.path().join("conflict.docx");
+    let mut request = fixture.request(OfficeOperation::Set);
+    request.destination_path = Some("conflict.docx".to_string());
+    let prepared = fixture
+        .engine
+        .prepare(&workspace_context(fixture.workspace.path()), &request)
+        .unwrap();
+    write_docx(&second_destination, "concurrent-create");
+    let concurrent = fs::read(&second_destination).unwrap();
+    let error = fixture
+        .engine
+        .execute_prepared(
+            &workspace_context(fixture.workspace.path()),
+            &prepared,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::PreconditionFailed);
+    assert_eq!(fs::read(second_destination).unwrap(), concurrent);
+
+    let mut request = fixture.request(OfficeOperation::Set);
+    request.destination_path = Some("source-changed.docx".to_string());
+    let prepared = fixture
+        .engine
+        .prepare(&workspace_context(fixture.workspace.path()), &request)
+        .unwrap();
+    write_docx(&source, "concurrent-source-change");
+    let error = fixture
+        .engine
+        .execute_prepared(
+            &workspace_context(fixture.workspace.path()),
+            &prepared,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::PreconditionFailed);
+    assert!(!fixture
+        .workspace
+        .path()
+        .join("source-changed.docx")
+        .exists());
+}
+
+#[test]
+fn destination_path_is_rejected_outside_mutation_operations() {
+    let fixture = Fixture::new(basic_script());
+    write_docx(&fixture.workspace.path().join("sample.docx"), "source");
+    for operation in [
+        OfficeOperation::Help,
+        OfficeOperation::Create,
+        OfficeOperation::View,
+        OfficeOperation::Get,
+        OfficeOperation::Query,
+        OfficeOperation::Validate,
+    ] {
+        let mut request = fixture.request(operation);
+        if operation == OfficeOperation::Help {
+            request.document_path = None;
+        }
+        request.arguments = match operation {
+            OfficeOperation::View => vec!["text".to_string()],
+            OfficeOperation::Query => vec!["*".to_string()],
+            _ => Vec::new(),
+        };
+        request.destination_path = Some("destination.docx".to_string());
+        let error = fixture
+            .engine
+            .prepare(&workspace_context(fixture.workspace.path()), &request)
+            .unwrap_err();
+        assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+    }
+}
+
+#[test]
+fn cancellation_is_linearized_before_the_atomic_commit() {
+    let replacement = tempfile::NamedTempFile::new().unwrap();
+    write_docx(replacement.path(), "replacement");
+    let fixture = Fixture::new(&format!(
+        "#!/bin/sh\n/bin/cp '{}' \"$2\"\n",
+        replacement.path().display()
+    ));
+    let target = fixture.workspace.path().join("sample.docx");
+    write_docx(&target, "original");
+    let original = fs::read(&target).unwrap();
+    let hook_target = target.canonicalize().unwrap();
+
+    let cancellation = Arc::new(AtomicBool::new(false));
+    install_commit_test_hook(
+        hook_target.clone(),
+        CommitTestPhase::BeforeCancellationCheck,
+        cancellation.clone(),
+    );
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &fixture.request(OfficeOperation::Set),
+            AgentCancellationToken::new(),
+            Some(cancellation),
+        )
+        .unwrap();
+    assert!(result.cancelled);
+    assert_eq!(result.error_code.as_deref(), Some("office.cancelled"));
+    assert_eq!(fs::read(&target).unwrap(), original);
+
+    let cancellation = Arc::new(AtomicBool::new(false));
+    install_commit_test_hook(
+        hook_target,
+        CommitTestPhase::AfterCancellationCheck,
+        cancellation.clone(),
+    );
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &fixture.request(OfficeOperation::Set),
+            AgentCancellationToken::new(),
+            Some(cancellation.clone()),
+        )
+        .unwrap();
+    assert!(cancellation.load(Ordering::SeqCst));
+    assert!(!result.cancelled);
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    assert_eq!(
+        fs::read(target).unwrap(),
+        fs::read(replacement.path()).unwrap()
+    );
+}
+
+#[test]
+fn symlinked_inputs_and_component_escapes_are_rejected() {
+    let fixture = Fixture::new(basic_script());
+    let outside = fixture.engine_dir.path().join("outside.docx");
+    fs::write(&outside, b"secret").unwrap();
+    symlink(&outside, fixture.workspace.path().join("sample.docx")).unwrap();
+    let error = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &fixture.request(OfficeOperation::Validate),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+
+    let resources = tempfile::tempdir().unwrap();
+    let component = resources.path().join(office_cli_component_relative_path());
+    fs::create_dir_all(component.parent().unwrap()).unwrap();
+    symlink(fixture.engine.executable_path(), &component).unwrap();
+    let options = OfficeCliDiscoveryOptions::new()
+        .with_application_resources_dir(resources.path())
+        .with_workspace_root(fixture.workspace.path());
+    let error = OfficeCliEngine::discover(&options).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidConfiguration);
+}
+
+#[test]
+fn rendering_requires_a_validated_output_path() {
+    let fixture = Fixture::new(basic_script());
+    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let mut request = fixture.request(OfficeOperation::View);
+    request.arguments = vec!["screenshot".to_string()];
+    let error = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+
+    request.output_path = Some("preview.png".to_string());
+    let result = fixture
+        .engine
+        .execute(
+            &workspace_context(fixture.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(result.argv.last().map(String::as_str), Some("preview.png"));
+    assert_eq!(request.access(), OfficeOperationAccess::FileWrite);
+}
+
+#[test]
+fn office_paths_follow_the_read_write_permission_matrix() {
+    let fixture = Fixture::new(basic_script());
+    let workspace_document = fixture.workspace.path().join("sample.docx");
+    write_docx(&workspace_document, "workspace");
+    let external = tempfile::tempdir().unwrap();
+    let external_root = external.path().canonicalize().unwrap();
+    let external_document = external_root.join("external.docx");
+    write_docx(&external_document, "external");
+
+    let workspace_read = fixture.request(OfficeOperation::Validate);
+    fixture
+        .engine
+        .prepare(
+            &permission_context(
+                Some(fixture.workspace.path()),
+                AgentReadPermission::WorkspaceOnly,
+                AgentWritePermission::Denied,
+            ),
+            &workspace_read,
+        )
+        .expect("write=denied must not remove Office read operations");
+
+    let read = OfficeExecutionRequest {
+        document_path: Some(external_document.to_string_lossy().into_owned()),
+        ..fixture.request(OfficeOperation::Validate)
+    };
+    let error = fixture
+        .engine
+        .prepare(
+            &permission_context(
+                Some(fixture.workspace.path()),
+                AgentReadPermission::WorkspaceOnly,
+                AgentWritePermission::WorkspaceOnly,
+            ),
+            &read,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+    let prepared = fixture
+        .engine
+        .prepare(
+            &permission_context(
+                Some(fixture.workspace.path()),
+                AgentReadPermission::All,
+                AgentWritePermission::WorkspaceOnly,
+            ),
+            &read,
+        )
+        .unwrap();
+    assert_eq!(
+        prepared_path(&prepared, &OfficePathSlot::Document).scope,
+        OfficePathScope::External
+    );
+
+    let create = OfficeExecutionRequest {
+        document_kind: OfficeDocumentKind::Document,
+        operation: OfficeOperation::Create,
+        document_path: Some(
+            external_root
+                .join("created.docx")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        arguments: Vec::new(),
+        output_path: None,
+        destination_path: None,
+        timeout_ms: Some(10_000),
+    };
+    for write in [
+        AgentWritePermission::Denied,
+        AgentWritePermission::WorkspaceOnly,
+    ] {
+        let error = fixture
+            .engine
+            .prepare(
+                &permission_context(
+                    Some(fixture.workspace.path()),
+                    AgentReadPermission::All,
+                    write,
+                ),
+                &create,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+    }
+    let prepared = fixture
+        .engine
+        .prepare(
+            &permission_context(
+                None,
+                AgentReadPermission::WorkspaceOnly,
+                AgentWritePermission::All,
+            ),
+            &create,
+        )
+        .unwrap();
+    let target = prepared_path(&prepared, &OfficePathSlot::Document);
+    assert_eq!(target.scope, OfficePathScope::External);
+    assert_eq!(target.purpose, OfficePathPurpose::WriteTarget);
+    assert_eq!(
+        target.write_disposition,
+        Some(OfficeWriteDisposition::CreateNew)
+    );
+    assert!(target.object_identity.is_none());
+
+    let relative_without_workspace = OfficeExecutionRequest {
+        document_path: Some("relative.docx".to_string()),
+        ..create.clone()
+    };
+    let error = fixture
+        .engine
+        .prepare(
+            &permission_context(None, AgentReadPermission::All, AgentWritePermission::All),
+            &relative_without_workspace,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+}
+
+#[test]
+fn in_place_external_edits_use_write_permission_not_independent_read_permission() {
+    let fixture = Fixture::new(basic_script());
+    let external = tempfile::tempdir().unwrap();
+    let document = external
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("external.docx");
+    write_docx(&document, "external");
+    let request = OfficeExecutionRequest {
+        document_path: Some(document.to_string_lossy().into_owned()),
+        ..fixture.request(OfficeOperation::Set)
+    };
+    let prepared = fixture
+        .engine
+        .prepare(
+            &permission_context(
+                Some(fixture.workspace.path()),
+                AgentReadPermission::WorkspaceOnly,
+                AgentWritePermission::All,
+            ),
+            &request,
+        )
+        .unwrap();
+    let document = prepared_path(&prepared, &OfficePathSlot::Document);
+    assert_eq!(document.purpose, OfficePathPurpose::InPlaceTarget);
+    assert_eq!(document.scope, OfficePathScope::External);
+
+    let mut save_as = request;
+    save_as.destination_path = Some("copy.docx".to_string());
+    let error = fixture
+        .engine
+        .prepare(
+            &permission_context(
+                Some(fixture.workspace.path()),
+                AgentReadPermission::WorkspaceOnly,
+                AgentWritePermission::All,
+            ),
+            &save_as,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+    fixture
+        .engine
+        .prepare(
+            &permission_context(
+                Some(fixture.workspace.path()),
+                AgentReadPermission::All,
+                AgentWritePermission::WorkspaceOnly,
+            ),
+            &save_as,
+        )
+        .unwrap();
+}
+
+#[test]
+fn registered_attachments_are_read_only_sources() {
+    let fixture = Fixture::new(basic_script());
+    let library_root = tempfile::tempdir().unwrap();
+    let stored = library_root.path().join("stored.docx");
+    write_docx(&stored, "attachment");
+    let read_path = "@attachments/a1/source.docx".to_string();
+    let reference = AgentAttachmentReference {
+        id: "a1".to_string(),
+        conversation_id: "conversation".to_string(),
+        message_id: "message".to_string(),
+        project_id: None,
+        kind: AgentInputAttachmentKind::File,
+        name: "source.docx".to_string(),
+        mime_type: Some(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string(),
+        ),
+        size_bytes: fs::metadata(&stored).unwrap().len(),
+        read_path: read_path.clone(),
+        storage_rel_path: "stored.docx".to_string(),
+        created_at: 1,
+    };
+    let library = AgentAttachmentLibraryContext {
+        root_path: Some(library_root.path().to_string_lossy().into_owned()),
+        conversation_id: Some("conversation".to_string()),
+        project_id: None,
+        conversation_attachments: vec![reference],
+        project_attachments: Vec::new(),
+    };
+    let permissions = AgentPermissions {
+        write: AgentWritePermission::WorkspaceOnly,
+        ..AgentPermissions::default()
+    };
+    let context = OfficeExecutionContext::new(
+        Some(fixture.workspace.path().to_path_buf()),
+        permissions,
+        Some(library),
+    );
+    let request = OfficeExecutionRequest {
+        document_path: Some(read_path.clone()),
+        ..fixture.request(OfficeOperation::Validate)
+    };
+    let prepared = fixture.engine.prepare(&context, &request).unwrap();
+    assert_eq!(
+        prepared_path(&prepared, &OfficePathSlot::Document).scope,
+        OfficePathScope::Attachment
+    );
+
+    let mutation = OfficeExecutionRequest {
+        document_path: Some(read_path),
+        ..fixture.request(OfficeOperation::Set)
+    };
+    let error = fixture.engine.prepare(&context, &mutation).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+}
+
+#[test]
+fn execution_rechecks_current_permissions_and_rejects_schema_v2() {
+    let fixture = Fixture::new(basic_script());
+    let external = tempfile::tempdir().unwrap();
+    let request = OfficeExecutionRequest {
+        document_kind: OfficeDocumentKind::Document,
+        operation: OfficeOperation::Create,
+        document_path: Some(
+            external
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("created.docx")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        arguments: Vec::new(),
+        output_path: None,
+        destination_path: None,
+        timeout_ms: Some(10_000),
+    };
+    let all = permission_context(None, AgentReadPermission::All, AgentWritePermission::All);
+    let prepared = fixture.engine.prepare(&all, &request).unwrap();
+    let restricted = permission_context(
+        Some(fixture.workspace.path()),
+        AgentReadPermission::All,
+        AgentWritePermission::WorkspaceOnly,
+    );
+    let error = fixture
+        .engine
+        .execute_prepared(&restricted, &prepared, AgentCancellationToken::new(), None)
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+
+    let mut legacy_json = serde_json::to_value(&prepared).unwrap();
+    legacy_json["schemaVersion"] = serde_json::json!(2);
+    legacy_json["access"] = serde_json::json!("workspaceWrite");
+    legacy_json.as_object_mut().unwrap().remove("paths");
+    let legacy: OfficePreparedExecution = serde_json::from_value(legacy_json).unwrap();
+    assert_eq!(legacy.access, OfficeOperationAccess::FileWrite);
+    let error = fixture
+        .engine
+        .execute_prepared(&all, &legacy, AgentCancellationToken::new(), None)
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::PreconditionFailed);
+}
+
+#[test]
+fn system_alias_targets_are_supported_only_with_write_all() {
+    let fixture = Fixture::new(basic_script());
+    let path = format!("@home/.mycopilot-office-{}.docx", uuid::Uuid::new_v4());
+    let request = OfficeExecutionRequest {
+        document_kind: OfficeDocumentKind::Document,
+        operation: OfficeOperation::Create,
+        document_path: Some(path),
+        arguments: Vec::new(),
+        output_path: None,
+        destination_path: None,
+        timeout_ms: Some(10_000),
+    };
+    let error = fixture
+        .engine
+        .prepare(
+            &permission_context(
+                Some(fixture.workspace.path()),
+                AgentReadPermission::All,
+                AgentWritePermission::WorkspaceOnly,
+            ),
+            &request,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+    let prepared = fixture
+        .engine
+        .prepare(
+            &permission_context(None, AgentReadPermission::All, AgentWritePermission::All),
+            &request,
+        )
+        .unwrap();
+    assert_eq!(
+        prepared_path(&prepared, &OfficePathSlot::Document).scope,
+        OfficePathScope::External
+    );
+}
+
+#[test]
+#[ignore = "requires MYCOPILOT_OFFICECLI_PATH to point to a managed OfficeCLI component"]
+fn real_officecli_creates_and_validates_all_supported_formats() {
+    let executable = std::env::var_os("MYCOPILOT_OFFICECLI_PATH")
+        .expect("MYCOPILOT_OFFICECLI_PATH is required for the real provider smoke test");
+    let workspace = tempfile::tempdir().unwrap();
+    let engine = OfficeCliEngine::discover(
+        &OfficeCliDiscoveryOptions::new()
+            .with_configured_executable(executable)
+            .with_workspace_root(workspace.path()),
+    )
+    .unwrap();
+    let status = engine.status(AgentCancellationToken::new());
+    assert_eq!(status.availability, OfficeEngineAvailability::Available);
+
+    for (document_kind, path) in [
+        (OfficeDocumentKind::Document, "smoke.docx"),
+        (OfficeDocumentKind::Spreadsheet, "smoke.xlsx"),
+        (OfficeDocumentKind::Presentation, "smoke.pptx"),
+    ] {
+        let create = engine
+            .execute(
+                &workspace_context(workspace.path()),
+                &OfficeExecutionRequest {
+                    document_kind,
+                    operation: OfficeOperation::Create,
+                    document_path: Some(path.to_string()),
+                    arguments: vec!["--json".to_string()],
+                    output_path: None,
+                    destination_path: None,
+                    timeout_ms: Some(30_000),
+                },
+                AgentCancellationToken::new(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(create.exit_code, Some(0), "{}", create.stderr);
+        assert!(create.error_code.is_none(), "{:?}", create.error);
+        assert!(workspace.path().join(path).is_file());
+
+        let validate = engine
+            .execute(
+                &workspace_context(workspace.path()),
+                &OfficeExecutionRequest {
+                    document_kind,
+                    operation: OfficeOperation::Validate,
+                    document_path: Some(path.to_string()),
+                    arguments: vec!["--json".to_string()],
+                    output_path: None,
+                    destination_path: None,
+                    timeout_ms: Some(30_000),
+                },
+                AgentCancellationToken::new(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(validate.exit_code, Some(0), "{}", validate.stderr);
+        assert!(validate.error_code.is_none(), "{:?}", validate.error);
+        assert!(validate.stdout.contains("\"count\": 0"));
+    }
+}
+
+#[test]
+#[ignore = "requires MYCOPILOT_OFFICECLI_PATH to point to the pinned OfficeCLI v1.0.139 component"]
+fn real_officecli_hidden_write_options_are_rejected_before_spawn() {
+    let executable = std::env::var_os("MYCOPILOT_OFFICECLI_PATH")
+        .expect("MYCOPILOT_OFFICECLI_PATH is required for the real provider security regression");
+    let workspace = tempfile::tempdir().unwrap();
+    let engine = OfficeCliEngine::discover(
+        &OfficeCliDiscoveryOptions::new()
+            .with_configured_executable(executable)
+            .with_workspace_root(workspace.path()),
+    )
+    .unwrap();
+    write_docx(&workspace.path().join("sample.docx"), "security-regression");
+
+    for (operation, arguments) in [
+        (
+            OfficeOperation::Get,
+            vec!["/picture[1]".to_string(), "--save=payload.bin".to_string()],
+        ),
+        (
+            OfficeOperation::View,
+            vec!["html".to_string(), "--out=preview.html".to_string()],
+        ),
+    ] {
+        let request = OfficeExecutionRequest {
+            document_kind: OfficeDocumentKind::Document,
+            operation,
+            document_path: Some("sample.docx".to_string()),
+            arguments,
+            output_path: None,
+            destination_path: None,
+            timeout_ms: Some(10_000),
+        };
+        let error = engine
+            .prepare(&workspace_context(workspace.path()), &request)
+            .unwrap_err();
+        assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
+    }
+    assert!(!workspace.path().join("payload.bin").exists());
+    assert!(!workspace.path().join("preview.html").exists());
+}

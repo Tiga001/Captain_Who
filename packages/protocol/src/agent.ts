@@ -44,8 +44,9 @@ export type AgentCommandPermission = 'require_approval' | 'auto_approve'
 export type AgentCommandSafetyPolicy = 'guarded' | 'full_access'
 
 /**
- * Controls whether file-edit proposals from apply_patch and write_file require a human click.
- * auto_approve only skips the prompt; backend path, symlink, binary, and revision checks still apply.
+ * Controls whether structured file-write proposals require a human click. This includes text
+ * patches, transactional file writes, Skill resource materialization, and Office document writes.
+ * auto_approve only skips the prompt; backend path, symlink, format, and revision checks still apply.
  */
 export type AgentPatchPermission = 'require_approval' | 'auto_approve'
 
@@ -82,6 +83,14 @@ export type AgentToolName =
   | 'apply_patch'
   | 'write_file'
   | 'run_command'
+  | 'skills_list_resources'
+  | 'skills_read_resource'
+  | 'skills_materialize_resource'
+  | 'skills_preflight_script'
+  | 'skills_run_script'
+  | 'office_document'
+  | 'office_spreadsheet'
+  | 'office_presentation'
   | (string & {})
 
 export type AgentToolSafety = 'read_only' | 'requires_approval' | 'destructive'
@@ -883,11 +892,206 @@ export interface AgentCommandRequest {
   reason?: string
 }
 
+export type AgentSkillMaterializationResultStatus =
+  'applied' | 'already_applied' | 'conflict' | 'rejected' | 'failed'
+
+export interface AgentSkillMaterializationRequest {
+  id: string
+  sourceUri: string
+  sourcePrefix?: string
+  destination: string
+  approvalStatus: AgentApprovalStatus
+  reason?: string
+}
+
+export interface AgentSkillMaterializationResult {
+  status: AgentSkillMaterializationResultStatus
+  sourceUri: string
+  sourcePrefix?: string
+  destination: string
+  sourceRevision: string
+  fileCount: number
+  byteCount: number
+  planDigest?: string
+  error?: string
+  message?: string
+}
+
+export type AgentSkillScriptInterpreter = 'python3'
+export type AgentSkillScriptPreflightStatus =
+  'ready' | 'missing_dependencies' | 'unsupported' | 'conflict'
+export type AgentSkillDependencyKind = 'python_distribution' | 'command'
+export type AgentSkillDependencyStatus = 'available' | 'missing'
+
+export interface AgentSkillScriptRequirements {
+  pythonDistributions?: string[]
+  commands?: string[]
+}
+
+export interface AgentSkillDependencyCheck {
+  kind: AgentSkillDependencyKind
+  name: string
+  status: AgentSkillDependencyStatus
+  version?: string
+}
+
+export interface AgentSkillScriptPreflightReport {
+  status: AgentSkillScriptPreflightStatus
+  interpreter: AgentSkillScriptInterpreter
+  interpreterVersion?: string
+  dependencies?: AgentSkillDependencyCheck[]
+  runtimeFingerprint: string
+  errorCode?: string
+  message?: string
+}
+
+export interface AgentSkillScriptRequest {
+  id: string
+  scriptUri: string
+  skillId: string
+  skillRevision: string
+  resourcePath: string
+  resourceDigest: string
+  interpreter: AgentSkillScriptInterpreter
+  args: string[]
+  requirements: AgentSkillScriptRequirements
+  preflight: AgentSkillScriptPreflightReport
+  timeoutMs?: number
+  approvalStatus: AgentApprovalStatus
+  reason?: string
+}
+
+export interface AgentSkillScriptResult {
+  scriptUri: string
+  skillId: string
+  skillRevision: string
+  resourceDigest: string
+  preflight: AgentSkillScriptPreflightReport
+  exitCode?: number
+  stdout: string
+  stderr: string
+  timedOut: boolean
+  cancelled: boolean
+  durationMs: number
+  stdoutTruncated: boolean
+  stderrTruncated: boolean
+  errorCode?: string
+  error?: string
+}
+
+export type OfficeDocumentKind = 'document' | 'spreadsheet' | 'presentation'
+
+export type OfficeOperation =
+  | 'help'
+  | 'create'
+  | 'view'
+  | 'get'
+  | 'query'
+  | 'validate'
+  | 'set'
+  | 'add'
+  | 'remove'
+  | 'move'
+  | 'swap'
+
+/** Describes whether the normalized operation has file side effects.
+ *
+ * Path location is expressed independently by each OfficeFrozenPath.scope.
+ */
+export type OfficeOperationAccess = 'readOnly' | 'fileWrite'
+
+export interface OfficeExecutionRequest {
+  documentKind: OfficeDocumentKind
+  operation: OfficeOperation
+  documentPath?: string
+  arguments?: string[]
+  outputPath?: string
+  destinationPath?: string
+  timeoutMs?: number
+}
+
+export type OfficeFilePreconditionState = 'missing' | 'present'
+
+export interface OfficeFilePrecondition {
+  path: string
+  state: OfficeFilePreconditionState
+  contentRevision?: string
+  size?: number
+}
+
+export type OfficePathSlot =
+  | { type: 'document' }
+  | { type: 'output' }
+  | { type: 'destination' }
+  | { type: 'resource'; index: number }
+
+export type OfficePathPurpose = 'readSource' | 'writeTarget' | 'inPlaceTarget'
+
+export type OfficePathScope = 'workspace' | 'external' | 'attachment'
+
+export type OfficeWriteDisposition = 'createNew' | 'replaceExisting'
+
+export interface OfficePathIdentity {
+  revision: string
+  device?: number
+  inode?: number
+}
+
+/**
+ * One backend-authorized path in an immutable Office execution snapshot.
+ * The Renderer may display this metadata but must never derive authorization
+ * or approval requirements from it.
+ */
+export interface OfficeFrozenPath {
+  slot: OfficePathSlot
+  logicalPath: string
+  purpose: OfficePathPurpose
+  scope: OfficePathScope
+  normalizedPath: string
+  state: OfficeFilePreconditionState
+  objectIdentity?: OfficePathIdentity
+  parentIdentity: OfficePathIdentity
+  contentRevision?: string
+  size?: number
+  writeDisposition?: OfficeWriteDisposition
+}
+
+/** Immutable, shell-free Office execution snapshot prepared by the trusted backend. */
+export interface OfficePreparedExecution {
+  schemaVersion: number
+  providerId: string
+  engineRevision: string
+  workspaceRevision?: string
+  access: OfficeOperationAccess
+  request: OfficeExecutionRequest
+  argv: string[]
+  paths: OfficeFrozenPath[]
+  /** @deprecated Schema-v2 compatibility only; schema-v3 actions use paths. */
+  documentPrecondition?: OfficeFilePrecondition
+  /** @deprecated Schema-v2 compatibility only; schema-v3 actions use paths. */
+  outputPrecondition?: OfficeFilePrecondition
+  /** @deprecated Schema-v2 compatibility only; schema-v3 actions use paths. */
+  destinationPrecondition?: OfficeFilePrecondition
+  /** @deprecated Schema-v2 compatibility only; schema-v3 actions use paths. */
+  resourcePreconditions?: OfficeFilePrecondition[]
+}
+
+export interface AgentOfficeOperationRequest {
+  schemaVersion: number
+  id: string
+  prepared: OfficePreparedExecution
+  approvalStatus: AgentApprovalStatus
+  reason?: string
+}
+
 export type AgentProposedAction =
   | { type: 'tool_call'; call: AgentToolCall }
   | { type: 'diff'; diff: AgentDiffProposal }
   | { type: 'file_write'; fileWrite: AgentFileWriteProposal }
   | { type: 'command'; command: AgentCommandRequest }
+  | { type: 'skill_materialization'; materialization: AgentSkillMaterializationRequest }
+  | { type: 'skill_script'; script: AgentSkillScriptRequest }
+  | { type: 'office_operation'; officeOperation: AgentOfficeOperationRequest }
 
 export type AgentEvent =
   | { type: 'started'; runId: string; toolDefinitions: AgentToolDefinition[] }

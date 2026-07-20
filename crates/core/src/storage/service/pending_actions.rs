@@ -15,6 +15,11 @@ pub(super) fn is_valid_pending_successor(
         AgentProposedAction::Diff { diff } => diff.id.as_str(),
         AgentProposedAction::FileWrite { file_write } => file_write.id.as_str(),
         AgentProposedAction::Command { command } => command.id.as_str(),
+        AgentProposedAction::SkillMaterialization { materialization } => {
+            materialization.id.as_str()
+        }
+        AgentProposedAction::SkillScript { script } => script.id.as_str(),
+        AgentProposedAction::OfficeOperation { office_operation } => office_operation.id.as_str(),
     };
     if candidate.tool_call_id.as_deref() != Some(action_id) {
         return false;
@@ -69,6 +74,52 @@ pub(super) fn is_pending_successor_candidate(
 }
 
 impl StorageService {
+    pub fn inspect_agent_action_audit_execution(
+        &self,
+        record: AgentActionAuditRecord,
+    ) -> Result<Option<agent_action_audit_repository::AgentActionAuditExecutionClaimOutcome>, String>
+    {
+        let connection = self.state.connection()?;
+        agent_action_audit_repository::inspect_action_audit_execution(&connection, &record)
+            .map_err(storage_error)
+    }
+
+    pub fn insert_agent_action_audit_if_absent(
+        &self,
+        record: AgentActionAuditRecord,
+    ) -> Result<bool, String> {
+        let connection = self.state.connection()?;
+        agent_action_audit_repository::insert_action_audit_record_if_absent(&connection, &record)
+            .map_err(storage_error)
+    }
+
+    pub fn claim_agent_action_audit_execution(
+        &self,
+        record: AgentActionAuditRecord,
+    ) -> Result<agent_action_audit_repository::AgentActionAuditExecutionClaimOutcome, String> {
+        let connection = self.state.connection()?;
+        agent_action_audit_repository::claim_action_audit_execution(&connection, &record)
+            .map_err(storage_error)
+    }
+
+    pub fn finalize_agent_action_audit_execution(
+        &self,
+        record: AgentActionAuditRecord,
+    ) -> Result<agent_action_audit_repository::AgentActionAuditFinalizationOutcome, String> {
+        if !matches!(record.status.as_str(), "completed" | "failed") {
+            return Err(format!(
+                "自动操作审计终态无效：{}（仅允许 completed 或 failed）。",
+                record.status
+            ));
+        }
+        if record.completed_at.is_none() {
+            return Err("自动操作审计终态缺少 completed_at。".to_string());
+        }
+        let connection = self.state.connection()?;
+        agent_action_audit_repository::finalize_claimed_action_audit_execution(&connection, &record)
+            .map_err(storage_error)
+    }
+
     pub fn upsert_agent_action_audit(&self, record: AgentActionAuditRecord) -> Result<(), String> {
         let connection = self.state.connection()?;
         agent_action_audit_repository::upsert_action_audit_record(&connection, &record)
@@ -104,7 +155,7 @@ impl StorageService {
         updated_at: i64,
     ) -> Result<Vec<AgentPendingActionRecord>, String> {
         const INTERRUPTION_REASON: &str =
-            "The application exited after approval; command outcome is unknown and was not replayed.";
+            "The application exited after approval; process outcome is unknown and was not replayed.";
         let mut connection = self.state.connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let interrupted = pending_action_repository::list_interrupted_actions(&transaction)
@@ -375,5 +426,52 @@ impl StorageService {
             ));
         }
         Ok(())
+    }
+
+    /// Atomically records a pending action's durable outcome and its paired in-progress trace.
+    ///
+    /// A tool result must not become a terminal pending-action fact without also closing the
+    /// corresponding tool call in the conversation trace. Keeping both writes in one SQLite
+    /// transaction gives approval continuations a single recovery boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_pending_agent_action_result_trace(
+        &self,
+        action_id: &str,
+        expected_status: &str,
+        target_status: &str,
+        trace: &ConversationTurnTrace,
+        trace_created_at: i64,
+        committed_at: i64,
+    ) -> Result<bool, String> {
+        if !matches!(
+            target_status,
+            "rejected" | "cancelled" | "completed" | "failed"
+        ) {
+            return Err(format!("待审批操作目标状态必须是终态：{target_status}"));
+        }
+        let mut connection = self.state.connection()?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let affected = pending_action_repository::set_pending_action_target_status(
+            &transaction,
+            action_id,
+            expected_status,
+            target_status,
+            committed_at,
+        )
+        .map_err(storage_error)?;
+        if affected != 1 {
+            return Err(format!(
+                "待审批操作目标状态写入冲突：actionId={action_id}, expectedStatus={expected_status}, targetStatus={target_status}"
+            ));
+        }
+        let trace_changed = conversation_trace_repository::commit_trace_in_connection(
+            &transaction,
+            trace,
+            trace_created_at,
+            committed_at,
+        )
+        .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(trace_changed)
     }
 }

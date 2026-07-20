@@ -78,7 +78,7 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
     let descriptor = catalog
         .skills()
         .iter()
-        .find(|skill| skill.source_kind() == mycopilot_core::skills::SkillSourceKind::Bundled)
+        .find(|skill| skill.id().as_str() == "bundled:application:repository-evidence-auditor")
         .expect("production catalog must expose the bundled auditor");
     let selection = mycopilot_protocol_rs::SkillSelectionDto {
         id: descriptor.id().as_str().to_string(),
@@ -305,6 +305,23 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         DESCRIPTION_MARKER, INSTRUCTION_MARKER
     );
     fs::write(local_skill.join("SKILL.md"), &source_text).unwrap();
+    fs::create_dir_all(local_skill.join("templates")).unwrap();
+    fs::write(
+        local_skill.join("templates/runtime.md"),
+        "revision-bound resource marker",
+    )
+    .unwrap();
+    fs::create_dir_all(local_skill.join("scripts")).unwrap();
+    fs::write(
+        local_skill.join("scripts/fail.py"),
+        concat!(
+            "import sys\n",
+            "print('skill stdout marker')\n",
+            "print('skill stderr marker', file=sys.stderr)\n",
+            "raise SystemExit(17)\n",
+        ),
+    )
+    .unwrap();
     let installation_id = SkillInstallationId::parse(INSTALLATION_ID).unwrap();
     let installations = SkillInstallationService::new(&store_root).unwrap();
     let installed = installations
@@ -326,9 +343,11 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         })
         .unwrap();
 
-    let skills = SkillsService::new()
-        .with_installed_source(&store_root)
-        .unwrap();
+    let skills = Arc::new(
+        SkillsService::new()
+            .with_installed_source(&store_root)
+            .unwrap(),
+    );
     let catalog = skills
         .list_with_workspace("project-installed-skill", &workspace)
         .unwrap();
@@ -367,6 +386,245 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
     assert!(!activation.skills[0]
         .instructions
         .contains(DESCRIPTION_MARKER));
+    let resources = activation.skills[0]
+        .resources
+        .as_ref()
+        .expect("installed sibling resource metadata must cross the runtime boundary");
+    assert_eq!(resources.resource_count, 2);
+    assert_eq!(resources.kinds, vec!["other", "script"]);
+    let session = prepared
+        .skill_resources
+        .as_ref()
+        .expect("prepared turn must retain the host-only resource authority");
+    let package = mycopilot_core::skills::SkillPackageUri::parse(&resources.root_uri).unwrap();
+    let page = session
+        .list(
+            &package,
+            &mycopilot_core::skills::SkillResourceListOptions::new(10).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(page.entries().len(), 2);
+    let template_entry = page
+        .entries()
+        .iter()
+        .find(|entry| entry.descriptor().path() == "templates/runtime.md")
+        .expect("installed template must be indexed");
+    let script_entry = page
+        .entries()
+        .iter()
+        .find(|entry| entry.descriptor().path() == "scripts/fail.py")
+        .expect("installed script must be indexed");
+    let text = session
+        .read_text(
+            template_entry.uri(),
+            mycopilot_core::skills::SkillResourceTextReadOptions::new(0, 1024).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(text.text(), "revision-bound resource marker");
+
+    let mut materialization_input = prepared.agent_input.clone();
+    materialization_input
+        .context
+        .as_mut()
+        .unwrap()
+        .permissions
+        .write = AgentWritePermission::WorkspaceOnly;
+    let service = AgentService::new(Arc::clone(&storage)).with_skills_service(Arc::clone(&skills));
+    let request = AgentSkillMaterializationRequest {
+        id: "materialize-runtime-template".to_string(),
+        source_uri: template_entry.uri().to_string(),
+        source_prefix: None,
+        destination: "runtime.md".to_string(),
+        approval_status: AgentApprovalStatus::Approved,
+        reason: Some("exercise the exact revision materializer".to_string()),
+    };
+    let first = service.execute_skill_materialization(
+        &materialization_input,
+        &request,
+        Some(session.as_ref()),
+    );
+    assert!(first.ok, "materialization failed: {:?}", first.error);
+    assert_eq!(
+        fs::read_to_string(workspace.join("runtime.md")).unwrap(),
+        "revision-bound resource marker"
+    );
+    let second = service.execute_skill_materialization(
+        &materialization_input,
+        &request,
+        Some(session.as_ref()),
+    );
+    assert!(second.ok);
+    assert_eq!(
+        second
+            .result
+            .as_ref()
+            .and_then(|result| result.get("status"))
+            .and_then(Value::as_str),
+        Some("already_applied")
+    );
+
+    let script_uri = script_entry.uri().clone();
+    let preflight = mycopilot_core::skills::preflight_skill_python_script(
+        session,
+        &workspace,
+        &script_uri,
+        mycopilot_core::AgentSkillScriptInterpreter::Python3,
+        &mycopilot_core::AgentSkillScriptRequirements::default(),
+    )
+    .unwrap();
+    if let mycopilot_core::skills::SkillScriptPreflightOutcome::Ready { report, plan } = preflight {
+        let mut script_input = materialization_input.clone();
+        let permissions = &mut script_input.context.as_mut().unwrap().permissions;
+        permissions.command = mycopilot_core::AgentCommandPermission::AutoApprove;
+        permissions.command_safety = mycopilot_core::AgentCommandSafetyPolicy::Guarded;
+        let script_request = mycopilot_core::AgentSkillScriptRequest {
+            id: "run-installed-failing-script".to_string(),
+            script_uri: script_uri.to_string(),
+            skill_id: script_uri.package().skill_id().as_str().to_string(),
+            skill_revision: script_uri.package().revision().as_str().to_string(),
+            resource_path: script_uri.path().as_str().to_string(),
+            resource_digest: plan.resource_digest().to_string(),
+            interpreter: mycopilot_core::AgentSkillScriptInterpreter::Python3,
+            args: Vec::new(),
+            requirements: mycopilot_core::AgentSkillScriptRequirements::default(),
+            preflight: report,
+            timeout_ms: Some(2_000),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: Some("verify failure result fidelity".to_string()),
+        };
+
+        let automatic = service.execute_skill_script(
+            &script_input,
+            &script_request,
+            Some(session),
+            CommandAuthorizationSource::Automatic,
+            AgentCancellationToken::new(),
+            None,
+        );
+        assert!(!automatic.ok);
+        assert_eq!(
+            automatic
+                .result
+                .as_ref()
+                .and_then(|result| result.get("code"))
+                .and_then(Value::as_str),
+            Some("authorizationDenied")
+        );
+
+        script_input
+            .context
+            .as_mut()
+            .unwrap()
+            .permissions
+            .command_safety = mycopilot_core::AgentCommandSafetyPolicy::FullAccess;
+        script_input.context.as_mut().unwrap().permissions.read =
+            mycopilot_core::AgentReadPermission::All;
+        script_input.context.as_mut().unwrap().permissions.write = AgentWritePermission::All;
+        let full_access_automatic = service.execute_skill_script(
+            &script_input,
+            &script_request,
+            Some(session),
+            CommandAuthorizationSource::Automatic,
+            AgentCancellationToken::new(),
+            None,
+        );
+        assert!(!full_access_automatic.ok);
+        assert_eq!(
+            full_access_automatic
+                .result
+                .as_ref()
+                .and_then(|result| result.get("code"))
+                .and_then(Value::as_str),
+            Some("authorizationDenied")
+        );
+        let explicitly_approved = service.execute_skill_script(
+            &script_input,
+            &script_request,
+            Some(session),
+            CommandAuthorizationSource::ExplicitUser,
+            AgentCancellationToken::new(),
+            None,
+        );
+        assert!(!explicitly_approved.ok);
+        let result = explicitly_approved
+            .result
+            .as_ref()
+            .expect("non-zero scripts must retain their structured execution result");
+        assert_eq!(result["exitCode"], 17);
+        assert!(result["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("skill stdout marker"));
+        assert!(result["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("skill stderr marker"));
+        assert_eq!(result["errorCode"], "skill_script.nonzero_exit");
+    }
+
+    // Persisted approval continuations carry only id + exact revision. Prove
+    // the Host restoration boundary reopens that immutable package after the
+    // mutable receipt has moved to a newer revision and after it is removed.
+    fs::write(
+        local_skill.join("templates/runtime.md"),
+        "new receipt resource marker",
+    )
+    .unwrap();
+    let updated = installations
+        .update_local_directory(&LocalSkillUpdateRequest::new(
+            descriptor.id().clone(),
+            descriptor.revision().clone(),
+            &local_skill,
+        ))
+        .unwrap();
+    assert_eq!(updated.outcome(), SkillInstallationOutcome::Updated);
+
+    let restore_and_materialize_old = |destination: &str| {
+        let restarted_skills = Arc::new(
+            SkillsService::new()
+                .with_installed_source(&store_root)
+                .unwrap(),
+        );
+        let restarted = AgentService::new(Arc::clone(&storage))
+            .with_skills_service(Arc::clone(&restarted_skills));
+        let restored = restarted
+            .restore_skill_resource_session(&prepared.agent_input)
+            .unwrap()
+            .expect("old exact resource grant must restore after restart");
+        let request = AgentSkillMaterializationRequest {
+            id: format!("materialize-{destination}"),
+            source_uri: template_entry.uri().to_string(),
+            source_prefix: None,
+            destination: destination.to_string(),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: Some("verify exact revision restoration".to_string()),
+        };
+        let result = restarted.execute_skill_materialization(
+            &materialization_input,
+            &request,
+            Some(restored.as_ref()),
+        );
+        assert!(
+            result.ok,
+            "restored materialization failed: {:?}",
+            result.error
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join(destination)).unwrap(),
+            "revision-bound resource marker"
+        );
+    };
+    restore_and_materialize_old("runtime-after-update.md");
+
+    let uninstalled = installations
+        .uninstall(&SkillUninstallRequest::new(
+            descriptor.id().clone(),
+            updated.package_revision().unwrap().clone(),
+        ))
+        .unwrap();
+    assert_eq!(uninstalled.outcome(), SkillInstallationOutcome::Uninstalled);
+    restore_and_materialize_old("runtime-after-uninstall.md");
+
     assert_eq!(prepared.output.activated_skills.len(), 1);
     assert_eq!(
         prepared.output.activated_skills[0].source.kind,
@@ -377,6 +635,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
     assert!(!public_output.contains(INSTRUCTION_MARKER));
     assert!(!public_output.contains(DESCRIPTION_MARKER));
     assert!(!public_output.contains(&source_text));
+    assert!(!public_output.contains("revision-bound resource marker"));
     let persisted = storage
         .load_conversation("conversation-installed-skill")
         .unwrap()
@@ -385,6 +644,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
     assert!(!persisted_json.contains(INSTRUCTION_MARKER));
     assert!(!persisted_json.contains(DESCRIPTION_MARKER));
     assert!(!persisted_json.contains(&source_text));
+    assert!(!persisted_json.contains("revision-bound resource marker"));
 }
 
 #[test]

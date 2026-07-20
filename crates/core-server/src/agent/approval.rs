@@ -1,5 +1,25 @@
 use super::*;
 
+pub(super) fn publish_inline_file_write_tool_result(
+    notifications: &CoreServerNotificationSender,
+    run_id: &str,
+    action: &AgentProposedAction,
+    decision_status: AgentApprovalDecisionStatus,
+    tool_result: &AgentToolResult,
+) -> bool {
+    let should_publish = matches!(action, AgentProposedAction::FileWrite { .. })
+        || (decision_status == AgentApprovalDecisionStatus::Rejected
+            && matches!(action, AgentProposedAction::OfficeOperation { .. }));
+    if !should_publish {
+        return false;
+    }
+    let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+        run_id: run_id.to_string(),
+        result: tool_result.clone(),
+    }));
+    true
+}
+
 impl AgentService {
     pub fn list_pending_actions(&self) -> Vec<PendingAgentActionSnapshot> {
         let pending_actions = self
@@ -112,9 +132,14 @@ impl AgentService {
             return Ok(false);
         }
         if record.snapshot.status == PendingActionStatus::Approved
-            && matches!(record.snapshot.action, AgentProposedAction::Command { .. })
+            && matches!(
+                record.snapshot.action,
+                AgentProposedAction::Command { .. }
+                    | AgentProposedAction::SkillScript { .. }
+                    | AgentProposedAction::OfficeOperation { .. }
+            )
         {
-            let cancelled = self.command_runs.cancel(&record.storage_id);
+            let cancelled = self.process_runs.cancel(&record.storage_id);
             if cancelled {
                 if let Some(token) = self
                     .cancellations
@@ -131,7 +156,7 @@ impl AgentService {
                     None,
                     None,
                     None,
-                    Some("Command execution was cancelled by the user."),
+                    Some("Process execution was cancelled by the user."),
                     Some(now_ms()),
                     None,
                 );
@@ -268,7 +293,7 @@ impl AgentService {
             .deleting_projects
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (record, approved_command_guard) = {
+        let (record, approved_process_guard) = {
             let mut pending_actions = self
                 .pending_actions
                 .lock()
@@ -291,20 +316,33 @@ impl AgentService {
             {
                 return Err("项目正在移除，无法处理待审批操作。".to_string());
             }
-            let is_approved_command = decision_status == AgentApprovalDecisionStatus::Approved
-                && matches!(record.snapshot.action, AgentProposedAction::Command { .. });
-            let approved_command_guard = is_approved_command.then(|| {
-                self.command_runs
+            if decision_status == AgentApprovalDecisionStatus::Approved {
+                authorize_structured_file_write(
+                    &record.agent_input,
+                    &record.snapshot.action,
+                    FileWriteAuthorizationSource::ExplicitUser,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            let is_approved_process = decision_status == AgentApprovalDecisionStatus::Approved
+                && matches!(
+                    record.snapshot.action,
+                    AgentProposedAction::Command { .. }
+                        | AgentProposedAction::SkillScript { .. }
+                        | AgentProposedAction::OfficeOperation { .. }
+                );
+            let approved_process_guard = is_approved_process.then(|| {
+                self.process_runs
                     .register(&record.storage_id, &record.snapshot.run_id)
             });
-            let execution_status = if is_approved_command {
+            let execution_status = if is_approved_process {
                 PendingActionStatus::Approved
             } else {
                 PendingActionStatus::Executing
             };
             self.persist_pending_status(record, PendingActionStatus::Pending, execution_status)?;
             record.snapshot.status = execution_status;
-            (record.clone(), approved_command_guard)
+            (record.clone(), approved_process_guard)
         };
 
         let mut call = tool_call_for_action(&record.snapshot.action);
@@ -331,18 +369,120 @@ impl AgentService {
             return self.queue_command_execution(
                 record,
                 call,
-                approved_command_guard.expect("approved command registered under pending lock"),
+                approved_process_guard.expect("approved command registered under pending lock"),
+                notifications,
+            );
+        }
+        if decision_status == AgentApprovalDecisionStatus::Approved
+            && matches!(
+                record.snapshot.action,
+                AgentProposedAction::SkillScript { .. }
+            )
+        {
+            self.record_action_audit(
+                &record,
+                Some("approved"),
+                "approved",
+                None,
+                None,
+                None,
+                None,
+                Some(decided_at),
+                None,
+            );
+            drop(deleting_projects);
+            return self.queue_skill_script_execution(
+                record,
+                call,
+                approved_process_guard
+                    .expect("approved Skill script registered under pending lock"),
+                notifications,
+            );
+        }
+        if decision_status == AgentApprovalDecisionStatus::Approved
+            && matches!(
+                record.snapshot.action,
+                AgentProposedAction::OfficeOperation { .. }
+            )
+        {
+            self.record_action_audit(
+                &record,
+                Some("approved"),
+                "approved",
+                None,
+                None,
+                None,
+                None,
+                Some(decided_at),
+                None,
+            );
+            drop(deleting_projects);
+            return self.queue_office_operation_execution(
+                record,
+                call,
+                approved_process_guard
+                    .expect("approved Office operation registered under pending lock"),
                 notifications,
             );
         }
 
-        let execution = action_execution_for_decision(
-            &self.storage,
-            &record,
-            &call,
-            decision_status,
-            message.as_deref(),
-        );
+        let execution = if decision_status == AgentApprovalDecisionStatus::Approved {
+            if let AgentProposedAction::SkillMaterialization { materialization } =
+                &record.snapshot.action
+            {
+                let mut materialization = materialization.clone();
+                materialization.approval_status = AgentApprovalStatus::Approved;
+                let tool_result = match self.restore_skill_resource_session(&record.agent_input) {
+                    Ok(resources) => self.execute_skill_materialization(
+                        &record.agent_input,
+                        &materialization,
+                        resources.as_deref(),
+                    ),
+                    Err(error) => AgentToolResult {
+                        call_id: materialization.id.clone(),
+                        tool: "skills_materialize_resource".to_string(),
+                        ok: false,
+                        result: Some(serde_json::json!({
+                            "type": "skill_materialization",
+                            "code": "snapshotUnavailable",
+                            "recovery": "reactivateSkill",
+                        })),
+                        error: Some(error.to_string()),
+                    },
+                };
+                ActionExecutionDecision {
+                    status: if tool_result.ok {
+                        "applied".to_string()
+                    } else {
+                        "failed".to_string()
+                    },
+                    final_pending_status: if tool_result.ok {
+                        PendingActionStatus::Completed
+                    } else {
+                        PendingActionStatus::Failed
+                    },
+                    patch_result: None,
+                    file_write_result: None,
+                    tool_result,
+                }
+            } else {
+                action_execution_for_decision(
+                    &self.storage,
+                    &record,
+                    &call,
+                    decision_status,
+                    message.as_deref(),
+                )
+            }
+        } else {
+            action_execution_for_decision(
+                &self.storage,
+                &record,
+                &call,
+                decision_status,
+                message.as_deref(),
+            )
+        };
         let final_pending_status = execution.final_pending_status;
         let tool_result = execution.tool_result.clone();
         self.record_action_audit(
@@ -373,26 +513,33 @@ impl AgentService {
             result: tool_result.clone(),
         });
         self.commit_trace_snapshot_with_continuation(&record, &agent_input, &notifications)?;
-        if matches!(
-            record.snapshot.action,
-            AgentProposedAction::FileWrite { .. }
+        if publish_inline_file_write_tool_result(
+            &notifications,
+            &record.snapshot.run_id,
+            &record.snapshot.action,
+            decision_status,
+            &tool_result,
         ) {
-            let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
-                run_id: record.snapshot.run_id.clone(),
-                result: tool_result.clone(),
-            }));
-            if let Some(file_write_result) = execution.file_write_result.as_ref() {
-                if let Ok(Some(draft)) = self
-                    .storage
-                    .get_agent_file_draft(&file_write_result.draft_id)
-                {
-                    if let Ok(snapshot) = file_draft_snapshot(&draft) {
-                        let _ = notifications.send(agent_event_notification(
-                            AgentEvent::FileDraftUpdated {
-                                run_id: record.snapshot.run_id.clone(),
-                                draft: snapshot,
-                            },
-                        ));
+            // Approved Office operations return earlier and publish exactly one ToolResult from
+            // their asynchronous executor. Rejected Office actions reach this synchronous path,
+            // so publish the paired rejection result here just like write_file.
+            if matches!(
+                record.snapshot.action,
+                AgentProposedAction::FileWrite { .. }
+            ) {
+                if let Some(file_write_result) = execution.file_write_result.as_ref() {
+                    if let Ok(Some(draft)) = self
+                        .storage
+                        .get_agent_file_draft(&file_write_result.draft_id)
+                    {
+                        if let Ok(snapshot) = file_draft_snapshot(&draft) {
+                            let _ = notifications.send(agent_event_notification(
+                                AgentEvent::FileDraftUpdated {
+                                    run_id: record.snapshot.run_id.clone(),
+                                    draft: snapshot,
+                                },
+                            ));
+                        }
                     }
                 }
             }

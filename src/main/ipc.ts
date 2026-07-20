@@ -320,6 +320,7 @@ export function registerHostIpc(
   })
 
   ipcMain.handle('host:core.ping', (_event, input) => coreServer.ping(input))
+  ipcMain.handle('host:office.getStatus', () => coreServer.getOfficeStatus())
   ipcMain.handle('host:app.getWindowState', (event) => getAppWindowState(getInvokeWindow(event)))
   ipcMain.handle('host:app.openExternal', (_event, url) => openExternalUrl(url))
   ipcMain.handle('host:app.setNativeThemeSource', (_event, themeSource) => {

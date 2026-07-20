@@ -13,6 +13,10 @@ pub(super) struct AttachmentsListTool;
 pub(super) struct AttachmentsListProjectTool;
 
 impl AgentTool for AttachmentsListTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "attachments_list".to_string(),
@@ -36,6 +40,10 @@ impl AgentTool for AttachmentsListTool {
 }
 
 impl AgentTool for AttachmentsListProjectTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "attachments_list_project".to_string(),

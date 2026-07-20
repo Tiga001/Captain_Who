@@ -1,5 +1,46 @@
 use super::*;
 
+#[cfg(test)]
+static AUTO_ACTION_AUDIT_FAILURES: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
+
+/// Installs a one-shot, action-scoped audit persistence failure for Host boundary tests.
+///
+/// Matching on run, provider action id, and status keeps parallel tests isolated without adding
+/// production-only dependency injection surface to `AgentService`.
+#[cfg(test)]
+pub(super) fn inject_auto_action_audit_failure(
+    run_id: &str,
+    provider_action_id: &str,
+    status: &str,
+) {
+    AUTO_ACTION_AUDIT_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((
+            run_id.to_string(),
+            provider_action_id.to_string(),
+            status.to_string(),
+        ));
+}
+
+#[cfg(test)]
+fn take_auto_action_audit_failure(
+    run_id: &str,
+    provider_action_id: &str,
+    status: &str,
+) -> Option<String> {
+    let mut failures = AUTO_ACTION_AUDIT_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let index = failures.iter().position(|candidate| {
+        candidate.0 == run_id && candidate.1 == provider_action_id && candidate.2 == status
+    })?;
+    failures.swap_remove(index);
+    Some(format!(
+        "injected auto action audit persistence failure for run={run_id}, action={provider_action_id}, status={status}"
+    ))
+}
+
 impl AgentService {
     pub(super) fn store_pending_action(
         &self,
@@ -179,44 +220,45 @@ impl AgentService {
         decided_at: Option<i64>,
         completed_at: Option<i64>,
     ) {
-        let audit = AgentActionAuditRecord {
-            action_id: record.storage_id.clone(),
-            run_id: record.snapshot.run_id.clone(),
-            conversation_id: record.snapshot.conversation_id.clone(),
-            assistant_message_id: record.snapshot.assistant_message_id.clone(),
-            action_type: record.snapshot.action_type.clone(),
-            tool_name: record.snapshot.tool_name.clone(),
-            decision: decision.map(ToString::to_string),
-            status: status.to_string(),
-            action_json: serialize_json(&record.snapshot.action),
-            patch_result_json: patch_result.map(serialize_json),
-            command_result_json: command_result.map(serialize_json),
-            tool_result_json: tool_result.map(serialize_json),
-            error: error.map(ToString::to_string),
-            created_at: record.snapshot.created_at,
+        if let Err(error) = self.persist_action_audit(
+            record,
+            decision,
+            status,
+            patch_result,
+            command_result,
+            tool_result,
+            error,
             decided_at,
             completed_at,
-            effective_permissions_json: Some(serialize_json(&permissions_from_input(
-                &record.agent_input,
-            ))),
-            path_scope: path_scope_for_action(&record.agent_input, &record.snapshot.action),
-            command_cwd_scope: command_cwd_scope_for_action(
-                &record.agent_input,
-                &record.snapshot.action,
-            ),
-            blocked_reason: error.map(ToString::to_string),
-            decision_source: Some(
-                if decision.is_none() && status == "pending" {
-                    "manual_pending"
-                } else {
-                    "manual"
-                }
-                .to_string(),
-            ),
-        };
-        if let Err(error) = self.storage.upsert_agent_action_audit(audit) {
+        ) {
             eprintln!("failed to write agent action audit log: {error}");
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn persist_action_audit(
+        &self,
+        record: &PendingActionRecord,
+        decision: Option<&str>,
+        status: &str,
+        patch_result: Option<&AgentPatchResult>,
+        command_result: Option<&AgentCommandExecutionResult>,
+        tool_result: Option<&AgentToolResult>,
+        error: Option<&str>,
+        decided_at: Option<i64>,
+        completed_at: Option<i64>,
+    ) -> Result<(), String> {
+        self.storage.upsert_agent_action_audit(action_audit_record(
+            record,
+            decision,
+            status,
+            patch_result,
+            command_result,
+            tool_result,
+            error,
+            decided_at,
+            completed_at,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -235,33 +277,302 @@ impl AgentService {
         created_at: i64,
         completed_at: i64,
     ) {
-        let provider_action_id = action_id_for_action(&action);
-        let audit = AgentActionAuditRecord {
-            action_id: pending_action_storage_id(run_id, &provider_action_id),
-            run_id: run_id.to_string(),
-            conversation_id,
-            assistant_message_id,
-            action_type: action_type_for_action(&action).to_string(),
-            tool_name: tool_name_for_action(&action),
-            decision: Some("approved".to_string()),
-            status: status.to_string(),
-            action_json: serialize_json(&action),
-            patch_result_json: patch_result.map(serialize_json),
-            command_result_json: command_result.map(serialize_json),
-            tool_result_json: tool_result.map(serialize_json),
-            error: error.map(ToString::to_string),
+        if let Err(error) = self.persist_auto_action_audit(
+            run_id,
+            conversation_id.as_deref(),
+            assistant_message_id.as_deref(),
+            agent_input,
+            &action,
+            status,
+            patch_result,
+            command_result,
+            tool_result,
+            error,
             created_at,
-            decided_at: Some(created_at),
-            completed_at: Some(completed_at),
-            effective_permissions_json: Some(serialize_json(&permissions_from_input(agent_input))),
-            path_scope: path_scope_for_action(agent_input, &action),
-            command_cwd_scope: command_cwd_scope_for_action(agent_input, &action),
-            blocked_reason: error.map(ToString::to_string),
-            decision_source: Some("auto".to_string()),
-        };
-        if let Err(error) = self.storage.upsert_agent_action_audit(audit) {
+            Some(completed_at),
+        ) {
             eprintln!("failed to write auto agent action audit log: {error}");
         }
+    }
+
+    /// Durably records an automatically approved action audit transition.
+    ///
+    /// Most legacy auto-approved actions treat audit persistence as best effort through
+    /// [`Self::record_auto_action_audit`]. File-producing Office operations use this fallible
+    /// boundary directly for non-claim transitions. Office execution uses the stricter
+    /// claim/finalize methods below so retries cannot overwrite an existing execution receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn persist_auto_action_audit(
+        &self,
+        run_id: &str,
+        conversation_id: Option<&str>,
+        assistant_message_id: Option<&str>,
+        agent_input: &AgentChatInput,
+        action: &AgentProposedAction,
+        status: &str,
+        patch_result: Option<&AgentPatchResult>,
+        command_result: Option<&AgentCommandExecutionResult>,
+        tool_result: Option<&AgentToolResult>,
+        error: Option<&str>,
+        created_at: i64,
+        completed_at: Option<i64>,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(error) =
+            take_auto_action_audit_failure(run_id, &action_id_for_action(action), status)
+        {
+            return Err(error);
+        }
+        let audit = auto_action_audit_record(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            agent_input,
+            action,
+            status,
+            patch_result,
+            command_result,
+            tool_result,
+            error,
+            created_at,
+            completed_at,
+        );
+        self.storage.upsert_agent_action_audit(audit)
+    }
+
+    /// Persists a terminal pre-execution decision without replacing a prior execution receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn persist_auto_action_audit_if_absent(
+        &self,
+        run_id: &str,
+        conversation_id: Option<&str>,
+        assistant_message_id: Option<&str>,
+        agent_input: &AgentChatInput,
+        action: &AgentProposedAction,
+        status: &str,
+        tool_result: &AgentToolResult,
+        error: Option<&str>,
+        created_at: i64,
+        completed_at: i64,
+    ) -> Result<bool, String> {
+        #[cfg(test)]
+        if let Some(error) =
+            take_auto_action_audit_failure(run_id, &action_id_for_action(action), status)
+        {
+            return Err(error);
+        }
+        let audit = auto_action_audit_record(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            agent_input,
+            action,
+            status,
+            None,
+            None,
+            Some(tool_result),
+            error,
+            created_at,
+            Some(completed_at),
+        );
+        self.storage.insert_agent_action_audit_if_absent(audit)
+    }
+
+    /// Reads an existing automatic action receipt without acquiring execution rights.
+    /// Atomically acquires the sole durable execution right for an automatically approved action.
+    ///
+    /// The receipt is committed before this method returns. A matching existing receipt is never
+    /// treated as a lease and therefore never permits automatic replay after a crash.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn inspect_auto_action_execution_audit(
+        &self,
+        run_id: &str,
+        conversation_id: Option<&str>,
+        assistant_message_id: Option<&str>,
+        agent_input: &AgentChatInput,
+        action: &AgentProposedAction,
+        created_at: i64,
+    ) -> Result<Option<AgentActionAuditExecutionClaimOutcome>, String> {
+        let audit = auto_action_audit_record(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            agent_input,
+            action,
+            "executing",
+            None,
+            None,
+            None,
+            None,
+            created_at,
+            None,
+        );
+        self.storage.inspect_agent_action_audit_execution(audit)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn claim_auto_action_execution_audit(
+        &self,
+        run_id: &str,
+        conversation_id: Option<&str>,
+        assistant_message_id: Option<&str>,
+        agent_input: &AgentChatInput,
+        action: &AgentProposedAction,
+        created_at: i64,
+    ) -> Result<AgentActionAuditExecutionClaimOutcome, String> {
+        #[cfg(test)]
+        if let Some(error) =
+            take_auto_action_audit_failure(run_id, &action_id_for_action(action), "executing")
+        {
+            return Err(error);
+        }
+        let audit = auto_action_audit_record(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            agent_input,
+            action,
+            "executing",
+            None,
+            None,
+            None,
+            None,
+            created_at,
+            None,
+        );
+        self.storage.claim_agent_action_audit_execution(audit)
+    }
+
+    /// Commits the result only if the exact frozen receipt still owns the `executing` state.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn finalize_auto_action_execution_audit(
+        &self,
+        run_id: &str,
+        conversation_id: Option<&str>,
+        assistant_message_id: Option<&str>,
+        agent_input: &AgentChatInput,
+        action: &AgentProposedAction,
+        status: &str,
+        tool_result: &AgentToolResult,
+        error: Option<&str>,
+        created_at: i64,
+        completed_at: i64,
+    ) -> Result<(), String> {
+        let provider_action_id = action_id_for_action(action);
+        #[cfg(test)]
+        if let Some(error) = take_auto_action_audit_failure(run_id, &provider_action_id, status) {
+            return Err(error);
+        }
+        let audit = auto_action_audit_record(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            agent_input,
+            action,
+            status,
+            None,
+            None,
+            Some(tool_result),
+            error,
+            created_at,
+            Some(completed_at),
+        );
+        match self.storage.finalize_agent_action_audit_execution(audit)? {
+            AgentActionAuditFinalizationOutcome::Finalized => Ok(()),
+            AgentActionAuditFinalizationOutcome::ClaimMissingOrChanged => Err(format!(
+                "automatic action audit claim was missing, terminal, or changed for run={run_id}, action={provider_action_id}"
+            )),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn action_audit_record(
+    record: &PendingActionRecord,
+    decision: Option<&str>,
+    status: &str,
+    patch_result: Option<&AgentPatchResult>,
+    command_result: Option<&AgentCommandExecutionResult>,
+    tool_result: Option<&AgentToolResult>,
+    error: Option<&str>,
+    decided_at: Option<i64>,
+    completed_at: Option<i64>,
+) -> AgentActionAuditRecord {
+    AgentActionAuditRecord {
+        action_id: record.storage_id.clone(),
+        run_id: record.snapshot.run_id.clone(),
+        conversation_id: record.snapshot.conversation_id.clone(),
+        assistant_message_id: record.snapshot.assistant_message_id.clone(),
+        action_type: record.snapshot.action_type.clone(),
+        tool_name: record.snapshot.tool_name.clone(),
+        decision: decision.map(ToString::to_string),
+        status: status.to_string(),
+        action_json: serialize_json(&record.snapshot.action),
+        patch_result_json: patch_result.map(serialize_json),
+        command_result_json: command_result.map(serialize_json),
+        tool_result_json: tool_result.map(serialize_json),
+        error: error.map(ToString::to_string),
+        created_at: record.snapshot.created_at,
+        decided_at,
+        completed_at,
+        effective_permissions_json: Some(serialize_json(&permissions_from_input(
+            &record.agent_input,
+        ))),
+        path_scope: path_scope_for_action(&record.agent_input, &record.snapshot.action),
+        command_cwd_scope: command_cwd_scope_for_action(
+            &record.agent_input,
+            &record.snapshot.action,
+        ),
+        blocked_reason: error.map(ToString::to_string),
+        decision_source: Some(
+            if decision.is_none() && status == "pending" {
+                "manual_pending"
+            } else {
+                "manual"
+            }
+            .to_string(),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn auto_action_audit_record(
+    run_id: &str,
+    conversation_id: Option<&str>,
+    assistant_message_id: Option<&str>,
+    agent_input: &AgentChatInput,
+    action: &AgentProposedAction,
+    status: &str,
+    patch_result: Option<&AgentPatchResult>,
+    command_result: Option<&AgentCommandExecutionResult>,
+    tool_result: Option<&AgentToolResult>,
+    error: Option<&str>,
+    created_at: i64,
+    completed_at: Option<i64>,
+) -> AgentActionAuditRecord {
+    let provider_action_id = action_id_for_action(action);
+    AgentActionAuditRecord {
+        action_id: pending_action_storage_id(run_id, &provider_action_id),
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.map(ToString::to_string),
+        assistant_message_id: assistant_message_id.map(ToString::to_string),
+        action_type: action_type_for_action(action).to_string(),
+        tool_name: tool_name_for_action(action),
+        decision: Some("approved".to_string()),
+        status: status.to_string(),
+        action_json: serialize_json(action),
+        patch_result_json: patch_result.map(serialize_json),
+        command_result_json: command_result.map(serialize_json),
+        tool_result_json: tool_result.map(serialize_json),
+        error: error.map(ToString::to_string),
+        created_at,
+        decided_at: Some(created_at),
+        completed_at,
+        effective_permissions_json: Some(serialize_json(&permissions_from_input(agent_input))),
+        path_scope: path_scope_for_action(agent_input, action),
+        command_cwd_scope: command_cwd_scope_for_action(agent_input, action),
+        blocked_reason: error.map(ToString::to_string),
+        decision_source: Some("auto".to_string()),
     }
 }
 
@@ -527,9 +838,52 @@ pub(super) fn path_scope_for_action(
     input: &AgentChatInput,
     action: &AgentProposedAction,
 ) -> Option<String> {
+    if let AgentProposedAction::OfficeOperation { office_operation } = action {
+        if !office_operation.prepared.paths.is_empty() {
+            // A valid Office request is bounded by the provider argument limit. Keep a second
+            // defensive bound for persisted/corrupt snapshots so audit generation itself cannot
+            // amplify untrusted data. Valid plans retain every slot's purpose and scope.
+            const MAX_AUDITED_OFFICE_PATHS: usize = 260;
+            let paths = office_operation
+                .prepared
+                .paths
+                .iter()
+                .take(MAX_AUDITED_OFFICE_PATHS)
+                .map(|path| {
+                    serde_json::json!({
+                        "slot": path.slot,
+                        "purpose": path.purpose,
+                        "scope": path.scope,
+                    })
+                })
+                .collect::<Vec<_>>();
+            return Some(serialize_json(&serde_json::json!({
+                "schemaVersion": 1,
+                "totalPathCount": office_operation.prepared.paths.len(),
+                "truncated": office_operation.prepared.paths.len() > MAX_AUDITED_OFFICE_PATHS,
+                "paths": paths,
+            })));
+        }
+    }
+
     let path = match action {
         AgentProposedAction::Diff { diff } => Some(diff.file_path.as_str()),
         AgentProposedAction::FileWrite { file_write } => Some(file_write.file_path.as_str()),
+        AgentProposedAction::SkillMaterialization { materialization } => {
+            Some(materialization.destination.as_str())
+        }
+        AgentProposedAction::SkillScript { .. } => None,
+        AgentProposedAction::OfficeOperation { office_operation } => office_operation
+            .prepared
+            .request
+            .destination_path
+            .as_deref()
+            .or(office_operation
+                .prepared
+                .request
+                .output_path
+                .as_deref()
+                .or(office_operation.prepared.request.document_path.as_deref())),
         AgentProposedAction::ToolCall { call } if call.tool == "apply_patch" => call
             .args
             .get("filePath")
@@ -545,6 +899,8 @@ pub(super) fn command_cwd_scope_for_action(
 ) -> Option<String> {
     let cwd = match action {
         AgentProposedAction::Command { command } => command.cwd.as_deref().unwrap_or("."),
+        AgentProposedAction::SkillScript { .. } => ".",
+        AgentProposedAction::OfficeOperation { .. } => ".",
         AgentProposedAction::ToolCall { call } if call.tool == "run_command" => call
             .args
             .get("cwd")

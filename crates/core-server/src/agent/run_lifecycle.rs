@@ -12,8 +12,8 @@ impl AgentService {
         } else {
             false
         };
-        let cancelled_commands = self.command_runs.cancel_run(run_id);
-        cancelled_run || cancelled_commands > 0
+        let cancelled_processes = self.process_runs.cancel_run(run_id);
+        cancelled_run || cancelled_processes > 0
     }
 
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
@@ -99,7 +99,7 @@ impl AgentService {
 
         for (run_id, token) in &active_runs {
             token.cancel();
-            self.command_runs.cancel_run(run_id);
+            self.process_runs.cancel_run(run_id);
         }
 
         if active_runs.is_empty() {

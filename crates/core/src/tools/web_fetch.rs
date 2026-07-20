@@ -30,6 +30,10 @@ impl WebFetchTool {
 }
 
 impl AgentTool for WebFetchTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "web_fetch".to_string(),

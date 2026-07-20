@@ -6,6 +6,7 @@ use crate::skills::model::{
 };
 use crate::skills::source::WorkspaceSkillSource;
 use crate::skills::workspace::{AGENTS_DIRECTORY, SKILLS_DIRECTORY, SKILL_FILE_NAME};
+use crate::skills::REPOSITORY_EVIDENCE_AUDITOR_LOCAL_ID;
 use std::fs;
 use std::ops::Range;
 use tempfile::tempdir;
@@ -443,8 +444,12 @@ fn explicit_bundled_registration_exposes_the_real_embedded_skill() {
     let service = SkillsService::new().with_bundled_source().unwrap();
     let catalog = service.list().unwrap();
 
-    assert_eq!(catalog.skills().len(), 1);
-    let descriptor = &catalog.skills()[0];
+    assert_eq!(catalog.skills().len(), 4);
+    let descriptor = catalog
+        .skills()
+        .iter()
+        .find(|skill| skill.id().local_id() == REPOSITORY_EVIDENCE_AUDITOR_LOCAL_ID)
+        .unwrap();
     assert_eq!(
         descriptor.id().as_str(),
         "bundled:application:repository-evidence-auditor"
@@ -473,7 +478,7 @@ fn list_with_workspace_aggregates_real_sources_in_stable_order() {
         .unwrap();
 
     assert_eq!(first, second);
-    assert_eq!(first.skills().len(), 2);
+    assert_eq!(first.skills().len(), 5);
     assert_eq!(
         first
             .skills()
@@ -481,7 +486,10 @@ fn list_with_workspace_aggregates_real_sources_in_stable_order() {
             .map(|skill| skill.id().as_str())
             .collect::<Vec<_>>(),
         vec![
+            "bundled:application:documents",
+            "bundled:application:presentations",
             "bundled:application:repository-evidence-auditor",
+            "bundled:application:spreadsheets",
             "workspace:workspace:workspace-skill",
         ]
     );
@@ -491,17 +499,23 @@ fn list_with_workspace_aggregates_real_sources_in_stable_order() {
             .iter()
             .map(SkillDescriptor::source_kind)
             .collect::<Vec<_>>(),
-        vec![SkillSourceKind::Bundled, SkillSourceKind::Workspace]
+        vec![
+            SkillSourceKind::Bundled,
+            SkillSourceKind::Bundled,
+            SkillSourceKind::Bundled,
+            SkillSourceKind::Bundled,
+            SkillSourceKind::Workspace,
+        ]
     );
     assert!(first.diagnostics().is_empty());
 
     // The request-scoped workspace must not mutate the registered source set.
     let registered = service.list().unwrap();
-    assert_eq!(registered.skills().len(), 1);
-    assert_eq!(
-        registered.skills()[0].source_kind(),
-        SkillSourceKind::Bundled
-    );
+    assert_eq!(registered.skills().len(), 4);
+    assert!(registered
+        .skills()
+        .iter()
+        .all(|skill| skill.source_kind() == SkillSourceKind::Bundled));
 }
 
 #[test]

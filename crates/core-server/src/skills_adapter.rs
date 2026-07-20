@@ -9,13 +9,13 @@ use mycopilot_core::skills::{
     SkillActivationError, SkillActivationScope, SkillCatalog, SkillDescriptor,
     SkillDiagnosticSeverity, SkillErrorCode, SkillInstallationMutation, SkillInstallationOperation,
     SkillInstallationOutcome, SkillInstallationService, SkillInstallationServiceError,
-    SkillInstallationWorkflow, SkillProvenance, SkillRecovery, SkillSelection, SkillSourceKind,
-    SkillTrust, SkillsService,
+    SkillInstallationWorkflow, SkillProvenance, SkillRecovery, SkillResourceSession,
+    SkillSelection, SkillSourceKind, SkillTrust, SkillsService,
 };
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::storage::skill_enablement_repository::SkillEnablementCompareAndSetOutcome;
 use mycopilot_core::storage::skill_enablement_repository::SkillEnablementState;
-use mycopilot_core::{AgentActivatedSkill, AgentSkillActivation};
+use mycopilot_core::{AgentActivatedSkill, AgentActivatedSkillResources, AgentSkillActivation};
 use mycopilot_protocol_rs::{
     ActivatedSkillSummaryDto, SkillActivationErrorCodeDto, SkillActivationErrorData,
     SkillActivationRecoveryDto, SkillCompatibilityReportDto, SkillCompatibilityStatusDto,
@@ -46,6 +46,7 @@ pub(crate) use management::*;
 #[derive(Debug, Default)]
 pub(crate) struct PreparedSkillActivation {
     pub(crate) runtime: Option<AgentSkillActivation>,
+    pub(crate) resources: Option<std::sync::Arc<SkillResourceSession>>,
     pub(crate) summaries: Vec<ActivatedSkillSummaryDto>,
     pub(crate) revision: Option<String>,
 }

@@ -285,6 +285,63 @@ function getActionToolCall(action: AgentProposedAction): AgentToolCall | null {
     }
   }
 
+  if (action.type === 'skill_materialization') {
+    return {
+      id: action.materialization.id,
+      tool: 'skills_materialize_resource',
+      args: {
+        sourceUri: action.materialization.sourceUri,
+        sourcePrefix: action.materialization.sourcePrefix,
+        destination: action.materialization.destination,
+        reason: action.materialization.reason
+      },
+      approvalStatus: action.materialization.approvalStatus,
+      reason: action.materialization.reason
+    }
+  }
+
+  if (action.type === 'skill_script') {
+    return {
+      id: action.script.id,
+      tool: 'skills_run_script',
+      args: {
+        scriptUri: action.script.scriptUri,
+        interpreter: action.script.interpreter,
+        args: action.script.args,
+        requirements: action.script.requirements,
+        timeoutMs: action.script.timeoutMs,
+        reason: action.script.reason
+      },
+      approvalStatus: action.script.approvalStatus,
+      reason: action.script.reason
+    }
+  }
+
+  if (action.type === 'office_operation') {
+    const request = action.officeOperation.prepared.request
+    const tool =
+      request.documentKind === 'document'
+        ? 'office_document'
+        : request.documentKind === 'spreadsheet'
+          ? 'office_spreadsheet'
+          : 'office_presentation'
+    return {
+      id: action.officeOperation.id,
+      tool,
+      args: {
+        operation: request.operation,
+        path: request.documentPath,
+        arguments: request.arguments,
+        outputPath: request.outputPath,
+        destinationPath: request.destinationPath,
+        timeoutMs: request.timeoutMs,
+        reason: action.officeOperation.reason
+      },
+      approvalStatus: action.officeOperation.approvalStatus,
+      reason: action.officeOperation.reason
+    }
+  }
+
   if (action.type !== 'command') return null
 
   return {
@@ -331,6 +388,36 @@ function withActionApprovalStatus(
       ...action,
       fileWrite: {
         ...action.fileWrite,
+        approvalStatus
+      }
+    }
+  }
+
+  if (action.type === 'skill_materialization') {
+    return {
+      ...action,
+      materialization: {
+        ...action.materialization,
+        approvalStatus
+      }
+    }
+  }
+
+  if (action.type === 'skill_script') {
+    return {
+      ...action,
+      script: {
+        ...action.script,
+        approvalStatus
+      }
+    }
+  }
+
+  if (action.type === 'office_operation') {
+    return {
+      ...action,
+      officeOperation: {
+        ...action.officeOperation,
         approvalStatus
       }
     }

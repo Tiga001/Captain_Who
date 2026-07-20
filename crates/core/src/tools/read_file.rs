@@ -12,6 +12,10 @@ const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 pub(super) struct ReadFileTool;
 
 impl AgentTool for ReadFileTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_file".to_string(),

@@ -1,5 +1,265 @@
 use crate::storage::models::AgentActionAuditRecord;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+
+/// Result of atomically claiming an action's one allowed execution attempt.
+///
+/// The action audit primary key is also the durable idempotency key. A caller may execute the
+/// side effect only after receiving [`AgentActionAuditExecutionClaimOutcome::Claimed`]. An
+/// existing claim is deliberately not a lease: after a process crash the action remains claimed
+/// and requires state inspection instead of an unsafe automatic replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentActionAuditExecutionClaimOutcome {
+    Claimed,
+    AlreadyClaimed {
+        status: String,
+        tool_result_json: Option<String>,
+    },
+    IdentityConflict {
+        status: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentActionAuditFinalizationOutcome {
+    Finalized,
+    ClaimMissingOrChanged,
+}
+
+/// Inserts the pre-execution audit receipt if and only if this action has never been claimed.
+///
+/// SQLite enforces the claim through the `action_id` primary key, so this remains atomic across
+/// threads, `StorageService` instances, and processes sharing the database.
+pub fn claim_action_audit_execution(
+    connection: &Connection,
+    record: &AgentActionAuditRecord,
+) -> rusqlite::Result<AgentActionAuditExecutionClaimOutcome> {
+    let inserted = insert_action_audit_record_if_absent(connection, record)?;
+    if inserted {
+        return Ok(AgentActionAuditExecutionClaimOutcome::Claimed);
+    }
+
+    let existing = load_action_audit_record(connection, &record.action_id)?
+        .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
+    let status = existing.status.clone();
+    Ok(if has_same_execution_identity(&existing, record) {
+        AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+            status,
+            tool_result_json: existing.tool_result_json,
+        }
+    } else {
+        AgentActionAuditExecutionClaimOutcome::IdentityConflict { status }
+    })
+}
+
+/// Looks up a durable claim without creating one.
+///
+/// Hosts use this before policy evaluation so a retry can replay an already-final result instead
+/// of manufacturing a second, contradictory result when permissions have since changed.
+pub fn inspect_action_audit_execution(
+    connection: &Connection,
+    record: &AgentActionAuditRecord,
+) -> rusqlite::Result<Option<AgentActionAuditExecutionClaimOutcome>> {
+    let Some(existing) = load_action_audit_record(connection, &record.action_id)? else {
+        return Ok(None);
+    };
+    let status = existing.status.clone();
+    Ok(Some(if has_same_execution_identity(&existing, record) {
+        AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+            status,
+            tool_result_json: existing.tool_result_json,
+        }
+    } else {
+        AgentActionAuditExecutionClaimOutcome::IdentityConflict { status }
+    }))
+}
+
+/// Inserts an immutable audit receipt without replacing any record that already owns the id.
+pub fn insert_action_audit_record_if_absent(
+    connection: &Connection,
+    record: &AgentActionAuditRecord,
+) -> rusqlite::Result<bool> {
+    let changed = connection.execute(
+        "
+        INSERT INTO agent_action_audit (
+            action_id,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            action_type,
+            tool_name,
+            decision,
+            status,
+            action_json,
+            patch_result_json,
+            command_result_json,
+            tool_result_json,
+            error,
+            created_at,
+            decided_at,
+            completed_at,
+            effective_permissions_json,
+            path_scope,
+            command_cwd_scope,
+            blocked_reason,
+            decision_source
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+        ON CONFLICT(action_id) DO NOTHING
+        ",
+        params![
+            &record.action_id,
+            &record.run_id,
+            &record.conversation_id,
+            &record.assistant_message_id,
+            &record.action_type,
+            &record.tool_name,
+            &record.decision,
+            &record.status,
+            &record.action_json,
+            &record.patch_result_json,
+            &record.command_result_json,
+            &record.tool_result_json,
+            &record.error,
+            record.created_at,
+            record.decided_at,
+            record.completed_at,
+            &record.effective_permissions_json,
+            &record.path_scope,
+            &record.command_cwd_scope,
+            &record.blocked_reason,
+            &record.decision_source,
+        ],
+    )?;
+    Ok(changed == 1)
+}
+
+/// Commits a final result only for the exact pre-execution receipt that is still `executing`.
+///
+/// This is intentionally an UPDATE rather than an upsert: a missing receipt, a terminal receipt,
+/// or a receipt with different frozen identity must never be created or overwritten here.
+pub fn finalize_claimed_action_audit_execution(
+    connection: &Connection,
+    record: &AgentActionAuditRecord,
+) -> rusqlite::Result<AgentActionAuditFinalizationOutcome> {
+    let changed = connection.execute(
+        "
+        UPDATE agent_action_audit
+        SET status = ?2,
+            patch_result_json = ?3,
+            command_result_json = ?4,
+            tool_result_json = ?5,
+            error = ?6,
+            completed_at = ?7,
+            blocked_reason = ?8
+        WHERE action_id = ?1
+          AND status = 'executing'
+          AND run_id = ?9
+          AND conversation_id IS ?10
+          AND assistant_message_id IS ?11
+          AND action_type = ?12
+          AND tool_name = ?13
+          AND decision IS ?14
+          AND action_json = ?15
+          AND created_at = ?16
+          AND decided_at IS ?17
+          AND effective_permissions_json IS ?18
+          AND path_scope IS ?19
+          AND command_cwd_scope IS ?20
+          AND decision_source IS ?21
+        ",
+        params![
+            &record.action_id,
+            &record.status,
+            &record.patch_result_json,
+            &record.command_result_json,
+            &record.tool_result_json,
+            &record.error,
+            record.completed_at,
+            &record.blocked_reason,
+            &record.run_id,
+            &record.conversation_id,
+            &record.assistant_message_id,
+            &record.action_type,
+            &record.tool_name,
+            &record.decision,
+            &record.action_json,
+            record.created_at,
+            record.decided_at,
+            &record.effective_permissions_json,
+            &record.path_scope,
+            &record.command_cwd_scope,
+            &record.decision_source,
+        ],
+    )?;
+    Ok(if changed == 1 {
+        AgentActionAuditFinalizationOutcome::Finalized
+    } else {
+        AgentActionAuditFinalizationOutcome::ClaimMissingOrChanged
+    })
+}
+
+fn load_action_audit_record(
+    connection: &Connection,
+    action_id: &str,
+) -> rusqlite::Result<Option<AgentActionAuditRecord>> {
+    connection
+        .query_row(
+            "
+            SELECT action_id, run_id, conversation_id, assistant_message_id, action_type,
+                   tool_name, decision, status, action_json, patch_result_json,
+                   command_result_json, tool_result_json, error, created_at, decided_at,
+                   completed_at, effective_permissions_json, path_scope, command_cwd_scope,
+                   blocked_reason, decision_source
+            FROM agent_action_audit
+            WHERE action_id = ?1
+            ",
+            params![action_id],
+            |row| {
+                Ok(AgentActionAuditRecord {
+                    action_id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    conversation_id: row.get(2)?,
+                    assistant_message_id: row.get(3)?,
+                    action_type: row.get(4)?,
+                    tool_name: row.get(5)?,
+                    decision: row.get(6)?,
+                    status: row.get(7)?,
+                    action_json: row.get(8)?,
+                    patch_result_json: row.get(9)?,
+                    command_result_json: row.get(10)?,
+                    tool_result_json: row.get(11)?,
+                    error: row.get(12)?,
+                    created_at: row.get(13)?,
+                    decided_at: row.get(14)?,
+                    completed_at: row.get(15)?,
+                    effective_permissions_json: row.get(16)?,
+                    path_scope: row.get(17)?,
+                    command_cwd_scope: row.get(18)?,
+                    blocked_reason: row.get(19)?,
+                    decision_source: row.get(20)?,
+                })
+            },
+        )
+        .optional()
+}
+
+fn has_same_execution_identity(
+    existing: &AgentActionAuditRecord,
+    candidate: &AgentActionAuditRecord,
+) -> bool {
+    existing.action_id == candidate.action_id
+        && existing.run_id == candidate.run_id
+        && existing.conversation_id == candidate.conversation_id
+        && existing.assistant_message_id == candidate.assistant_message_id
+        && existing.action_type == candidate.action_type
+        && existing.tool_name == candidate.tool_name
+        && existing.decision == candidate.decision
+        && existing.action_json == candidate.action_json
+        && existing.effective_permissions_json == candidate.effective_permissions_json
+        && existing.path_scope == candidate.path_scope
+        && existing.command_cwd_scope == candidate.command_cwd_scope
+        && existing.decision_source == candidate.decision_source
+}
 
 pub fn upsert_action_audit_record(
     connection: &Connection,
@@ -178,6 +438,131 @@ mod tests {
             .unwrap();
         assert_eq!(status, "completed");
         assert_eq!(decision_source.as_deref(), Some("manual"));
+    }
+
+    #[test]
+    fn execution_claim_is_atomic_and_never_overwrites_the_first_receipt() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+
+        let mut first = AgentActionAuditRecord {
+            action_id: "run-1:action-1".to_string(),
+            run_id: "run-1".to_string(),
+            conversation_id: Some("conversation-1".to_string()),
+            assistant_message_id: Some("message-1".to_string()),
+            action_type: "office_operation".to_string(),
+            tool_name: "office_spreadsheet".to_string(),
+            decision: Some("approved".to_string()),
+            status: "executing".to_string(),
+            action_json: r#"{"operation":"set"}"#.to_string(),
+            patch_result_json: None,
+            command_result_json: None,
+            tool_result_json: None,
+            error: None,
+            created_at: 1,
+            decided_at: Some(1),
+            completed_at: None,
+            effective_permissions_json: None,
+            path_scope: None,
+            command_cwd_scope: None,
+            blocked_reason: None,
+            decision_source: Some("auto".to_string()),
+        };
+        assert_eq!(
+            claim_action_audit_execution(&connection, &first).unwrap(),
+            AgentActionAuditExecutionClaimOutcome::Claimed
+        );
+
+        first.action_json = r#"{"operation":"remove"}"#.to_string();
+        first.created_at = 2;
+        assert_eq!(
+            claim_action_audit_execution(&connection, &first).unwrap(),
+            AgentActionAuditExecutionClaimOutcome::IdentityConflict {
+                status: "executing".to_string()
+            }
+        );
+
+        let (action_json, created_at): (String, i64) = connection
+            .query_row(
+                "SELECT action_json, created_at FROM agent_action_audit WHERE action_id = ?1",
+                params![first.action_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(action_json, r#"{"operation":"set"}"#);
+        assert_eq!(created_at, 1);
+    }
+
+    #[test]
+    fn matching_execution_claim_is_idempotent_and_finalization_is_cas_guarded() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let mut record = AgentActionAuditRecord {
+            action_id: "run-1:action-1".to_string(),
+            run_id: "run-1".to_string(),
+            conversation_id: Some("conversation-1".to_string()),
+            assistant_message_id: Some("message-1".to_string()),
+            action_type: "office_operation".to_string(),
+            tool_name: "office_spreadsheet".to_string(),
+            decision: Some("approved".to_string()),
+            status: "executing".to_string(),
+            action_json: r#"{"operation":"set"}"#.to_string(),
+            patch_result_json: None,
+            command_result_json: None,
+            tool_result_json: None,
+            error: None,
+            created_at: 1,
+            decided_at: Some(1),
+            completed_at: None,
+            effective_permissions_json: Some(r#"{"write":"all"}"#.to_string()),
+            path_scope: Some("external".to_string()),
+            command_cwd_scope: None,
+            blocked_reason: None,
+            decision_source: Some("auto".to_string()),
+        };
+        assert_eq!(
+            claim_action_audit_execution(&connection, &record).unwrap(),
+            AgentActionAuditExecutionClaimOutcome::Claimed
+        );
+
+        let mut retry = record.clone();
+        retry.created_at = 99;
+        retry.decided_at = Some(99);
+        assert_eq!(
+            claim_action_audit_execution(&connection, &retry).unwrap(),
+            AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+                status: "executing".to_string(),
+                tool_result_json: None,
+            }
+        );
+
+        record.status = "completed".to_string();
+        record.tool_result_json = Some(r#"{"ok":true}"#.to_string());
+        record.completed_at = Some(2);
+        assert_eq!(
+            finalize_claimed_action_audit_execution(&connection, &record).unwrap(),
+            AgentActionAuditFinalizationOutcome::Finalized
+        );
+        assert_eq!(
+            finalize_claimed_action_audit_execution(&connection, &record).unwrap(),
+            AgentActionAuditFinalizationOutcome::ClaimMissingOrChanged
+        );
+
+        let persisted = load_action_audit_record(&connection, &record.action_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, "completed");
+        assert_eq!(persisted.tool_result_json, record.tool_result_json);
+        assert_eq!(persisted.created_at, 1);
+
+        retry.status = "executing".to_string();
+        assert_eq!(
+            claim_action_audit_execution(&connection, &retry).unwrap(),
+            AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+                status: "completed".to_string(),
+                tool_result_json: Some(r#"{"ok":true}"#.to_string()),
+            }
+        );
     }
 
     #[test]

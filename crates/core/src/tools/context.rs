@@ -22,6 +22,7 @@ pub struct ToolExecutionContext {
     run_id: Option<String>,
     storage: Option<Arc<StorageService>>,
     text_output_budget: ContextTextBudget,
+    skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
 }
 
 impl ToolExecutionContext {
@@ -47,6 +48,7 @@ impl ToolExecutionContext {
             run_id: None,
             storage: None,
             text_output_budget: ContextTextBudget::heuristic_default(),
+            skill_resources: None,
         }
     }
 
@@ -67,6 +69,14 @@ impl ToolExecutionContext {
 
     pub(crate) fn with_text_output_budget(mut self, budget: ContextTextBudget) -> Self {
         self.text_output_budget = budget;
+        self
+    }
+
+    pub(crate) fn with_skill_resources(
+        mut self,
+        resources: Option<Arc<crate::skills::SkillResourceSession>>,
+    ) -> Self {
+        self.skill_resources = resources;
         self
     }
 
@@ -108,6 +118,14 @@ impl ToolExecutionContext {
         self.permissions
     }
 
+    /// Returns the registered attachment capabilities for trusted tool
+    /// adapters that perform their own purpose-aware path authorization.
+    /// Callers must still resolve an attachment by its exact backend-issued
+    /// `readPath`; this accessor does not grant generic filesystem access.
+    pub(super) fn attachment_library(&self) -> Option<&AgentAttachmentLibraryContext> {
+        self.attachment_library.as_ref()
+    }
+
     pub(super) fn conversation_id(&self) -> AgentResult<&str> {
         self.conversation_id
             .as_deref()
@@ -128,6 +146,12 @@ impl ToolExecutionContext {
         self.storage
             .as_ref()
             .ok_or_else(|| AgentError::new("当前 host 未提供会话存储服务。"))
+    }
+
+    pub(super) fn skill_resources(&self) -> AgentResult<&Arc<crate::skills::SkillResourceSession>> {
+        self.skill_resources.as_ref().ok_or_else(|| {
+            AgentError::new("当前运行没有激活可访问资源的 Skill；请先选择并激活一个 Skill。")
+        })
     }
 
     pub(super) fn resolve_existing_path(&self, input_path: &str) -> AgentResult<PathBuf> {

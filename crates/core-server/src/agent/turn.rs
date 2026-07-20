@@ -36,6 +36,7 @@ impl AgentService {
         let worker_assistant_message_id = output.assistant_message_id.clone();
         let worker_assistant_created_at = output.assistant_message.created_at;
         let pending_agent_input = prepared.agent_input.clone();
+        let skill_resources = prepared.skill_resources.clone();
 
         tokio::spawn(async move {
             let emitter_notifications = notifications.clone();
@@ -91,6 +92,7 @@ impl AgentService {
                 worker_run_id.clone(),
                 Some(worker_conversation_id.clone()),
                 Some(worker_assistant_message_id.clone()),
+                skill_resources.clone(),
             );
             let trace_observer = service.trace_observer(
                 &worker_run_id,
@@ -112,11 +114,15 @@ impl AgentService {
                 &worker_conversation_id,
                 &worker_assistant_message_id,
             );
-            let host_services = AgentRuntimeHostServices::new()
+            let mut host_services = AgentRuntimeHostServices::new()
                 .with_host_actions(host_executor, service.storage.clone())
+                .with_office_engine(service.office_engine.clone())
                 .with_trace_observer(trace_observer)
                 .with_model_request_observer(model_request_observer)
                 .with_context_compaction(context_compaction_services);
+            if let Some(resources) = skill_resources {
+                host_services = host_services.with_skill_resources(resources);
+            }
             let result = send_chat_with_host_services(
                 prepared.agent_input,
                 worker_run_id.clone(),

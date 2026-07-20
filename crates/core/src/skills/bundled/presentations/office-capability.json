@@ -1,0 +1,6 @@
+{
+  "contractVersion": 1,
+  "engine": "officecli",
+  "tool": "office_presentation",
+  "extensions": [".pptx"]
+}

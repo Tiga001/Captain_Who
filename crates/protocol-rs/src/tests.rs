@@ -625,6 +625,45 @@ fn skill_installation_workflow_requests_are_strict_discriminated_unions() {
 }
 
 #[test]
+fn office_status_contract_is_strict_and_uses_the_stable_method() {
+    assert_eq!(OFFICE_GET_STATUS_METHOD, "office.getStatus");
+
+    let status = serde_json::from_value::<OfficeEngineStatusDto>(serde_json::json!({
+        "schemaVersion": OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
+        "providerId": "officecli",
+        "availability": "available",
+        "source": "packagedComponent",
+        "version": "OfficeCLI 1.2.3",
+        "engineRevision": "office-engine-sha256-v1:abc",
+        "capabilities": {
+            "providerId": "officecli",
+            "documentKinds": ["document", "spreadsheet", "presentation"],
+            "operations": ["help", "create", "validate"],
+            "supportsRendering": true,
+            "supportsValidation": true,
+            "supportsStructuredOutput": true
+        }
+    }))
+    .expect("valid Office status must deserialize");
+    assert_eq!(status.availability, OfficeEngineAvailabilityDto::Available);
+    assert_eq!(
+        status.source,
+        Some(OfficeEngineSourceDto::PackagedComponent)
+    );
+
+    let mut unknown_field = serde_json::to_value(&status).unwrap();
+    unknown_field.as_object_mut().unwrap().insert(
+        "executablePath".to_string(),
+        serde_json::json!("/secret/path"),
+    );
+    assert!(serde_json::from_value::<OfficeEngineStatusDto>(unknown_field).is_err());
+
+    let mut unknown_enum = serde_json::to_value(&status).unwrap();
+    unknown_enum["availability"] = serde_json::json!("degraded");
+    assert!(serde_json::from_value::<OfficeEngineStatusDto>(unknown_enum).is_err());
+}
+
+#[test]
 fn disabled_skill_activation_has_a_stable_reject_selection_contract() {
     let data = SkillActivationErrorData {
         error_type: "skillActivation",

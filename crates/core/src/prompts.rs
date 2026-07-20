@@ -1,3 +1,4 @@
+use crate::file_write::{file_write_approval_route, FileWriteApprovalRoute};
 use crate::protocol::{
     AgentCommandPermission, AgentCommandSafetyPolicy, AgentPromptPreferences, AgentPromptTone,
     AgentPromptWorkMode, AgentReadPermission, AgentRunContext, AgentToolDefinition,
@@ -165,10 +166,10 @@ fn permission_policy_section(context: Option<&AgentRunContext>) -> String {
     };
     let patch = match permissions.patch {
         crate::protocol::AgentPatchPermission::RequireApproval => {
-            "require_approval（apply_patch 每次应用前必须等待用户审批）"
+            "require_approval（所有结构化文件写入在实际应用前必须等待用户审批）"
         }
         crate::protocol::AgentPatchPermission::AutoApprove => {
-            "auto_approve（apply_patch 由 host 自动审批；不会扩大 write 允许的范围）"
+            "auto_approve（所有结构化文件写入由 host 自动审批；不会扩大 write 允许的范围）"
         }
     };
 
@@ -185,8 +186,8 @@ fn permission_policy_section(context: Option<&AgentRunContext>) -> String {
         - command=auto_approve：允许 host 自动执行策略判定可自动运行的命令；guarded 下的高影响命令仍会转为人工审批。\n\
         - commandSafety=guarded：自动执行只覆盖低风险命令；高影响命令需要用户对精确请求单次批准；被 host 策略识别为灾难性或不支持的命令始终拒绝。\n\
         - commandSafety=full_access：允许自动执行高影响命令；仍不绕过 host 可识别的灾难性操作、路径范围、输入形状、超时、取消和工具能力边界。\n\
-        - patch=require_approval：apply_patch 可以提出，但必须由用户批准后应用。\n\
-        - patch=auto_approve：apply_patch 由 host 自动批准；write=denied 时仍然禁止写入，也不会扩大 write 的路径范围。\n\
+        - patch=require_approval：结构化文件写入可以提出，但必须由用户批准后应用。\n\
+        - patch=auto_approve：结构化文件写入由 host 自动批准；write=denied 时仍然禁止写入，也不会扩大 write 的路径范围。\n\
         当前生效权限：\n\
         - 读取：{read}。\n\
         - 写入：{write}。\n\
@@ -228,15 +229,19 @@ fn approval_policy_section(context: Option<&AgentRunContext>) -> String {
         }
         _ => "- 当前 run_command 每次都需要审批；用户批准前不能声称已经执行。",
     };
-    let patch_rule = if context
-        .map(|context| {
-            context.permissions.patch == crate::protocol::AgentPatchPermission::AutoApprove
-        })
-        .unwrap_or(false)
+    let patch_rule = match context
+        .map(|context| file_write_approval_route(context.permissions))
+        .unwrap_or(FileWriteApprovalRoute::Denied)
     {
-        "- 当前 apply_patch 使用自动审批；host 返回 tool result 后再继续，不要生成独立 approval。"
-    } else {
-        "- 当前 apply_patch 需要审批；用户批准前不能声称已经应用。"
+        FileWriteApprovalRoute::Denied => {
+            "- 当前禁止文件写入；不得调用或变相调用任何会落盘的工具。"
+        }
+        FileWriteApprovalRoute::RequireExplicitApproval => {
+            "- 当前结构化文件写入工具需要审批；用户批准前不能声称已经应用。"
+        }
+        FileWriteApprovalRoute::AutoApprove => {
+            "- 当前结构化文件写入请求使用自动审批；host 返回 tool result 后再继续，不要生成独立 approval。若当前运行环境没有 host 写入执行能力，则不能声称已经应用。"
+        }
     };
 
     format!(
@@ -766,5 +771,34 @@ mod tests {
         assert!(prompt.contains("当前没有 workspace，但这不等于不能处理本地文件"));
         assert!(prompt.contains("用户说“桌面”时直接使用 @desktop"));
         assert!(prompt.contains("不要询问用户名或完整主目录路径"));
+    }
+
+    #[test]
+    fn approval_guidance_uses_the_effective_file_write_route() {
+        let denied_context = AgentRunContext {
+            conversation_id: None,
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: crate::protocol::AgentPermissions {
+                write: AgentWritePermission::Denied,
+                patch: crate::protocol::AgentPatchPermission::AutoApprove,
+                ..Default::default()
+            },
+        };
+        let denied = build_system_prompt(Some(&denied_context), None, &[]);
+        assert!(denied.contains("当前禁止文件写入"));
+        assert!(!denied.contains("当前结构化文件写入请求使用自动审批"));
+
+        let automatic_context = AgentRunContext {
+            permissions: crate::protocol::AgentPermissions {
+                write: AgentWritePermission::WorkspaceOnly,
+                patch: crate::protocol::AgentPatchPermission::AutoApprove,
+                ..Default::default()
+            },
+            ..denied_context
+        };
+        let automatic = build_system_prompt(Some(&automatic_context), None, &[]);
+        assert!(automatic.contains("当前结构化文件写入请求使用自动审批"));
     }
 }

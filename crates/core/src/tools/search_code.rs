@@ -10,6 +10,10 @@ use std::fs;
 pub(super) struct SearchCodeTool;
 
 impl AgentTool for SearchCodeTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "search_code".to_string(),

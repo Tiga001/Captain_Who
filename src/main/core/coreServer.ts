@@ -20,6 +20,7 @@ import type {
   AgentUsageSummaryInput,
   AgentUsageSummaryOutput,
   PendingAgentActionSnapshot,
+  OfficeEngineStatus,
   CorePingRequest,
   CorePingResponse,
   CoreShutdownResponse,
@@ -99,6 +100,8 @@ import {
   SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD,
   SKILLS_SET_ENABLED_METHOD,
   SKILL_SOURCE_RESOLUTION_ERROR_CODE,
+  OFFICE_GET_STATUS_METHOD,
+  parseOfficeEngineStatus,
   SKILLS_UNINSTALL_METHOD,
   SKILLS_UPDATE_LOCAL_METHOD
 } from '@mycopilot/protocol'
@@ -232,6 +235,10 @@ export class CoreServer {
 
   ping(input?: CorePingRequest): Promise<CorePingResponse> {
     return this.rpc.request<CorePingResponse, CorePingRequest>(CORE_PING_METHOD, input ?? {})
+  }
+
+  getOfficeStatus(): Promise<OfficeEngineStatus> {
+    return this.rpc.request<unknown>(OFFICE_GET_STATUS_METHOD).then(parseOfficeEngineStatus)
   }
 
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput> {

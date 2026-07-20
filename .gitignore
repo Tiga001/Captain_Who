@@ -15,5 +15,7 @@ coverage
 
 .pnpm-store/
 
+.cache/officecli/
+
 __pycache__/
 *.pyc

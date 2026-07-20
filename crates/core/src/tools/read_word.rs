@@ -10,6 +10,10 @@ use serde_json::{json, Value};
 pub(super) struct ReadWordTool;
 
 impl AgentTool for ReadWordTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_word".to_string(),

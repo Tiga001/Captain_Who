@@ -47,7 +47,7 @@ export class CoreJsonRpcClient {
     const command = this.resolveCommand()
     this.child = spawn(command.executable, command.args, {
       cwd: command.cwd,
-      env: process.env,
+      env: this.resolveEnvironment(),
       stdio: 'pipe'
     })
 
@@ -205,5 +205,31 @@ export class CoreJsonRpcClient {
       args: [],
       cwd: process.resourcesPath
     }
+  }
+
+  private resolveEnvironment(): NodeJS.ProcessEnv {
+    const configuredOfficeCliPath = process.env.MYCOPILOT_OFFICECLI_PATH
+    const configuredComponentsDirectory = process.env.MYCOPILOT_OFFICE_COMPONENTS_DIR
+    const environment = { ...process.env }
+    if (configuredOfficeCliPath !== undefined || configuredComponentsDirectory !== undefined) {
+      return environment
+    }
+
+    if (app.isPackaged) {
+      // Let the Rust discovery layer resolve the canonical component layout so status reports the
+      // provider as an application-packaged component rather than as a user override.
+      environment.MYCOPILOT_OFFICE_COMPONENTS_DIR = join(process.resourcesPath, 'components')
+    } else {
+      const executableName = process.platform === 'win32' ? 'officecli.exe' : 'officecli'
+      environment.MYCOPILOT_OFFICECLI_PATH = join(
+        __dirname,
+        '../..',
+        '.cache',
+        'officecli',
+        'current',
+        executableName
+      )
+    }
+    return environment
   }
 }

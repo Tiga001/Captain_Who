@@ -4,6 +4,11 @@ pub(crate) struct PreparedConversationTurn {
     pub(crate) output: AgentConversationTurnOutput,
     pub(crate) agent_input: AgentChatInput,
     pub(crate) usage_context: AgentRunUsageContext,
+    /// Exact, run-scoped access to sibling resources of the activated Skill
+    /// revisions. This authority is host-only and is deliberately not
+    /// serialized into `AgentChatInput`.
+    pub(crate) skill_resources:
+        Option<std::sync::Arc<mycopilot_core::skills::SkillResourceSession>>,
 }
 
 pub(crate) fn prepare_conversation_turn(
@@ -195,6 +200,7 @@ pub(crate) fn prepare_conversation_turn(
     };
 
     Ok(PreparedConversationTurn {
+        skill_resources: prepared_skills.resources,
         usage_context: AgentRunUsageContext {
             conversation_id: conversation_id.clone(),
             assistant_message_id: assistant_message_id.clone(),

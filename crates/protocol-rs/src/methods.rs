@@ -1,5 +1,6 @@
 pub const CORE_PING_METHOD: &str = "core.ping";
 pub const CORE_SHUTDOWN_METHOD: &str = "core.shutdown";
+pub const OFFICE_GET_STATUS_METHOD: &str = "office.getStatus";
 pub const AGENT_CANCEL_RUN_METHOD: &str = "agent.cancelRun";
 pub const AGENT_START_CONVERSATION_TURN_METHOD: &str = "agent.startConversationTurn";
 pub const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD: &str = "agent.getContextWindowSnapshot";

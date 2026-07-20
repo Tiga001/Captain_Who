@@ -493,6 +493,13 @@ impl ConversationTraceRecorder {
                 (&file_write.id, file_write.approval_status)
             }
             AgentProposedAction::Command { command } => (&command.id, command.approval_status),
+            AgentProposedAction::SkillMaterialization { materialization } => {
+                (&materialization.id, materialization.approval_status)
+            }
+            AgentProposedAction::SkillScript { script } => (&script.id, script.approval_status),
+            AgentProposedAction::OfficeOperation { office_operation } => {
+                (&office_operation.id, office_operation.approval_status)
+            }
             AgentProposedAction::ToolCall { call } => (&call.id, call.approval_status),
         };
         if let Some(ConversationTurnTraceItem::ToolCall {

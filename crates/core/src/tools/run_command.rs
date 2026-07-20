@@ -14,6 +14,10 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 pub(super) struct RunCommandTool;
 
 impl AgentTool for RunCommandTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "run_command".to_string(),

@@ -204,16 +204,10 @@ pub(super) fn run_shell_command(
                 .map_err(|error| format!("等待已取消命令失败：{error}"))?;
         }
 
-        match child
-            .try_wait()
+        match try_wait_command_process_group(&mut child)
             .map_err(|error| format!("等待命令失败：{error}"))?
         {
-            Some(status) => {
-                // A command may spawn descendants which keep stdout/stderr pipes open after the
-                // shell exits. Clean the dedicated group before joining reader threads.
-                terminate_command_process_group(&mut child);
-                break status;
-            }
+            Some(status) => break status,
             None if started.elapsed() >= deadline => {
                 timed_out = true;
                 terminate_command_process_group(&mut child);
@@ -252,7 +246,7 @@ pub(super) fn command_cancel_requested(
         || action_cancel_flag.is_some_and(|flag| flag.load(Ordering::SeqCst))
 }
 
-pub(super) fn spawn_bounded_output_reader<R>(
+pub(crate) fn spawn_bounded_output_reader<R>(
     mut reader: R,
 ) -> thread::JoinHandle<std::io::Result<(String, bool)>>
 where
@@ -280,7 +274,7 @@ where
     })
 }
 
-pub(super) fn join_output_reader(
+pub(crate) fn join_output_reader(
     reader: thread::JoinHandle<std::io::Result<(String, bool)>>,
     stream: &str,
 ) -> Result<(String, bool), String> {
@@ -290,17 +284,61 @@ pub(super) fn join_output_reader(
         .map_err(|error| format!("读取命令 {stream} 失败：{error}"))
 }
 
+/// Observes a completed process-group leader, terminates any surviving descendants, and only then
+/// reaps the leader.
+///
+/// `Child::try_wait` reaps on Unix. Calling `killpg(child.id())` afterwards can therefore race PID
+/// reuse and signal an unrelated process group under parallel load. `waitid(..., WNOWAIT)` leaves
+/// the exited leader as a zombie, which pins its PID/process-group identity until cleanup is sent
+/// and `Child::wait` performs the authoritative reap.
 #[cfg(unix)]
-pub(super) fn configure_command_process_group(command: &mut Command) {
+pub(crate) fn try_wait_command_process_group(
+    child: &mut Child,
+) -> std::io::Result<Option<ExitStatus>> {
+    let mut information = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    // SAFETY: `information` points to writable storage for one siginfo_t. The child PID belongs to
+    // this process, and WNOWAIT intentionally preserves its waitable state for `Child::wait`.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            information.as_mut_ptr(),
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a successful waitid call initializes the siginfo_t. POSIX specifies si_pid == 0
+    // when WNOHANG finds no waitable child state.
+    let information = unsafe { information.assume_init() };
+    // SAFETY: si_pid is defined for SIGCHLD information returned by waitid with WEXITED.
+    if unsafe { information.si_pid() } == 0 {
+        return Ok(None);
+    }
+
+    terminate_command_process_group(child);
+    child.wait().map(Some)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn try_wait_command_process_group(
+    child: &mut Child,
+) -> std::io::Result<Option<ExitStatus>> {
+    child.try_wait()
+}
+
+#[cfg(unix)]
+pub(crate) fn configure_command_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
 
 #[cfg(not(unix))]
-pub(super) fn configure_command_process_group(_command: &mut Command) {}
+pub(crate) fn configure_command_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
-pub(super) fn terminate_command_process_group(child: &mut Child) {
+pub(crate) fn terminate_command_process_group(child: &mut Child) {
     let Ok(process_group) = i32::try_from(child.id()) else {
         let _ = child.kill();
         return;
@@ -316,7 +354,7 @@ pub(super) fn terminate_command_process_group(child: &mut Child) {
 }
 
 #[cfg(not(unix))]
-pub(super) fn terminate_command_process_group(child: &mut Child) {
+pub(crate) fn terminate_command_process_group(child: &mut Child) {
     // Defensive fallback for internal plumbing only. The authorized public entry point fails
     // closed on Windows until a Job Object can provide equivalent descendant cleanup.
     let _ = child.kill();

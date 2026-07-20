@@ -15,6 +15,10 @@ const THUMBNAIL_MAX_EDGE: u32 = 160;
 pub(super) struct ReadImageTool;
 
 impl AgentTool for ReadImageTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_image".to_string(),

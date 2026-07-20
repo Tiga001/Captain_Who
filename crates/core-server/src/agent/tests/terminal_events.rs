@@ -10,10 +10,13 @@ fn automatic_and_explicit_user_server_paths_use_distinct_authorization_sources()
     let automatic_request = command_request("automatic-command", "mkdir automatic-blocked");
     let automatic_result = service
         .execute_auto_approved_action(
-            input.clone(),
-            "run-automatic-command".to_string(),
-            None,
-            None,
+            AutoApprovedActionContext::new(
+                input.clone(),
+                "run-automatic-command".to_string(),
+                None,
+                None,
+                None,
+            ),
             AgentProposedAction::Command {
                 command: automatic_request,
             },
@@ -39,10 +42,13 @@ fn automatic_and_explicit_user_server_paths_use_distinct_authorization_sources()
         command_request("automatic-full-access", "mkdir automatic-full-access");
     let full_access_result = service
         .execute_auto_approved_action(
-            full_access_input,
-            "run-automatic-full-access".to_string(),
-            None,
-            None,
+            AutoApprovedActionContext::new(
+                full_access_input,
+                "run-automatic-full-access".to_string(),
+                None,
+                None,
+                None,
+            ),
             AgentProposedAction::Command {
                 command: full_access_request,
             },

@@ -561,10 +561,6 @@ async fn two_phase_rpc_runs_install_update_activation_and_uninstall_end_to_end()
         );
         assert_eq!(
             install_preview["result"]["compatibility"]["issues"][0]["id"],
-            "resourcesNotExposed"
-        );
-        assert_eq!(
-            install_preview["result"]["compatibility"]["issues"][1]["id"],
             "containsScripts"
         );
 

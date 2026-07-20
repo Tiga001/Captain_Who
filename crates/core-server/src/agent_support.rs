@@ -22,9 +22,9 @@ use mycopilot_core::{
     AgentInputAttachmentKind, AgentPatchResult, AgentPatchResultStatus, AgentPermissions,
     AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
     AgentProposedAction, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
-    AgentToolCall, AgentToolResult, AgentUsage, AgentWorkspaceContext,
-    ContextCompactionAuditBundle, ContextJournalCursor, ConversationTurnTrace,
-    ConversationTurnTraceTerminalStatus,
+    AgentSkillMaterializationRequest, AgentSkillScriptRequest, AgentToolCall, AgentToolResult,
+    AgentUsage, AgentWorkspaceContext, ContextCompactionAuditBundle, ContextJournalCursor,
+    ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
 };
 use mycopilot_protocol_rs::{
     ActivatedSkillSummaryDto, SkillActivationErrorData, SkillSelectionDto,

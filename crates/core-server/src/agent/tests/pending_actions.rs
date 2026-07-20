@@ -243,6 +243,7 @@ fn terminal_pending_action_persistence_redacts_only_skill_instruction_bodies() {
             revision: "package-revision".to_string(),
             source: "bundled:application".to_string(),
             instructions: MARKER.to_string(),
+            resources: None,
         }],
     });
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
@@ -388,6 +389,7 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
             revision: "package-missing-row".to_string(),
             source: "bundled:application".to_string(),
             instructions: MARKER.to_string(),
+            resources: None,
         }],
     });
     let call = AgentToolCall {
@@ -464,6 +466,7 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
             revision: "package-cancel-rollback".to_string(),
             source: "bundled:application".to_string(),
             instructions: MARKER.to_string(),
+            resources: None,
         }],
     });
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {

@@ -632,18 +632,10 @@ pub(super) fn build_preview(
         }
     }
     let mut warnings = Vec::new();
-    if resources.resource_count > 0 {
-        warnings.push(SkillInstallationWarning {
-            code: SkillInstallationWarningCode::ResourcesNotExposed,
-            message: "This version preserves sibling Skill files but does not yet expose them to the agent runtime. Instructions that depend on those files may not work."
-                .to_string(),
-            acknowledgement_required: false,
-        });
-    }
     if resources.script_count > 0 {
         warnings.push(SkillInstallationWarning {
             code: SkillInstallationWarningCode::ContainsScripts,
-            message: "This Skill contains script files. They are installed as inert resources and are never executed automatically."
+            message: "This Skill contains executable scripts. Activation alone never runs them; each execution is revision-bound, dependency-checked, and subject to the current command approval policy."
                 .to_string(),
             acknowledgement_required: true,
         });

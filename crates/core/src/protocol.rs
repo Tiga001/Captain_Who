@@ -68,6 +68,19 @@ pub struct AgentActivatedSkill {
     pub revision: String,
     pub source: String,
     pub instructions: String,
+    /// Lightweight discovery hint for the run-scoped Resource Runtime. The
+    /// resource index and bytes remain behind the host capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<AgentActivatedSkillResources>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivatedSkillResources {
+    pub root_uri: String,
+    pub resource_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
 }
 
 impl std::fmt::Debug for AgentActivatedSkill {
@@ -79,6 +92,7 @@ impl std::fmt::Debug for AgentActivatedSkill {
             .field("revision", &self.revision)
             .field("source", &self.source)
             .field("instructions_bytes", &self.instructions.len())
+            .field("resources", &self.resources)
             .finish()
     }
 }
@@ -337,11 +351,12 @@ pub enum AgentCommandSafetyPolicy {
     FullAccess,
 }
 
-/// Controls whether file edit proposals require a human click.
+/// Controls whether structured file-write proposals require a human click.
 ///
 /// `AutoApprove` only skips the approval prompt. It still runs through the same safe patch
-/// executor, write scope checks, symlink/path traversal checks, and revision conflict checks as
-/// manual approval.
+/// or document executor, write scope checks, path checks, and revision conflict checks as manual
+/// approval. This policy covers every tool registered in the file-write permission domain,
+/// including Office document writers.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentPatchPermission {
@@ -717,6 +732,70 @@ pub enum AgentFileWriteResultStatus {
     AlreadyApplied,
 }
 
+/// Result status for a revision-bound Skill resource materialization.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSkillMaterializationResultStatus {
+    Applied,
+    AlreadyApplied,
+    Conflict,
+    Rejected,
+    Failed,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSkillScriptInterpreter {
+    Python3,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSkillScriptPreflightStatus {
+    Ready,
+    MissingDependencies,
+    Unsupported,
+    Conflict,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSkillDependencyKind {
+    PythonDistribution,
+    Command,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSkillDependencyStatus {
+    Available,
+    Missing,
+}
+
+/// Version of the persisted, approval-gated Office action envelope.
+///
+/// Version 2 binds the action to the permission-aware Office prepared-execution
+/// schema. Persisted version 1 actions must be prepared again instead of being
+/// interpreted with the broader external-path semantics.
+pub const AGENT_OFFICE_OPERATION_SCHEMA_VERSION: u32 = 2;
+
+/// Wire contract for an approval-gated Office mutation.
+///
+/// The prepared execution is produced by the trusted Office adapter before an
+/// approval is requested. It contains only a normalized, shell-free operation
+/// plan and immutable preconditions; executable paths and environment values
+/// are deliberately excluded from the persisted action.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentOfficeOperationRequest {
+    pub schema_version: u32,
+    pub id: String,
+    pub prepared: crate::office::OfficePreparedExecution,
+    pub approval_status: AgentApprovalStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTodoStatus {
@@ -947,6 +1026,128 @@ pub struct AgentCommandRequest {
     pub reason: Option<String>,
 }
 
+/// Frozen request to copy one immutable Skill resource, or one resource-tree
+/// prefix, into the selected workspace.
+///
+/// The source is a logical `skill://` URI. Managed-store paths and resource
+/// bytes never cross the runtime action protocol.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillMaterializationRequest {
+    pub id: String,
+    pub source_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_prefix: Option<String>,
+    pub destination: String,
+    pub approval_status: AgentApprovalStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillMaterializationResult {
+    pub status: AgentSkillMaterializationResultStatus,
+    pub source_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_prefix: Option<String>,
+    pub destination: String,
+    pub source_revision: String,
+    pub file_count: u64,
+    pub byte_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Declarative runtime requirements used only for dependency discovery. They
+/// never grant permissions and never trigger dependency installation.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentSkillScriptRequirements {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub python_distributions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillDependencyCheck {
+    pub kind: AgentSkillDependencyKind,
+    pub name: String,
+    pub status: AgentSkillDependencyStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillScriptPreflightReport {
+    pub status: AgentSkillScriptPreflightStatus,
+    pub interpreter: AgentSkillScriptInterpreter,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interpreter_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<AgentSkillDependencyCheck>,
+    pub runtime_fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Frozen, revision-bound Skill script request. The script URI and digest
+/// identify immutable package bytes; arguments remain a structured argv and
+/// are never converted to a shell command.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillScriptRequest {
+    pub id: String,
+    pub script_uri: String,
+    pub skill_id: String,
+    pub skill_revision: String,
+    pub resource_path: String,
+    pub resource_digest: String,
+    pub interpreter: AgentSkillScriptInterpreter,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub requirements: AgentSkillScriptRequirements,
+    pub preflight: AgentSkillScriptPreflightReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    pub approval_status: AgentApprovalStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillScriptResult {
+    pub script_uri: String,
+    pub skill_id: String,
+    pub skill_revision: String,
+    pub resource_digest: String,
+    pub preflight: AgentSkillScriptPreflightReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+    pub cancelled: bool,
+    pub duration_ms: u64,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(
     tag = "type",
@@ -954,10 +1155,27 @@ pub struct AgentCommandRequest {
     rename_all_fields = "camelCase"
 )]
 pub enum AgentProposedAction {
-    ToolCall { call: AgentToolCall },
-    Diff { diff: AgentDiffProposal },
-    FileWrite { file_write: AgentFileWriteProposal },
-    Command { command: AgentCommandRequest },
+    ToolCall {
+        call: AgentToolCall,
+    },
+    Diff {
+        diff: AgentDiffProposal,
+    },
+    FileWrite {
+        file_write: AgentFileWriteProposal,
+    },
+    Command {
+        command: AgentCommandRequest,
+    },
+    SkillMaterialization {
+        materialization: AgentSkillMaterializationRequest,
+    },
+    SkillScript {
+        script: Box<AgentSkillScriptRequest>,
+    },
+    OfficeOperation {
+        office_operation: Box<AgentOfficeOperationRequest>,
+    },
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1287,6 +1505,7 @@ mod tests {
                 revision: "skill-sha256-v1:test".to_string(),
                 source: "workspace".to_string(),
                 instructions: "PRIVATE_SKILL_INSTRUCTIONS".to_string(),
+                resources: None,
             }],
         };
 

@@ -11,6 +11,9 @@ use super::model::{
 };
 use super::package::PackageManifest;
 use super::parser::parse_skill_document;
+use super::resource_runtime::{
+    SkillResourceError, SkillResourceSession, SkillResourceSessionBinding,
+};
 use super::source::{SkillSource, WorkspaceSkillSource};
 use super::workspace::{
     percent_encode, AGENTS_DIRECTORY, MAX_SKILL_FILE_BYTES, SKILLS_DIRECTORY, SKILL_FILE_NAME,
@@ -198,6 +201,112 @@ impl SkillsService {
             revision,
             total_source_bytes,
         ))
+    }
+
+    /// Create immutable resource grants for an already activated Skill set.
+    ///
+    /// The returned session captures only exact package ids, revisions,
+    /// descriptors, and source-owned readers. It never stores resource bytes
+    /// in Agent input and never follows a later installation receipt.
+    pub fn resource_session(
+        &self,
+        activated: &ActivatedSkillSet,
+    ) -> Result<SkillResourceSession, SkillResourceError> {
+        let mut bindings = Vec::with_capacity(activated.skills().len());
+        for package in activated.skills() {
+            let source_id = package.id().source_id();
+            // Instruction-only packages need no source-owned byte authority.
+            // This also keeps request-scoped workspace Skills usable after
+            // their temporary source has finished activation. If a future
+            // workspace package exposes siblings, it must take the normal
+            // reader path below and remain bound to that scoped source.
+            if package.resources().is_empty() {
+                bindings.push(SkillResourceSessionBinding {
+                    skill_id: package.id().clone(),
+                    revision: package.revision().clone(),
+                    source_id: source_id.clone(),
+                    resources: package.resources().clone(),
+                    reader: None,
+                });
+                continue;
+            }
+            let source = self.registry.get(source_id).ok_or_else(|| {
+                SkillResourceError::SnapshotUnavailable {
+                    skill_id: package.id().clone(),
+                    revision: package.revision().clone(),
+                    reason: format!("Skill source `{source_id}` is not registered"),
+                }
+            })?;
+            validate_descriptor_contract(source.as_ref(), package.descriptor()).map_err(
+                |reason| SkillResourceError::SourceContractViolation {
+                    source_id: source_id.clone(),
+                    reason,
+                },
+            )?;
+            let reader = source.open_resource_reader(package)?;
+            bindings.push(SkillResourceSessionBinding {
+                skill_id: package.id().clone(),
+                revision: package.revision().clone(),
+                source_id: source_id.clone(),
+                resources: package.resources().clone(),
+                reader,
+            });
+        }
+        SkillResourceSession::from_bindings(bindings)
+    }
+
+    /// Restore run-scoped resource grants from persisted activated id +
+    /// revision metadata, such as a pending approval after process restart.
+    ///
+    /// Installed sources reopen the immutable content-addressed revision
+    /// directly. The current receipt is deliberately not consulted, so an
+    /// update or uninstall cannot redirect a restored grant to different
+    /// bytes.
+    pub fn restore_resource_session(
+        &self,
+        selections: &[SkillSelection],
+    ) -> Result<SkillResourceSession, SkillResourceError> {
+        if selections.len() > self.activation_policy.max_skills() {
+            return Err(SkillResourceError::InvalidRequest {
+                reason: format!(
+                    "cannot restore {} Skill resource bindings; the limit is {}",
+                    selections.len(),
+                    self.activation_policy.max_skills()
+                ),
+            });
+        }
+        let mut seen = BTreeSet::new();
+        let mut bindings = Vec::with_capacity(selections.len());
+        for selection in selections {
+            if !seen.insert(selection.skill_id().clone()) {
+                return Err(SkillResourceError::InvalidRequest {
+                    reason: format!(
+                        "Skill `{}` appears more than once in restored activation metadata",
+                        selection.skill_id()
+                    ),
+                });
+            }
+            let source_id = selection.skill_id().source_id();
+            let source = self.registry.get(source_id).ok_or_else(|| {
+                SkillResourceError::SnapshotUnavailable {
+                    skill_id: selection.skill_id().clone(),
+                    revision: selection.expected_revision().clone(),
+                    reason: format!("Skill source `{source_id}` is not registered"),
+                }
+            })?;
+            let binding = source.restore_resource_binding(selection)?;
+            if binding.skill_id != *selection.skill_id()
+                || binding.revision != *selection.expected_revision()
+                || binding.source_id != *source_id
+            {
+                return Err(SkillResourceError::SourceContractViolation {
+                    source_id: source_id.clone(),
+                    reason: "source restored a different Skill id or revision".to_string(),
+                });
+            }
+            bindings.push(binding);
+        }
+        SkillResourceSession::from_bindings(bindings)
     }
 
     /// Compatibility adapter for request-scoped workspace lookup.

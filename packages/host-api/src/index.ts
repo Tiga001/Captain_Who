@@ -15,6 +15,7 @@ import type {
   AgentFileWriteDiffInput,
   AgentFileWriteDiffPage,
   PendingAgentActionSnapshot,
+  OfficeEngineStatus,
   AgentRejectActionRequest,
   AgentUsageClearInput,
   AgentUsageClearOutput,
@@ -88,6 +89,11 @@ export interface AttachmentsHostApi {
 
 export interface BrowserHostApi {
   clearBrowsingData(): Promise<void>
+}
+
+export interface OfficeHostApi {
+  /** Probes the Office engine shared by Agent tools. */
+  getStatus(): Promise<OfficeEngineStatus>
 }
 
 export interface StorageHostApi {
@@ -241,6 +247,7 @@ export interface HostApi {
   attachments: AttachmentsHostApi
   browser: BrowserHostApi
   git: GitHostApi
+  office: OfficeHostApi
   resources: ResourcesHostApi
   search: SearchHostApi
   skills: SkillsHostApi

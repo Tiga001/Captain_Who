@@ -2,7 +2,10 @@ use super::apply_patch_diff::{build_unified_diff, sanitize_patch, validate_patch
 use super::apply_patch_paths::sanitize_file_path;
 #[cfg(test)]
 use super::apply_patch_paths::validate_text_patch_path;
-use super::{clean_relative_path, AgentTool, ToolExecutionContext};
+use super::{
+    clean_relative_path, AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess,
+    ToolExecutionContext,
+};
 use crate::protocol::{
     AgentApprovalStatus, AgentDiffProposal, AgentError, AgentPatchOperation, AgentProposedAction,
     AgentResult, AgentToolCall, AgentToolDefinition, AgentToolSafety,
@@ -36,6 +39,10 @@ impl AgentTool for ApplyPatchTool {
         Err(AgentError::new(
             "apply_patch 需要用户审批和 host 执行层，不能由 agent runtime 自动应用。",
         ))
+    }
+
+    fn permission_policy(&self) -> AgentToolPermissionPolicy {
+        AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::WriteOnly)
     }
 
     fn proposed_action(

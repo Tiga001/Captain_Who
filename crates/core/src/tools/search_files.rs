@@ -9,6 +9,10 @@ use serde_json::{json, Value};
 pub(super) struct SearchFilesTool;
 
 impl AgentTool for SearchFilesTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "search_files".to_string(),

@@ -254,6 +254,10 @@ mod tests {
     struct TestTool(&'static str);
 
     impl AgentTool for TestTool {
+        fn permission_policy(&self) -> crate::tools::AgentToolPermissionPolicy {
+            crate::tools::AgentToolPermissionPolicy::Default
+        }
+
         fn definition(&self) -> AgentToolDefinition {
             AgentToolDefinition {
                 name: self.0.to_string(),

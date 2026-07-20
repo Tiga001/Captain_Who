@@ -19,6 +19,10 @@ const MAX_TOP_DIRECTORIES: usize = 30;
 pub(super) struct WorkspaceMapTool;
 
 impl AgentTool for WorkspaceMapTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "workspace_map".to_string(),

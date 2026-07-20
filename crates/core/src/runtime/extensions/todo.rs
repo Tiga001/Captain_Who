@@ -286,6 +286,10 @@ struct TodoTool {
 }
 
 impl AgentTool for TodoTool {
+    fn permission_policy(&self) -> crate::tools::AgentToolPermissionPolicy {
+        crate::tools::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         todo_tool_definition()
     }

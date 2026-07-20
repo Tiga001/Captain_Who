@@ -365,6 +365,7 @@ impl ContextMetadata {
 #[derive(Debug, Clone)]
 pub(crate) struct ContextItem {
     message: LlmMessage,
+    checkpoint_message: Option<LlmMessage>,
     metadata: ContextMetadata,
     measurement: Option<ContextItemMeasurement>,
 }
@@ -379,6 +380,7 @@ impl ContextItem {
     pub(crate) fn new(message: LlmMessage, metadata: ContextMetadata) -> Self {
         Self {
             message,
+            checkpoint_message: None,
             metadata,
             measurement: None,
         }
@@ -415,6 +417,22 @@ impl ContextItem {
             LlmMessage::tool_result(tool_call_id, content, is_error),
             metadata,
         )
+    }
+
+    /// Keeps a richer observation in the live model loop while supplying a
+    /// durable-safe replacement for approval checkpoints. The replacement
+    /// must preserve the same tool protocol identity and error semantics.
+    pub(crate) fn with_checkpoint_tool_result(
+        mut self,
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+        is_error: bool,
+    ) -> Self {
+        let projected = LlmMessage::tool_result(tool_call_id, content, is_error);
+        if projected != self.message {
+            self.checkpoint_message = Some(projected);
+        }
+        self
     }
 
     fn measure(&mut self, estimator: &dyn ContextTokenEstimator) -> ContextMessageEstimate {

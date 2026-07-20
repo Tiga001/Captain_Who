@@ -6,6 +6,9 @@ pub(crate) fn action_id_for_action(action: &AgentProposedAction) -> String {
         AgentProposedAction::Diff { diff } => diff.id.clone(),
         AgentProposedAction::FileWrite { file_write } => file_write.id.clone(),
         AgentProposedAction::Command { command } => command.id.clone(),
+        AgentProposedAction::SkillMaterialization { materialization } => materialization.id.clone(),
+        AgentProposedAction::SkillScript { script } => script.id.clone(),
+        AgentProposedAction::OfficeOperation { office_operation } => office_operation.id.clone(),
     }
 }
 
@@ -20,6 +23,9 @@ pub(crate) fn action_type_for_action(action: &AgentProposedAction) -> &'static s
         AgentProposedAction::Diff { .. } => "diff",
         AgentProposedAction::FileWrite { .. } => "file_write",
         AgentProposedAction::Command { .. } => "command",
+        AgentProposedAction::SkillMaterialization { .. } => "skill_materialization",
+        AgentProposedAction::SkillScript { .. } => "skill_script",
+        AgentProposedAction::OfficeOperation { .. } => "office_operation",
     }
 }
 
@@ -29,6 +35,13 @@ pub(crate) fn tool_name_for_action(action: &AgentProposedAction) -> String {
         AgentProposedAction::Diff { .. } => "apply_patch".to_string(),
         AgentProposedAction::FileWrite { .. } => "write_file".to_string(),
         AgentProposedAction::Command { .. } => "run_command".to_string(),
+        AgentProposedAction::SkillMaterialization { .. } => {
+            "skills_materialize_resource".to_string()
+        }
+        AgentProposedAction::SkillScript { .. } => "skills_run_script".to_string(),
+        AgentProposedAction::OfficeOperation { office_operation } => {
+            office_tool_name(office_operation.prepared.request.document_kind).to_string()
+        }
     }
 }
 
@@ -38,6 +51,76 @@ pub(crate) fn tool_call_for_action(action: &AgentProposedAction) -> AgentToolCal
         AgentProposedAction::Diff { diff } => diff_tool_call(diff),
         AgentProposedAction::FileWrite { file_write } => file_write_tool_call(file_write),
         AgentProposedAction::Command { command } => command_tool_call(command),
+        AgentProposedAction::SkillMaterialization { materialization } => {
+            skill_materialization_tool_call(materialization)
+        }
+        AgentProposedAction::SkillScript { script } => skill_script_tool_call(script),
+        AgentProposedAction::OfficeOperation { office_operation } => {
+            office_operation_tool_call(office_operation)
+        }
+    }
+}
+
+pub(crate) fn office_tool_name(kind: mycopilot_core::office::OfficeDocumentKind) -> &'static str {
+    match kind {
+        mycopilot_core::office::OfficeDocumentKind::Document => "office_document",
+        mycopilot_core::office::OfficeDocumentKind::Spreadsheet => "office_spreadsheet",
+        mycopilot_core::office::OfficeDocumentKind::Presentation => "office_presentation",
+    }
+}
+
+pub(crate) fn office_operation_tool_call(
+    office_operation: &mycopilot_core::AgentOfficeOperationRequest,
+) -> AgentToolCall {
+    let request = &office_operation.prepared.request;
+    AgentToolCall {
+        id: office_operation.id.clone(),
+        tool: office_tool_name(request.document_kind).to_string(),
+        args: json!({
+            "operation": request.operation,
+            "path": request.document_path,
+            "arguments": request.arguments,
+            "outputPath": request.output_path,
+            "destinationPath": request.destination_path,
+            "timeoutMs": request.timeout_ms,
+            "reason": office_operation.reason,
+        }),
+        approval_status: office_operation.approval_status,
+        reason: office_operation.reason.clone(),
+    }
+}
+
+pub(crate) fn skill_script_tool_call(script: &AgentSkillScriptRequest) -> AgentToolCall {
+    AgentToolCall {
+        id: script.id.clone(),
+        tool: "skills_run_script".to_string(),
+        args: json!({
+            "scriptUri": script.script_uri,
+            "interpreter": script.interpreter,
+            "args": script.args,
+            "requirements": script.requirements,
+            "timeoutMs": script.timeout_ms,
+            "reason": script.reason,
+        }),
+        approval_status: script.approval_status,
+        reason: script.reason.clone(),
+    }
+}
+
+pub(crate) fn skill_materialization_tool_call(
+    materialization: &AgentSkillMaterializationRequest,
+) -> AgentToolCall {
+    AgentToolCall {
+        id: materialization.id.clone(),
+        tool: "skills_materialize_resource".to_string(),
+        args: json!({
+            "sourceUri": materialization.source_uri,
+            "sourcePrefix": materialization.source_prefix,
+            "destination": materialization.destination,
+            "reason": materialization.reason,
+        }),
+        approval_status: materialization.approval_status,
+        reason: materialization.reason.clone(),
     }
 }
 

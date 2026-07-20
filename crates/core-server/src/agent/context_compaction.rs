@@ -598,6 +598,84 @@ impl AgentService {
         .map(|_| ())
     }
 
+    /// Atomically persists the action outcome and the trace item that pairs its tool result.
+    pub(super) fn commit_pending_result_trace_with_continuation(
+        &self,
+        record: &PendingActionRecord,
+        agent_input: &AgentChatInput,
+        target_status: PendingActionStatus,
+        notifications: &CoreServerNotificationSender,
+    ) -> Result<(), String> {
+        let checkpoint = record
+            .agent_input
+            .resume_checkpoint
+            .as_ref()
+            .ok_or_else(|| "审批续跑缺少会话轨迹检查点。".to_string())?;
+        let continuation = agent_input
+            .tool_continuation
+            .as_ref()
+            .ok_or_else(|| "审批续跑缺少工具结果。".to_string())?;
+        let snapshot = conversation_trace_snapshot_from_checkpoint_and_continuation(
+            checkpoint,
+            &continuation.call,
+            &continuation.result,
+        );
+        let run_id = &record.snapshot.run_id;
+        let conversation_id = record
+            .snapshot
+            .conversation_id
+            .as_deref()
+            .ok_or_else(|| "审批续跑缺少 conversation id。".to_string())?;
+        let assistant_message_id = record
+            .snapshot
+            .assistant_message_id
+            .as_deref()
+            .ok_or_else(|| "审批续跑缺少 assistant message id。".to_string())?;
+        let configuration_revision =
+            conversation_context_configuration_revision(&record.agent_input)
+                .map_err(|error| error.to_string())?;
+        let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
+        let changed = self.storage.commit_pending_agent_action_result_trace(
+            &record.storage_id,
+            pending_status_label(record.snapshot.status),
+            pending_status_label(target_status),
+            &trace,
+            record.snapshot.created_at,
+            now_ms(),
+        )?;
+
+        self.trace_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(run_id.to_string(), snapshot);
+        match self.update_running_conversation_context_state(
+            &record.agent_input,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            &trace,
+            &configuration_revision,
+        ) {
+            Ok(update) if changed => self.emit_context_window_snapshot(
+                notifications,
+                run_id,
+                conversation_id,
+                update.snapshot,
+            ),
+            Ok(_) => {}
+            Err(error) => {
+                // The durable result/trace transaction already committed. This cache is derived
+                // state, so discard it and let the continuation rebuild instead of pretending
+                // that the authoritative tool result was not persisted.
+                self.invalidate_conversation_context_state(conversation_id);
+                eprintln!(
+                    "failed to update derived context after durable approval result: {error}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn discard_trace_snapshot(&self, run_id: &str) {
         self.trace_snapshots
             .lock()

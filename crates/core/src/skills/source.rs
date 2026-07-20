@@ -5,6 +5,9 @@ use super::model::{
     SkillSourceKind, SkillTrust,
 };
 use super::resolver::resolve_workspace_source;
+use super::resource_runtime::{
+    restore_resolve_error, SkillResourceError, SkillResourceReaderRef, SkillResourceSessionBinding,
+};
 use super::workspace::percent_encode;
 use std::path::{Path, PathBuf};
 
@@ -23,6 +26,46 @@ pub(super) trait SkillSource: Send + Sync {
         &self,
         selection: &SkillSelection,
     ) -> Result<ResolvedSkillPackage, SkillResolveError>;
+
+    /// Open a reader for the exact package snapshot already authorized by
+    /// activation. Implementations must not silently follow mutable source
+    /// state such as an installation receipt.
+    fn open_resource_reader(
+        &self,
+        package: &ResolvedSkillPackage,
+    ) -> Result<Option<SkillResourceReaderRef>, SkillResourceError> {
+        if package.resources().is_empty() {
+            Ok(None)
+        } else {
+            Err(SkillResourceError::SourceContractViolation {
+                source_id: self.id().clone(),
+                reason: format!(
+                    "source exposes resources for Skill `{}` without a resource reader",
+                    package.id()
+                ),
+            })
+        }
+    }
+
+    /// Reconstruct a resource binding from persisted id + revision metadata.
+    /// Sources with durable immutable package storage should override this to
+    /// bypass mutable catalog pointers.
+    fn restore_resource_binding(
+        &self,
+        selection: &SkillSelection,
+    ) -> Result<SkillResourceSessionBinding, SkillResourceError> {
+        let package = self.resolve(selection).map_err(|error| {
+            restore_resolve_error(selection.skill_id(), selection.expected_revision(), error)
+        })?;
+        let reader = self.open_resource_reader(&package)?;
+        Ok(SkillResourceSessionBinding {
+            skill_id: package.id().clone(),
+            revision: package.revision().clone(),
+            source_id: self.id().clone(),
+            resources: package.resources().clone(),
+            reader,
+        })
+    }
 }
 
 #[derive(Debug)]

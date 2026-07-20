@@ -9,6 +9,7 @@ mod filesystem;
 mod git_diff;
 mod input_stream;
 mod limits;
+mod office;
 mod read_file;
 mod read_image;
 mod read_pdf;
@@ -19,12 +20,17 @@ mod run_command;
 pub(crate) mod schema;
 mod search_code;
 mod search_files;
+mod skills_list_resources;
+mod skills_materialize_resource;
+mod skills_read_resource;
+mod skills_script;
 mod web_fetch;
 mod web_search;
 mod workspace_map;
 mod write_file;
 mod write_file_stream;
 
+use crate::conversation_trace::canonical_tool_result_for_context;
 use crate::protocol::{
     AgentError, AgentFileWritePreview, AgentProposedAction, AgentResult, AgentSearchConfig,
     AgentSearchMode, AgentToolCall, AgentToolDefinition, AgentToolResult,
@@ -33,6 +39,7 @@ use apply_patch::ApplyPatchTool;
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
 use conversation_history::ConversationHistoryTool;
 use git_diff::GitDiffTool;
+use office::{OfficeDocumentTool, OfficePresentationTool, OfficeSpreadsheetTool};
 use read_file::ReadFileTool;
 use read_image::ReadImageTool;
 use read_pdf::ReadPdfTool;
@@ -44,7 +51,12 @@ use schema::validate_portable_tool_input_schema;
 use search_code::SearchCodeTool;
 use search_files::SearchFilesTool;
 use serde_json::Value;
+use skills_list_resources::SkillsListResourcesTool;
+use skills_materialize_resource::SkillsMaterializeResourceTool;
+use skills_read_resource::SkillsReadResourceTool;
+use skills_script::{SkillsPreflightScriptTool, SkillsRunScriptTool};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use web_fetch::WebFetchTool;
 use web_search::WebSearchTool;
 use workspace_map::WorkspaceMapTool;
@@ -66,8 +78,44 @@ pub struct ToolRegistry {
     owners: BTreeMap<String, String>,
 }
 
+/// Declares which host permission policy authorizes a tool's state-changing
+/// calls. Keeping this on the tool implementation means future built-in and
+/// extension tools opt into the common policy without adding their names to a
+/// second, easily-stale allowlist in the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentToolPermissionPolicy {
+    Default,
+    FileWrite(FileWriteToolAccess),
+}
+
+/// Controls whether a file-writing tool still has useful read-only calls when
+/// writes are disabled. `ReadWrite` tools stay visible, but their write calls
+/// must still fail closed in proposal preparation and host execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileWriteToolAccess {
+    WriteOnly,
+    ReadWrite,
+}
+
+impl AgentToolPermissionPolicy {
+    pub(crate) fn uses_file_write_approval(self) -> bool {
+        matches!(self, Self::FileWrite(_))
+    }
+
+    pub(crate) fn is_available_when_write_denied(self) -> bool {
+        !matches!(self, Self::FileWrite(FileWriteToolAccess::WriteOnly))
+    }
+}
+
 impl ToolRegistry {
     pub fn defaults_with_search(search_config: Option<&AgentSearchConfig>) -> Self {
+        Self::defaults_with_search_and_office(search_config, None)
+    }
+
+    pub(crate) fn defaults_with_search_and_office(
+        search_config: Option<&AgentSearchConfig>,
+        office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
+    ) -> Self {
         let mut registry = Self {
             tools: BTreeMap::new(),
             owners: BTreeMap::new(),
@@ -80,6 +128,11 @@ impl ToolRegistry {
         registry.register(ReadWordTool);
         registry.register(ReadPresentationTool);
         registry.register(ReadSpreadsheetTool);
+        if let Some(engine) = office_engine {
+            registry.register(OfficeDocumentTool::new(engine.clone()));
+            registry.register(OfficeSpreadsheetTool::new(engine.clone()));
+            registry.register(OfficePresentationTool::new(engine));
+        }
         registry.register(WorkspaceMapTool);
         registry.register(SearchFilesTool);
         registry.register(SearchCodeTool);
@@ -91,6 +144,11 @@ impl ToolRegistry {
         registry.register(ApplyPatchTool);
         registry.register(WriteFileTool);
         registry.register(RunCommandTool);
+        registry.register(SkillsListResourcesTool);
+        registry.register(SkillsReadResourceTool);
+        registry.register(SkillsMaterializeResourceTool);
+        registry.register(SkillsPreflightScriptTool);
+        registry.register(SkillsRunScriptTool);
         registry
     }
 
@@ -108,6 +166,13 @@ impl ToolRegistry {
             .get(tool_name)
             .map(|tool| tool.requires_approval_for_call(args))
             .unwrap_or(false)
+    }
+
+    pub(crate) fn permission_policy(&self, tool_name: &str) -> AgentToolPermissionPolicy {
+        self.tools
+            .get(tool_name)
+            .map(|tool| tool.permission_policy())
+            .unwrap_or(AgentToolPermissionPolicy::Default)
     }
 
     pub(crate) fn input_stream_observer(
@@ -182,10 +247,39 @@ impl ToolRegistry {
                 call_id: call.id.clone(),
                 tool: call.tool.clone(),
                 ok: false,
-                result: None,
+                result: structured_error_result(&error),
                 error: Some(error.to_string()),
             },
         }
+    }
+
+    /// Returns the durable, history-safe projection of a tool result.
+    ///
+    /// Most tools retain their complete canonical result. Tools that disclose
+    /// run-scoped or sensitive payloads can override this hook so the current
+    /// model turn receives the payload while conversation history stores only
+    /// stable provenance and range metadata.
+    pub(crate) fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.tools
+            .get(&result.tool)
+            .map(|tool| tool.trace_projection(result))
+            .unwrap_or_else(|| canonical_tool_result_for_context(result))
+    }
+
+    /// Returns the projection safe to publish through runtime events.
+    pub(crate) fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.tools
+            .get(&result.tool)
+            .map(|tool| tool.event_projection(result))
+            .unwrap_or_else(|| canonical_tool_result_for_context(result))
+    }
+
+    /// Returns the projection safe to serialize into an approval checkpoint.
+    pub(crate) fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.tools
+            .get(&result.tool)
+            .map(|tool| tool.checkpoint_projection(result))
+            .unwrap_or_else(|| canonical_tool_result_for_context(result))
     }
 
     pub(crate) fn register_extension_tool(
@@ -235,6 +329,17 @@ impl ToolRegistry {
     }
 }
 
+fn structured_error_result(error: &AgentError) -> Option<Value> {
+    error.details().cloned().map(|mut details| {
+        if let (Some(code), Some(object)) = (error.code(), details.as_object_mut()) {
+            object
+                .entry("errorCode".to_string())
+                .or_insert_with(|| serde_json::json!(code));
+        }
+        details
+    })
+}
+
 fn tavily_api_key(search_config: Option<&AgentSearchConfig>) -> Option<String> {
     let search_config = search_config?;
     if search_config.mode == AgentSearchMode::Disabled {
@@ -253,6 +358,8 @@ fn tavily_api_key(search_config: Option<&AgentSearchConfig>) -> Option<String> {
 pub(crate) trait AgentTool: Send + Sync {
     fn definition(&self) -> AgentToolDefinition;
     fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value>;
+    fn permission_policy(&self) -> AgentToolPermissionPolicy;
+
     fn proposed_action(
         &self,
         _context: &ToolExecutionContext,
@@ -270,6 +377,18 @@ pub(crate) trait AgentTool: Send + Sync {
         _context: ToolExecutionContext,
     ) -> Option<Box<dyn ToolInputStreamObserver>> {
         None
+    }
+
+    fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        canonical_tool_result_for_context(result)
+    }
+
+    fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.trace_projection(result)
+    }
+
+    fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.trace_projection(result)
     }
 }
 
@@ -300,7 +419,8 @@ mod tests {
     use super::*;
     use crate::protocol::{
         AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachmentKind,
-        AgentRunContext, AgentSearchConfig, AgentSearchMode, AgentToolCall, AgentWorkspaceContext,
+        AgentRunContext, AgentSearchConfig, AgentSearchMode, AgentToolCall, AgentToolSafety,
+        AgentWorkspaceContext,
     };
     use serde_json::json;
     use std::fs;
@@ -312,6 +432,10 @@ mod tests {
     struct InvalidSchemaTool;
 
     impl AgentTool for InvalidSchemaTool {
+        fn permission_policy(&self) -> AgentToolPermissionPolicy {
+            AgentToolPermissionPolicy::Default
+        }
+
         fn definition(&self) -> AgentToolDefinition {
             AgentToolDefinition {
                 name: "invalid_schema".to_string(),
@@ -407,6 +531,122 @@ mod tests {
         assert_eq!(definition.name, "apply_patch");
         assert!(!definition.requires_workspace);
         assert!(definition.requires_approval);
+    }
+
+    #[test]
+    fn registers_progressive_skill_runtime_tools_with_separate_safety_boundaries() {
+        let registry = ToolRegistry::defaults_with_search(None);
+        let list = registry.definition_for("skills_list_resources").unwrap();
+        let read = registry.definition_for("skills_read_resource").unwrap();
+        let materialize = registry
+            .definition_for("skills_materialize_resource")
+            .unwrap();
+        let preflight = registry.definition_for("skills_preflight_script").unwrap();
+        let run = registry.definition_for("skills_run_script").unwrap();
+
+        assert!(!list.requires_approval);
+        assert!(!read.requires_approval);
+        assert!(materialize.requires_approval);
+        assert!(!preflight.requires_approval);
+        assert!(run.requires_approval);
+        assert!(materialize.requires_workspace);
+        assert!(preflight.requires_workspace);
+        assert!(run.requires_workspace);
+    }
+
+    #[test]
+    fn registers_three_native_office_tools_with_dynamic_write_approval() {
+        let engine =
+            crate::office::resolve_office_engine(&crate::office::OfficeCliDiscoveryOptions::new());
+        let registry = ToolRegistry::defaults_with_search_and_office(None, Some(engine));
+
+        for (tool_name, document_path) in [
+            ("office_document", "test.docx"),
+            ("office_spreadsheet", "test.xlsx"),
+            ("office_presentation", "test.pptx"),
+        ] {
+            let definition = registry.definition_for(tool_name).unwrap();
+            assert_eq!(definition.safety, AgentToolSafety::RequiresApproval);
+            assert_eq!(
+                definition.approval_mode,
+                crate::protocol::AgentToolApprovalMode::Dynamic
+            );
+            assert!(!definition.requires_workspace);
+            assert!(
+                !registry.requires_approval_for_call(tool_name, &json!({ "operation": "status" }))
+            );
+            for args in [
+                json!({ "operation": "help" }),
+                json!({ "operation": "get", "path": document_path }),
+                json!({ "operation": "query", "path": document_path, "arguments": ["/sheet[1]"] }),
+                json!({ "operation": "validate", "path": document_path }),
+            ] {
+                assert!(!registry.requires_approval_for_call(tool_name, &args));
+            }
+            assert!(!registry.requires_approval_for_call(
+                tool_name,
+                &json!({ "operation": "view", "path": document_path, "arguments": ["text"] })
+            ));
+            for args in [
+                json!({ "operation": "create", "path": document_path }),
+                json!({ "operation": "set", "path": document_path, "arguments": ["/sheet[1]"] }),
+                json!({ "operation": "add", "path": document_path, "arguments": ["/sheet[1]"] }),
+                json!({ "operation": "remove", "path": document_path, "arguments": ["/sheet[1]"] }),
+                json!({ "operation": "move", "path": document_path, "arguments": ["/sheet[1]"] }),
+                json!({ "operation": "swap", "path": document_path, "arguments": ["/sheet[1]", "/sheet[2]"] }),
+            ] {
+                assert!(
+                    registry.requires_approval_for_call(tool_name, &args),
+                    "{tool_name} write operations must use the file-edit approval path"
+                );
+            }
+            assert!(registry.requires_approval_for_call(
+                tool_name,
+                &json!({
+                    "operation": "view",
+                    "path": document_path,
+                    "arguments": ["html"],
+                    "outputPath": "preview.html"
+                })
+            ));
+            assert!(registry
+                .requires_approval_for_call(tool_name, &json!({ "operation": "unsupported" })));
+            for invalid in [
+                json!({ "operation": "status", "path": document_path }),
+                json!({ "operation": "help", "path": document_path }),
+                json!({ "operation": "query", "path": document_path }),
+                json!({ "operation": "validate", "path": document_path, "arguments": ["--output", "stolen.xlsx"] }),
+                json!({ "operation": "validate", "path": document_path, "outputPath": "preview.html" }),
+                json!({ "operation": "validate", "path": document_path, "access": "readOnly" }),
+                json!({ "operation": "validate", "path": "wrong-extension.bin" }),
+            ] {
+                assert!(
+                    registry.requires_approval_for_call(tool_name, &invalid),
+                    "invalid Office calls must fail closed during approval routing"
+                );
+            }
+            assert_eq!(
+                registry.permission_policy(tool_name),
+                AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::ReadWrite)
+            );
+        }
+    }
+
+    #[test]
+    fn structured_writers_declare_the_shared_file_write_permission_policy() {
+        let registry = ToolRegistry::defaults_with_search(None);
+
+        for tool_name in ["apply_patch", "write_file", "skills_materialize_resource"] {
+            assert_eq!(
+                registry.permission_policy(tool_name),
+                AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::WriteOnly),
+                "{tool_name} must opt into the common file-write policy"
+            );
+        }
+        assert_eq!(
+            registry.permission_policy("read_file"),
+            AgentToolPermissionPolicy::Default
+        );
     }
 
     #[test]
@@ -597,6 +837,23 @@ mod tests {
         assert_eq!(result.result.unwrap()["content"], "outside content");
 
         let _ = fs::remove_file(outside);
+    }
+
+    #[test]
+    fn structured_tool_failures_preserve_machine_readable_details() {
+        let error = AgentError::structured(
+            "skill_script.dependency_missing",
+            "dependency is missing",
+            json!({
+                "type": "skill_script_preflight",
+                "code": "dependencyMissing",
+                "missing": ["openpyxl"],
+            }),
+        );
+
+        let result = structured_error_result(&error).unwrap();
+        assert_eq!(result["missing"], json!(["openpyxl"]));
+        assert_eq!(result["errorCode"], "skill_script.dependency_missing");
     }
 
     struct TestWorkspace {

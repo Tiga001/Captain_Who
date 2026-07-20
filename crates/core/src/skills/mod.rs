@@ -11,6 +11,7 @@ mod installed;
 mod managed_fs;
 mod managed_installer;
 mod managed_store;
+mod materialization;
 mod model;
 mod origin;
 mod package;
@@ -18,6 +19,8 @@ mod parser;
 mod prepared;
 mod prepared_acquisition;
 mod resolver;
+mod resource_runtime;
+mod script_runtime;
 mod service;
 mod source;
 mod source_resolution;
@@ -28,7 +31,10 @@ pub use acquisition_provenance::{
     SkillInstallationProvenanceError, SkillInstallationProvenanceView, SkillInstallationRefresh,
     SkillInstallationRefreshView, MAX_SKILL_PROVENANCE_PAYLOAD_BYTES,
 };
-pub use bundled::{APPLICATION_BUNDLED_SKILL_SOURCE_ID, REPOSITORY_EVIDENCE_AUDITOR_LOCAL_ID};
+pub use bundled::{
+    APPLICATION_BUNDLED_SKILL_SOURCE_ID, DOCUMENTS_LOCAL_ID, PRESENTATIONS_LOCAL_ID,
+    REPOSITORY_EVIDENCE_AUDITOR_LOCAL_ID, SPREADSHEETS_LOCAL_ID,
+};
 pub use github_acquisition::{
     AcquiredGitHubSkill, GitHubAcquisitionError, GitHubAcquisitionErrorCode,
     GitHubAcquisitionSummary, GitHubAcquisitionTransport, GitHubArchiveRequest, GitHubCommit,
@@ -70,6 +76,15 @@ pub use managed_installer::{
     ManagedSkillStoreCapacity, ManagedSkillUninstallOutcome, ManagedSkillUninstallRequest,
     ManagedSkillUpdateOutcome, ManagedSkillUpdateRequest,
 };
+pub use materialization::{
+    SkillMaterializationDestination, SkillMaterializationError, SkillMaterializationErrorCode,
+    SkillMaterializationOutcome, SkillMaterializationRecovery, SkillMaterializationRequest,
+    SkillMaterializationStatus, SkillMaterializedTreeEntry, SkillResourceMaterializer,
+    SkillTemplateTreeMaterializationOutcome, SkillTemplateTreeMaterializationRequest,
+    MAX_SKILL_MATERIALIZATION_FILE_BYTES, MAX_SKILL_MATERIALIZATION_TREE_BYTES,
+    MAX_SKILL_MATERIALIZATION_TREE_DIRECTORIES, MAX_SKILL_MATERIALIZATION_TREE_FILES,
+    SKILL_MATERIALIZATION_TREE_DIGEST_PREFIX,
+};
 pub use model::{
     ActivatedSkillSet, ResolvedSkill, ResolvedSkillPackage, SkillActivationError,
     SkillActivationPolicy, SkillActivationRevision, SkillActivationScope, SkillCatalog,
@@ -87,6 +102,22 @@ pub use prepared::{
     PreparedSkillPackage, SkillPackagePreparationError, LOCAL_DIRECTORY_SKILL_ORIGIN_PROVIDER,
 };
 pub use prepared_acquisition::PreparedSkillAcquisition;
+#[cfg(test)]
+pub(crate) use resource_runtime::memory_resource_session_for_test;
+pub use resource_runtime::{
+    SkillPackageUri, SkillResourceError, SkillResourceErrorCode, SkillResourceListEntry,
+    SkillResourceListOptions, SkillResourceListPage, SkillResourcePath, SkillResourceRecovery,
+    SkillResourceSession, SkillResourceTextPage, SkillResourceTextReadOptions, SkillResourceUri,
+    SkillResourceUriError, DEFAULT_SKILL_RESOURCE_LIST_PAGE_SIZE,
+    DEFAULT_SKILL_RESOURCE_TEXT_PAGE_BYTES, MAX_SKILL_RESOURCE_LIST_PAGE_SIZE,
+    MAX_SKILL_RESOURCE_TEXT_PAGE_BYTES, MAX_SKILL_RESOURCE_URI_BYTES,
+};
+pub use script_runtime::{
+    execute_skill_python_script, preflight_skill_python_script, SkillScriptPreflightOutcome,
+    SkillScriptReadyPlan, SkillScriptRuntimeError, SkillScriptRuntimeErrorCode,
+    SkillScriptRuntimeRecovery, DEFAULT_SKILL_SCRIPT_TIMEOUT_MS, MAX_SKILL_SCRIPT_ARGUMENTS,
+    MAX_SKILL_SCRIPT_ARGUMENT_BYTES, MAX_SKILL_SCRIPT_REQUIREMENTS, MAX_SKILL_SCRIPT_TIMEOUT_MS,
+};
 pub use service::SkillsService;
 pub use source_resolution::{
     PreparedSkillSourceResolution, PreparedSkillSourceResolutionCandidate,

@@ -9,6 +9,10 @@ use serde_json::{json, Value};
 pub(super) struct ReadPdfTool;
 
 impl AgentTool for ReadPdfTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_pdf".to_string(),

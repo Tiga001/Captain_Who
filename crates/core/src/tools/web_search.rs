@@ -24,6 +24,10 @@ impl WebSearchTool {
 }
 
 impl AgentTool for WebSearchTool {
+    fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
+        super::AgentToolPermissionPolicy::Default
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "web_search".to_string(),

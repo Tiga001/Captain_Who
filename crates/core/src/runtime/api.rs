@@ -26,6 +26,8 @@ pub struct AgentRuntimeHostServices {
     pub(super) trace_observer: Option<AgentConversationTraceObserver>,
     pub(super) model_request_observer: Option<AgentModelRequestObserver>,
     pub(super) context_compaction_services: Option<AgentContextCompactionServices>,
+    pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
+    pub(super) office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
 }
 
 impl AgentRuntimeHostServices {
@@ -60,6 +62,25 @@ impl AgentRuntimeHostServices {
 
     pub fn with_context_compaction(mut self, services: AgentContextCompactionServices) -> Self {
         self.context_compaction_services = Some(services);
+        self
+    }
+
+    /// Supplies the exact, run-scoped Skill resource authority resolved by the
+    /// host. Resource bytes and managed-store paths remain outside Agent input
+    /// and checkpoints.
+    pub fn with_skill_resources(
+        mut self,
+        resources: Arc<crate::skills::SkillResourceSession>,
+    ) -> Self {
+        self.skill_resources = Some(resources);
+        self
+    }
+
+    /// Supplies the application-owned Office provider used by both read-only
+    /// runtime tools and approval-gated Host operations. The provider remains
+    /// outside model input and persisted checkpoints.
+    pub fn with_office_engine(mut self, engine: Arc<dyn crate::office::OfficeEngine>) -> Self {
+        self.office_engine = Some(engine);
         self
     }
 }
@@ -195,7 +216,7 @@ pub(super) fn prepare_conversation_context(
     let run_id = "conversation-context-state";
     let PreparedRuntimeCapabilities {
         tool_definitions, ..
-    } = prepare_runtime_capabilities(input, run_id, &[], true)?;
+    } = prepare_runtime_capabilities(input, run_id, &[], true, None)?;
     let api_style = input
         .api_style
         .unwrap_or_else(|| detect_api_style(input.api_url.trim()));

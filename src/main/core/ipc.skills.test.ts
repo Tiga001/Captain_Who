@@ -177,3 +177,29 @@ describe('Skill management IPC registration', () => {
     expect(uninstallSkill).toHaveBeenCalledWith(input)
   })
 })
+
+describe('Office status IPC registration', () => {
+  beforeEach(() => {
+    ipcMainHandle.mockReset()
+  })
+
+  it('registers a trusted no-parameter bridge to CoreServer', async () => {
+    const output = { schemaVersion: 1, providerId: 'officecli', availability: 'unavailable' }
+    const getOfficeStatus = vi.fn().mockResolvedValue(output)
+    const coreServer = {
+      onAgentEvent: vi.fn(),
+      onSkillsChanged: vi.fn(),
+      getOfficeStatus
+    }
+    registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
+    const registration = ipcMainHandle.mock.calls.find(
+      ([channel]) => channel === 'host:office.getStatus'
+    )
+    const handler = registration?.[1] as
+      ((event: IpcMainInvokeEvent) => Promise<unknown>) | undefined
+
+    expect(handler).toBeTypeOf('function')
+    await expect(handler?.(event)).resolves.toBe(output)
+    expect(getOfficeStatus).toHaveBeenCalledWith()
+  })
+})

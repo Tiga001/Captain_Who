@@ -8,6 +8,7 @@ pub mod file_write;
 pub mod git_review;
 mod llm;
 mod model_request_observation;
+pub mod office;
 pub mod patch;
 mod prompts;
 pub mod protocol;
@@ -51,25 +52,31 @@ pub use model_request_observation::{
     ModelRequestPurpose, ModelRequestUsageNormalization, MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
 };
 pub use protocol::{
-    AgentActivatedSkill, AgentApiStyle, AgentApprovalDecision, AgentApprovalDecisionStatus,
-    AgentApprovalStatus, AgentAttachmentLibraryContext, AgentAttachmentReference, AgentChatInput,
-    AgentChatMessage, AgentChatOutput, AgentCommandOutputStream, AgentCommandPermission,
-    AgentCommandRequest, AgentCommandRiskLevel, AgentCommandSafetyPolicy,
-    AgentContextCheckpointGroup, AgentContextCheckpointImage, AgentContextCheckpointItem,
-    AgentContextCheckpointOrigin, AgentContextCheckpointToolCall, AgentContextWindowPhase,
-    AgentContextWindowSnapshot, AgentContextWindowStatus, AgentDiffProposal, AgentError,
-    AgentEvent, AgentExtensionSnapshot, AgentFileDraftSnapshot, AgentFileDraftStatus,
-    AgentFileWriteMode, AgentFileWriteProposal, AgentFileWriteResult, AgentFileWriteResultStatus,
-    AgentGitDiffSnapshot, AgentInputAttachment, AgentInputAttachmentEncoding,
-    AgentInputAttachmentKind, AgentPatchOperation, AgentPatchPermission, AgentPatchResult,
-    AgentPatchResultStatus, AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences,
-    AgentPromptTone, AgentPromptWorkMode, AgentProposedAction, AgentQueuedToolCallCheckpoint,
-    AgentReadPermission, AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus,
-    AgentSearchConfig, AgentSearchMode, AgentSkillActivation, AgentStateSnapshot,
+    AgentActivatedSkill, AgentActivatedSkillResources, AgentApiStyle, AgentApprovalDecision,
+    AgentApprovalDecisionStatus, AgentApprovalStatus, AgentAttachmentLibraryContext,
+    AgentAttachmentReference, AgentChatInput, AgentChatMessage, AgentChatOutput,
+    AgentCommandOutputStream, AgentCommandPermission, AgentCommandRequest, AgentCommandRiskLevel,
+    AgentCommandSafetyPolicy, AgentContextCheckpointGroup, AgentContextCheckpointImage,
+    AgentContextCheckpointItem, AgentContextCheckpointOrigin, AgentContextCheckpointToolCall,
+    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentContextWindowStatus,
+    AgentDiffProposal, AgentError, AgentEvent, AgentExtensionSnapshot, AgentFileDraftSnapshot,
+    AgentFileDraftStatus, AgentFileWriteMode, AgentFileWriteProposal, AgentFileWriteResult,
+    AgentFileWriteResultStatus, AgentGitDiffSnapshot, AgentInputAttachment,
+    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentOfficeOperationRequest,
+    AgentPatchOperation, AgentPatchPermission, AgentPatchResult, AgentPatchResultStatus,
+    AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone,
+    AgentPromptWorkMode, AgentProposedAction, AgentQueuedToolCallCheckpoint, AgentReadPermission,
+    AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentSearchConfig,
+    AgentSearchMode, AgentSkillActivation, AgentSkillDependencyCheck, AgentSkillDependencyKind,
+    AgentSkillDependencyStatus, AgentSkillMaterializationRequest, AgentSkillMaterializationResult,
+    AgentSkillMaterializationResultStatus, AgentSkillScriptInterpreter,
+    AgentSkillScriptPreflightReport, AgentSkillScriptPreflightStatus, AgentSkillScriptRequest,
+    AgentSkillScriptRequirements, AgentSkillScriptResult, AgentStateSnapshot,
     AgentToolApprovalMode, AgentToolCall, AgentToolContinuation, AgentToolDefinition,
     AgentToolResult, AgentToolSafety, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
     AgentUsageModelSummary, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission,
+    AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
 };
 pub use revision::content_revision;
 pub use runtime::{
