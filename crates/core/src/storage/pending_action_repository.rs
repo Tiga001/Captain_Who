@@ -1,5 +1,5 @@
 use crate::storage::models::AgentPendingActionRecord;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// Result of publishing an immutable pending-action snapshot.
 ///
@@ -60,8 +60,26 @@ pub fn store_pending_action(
         return Ok(PendingActionStoreOutcome::Inserted);
     }
 
-    let existing = connection.query_row(
-        "
+    let existing = load_pending_action(connection, &record.action_id)?
+        .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
+
+    if same_frozen_identity(&existing, record) {
+        Ok(PendingActionStoreOutcome::Idempotent)
+    } else {
+        Ok(PendingActionStoreOutcome::Conflict {
+            existing_run_id: existing.run_id,
+            existing_status: existing.status,
+        })
+    }
+}
+
+pub(crate) fn load_pending_action(
+    connection: &Connection,
+    action_id: &str,
+) -> rusqlite::Result<Option<AgentPendingActionRecord>> {
+    connection
+        .query_row(
+            "
         SELECT
             action_id,
             run_id,
@@ -79,34 +97,26 @@ pub fn store_pending_action(
         FROM agent_pending_actions
         WHERE action_id = ?1
         ",
-        [&record.action_id],
-        |row| {
-            Ok(AgentPendingActionRecord {
-                action_id: row.get(0)?,
-                run_id: row.get(1)?,
-                conversation_id: row.get(2)?,
-                assistant_message_id: row.get(3)?,
-                action_type: row.get(4)?,
-                tool_name: row.get(5)?,
-                tool_call_id: row.get(6)?,
-                status: row.get(7)?,
-                target_status: row.get(8)?,
-                action_json: row.get(9)?,
-                agent_input_json: row.get(10)?,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
-            })
-        },
-    )?;
-
-    if same_frozen_identity(&existing, record) {
-        Ok(PendingActionStoreOutcome::Idempotent)
-    } else {
-        Ok(PendingActionStoreOutcome::Conflict {
-            existing_run_id: existing.run_id,
-            existing_status: existing.status,
-        })
-    }
+            [action_id],
+            |row| {
+                Ok(AgentPendingActionRecord {
+                    action_id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    conversation_id: row.get(2)?,
+                    assistant_message_id: row.get(3)?,
+                    action_type: row.get(4)?,
+                    tool_name: row.get(5)?,
+                    tool_call_id: row.get(6)?,
+                    status: row.get(7)?,
+                    target_status: row.get(8)?,
+                    action_json: row.get(9)?,
+                    agent_input_json: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
+                })
+            },
+        )
+        .optional()
 }
 
 fn same_frozen_identity(
@@ -302,6 +312,29 @@ pub fn delete_pending_actions_for_conversation(
         "DELETE FROM agent_pending_actions WHERE conversation_id = ?1",
         params![conversation_id],
     )?;
+    Ok(())
+}
+
+/// Retires pending-action lifecycle rows owned by specific assistant messages.
+///
+/// `agent_pending_actions` intentionally has no foreign key to `messages`: the row is a durable
+/// recovery receipt while an action is live. Once the service-level deletion barrier has proved
+/// the owner message safe to delete, this helper must run in the same transaction as that message
+/// deletion so a trace cascade cannot leave a recovery-only orphan behind.
+pub(crate) fn delete_pending_actions_for_messages(
+    connection: &Connection,
+    conversation_id: &str,
+    assistant_message_ids: &[String],
+) -> rusqlite::Result<()> {
+    for assistant_message_id in assistant_message_ids {
+        connection.execute(
+            "
+            DELETE FROM agent_pending_actions
+            WHERE conversation_id = ?1 AND assistant_message_id = ?2
+            ",
+            params![conversation_id, assistant_message_id],
+        )?;
+    }
     Ok(())
 }
 

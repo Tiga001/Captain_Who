@@ -416,6 +416,18 @@ pub struct AgentActionAuditRecord {
     pub decision_source: Option<String>,
 }
 
+/// Persisted file-producing action whose process outcome cannot be proven after restart.
+///
+/// An `executing` claim is intentionally treated as effects-may-have-occurred. Conversation or
+/// project deletion must not erase it until a separate recovery workflow settles the receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentUnsettledFileEffect {
+    pub project_id: Option<String>,
+    pub conversation_id: String,
+    pub run_id: String,
+    pub action_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentPendingActionRecord {
     pub action_id: String,

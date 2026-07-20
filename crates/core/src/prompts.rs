@@ -369,7 +369,7 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
         rules.push("- write_file append 成功后以前的块已经持久化，不要重复生成；调用失败时依据返回的 nextChunkIndex 和草稿状态处理。finish 的任何 applied/rejected/conflict/failed 结果都会终结当前草稿；后续再次修改同一文件必须重新 phase=begin。".to_string());
     }
     if has_tool(tool_definitions, "run_command") {
-        rules.push("- run_command 只用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i 或脚本绕过 apply_patch 创建、编辑或删除文件。".to_string());
+        rules.push("- run_command 用于构建、测试、查询和运行程序。不得用 printf、echo、cat、tee、重定向、sed -i、内联代码或其他命令手段绕过 apply_patch/write_file 创建或编辑文本、代码和配置文件。已激活 Skill 明确规定脚本生成二进制或结构化产物时，必须先用文件编辑工具保存可审查脚本，再用 run_command 执行，并按 Skill 契约填写产物观察提示；产物观察只记录结果，不授予任何权限。".to_string());
         rules.push("- run_command.command 必须是单行字符串。审批状态属于同一个 tool call 生命周期，不要生成第二个命令调用来表示批准后的执行。".to_string());
     }
 

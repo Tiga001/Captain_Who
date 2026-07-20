@@ -33,7 +33,8 @@ impl AgentTool for SkillsMaterializeResourceTool {
                     "destination": { "type": "string", "description": "New workspace-relative file or directory path. Existing destinations are never overwritten or merged." },
                     "reason": { "type": "string", "maxLength": 2000, "description": "Short explanation of why the resource is needed." }
                 },
-                "required": ["sourceUri", "destination"]
+                "required": ["sourceUri", "destination"],
+                "additionalProperties": false
             }),
             safety: AgentToolSafety::RequiresApproval,
             requires_workspace: true,
@@ -92,12 +93,45 @@ impl AgentTool for SkillsMaterializeResourceTool {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MaterializeArgs {
     source_uri: Option<String>,
     source_prefix: Option<String>,
     destination: Option<String>,
     reason: Option<String>,
+}
+
+pub(crate) fn validate_frozen_materialization_trace_args(
+    frozen: &AgentSkillMaterializationRequest,
+    operation: &Value,
+) -> Result<(), String> {
+    let args: MaterializeArgs = serde_json::from_value(operation.clone()).map_err(|error| {
+        format!("skills_materialize_resource frozen ToolCall arguments are invalid: {error}")
+    })?;
+    let source_uri = required(args.source_uri.as_deref(), "sourceUri")
+        .map_err(|_| "materialization sourceUri is invalid".to_string())?;
+    let destination = required(args.destination.as_deref(), "destination")
+        .map_err(|_| "materialization destination is invalid".to_string())?;
+    let destination = clean_relative_path(destination)
+        .map_err(|_| "materialization destination is invalid".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    validate_destination(&destination)
+        .map_err(|_| "materialization destination is denied".to_string())?;
+    let source_prefix = non_empty(args.source_prefix.as_deref()).map(ToString::to_string);
+    let reason_was_present = args.reason.is_some();
+    let reason = non_empty(args.reason.as_deref()).map(|reason| truncate_chars(reason, 2_000));
+
+    if source_uri != frozen.source_uri
+        || source_prefix != frozen.source_prefix
+        || destination != frozen.destination
+        || (reason_was_present && reason != frozen.reason)
+    {
+        return Err(
+            "skills_materialize_resource ToolCall differs from the frozen request".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_single_resource(context: &ToolExecutionContext, source: &str) -> AgentResult<()> {
@@ -251,5 +285,15 @@ mod tests {
             error.code(),
             Some("skill_materialization.destinationDenied")
         );
+    }
+
+    #[test]
+    fn rejects_unknown_materialization_authority_fields() {
+        assert!(serde_json::from_value::<MaterializeArgs>(json!({
+            "sourceUri": "skill://package/example/revision/template.xlsx",
+            "destination": "template.xlsx",
+            "overwrite": true,
+        }))
+        .is_err());
     }
 }

@@ -1,4 +1,4 @@
-use crate::storage::models::AgentActionAuditRecord;
+use crate::storage::models::{AgentActionAuditRecord, AgentUnsettledFileEffect};
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Result of atomically claiming an action's one allowed execution attempt.
@@ -23,6 +23,22 @@ pub enum AgentActionAuditExecutionClaimOutcome {
 pub enum AgentActionAuditFinalizationOutcome {
     Finalized,
     ClaimMissingOrChanged,
+}
+
+/// Result of advancing a manually approved command audit to its terminal receipt.
+///
+/// Manual actions may have an older `pending`, `approved`, or `cancellation_requested` audit from
+/// the approval lifecycle. The frozen identity is immutable; only lifecycle/result fields may be
+/// advanced. A repeated byte-identical terminal receipt is safe and explicitly idempotent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManualTerminalActionAuditOutcome {
+    Inserted,
+    Advanced,
+    Idempotent,
+    Conflict {
+        existing_status: Option<String>,
+        reason: &'static str,
+    },
 }
 
 /// Inserts the pre-execution audit receipt if and only if this action has never been claimed.
@@ -198,7 +214,116 @@ pub fn finalize_claimed_action_audit_execution(
     })
 }
 
-fn load_action_audit_record(
+/// Inserts or advances one manually approved command audit inside the caller's transaction.
+///
+/// Unlike [`upsert_action_audit_record`], this function never overwrites frozen identity and never
+/// clears the original approval timestamp. It is intended to share a transaction with the
+/// pending-action target and paired conversation trace.
+pub fn settle_manual_terminal_action_audit(
+    connection: &Connection,
+    terminal: &AgentActionAuditRecord,
+    fallback_decided_at: i64,
+) -> rusqlite::Result<ManualTerminalActionAuditOutcome> {
+    let existing = load_action_audit_record(connection, &terminal.action_id)?;
+    let Some(existing) = existing else {
+        let mut inserted = terminal.clone();
+        inserted.decided_at = inserted.decided_at.or(Some(fallback_decided_at));
+        inserted.decision_source = Some("manual".to_string());
+        let inserted_record = insert_action_audit_record_if_absent(connection, &inserted)?;
+        return Ok(if inserted_record {
+            ManualTerminalActionAuditOutcome::Inserted
+        } else {
+            ManualTerminalActionAuditOutcome::Conflict {
+                existing_status: None,
+                reason: "audit appeared while terminal receipt was being inserted",
+            }
+        });
+    };
+
+    if !has_same_manual_frozen_identity(&existing, terminal) {
+        return Ok(ManualTerminalActionAuditOutcome::Conflict {
+            existing_status: Some(existing.status),
+            reason: "manual command audit frozen identity differs",
+        });
+    }
+
+    if matches!(
+        existing.status.as_str(),
+        "completed" | "failed" | "cancelled"
+    ) {
+        return Ok(if has_same_manual_terminal_result(&existing, terminal) {
+            ManualTerminalActionAuditOutcome::Idempotent
+        } else {
+            ManualTerminalActionAuditOutcome::Conflict {
+                existing_status: Some(existing.status),
+                reason: "manual command audit already has a different terminal result",
+            }
+        });
+    }
+
+    if !matches!(
+        existing.status.as_str(),
+        "pending" | "approved" | "cancellation_requested"
+    ) {
+        return Ok(ManualTerminalActionAuditOutcome::Conflict {
+            existing_status: Some(existing.status),
+            reason: "manual command audit has an invalid pre-terminal status",
+        });
+    }
+    if !matches!(
+        existing.decision_source.as_deref(),
+        Some("manual") | Some("manual_pending")
+    ) {
+        return Ok(ManualTerminalActionAuditOutcome::Conflict {
+            existing_status: Some(existing.status),
+            reason: "manual command audit has an invalid decision source",
+        });
+    }
+
+    let changed = connection.execute(
+        "
+        UPDATE agent_action_audit
+        SET decision = COALESCE(decision, ?2),
+            status = ?3,
+            patch_result_json = ?4,
+            command_result_json = ?5,
+            tool_result_json = ?6,
+            error = ?7,
+            decided_at = COALESCE(decided_at, ?8),
+            completed_at = ?9,
+            blocked_reason = ?10,
+            decision_source = 'manual'
+        WHERE action_id = ?1
+          AND status IN ('pending', 'approved', 'cancellation_requested')
+        ",
+        params![
+            &terminal.action_id,
+            &terminal.decision,
+            &terminal.status,
+            &terminal.patch_result_json,
+            &terminal.command_result_json,
+            &terminal.tool_result_json,
+            &terminal.error,
+            fallback_decided_at,
+            terminal.completed_at,
+            &terminal.blocked_reason,
+        ],
+    )?;
+    Ok(if changed == 1 {
+        ManualTerminalActionAuditOutcome::Advanced
+    } else {
+        ManualTerminalActionAuditOutcome::Conflict {
+            existing_status: Some(existing.status),
+            reason: "manual command audit changed before terminal CAS",
+        }
+    })
+}
+
+/// Loads one raw audit receipt for storage-level reconciliation.
+///
+/// Callers must still validate the receipt against the frozen pending action before treating a
+/// terminal status or ToolResult as authoritative.
+pub(crate) fn load_action_audit_record(
     connection: &Connection,
     action_id: &str,
 ) -> rusqlite::Result<Option<AgentActionAuditRecord>> {
@@ -259,6 +384,59 @@ fn has_same_execution_identity(
         && existing.path_scope == candidate.path_scope
         && existing.command_cwd_scope == candidate.command_cwd_scope
         && existing.decision_source == candidate.decision_source
+}
+
+fn has_same_manual_frozen_identity(
+    existing: &AgentActionAuditRecord,
+    candidate: &AgentActionAuditRecord,
+) -> bool {
+    existing.action_id == candidate.action_id
+        && existing.run_id == candidate.run_id
+        && existing.conversation_id == candidate.conversation_id
+        && existing.assistant_message_id == candidate.assistant_message_id
+        && existing.action_type == candidate.action_type
+        && existing.tool_name == candidate.tool_name
+        && existing.action_json == candidate.action_json
+        && existing.created_at == candidate.created_at
+        && existing.effective_permissions_json == candidate.effective_permissions_json
+        && existing.path_scope == candidate.path_scope
+        && existing.command_cwd_scope == candidate.command_cwd_scope
+}
+
+fn has_same_manual_terminal_result(
+    existing: &AgentActionAuditRecord,
+    candidate: &AgentActionAuditRecord,
+) -> bool {
+    existing.status == candidate.status
+        && existing.patch_result_json == candidate.patch_result_json
+        && existing.command_result_json == candidate.command_result_json
+        && existing.tool_result_json == candidate.tool_result_json
+        && existing.error == candidate.error
+        && existing.completed_at == candidate.completed_at
+        && existing.blocked_reason == candidate.blocked_reason
+}
+
+pub(crate) fn matches_manual_terminal_action_audit(
+    existing: &AgentActionAuditRecord,
+    candidate: &AgentActionAuditRecord,
+) -> bool {
+    has_same_manual_frozen_identity(existing, candidate)
+        && has_same_manual_terminal_result(existing, candidate)
+}
+
+pub(crate) fn matches_manual_preterminal_action_audit(
+    existing: &AgentActionAuditRecord,
+    candidate: &AgentActionAuditRecord,
+) -> bool {
+    has_same_manual_frozen_identity(existing, candidate)
+        && matches!(
+            existing.status.as_str(),
+            "pending" | "approved" | "cancellation_requested"
+        )
+        && matches!(
+            existing.decision_source.as_deref(),
+            Some("manual") | Some("manual_pending")
+        )
 }
 
 pub fn upsert_action_audit_record(
@@ -361,6 +539,92 @@ pub fn list_tool_result_json_for_run(
     Ok(results)
 }
 
+pub fn list_command_result_json_for_run(
+    connection: &Connection,
+    run_id: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT command_result_json
+        FROM agent_action_audit
+        WHERE run_id = ?1
+          AND tool_name = 'run_command'
+          AND command_result_json IS NOT NULL
+        ORDER BY COALESCE(completed_at, decided_at, created_at) ASC, action_id ASC
+        ",
+    )?;
+    let results = statement
+        .query_map(params![run_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(results)
+}
+
+pub fn list_unsettled_file_effects(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<AgentUnsettledFileEffect>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT project_id, conversation_id, run_id, action_id
+        FROM (
+            SELECT
+                conversations.project_id AS project_id,
+                conversations.id AS conversation_id,
+                audit.run_id AS run_id,
+                audit.action_id AS action_id,
+                audit.created_at AS created_at
+            FROM agent_action_audit audit
+            JOIN conversations ON conversations.id = audit.conversation_id
+            WHERE audit.tool_name IN (
+                'run_command',
+                'office_document',
+                'office_spreadsheet',
+                'office_presentation',
+                'skills_run_script',
+                'skills_materialize_resource'
+              )
+              AND audit.status = 'executing'
+              AND audit.decision_source = 'auto'
+
+            UNION
+
+            SELECT
+                conversations.project_id AS project_id,
+                conversations.id AS conversation_id,
+                pending.run_id AS run_id,
+                pending.action_id AS action_id,
+                pending.created_at AS created_at
+            FROM agent_pending_actions pending
+            JOIN conversations ON conversations.id = pending.conversation_id
+            WHERE pending.tool_name IN (
+                'run_command',
+                'office_document',
+                'office_spreadsheet',
+                'office_presentation',
+                'skills_run_script',
+                'skills_materialize_resource'
+              )
+              -- Every write-ahead terminal target is a candidate until StorageService proves a
+              -- matching manual terminal audit and paired ToolResult trace. Limiting this branch
+              -- to `failed` loses the legacy crash boundary where `completed`/`cancelled` was
+              -- durable but the receipt was not.
+              AND pending.target_status IN ('completed', 'failed', 'cancelled')
+        ) unsettled
+        ORDER BY created_at ASC, action_id ASC
+        ",
+    )?;
+    let records = statement
+        .query_map([], |row| {
+            Ok(AgentUnsettledFileEffect {
+                project_id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                run_id: row.get(2)?,
+                action_id: row.get(3)?,
+            })
+        })?
+        .collect();
+    records
+}
+
 pub fn delete_action_audit_for_conversation(
     connection: &Connection,
     conversation_id: &str,
@@ -369,6 +633,29 @@ pub fn delete_action_audit_for_conversation(
         "DELETE FROM agent_action_audit WHERE conversation_id = ?1",
         params![conversation_id],
     )?;
+    Ok(())
+}
+
+/// Retires action receipts owned by specific assistant messages after the service-level deletion
+/// barrier has proved that no effect is still executing or durably unsettled.
+///
+/// Keep this in the caller's message-deletion transaction. The audit table deliberately outlives
+/// ordinary message foreign-key cascades for crash recovery, so deleting the message first would
+/// otherwise manufacture an orphan receipt that looks unsettled on the next startup.
+pub(crate) fn delete_action_audit_for_messages(
+    connection: &Connection,
+    conversation_id: &str,
+    assistant_message_ids: &[String],
+) -> rusqlite::Result<()> {
+    for assistant_message_id in assistant_message_ids {
+        connection.execute(
+            "
+            DELETE FROM agent_action_audit
+            WHERE conversation_id = ?1 AND assistant_message_id = ?2
+            ",
+            params![conversation_id, assistant_message_id],
+        )?;
+    }
     Ok(())
 }
 

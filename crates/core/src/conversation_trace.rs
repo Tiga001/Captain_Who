@@ -530,25 +530,16 @@ impl ConversationTraceRecorder {
             *approval_status = call.approval_status;
         }
 
-        let status = result_status(result);
-        let success = status == ConversationTraceToolResultStatus::Succeeded;
-        let (observation, result_redacted) =
-            sanitize_value(result.result.as_ref().unwrap_or(&Value::Null));
-        let (error, error_redacted) = sanitize_optional_text(result.error.as_deref());
-        let redacted = result_redacted || error_redacted;
         let sequence = self.take_sequence();
-        self.items.push(ConversationTurnTraceItem::ToolResult {
-            sequence,
-            call_id: call.id.clone(),
-            tool: call.tool.clone(),
-            status,
-            success,
-            observation,
-            approval_status: call.approval_status,
-            error,
-            truncated: redacted,
-        });
-        self.truncated |= redacted;
+        let item = projected_tool_result_trace_item(sequence, call, result);
+        self.truncated |= matches!(
+            &item,
+            ConversationTurnTraceItem::ToolResult {
+                truncated: true,
+                ..
+            }
+        );
+        self.items.push(item);
     }
 
     pub(crate) fn finish(
@@ -630,6 +621,34 @@ impl ConversationTraceRecorder {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.saturating_add(1);
         sequence
+    }
+}
+
+/// Produces the canonical persisted trace item for a ToolResult.
+///
+/// Durable settlement verification uses this same projection so an audit receipt cannot be paired
+/// with a trace item carrying different (or less complete) result/error evidence.
+pub(crate) fn projected_tool_result_trace_item(
+    sequence: u64,
+    call: &AgentToolCall,
+    result: &AgentToolResult,
+) -> ConversationTurnTraceItem {
+    let status = result_status(result);
+    let success = status == ConversationTraceToolResultStatus::Succeeded;
+    let (observation, result_redacted) =
+        sanitize_value(result.result.as_ref().unwrap_or(&Value::Null));
+    let (error, error_redacted) = sanitize_optional_text(result.error.as_deref());
+    let redacted = result_redacted || error_redacted;
+    ConversationTurnTraceItem::ToolResult {
+        sequence,
+        call_id: call.id.clone(),
+        tool: call.tool.clone(),
+        status,
+        success,
+        observation,
+        approval_status: call.approval_status,
+        error,
+        truncated: redacted,
     }
 }
 

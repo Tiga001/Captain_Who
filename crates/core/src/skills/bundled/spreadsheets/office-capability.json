@@ -1,6 +1,40 @@
 {
-  "contractVersion": 1,
+  "contractVersion": 2,
   "engine": "officecli",
   "tool": "office_spreadsheet",
-  "extensions": [".xlsx"]
+  "extensions": [".xlsx"],
+  "modes": {
+    "native": {
+      "tool": "office_spreadsheet",
+      "bestFor": "targeted_structured_operations"
+    },
+    "script": {
+      "editTools": ["apply_patch", "write_file"],
+      "executionTool": "run_command",
+      "runtimes": [
+        {
+          "provider": "managedArtifact",
+          "kind": "python",
+          "extension": ".py",
+          "availablePackages": [
+            { "name": "openpyxl", "version": "3.1.5" },
+            { "name": "xlsxwriter", "version": "3.2.9" }
+          ]
+        },
+        {
+          "provider": "managedArtifact",
+          "kind": "node",
+          "extension": ".mjs",
+          "availablePackages": [{ "name": "exceljs", "version": "4.4.0" }]
+        }
+      ],
+      "requiredPackagesField": "runtime.requiredPackages",
+      "observation": {
+        "kind": "office",
+        "expectedOutputsField": "observe.expectedOutputs",
+        "additionalRootsField": "observe.additionalRoots",
+        "resultField": "artifactObservation"
+      }
+    }
+  }
 }

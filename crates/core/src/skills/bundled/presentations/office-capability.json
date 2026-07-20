@@ -1,6 +1,37 @@
 {
-  "contractVersion": 1,
+  "contractVersion": 2,
   "engine": "officecli",
   "tool": "office_presentation",
-  "extensions": [".pptx"]
+  "extensions": [".pptx"],
+  "modes": {
+    "native": {
+      "tool": "office_presentation",
+      "bestFor": "targeted_structured_operations"
+    },
+    "script": {
+      "editTools": ["apply_patch", "write_file"],
+      "executionTool": "run_command",
+      "runtimes": [
+        {
+          "provider": "managedArtifact",
+          "kind": "python",
+          "extension": ".py",
+          "availablePackages": [{ "name": "python-pptx", "version": "1.0.2" }]
+        },
+        {
+          "provider": "managedArtifact",
+          "kind": "node",
+          "extension": ".mjs",
+          "availablePackages": [{ "name": "pptxgenjs", "version": "4.0.1" }]
+        }
+      ],
+      "requiredPackagesField": "runtime.requiredPackages",
+      "observation": {
+        "kind": "office",
+        "expectedOutputsField": "observe.expectedOutputs",
+        "additionalRootsField": "observe.additionalRoots",
+        "resultField": "artifactObservation"
+      }
+    }
+  }
 }

@@ -16,14 +16,14 @@ pub(crate) const MAX_COMMAND_CHARS: usize = 2_000;
 ///
 /// The trusted host must choose this value from its own approval state. It must never be accepted
 /// from model arguments, renderer payloads, or another untrusted request field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandAuthorizationSource {
     Automatic,
     ExplicitUser,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandPolicyDecision {
     Allow,
@@ -31,7 +31,7 @@ pub enum CommandPolicyDecision {
     Deny,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandRiskClass {
     ReadOnly,
@@ -46,7 +46,7 @@ pub enum CommandRiskClass {
     ExternalRead,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandPolicyFinding {
     pub segment_index: usize,
@@ -58,7 +58,7 @@ pub struct CommandPolicyFinding {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandPolicyEvaluation {
     pub decision: CommandPolicyDecision,
@@ -78,6 +78,7 @@ pub struct CommandPolicyEvaluation {
 pub struct CommandExecutionError {
     pub(super) message: String,
     pub(super) policy_evaluation: Option<CommandPolicyEvaluation>,
+    pub(super) artifact_observation: Option<Box<AgentCommandArtifactObservation>>,
 }
 
 impl CommandExecutionError {
@@ -90,11 +91,24 @@ impl CommandExecutionError {
         Self {
             message: format!("{prefix}（{}）：{}", evaluation.code, evaluation.reason),
             policy_evaluation: Some(evaluation),
+            artifact_observation: None,
         }
     }
 
     pub fn policy_evaluation(&self) -> Option<&CommandPolicyEvaluation> {
         self.policy_evaluation.as_ref()
+    }
+
+    pub fn artifact_observation(&self) -> Option<&AgentCommandArtifactObservation> {
+        self.artifact_observation.as_deref()
+    }
+
+    pub(super) fn with_artifact_observation(
+        mut self,
+        artifact_observation: Option<AgentCommandArtifactObservation>,
+    ) -> Self {
+        self.artifact_observation = artifact_observation.map(Box::new);
+        self
     }
 }
 
@@ -103,6 +117,7 @@ impl From<String> for CommandExecutionError {
         Self {
             message,
             policy_evaluation: None,
+            artifact_observation: None,
         }
     }
 }
@@ -115,7 +130,7 @@ impl std::fmt::Display for CommandExecutionError {
 
 impl std::error::Error for CommandExecutionError {}
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCommandExecutionResult {
     pub command: String,
@@ -133,6 +148,10 @@ pub struct AgentCommandExecutionResult {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_evaluation: Option<CommandPolicyEvaluation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_observation: Option<AgentCommandArtifactObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<AgentCommandRuntimeResolution>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -206,6 +225,20 @@ impl CommandRunState {
             cancelled += 1;
         }
         cancelled
+    }
+
+    /// Returns whether an approved process action still owns its pre-spawn or running guard.
+    ///
+    /// Destructive lifecycle operations use this together with the higher-level cancellation map:
+    /// the guard is registered while the pending-action lock is held, before the async worker is
+    /// queued, so it closes the otherwise unobservable approved-to-worker-start gap.
+    pub fn has_active_run(&self, run_id: &str) -> bool {
+        let running = self
+            .inner
+            .running
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        running.values().any(|command| command.run_id == run_id)
     }
 
     pub(super) fn unregister(&self, action_id: &str) {

@@ -259,20 +259,34 @@ impl StorageService {
         }
 
         let mut connection = self.state.connection()?;
+        let transaction = connection.transaction().map_err(storage_error)?;
         let attachments = attachment_repository::list_message_attachments(
-            &connection,
+            &transaction,
             conversation_id,
             message_ids,
         )
         .map_err(storage_error)?;
         attachment_repository::delete_message_attachments(
-            &connection,
+            &transaction,
             conversation_id,
             message_ids,
         )
         .map_err(storage_error)?;
-        chat_repository::delete_messages(&mut connection, conversation_id, message_ids)
+        pending_action_repository::delete_pending_actions_for_messages(
+            &transaction,
+            conversation_id,
+            message_ids,
+        )
+        .map_err(storage_error)?;
+        agent_action_audit_repository::delete_action_audit_for_messages(
+            &transaction,
+            conversation_id,
+            message_ids,
+        )
+        .map_err(storage_error)?;
+        chat_repository::delete_messages_in_transaction(&transaction, conversation_id, message_ids)
             .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
         if let Err(error) = self.cleanup_attachment_files(attachments) {
             eprintln!("failed to remove deleted message attachment files: {error}");
         }

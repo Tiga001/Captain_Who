@@ -45,6 +45,24 @@ fn production_bootstrap_serves_skill_management_and_shuts_down_cleanly() {
     assert_eq!(ping["result"]["message"], "pong");
     assert_eq!(ping["result"]["echo"], "startup-smoke");
 
+    let mut contender = Command::new(env!("CARGO_BIN_EXE_core-server"))
+        .env("MYCOPILOT_STORAGE_DB", &database)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn competing core-server binary");
+    let contender_status = wait_for_exit(&mut contender, EXIT_TIMEOUT);
+    let contender_stderr = read_stderr(&mut contender);
+    assert!(
+        !contender_status.success(),
+        "a competing core-server unexpectedly acquired the live database"
+    );
+    assert!(
+        contender_stderr.contains("another core-server already owns storage"),
+        "competing core-server did not report the instance lock: {contender_stderr}"
+    );
+
     send_request(
         &mut stdin,
         json!({

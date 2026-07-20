@@ -309,6 +309,31 @@ fn parse_args(value: Value, tool_name: &str) -> AgentResult<OfficeToolArgs> {
     Ok(args)
 }
 
+pub(crate) fn validate_frozen_office_trace_args(
+    frozen: &AgentOfficeOperationRequest,
+    operation: &Value,
+) -> Result<(), String> {
+    let document_kind = frozen.prepared.request.document_kind;
+    let tool_name = match document_kind {
+        OfficeDocumentKind::Document => "office_document",
+        OfficeDocumentKind::Spreadsheet => "office_spreadsheet",
+        OfficeDocumentKind::Presentation => "office_presentation",
+    };
+    let args = parse_args(operation.clone(), tool_name)
+        .map_err(|_| format!("{tool_name} frozen ToolCall arguments are invalid"))?;
+    let reason_was_present = args.reason.is_some();
+    let reason = non_empty(args.reason.as_deref()).map(truncate_reason);
+    let request = args
+        .into_request(document_kind)
+        .map_err(|_| format!("{tool_name} frozen ToolCall request is invalid"))?;
+    if request != frozen.prepared.request || (reason_was_present && reason != frozen.reason) {
+        return Err(format!(
+            "{tool_name} ToolCall differs from the frozen request"
+        ));
+    }
+    Ok(())
+}
+
 fn office_execution_value(result: OfficeExecutionResult) -> AgentResult<Value> {
     let succeeded = result.exit_code == Some(0)
         && !result.timed_out
@@ -399,7 +424,8 @@ fn office_input_schema(document_kind: OfficeDocumentKind) -> Value {
                 "description": "Short user-facing reason for a file-changing approval request."
             }
         },
-        "required": ["operation"]
+        "required": ["operation"],
+        "additionalProperties": false
     })
 }
 

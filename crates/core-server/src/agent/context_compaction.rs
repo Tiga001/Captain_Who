@@ -598,12 +598,35 @@ impl AgentService {
         .map(|_| ())
     }
 
-    /// Atomically persists the action outcome and the trace item that pairs its tool result.
-    pub(super) fn commit_pending_result_trace_with_continuation(
+    /// Commits a manually approved command's terminal audit and paired continuation as one fact.
+    pub(super) fn commit_audited_command_result_trace_with_continuation(
         &self,
         record: &PendingActionRecord,
         agent_input: &AgentChatInput,
         target_status: PendingActionStatus,
+        command_result: &AgentCommandExecutionResult,
+        completed_at: i64,
+        notifications: &CoreServerNotificationSender,
+    ) -> Result<(), String> {
+        self.commit_audited_result_trace_with_continuation(
+            record,
+            agent_input,
+            target_status,
+            Some(command_result),
+            completed_at,
+            notifications,
+        )
+    }
+
+    /// Commits a manually approved file-producing action's terminal audit, pending target and
+    /// paired ToolResult trace in one storage transaction.
+    pub(super) fn commit_audited_result_trace_with_continuation(
+        &self,
+        record: &PendingActionRecord,
+        agent_input: &AgentChatInput,
+        target_status: PendingActionStatus,
+        command_result: Option<&AgentCommandExecutionResult>,
+        completed_at: i64,
         notifications: &CoreServerNotificationSender,
     ) -> Result<(), String> {
         let checkpoint = record
@@ -635,13 +658,13 @@ impl AgentService {
             conversation_context_configuration_revision(&record.agent_input)
                 .map_err(|error| error.to_string())?;
         let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
-        let changed = self.storage.commit_pending_agent_action_result_trace(
-            &record.storage_id,
-            pending_status_label(record.snapshot.status),
-            pending_status_label(target_status),
+        let trace_changed = self.persist_manual_audited_result_trace(
+            record,
+            target_status,
+            command_result,
+            &continuation.result,
             &trace,
-            record.snapshot.created_at,
-            now_ms(),
+            completed_at,
         )?;
 
         self.trace_snapshots
@@ -656,7 +679,7 @@ impl AgentService {
             &trace,
             &configuration_revision,
         ) {
-            Ok(update) if changed => self.emit_context_window_snapshot(
+            Ok(update) if trace_changed => self.emit_context_window_snapshot(
                 notifications,
                 run_id,
                 conversation_id,
@@ -664,16 +687,115 @@ impl AgentService {
             ),
             Ok(_) => {}
             Err(error) => {
-                // The durable result/trace transaction already committed. This cache is derived
-                // state, so discard it and let the continuation rebuild instead of pretending
-                // that the authoritative tool result was not persisted.
                 self.invalidate_conversation_context_state(conversation_id);
-                eprintln!(
-                    "failed to update derived context after durable approval result: {error}"
-                );
+                eprintln!("failed to update derived context after durable action result: {error}");
             }
         }
         Ok(())
+    }
+
+    /// Reconciles a commit-unknown manual command settlement from one authoritative snapshot.
+    ///
+    /// `CommittedAtBoundary` adopts the exact candidate into derived in-memory state so the same
+    /// process may safely continue. `CommittedAndAdvanced` is owned by another continuation and
+    /// deliberately invalidates local state; callers must not run the model a second time.
+    pub(super) fn inspect_audited_command_result_trace_with_continuation(
+        &self,
+        record: &PendingActionRecord,
+        agent_input: &AgentChatInput,
+        target_status: PendingActionStatus,
+        command_result: &AgentCommandExecutionResult,
+        completed_at: i64,
+    ) -> Result<AgentPendingActionSettlementInspection, String> {
+        self.inspect_audited_result_trace_with_continuation(
+            record,
+            agent_input,
+            target_status,
+            Some(command_result),
+            completed_at,
+        )
+    }
+
+    pub(super) fn inspect_audited_result_trace_with_continuation(
+        &self,
+        record: &PendingActionRecord,
+        agent_input: &AgentChatInput,
+        target_status: PendingActionStatus,
+        command_result: Option<&AgentCommandExecutionResult>,
+        completed_at: i64,
+    ) -> Result<AgentPendingActionSettlementInspection, String> {
+        let checkpoint = record
+            .agent_input
+            .resume_checkpoint
+            .as_ref()
+            .ok_or_else(|| "审批续跑缺少会话轨迹检查点。".to_string())?;
+        let continuation = agent_input
+            .tool_continuation
+            .as_ref()
+            .ok_or_else(|| "审批续跑缺少工具结果。".to_string())?;
+        let snapshot = conversation_trace_snapshot_from_checkpoint_and_continuation(
+            checkpoint,
+            &continuation.call,
+            &continuation.result,
+        );
+        let run_id = &record.snapshot.run_id;
+        let conversation_id = record
+            .snapshot
+            .conversation_id
+            .as_deref()
+            .ok_or_else(|| "审批续跑缺少 conversation id。".to_string())?;
+        let assistant_message_id = record
+            .snapshot
+            .assistant_message_id
+            .as_deref()
+            .ok_or_else(|| "审批续跑缺少 assistant message id。".to_string())?;
+        let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
+        let outcome = self.inspect_manual_audited_result_trace(
+            record,
+            target_status,
+            command_result,
+            &continuation.result,
+            &trace,
+            completed_at,
+        )?;
+        match outcome {
+            AgentPendingActionSettlementInspection::CommittedAtBoundary => {
+                self.trace_snapshots
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .insert(run_id.to_string(), snapshot);
+                match conversation_context_configuration_revision(&record.agent_input) {
+                    Ok(configuration_revision) => {
+                        if let Err(error) = self.update_running_conversation_context_state(
+                            &record.agent_input,
+                            run_id,
+                            conversation_id,
+                            assistant_message_id,
+                            &trace,
+                            &configuration_revision,
+                        ) {
+                            self.invalidate_conversation_context_state(conversation_id);
+                            eprintln!(
+                                "failed to adopt derived context after reconciling action result: {error}"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        self.invalidate_conversation_context_state(conversation_id);
+                        eprintln!(
+                            "failed to rebuild derived context revision after reconciling action result: {error}"
+                        );
+                    }
+                }
+            }
+            AgentPendingActionSettlementInspection::CommittedAndAdvanced => {
+                self.discard_trace_snapshot(run_id);
+                self.invalidate_conversation_context_state(conversation_id);
+            }
+            AgentPendingActionSettlementInspection::DefinitelyUncommitted
+            | AgentPendingActionSettlementInspection::Diverged { .. } => {}
+        }
+        Ok(outcome)
     }
 
     pub(super) fn discard_trace_snapshot(&self, run_id: &str) {

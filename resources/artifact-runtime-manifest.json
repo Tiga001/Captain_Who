@@ -1,0 +1,176 @@
+{
+  "schemaVersion": 3,
+  "providerId": "mycopilot.artifact-runtime",
+  "bundleVersion": "2026.07.3",
+  "buildInputs": {
+    "builder": {
+      "path": "scripts/prepare-artifact-runtime.mjs",
+      "sha256": "69ac8369a9dc62859b7977a5f401405865616189d710671877ee33e59589a553"
+    },
+    "nodeBootstrap": {
+      "path": "resources/artifact-runtime/node-bootstrap.mjs",
+      "sha256": "67b6690bfaae2507b38c70f4ef062b3c100f5706533978ea1e0d675b486d43a8"
+    },
+    "nodeLoader": {
+      "path": "resources/artifact-runtime/node-loader.mjs",
+      "sha256": "54f0edac1e223381f48647224fb599407aa340e87132dca5edf5fa0ce32e3183"
+    },
+    "nodePackageManifest": {
+      "path": "packages/artifact-runtime-node/package.json",
+      "sha256": "99305ec3a98d5224c56beb55573ac1674ae7e826cff33cf7a1bc7952a05b56e9"
+    },
+    "nodePackageEvidence": {
+      "path": "resources/artifact-runtime-node-package-evidence.json",
+      "sha256": "3582172e829aa8404647e9efa75119c4fa43f497f9ddc1e63335573b9f1b4356"
+    },
+    "pnpmLockfile": {
+      "path": "pnpm-lock.yaml",
+      "sha256": "ff00b75f8f08f98494da70fcff19c833cefca642a5c99b0b87ded35bf0e34f24"
+    },
+    "pythonRequirements": {
+      "path": "resources/artifact-runtime-python-requirements.txt",
+      "sha256": "a0662a4c086c13f57763d4c78385a276860c92a1c6d44ac75b899dc0abb14f82"
+    }
+  },
+  "node": {
+    "version": "22.23.1",
+    "executable": {
+      "unix": "dependencies/node/bin/node",
+      "win32": "dependencies/node/bin/node.exe"
+    },
+    "packageRoot": "dependencies/node/node_modules",
+    "bootstrap": "runtime/node-bootstrap.mjs",
+    "loader": "runtime/node-loader.mjs",
+    "assets": {
+      "darwin-arm64": {
+        "format": "tar.gz",
+        "archiveRoot": "node-v22.23.1-darwin-arm64",
+        "url": "https://nodejs.org/dist/v22.23.1/node-v22.23.1-darwin-arm64.tar.gz",
+        "size": 50067502,
+        "sha256": "ef28d8fab2c0e4314522d4bb1b7173270aa3937e93b92cb7de79c112ac1fa953"
+      },
+      "darwin-x64": {
+        "format": "tar.gz",
+        "archiveRoot": "node-v22.23.1-darwin-x64",
+        "url": "https://nodejs.org/dist/v22.23.1/node-v22.23.1-darwin-x64.tar.gz",
+        "size": 51245086,
+        "sha256": "b8da981b8a0b1241b70249204916da76c63573ddf5814dbd2d1e41069105cb81"
+      },
+      "linux-arm64": {
+        "format": "tar.gz",
+        "archiveRoot": "node-v22.23.1-linux-arm64",
+        "url": "https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-arm64.tar.gz",
+        "size": 56736321,
+        "sha256": "543fa39e57d4c07855939459a323f4deb9a79dd1bb45e6e99458b0f2de10db8d"
+      },
+      "linux-x64": {
+        "format": "tar.gz",
+        "archiveRoot": "node-v22.23.1-linux-x64",
+        "url": "https://nodejs.org/dist/v22.23.1/node-v22.23.1-linux-x64.tar.gz",
+        "size": 56887015,
+        "sha256": "7a8cb04b4a1df4eaf432125324b81b29a088e73570a23259a8de1c65d07fc129"
+      },
+      "win32-arm64": {
+        "format": "executable",
+        "url": "https://nodejs.org/dist/v22.23.1/win-arm64/node.exe",
+        "size": 77126472,
+        "sha256": "f55db97c9924b0b37b05e8cf1be4e04c72aec01dc1c22420b5c31ab9cd118b89"
+      },
+      "win32-x64": {
+        "format": "executable",
+        "url": "https://nodejs.org/dist/v22.23.1/win-x64/node.exe",
+        "size": 86989128,
+        "sha256": "f8d162c0641dcee512132f3bcf8a68169c7ecb852efd8e1a46c9fec5a0f469ed"
+      }
+    },
+    "dependencies": [
+      {
+        "name": "docx",
+        "version": "9.6.1",
+        "identityFile": "dependencies/node/node_modules/docx/package.json"
+      },
+      {
+        "name": "exceljs",
+        "version": "4.4.0",
+        "identityFile": "dependencies/node/node_modules/exceljs/package.json"
+      },
+      {
+        "name": "pptxgenjs",
+        "version": "4.0.1",
+        "identityFile": "dependencies/node/node_modules/pptxgenjs/package.json"
+      }
+    ],
+    "licenseFile": {
+      "target": "legal/node/LICENSE",
+      "url": "https://raw.githubusercontent.com/nodejs/node/v22.23.1/LICENSE",
+      "size": 145485,
+      "sha256": "c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4"
+    }
+  },
+  "python": {
+    "version": "3.12.13",
+    "release": "20260610",
+    "executable": {
+      "unix": "dependencies/python/bin/python3",
+      "win32": "dependencies/python/python.exe"
+    },
+    "runtimeHome": "dependencies/python",
+    "requirements": "resources/artifact-runtime-python-requirements.txt",
+    "dependencies": [
+      {
+        "name": "openpyxl",
+        "version": "3.1.5",
+        "identityFile": "dependencies/python/lib/python3.12/site-packages/openpyxl-3.1.5.dist-info/METADATA"
+      },
+      {
+        "name": "python-docx",
+        "version": "1.2.0",
+        "identityFile": "dependencies/python/lib/python3.12/site-packages/python_docx-1.2.0.dist-info/METADATA"
+      },
+      {
+        "name": "python-pptx",
+        "version": "1.0.2",
+        "identityFile": "dependencies/python/lib/python3.12/site-packages/python_pptx-1.0.2.dist-info/METADATA"
+      },
+      {
+        "name": "xlsxwriter",
+        "version": "3.2.9",
+        "identityFile": "dependencies/python/lib/python3.12/site-packages/xlsxwriter-3.2.9.dist-info/METADATA"
+      }
+    ],
+    "assets": {
+      "darwin-arm64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13%2B20260610-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        "size": 25000199,
+        "sha256": "f0a7fa7decc75df2b1a789329a44f657c4a15c0a683f197ce46a5cb621bc6ef4"
+      },
+      "darwin-x64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13%2B20260610-x86_64-apple-darwin-install_only_stripped.tar.gz",
+        "size": 24690110,
+        "sha256": "c56c2dfe3fb5569430f4eabcff1fc1334c66db708bf17c103eef3dd237f3e3ab"
+      },
+      "linux-arm64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13%2B20260610-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "size": 29197829,
+        "sha256": "eb85c6903552b1cb40b183a119681a9326fa97e31cf0e4b8c78bf26735ff1552"
+      },
+      "linux-x64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13%2B20260610-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "size": 34145919,
+        "sha256": "6682afef6b510037a0ad84e61150e5121af2e2785c9ca27b047e029270a840fe"
+      },
+      "win32-arm64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13%2B20260610-aarch64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "size": 20655217,
+        "sha256": "45cef3d23be2bbf950e33f1ed2517aaab5b5efb2f1bf2ae5b2c16ad9a7acc176"
+      },
+      "win32-x64": {
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13%2B20260610-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "size": 21932694,
+        "sha256": "99dce0b23bf3c3b28d350cdd7bfe3cd3be51cc4f285faae7c0df110d106d1a8d"
+      }
+    },
+    "source": "https://github.com/astral-sh/python-build-standalone",
+    "license": "MPL-2.0 AND Python-2.0"
+  }
+}

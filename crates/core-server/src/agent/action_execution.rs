@@ -154,6 +154,155 @@ fn office_audit_persistence_failure(
     }
 }
 
+fn command_audit_persistence_failure(
+    command: &mycopilot_core::AgentCommandRequest,
+    phase: &str,
+    audit_error: &str,
+    execution_result: Option<&AgentCommandExecutionResult>,
+) -> AgentToolResult {
+    let execution_attempted = execution_result.is_some();
+    let message = if execution_attempted {
+        "The command finished, but its final action audit could not be persisted. Inspect the observed artifacts before retrying."
+    } else {
+        "The command was not started because its executing action audit could not be persisted."
+    };
+    AgentToolResult {
+        call_id: command.id.clone(),
+        tool: "run_command".to_string(),
+        ok: false,
+        result: Some(serde_json::json!({
+            "type": "command_execution",
+            "code": "auditPersistenceFailed",
+            "recovery": if execution_attempted { "inspectArtifacts" } else { "retry" },
+            "phase": phase,
+            "executionAttempted": execution_attempted,
+            // An approved command can have changed files even when its process or audit failed.
+            // Keep the complete bounded command result, including artifactObservation, so the
+            // model-facing continuation never mistakes an audit failure for a clean rollback.
+            "effectsMayHaveOccurred": execution_attempted,
+            "auditError": bounded_audit_error(audit_error),
+            "execution": execution_result,
+        })),
+        error: Some(message.to_string()),
+    }
+}
+
+fn command_audit_finalization_indeterminate(
+    command: &mycopilot_core::AgentCommandRequest,
+    audit_error: &str,
+    reconciliation_error: &str,
+    execution_result: &AgentCommandExecutionResult,
+) -> AgentToolResult {
+    AgentToolResult {
+        call_id: command.id.clone(),
+        tool: "run_command".to_string(),
+        ok: false,
+        result: Some(serde_json::json!({
+            "type": "command_execution",
+            "code": "finalizationIndeterminate",
+            "recovery": "inspectArtifacts",
+            "phase": "afterExecution",
+            "executionAttempted": true,
+            "effectsMayHaveOccurred": true,
+            "auditError": bounded_audit_error(audit_error),
+            "reconciliationError": bounded_audit_error(reconciliation_error),
+            // The command already ran. Preserve every bounded process and artifact field even
+            // when durable state cannot prove whether the terminal receipt committed.
+            "execution": execution_result,
+        })),
+        error: Some(
+            "The command finished, but the terminal audit commit could not be reconciled. Inspect the observed artifacts and durable action state before retrying."
+                .to_string(),
+        ),
+    }
+}
+
+struct ManualCommandSettlementError<'a> {
+    code: &'a str,
+    message: String,
+    attempt_error: &'a str,
+    inspection_error: Option<&'a str>,
+    command_result: &'a AgentCommandExecutionResult,
+    tool_result: &'a AgentToolResult,
+}
+
+fn emit_manual_command_settlement_error(
+    notifications: &CoreServerNotificationSender,
+    run_id: &str,
+    error: ManualCommandSettlementError<'_>,
+) {
+    let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+        run_id: Some(run_id.to_string()),
+        message: error.message,
+        recoverable: true,
+        code: Some(error.code.to_string()),
+        details: Some(serde_json::json!({
+            "type": "command_execution",
+            "code": if error.code == "approval_result_commit_indeterminate" {
+                "finalizationIndeterminate"
+            } else {
+                "auditPersistenceFailed"
+            },
+            "recovery": "inspectArtifacts",
+            "effectsMayHaveOccurred": true,
+            "attemptError": bounded_audit_error(error.attempt_error),
+            "inspectionError": error.inspection_error.map(bounded_audit_error),
+            "execution": error.command_result,
+            "toolResult": error.tool_result,
+        })),
+    }));
+}
+
+pub(super) enum ManualFileEffectSettlement {
+    Committed {
+        agent_input: Box<AgentChatInput>,
+        tool_result: AgentToolResult,
+        pending_status: PendingActionStatus,
+    },
+    CommittedAndAdvanced,
+    Unsettled,
+}
+
+struct ManualFileEffectSettlementError<'a> {
+    effect_type: &'a str,
+    code: &'a str,
+    message: String,
+    attempt_error: &'a str,
+    inspection_error: Option<&'a str>,
+    execution_result: &'a AgentToolResult,
+}
+
+fn emit_manual_file_effect_settlement_error(
+    notifications: &CoreServerNotificationSender,
+    run_id: &str,
+    error: ManualFileEffectSettlementError<'_>,
+) {
+    let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+        run_id: Some(run_id.to_string()),
+        message: error.message,
+        recoverable: true,
+        code: Some(error.code.to_string()),
+        details: Some(serde_json::json!({
+            "type": error.effect_type,
+            "code": if error.code == "approval_result_commit_indeterminate" {
+                "finalizationIndeterminate"
+            } else {
+                "auditPersistenceFailed"
+            },
+            "recovery": "inspectState",
+            "effectsMayHaveOccurred": true,
+            "attemptError": bounded_audit_error(error.attempt_error),
+            "inspectionError": error.inspection_error.map(bounded_audit_error),
+            "execution": error.execution_result,
+        })),
+    }));
+}
+
+enum CommandAuditReconciliation {
+    Executing,
+    Terminal(AgentToolResult),
+}
+
 fn office_execution_claim_error(existing_status: &str, identity_conflict: bool) -> AgentError {
     let prior_execution_may_have_started = matches!(
         existing_status,
@@ -231,6 +380,262 @@ fn resolve_office_claim_outcome(
         .map(Some),
         AgentActionAuditExecutionClaimOutcome::IdentityConflict { status } => {
             Err(office_execution_claim_error(&status, true))
+        }
+    }
+}
+
+fn command_execution_claim_error(existing_status: &str, identity_conflict: bool) -> AgentError {
+    let prior_execution_may_have_started = matches!(
+        existing_status,
+        "executing" | "completed" | "failed" | "cancelled"
+    );
+    let (code, message) = if identity_conflict {
+        (
+            "actionIdentityConflict",
+            "A command action with the same identity already exists but its frozen contents differ. The command was not replayed; inspect its artifacts and start a new action.",
+        )
+    } else {
+        (
+            "executionAlreadyClaimed",
+            "This command has already been claimed for execution. It was not replayed; inspect the authoritative result and observed artifacts before continuing.",
+        )
+    };
+    AgentError::structured(
+        "agent.command_execution_claim_rejected",
+        message,
+        serde_json::json!({
+            "type": "command_execution",
+            "code": code,
+            "recovery": "inspectArtifacts",
+            "phase": "beforeExecution",
+            "existingStatus": existing_status,
+            "executionAttempted": false,
+            "priorExecutionMayHaveStarted": prior_execution_may_have_started,
+            "effectsMayHaveOccurred": prior_execution_may_have_started,
+        }),
+    )
+}
+
+fn resolve_command_claim_outcome(
+    command: &mycopilot_core::AgentCommandRequest,
+    outcome: AgentActionAuditExecutionClaimOutcome,
+) -> AgentResult<Option<AgentToolResult>> {
+    match outcome {
+        AgentActionAuditExecutionClaimOutcome::Claimed => Ok(None),
+        AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+            status,
+            tool_result_json,
+        } => {
+            if let Some(json) = tool_result_json {
+                if let Ok(result) = serde_json::from_str::<AgentToolResult>(&json) {
+                    if result.call_id == command.id && result.tool == "run_command" {
+                        return Ok(Some(result));
+                    }
+                }
+                return Err(AgentError::structured(
+                    "agent.command_persisted_result_invalid",
+                    "The claimed command has an invalid persisted result. It was not replayed; inspect durable state before continuing.",
+                    serde_json::json!({
+                        "type": "command_execution",
+                        "code": "persistedResultInvalid",
+                        "recovery": "inspectArtifacts",
+                        "existingStatus": status,
+                        "executionAttempted": false,
+                        "effectsMayHaveOccurred": true,
+                    }),
+                ));
+            }
+            Err(command_execution_claim_error(&status, false))
+        }
+        AgentActionAuditExecutionClaimOutcome::IdentityConflict { status } => {
+            Err(command_execution_claim_error(&status, true))
+        }
+    }
+}
+
+fn resolve_file_effect_claim_outcome(
+    call_id: &str,
+    tool: &str,
+    effect_type: &str,
+    outcome: AgentActionAuditExecutionClaimOutcome,
+) -> AgentResult<Option<AgentToolResult>> {
+    match outcome {
+        AgentActionAuditExecutionClaimOutcome::Claimed => Ok(None),
+        AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+            status,
+            tool_result_json,
+        } => {
+            if let Some(json) = tool_result_json {
+                if let Ok(result) = serde_json::from_str::<AgentToolResult>(&json) {
+                    if result.call_id == call_id && result.tool == tool {
+                        return Ok(Some(result));
+                    }
+                }
+                return Err(AgentError::structured(
+                    "agent.file_effect_persisted_result_invalid",
+                    "The claimed file-producing action has an invalid persisted result and was not replayed.",
+                    serde_json::json!({
+                        "type": effect_type,
+                        "code": "persistedResultInvalid",
+                        "recovery": "inspectState",
+                        "existingStatus": status,
+                        "effectsMayHaveOccurred": true,
+                    }),
+                ));
+            }
+            Err(AgentError::structured(
+                "agent.file_effect_execution_claim_rejected",
+                "This file-producing action has already been claimed and was not replayed.",
+                serde_json::json!({
+                    "type": effect_type,
+                    "code": "executionAlreadyClaimed",
+                    "recovery": "inspectState",
+                    "existingStatus": status,
+                    "effectsMayHaveOccurred": matches!(status.as_str(), "executing" | "completed" | "failed" | "cancelled"),
+                }),
+            ))
+        }
+        AgentActionAuditExecutionClaimOutcome::IdentityConflict { status } => {
+            Err(AgentError::structured(
+                "agent.file_effect_execution_claim_rejected",
+                "A file-producing action with this identity already has different frozen contents.",
+                serde_json::json!({
+                    "type": effect_type,
+                    "code": "actionIdentityConflict",
+                    "recovery": "inspectState",
+                    "existingStatus": status,
+                    "effectsMayHaveOccurred": matches!(status.as_str(), "executing" | "completed" | "failed" | "cancelled"),
+                }),
+            ))
+        }
+    }
+}
+
+fn file_effect_audit_persistence_failure(
+    call_id: &str,
+    tool: &str,
+    effect_type: &str,
+    phase: &str,
+    audit_error: &str,
+    execution_result: Option<&AgentToolResult>,
+) -> AgentToolResult {
+    let execution_attempted = execution_result.is_some();
+    AgentToolResult {
+        call_id: call_id.to_string(),
+        tool: tool.to_string(),
+        ok: false,
+        result: Some(serde_json::json!({
+            "type": effect_type,
+            "code": "auditPersistenceFailed",
+            "recovery": if execution_attempted { "inspectState" } else { "retry" },
+            "phase": phase,
+            "executionAttempted": execution_attempted,
+            "effectsMayHaveOccurred": execution_attempted,
+            "auditError": bounded_audit_error(audit_error),
+            "execution": execution_result,
+        })),
+        error: Some(if execution_attempted {
+            "The file-producing action finished, but its terminal audit could not be persisted. Inspect durable state before retrying."
+        } else {
+            "The file-producing action was not started because its execution claim could not be persisted."
+        }.to_string()),
+    }
+}
+
+enum FileEffectAuditReconciliation {
+    Executing,
+    Terminal(AgentToolResult),
+}
+
+fn reconcile_file_effect_audit_outcome(
+    call_id: &str,
+    tool: &str,
+    outcome: Option<AgentActionAuditExecutionClaimOutcome>,
+) -> Result<FileEffectAuditReconciliation, String> {
+    let Some(outcome) = outcome else {
+        return Err("the durable execution claim is missing".to_string());
+    };
+    match outcome {
+        AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+            status,
+            tool_result_json,
+        } if status == "executing" && tool_result_json.is_none() => {
+            Ok(FileEffectAuditReconciliation::Executing)
+        }
+        AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+            status,
+            tool_result_json,
+        } if matches!(
+            status.as_str(),
+            "completed" | "failed" | "cancelled" | "rejected"
+        ) =>
+        {
+            let json = tool_result_json.ok_or_else(|| {
+                format!("terminal audit status `{status}` has no paired ToolResult")
+            })?;
+            let result = serde_json::from_str::<AgentToolResult>(&json)
+                .map_err(|error| format!("terminal audit ToolResult is invalid: {error}"))?;
+            if result.call_id != call_id || result.tool != tool {
+                return Err(format!(
+                    "terminal audit ToolResult identity differs: expected {tool}/{call_id}, found {}/{}",
+                    result.tool, result.call_id
+                ));
+            }
+            Ok(FileEffectAuditReconciliation::Terminal(result))
+        }
+        AgentActionAuditExecutionClaimOutcome::AlreadyClaimed { status, .. } => Err(format!(
+            "the durable execution claim has unsupported status `{status}`"
+        )),
+        AgentActionAuditExecutionClaimOutcome::IdentityConflict { status } => Err(format!(
+            "the durable execution claim identity differs (status `{status}`)"
+        )),
+        AgentActionAuditExecutionClaimOutcome::Claimed => {
+            Err("inspection unexpectedly reported a newly claimed action".to_string())
+        }
+    }
+}
+
+fn reconcile_command_audit_outcome(
+    command: &mycopilot_core::AgentCommandRequest,
+    outcome: Option<AgentActionAuditExecutionClaimOutcome>,
+) -> Result<CommandAuditReconciliation, String> {
+    match outcome {
+        Some(AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+            status,
+            tool_result_json: None,
+        }) if status == "executing" => Ok(CommandAuditReconciliation::Executing),
+        Some(AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+            status,
+            tool_result_json: Some(json),
+        }) if matches!(status.as_str(), "completed" | "failed") => {
+            let result = serde_json::from_str::<AgentToolResult>(&json).map_err(|error| {
+                format!(
+                    "terminal command audit contains invalid tool_result_json (status={status}): {error}"
+                )
+            })?;
+            if result.call_id != command.id || result.tool != "run_command" {
+                return Err(format!(
+                    "terminal command audit result identity differs from call={} (status={status})",
+                    command.id
+                ));
+            }
+            Ok(CommandAuditReconciliation::Terminal(result))
+        }
+        Some(AgentActionAuditExecutionClaimOutcome::AlreadyClaimed {
+            status,
+            tool_result_json,
+        }) => Err(format!(
+            "command audit is in unexpected state status={status}, hasToolResult={}",
+            tool_result_json.is_some()
+        )),
+        Some(AgentActionAuditExecutionClaimOutcome::IdentityConflict { status }) => Err(format!(
+            "command audit identity conflict while reconciling terminal commit (status={status})"
+        )),
+        Some(AgentActionAuditExecutionClaimOutcome::Claimed) => {
+            Err("command audit inspection unexpectedly returned a newly claimed state".to_string())
+        }
+        None => {
+            Err("command audit claim disappeared while reconciling terminal commit".to_string())
         }
     }
 }
@@ -423,6 +828,214 @@ impl AgentService {
         })
     }
 
+    pub(super) fn settle_manual_file_effect(
+        &self,
+        record: &PendingActionRecord,
+        call: &AgentToolCall,
+        desired_pending_status: PendingActionStatus,
+        execution_result: AgentToolResult,
+        effect_type: &str,
+        notifications: &CoreServerNotificationSender,
+    ) -> ManualFileEffectSettlement {
+        let run_id = &record.snapshot.run_id;
+        let completed_at = now_ms();
+        let build_input = |tool_result: &AgentToolResult| {
+            let mut agent_input = record.agent_input.clone();
+            agent_input.approval_decision = Some(AgentApprovalDecision {
+                action_id: record.snapshot.action_id.clone(),
+                status: AgentApprovalDecisionStatus::Approved,
+                message: None,
+            });
+            agent_input.tool_continuation = Some(AgentToolContinuation {
+                call: call.clone(),
+                result: tool_result.clone(),
+            });
+            agent_input
+        };
+
+        let agent_input = build_input(&execution_result);
+        let mut attempt_errors = Vec::new();
+        for _ in 0..2 {
+            match self.commit_audited_result_trace_with_continuation(
+                record,
+                &agent_input,
+                desired_pending_status,
+                None,
+                completed_at,
+                notifications,
+            ) {
+                Ok(()) => {
+                    return ManualFileEffectSettlement::Committed {
+                        agent_input: Box::new(agent_input),
+                        tool_result: execution_result,
+                        pending_status: desired_pending_status,
+                    };
+                }
+                Err(error) => attempt_errors.push(error),
+            }
+        }
+
+        match self.inspect_audited_result_trace_with_continuation(
+            record,
+            &agent_input,
+            desired_pending_status,
+            None,
+            completed_at,
+        ) {
+            Ok(AgentPendingActionSettlementInspection::CommittedAtBoundary) => {
+                return ManualFileEffectSettlement::Committed {
+                    agent_input: Box::new(agent_input),
+                    tool_result: execution_result,
+                    pending_status: desired_pending_status,
+                };
+            }
+            Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => {
+                return ManualFileEffectSettlement::CommittedAndAdvanced;
+            }
+            Ok(AgentPendingActionSettlementInspection::DefinitelyUncommitted) => {}
+            Ok(AgentPendingActionSettlementInspection::Diverged { component, reason }) => {
+                emit_manual_file_effect_settlement_error(
+                    notifications,
+                    run_id,
+                    ManualFileEffectSettlementError {
+                        effect_type,
+                        code: "approval_result_commit_indeterminate",
+                        message: format!(
+                            "The file-producing action finished, but its terminal receipt is divergent; continuation stopped: {component}: {reason}"
+                        ),
+                        attempt_error: &attempt_errors.join("; retry: "),
+                        inspection_error: Some(&reason),
+                        execution_result: &execution_result,
+                    },
+                );
+                return ManualFileEffectSettlement::Unsettled;
+            }
+            Err(inspection_error) => {
+                emit_manual_file_effect_settlement_error(
+                    notifications,
+                    run_id,
+                    ManualFileEffectSettlementError {
+                        effect_type,
+                        code: "approval_result_commit_indeterminate",
+                        message: format!(
+                            "The file-producing action finished, but its terminal receipt could not be inspected; continuation stopped: {inspection_error}"
+                        ),
+                        attempt_error: &attempt_errors.join("; retry: "),
+                        inspection_error: Some(&inspection_error),
+                        execution_result: &execution_result,
+                    },
+                );
+                return ManualFileEffectSettlement::Unsettled;
+            }
+        }
+
+        // The original result is definitely absent. Persist an explicit durability failure that
+        // embeds the original bounded execution evidence, so the model never sees a clean
+        // rollback or loses provider output after the side effect has already been attempted.
+        let attempt_error = attempt_errors.join("; retry: ");
+        let persistence_failure = file_effect_audit_persistence_failure(
+            &execution_result.call_id,
+            &execution_result.tool,
+            effect_type,
+            "afterExecution",
+            &attempt_error,
+            Some(&execution_result),
+        );
+        let failure_input = build_input(&persistence_failure);
+        let failure_status = PendingActionStatus::Failed;
+        let mut failure_errors = Vec::new();
+        for _ in 0..2 {
+            match self.commit_audited_result_trace_with_continuation(
+                record,
+                &failure_input,
+                failure_status,
+                None,
+                completed_at,
+                notifications,
+            ) {
+                Ok(()) => {
+                    return ManualFileEffectSettlement::Committed {
+                        agent_input: Box::new(failure_input),
+                        tool_result: persistence_failure,
+                        pending_status: failure_status,
+                    };
+                }
+                Err(error) => failure_errors.push(error),
+            }
+        }
+
+        let failure_error = failure_errors.join("; retry: ");
+        match self.inspect_audited_result_trace_with_continuation(
+            record,
+            &failure_input,
+            failure_status,
+            None,
+            completed_at,
+        ) {
+            Ok(AgentPendingActionSettlementInspection::CommittedAtBoundary) => {
+                ManualFileEffectSettlement::Committed {
+                    agent_input: Box::new(failure_input),
+                    tool_result: persistence_failure,
+                    pending_status: failure_status,
+                }
+            }
+            Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => {
+                ManualFileEffectSettlement::CommittedAndAdvanced
+            }
+            Ok(AgentPendingActionSettlementInspection::DefinitelyUncommitted) => {
+                emit_manual_file_effect_settlement_error(
+                    notifications,
+                    run_id,
+                    ManualFileEffectSettlementError {
+                        effect_type,
+                        code: "approval_result_persistence_failed",
+                        message: format!(
+                            "The file-producing action finished, but its audit, target state and paired ToolResult trace were not persisted; continuation stopped: {failure_error}"
+                        ),
+                        attempt_error: &failure_error,
+                        inspection_error: None,
+                        execution_result: &execution_result,
+                    },
+                );
+                ManualFileEffectSettlement::Unsettled
+            }
+            Ok(AgentPendingActionSettlementInspection::Diverged { component, reason }) => {
+                emit_manual_file_effect_settlement_error(
+                    notifications,
+                    run_id,
+                    ManualFileEffectSettlementError {
+                        effect_type,
+                        code: "approval_result_commit_indeterminate",
+                        message: format!(
+                            "The file-producing action finished, but its failure receipt is divergent; continuation stopped: {component}: {reason}"
+                        ),
+                        attempt_error: &failure_error,
+                        inspection_error: Some(&reason),
+                        execution_result: &execution_result,
+                    },
+                );
+                ManualFileEffectSettlement::Unsettled
+            }
+            Err(inspection_error) => {
+                emit_manual_file_effect_settlement_error(
+                    notifications,
+                    run_id,
+                    ManualFileEffectSettlementError {
+                        effect_type,
+                        code: "approval_result_commit_indeterminate",
+                        message: format!(
+                            "The file-producing action finished, but its failure receipt could not be inspected; continuation stopped: {inspection_error}"
+                        ),
+                        attempt_error: &failure_error,
+                        inspection_error: Some(&inspection_error),
+                        execution_result: &execution_result,
+                    },
+                );
+                ManualFileEffectSettlement::Unsettled
+            }
+        }
+    }
+
     pub(super) fn execute_auto_approved_action(
         &self,
         context: AutoApprovedActionContext,
@@ -437,34 +1050,158 @@ impl AgentService {
             skill_resources,
         } = context;
         cancellation_token.check()?;
-        if self.is_agent_input_project_deleting(&agent_input) {
+        if self.is_agent_input_scope_deleting(&agent_input) {
             return Err(AgentError::cancelled());
         }
         let created_at = now_ms();
-        if let AgentProposedAction::OfficeOperation { office_operation } = &action {
-            match self.inspect_auto_action_execution_audit(
-                &run_id,
-                conversation_id.as_deref(),
-                assistant_message_id.as_deref(),
-                &agent_input,
-                &action,
-                created_at,
-            ) {
-                Ok(Some(outcome)) => {
-                    if let Some(result) = resolve_office_claim_outcome(office_operation, outcome)? {
-                        return Ok(result);
+        match &action {
+            AgentProposedAction::OfficeOperation { office_operation } => {
+                match self.inspect_auto_action_execution_audit(
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &agent_input,
+                    &action,
+                    created_at,
+                ) {
+                    Ok(Some(outcome)) => {
+                        if let Some(result) =
+                            resolve_office_claim_outcome(office_operation, outcome)?
+                        {
+                            let effect_storage_id =
+                                pending_action_storage_id(&run_id, &office_operation.id);
+                            let mut file_effect_guard = self.register_file_effect(
+                                &agent_input,
+                                &run_id,
+                                &effect_storage_id,
+                            )?;
+                            file_effect_guard.mark_durably_settled();
+                            return Ok(result);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Ok(office_audit_persistence_failure(
+                            office_operation,
+                            "beforeExecution",
+                            &error,
+                            None,
+                        ));
                     }
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    return Ok(office_audit_persistence_failure(
-                        office_operation,
-                        "beforeExecution",
-                        &error,
-                        None,
-                    ));
+            }
+            AgentProposedAction::Command { command } => {
+                match self.inspect_auto_action_execution_audit(
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &agent_input,
+                    &action,
+                    created_at,
+                ) {
+                    Ok(Some(outcome)) => {
+                        if let Some(result) = resolve_command_claim_outcome(command, outcome)? {
+                            let effect_storage_id = pending_action_storage_id(&run_id, &command.id);
+                            let mut file_effect_guard = self.register_file_effect(
+                                &agent_input,
+                                &run_id,
+                                &effect_storage_id,
+                            )?;
+                            file_effect_guard.mark_durably_settled();
+                            return Ok(result);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Ok(command_audit_persistence_failure(
+                            command,
+                            "beforeExecution",
+                            &error,
+                            None,
+                        ));
+                    }
                 }
             }
+            AgentProposedAction::SkillMaterialization { materialization } => {
+                match self.inspect_auto_action_execution_audit(
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &agent_input,
+                    &action,
+                    created_at,
+                ) {
+                    Ok(Some(outcome)) => {
+                        if let Some(result) = resolve_file_effect_claim_outcome(
+                            &materialization.id,
+                            "skills_materialize_resource",
+                            "skill_materialization",
+                            outcome,
+                        )? {
+                            let effect_storage_id =
+                                pending_action_storage_id(&run_id, &materialization.id);
+                            let mut file_effect_guard = self.register_file_effect(
+                                &agent_input,
+                                &run_id,
+                                &effect_storage_id,
+                            )?;
+                            file_effect_guard.mark_durably_settled();
+                            return Ok(result);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Ok(file_effect_audit_persistence_failure(
+                            &materialization.id,
+                            "skills_materialize_resource",
+                            "skill_materialization",
+                            "beforeExecution",
+                            &error,
+                            None,
+                        ));
+                    }
+                }
+            }
+            AgentProposedAction::SkillScript { script } => {
+                match self.inspect_auto_action_execution_audit(
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &agent_input,
+                    &action,
+                    created_at,
+                ) {
+                    Ok(Some(outcome)) => {
+                        if let Some(result) = resolve_file_effect_claim_outcome(
+                            &script.id,
+                            "skills_run_script",
+                            "skill_script",
+                            outcome,
+                        )? {
+                            let effect_storage_id = pending_action_storage_id(&run_id, &script.id);
+                            let mut file_effect_guard = self.register_file_effect(
+                                &agent_input,
+                                &run_id,
+                                &effect_storage_id,
+                            )?;
+                            file_effect_guard.mark_durably_settled();
+                            return Ok(result);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Ok(file_effect_audit_persistence_failure(
+                            &script.id,
+                            "skills_run_script",
+                            "skill_script",
+                            "beforeExecution",
+                            &error,
+                            None,
+                        ));
+                    }
+                }
+            }
+            _ => {}
         }
         if let Err(error) = authorize_structured_file_write(
             &agent_input,
@@ -498,13 +1235,11 @@ impl AgentService {
         }
         match action {
             AgentProposedAction::Diff { diff } => {
-                let deleting_projects = self
-                    .deleting_projects
+                let deletion_lifecycle = self
+                    .deletion_lifecycle
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                if agent_input_project_id(&agent_input)
-                    .is_some_and(|project_id| deleting_projects.contains(project_id))
-                {
+                if deletion_lifecycle.contains_input(&agent_input) {
                     return Err(AgentError::cancelled());
                 }
                 cancellation_token.check()?;
@@ -524,69 +1259,196 @@ impl AgentService {
                     created_at,
                     now_ms(),
                 );
-                drop(deleting_projects);
+                drop(deletion_lifecycle);
                 Ok(execution.tool_result)
             }
             AgentProposedAction::Command { command } => {
+                let effect_storage_id = pending_action_storage_id(&run_id, &command.id);
+                let mut file_effect_guard =
+                    self.register_file_effect(&agent_input, &run_id, &effect_storage_id)?;
+                let action = AgentProposedAction::Command {
+                    command: command.clone(),
+                };
+                match self.claim_auto_action_execution_audit(
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &agent_input,
+                    &action,
+                    created_at,
+                ) {
+                    Ok(outcome) => {
+                        if let Some(result) = resolve_command_claim_outcome(&command, outcome)? {
+                            // A prior attempt already published the authoritative terminal
+                            // receipt. Clear any in-process unresolved marker restored by an
+                            // earlier commit-unknown path before returning the replayed result.
+                            file_effect_guard.mark_durably_settled();
+                            return Ok(result);
+                        }
+                    }
+                    Err(error) => {
+                        return Ok(command_audit_persistence_failure(
+                            &command,
+                            "beforeExecution",
+                            &error,
+                            None,
+                        ));
+                    }
+                }
                 let workspace_root = workspace_root_optional(&agent_input);
                 let permissions = permissions_from_input(&agent_input);
                 let command_for_error = command.clone();
-                let command_result = run_authorized_command(
+                file_effect_guard.mark_effects_started();
+                let command_result = run_authorized_command_with_artifact_runtime(
                     workspace_root.as_deref(),
                     &command,
                     permissions,
                     CommandAuthorizationSource::Automatic,
                     cancellation_token.clone(),
                     None,
+                    self.artifact_runtime.as_deref(),
                 )
                 .unwrap_or_else(|error| {
                     let policy_evaluation = error.policy_evaluation().cloned();
-                    failed_command_result(&command_for_error, error.to_string(), policy_evaluation)
+                    let artifact_observation = error.artifact_observation().cloned();
+                    let mut result = failed_command_result(
+                        &command_for_error,
+                        error.to_string(),
+                        policy_evaluation,
+                    );
+                    result.artifact_observation = artifact_observation;
+                    result
                 });
-                let deleting_projects = self
-                    .deleting_projects
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                if agent_input_project_id(&agent_input)
-                    .is_some_and(|project_id| deleting_projects.contains(project_id))
-                {
-                    return Err(AgentError::cancelled());
-                }
                 let command_succeeded = command_result.error.is_none()
                     && !command_result.timed_out
                     && !command_result.cancelled
                     && command_result.exit_code == Some(0);
-                let tool_result =
-                    command_tool_result(&command.id, command_succeeded, &command_result);
-                self.record_auto_action_audit(
+                let tool_result = command_tool_result(&command.id, &command_result);
+                let status = if command_succeeded {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                if let Err(error) = self.finalize_auto_action_execution_audit(
                     &run_id,
-                    conversation_id,
-                    assistant_message_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
                     &agent_input,
-                    AgentProposedAction::Command { command },
-                    if command_succeeded {
-                        "completed"
-                    } else {
-                        "failed"
-                    },
-                    None,
+                    &action,
+                    status,
                     Some(&command_result),
-                    Some(&tool_result),
+                    &tool_result,
                     tool_result.error.as_deref(),
                     created_at,
                     now_ms(),
-                );
-                drop(deleting_projects);
+                ) {
+                    let reconciliation = self
+                        .inspect_auto_action_execution_audit(
+                            &run_id,
+                            conversation_id.as_deref(),
+                            assistant_message_id.as_deref(),
+                            &agent_input,
+                            &action,
+                            created_at,
+                        )
+                        .map_err(|inspect_error| {
+                            format!("failed to inspect command audit: {inspect_error}")
+                        })
+                        .and_then(|outcome| reconcile_command_audit_outcome(&command, outcome));
+                    match reconciliation {
+                        Ok(CommandAuditReconciliation::Terminal(persisted)) => {
+                            // SQLite committed the first terminal receipt even though the caller
+                            // observed an error. Durable state is authoritative; never replace a
+                            // successful receipt with a manufactured persistence failure.
+                            file_effect_guard.mark_durably_settled();
+                            return Ok(persisted);
+                        }
+                        Ok(CommandAuditReconciliation::Executing) => {}
+                        Err(reconciliation_error) => {
+                            let indeterminate = command_audit_finalization_indeterminate(
+                                &command,
+                                &error,
+                                &reconciliation_error,
+                                &command_result,
+                            );
+                            return Ok(indeterminate);
+                        }
+                    }
+
+                    let persistence_failure = command_audit_persistence_failure(
+                        &command,
+                        "afterExecution",
+                        &error,
+                        Some(&command_result),
+                    );
+                    // A transient finalization failure gets one terminal retry. The immutable
+                    // executing claim prevents a duplicate process execution, while persisting
+                    // the original command result alongside the explicit durability failure.
+                    if let Err(retry_error) = self.finalize_auto_action_execution_audit(
+                        &run_id,
+                        conversation_id.as_deref(),
+                        assistant_message_id.as_deref(),
+                        &agent_input,
+                        &action,
+                        "failed",
+                        Some(&command_result),
+                        &persistence_failure,
+                        persistence_failure.error.as_deref(),
+                        created_at,
+                        now_ms(),
+                    ) {
+                        let reconciliation = self
+                            .inspect_auto_action_execution_audit(
+                                &run_id,
+                                conversation_id.as_deref(),
+                                assistant_message_id.as_deref(),
+                                &agent_input,
+                                &action,
+                                created_at,
+                            )
+                            .map_err(|inspect_error| {
+                                format!(
+                                    "failed to inspect command audit after retry: {inspect_error}"
+                                )
+                            })
+                            .and_then(|outcome| reconcile_command_audit_outcome(&command, outcome));
+                        match reconciliation {
+                            Ok(CommandAuditReconciliation::Terminal(persisted)) => {
+                                file_effect_guard.mark_durably_settled();
+                                return Ok(persisted);
+                            }
+                            Ok(CommandAuditReconciliation::Executing) => {
+                                let indeterminate = command_audit_finalization_indeterminate(
+                                    &command,
+                                    &retry_error,
+                                    "command audit remained executing after terminal retry",
+                                    &command_result,
+                                );
+                                return Ok(indeterminate);
+                            }
+                            Err(reconciliation_error) => {
+                                let indeterminate = command_audit_finalization_indeterminate(
+                                    &command,
+                                    &retry_error,
+                                    &reconciliation_error,
+                                    &command_result,
+                                );
+                                return Ok(indeterminate);
+                            }
+                        }
+                    }
+                    file_effect_guard.mark_durably_settled();
+                    return Ok(persistence_failure);
+                }
+                file_effect_guard.mark_durably_settled();
                 Ok(tool_result)
             }
             AgentProposedAction::FileWrite { file_write } => {
-                let deleting_projects = self
-                    .deleting_projects
+                let deletion_lifecycle = self
+                    .deletion_lifecycle
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                if agent_input_project_id(&agent_input)
-                    .is_some_and(|project_id| deleting_projects.contains(project_id))
-                {
+                if deletion_lifecycle.contains_input(&agent_input) {
                     return Err(AgentError::cancelled());
                 }
                 cancellation_token.check()?;
@@ -609,7 +1471,7 @@ impl AgentService {
                     created_at,
                     now_ms(),
                 );
-                drop(deleting_projects);
+                drop(deletion_lifecycle);
                 Ok(execution.tool_result)
             }
             AgentProposedAction::ToolCall { call } => Ok(AgentToolResult {
@@ -622,32 +1484,147 @@ impl AgentService {
                 ),
             }),
             AgentProposedAction::SkillMaterialization { materialization } => {
+                let effect_storage_id = pending_action_storage_id(&run_id, &materialization.id);
+                let mut file_effect_guard =
+                    self.register_file_effect(&agent_input, &run_id, &effect_storage_id)?;
+                let action = AgentProposedAction::SkillMaterialization {
+                    materialization: materialization.clone(),
+                };
+                match self.claim_auto_action_execution_audit(
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &agent_input,
+                    &action,
+                    created_at,
+                ) {
+                    Ok(outcome) => {
+                        if let Some(result) = resolve_file_effect_claim_outcome(
+                            &materialization.id,
+                            "skills_materialize_resource",
+                            "skill_materialization",
+                            outcome,
+                        )? {
+                            file_effect_guard.mark_durably_settled();
+                            return Ok(result);
+                        }
+                    }
+                    Err(error) => {
+                        return Ok(file_effect_audit_persistence_failure(
+                            &materialization.id,
+                            "skills_materialize_resource",
+                            "skill_materialization",
+                            "beforeExecution",
+                            &error,
+                            None,
+                        ));
+                    }
+                }
+                file_effect_guard.mark_effects_started();
                 let tool_result = self.execute_skill_materialization(
                     &agent_input,
                     &materialization,
                     skill_resources.as_deref(),
                 );
-                self.record_auto_action_audit(
+                let status = if tool_result.ok {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                if let Err(error) = self.finalize_auto_action_execution_audit(
                     &run_id,
-                    conversation_id,
-                    assistant_message_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
                     &agent_input,
-                    AgentProposedAction::SkillMaterialization { materialization },
-                    if tool_result.ok {
-                        "completed"
-                    } else {
-                        "failed"
-                    },
+                    &action,
+                    status,
                     None,
-                    None,
-                    Some(&tool_result),
+                    &tool_result,
                     tool_result.error.as_deref(),
                     created_at,
                     now_ms(),
-                );
+                ) {
+                    let reconciliation = self
+                        .inspect_auto_action_execution_audit(
+                            &run_id,
+                            conversation_id.as_deref(),
+                            assistant_message_id.as_deref(),
+                            &agent_input,
+                            &action,
+                            created_at,
+                        )
+                        .map_err(|inspect_error| {
+                            format!(
+                                "failed to inspect Skill materialization audit: {inspect_error}"
+                            )
+                        })
+                        .and_then(|outcome| {
+                            reconcile_file_effect_audit_outcome(
+                                &materialization.id,
+                                "skills_materialize_resource",
+                                outcome,
+                            )
+                        });
+                    let reconciliation_error = match reconciliation {
+                        Ok(FileEffectAuditReconciliation::Terminal(persisted)) => {
+                            file_effect_guard.mark_durably_settled();
+                            return Ok(persisted);
+                        }
+                        Ok(FileEffectAuditReconciliation::Executing) => {
+                            "audit remained executing after terminal finalization".to_string()
+                        }
+                        Err(reconciliation_error) => reconciliation_error,
+                    };
+                    return Ok(file_effect_audit_persistence_failure(
+                        &materialization.id,
+                        "skills_materialize_resource",
+                        "skill_materialization",
+                        "afterExecution",
+                        &format!("{error}; reconciliation: {reconciliation_error}"),
+                        Some(&tool_result),
+                    ));
+                }
+                file_effect_guard.mark_durably_settled();
                 Ok(tool_result)
             }
             AgentProposedAction::SkillScript { script } => {
+                let effect_storage_id = pending_action_storage_id(&run_id, &script.id);
+                let mut file_effect_guard =
+                    self.register_file_effect(&agent_input, &run_id, &effect_storage_id)?;
+                let action = AgentProposedAction::SkillScript {
+                    script: script.clone(),
+                };
+                match self.claim_auto_action_execution_audit(
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &agent_input,
+                    &action,
+                    created_at,
+                ) {
+                    Ok(outcome) => {
+                        if let Some(result) = resolve_file_effect_claim_outcome(
+                            &script.id,
+                            "skills_run_script",
+                            "skill_script",
+                            outcome,
+                        )? {
+                            file_effect_guard.mark_durably_settled();
+                            return Ok(result);
+                        }
+                    }
+                    Err(error) => {
+                        return Ok(file_effect_audit_persistence_failure(
+                            &script.id,
+                            "skills_run_script",
+                            "skill_script",
+                            "beforeExecution",
+                            &error,
+                            None,
+                        ));
+                    }
+                }
+                file_effect_guard.mark_effects_started();
                 let tool_result = self.execute_skill_script(
                     &agent_input,
                     &script,
@@ -656,24 +1633,63 @@ impl AgentService {
                     cancellation_token,
                     None,
                 );
-                self.record_auto_action_audit(
+                let status = if tool_result.ok {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                if let Err(error) = self.finalize_auto_action_execution_audit(
                     &run_id,
-                    conversation_id,
-                    assistant_message_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
                     &agent_input,
-                    AgentProposedAction::SkillScript { script },
-                    if tool_result.ok {
-                        "completed"
-                    } else {
-                        "failed"
-                    },
+                    &action,
+                    status,
                     None,
-                    None,
-                    Some(&tool_result),
+                    &tool_result,
                     tool_result.error.as_deref(),
                     created_at,
                     now_ms(),
-                );
+                ) {
+                    let reconciliation = self
+                        .inspect_auto_action_execution_audit(
+                            &run_id,
+                            conversation_id.as_deref(),
+                            assistant_message_id.as_deref(),
+                            &agent_input,
+                            &action,
+                            created_at,
+                        )
+                        .map_err(|inspect_error| {
+                            format!("failed to inspect Skill script audit: {inspect_error}")
+                        })
+                        .and_then(|outcome| {
+                            reconcile_file_effect_audit_outcome(
+                                &script.id,
+                                "skills_run_script",
+                                outcome,
+                            )
+                        });
+                    let reconciliation_error = match reconciliation {
+                        Ok(FileEffectAuditReconciliation::Terminal(persisted)) => {
+                            file_effect_guard.mark_durably_settled();
+                            return Ok(persisted);
+                        }
+                        Ok(FileEffectAuditReconciliation::Executing) => {
+                            "audit remained executing after terminal finalization".to_string()
+                        }
+                        Err(reconciliation_error) => reconciliation_error,
+                    };
+                    return Ok(file_effect_audit_persistence_failure(
+                        &script.id,
+                        "skills_run_script",
+                        "skill_script",
+                        "afterExecution",
+                        &format!("{error}; reconciliation: {reconciliation_error}"),
+                        Some(&tool_result),
+                    ));
+                }
+                file_effect_guard.mark_durably_settled();
                 Ok(tool_result)
             }
             AgentProposedAction::OfficeOperation { office_operation } => {
@@ -681,6 +1697,10 @@ impl AgentService {
                 let AgentProposedAction::OfficeOperation { office_operation } = &action else {
                     unreachable!("the action was constructed as an Office operation")
                 };
+                let tool = office_tool_name(office_operation.prepared.request.document_kind);
+                let effect_storage_id = pending_action_storage_id(&run_id, &office_operation.id);
+                let mut file_effect_guard =
+                    self.register_file_effect(&agent_input, &run_id, &effect_storage_id)?;
                 let claim = self.claim_auto_action_execution_audit(
                     &run_id,
                     conversation_id.as_deref(),
@@ -694,6 +1714,7 @@ impl AgentService {
                         if let Some(result) =
                             resolve_office_claim_outcome(office_operation, outcome)?
                         {
+                            file_effect_guard.mark_durably_settled();
                             return Ok(result);
                         }
                     }
@@ -706,6 +1727,7 @@ impl AgentService {
                         ));
                     }
                 }
+                file_effect_guard.mark_effects_started();
                 let tool_result = self.execute_office_operation(
                     &agent_input,
                     office_operation,
@@ -724,11 +1746,31 @@ impl AgentService {
                     &agent_input,
                     &action,
                     status,
+                    None,
                     &tool_result,
                     tool_result.error.as_deref(),
                     created_at,
                     now_ms(),
                 ) {
+                    let reconciliation = self
+                        .inspect_auto_action_execution_audit(
+                            &run_id,
+                            conversation_id.as_deref(),
+                            assistant_message_id.as_deref(),
+                            &agent_input,
+                            &action,
+                            created_at,
+                        )
+                        .map_err(|inspect_error| {
+                            format!("failed to inspect Office audit: {inspect_error}")
+                        })
+                        .and_then(|outcome| {
+                            reconcile_file_effect_audit_outcome(&office_operation.id, tool, outcome)
+                        });
+                    if let Ok(FileEffectAuditReconciliation::Terminal(persisted)) = reconciliation {
+                        file_effect_guard.mark_durably_settled();
+                        return Ok(persisted);
+                    }
                     return Ok(office_audit_persistence_failure(
                         office_operation,
                         "afterExecution",
@@ -736,6 +1778,7 @@ impl AgentService {
                         Some(&tool_result),
                     ));
                 }
+                file_effect_guard.mark_durably_settled();
                 Ok(tool_result)
             }
         }
@@ -1135,7 +2178,7 @@ impl AgentService {
             &run_id,
             record.agent_input.resume_checkpoint.as_ref(),
         );
-        if self.is_agent_input_project_deleting(&record.agent_input) {
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
             self.discard_usage_context(&run_id);
             return;
         }
@@ -1148,7 +2191,15 @@ impl AgentService {
             return;
         };
         office_operation.approval_status = AgentApprovalStatus::Approved;
-        let office_operation_for_audit = office_operation.clone();
+
+        let mut file_effect_guard =
+            match self.register_file_effect(&record.agent_input, &run_id, &record.storage_id) {
+                Ok(guard) => guard,
+                Err(_) => {
+                    self.discard_usage_context(&run_id);
+                    return;
+                }
+            };
 
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
@@ -1156,6 +2207,7 @@ impl AgentService {
         let cancel_flag = guard.cancel_flag();
         let service = self.clone();
         let agent_input = record.agent_input.clone();
+        file_effect_guard.mark_effects_started();
         let task_result = tokio::task::spawn_blocking(move || {
             let _guard = guard;
             service.execute_office_operation(
@@ -1202,69 +2254,54 @@ impl AgentService {
                 result.insert("error".to_string(), Value::String(message));
             }
         }
-        let mut final_pending_status = if result_cancelled {
+        let desired_pending_status = if result_cancelled {
             PendingActionStatus::Cancelled
         } else if tool_result.ok {
             PendingActionStatus::Completed
         } else {
             PendingActionStatus::Failed
         };
-        if let Err(error) = self.persist_action_audit(
+        let settlement = self.settle_manual_file_effect(
             &record,
-            Some("approved"),
-            pending_status_label(final_pending_status),
-            None,
-            None,
-            Some(&tool_result),
-            tool_result.error.as_deref(),
-            None,
-            Some(now_ms()),
-        ) {
-            tool_result = office_audit_persistence_failure(
-                &office_operation_for_audit,
-                "afterExecution",
-                &error,
-                Some(&tool_result),
-            );
-            final_pending_status = PendingActionStatus::Failed;
-        }
-
-        let mut agent_input = record.agent_input.clone();
-        agent_input.approval_decision = Some(AgentApprovalDecision {
-            action_id: action_id.clone(),
-            status: AgentApprovalDecisionStatus::Approved,
-            message: None,
-        });
-        agent_input.tool_continuation = Some(AgentToolContinuation {
-            call,
-            result: tool_result.clone(),
-        });
-        if let Err(error) = self.commit_pending_result_trace_with_continuation(
-            &record,
-            &agent_input,
-            final_pending_status,
+            &call,
+            desired_pending_status,
+            tool_result,
+            "office_operation",
             &notifications,
-        ) {
-            self.unregister_cancellation(&run_id);
-            let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
-                run_id: run_id.clone(),
-                result: tool_result.clone(),
-            }));
-            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                run_id: Some(run_id),
-                message: format!(
-                    "Office operation outcome and paired trace could not be committed atomically; continuation stopped: {error}"
-                ),
-                recoverable: true,
-                code: Some("approval_result_persistence_failed".to_string()),
-                details: None,
-            }));
-            return;
+        );
+        let (agent_input, tool_result, final_pending_status) = match settlement {
+            ManualFileEffectSettlement::Committed {
+                agent_input,
+                tool_result,
+                pending_status,
+            } => (*agent_input, tool_result, pending_status),
+            ManualFileEffectSettlement::CommittedAndAdvanced => {
+                file_effect_guard.mark_durably_settled();
+                self.unregister_cancellation(&run_id);
+                return;
+            }
+            ManualFileEffectSettlement::Unsettled => {
+                self.unregister_cancellation(&run_id);
+                return;
+            }
+        };
+        file_effect_guard.mark_durably_settled();
+        drop(file_effect_guard);
+        // The receipt is already durable, but a concurrent message/conversation deletion may now
+        // own the scope. Do not emit a transient result for an owner that is being removed; the
+        // continuation below observes the same marker and terminates without recreating state.
+        {
+            let deletion_lifecycle = self
+                .deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !deletion_lifecycle.contains_input(&record.agent_input) {
+                let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+                    run_id: run_id.clone(),
+                    result: tool_result,
+                }));
+            }
         }
-        let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
-            run_id: run_id.clone(),
-            result: tool_result,
-        }));
         self.run_action_continuation(
             record,
             agent_input,
@@ -1288,7 +2325,7 @@ impl AgentService {
             &run_id,
             record.agent_input.resume_checkpoint.as_ref(),
         );
-        if self.is_agent_input_project_deleting(&record.agent_input) {
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
             self.discard_usage_context(&run_id);
             return;
         }
@@ -1298,6 +2335,15 @@ impl AgentService {
             return;
         };
         script.approval_status = AgentApprovalStatus::Approved;
+
+        let mut file_effect_guard =
+            match self.register_file_effect(&record.agent_input, &run_id, &record.storage_id) {
+                Ok(guard) => guard,
+                Err(_) => {
+                    self.discard_usage_context(&run_id);
+                    return;
+                }
+            };
 
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
@@ -1322,6 +2368,7 @@ impl AgentService {
             Ok(resources) => {
                 let service = self.clone();
                 let agent_input = record.agent_input.clone();
+                file_effect_guard.mark_effects_started();
                 match tokio::task::spawn_blocking(move || {
                     let _guard = guard;
                     service.execute_skill_script(
@@ -1371,65 +2418,51 @@ impl AgentService {
                 result.insert("error".to_string(), Value::String(message));
             }
         }
-        let final_pending_status = if result_cancelled {
+        let desired_pending_status = if result_cancelled {
             PendingActionStatus::Cancelled
         } else if tool_result.ok {
             PendingActionStatus::Completed
         } else {
             PendingActionStatus::Failed
         };
-        self.record_action_audit(
+        let settlement = self.settle_manual_file_effect(
             &record,
-            Some("approved"),
-            pending_status_label(final_pending_status),
-            None,
-            None,
-            Some(&tool_result),
-            tool_result.error.as_deref(),
-            None,
-            Some(now_ms()),
+            &call,
+            desired_pending_status,
+            tool_result,
+            "skill_script",
+            &notifications,
         );
-
-        let mut agent_input = record.agent_input.clone();
-        agent_input.approval_decision = Some(AgentApprovalDecision {
-            action_id: action_id.clone(),
-            status: AgentApprovalDecisionStatus::Approved,
-            message: None,
-        });
-        agent_input.tool_continuation = Some(AgentToolContinuation {
-            call,
-            result: tool_result.clone(),
-        });
-        if let Err(error) = self.persist_pending_target_status(&record, final_pending_status) {
-            self.unregister_cancellation(&run_id);
-            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                run_id: Some(run_id),
-                message: format!(
-                    "Skill script target status could not be persisted; continuation stopped: {error}"
-                ),
-                recoverable: true,
-                code: Some("pending_action_target_persistence_failed".to_string()),
-                details: None,
-            }));
-            return;
-        }
-        if let Err(error) =
-            self.commit_trace_snapshot_with_continuation(&record, &agent_input, &notifications)
+        let (agent_input, tool_result, final_pending_status) = match settlement {
+            ManualFileEffectSettlement::Committed {
+                agent_input,
+                tool_result,
+                pending_status,
+            } => (*agent_input, tool_result, pending_status),
+            ManualFileEffectSettlement::CommittedAndAdvanced => {
+                file_effect_guard.mark_durably_settled();
+                self.unregister_cancellation(&run_id);
+                return;
+            }
+            ManualFileEffectSettlement::Unsettled => {
+                self.unregister_cancellation(&run_id);
+                return;
+            }
+        };
+        file_effect_guard.mark_durably_settled();
+        drop(file_effect_guard);
         {
-            self.unregister_cancellation(&run_id);
-            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                run_id: Some(run_id),
-                message: format!("Skill script result could not be persisted: {error}"),
-                recoverable: true,
-                code: Some("conversation_trace_persistence_failed".to_string()),
-                details: None,
-            }));
-            return;
+            let deletion_lifecycle = self
+                .deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !deletion_lifecycle.contains_input(&record.agent_input) {
+                let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+                    run_id: run_id.clone(),
+                    result: tool_result,
+                }));
+            }
         }
-        let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
-            run_id: run_id.clone(),
-            result: tool_result,
-        }));
         self.run_action_continuation(
             record,
             agent_input,
@@ -1453,7 +2486,7 @@ impl AgentService {
             &run_id,
             record.agent_input.resume_checkpoint.as_ref(),
         );
-        if self.is_agent_input_project_deleting(&record.agent_input) {
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
             self.discard_usage_context(&run_id);
             return;
         }
@@ -1481,9 +2514,18 @@ impl AgentService {
             return;
         };
 
+        let mut file_effect_guard =
+            match self.register_file_effect(&record.agent_input, &run_id, &record.storage_id) {
+                Ok(guard) => guard,
+                Err(_) => {
+                    self.discard_usage_context(&run_id);
+                    return;
+                }
+            };
+
         let cancellation_token = AgentCancellationToken::new();
         self.register_cancellation(&run_id, cancellation_token.clone());
-        if self.is_agent_input_project_deleting(&record.agent_input) {
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
             cancellation_token.cancel();
             self.unregister_cancellation(&run_id);
             self.discard_usage_context(&run_id);
@@ -1494,26 +2536,32 @@ impl AgentService {
         let post_execution_cancel_flag = Arc::clone(&cancel_flag);
         let run_cancellation_token = cancellation_token.clone();
         let command_for_error = command.clone();
-        let command_for_execution = command.clone();
         let execution_record = record.clone();
+        let artifact_runtime = self.artifact_runtime.clone();
+        file_effect_guard.mark_effects_started();
         let mut command_result = match tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            if cancel_flag.load(Ordering::SeqCst) || cancellation_token.is_cancelled() {
-                Ok(cancelled_command_result(&command_for_execution))
-            } else {
-                run_explicitly_approved_command_from_snapshot(
-                    &execution_record,
-                    cancellation_token,
-                    Some(cancel_flag),
-                )
-            }
+            // Keep pre-cancelled manual approvals on the same executor path as every other
+            // command. The executor short-circuits before spawning a process, while still
+            // producing the frozen runtime and artifact-observation evidence expected by the
+            // durable command-result contract.
+            run_explicitly_approved_command_from_snapshot_with_artifact_runtime(
+                &execution_record,
+                cancellation_token,
+                Some(cancel_flag),
+                artifact_runtime.as_deref(),
+            )
         })
         .await
         {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
                 let policy_evaluation = error.policy_evaluation().cloned();
-                failed_command_result(&command_for_error, error.to_string(), policy_evaluation)
+                let artifact_observation = error.artifact_observation().cloned();
+                let mut result =
+                    failed_command_result(&command_for_error, error.to_string(), policy_evaluation);
+                result.artifact_observation = artifact_observation;
+                result
             }
             Err(error) => failed_command_result(
                 &command_for_error,
@@ -1529,43 +2577,20 @@ impl AgentService {
         }
 
         let (agent_input, final_pending_status) = {
-            let deleting_projects = self
-                .deleting_projects
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if agent_input_project_id(&record.agent_input)
-                .is_some_and(|project_id| deleting_projects.contains(project_id))
-            {
-                self.discard_usage_context(&run_id);
-                self.unregister_cancellation(&run_id);
-                return;
-            }
-
             let command_succeeded = !execution_was_cancelled
                 && command_result.error.is_none()
                 && !command_result.timed_out
                 && !command_result.cancelled
                 && command_result.exit_code == Some(0);
-            let final_pending_status = if execution_was_cancelled {
+            let desired_pending_status = if execution_was_cancelled {
                 PendingActionStatus::Cancelled
             } else if command_succeeded {
                 PendingActionStatus::Completed
             } else {
                 PendingActionStatus::Failed
             };
-            let tool_result = command_tool_result(&action_id, command_succeeded, &command_result);
-            self.record_action_audit(
-                &record,
-                Some("approved"),
-                pending_status_label(final_pending_status),
-                None,
-                Some(&command_result),
-                Some(&tool_result),
-                tool_result.error.as_deref(),
-                None,
-                Some(now_ms()),
-            );
-
+            let mut final_pending_status = desired_pending_status;
+            let mut tool_result = command_tool_result(&action_id, &command_result);
             let mut agent_input = record.agent_input.clone();
             agent_input.approval_decision = Some(AgentApprovalDecision {
                 action_id: action_id.clone(),
@@ -1573,45 +2598,229 @@ impl AgentService {
                 message: None,
             });
             agent_input.tool_continuation = Some(AgentToolContinuation {
-                call,
-                result: tool_result,
+                call: call.clone(),
+                result: tool_result.clone(),
             });
+
+            // Capture one immutable terminal timestamp and retry the exact settlement. The
+            // storage transaction is idempotent, so a SQLite commit that succeeded but returned
+            // an error is recovered without replacing the real result with a synthetic failure.
+            let completed_at = now_ms();
+            let mut settlement_errors = Vec::new();
+            let mut settled = false;
+            for _ in 0..2 {
+                match self.commit_audited_command_result_trace_with_continuation(
+                    &record,
+                    &agent_input,
+                    desired_pending_status,
+                    &command_result,
+                    completed_at,
+                    &notifications,
+                ) {
+                    Ok(()) => {
+                        settled = true;
+                        break;
+                    }
+                    Err(error) => settlement_errors.push(error),
+                }
+            }
+
+            if !settled {
+                match self.inspect_audited_command_result_trace_with_continuation(
+                    &record,
+                    &agent_input,
+                    desired_pending_status,
+                    &command_result,
+                    completed_at,
+                ) {
+                    Ok(AgentPendingActionSettlementInspection::CommittedAtBoundary) => {
+                        settled = true;
+                    }
+                    Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => {
+                        file_effect_guard.mark_durably_settled();
+                        self.unregister_cancellation(&run_id);
+                        return;
+                    }
+                    Ok(AgentPendingActionSettlementInspection::DefinitelyUncommitted) => {}
+                    Ok(AgentPendingActionSettlementInspection::Diverged { component, reason }) => {
+                        self.unregister_cancellation(&run_id);
+                        emit_manual_command_settlement_error(
+                            &notifications,
+                            &run_id,
+                            ManualCommandSettlementError {
+                                code: "approval_result_commit_indeterminate",
+                                message: format!(
+                                    "命令已经结束，但审计事务处于冲突或部分提交状态；已停止续跑：{component}: {reason}"
+                                ),
+                                attempt_error: &settlement_errors.join("; retry: "),
+                                inspection_error: Some(&reason),
+                                command_result: &command_result,
+                                tool_result: &tool_result,
+                            },
+                        );
+                        return;
+                    }
+                    Err(inspection_error) => {
+                        self.unregister_cancellation(&run_id);
+                        emit_manual_command_settlement_error(
+                            &notifications,
+                            &run_id,
+                            ManualCommandSettlementError {
+                                code: "approval_result_commit_indeterminate",
+                                message: format!(
+                                    "命令已经结束，但无法权威核对审计事务是否提交；已停止续跑：{inspection_error}"
+                                ),
+                                attempt_error: &settlement_errors.join("; retry: "),
+                                inspection_error: Some(&inspection_error),
+                                command_result: &command_result,
+                                tool_result: &tool_result,
+                            },
+                        );
+                        return;
+                    }
+                }
+            }
+
+            if !settled {
+                let audit_error = settlement_errors.join("; retry: ");
+                tool_result = command_audit_persistence_failure(
+                    &command_for_error,
+                    "afterExecution",
+                    &audit_error,
+                    Some(&command_result),
+                );
+                final_pending_status = PendingActionStatus::Failed;
+                agent_input.tool_continuation = Some(AgentToolContinuation {
+                    call: call.clone(),
+                    result: tool_result.clone(),
+                });
+
+                let mut failure_errors = Vec::new();
+                for _ in 0..2 {
+                    match self.commit_audited_command_result_trace_with_continuation(
+                        &record,
+                        &agent_input,
+                        final_pending_status,
+                        &command_result,
+                        completed_at,
+                        &notifications,
+                    ) {
+                        Ok(()) => {
+                            settled = true;
+                            break;
+                        }
+                        Err(error) => failure_errors.push(error),
+                    }
+                }
+
+                if !settled {
+                    let persistence_error = failure_errors.join("; retry: ");
+                    match self.inspect_audited_command_result_trace_with_continuation(
+                        &record,
+                        &agent_input,
+                        final_pending_status,
+                        &command_result,
+                        completed_at,
+                    ) {
+                        Ok(AgentPendingActionSettlementInspection::CommittedAtBoundary) => {
+                            settled = true;
+                        }
+                        Ok(AgentPendingActionSettlementInspection::CommittedAndAdvanced) => {
+                            file_effect_guard.mark_durably_settled();
+                            self.unregister_cancellation(&run_id);
+                            return;
+                        }
+                        Ok(AgentPendingActionSettlementInspection::DefinitelyUncommitted) => {
+                            self.unregister_cancellation(&run_id);
+                            emit_manual_command_settlement_error(
+                                &notifications,
+                                &run_id,
+                                ManualCommandSettlementError {
+                                    code: "approval_result_persistence_failed",
+                                    message: format!(
+                                        "命令已经结束，但审计、目标终态和工具结果轨迹确认未提交；已停止续跑：{persistence_error}"
+                                    ),
+                                    attempt_error: &persistence_error,
+                                    inspection_error: None,
+                                    command_result: &command_result,
+                                    tool_result: &tool_result,
+                                },
+                            );
+                            return;
+                        }
+                        Ok(AgentPendingActionSettlementInspection::Diverged {
+                            component,
+                            reason,
+                        }) => {
+                            self.unregister_cancellation(&run_id);
+                            emit_manual_command_settlement_error(
+                                &notifications,
+                                &run_id,
+                                ManualCommandSettlementError {
+                                    code: "approval_result_commit_indeterminate",
+                                    message: format!(
+                                        "命令已经结束，但失败回执处于冲突或部分提交状态；已停止续跑：{component}: {reason}"
+                                    ),
+                                    attempt_error: &persistence_error,
+                                    inspection_error: Some(&reason),
+                                    command_result: &command_result,
+                                    tool_result: &tool_result,
+                                },
+                            );
+                            return;
+                        }
+                        Err(inspection_error) => {
+                            self.unregister_cancellation(&run_id);
+                            emit_manual_command_settlement_error(
+                                &notifications,
+                                &run_id,
+                                ManualCommandSettlementError {
+                                    code: "approval_result_commit_indeterminate",
+                                    message: format!(
+                                        "命令已经结束，但无法权威核对失败回执是否提交；已停止续跑：{inspection_error}"
+                                    ),
+                                    attempt_error: &persistence_error,
+                                    inspection_error: Some(&inspection_error),
+                                    command_result: &command_result,
+                                    tool_result: &tool_result,
+                                },
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+            debug_assert!(settled);
+            file_effect_guard.mark_durably_settled();
             (agent_input, final_pending_status)
         };
-        if let Err(error) = self.persist_pending_target_status(&record, final_pending_status) {
-            self.unregister_cancellation(&run_id);
-            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                run_id: Some(run_id),
-                message: format!("命令目标终态无法持久化，已停止续跑：{error}"),
-                recoverable: true,
-                code: Some("pending_action_target_persistence_failed".to_string()),
-                details: None,
-            }));
-            return;
-        }
-        if let Err(error) =
-            self.commit_trace_snapshot_with_continuation(&record, &agent_input, &notifications)
-        {
-            self.unregister_cancellation(&run_id);
-            let _ = notifications.send(agent_event_notification(AgentEvent::Error {
-                run_id: Some(run_id),
-                message: format!("命令结果无法写入会话轨迹：{error}"),
-                recoverable: true,
-                code: Some("conversation_trace_persistence_failed".to_string()),
-                details: None,
-            }));
-            return;
-        }
-        if let Some(continuation) = agent_input.tool_continuation.as_ref() {
-            let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
-                run_id: run_id.clone(),
-                result: continuation.result.clone(),
-            }));
-        }
+        // The file-producing boundary is now durably paired with its ToolResult. Release the
+        // project effect lease before model continuation; a concurrent deletion may proceed and
+        // the continuation's deletion marker check will then stop any new action.
+        drop(file_effect_guard);
 
-        if execution_was_cancelled {
+        if execution_was_cancelled && final_pending_status == PendingActionStatus::Cancelled {
             const REASON: &str =
                 "Agent run was cancelled while the approved command was executing.";
+            // Order the final cancelled receipt, pending transition, and terminal events against
+            // the same lifecycle marker used by destructive operations. If deletion won the
+            // marker first, it owns cancellation and no state or event may be recreated here.
+            let deletion_lifecycle = self
+                .deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if deletion_lifecycle.contains_input(&record.agent_input) {
+                drop(deletion_lifecycle);
+                self.discard_usage_context(&run_id);
+                self.unregister_cancellation(&run_id);
+                return;
+            }
+            if let Some(continuation) = agent_input.tool_continuation.as_ref() {
+                let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+                    run_id: run_id.clone(),
+                    result: continuation.result.clone(),
+                }));
+            }
             let persisted = if let (
                 Some(conversation_id),
                 Some(assistant_message_id),
@@ -1686,6 +2895,21 @@ impl AgentService {
             return;
         }
 
+        {
+            let deletion_lifecycle = self
+                .deletion_lifecycle
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if !deletion_lifecycle.contains_input(&record.agent_input) {
+                if let Some(continuation) = agent_input.tool_continuation.as_ref() {
+                    let _ = notifications.send(agent_event_notification(AgentEvent::ToolResult {
+                        run_id: run_id.clone(),
+                        result: continuation.result.clone(),
+                    }));
+                }
+            }
+        }
+
         self.run_action_continuation(
             record,
             agent_input,
@@ -1705,16 +2929,21 @@ impl AgentService {
         existing_cancellation_token: Option<AgentCancellationToken>,
     ) {
         let run_id = record.snapshot.run_id.clone();
-        if self.is_agent_input_project_deleting(&record.agent_input) {
+        let cancellation_token = existing_cancellation_token.unwrap_or_default();
+        if cancellation_token.is_cancelled() {
             self.discard_usage_context(&run_id);
-            self.unregister_cancellation(&run_id);
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
             return;
         }
-        let cancellation_token = existing_cancellation_token.unwrap_or_default();
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
+            self.discard_usage_context(&run_id);
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+            return;
+        }
         self.register_cancellation(&run_id, cancellation_token.clone());
-        if self.is_agent_input_project_deleting(&record.agent_input) {
+        if self.is_agent_input_scope_deleting(&record.agent_input) {
             cancellation_token.cancel();
-            self.unregister_cancellation(&run_id);
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
             self.discard_usage_context(&run_id);
             return;
         }
@@ -1771,7 +3000,7 @@ impl AgentService {
             Err(error) => {
                 let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
                 self.discard_usage_context(&run_id);
-                self.unregister_cancellation(&run_id);
+                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                     run_id: Some(run_id),
                     message: error.to_string(),
@@ -1829,7 +3058,7 @@ impl AgentService {
             agent_input,
             run_id.clone(),
             emitter,
-            cancellation_token,
+            cancellation_token.clone(),
             host_services,
         )
         .await;
@@ -1849,16 +3078,14 @@ impl AgentService {
             Ok(output) if output.status == AgentRunStatus::WaitingForApproval
         );
 
-        let deleting_projects = self
-            .deleting_projects
+        let deletion_lifecycle = self
+            .deletion_lifecycle
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if agent_input_project_id(&record.agent_input)
-            .is_some_and(|project_id| deleting_projects.contains(project_id))
-        {
-            drop(deleting_projects);
+        if deletion_lifecycle.contains_input(&record.agent_input) {
+            drop(deletion_lifecycle);
             self.discard_usage_context(&run_id);
-            self.unregister_cancellation(&run_id);
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
             return;
         }
 
@@ -2038,11 +3265,11 @@ impl AgentService {
             }
         }
 
-        drop(deleting_projects);
+        drop(deletion_lifecycle);
         if !keep_trace_snapshot {
             self.discard_trace_snapshot(&run_id);
         }
-        self.unregister_cancellation(&run_id);
+        self.unregister_cancellation_if_current(&run_id, &cancellation_token);
     }
 }
 
@@ -2051,22 +3278,38 @@ impl AgentService {
 /// The approval endpoint accepts an action id rather than a replacement command. Keeping snapshot
 /// selection and the `ExplicitUser` authorization source together at this boundary prevents a
 /// caller from turning approval of one command into execution of another.
+#[cfg(test)]
 pub(super) fn run_explicitly_approved_command_from_snapshot(
     record: &PendingActionRecord,
     cancellation_token: AgentCancellationToken,
     action_cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
+    run_explicitly_approved_command_from_snapshot_with_artifact_runtime(
+        record,
+        cancellation_token,
+        action_cancel_flag,
+        None,
+    )
+}
+
+pub(super) fn run_explicitly_approved_command_from_snapshot_with_artifact_runtime(
+    record: &PendingActionRecord,
+    cancellation_token: AgentCancellationToken,
+    action_cancel_flag: Option<Arc<AtomicBool>>,
+    artifact_runtime: Option<&mycopilot_core::artifact_runtime::ArtifactRuntimeProvider>,
+) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
     let AgentProposedAction::Command { command } = &record.snapshot.action else {
         return Err("待审批操作不包含可执行命令。".to_string().into());
     };
     let workspace_root = workspace_root_optional(&record.agent_input);
-    run_authorized_command(
+    run_authorized_command_with_artifact_runtime(
         workspace_root.as_deref(),
         command,
         permissions_from_input(&record.agent_input),
         CommandAuthorizationSource::ExplicitUser,
         cancellation_token,
         action_cancel_flag,
+        artifact_runtime,
     )
 }
 

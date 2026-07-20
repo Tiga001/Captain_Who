@@ -1,0 +1,36 @@
+# Managed Artifact Runtime Python dependencies.
+#
+# Every package, including transitive dependencies, is pinned and hash-checked.
+# Preparation uses --only-binary=:all: and never resolves an sdist. The native
+# wheel hashes below cover CPython 3.12 on darwin/linux/win32, arm64 and x64.
+
+openpyxl==3.1.5 \
+    --hash=sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2
+et-xmlfile==2.0.0 \
+    --hash=sha256:7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa
+python-docx==1.2.0 \
+    --hash=sha256:3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7
+python-pptx==1.0.2 \
+    --hash=sha256:160838e0b8565a8b1f67947675886e9fea18aa5e795db7ae531606d68e785cba
+xlsxwriter==3.2.9 \
+    --hash=sha256:9a5db42bc5dff014806c58a20b9eae7322a134abb6fce3c92c181bfb275ec5b3
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+lxml==6.0.2 \
+    --hash=sha256:a59f5448ba2ceccd06995c95ea59a7674a10de0810f2ce90c9006f3cbc044456 \
+    --hash=sha256:e8113639f3296706fbac34a30813929e29247718e88173ad849f57ca59754924 \
+    --hash=sha256:a8bef9b9825fa8bc816a6e641bb67219489229ebc648be422af695f6e7a4fa7f \
+    --hash=sha256:65ea18d710fd14e0186c2f973dc60bb52039a275f82d3c44a0e42b43440ea534 \
+    --hash=sha256:c371aa98126a0d4c739ca93ceffa0fd7a5d732e3ac66a46e74339acd4d334564 \
+    --hash=sha256:90a345bbeaf9d0587a3aaffb7006aa39ccb6ff0e96a57286c0cb2fd1520ea192 \
+    --hash=sha256:72c87e5ee4e58a8354fb9c7c84cbf95a1c8236c127a5d1b7683f04bed8361e1f \
+    --hash=sha256:61cb10eeb95570153e0c0e554f58df92ecf5109f75eacad4a95baa709e26c3d6
+pillow==12.2.0 \
+    --hash=sha256:2d192a155bbcec180f8564f693e6fd9bccff5a7af9b32e2e4bf8c9c69dbad6b5 \
+    --hash=sha256:f3f40b3c5a968281fd507d519e444c35f0ff171237f4fdde090dd60699458421 \
+    --hash=sha256:03e7e372d5240cc23e9f07deca4d775c0817bffc641b01e9c3af208dbd300987 \
+    --hash=sha256:b86024e52a1b269467a802258c25521e6d742349d760728092e1bc2d135b4d76 \
+    --hash=sha256:7371b48c4fa448d20d2714c9a1f775a81155050d383333e0a6c15b1123dda005 \
+    --hash=sha256:62f5409336adb0663b7caa0da5c7d9e7bdbaae9ce761d34669420c2a801b2780 \
+    --hash=sha256:7f84204dee22a783350679a0333981df803dac21a0190d706a50475e361c93f5 \
+    --hash=sha256:af73337013e0b3b46f175e79492d96845b16126ddf79c438d7ea7ff27783a414

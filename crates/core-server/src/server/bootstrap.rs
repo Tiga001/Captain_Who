@@ -1,15 +1,22 @@
 use super::*;
+use std::fs::{self, File, OpenOptions};
+use std::path::Path;
 
 pub(crate) struct CoreServerBootstrap {
     pub(crate) storage: Arc<StorageService>,
     pub(crate) agent_service: AgentService,
     pub(crate) skill_services: SkillServices,
     pub(crate) git_review_service: Arc<GitReviewService>,
+    // Fields drop in declaration order. Keep this owner last so the database lock outlives every
+    // service and SQLite connection above it. File-effect deletion barriers are process-local;
+    // this OS lock makes one core-server the authoritative lifecycle owner for the exact DB.
+    _database_instance_lock: File,
 }
 
 impl CoreServerBootstrap {
     pub(crate) fn initialize() -> io::Result<Self> {
         let database_path = absolute_path(database_path())?;
+        let database_instance_lock = acquire_database_instance_lock(&database_path)?;
         let skill_store_root = skill_store_root(&database_path);
         let storage =
             Arc::new(StorageService::open(&database_path).map_err(|error| {
@@ -89,8 +96,65 @@ impl CoreServerBootstrap {
             agent_service,
             skill_services,
             git_review_service,
+            _database_instance_lock: database_instance_lock,
         })
     }
+}
+
+pub(crate) fn acquire_database_instance_lock(database_path: &Path) -> io::Result<File> {
+    let parent = database_path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let canonical_parent = fs::canonicalize(parent)?;
+    let file_name = database_path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "storage database path has no file name: {}",
+                database_path.display()
+            ),
+        )
+    })?;
+    let database_identity = if database_path.exists() {
+        fs::canonicalize(database_path)?
+    } else {
+        canonical_parent.join(file_name)
+    };
+    let lock_file_name = format!(
+        ".{}.core-server.lock",
+        database_identity
+            .file_name()
+            .expect("database identity retains a file name")
+            .to_string_lossy()
+    );
+    let lock_path = database_identity.with_file_name(lock_file_name);
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    if let Err(error) = lock.try_lock() {
+        let (kind, message) = match error {
+            fs::TryLockError::WouldBlock => (
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "another core-server already owns storage `{}` (instance lock `{}`)",
+                    database_identity.display(),
+                    lock_path.display()
+                ),
+            ),
+            fs::TryLockError::Error(error) => (
+                error.kind(),
+                format!(
+                    "failed to acquire the core-server instance lock `{}` for storage `{}`: {error}",
+                    lock_path.display(),
+                    database_identity.display()
+                ),
+            ),
+        };
+        return Err(io::Error::new(kind, message));
+    }
+    Ok(lock)
 }
 
 pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Result<()> {

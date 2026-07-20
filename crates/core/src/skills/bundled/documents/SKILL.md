@@ -1,20 +1,27 @@
 ---
 name: documents
-description: Create, edit, inspect, render, and validate Microsoft Word-compatible .docx documents with the native office_document tool. Use for professional document authoring, formatting, tables, page layout, headers and footers, or other Word document work.
+description: Create, edit, inspect, render, and validate Microsoft Word-compatible .docx documents with native structured operations or reproducible Python and Node.js scripts. Use for professional document authoring, formatting, tables, page layout, headers and footers, batch generation, or other Word document work.
 ---
 
 # Documents
 
-Use `office_document` for Word document work. Do not invoke OfficeCLI through a shell command.
+Choose the execution path that matches the task:
+
+- Use `office_document` for inspection and small, targeted, structured changes. It provides the strongest in-place safety and should remain the default when the provider supports the requested operation directly.
+- For complex, repetitive, data-driven, batch, or reproducible authoring, create or update a saved `.py` or `.mjs` generator with `apply_patch` or `write_file`, then execute that file with `run_command` and the managed Artifact Runtime.
+- A hybrid workflow is valid: generate or transform with a script, then inspect, render, and validate the resulting `.docx` with the native tools.
+
+Never invoke OfficeCLI itself through a shell command, and never use a system-PATH Python or Node.js executable for this script route. If the managed Artifact Runtime or a declared dependency is unavailable, return that preflight failure faithfully. Do not use inline Python or JavaScript, heredocs, shell redirection, or shell text utilities to bypass the normal file-editing tools. Editing the script and executing the script remain separate, independently authorized tool calls; runtime selection and artifact observation do not grant permission.
 
 ## Workflow
 
-1. Call the tool's `status` operation before the first document operation in a run. Use `help` when the required operation or parameters are uncertain.
-2. Inspect an existing document before editing it. Preserve unrelated content, styles, sections, and package parts.
-3. Make the smallest structured change that satisfies the request. Keep every input and output inside the active workspace.
-4. Render and validate the finished document when layout matters. Inspect the rendered result, not only the command result.
-5. Report the output path and the checks actually performed.
+1. Inspect an existing document before editing it, and choose the native or scripted path deliberately. Prefer a distinct output file unless the user explicitly requested an in-place edit.
+2. Before the first native document operation in a run, call `office_document` with `status`. Use `help` when the required operation or parameters are uncertain.
+3. For a scripted operation, keep the generator as a reviewable `.py` or `.mjs` file and name that saved script explicitly in the command. Always set `observe.kinds=["office"]` and list every file that the command should create or modify in `observe.expectedOutputs`. Use `observe.additionalRoots` only when changes to other Office files in a directory also need to be detected; an external directory scan requires `read=all`, and an expected external output does not require scanning its parent.
+4. Inspect `artifactObservation` on every command result, including non-zero exits, timeouts, and cancellations. A zero exit code is not proof of document success. Confirm that every expected document was created or changed, and disclose unexpected replacements, deletions, renames, partial coverage, or failed observation. Never retry blindly after a command that produced file effects.
+5. Inspect, render, and validate the finished document when layout matters. Inspect the rendered result, not only the command or observation result.
+6. Report the output path, the observed file effects, and the checks actually performed.
 
-If `status` reports that the Office engine is unavailable, return that error faithfully and explain which capability is missing. Never claim that a file was created, edited, rendered, or validated without a successful tool result and output verification.
+If native `status` reports that the Office engine is unavailable, preserve that error and do not claim that native inspection, rendering, or validation ran. A script route may continue only when the managed runtime is available and its output can be independently observed and verified; disclose any missing native checks. Never claim that a file was created or edited without a successful command result, matching artifact effects, and output verification.
 
 Read [references/workflows.md](references/workflows.md) for detailed authoring, editing, and verification guidance when performing a document task.

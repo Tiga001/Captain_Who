@@ -24,6 +24,21 @@ fn relative_database_override_is_absolutized_before_source_registration() {
 }
 
 #[test]
+fn database_instance_lock_enforces_one_core_server_and_releases_on_drop() {
+    let fixture = tempfile::tempdir().unwrap();
+    let database_path = fixture.path().join("storage.sqlite");
+
+    let first = acquire_database_instance_lock(&database_path).unwrap();
+    let error = acquire_database_instance_lock(&database_path).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert!(error.to_string().contains("another core-server"));
+
+    drop(first);
+    acquire_database_instance_lock(&database_path)
+        .expect("dropping the owning core-server must release the database lock");
+}
+
+#[test]
 fn agent_skill_failures_preserve_structured_json_rpc_recovery_data() {
     let response = agent_service_error_response(
         JsonRpcId::Number(9),

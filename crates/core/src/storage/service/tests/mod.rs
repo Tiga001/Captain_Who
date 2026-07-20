@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod attachments;
 mod conversations;
+mod message_deletion;
 mod reconciliation;
 mod settings;
 

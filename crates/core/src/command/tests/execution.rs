@@ -280,3 +280,122 @@ fn executor_refuses_guarded_automatic_command_that_needs_approval() {
     );
     assert!(!workspace.path.join("output.txt").exists());
 }
+
+fn observe_office_output(request: &mut AgentCommandRequest, path: &str) {
+    request.observe = Some(AgentCommandArtifactObservationRequest {
+        kinds: vec![AgentCommandArtifactObservationKind::Office],
+        expected_outputs: vec![path.to_string()],
+        additional_roots: Vec::new(),
+    });
+}
+
+fn explicit_workspace_permissions() -> AgentPermissions {
+    AgentPermissions {
+        read: AgentReadPermission::WorkspaceOnly,
+        write: AgentWritePermission::WorkspaceOnly,
+        command: AgentCommandPermission::RequireApproval,
+        command_safety: AgentCommandSafetyPolicy::Guarded,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn nonzero_exit_preserves_created_office_artifact_observation() {
+    let workspace = TestWorkspace::new();
+    let mut command = request("printf failed-output > failed.csv; false", Some(5_000));
+    observe_office_output(&mut command, "failed.csv");
+
+    let result = run_authorized_command(
+        Some(&workspace.path),
+        &command,
+        explicit_workspace_permissions(),
+        CommandAuthorizationSource::ExplicitUser,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result.exit_code, Some(1));
+    let observation = result.artifact_observation.unwrap();
+    assert_eq!(
+        observation.expected_outputs[0].outcome,
+        AgentCommandExpectedArtifactOutcomeKind::Created
+    );
+    assert!(observation.changes.iter().any(|change| {
+        change.path == "failed.csv" && change.kind == AgentCommandArtifactChangeKind::Created
+    }));
+}
+
+#[test]
+fn timeout_preserves_artifacts_created_before_process_termination() {
+    let workspace = TestWorkspace::new();
+    let mut command = request("printf timed-output > timed.csv; sleep 30", Some(50));
+    observe_office_output(&mut command, "timed.csv");
+
+    let result = run_authorized_command(
+        Some(&workspace.path),
+        &command,
+        explicit_workspace_permissions(),
+        CommandAuthorizationSource::ExplicitUser,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+
+    assert!(result.timed_out);
+    let observation = result.artifact_observation.unwrap();
+    assert_eq!(
+        observation.expected_outputs[0].outcome,
+        AgentCommandExpectedArtifactOutcomeKind::Created
+    );
+    assert!(observation
+        .changes
+        .iter()
+        .any(|change| change.path == "timed.csv"));
+}
+
+#[test]
+fn cancellation_preserves_artifacts_created_before_process_termination() {
+    let workspace = TestWorkspace::new();
+    let mut command = request(
+        "printf cancelled-output > cancelled.csv; sleep 30",
+        Some(10_000),
+    );
+    observe_office_output(&mut command, "cancelled.csv");
+    let cancellation = AgentCancellationToken::new();
+    let worker_cancellation = cancellation.clone();
+    let workspace_path = workspace.path.clone();
+    let worker = std::thread::spawn(move || {
+        run_authorized_command(
+            Some(&workspace_path),
+            &command,
+            explicit_workspace_permissions(),
+            CommandAuthorizationSource::ExplicitUser,
+            worker_cancellation,
+            None,
+        )
+        .unwrap()
+    });
+    let output = workspace.path.join("cancelled.csv");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !output.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        output.exists(),
+        "command did not create its output before cancellation"
+    );
+    cancellation.cancel();
+    let result = worker.join().unwrap();
+
+    assert!(result.cancelled);
+    let observation = result.artifact_observation.unwrap();
+    assert_eq!(
+        observation.expected_outputs[0].outcome,
+        AgentCommandExpectedArtifactOutcomeKind::Created
+    );
+    assert!(observation
+        .changes
+        .iter()
+        .any(|change| change.path == "cancelled.csv"));
+}

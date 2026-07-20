@@ -38,6 +38,26 @@ impl StorageService {
             .collect()
     }
 
+    /// Loads the authoritative command observations persisted in the action audit for a run.
+    ///
+    /// This is intentionally distinct from the model-facing Tool Result projection: callers that
+    /// audit failed, timed-out, or cancelled commands receive the complete execution structure,
+    /// including artifact observation coverage and effects.
+    pub fn list_agent_command_results_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<AgentCommandExecutionResult>, String> {
+        let connection = self.state.connection()?;
+        agent_action_audit_repository::list_command_result_json_for_run(&connection, run_id)
+            .map_err(storage_error)?
+            .into_iter()
+            .map(|payload| {
+                serde_json::from_str(&payload)
+                    .map_err(|error| format!("本地命令执行记录无法解析：{error}"))
+            })
+            .collect()
+    }
+
     pub fn settle_unresolved_agent_file_drafts_for_run(
         &self,
         run_id: &str,

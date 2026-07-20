@@ -1,3 +1,4 @@
+pub mod artifact_runtime;
 mod cancellation;
 pub mod command;
 mod context;
@@ -55,7 +56,17 @@ pub use protocol::{
     AgentActivatedSkill, AgentActivatedSkillResources, AgentApiStyle, AgentApprovalDecision,
     AgentApprovalDecisionStatus, AgentApprovalStatus, AgentAttachmentLibraryContext,
     AgentAttachmentReference, AgentChatInput, AgentChatMessage, AgentChatOutput,
+    AgentCommandArtifactChange, AgentCommandArtifactChangeKind, AgentCommandArtifactKind,
+    AgentCommandArtifactMetadata, AgentCommandArtifactObservation,
+    AgentCommandArtifactObservationCoverage, AgentCommandArtifactObservationKind,
+    AgentCommandArtifactObservationPhase, AgentCommandArtifactObservationRequest,
+    AgentCommandArtifactObservationStatus, AgentCommandArtifactObservationWarning,
+    AgentCommandArtifactScope, AgentCommandArtifactSnapshotCoverage,
+    AgentCommandArtifactValidation, AgentCommandArtifactValidationStatus,
+    AgentCommandExpectedArtifactOutcome, AgentCommandExpectedArtifactOutcomeKind,
     AgentCommandOutputStream, AgentCommandPermission, AgentCommandRequest, AgentCommandRiskLevel,
+    AgentCommandRuntimeKind, AgentCommandRuntimePackageRequirement, AgentCommandRuntimeProvider,
+    AgentCommandRuntimeRequest, AgentCommandRuntimeResolution, AgentCommandRuntimeResolvedPackage,
     AgentCommandSafetyPolicy, AgentContextCheckpointGroup, AgentContextCheckpointImage,
     AgentContextCheckpointItem, AgentContextCheckpointOrigin, AgentContextCheckpointToolCall,
     AgentContextWindowPhase, AgentContextWindowSnapshot, AgentContextWindowStatus,
@@ -76,7 +87,8 @@ pub use protocol::{
     AgentToolResult, AgentToolSafety, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
     AgentUsageModelSummary, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission,
-    AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
+    AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+    AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION, AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
 };
 pub use revision::content_revision;
 pub use runtime::{

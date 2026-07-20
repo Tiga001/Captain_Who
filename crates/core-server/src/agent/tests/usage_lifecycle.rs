@@ -98,6 +98,21 @@ fn deleting_project_cancels_runs_and_discards_usage_contexts() {
 }
 
 #[test]
+fn failed_project_deletion_releases_the_command_finalization_barrier() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(storage);
+    inject_project_deletion_failure("project-delete-failure");
+
+    let error = service
+        .delete_project("project-delete-failure")
+        .unwrap_err();
+
+    assert!(error.contains("injected project deletion failure"));
+    assert!(!service.is_project_deleting(Some("project-delete-failure")));
+}
+
+#[test]
 fn pending_approval_persists_full_run_checkpoint() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());

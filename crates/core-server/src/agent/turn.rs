@@ -6,8 +6,12 @@ impl AgentService {
         input: AgentConversationTurnInput,
         notifications: CoreServerNotificationSender,
     ) -> Result<AgentConversationTurnOutput, AgentServiceError> {
-        if self.is_project_deleting(input.project_id.as_deref()) {
-            return Err("项目正在移除，无法开始新的 agent 运行。".to_string().into());
+        if self.is_project_deleting(input.project_id.as_deref())
+            || self.is_conversation_deleting(input.conversation_id.as_deref())
+        {
+            return Err("项目或会话正在移除，无法开始新的 agent 运行。"
+                .to_string()
+                .into());
         }
         let run_id = next_run_id();
         let cancellation_token = AgentCancellationToken::new();
@@ -17,16 +21,18 @@ impl AgentService {
         {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.unregister_cancellation(&run_id);
+                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
                 return Err(error);
             }
         };
 
         self.register_usage_context(&run_id, prepared.usage_context.clone());
-        if self.is_agent_input_project_deleting(&prepared.agent_input) {
+        if self.is_agent_input_scope_deleting(&prepared.agent_input) {
             self.discard_usage_context(&run_id);
-            self.unregister_cancellation(&run_id);
-            return Err("项目正在移除，无法开始新的 agent 运行。".to_string().into());
+            self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+            return Err("项目或会话正在移除，无法开始新的 agent 运行。"
+                .to_string()
+                .into());
         }
 
         let output = prepared.output.clone();
@@ -127,7 +133,7 @@ impl AgentService {
                 prepared.agent_input,
                 worker_run_id.clone(),
                 emitter,
-                cancellation_token,
+                cancellation_token.clone(),
                 host_services,
             )
             .await;
@@ -147,16 +153,14 @@ impl AgentService {
                 Ok(output) if output.status == AgentRunStatus::WaitingForApproval
             );
 
-            let deleting_projects = service
-                .deleting_projects
+            let deletion_lifecycle = service
+                .deletion_lifecycle
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if agent_input_project_id(&pending_agent_input)
-                .is_some_and(|project_id| deleting_projects.contains(project_id))
-            {
-                drop(deleting_projects);
+            if deletion_lifecycle.contains_input(&pending_agent_input) {
+                drop(deletion_lifecycle);
                 service.discard_usage_context(&worker_run_id);
-                service.unregister_cancellation(&worker_run_id);
+                service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
                 return;
             }
 
@@ -262,11 +266,11 @@ impl AgentService {
                 }
             }
 
-            drop(deleting_projects);
+            drop(deletion_lifecycle);
             if !keep_trace_snapshot {
                 service.discard_trace_snapshot(&worker_run_id);
             }
-            service.unregister_cancellation(&worker_run_id);
+            service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
         });
 
         Ok(output)

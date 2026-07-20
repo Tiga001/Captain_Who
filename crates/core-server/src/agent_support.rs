@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub(super) use mycopilot_core::command::command_tool_result;
 use mycopilot_core::command::{AgentCommandExecutionResult, CommandPolicyEvaluation};
 use mycopilot_core::file_write::{apply_file_write, failed_file_write_result};
 use mycopilot_core::patch::apply_unified_diff_in_workspace;

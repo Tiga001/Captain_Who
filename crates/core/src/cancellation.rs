@@ -29,6 +29,14 @@ impl AgentCancellationToken {
         self.flag.load(Ordering::SeqCst)
     }
 
+    /// Returns whether both handles address the same cancellation state.
+    ///
+    /// This is intentionally stronger than comparing the current cancelled value: lifecycle
+    /// owners use it to avoid unregistering a newer token that reused the same stable run ID.
+    pub fn shares_state_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.flag, &other.flag)
+    }
+
     pub fn check(&self) -> AgentResult<()> {
         if self.is_cancelled() {
             Err(AgentError::cancelled())

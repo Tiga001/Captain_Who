@@ -1,4 +1,87 @@
 use super::*;
+use mycopilot_core::{
+    AgentCommandRuntimeKind, AgentCommandRuntimePackageRequirement, AgentCommandRuntimeProvider,
+    AgentCommandRuntimeRequest,
+};
+
+#[test]
+fn pending_command_round_trip_keeps_the_frozen_runtime_request() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    let action = AgentProposedAction::Command {
+        command: AgentCommandRequest {
+            id: "managed-runtime-pending".to_string(),
+            command: "python scripts/build.py".to_string(),
+            cwd: Some(".".to_string()),
+            timeout_ms: Some(30_000),
+            approval_status: AgentApprovalStatus::Required,
+            risk_level: None,
+            reason: Some("build an Office artifact".to_string()),
+            observe: None,
+            runtime: Some(AgentCommandRuntimeRequest {
+                provider: AgentCommandRuntimeProvider::ManagedArtifact,
+                kind: AgentCommandRuntimeKind::Python,
+                required_packages: vec![AgentCommandRuntimePackageRequirement {
+                    name: "openpyxl".to_string(),
+                    version: "3.1.5".to_string(),
+                }],
+            }),
+        },
+    };
+
+    assert!(service
+        .store_pending_action(
+            "managed-runtime-run",
+            "managed-runtime-conversation",
+            "managed-runtime-assistant",
+            action,
+            agent_input,
+        )
+        .unwrap());
+    drop(service);
+
+    let reloaded = AgentService::new(Arc::clone(&storage));
+    let pending = reloaded
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let stored = pending
+        .get(&pending_action_storage_id(
+            "managed-runtime-run",
+            "managed-runtime-pending",
+        ))
+        .expect("persisted command action must reload");
+    let AgentProposedAction::Command { command } = &stored.snapshot.action else {
+        panic!("persisted action must remain a command");
+    };
+    let runtime = command
+        .runtime
+        .as_ref()
+        .expect("managed runtime request must survive persistence");
+    assert_eq!(
+        runtime.provider,
+        AgentCommandRuntimeProvider::ManagedArtifact
+    );
+    assert_eq!(runtime.kind, AgentCommandRuntimeKind::Python);
+    assert_eq!(runtime.required_packages.len(), 1);
+    assert_eq!(runtime.required_packages[0].name, "openpyxl");
+    assert_eq!(runtime.required_packages[0].version, "3.1.5");
+    let resumed_call = tool_call_for_action(&stored.snapshot.action);
+    assert_eq!(resumed_call.args["runtime"]["provider"], "managedArtifact");
+    assert_eq!(resumed_call.args["runtime"]["kind"], "python");
+    assert_eq!(
+        resumed_call.args["runtime"]["requiredPackages"][0]["version"],
+        "3.1.5"
+    );
+}
 
 #[test]
 fn provider_action_id_is_scoped_by_run_and_same_run_reuse_is_strict() {

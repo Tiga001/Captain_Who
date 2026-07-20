@@ -478,10 +478,42 @@ mod tests {
         let source = BundledSkillSource::new().unwrap();
         let catalog = source.list().unwrap();
 
-        for (local_id, tool, extension) in [
-            (DOCUMENTS_LOCAL_ID, "office_document", ".docx"),
-            (PRESENTATIONS_LOCAL_ID, "office_presentation", ".pptx"),
-            (SPREADSHEETS_LOCAL_ID, "office_spreadsheet", ".xlsx"),
+        for (
+            local_id,
+            tool,
+            extension,
+            python_package,
+            python_version,
+            node_package,
+            node_version,
+        ) in [
+            (
+                DOCUMENTS_LOCAL_ID,
+                "office_document",
+                ".docx",
+                "python-docx",
+                "1.2.0",
+                "docx",
+                "9.6.1",
+            ),
+            (
+                PRESENTATIONS_LOCAL_ID,
+                "office_presentation",
+                ".pptx",
+                "python-pptx",
+                "1.0.2",
+                "pptxgenjs",
+                "4.0.1",
+            ),
+            (
+                SPREADSHEETS_LOCAL_ID,
+                "office_spreadsheet",
+                ".xlsx",
+                "openpyxl",
+                "3.1.5",
+                "exceljs",
+                "4.4.0",
+            ),
         ] {
             let descriptor = catalog
                 .skills()
@@ -514,40 +546,116 @@ mod tests {
             );
             assert!(package.instructions().contains(tool));
             assert!(package.instructions().contains("`status`"));
+            assert!(package.instructions().contains("managed Artifact Runtime"));
+            assert!(package.instructions().contains("observe.expectedOutputs"));
+            assert!(package.instructions().contains("artifactObservation"));
 
             let reader = source.open_resource_reader(&package).unwrap().unwrap();
             let capability = reader.read(&package.resources().entries()[0]).unwrap();
             let capability: serde_json::Value = serde_json::from_slice(&capability).unwrap();
-            assert_eq!(capability["contractVersion"], 1);
+            assert_eq!(capability["contractVersion"], 2);
             assert_eq!(capability["engine"], "officecli");
             assert_eq!(capability["tool"], tool);
             assert_eq!(capability["extensions"][0], extension);
+            assert_eq!(capability["modes"]["native"]["tool"], tool);
+            assert_eq!(
+                capability["modes"]["script"]["executionTool"],
+                "run_command"
+            );
+            assert_eq!(
+                capability["modes"]["script"]["runtimes"][0]["provider"],
+                "managedArtifact"
+            );
+            assert_eq!(
+                capability["modes"]["script"]["runtimes"][0]["kind"],
+                "python"
+            );
+            assert_eq!(
+                capability["modes"]["script"]["runtimes"][0]["availablePackages"][0]["name"],
+                python_package
+            );
+            assert_eq!(
+                capability["modes"]["script"]["runtimes"][0]["availablePackages"][0]["version"],
+                python_version
+            );
+            assert_eq!(capability["modes"]["script"]["runtimes"][1]["kind"], "node");
+            assert_eq!(
+                capability["modes"]["script"]["runtimes"][1]["availablePackages"][0]["name"],
+                node_package
+            );
+            assert_eq!(
+                capability["modes"]["script"]["runtimes"][1]["availablePackages"][0]["version"],
+                node_version
+            );
+            assert_eq!(
+                capability["modes"]["script"]["requiredPackagesField"],
+                "runtime.requiredPackages"
+            );
+            if local_id == SPREADSHEETS_LOCAL_ID {
+                assert_eq!(
+                    capability["modes"]["script"]["runtimes"][0]["availablePackages"][1]["name"],
+                    "xlsxwriter"
+                );
+                assert_eq!(
+                    capability["modes"]["script"]["runtimes"][0]["availablePackages"][1]["version"],
+                    "3.2.9"
+                );
+            }
+            assert_eq!(
+                capability["modes"]["script"]["observation"]["kind"],
+                "office"
+            );
+            assert_eq!(
+                capability["modes"]["script"]["observation"]["expectedOutputsField"],
+                "observe.expectedOutputs"
+            );
+            assert_eq!(
+                capability["modes"]["script"]["observation"]["additionalRootsField"],
+                "observe.additionalRoots"
+            );
+            assert_eq!(
+                capability["modes"]["script"]["observation"]["resultField"],
+                "artifactObservation"
+            );
         }
     }
 
     #[test]
     fn bundled_resources_are_readable_through_the_revision_bound_runtime() {
         let service = SkillsService::new().with_bundled_source().unwrap();
-        let descriptor = service
-            .list()
-            .unwrap()
-            .skills()
-            .iter()
-            .find(|skill| skill.id().local_id() == DOCUMENTS_LOCAL_ID)
-            .unwrap()
-            .clone();
-        let activated = service.activate(&[descriptor.selection()]).unwrap();
-        let resources = service.resource_session(&activated).unwrap();
-        let package = resources.package_uris().into_iter().next().unwrap();
-        let workflow =
-            package.resource(SkillResourcePath::parse("references/workflows.md").unwrap());
+        for (local_id, heading) in [
+            (DOCUMENTS_LOCAL_ID, "# Word document workflows"),
+            (PRESENTATIONS_LOCAL_ID, "# Presentation workflows"),
+            (SPREADSHEETS_LOCAL_ID, "# Spreadsheet workflows"),
+        ] {
+            let descriptor = service
+                .list()
+                .unwrap()
+                .skills()
+                .iter()
+                .find(|skill| skill.id().local_id() == local_id)
+                .unwrap()
+                .clone();
+            let activated = service.activate(&[descriptor.selection()]).unwrap();
+            let resources = service.resource_session(&activated).unwrap();
+            let package = resources.package_uris().into_iter().next().unwrap();
+            let workflow =
+                package.resource(SkillResourcePath::parse("references/workflows.md").unwrap());
 
-        let page = resources
-            .read_text(&workflow, SkillResourceTextReadOptions::default())
-            .unwrap();
+            let page = resources
+                .read_text(&workflow, SkillResourceTextReadOptions::default())
+                .unwrap();
 
-        assert!(page.text().contains("# Word document workflows"));
-        assert!(!page.truncated());
+            assert!(page.text().contains(heading));
+            assert!(page.text().contains("managed Artifact Runtime"));
+            assert!(page.text().contains("runtime.requiredPackages"));
+            assert!(page.text().contains("\"provider\": \"managedArtifact\""));
+            assert!(page.text().contains("observe.expectedOutputs"));
+            assert!(page.text().contains("observe.additionalRoots"));
+            assert!(page.text().contains("artifactObservation.expectedOutputs"));
+            assert!(page.text().contains("non-zero exit"));
+            assert!(!page.truncated());
+        }
     }
 
     #[test]

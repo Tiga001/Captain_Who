@@ -2,13 +2,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::command::AgentCommandExecutionResult;
 use crate::storage::models::{
     AgentActionAuditRecord, AgentFileDraftChunkRecord, AgentFileDraftOperationRecord,
     AgentFileDraftRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
-    AgentUsageRecordInsert, AttachmentImageRecord, AttachmentRecord, ChatConversationMetaRecord,
-    ChatConversationRecord, ChatMessageAttachmentRecord, ChatMessageRecord, ChatMessageStateRecord,
-    ChatSearchInput, ChatSearchResult, ComposerDraftRecord, ForkConversationInput,
-    ModelSettingsRecord, ProjectRecord, UiPreferencesRecord,
+    AgentUnsettledFileEffect, AgentUsageRecordInsert, AttachmentImageRecord, AttachmentRecord,
+    ChatConversationMetaRecord, ChatConversationRecord, ChatMessageAttachmentRecord,
+    ChatMessageRecord, ChatMessageStateRecord, ChatSearchInput, ChatSearchResult,
+    ComposerDraftRecord, ForkConversationInput, ModelSettingsRecord, ProjectRecord,
+    UiPreferencesRecord,
 };
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
@@ -21,11 +23,12 @@ use crate::storage::{
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentChatInput, AgentInputAttachment,
-    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentProposedAction, AgentToolResult,
-    AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
-    ContextCompactionAuditBundle, ContextCompactionPrefix, ContextCompactionReceipt,
-    ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
-    ConversationTurnTrace, ConversationTurnTraceItem, ModelRequestObservation,
+    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentProposedAction, AgentToolCall,
+    AgentToolResult, AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput,
+    AgentUsageSummaryOutput, ContextCompactionAuditBundle, ContextCompactionPrefix,
+    ContextCompactionReceipt, ContextCompactionSummary, ContextCompactionSummaryDraft,
+    ContextJournalCursor, ConversationTurnTrace, ConversationTurnTraceItem,
+    ModelRequestObservation,
 };
 use base64::Engine;
 use rusqlite::OptionalExtension;
@@ -42,6 +45,9 @@ mod settings;
 
 use attachments::*;
 pub use lifecycle::*;
+pub use pending_actions::{
+    AgentPendingActionResultCommitOutcome, AgentPendingActionSettlementInspection,
+};
 #[cfg(test)]
 use settings::MAX_SKILL_ENABLEMENT_ID_BYTES;
 

@@ -59,6 +59,8 @@ fn command_dispatch_fixture(command: &str) -> (AgentToolCall, AgentProposedActio
             approval_status: AgentApprovalStatus::NotRequired,
             risk_level: None,
             reason: None,
+            observe: None,
+            runtime: None,
         },
     };
     (call, action)

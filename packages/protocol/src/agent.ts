@@ -409,6 +409,10 @@ export interface AgentCommandExecutionResult {
   error?: string
   /** Present when execution was stopped by the authoritative backend command policy. */
   policyEvaluation?: AgentCommandPolicyEvaluation
+  /** Best-effort file effects observed around this exact command execution. */
+  artifactObservation?: AgentCommandArtifactObservation
+  /** Host-owned runtime resolution or structured preflight failure evidence. */
+  runtime?: AgentCommandRuntimeResolution
 }
 
 export interface AgentActionExecutionOutput {
@@ -882,6 +886,144 @@ export interface AgentGitDiffSnapshot {
   truncated: boolean
 }
 
+export type AgentCommandArtifactObservationKind = 'office'
+
+export interface AgentCommandArtifactObservationRequest {
+  kinds: AgentCommandArtifactObservationKind[]
+  /** Expected Office output files, resolved relative to command cwd. This does not grant access. */
+  expectedOutputs?: string[]
+  /** Extra files or directories to observe beyond the automatically included workspace. */
+  additionalRoots?: string[]
+}
+
+export type AgentCommandArtifactObservationStatus = 'complete' | 'partial' | 'failed'
+export type AgentCommandArtifactObservationPhase = 'setup' | 'before' | 'after'
+export type AgentCommandArtifactKind = 'document' | 'spreadsheet' | 'presentation'
+export type AgentCommandArtifactScope = 'workspace' | 'external'
+export type AgentCommandArtifactChangeKind =
+  'created' | 'modified' | 'replaced' | 'deleted' | 'renamed'
+export type AgentCommandExpectedArtifactOutcomeKind =
+  | 'created'
+  | 'modified'
+  | 'replaced'
+  | 'renamed'
+  | 'unchanged'
+  | 'missing'
+  | 'unobserved'
+  | 'invalid'
+export type AgentCommandArtifactValidationStatus =
+  'valid' | 'invalid' | 'not_applicable' | 'unchecked'
+
+export interface AgentCommandArtifactValidation {
+  status: AgentCommandArtifactValidationStatus
+  code?: string
+  message?: string
+}
+
+export interface AgentCommandArtifactMetadata {
+  sizeBytes: number
+  sha256?: string
+  validation: AgentCommandArtifactValidation
+}
+
+export interface AgentCommandArtifactChange {
+  kind: AgentCommandArtifactChangeKind
+  artifactKind: AgentCommandArtifactKind
+  path: string
+  scope: AgentCommandArtifactScope
+  previousPath?: string
+  previousScope?: AgentCommandArtifactScope
+  before?: AgentCommandArtifactMetadata
+  after?: AgentCommandArtifactMetadata
+}
+
+export interface AgentCommandExpectedArtifactOutcome {
+  requestedPath: string
+  outcome: AgentCommandExpectedArtifactOutcomeKind
+  path?: string
+  scope?: AgentCommandArtifactScope
+  artifactKind?: AgentCommandArtifactKind
+  metadata?: AgentCommandArtifactMetadata
+}
+
+export interface AgentCommandArtifactSnapshotCoverage {
+  rootsScanned: number
+  directoryEntriesScanned: number
+  officeFilesSeen: number
+  filesHashed: number
+  filesUnhashed: number
+  bytesHashed: number
+  symlinksSkipped: number
+  excludedDirectories: number
+  durationMs: number
+  timeBudgetExceeded: boolean
+  cancelled: boolean
+  truncated: boolean
+}
+
+export interface AgentCommandArtifactObservationCoverage {
+  workspaceIncluded: boolean
+  expectedOutputCount: number
+  additionalRootCount: number
+  before: AgentCommandArtifactSnapshotCoverage
+  after: AgentCommandArtifactSnapshotCoverage
+}
+
+export interface AgentCommandArtifactObservationWarning {
+  phase: AgentCommandArtifactObservationPhase
+  code: string
+  path?: string
+  message: string
+}
+
+export interface AgentCommandArtifactObservation {
+  schemaVersion: number
+  status: AgentCommandArtifactObservationStatus
+  coverage: AgentCommandArtifactObservationCoverage
+  changes: AgentCommandArtifactChange[]
+  changesTruncated: boolean
+  changesOmitted: number
+  expectedOutputs?: AgentCommandExpectedArtifactOutcome[]
+  warnings?: AgentCommandArtifactObservationWarning[]
+}
+
+/** Selects a host-owned runtime without granting command authorization. */
+export type AgentCommandRuntimeProvider = 'managedArtifact'
+
+export type AgentCommandRuntimeKind = 'node' | 'python'
+
+export interface AgentCommandRuntimePackageRequirement {
+  name: string
+  version: string
+}
+
+/** Frozen resolver request carried with the command action. */
+export interface AgentCommandRuntimeRequest {
+  provider: AgentCommandRuntimeProvider
+  kind: AgentCommandRuntimeKind
+  requiredPackages: AgentCommandRuntimePackageRequirement[]
+}
+
+export interface AgentCommandRuntimeResolvedPackage {
+  name: string
+  version: string
+}
+
+/** Public runtime evidence; private executable and component paths are intentionally absent. */
+export interface AgentCommandRuntimeResolution {
+  schemaVersion: number
+  providerId: string
+  bundleVersion?: string
+  bundleRevision?: string
+  kind: AgentCommandRuntimeKind
+  runtimeVersion?: string
+  runtimeFingerprint?: string
+  resolvedPackages?: AgentCommandRuntimeResolvedPackage[]
+  errorCode?: string
+  recovery?: string
+  message?: string
+}
+
 export interface AgentCommandRequest {
   id: string
   command: string
@@ -890,6 +1032,8 @@ export interface AgentCommandRequest {
   approvalStatus: AgentApprovalStatus
   riskLevel?: AgentCommandRiskLevel
   reason?: string
+  observe?: AgentCommandArtifactObservationRequest
+  runtime?: AgentCommandRuntimeRequest
 }
 
 export type AgentSkillMaterializationResultStatus =

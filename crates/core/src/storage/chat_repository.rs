@@ -2,7 +2,7 @@ use crate::storage::models::{
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageRecord, ChatMessageStateRecord,
 };
 use crate::storage::{context_compaction_repository, now_ms};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 use std::collections::HashSet;
 
 pub fn conversation_exists(
@@ -335,23 +335,37 @@ pub fn delete_messages(
     message_ids: &[String],
 ) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
+    delete_messages_in_transaction(&transaction, conversation_id, message_ids)?;
+    transaction.commit()
+}
+
+/// Deletes messages and rewinds any derived compaction state using the caller's transaction.
+///
+/// Message-owned records that live outside the `messages` foreign-key graph must be retired by
+/// the caller in the same transaction before invoking this helper. Keep [`delete_messages`] as the
+/// standalone convenience API for repository callers that do not own such records.
+pub(crate) fn delete_messages_in_transaction(
+    connection: &Transaction<'_>,
+    conversation_id: &str,
+    message_ids: &[String],
+) -> rusqlite::Result<()> {
     let compaction_rewind =
         context_compaction_repository::prepare_message_deletion_compaction_rewind(
-            &transaction,
+            connection,
             conversation_id,
             message_ids,
         )
         .map_err(context_compaction_error_to_sqlite)?;
 
     for message_id in message_ids {
-        transaction.execute(
+        connection.execute(
             "DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2",
             params![conversation_id, message_id],
         )?;
     }
 
     let ordered_message_ids = {
-        let mut statement = transaction.prepare(
+        let mut statement = connection.prepare(
             "
             SELECT id
             FROM messages
@@ -367,20 +381,19 @@ pub fn delete_messages(
     };
 
     for (position, message_id) in ordered_message_ids.iter().enumerate() {
-        transaction.execute(
+        connection.execute(
             "UPDATE messages SET position = ?1 WHERE conversation_id = ?2 AND id = ?3",
             params![position as i64, conversation_id, message_id],
         )?;
     }
 
     context_compaction_repository::finish_message_deletion_compaction_rewind(
-        &transaction,
+        connection,
         compaction_rewind,
         now_ms(),
     )
     .map_err(context_compaction_error_to_sqlite)?;
-
-    transaction.commit()
+    Ok(())
 }
 
 fn context_compaction_error_to_sqlite(
@@ -680,6 +693,37 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn caller_owned_message_deletion_can_be_rolled_back_as_one_transaction() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        save_conversation(&mut connection, conversation()).unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        delete_messages_in_transaction(
+            &transaction,
+            "conversation-1",
+            &["assistant-1".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            get_conversation(&transaction, "conversation-1")
+                .unwrap()
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        transaction.rollback().unwrap();
+
+        let stored = get_conversation(&connection, "conversation-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.messages.len(), 2);
+        assert_eq!(stored.messages[1].id, "assistant-1");
+        assert_eq!(stored.messages[1].role, "assistant");
     }
 
     fn conversation() -> ChatConversationRecord {

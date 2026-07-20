@@ -1,12 +1,10 @@
 use super::*;
 use crate::{AgentApprovalStatus, AgentCommandPermission, AgentReadPermission};
-use std::sync::atomic::{AtomicU64, Ordering};
+use tempfile::TempDir;
 
 mod execution;
 mod policy_basics;
 mod policy_complex;
-
-static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn request(command: &str, timeout_ms: Option<u64>) -> AgentCommandRequest {
     AgentCommandRequest {
@@ -17,6 +15,8 @@ fn request(command: &str, timeout_ms: Option<u64>) -> AgentCommandRequest {
         approval_status: AgentApprovalStatus::Required,
         risk_level: Some(AgentCommandRiskLevel::ReadOnly),
         reason: None,
+        observe: None,
+        runtime: None,
     }
 }
 
@@ -32,23 +32,21 @@ fn policy_permissions(
 }
 
 struct TestWorkspace {
+    _directory: TempDir,
     path: PathBuf,
 }
 
 impl TestWorkspace {
     fn new() -> Self {
-        let unique = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("mycopilot-command-test-{unique}"));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        let path = path.canonicalize().unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("mycopilot-command-test-")
+            .tempdir()
+            .unwrap();
+        let path = directory.path().canonicalize().unwrap();
 
-        Self { path }
-    }
-}
-
-impl Drop for TestWorkspace {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        Self {
+            _directory: directory,
+            path,
+        }
     }
 }

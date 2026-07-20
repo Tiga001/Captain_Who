@@ -143,7 +143,7 @@ impl AgentTool for SkillsRunScriptTool {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ScriptArgs {
     script_uri: String,
     #[serde(default = "python3")]
@@ -154,6 +154,37 @@ struct ScriptArgs {
     requirements: AgentSkillScriptRequirements,
     timeout_ms: Option<u64>,
     reason: Option<String>,
+}
+
+pub(crate) fn validate_frozen_skill_script_trace_args(
+    frozen: &AgentSkillScriptRequest,
+    operation: &Value,
+) -> Result<(), String> {
+    let args = parse_args(operation.clone(), "skills_run_script")
+        .map_err(|_| "skills_run_script frozen ToolCall arguments are invalid".to_string())?;
+    validate_argv(&args.args)
+        .map_err(|_| "skills_run_script frozen argv is invalid".to_string())?;
+    let uri = parse_uri(&args.script_uri)
+        .map_err(|_| "skills_run_script frozen scriptUri is invalid".to_string())?;
+    let timeout_ms = Some(
+        args.timeout_ms
+            .unwrap_or(DEFAULT_SKILL_SCRIPT_TIMEOUT_MS)
+            .clamp(1, MAX_SKILL_SCRIPT_TIMEOUT_MS),
+    );
+    let reason_was_present = args.reason.is_some();
+    let reason = non_empty(args.reason.as_deref())
+        .map(|reason| reason.chars().take(2_000).collect::<String>());
+
+    if uri.as_str() != frozen.script_uri
+        || args.interpreter != frozen.interpreter
+        || args.args != frozen.args
+        || args.requirements != frozen.requirements
+        || timeout_ms != frozen.timeout_ms
+        || (reason_was_present && reason != frozen.reason)
+    {
+        return Err("skills_run_script ToolCall differs from the frozen request".to_string());
+    }
+    Ok(())
 }
 
 fn python3() -> AgentSkillScriptInterpreter {
@@ -258,10 +289,12 @@ fn script_input_schema(include_execution: bool) -> Value {
                 "properties": {
                     "pythonDistributions": { "type": "array", "maxItems": 128, "items": { "type": "string", "maxLength": 128 } },
                     "commands": { "type": "array", "maxItems": 128, "items": { "type": "string", "maxLength": 128 } }
-                }
+                },
+                "additionalProperties": false
             }
         },
-        "required": ["scriptUri"]
+        "required": ["scriptUri"],
+        "additionalProperties": false
     });
     if include_execution {
         let properties = schema
@@ -315,5 +348,17 @@ mod tests {
         };
         let unrestricted = ToolExecutionContext::from_run_context(Some(&run_context));
         require_unrestricted_script_runtime(&unrestricted).unwrap();
+    }
+
+    #[test]
+    fn rejects_unknown_script_authority_fields() {
+        assert!(parse_args(
+            json!({
+                "scriptUri": "skill://package/example/revision/scripts/build.py",
+                "executable": "/tmp/untrusted-python",
+            }),
+            "skills_run_script",
+        )
+        .is_err());
     }
 }

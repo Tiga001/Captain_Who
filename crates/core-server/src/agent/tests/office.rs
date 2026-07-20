@@ -480,6 +480,47 @@ fn automatic_office_final_audit_failure_never_reports_success_and_preserves_exec
 }
 
 #[test]
+fn automatic_office_reconciles_a_terminal_receipt_after_post_commit_error() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let executions = Arc::new(AtomicUsize::new(0));
+    let service = AgentService::new(Arc::clone(&storage)).with_office_engine(Arc::new(
+        SuccessfulTrackingOfficeEngine {
+            executions: executions.clone(),
+        },
+    ));
+    let run_id = "run-office-post-commit-reconciliation";
+    let call_id = "office-post-commit-reconciliation";
+    inject_auto_action_audit_post_commit_failure(run_id, call_id, "completed");
+
+    let result = service
+        .execute_auto_approved_action(
+            AutoApprovedActionContext::new(
+                automatic_office_input(fixture.path()),
+                run_id.to_string(),
+                None,
+                None,
+                None,
+            ),
+            prepared_office_action(call_id),
+            AgentCancellationToken::new(),
+        )
+        .unwrap();
+
+    assert!(result.ok);
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    let audited = storage
+        .list_agent_tool_results_for_run(run_id, "office_spreadsheet")
+        .unwrap();
+    assert_eq!(audited.len(), 1);
+    assert_eq!(audited[0].call_id, result.call_id);
+    assert_eq!(audited[0].tool, result.tool);
+    assert_eq!(audited[0].ok, result.ok);
+    assert_eq!(audited[0].result, result.result);
+    assert_eq!(audited[0].error, result.error);
+}
+
+#[test]
 fn automatic_office_success_persists_one_final_tool_result_audit() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());

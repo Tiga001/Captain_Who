@@ -438,6 +438,92 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         approval_status: AgentApprovalStatus::Approved,
         reason: Some("exercise the exact revision materializer".to_string()),
     };
+    let mut automatic_materialization_input = materialization_input.clone();
+    automatic_materialization_input
+        .context
+        .as_mut()
+        .unwrap()
+        .permissions
+        .patch = mycopilot_core::AgentPatchPermission::AutoApprove;
+    let automatic_request = AgentSkillMaterializationRequest {
+        id: "auto-materialize-runtime-template".to_string(),
+        source_uri: template_entry.uri().to_string(),
+        source_prefix: None,
+        destination: "runtime-auto.md".to_string(),
+        approval_status: AgentApprovalStatus::Approved,
+        reason: Some("verify exact-once automatic materialization".to_string()),
+    };
+    inject_auto_action_audit_post_commit_failure(
+        "run-auto-materialize-runtime-template",
+        &automatic_request.id,
+        "completed",
+    );
+    let automatic = service
+        .execute_auto_approved_action(
+            AutoApprovedActionContext::new(
+                automatic_materialization_input.clone(),
+                "run-auto-materialize-runtime-template".to_string(),
+                Some("conversation-installed-skill".to_string()),
+                Some("assistant-auto-materialize-runtime-template".to_string()),
+                Some(Arc::clone(session)),
+            ),
+            AgentProposedAction::SkillMaterialization {
+                materialization: automatic_request.clone(),
+            },
+            AgentCancellationToken::new(),
+        )
+        .unwrap();
+    assert!(
+        automatic.ok,
+        "automatic materialization failed: {automatic:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("runtime-auto.md")).unwrap(),
+        "revision-bound resource marker"
+    );
+    let automatic_run_id = "run-auto-materialize-runtime-template";
+    let automatic_effect_id = pending_action_storage_id(automatic_run_id, &automatic_request.id);
+    service.file_effects.restore_unsettled(
+        None,
+        Some("conversation-installed-skill"),
+        automatic_run_id,
+        &automatic_effect_id,
+    );
+    assert_eq!(
+        service.unsettled_file_effect_ids_for_conversation("conversation-installed-skill"),
+        vec![format!("{automatic_run_id}/{automatic_effect_id}")]
+    );
+    let replay = service
+        .execute_auto_approved_action(
+            AutoApprovedActionContext::new(
+                automatic_materialization_input,
+                automatic_run_id.to_string(),
+                Some("conversation-installed-skill".to_string()),
+                Some("assistant-auto-materialize-runtime-template".to_string()),
+                Some(Arc::clone(session)),
+            ),
+            AgentProposedAction::SkillMaterialization {
+                materialization: automatic_request,
+            },
+            AgentCancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(replay.call_id, automatic.call_id);
+    assert_eq!(replay.ok, automatic.ok);
+    assert_eq!(replay.result, automatic.result);
+    assert!(service
+        .unsettled_file_effect_ids_for_conversation("conversation-installed-skill")
+        .is_empty());
+    assert_eq!(
+        storage
+            .list_agent_tool_results_for_run(
+                "run-auto-materialize-runtime-template",
+                "skills_materialize_resource",
+            )
+            .unwrap()
+            .len(),
+        1
+    );
     let first = service.execute_skill_materialization(
         &materialization_input,
         &request,

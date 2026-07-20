@@ -8,6 +8,20 @@ pub fn run_authorized_command(
     cancellation_token: AgentCancellationToken,
     action_cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
+    if request.runtime.is_some() {
+        // A runtime-bearing request must never be interpreted as an ordinary
+        // PATH/shell command by a compatibility caller that has not supplied
+        // the managed provider.
+        return run_authorized_command_with_artifact_runtime(
+            workspace_root,
+            request,
+            permissions,
+            authorization_source,
+            cancellation_token,
+            action_cancel_flag,
+            None,
+        );
+    }
     let root = workspace_root
         .map(canonicalize_workspace_root)
         .transpose()?;
@@ -24,14 +38,45 @@ pub fn run_authorized_command(
         Some(&cwd),
     )?;
 
-    run_shell_command(
+    // Artifact observation deliberately starts only after authoritative command policy succeeds.
+    // It is best-effort telemetry around the exact same process execution and never grants path,
+    // write, or command authority.
+    let observer = CommandArtifactObserver::prepare(
+        root.as_deref(),
+        &cwd,
+        request.observe.as_ref(),
+        permissions,
+    );
+    let observation_cancellation = cancellation_token.clone();
+    let before = observer.as_ref().map(|observer| {
+        observer.capture(
+            AgentCommandArtifactObservationPhase::Before,
+            Some(&observation_cancellation),
+        )
+    });
+    let execution = run_shell_command(
         &cwd,
         root.as_deref(),
         request,
         cancellation_token,
         action_cancel_flag,
-    )
-    .map_err(CommandExecutionError::from)
+    );
+    let artifact_observation = observer.as_ref().zip(before).map(|(observer, before)| {
+        // The process may have failed, timed out, or been cancelled after producing a file.
+        // Always perform the independently bounded after snapshot instead of inheriting the
+        // process cancellation token.
+        let after = observer.capture(AgentCommandArtifactObservationPhase::After, None);
+        observer.finish(before, after)
+    });
+    match execution {
+        Ok(mut result) => {
+            result.artifact_observation = artifact_observation;
+            Ok(result)
+        }
+        Err(error) => {
+            Err(CommandExecutionError::from(error).with_artifact_observation(artifact_observation))
+        }
+    }
 }
 
 pub(super) fn enforce_command_policy(
@@ -161,6 +206,8 @@ pub(super) fn run_shell_command(
             stderr_truncated: false,
             error: None,
             policy_evaluation: None,
+            artifact_observation: None,
+            runtime: None,
         });
     }
     let timeout_ms = request
@@ -235,6 +282,8 @@ pub(super) fn run_shell_command(
         stderr_truncated,
         error: None,
         policy_evaluation: None,
+        artifact_observation: None,
+        runtime: None,
     })
 }
 

@@ -210,25 +210,45 @@ export class CoreJsonRpcClient {
   private resolveEnvironment(): NodeJS.ProcessEnv {
     const configuredOfficeCliPath = process.env.MYCOPILOT_OFFICECLI_PATH
     const configuredComponentsDirectory = process.env.MYCOPILOT_OFFICE_COMPONENTS_DIR
+    const configuredArtifactRuntimeDirectory = process.env.MYCOPILOT_ARTIFACT_RUNTIME_DIR
     const environment = { ...process.env }
-    if (configuredOfficeCliPath !== undefined || configuredComponentsDirectory !== undefined) {
-      return environment
-    }
 
     if (app.isPackaged) {
       // Let the Rust discovery layer resolve the canonical component layout so status reports the
       // provider as an application-packaged component rather than as a user override.
-      environment.MYCOPILOT_OFFICE_COMPONENTS_DIR = join(process.resourcesPath, 'components')
-    } else {
-      const executableName = process.platform === 'win32' ? 'officecli.exe' : 'officecli'
-      environment.MYCOPILOT_OFFICECLI_PATH = join(
-        __dirname,
-        '../..',
-        '.cache',
-        'officecli',
-        'current',
-        executableName
+      if (configuredOfficeCliPath === undefined && configuredComponentsDirectory === undefined) {
+        environment.MYCOPILOT_OFFICE_COMPONENTS_DIR = join(process.resourcesPath, 'components')
+      }
+      // Production never accepts an inherited configured-component override.
+      // The Rust layer treats this application resource root as a packaged,
+      // code-signed trust boundary and appends `artifact-runtime` itself.
+      delete environment.MYCOPILOT_ARTIFACT_RUNTIME_DIR
+      environment.MYCOPILOT_ARTIFACT_RUNTIME_COMPONENTS_DIR = join(
+        process.resourcesPath,
+        'components'
       )
+    } else {
+      if (configuredOfficeCliPath === undefined && configuredComponentsDirectory === undefined) {
+        const executableName = process.platform === 'win32' ? 'officecli.exe' : 'officecli'
+        environment.MYCOPILOT_OFFICECLI_PATH = join(
+          __dirname,
+          '../..',
+          '.cache',
+          'officecli',
+          'current',
+          executableName
+        )
+      }
+      if (configuredArtifactRuntimeDirectory === undefined) {
+        environment.MYCOPILOT_ARTIFACT_RUNTIME_DIR = join(
+          __dirname,
+          '../..',
+          '.cache',
+          'artifact-runtime',
+          'current'
+        )
+      }
+      delete environment.MYCOPILOT_ARTIFACT_RUNTIME_COMPONENTS_DIR
     }
     return environment
   }

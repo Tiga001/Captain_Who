@@ -20,6 +20,8 @@ asarUnpack:
 extraResources:
   - from: .cache/officecli/current
     to: components/officecli
+  - from: .cache/artifact-runtime/current
+    to: components/artifact-runtime
   - from: THIRD_PARTY_NOTICES.txt
     to: THIRD_PARTY_NOTICES.txt
   - from: THIRD_PARTY_GRAMMAR_NOTICES.txt

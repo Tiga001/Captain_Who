@@ -3,6 +3,17 @@ use super::*;
 #[cfg(test)]
 static AUTO_ACTION_AUDIT_FAILURES: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
 
+#[cfg(test)]
+static AUTO_ACTION_AUDIT_POST_COMMIT_FAILURES: Mutex<Vec<(String, String, String)>> =
+    Mutex::new(Vec::new());
+
+#[cfg(test)]
+static MANUAL_ACTION_AUDIT_FAILURES: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+static MANUAL_ACTION_AUDIT_POST_COMMIT_FAILURES: Mutex<Vec<(String, String)>> =
+    Mutex::new(Vec::new());
+
 /// Installs a one-shot, action-scoped audit persistence failure for Host boundary tests.
 ///
 /// Matching on run, provider action id, and status keeps parallel tests isolated without adding
@@ -23,6 +34,43 @@ pub(super) fn inject_auto_action_audit_failure(
         ));
 }
 
+/// Simulates a storage/transport error reported after SQLite has committed the terminal receipt.
+///
+/// This is deliberately separate from [`inject_auto_action_audit_failure`]: callers must prove
+/// that a commit-unknown response is reconciled from durable state instead of overwriting a
+/// successful terminal receipt or replaying the process.
+#[cfg(test)]
+pub(super) fn inject_auto_action_audit_post_commit_failure(
+    run_id: &str,
+    provider_action_id: &str,
+    status: &str,
+) {
+    AUTO_ACTION_AUDIT_POST_COMMIT_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((
+            run_id.to_string(),
+            provider_action_id.to_string(),
+            status.to_string(),
+        ));
+}
+
+#[cfg(test)]
+pub(super) fn inject_manual_action_audit_failure(storage_id: &str, status: &str) {
+    MANUAL_ACTION_AUDIT_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((storage_id.to_string(), status.to_string()));
+}
+
+#[cfg(test)]
+pub(super) fn inject_manual_action_audit_post_commit_failure(storage_id: &str, status: &str) {
+    MANUAL_ACTION_AUDIT_POST_COMMIT_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((storage_id.to_string(), status.to_string()));
+}
+
 #[cfg(test)]
 fn take_auto_action_audit_failure(
     run_id: &str,
@@ -41,6 +89,52 @@ fn take_auto_action_audit_failure(
     ))
 }
 
+#[cfg(test)]
+fn take_auto_action_audit_post_commit_failure(
+    run_id: &str,
+    provider_action_id: &str,
+    status: &str,
+) -> Option<String> {
+    let mut failures = AUTO_ACTION_AUDIT_POST_COMMIT_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let index = failures.iter().position(|candidate| {
+        candidate.0 == run_id && candidate.1 == provider_action_id && candidate.2 == status
+    })?;
+    failures.swap_remove(index);
+    Some(format!(
+        "injected post-commit auto action audit failure for run={run_id}, action={provider_action_id}, status={status}"
+    ))
+}
+
+#[cfg(test)]
+fn take_manual_action_audit_failure(storage_id: &str, status: &str) -> Option<String> {
+    let mut failures = MANUAL_ACTION_AUDIT_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let index = failures
+        .iter()
+        .position(|candidate| candidate.0 == storage_id && candidate.1 == status)?;
+    failures.swap_remove(index);
+    Some(format!(
+        "injected manual action audit persistence failure for action={storage_id}, status={status}"
+    ))
+}
+
+#[cfg(test)]
+fn take_manual_action_audit_post_commit_failure(storage_id: &str, status: &str) -> Option<String> {
+    let mut failures = MANUAL_ACTION_AUDIT_POST_COMMIT_FAILURES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let index = failures
+        .iter()
+        .position(|candidate| candidate.0 == storage_id && candidate.1 == status)?;
+    failures.swap_remove(index);
+    Some(format!(
+        "injected post-commit manual action audit failure for action={storage_id}, status={status}"
+    ))
+}
+
 impl AgentService {
     pub(super) fn store_pending_action(
         &self,
@@ -50,14 +144,12 @@ impl AgentService {
         action: AgentProposedAction,
         agent_input: AgentChatInput,
     ) -> Result<bool, String> {
-        let deleting_projects = self
-            .deleting_projects
+        let deletion_lifecycle = self
+            .deletion_lifecycle
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if agent_input_project_id(&agent_input)
-            .is_some_and(|project_id| deleting_projects.contains(project_id))
-        {
-            return Err("项目正在移除，无法发布待审批操作。".to_string());
+        if deletion_lifecycle.contains_input(&agent_input) {
+            return Err("项目或会话正在移除，无法发布待审批操作。".to_string());
         }
         let action_id = action_id_for_action(&action);
         let storage_id = pending_action_storage_id(run_id, &action_id);
@@ -125,7 +217,7 @@ impl AgentService {
                 None,
             );
         }
-        drop(deleting_projects);
+        drop(deletion_lifecycle);
         Ok(should_publish)
     }
 
@@ -248,6 +340,10 @@ impl AgentService {
         decided_at: Option<i64>,
         completed_at: Option<i64>,
     ) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(error) = take_manual_action_audit_failure(&record.storage_id, status) {
+            return Err(error);
+        }
         self.storage.upsert_agent_action_audit(action_audit_record(
             record,
             decision,
@@ -259,6 +355,93 @@ impl AgentService {
             decided_at,
             completed_at,
         ))
+    }
+
+    /// Atomically commits the terminal audit, pending target and paired ToolResult trace for any
+    /// manually approved file-producing action. `command_result` is populated only for
+    /// `run_command`; Office and Skill actions preserve their full execution evidence inside the
+    /// typed ToolResult.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn persist_manual_audited_result_trace(
+        &self,
+        record: &PendingActionRecord,
+        target_status: PendingActionStatus,
+        command_result: Option<&AgentCommandExecutionResult>,
+        tool_result: &AgentToolResult,
+        trace: &mycopilot_core::ConversationTurnTrace,
+        completed_at: i64,
+    ) -> Result<bool, String> {
+        let status = pending_status_label(target_status);
+        #[cfg(test)]
+        if let Some(error) = take_manual_action_audit_failure(&record.storage_id, status) {
+            return Err(error);
+        }
+        let audit = action_audit_record(
+            record,
+            Some("approved"),
+            status,
+            None,
+            command_result,
+            Some(tool_result),
+            tool_result.error.as_deref(),
+            None,
+            Some(completed_at),
+        );
+        let outcome = self
+            .storage
+            .commit_pending_agent_action_audited_result_trace(
+                &audit,
+                pending_status_label(record.snapshot.status),
+                status,
+                trace,
+                completed_at,
+            )?;
+        #[cfg(test)]
+        if let Some(error) =
+            take_manual_action_audit_post_commit_failure(&record.storage_id, status)
+        {
+            return Err(error);
+        }
+        match outcome {
+            mycopilot_core::storage::service::AgentPendingActionResultCommitOutcome::Committed {
+                trace_changed,
+            } => Ok(trace_changed),
+            mycopilot_core::storage::service::AgentPendingActionResultCommitOutcome::Idempotent => {
+                Ok(false)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn inspect_manual_audited_result_trace(
+        &self,
+        record: &PendingActionRecord,
+        target_status: PendingActionStatus,
+        command_result: Option<&AgentCommandExecutionResult>,
+        tool_result: &AgentToolResult,
+        trace: &mycopilot_core::ConversationTurnTrace,
+        completed_at: i64,
+    ) -> Result<AgentPendingActionSettlementInspection, String> {
+        let status = pending_status_label(target_status);
+        let audit = action_audit_record(
+            record,
+            Some("approved"),
+            status,
+            None,
+            command_result,
+            Some(tool_result),
+            tool_result.error.as_deref(),
+            None,
+            Some(completed_at),
+        );
+        self.storage
+            .inspect_pending_agent_action_audited_result_trace(
+                &audit,
+                pending_status_label(record.snapshot.status),
+                status,
+                trace,
+                completed_at,
+            )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -299,8 +482,9 @@ impl AgentService {
     ///
     /// Most legacy auto-approved actions treat audit persistence as best effort through
     /// [`Self::record_auto_action_audit`]. File-producing Office operations use this fallible
-    /// boundary directly for non-claim transitions. Office execution uses the stricter
-    /// claim/finalize methods below so retries cannot overwrite an existing execution receipt.
+    /// boundary directly for non-claim transitions. Office operations and commands use the
+    /// stricter claim/finalize methods below so retries cannot overwrite an execution receipt or
+    /// repeat side effects after a process restart.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn persist_auto_action_audit(
         &self,
@@ -379,10 +563,6 @@ impl AgentService {
     }
 
     /// Reads an existing automatic action receipt without acquiring execution rights.
-    /// Atomically acquires the sole durable execution right for an automatically approved action.
-    ///
-    /// The receipt is committed before this method returns. A matching existing receipt is never
-    /// treated as a lease and therefore never permits automatic replay after a crash.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn inspect_auto_action_execution_audit(
         &self,
@@ -410,6 +590,10 @@ impl AgentService {
         self.storage.inspect_agent_action_audit_execution(audit)
     }
 
+    /// Atomically acquires the sole durable execution right for an automatically approved action.
+    ///
+    /// The receipt is committed before this method returns. A matching existing receipt is never
+    /// treated as a lease and therefore never permits automatic replay after a crash.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn claim_auto_action_execution_audit(
         &self,
@@ -453,6 +637,7 @@ impl AgentService {
         agent_input: &AgentChatInput,
         action: &AgentProposedAction,
         status: &str,
+        command_result: Option<&AgentCommandExecutionResult>,
         tool_result: &AgentToolResult,
         error: Option<&str>,
         created_at: i64,
@@ -471,13 +656,22 @@ impl AgentService {
             action,
             status,
             None,
-            None,
+            command_result,
             Some(tool_result),
             error,
             created_at,
             Some(completed_at),
         );
-        match self.storage.finalize_agent_action_audit_execution(audit)? {
+        let outcome = self.storage.finalize_agent_action_audit_execution(audit)?;
+        #[cfg(test)]
+        if outcome == AgentActionAuditFinalizationOutcome::Finalized {
+            if let Some(error) =
+                take_auto_action_audit_post_commit_failure(run_id, &provider_action_id, status)
+            {
+                return Err(error);
+            }
+        }
+        match outcome {
             AgentActionAuditFinalizationOutcome::Finalized => Ok(()),
             AgentActionAuditFinalizationOutcome::ClaimMissingOrChanged => Err(format!(
                 "automatic action audit claim was missing, terminal, or changed for run={run_id}, action={provider_action_id}"
@@ -938,4 +1132,11 @@ pub(super) fn agent_input_project_id(input: &AgentChatInput) -> Option<&str> {
         .context
         .as_ref()
         .and_then(|context| context.project_id.as_deref())
+}
+
+pub(super) fn agent_input_conversation_id(input: &AgentChatInput) -> Option<&str> {
+    input
+        .context
+        .as_ref()
+        .and_then(|context| context.conversation_id.as_deref())
 }

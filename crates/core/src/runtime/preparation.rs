@@ -330,7 +330,7 @@ pub(super) fn apply_permission_policy_to_tool_definitions(
             definition.name == "apply_patch" || definition.name == "write_file"
         }) {
             if definition.name == "apply_patch" {
-                definition.description = "Create, update, or delete one text/code/config file through structured content or edits; Rust generates the unified diff. The target may be workspace-relative, absolute, or use @home/@desktop/@documents/@downloads. This works without a workspace when write access allows all locations. Do not use run_command to write files. Applying the generated diff still requires host approval.".to_string();
+                definition.description = "Create, update, or delete one text/code/config file through structured content or edits; Rust generates the unified diff. The target may be workspace-relative, absolute, or use @home/@desktop/@documents/@downloads. This works without a workspace when write access allows all locations. Do not use run_command to bypass structured edits of text, code, or configuration files; an activated Skill may separately define a saved-script workflow for generated artifacts. Applying the generated diff still requires host approval.".to_string();
             } else {
                 definition.description.push_str(" Targets may be workspace-relative, absolute, or use @home/@desktop/@documents/@downloads when write access allows all locations.");
             }

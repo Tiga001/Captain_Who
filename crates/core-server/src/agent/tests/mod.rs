@@ -4,8 +4,8 @@ use mycopilot_core::skills::{
     SkillInstallationOutcome, SkillInstallationService, SkillUninstallRequest,
 };
 use mycopilot_core::storage::models::{
-    AgentFileDraftRecord, ChatConversationRecord, ChatMessageRecord, ModelConfigRecord,
-    ModelSettingsRecord, ProjectRecord,
+    AgentActionAuditRecord, AgentFileDraftRecord, AgentPendingActionRecord, ChatConversationRecord,
+    ChatMessageRecord, ModelConfigRecord, ModelSettingsRecord, ProjectRecord,
 };
 use mycopilot_core::{
     AgentActivatedSkill, AgentCommandRequest, AgentCommandRiskLevel, AgentFileWriteMode,
@@ -82,6 +82,8 @@ fn command_request(id: &str, command: &str) -> AgentCommandRequest {
         approval_status: AgentApprovalStatus::Required,
         risk_level: Some(AgentCommandRiskLevel::ReadOnly),
         reason: Some("exercise server authorization boundary".to_string()),
+        observe: None,
+        runtime: None,
     }
 }
 

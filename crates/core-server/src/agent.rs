@@ -12,12 +12,13 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use mycopilot_core::artifact_runtime::{ArtifactRuntimeDiscoveryOptions, ArtifactRuntimeProvider};
 use mycopilot_core::command::{
-    run_authorized_command, AgentCommandExecutionResult, CommandAuthorizationSource,
-    CommandExecutionError, CommandRunGuard, CommandRunState,
+    run_authorized_command_with_artifact_runtime, AgentCommandExecutionResult,
+    CommandAuthorizationSource, CommandExecutionError, CommandRunGuard, CommandRunState,
 };
 use mycopilot_core::file_write::{
     file_draft_snapshot, file_write_action_approval_status, file_write_approval_route,
@@ -42,7 +43,7 @@ use mycopilot_core::storage::models::{
     AgentActionAuditRecord, AgentPendingActionRecord, AgentUsageRecordInsert,
 };
 use mycopilot_core::storage::pending_action_repository::PendingActionStoreOutcome;
-use mycopilot_core::storage::service::StorageService;
+use mycopilot_core::storage::service::{AgentPendingActionSettlementInspection, StorageService};
 use mycopilot_core::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
@@ -81,9 +82,12 @@ mod usage;
 use action_execution::*;
 use completion::*;
 use pending_action_store::*;
+use run_lifecycle::{DeletionLifecycleState, FileEffectTracker};
 
 #[cfg(test)]
 use context_compaction::validate_compaction_model_visible_boundary;
+#[cfg(test)]
+use run_lifecycle::inject_project_deletion_failure;
 
 pub(crate) const AGENT_EVENT_NAME: &str = "agent.event";
 
@@ -135,8 +139,10 @@ pub struct AgentService {
     conversation_context_state_clock: Arc<AtomicU64>,
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
     office_engine: Arc<dyn OfficeEngine>,
+    artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
     process_runs: CommandRunState,
-    deleting_projects: Arc<Mutex<HashSet<String>>>,
+    deletion_lifecycle: Arc<Mutex<DeletionLifecycleState>>,
+    file_effects: Arc<FileEffectTracker>,
 }
 
 impl AgentService {
@@ -146,6 +152,18 @@ impl AgentService {
             .map_err(|error| format!("failed to reconcile interrupted pending actions: {error}"))?;
         let pending_actions = load_persisted_pending_actions(&storage)?;
         let office_engine = resolve_default_office_engine();
+        let artifact_runtime = resolve_default_artifact_runtime();
+        let file_effects = Arc::new(FileEffectTracker::default());
+        for effect in storage.list_unsettled_file_effects().map_err(|error| {
+            format!("failed to restore unsettled file-producing effects: {error}")
+        })? {
+            file_effects.restore_unsettled(
+                effect.project_id.as_deref(),
+                Some(&effect.conversation_id),
+                &effect.run_id,
+                &effect.action_id,
+            );
+        }
         Ok(Self {
             storage,
             skills: Arc::new(SkillsService::new()),
@@ -157,8 +175,10 @@ impl AgentService {
             conversation_context_state_clock: Arc::new(AtomicU64::new(1)),
             context_compaction_summary_generator: None,
             office_engine,
+            artifact_runtime,
             process_runs: CommandRunState::default(),
-            deleting_projects: Arc::new(Mutex::new(HashSet::new())),
+            deletion_lifecycle: Arc::new(Mutex::new(DeletionLifecycleState::default())),
+            file_effects,
         })
     }
 
@@ -242,6 +262,26 @@ fn resolve_default_office_engine() -> Arc<dyn OfficeEngine> {
         OfficeCliDiscoveryOptions::new().allow_path_fallback(cfg!(debug_assertions))
     };
     resolve_office_engine(&options)
+}
+
+fn resolve_default_artifact_runtime() -> Option<Arc<ArtifactRuntimeProvider>> {
+    let options = if let Some(directory) = std::env::var_os("MYCOPILOT_ARTIFACT_RUNTIME_DIR") {
+        ArtifactRuntimeDiscoveryOptions::new().with_configured_component_dir(directory)
+    } else if let Some(directory) = std::env::var_os("MYCOPILOT_ARTIFACT_RUNTIME_COMPONENTS_DIR") {
+        ArtifactRuntimeDiscoveryOptions::new().with_application_resources_dir(directory)
+    } else {
+        // The managed runtime is an optional application component. Native Office tools and
+        // ordinary commands must remain available when it has not been prepared or packaged.
+        return None;
+    };
+
+    match ArtifactRuntimeProvider::discover(&options) {
+        Ok(provider) => Some(Arc::new(provider)),
+        Err(error) => {
+            eprintln!("managed Artifact Runtime is unavailable: {error}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]

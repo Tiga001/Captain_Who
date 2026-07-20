@@ -320,6 +320,8 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         approval_status: AgentApprovalStatus::Required,
         risk_level: Some(AgentCommandRiskLevel::WritesWorkspace),
         reason: Some("verify approval cancellation race".to_string()),
+        observe: None,
+        runtime: None,
     };
     let call = command_tool_call(&command);
     let checkpoint = AgentRunCheckpoint {
@@ -412,6 +414,173 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
     assert!(!fixture.path().join("cancelled-before-spawn").exists());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let conversation_id = "conversation-delete-inline-continuation";
+    let assistant_message_id = "assistant-delete-inline-continuation";
+    let run_id = "run-delete-inline-continuation";
+    let action_id = "action-delete-inline-continuation";
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: conversation_id.to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Delete inline continuation".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: assistant_message_id.to_string(),
+                role: "assistant".to_string(),
+                content: THINKING_PLACEHOLDER.to_string(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+
+    let call = AgentToolCall {
+        id: action_id.to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({ "operation": "no-op" }),
+        approval_status: AgentApprovalStatus::Required,
+        reason: Some("exercise the pre-spawn continuation lease".to_string()),
+    };
+    let checkpoint = AgentRunCheckpoint {
+        version: 2,
+        run_id: run_id.to_string(),
+        context_items: Vec::new(),
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        suppressed_narration: false,
+        extension_snapshots: Vec::new(),
+        pending_tool_call_id: call.id.clone(),
+        conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            operation: call.args.clone(),
+            approval_status: AgentApprovalStatus::Required,
+            truncated: false,
+        }],
+        next_conversation_trace_sequence: 1,
+        conversation_trace_truncated: false,
+        model_visible_trace_item_count: 0,
+    };
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://must-not-be-called.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    agent_input.context = Some(AgentRunContext {
+        conversation_id: Some(conversation_id.to_string()),
+        project_id: None,
+        workspace: Some(AgentWorkspaceContext {
+            project_id: None,
+            display_name: Some("test".to_string()),
+            root_path: Some(fixture.path().to_string_lossy().into_owned()),
+        }),
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+    });
+    agent_input.resume_checkpoint = Some(checkpoint);
+
+    let service = AgentService::new(Arc::clone(&storage));
+    service
+        .store_pending_action(
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input,
+        )
+        .unwrap();
+    let stale_turn_cancellation = AgentCancellationToken::new();
+    service.register_cancellation(run_id, stale_turn_cancellation.clone());
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    service
+        .reject_action(
+            run_id,
+            action_id,
+            Some("not approved".to_string()),
+            notifications,
+        )
+        .unwrap();
+
+    // The original model worker may finish after the approval decision has already registered
+    // the continuation token. Its cleanup must not remove that newer registration by run ID.
+    service.unregister_cancellation_if_current(run_id, &stale_turn_cancellation);
+
+    // A current-thread runtime cannot poll the spawned continuation until this function yields.
+    // The lease therefore proves it was registered synchronously, before queue_action_continuation
+    // returned and before deletion could acquire its lifecycle marker.
+    assert!(service.process_runs.has_active_run(run_id));
+    assert!(service
+        .cancellations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(run_id));
+    let deletion_error = service
+        .delete_chat_messages(conversation_id, &[assistant_message_id.to_string()])
+        .unwrap_err();
+    assert!(deletion_error.contains("cancelled agent runs did not reach a safe terminal boundary"));
+    assert_eq!(
+        storage
+            .load_conversation(conversation_id)
+            .unwrap()
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+
+    tokio::task::yield_now().await;
+    for _ in 0..100 {
+        let cancellation_active = service
+            .cancellations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(run_id);
+        if !cancellation_active && !service.process_runs.has_active_run(run_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(!service.process_runs.has_active_run(run_id));
+    assert!(!service
+        .cancellations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains_key(run_id));
+
+    service
+        .delete_chat_messages(conversation_id, &[assistant_message_id.to_string()])
+        .unwrap();
+    assert!(storage
+        .load_conversation(conversation_id)
+        .unwrap()
+        .unwrap()
+        .messages
+        .is_empty());
+    assert!(storage
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .is_none());
+    assert!(service.list_pending_actions().is_empty());
+    assert!(service
+        .unsettled_file_effect_ids_for_conversation(conversation_id)
+        .is_empty());
+}
+
 #[tokio::test]
 async fn cancelling_run_during_approved_command_finishes_cancelled_without_resuming_model() {
     let fixture = tempdir().unwrap();
@@ -462,6 +631,8 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         approval_status: AgentApprovalStatus::Approved,
         risk_level: Some(AgentCommandRiskLevel::ReadOnly),
         reason: Some("exercise cancellation".to_string()),
+        observe: None,
+        runtime: None,
     };
     let call = command_tool_call(&command);
     let checkpoint = AgentRunCheckpoint {

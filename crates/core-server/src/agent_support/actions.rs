@@ -163,7 +163,9 @@ pub(crate) fn command_tool_call(command: &AgentCommandRequest) -> AgentToolCall 
             "cwd": command.cwd.clone(),
             "timeoutMs": command.timeout_ms,
             "riskLevel": command.risk_level,
-            "reason": command.reason.clone()
+            "reason": command.reason.clone(),
+            "observe": command.observe.clone(),
+            "runtime": command.runtime.clone()
         }),
         approval_status: command.approval_status,
         reason: command.reason.clone(),
@@ -501,32 +503,6 @@ pub(crate) fn patch_tool_result(
     }
 }
 
-pub(crate) fn command_tool_result(
-    action_id: &str,
-    observation_ok: bool,
-    command_result: &AgentCommandExecutionResult,
-) -> AgentToolResult {
-    AgentToolResult {
-        call_id: action_id.to_string(),
-        tool: "run_command".to_string(),
-        ok: observation_ok,
-        result: Some(json!(command_result)),
-        error: if observation_ok {
-            None
-        } else {
-            command_result.error.clone().or_else(|| {
-                Some(if command_result.cancelled {
-                    "命令已取消。".to_string()
-                } else if command_result.timed_out {
-                    "命令执行超时。".to_string()
-                } else {
-                    "命令执行失败。".to_string()
-                })
-            })
-        },
-    }
-}
-
 pub(crate) fn failed_command_result(
     request: &AgentCommandRequest,
     error: String,
@@ -545,24 +521,7 @@ pub(crate) fn failed_command_result(
         stderr_truncated: false,
         error: Some(error),
         policy_evaluation,
-    }
-}
-
-pub(crate) fn cancelled_command_result(
-    request: &AgentCommandRequest,
-) -> AgentCommandExecutionResult {
-    AgentCommandExecutionResult {
-        command: request.command.clone(),
-        cwd: request.cwd.clone().unwrap_or_else(|| ".".to_string()),
-        exit_code: None,
-        stdout: String::new(),
-        stderr: String::new(),
-        timed_out: false,
-        cancelled: true,
-        duration_ms: 0,
-        stdout_truncated: false,
-        stderr_truncated: false,
-        error: None,
-        policy_evaluation: None,
+        artifact_observation: None,
+        runtime: None,
     }
 }

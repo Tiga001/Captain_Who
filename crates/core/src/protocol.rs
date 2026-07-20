@@ -1010,6 +1010,276 @@ pub struct AgentGitDiffSnapshot {
     pub truncated: bool,
 }
 
+/// Schema version for the best-effort artifact observation attached to `run_command` results.
+///
+/// Observation is telemetry, not an authorization capability. The host still authorizes and
+/// executes the command exclusively through the existing command permission and safety policy.
+pub const AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION: u32 = 2;
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandArtifactObservationKind {
+    Office,
+}
+
+/// Optional, model-authored hint describing which command side effects should be observed.
+///
+/// A selected workspace is always included when this hint is present. Expected outputs and
+/// additional roots are resolved relative to the command cwd. Expected outputs are observation
+/// and validation hints, not write authorization. The trusted host validates every path against
+/// the current permission snapshot; this request cannot widen it.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCommandArtifactObservationRequest {
+    pub kinds: Vec<AgentCommandArtifactObservationKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_outputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_roots: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandArtifactObservationStatus {
+    Complete,
+    Partial,
+    Failed,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandArtifactObservationPhase {
+    Setup,
+    Before,
+    After,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandArtifactKind {
+    Document,
+    Spreadsheet,
+    Presentation,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandArtifactScope {
+    Workspace,
+    External,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandArtifactChangeKind {
+    Created,
+    Modified,
+    Replaced,
+    Deleted,
+    Renamed,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandExpectedArtifactOutcomeKind {
+    Created,
+    Modified,
+    Replaced,
+    Renamed,
+    Unchanged,
+    Missing,
+    Unobserved,
+    Invalid,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandArtifactValidationStatus {
+    Valid,
+    Invalid,
+    NotApplicable,
+    Unchecked,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCommandArtifactValidation {
+    pub status: AgentCommandArtifactValidationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCommandArtifactMetadata {
+    pub size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    pub validation: AgentCommandArtifactValidation,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCommandArtifactChange {
+    pub kind: AgentCommandArtifactChangeKind,
+    pub artifact_kind: AgentCommandArtifactKind,
+    pub path: String,
+    pub scope: AgentCommandArtifactScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_scope: Option<AgentCommandArtifactScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<AgentCommandArtifactMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<AgentCommandArtifactMetadata>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCommandExpectedArtifactOutcome {
+    pub requested_path: String,
+    pub outcome: AgentCommandExpectedArtifactOutcomeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<AgentCommandArtifactScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_kind: Option<AgentCommandArtifactKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<AgentCommandArtifactMetadata>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCommandArtifactSnapshotCoverage {
+    pub roots_scanned: u64,
+    pub directory_entries_scanned: u64,
+    pub office_files_seen: u64,
+    pub files_hashed: u64,
+    pub files_unhashed: u64,
+    pub bytes_hashed: u64,
+    pub symlinks_skipped: u64,
+    pub excluded_directories: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub time_budget_exceeded: bool,
+    #[serde(default)]
+    pub cancelled: bool,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCommandArtifactObservationCoverage {
+    pub workspace_included: bool,
+    pub expected_output_count: u64,
+    pub additional_root_count: u64,
+    pub before: AgentCommandArtifactSnapshotCoverage,
+    pub after: AgentCommandArtifactSnapshotCoverage,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCommandArtifactObservationWarning {
+    pub phase: AgentCommandArtifactObservationPhase,
+    pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCommandArtifactObservation {
+    pub schema_version: u32,
+    pub status: AgentCommandArtifactObservationStatus,
+    pub coverage: AgentCommandArtifactObservationCoverage,
+    pub changes: Vec<AgentCommandArtifactChange>,
+    #[serde(default)]
+    pub changes_truncated: bool,
+    #[serde(default)]
+    pub changes_omitted: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_outputs: Vec<AgentCommandExpectedArtifactOutcome>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<AgentCommandArtifactObservationWarning>,
+}
+
+/// Selects a host-owned runtime for one frozen command request.
+///
+/// This is a resolver hint, not an authorization capability. The original
+/// logical command is still evaluated by the normal command policy before the
+/// provider is consulted.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentCommandRuntimeProvider {
+    ManagedArtifact,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentCommandRuntimeKind {
+    Node,
+    Python,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentCommandRuntimePackageRequirement {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentCommandRuntimeRequest {
+    pub provider: AgentCommandRuntimeProvider,
+    pub kind: AgentCommandRuntimeKind,
+    pub required_packages: Vec<AgentCommandRuntimePackageRequirement>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentCommandRuntimeResolvedPackage {
+    pub name: String,
+    pub version: String,
+}
+
+pub const AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION: u32 = 1;
+
+/// Public execution evidence for a managed command runtime.
+///
+/// Executable and component paths are intentionally absent: they are private
+/// host implementation details and are never persisted into model-visible
+/// tool results.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentCommandRuntimeResolution {
+    pub schema_version: u32,
+    pub provider_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_revision: Option<String>,
+    pub kind: AgentCommandRuntimeKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved_packages: Vec<AgentCommandRuntimeResolvedPackage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCommandRequest {
@@ -1024,6 +1294,10 @@ pub struct AgentCommandRequest {
     pub risk_level: Option<AgentCommandRiskLevel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observe: Option<AgentCommandArtifactObservationRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<AgentCommandRuntimeRequest>,
 }
 
 /// Frozen request to copy one immutable Skill resource, or one resource-tree

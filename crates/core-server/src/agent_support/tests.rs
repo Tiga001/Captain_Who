@@ -1,4 +1,43 @@
 use super::*;
+use mycopilot_core::{
+    AgentCommandRuntimeKind, AgentCommandRuntimePackageRequirement, AgentCommandRuntimeProvider,
+    AgentCommandRuntimeRequest,
+};
+
+#[test]
+fn command_tool_call_keeps_the_frozen_managed_runtime_request() {
+    let request = AgentCommandRequest {
+        id: "command-runtime-1".to_string(),
+        command: "node scripts/build.mjs".to_string(),
+        cwd: Some("workspace".to_string()),
+        timeout_ms: Some(30_000),
+        approval_status: mycopilot_core::AgentApprovalStatus::Required,
+        risk_level: None,
+        reason: Some("build a workbook".to_string()),
+        observe: None,
+        runtime: Some(AgentCommandRuntimeRequest {
+            provider: AgentCommandRuntimeProvider::ManagedArtifact,
+            kind: AgentCommandRuntimeKind::Node,
+            required_packages: vec![AgentCommandRuntimePackageRequirement {
+                name: "exceljs".to_string(),
+                version: "4.4.0".to_string(),
+            }],
+        }),
+    };
+
+    let call = command_tool_call(&request);
+
+    assert_eq!(call.args["runtime"]["provider"], "managedArtifact");
+    assert_eq!(call.args["runtime"]["kind"], "node");
+    assert_eq!(
+        call.args["runtime"]["requiredPackages"][0]["name"],
+        "exceljs"
+    );
+    assert_eq!(
+        call.args["runtime"]["requiredPackages"][0]["version"],
+        "4.4.0"
+    );
+}
 
 #[test]
 fn failed_command_tool_result_keeps_the_complete_execution_observation() {
@@ -15,9 +54,11 @@ fn failed_command_tool_result_keeps_the_complete_execution_observation() {
         stderr_truncated: true,
         error: None,
         policy_evaluation: None,
+        artifact_observation: None,
+        runtime: None,
     };
 
-    let result = command_tool_result("command-1", false, &execution);
+    let result = command_tool_result("command-1", &execution);
     let observation = result.result.expect("structured command observation");
 
     assert!(!result.ok);
@@ -49,6 +90,8 @@ fn policy_rejection_keeps_stable_structured_diagnostics_in_tool_result() {
         approval_status: mycopilot_core::AgentApprovalStatus::Approved,
         risk_level: None,
         reason: None,
+        observe: None,
+        runtime: None,
     };
     let evaluation = evaluate_command_policy(
         &request.command,
@@ -62,7 +105,7 @@ fn policy_rejection_keeps_stable_structured_diagnostics_in_tool_result() {
         Some(evaluation),
     );
 
-    let result = command_tool_result(&request.id, false, &execution);
+    let result = command_tool_result(&request.id, &execution);
     let observation = result.result.expect("structured policy observation");
 
     assert_eq!(observation["policyEvaluation"]["decision"], "deny");

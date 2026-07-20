@@ -1,10 +1,23 @@
 use crate::system_paths::expand_system_path;
 use crate::{
-    AgentCancellationToken, AgentCommandRequest, AgentCommandRiskLevel, AgentCommandSafetyPolicy,
-    AgentPermissions, AgentReadPermission, AgentWritePermission,
+    AgentCancellationToken, AgentCommandArtifactChange, AgentCommandArtifactChangeKind,
+    AgentCommandArtifactKind, AgentCommandArtifactMetadata, AgentCommandArtifactObservation,
+    AgentCommandArtifactObservationCoverage, AgentCommandArtifactObservationKind,
+    AgentCommandArtifactObservationPhase, AgentCommandArtifactObservationRequest,
+    AgentCommandArtifactObservationStatus, AgentCommandArtifactObservationWarning,
+    AgentCommandArtifactScope, AgentCommandArtifactSnapshotCoverage,
+    AgentCommandArtifactValidation, AgentCommandArtifactValidationStatus,
+    AgentCommandExpectedArtifactOutcome, AgentCommandExpectedArtifactOutcomeKind,
+    AgentCommandRequest, AgentCommandRiskLevel, AgentCommandRuntimeKind,
+    AgentCommandRuntimeRequest, AgentCommandRuntimeResolution, AgentCommandRuntimeResolvedPackage,
+    AgentCommandSafetyPolicy, AgentPermissions, AgentReadPermission, AgentToolResult,
+    AgentWritePermission, AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
+    AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
 };
-use serde::Serialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -14,20 +27,65 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod allowlist;
+mod artifact_observer;
 mod execution;
 mod lexer;
+mod managed_runtime;
 mod policy;
 mod risk;
 mod segment;
 mod types;
 
 use allowlist::*;
+use artifact_observer::CommandArtifactObserver;
+pub(crate) use artifact_observer::{
+    MAX_ADDITIONAL_ROOTS, MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
+};
 pub use execution::*;
 use lexer::*;
+pub use managed_runtime::run_authorized_command_with_artifact_runtime;
+pub(crate) use managed_runtime::{
+    validate_command_runtime_request, validate_managed_artifact_command_shape,
+};
 pub use policy::*;
 use risk::*;
 use segment::*;
 pub use types::*;
+
+/// Projects an immutable command execution receipt into its canonical model-visible ToolResult.
+///
+/// Keeping this projection in the command domain ensures that live execution, durable audit
+/// recovery, and startup settlement verification cannot disagree about whether an execution
+/// succeeded or which error should be shown. User approval only authorizes an attempt; success is
+/// derived exclusively from the observed process outcome.
+pub fn command_tool_result(
+    call_id: &str,
+    command_result: &AgentCommandExecutionResult,
+) -> AgentToolResult {
+    let ok = command_result.exit_code == Some(0)
+        && !command_result.timed_out
+        && !command_result.cancelled
+        && command_result.error.is_none();
+    AgentToolResult {
+        call_id: call_id.to_string(),
+        tool: "run_command".to_string(),
+        ok,
+        result: Some(serde_json::json!(command_result)),
+        error: if ok {
+            None
+        } else {
+            command_result.error.clone().or_else(|| {
+                Some(if command_result.cancelled {
+                    "命令已取消。".to_string()
+                } else if command_result.timed_out {
+                    "命令执行超时。".to_string()
+                } else {
+                    "命令执行失败。".to_string()
+                })
+            })
+        },
+    }
+}
 
 #[cfg(all(test, not(windows)))]
 mod tests;

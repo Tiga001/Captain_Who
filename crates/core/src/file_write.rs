@@ -590,6 +590,8 @@ mod tests {
                     approval_status: AgentApprovalStatus::Required,
                     risk_level: None,
                     reason: None,
+                    observe: None,
+                    runtime: None,
                 },
             }
         ));

@@ -1,0 +1,11 @@
+{
+  "name": "@mycopilot/artifact-runtime-node",
+  "version": "2026.7.3",
+  "private": true,
+  "license": "UNLICENSED",
+  "dependencies": {
+    "docx": "9.6.1",
+    "exceljs": "4.4.0",
+    "pptxgenjs": "4.0.1"
+  }
+}
