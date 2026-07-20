@@ -282,7 +282,6 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
               <Plus aria-hidden="true" />
             </button>
           </div>
-
         </div>
       )}
     </ImagePreviewContext.Provider>

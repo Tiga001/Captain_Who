@@ -24,6 +24,16 @@ interface ModelSettingsContextValue {
 
 const ModelSettingsContext = createContext<ModelSettingsContextValue | null>(null)
 
+type ModelSettingsHydrationStatus = 'loading' | 'ready' | 'failed'
+
+// Renderer reloads can briefly overlap a core-server restart in development. Retry the
+// read, but never make a failed read indistinguishable from an empty first-run database.
+const MODEL_SETTINGS_LOAD_RETRY_DELAYS_MS = [0, 50, 200] as const
+
+function waitForModelSettingsRetry(delayMs: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, delayMs))
+}
+
 export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   const { t } = useFrontendConfig()
   const { showToast } = useToast()
@@ -34,33 +44,61 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
     modelConfig.webSearch.defaultTavilyApiKey
   )
   const [models, setModels] = useState<ModelConfig[]>(INITIAL_MODELS)
-  const [isHydrated, setIsHydrated] = useState(false)
+  const [hydrationStatus, setHydrationStatus] = useState<ModelSettingsHydrationStatus>('loading')
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve())
   const latestSaveRevisionRef = useRef(0)
+  const skipNextSaveRef = useRef(false)
+  const loadFailurePresentationRef = useRef({ showToast, t })
+
+  useEffect(() => {
+    loadFailurePresentationRef.current = { showToast, t }
+  }, [showToast, t])
 
   useEffect(() => {
     let isCancelled = false
 
-    void loadModelSettings()
-      .then((settings) => {
-        if (isCancelled) return
+    const hydrate = async () => {
+      let lastError: unknown
 
-        if (settings) {
-          setApiUrl(settings.apiUrl)
-          setApiToken(settings.apiToken)
-          setSearchMode(settings.searchMode)
-          setTavilyApiKey(settings.tavilyApiKey)
-          setModels(settings.models)
+      for (const retryDelayMs of MODEL_SETTINGS_LOAD_RETRY_DELAYS_MS) {
+        if (isCancelled) return
+        if (retryDelayMs > 0) {
+          await waitForModelSettingsRetry(retryDelayMs)
+          if (isCancelled) return
         }
-      })
-      .catch((error) => {
-        console.error('Failed to load model settings from SQLite', error)
-      })
-      .finally(() => {
-        if (!isCancelled) {
-          setIsHydrated(true)
+
+        try {
+          const settings = await loadModelSettings()
+          if (isCancelled) return
+
+          if (settings) {
+            // Loading a stored snapshot updates every dependency of the persistence effect.
+            // It is already durable, so do not immediately write it back unchanged.
+            skipNextSaveRef.current = true
+            setApiUrl(settings.apiUrl)
+            setApiToken(settings.apiToken)
+            setSearchMode(settings.searchMode)
+            setTavilyApiKey(settings.tavilyApiKey)
+            setModels(settings.models)
+          }
+
+          setHydrationStatus('ready')
+          return
+        } catch (error) {
+          lastError = error
         }
-      })
+      }
+
+      if (isCancelled) return
+
+      setHydrationStatus('failed')
+      console.error('Failed to load model settings from SQLite', lastError)
+      const detail = lastError instanceof Error ? lastError.message : String(lastError)
+      const { showToast: presentToast, t: translate } = loadFailurePresentationRef.current
+      presentToast(`${translate('configuration.loadFailed')}: ${detail}`, { durationMs: 5000 })
+    }
+
+    void hydrate()
 
     return () => {
       isCancelled = true
@@ -68,7 +106,12 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   }, [])
 
   useEffect(() => {
-    if (!isHydrated) return
+    // A failed read must never authorize default in-memory values to overwrite SQLite.
+    if (hydrationStatus !== 'ready') return
+    if (skipNextSaveRef.current) {
+      skipNextSaveRef.current = false
+      return
+    }
 
     const revision = latestSaveRevisionRef.current + 1
     latestSaveRevisionRef.current = revision
@@ -88,7 +131,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
         showToast(`${t('configuration.saveFailed')}: ${detail}`, { durationMs: 5000 })
       }
     })
-  }, [apiToken, apiUrl, isHydrated, models, searchMode, showToast, t, tavilyApiKey])
+  }, [apiToken, apiUrl, hydrationStatus, models, searchMode, showToast, t, tavilyApiKey])
 
   const value = useMemo<ModelSettingsContextValue>(() => {
     const enabledModels = models.filter(

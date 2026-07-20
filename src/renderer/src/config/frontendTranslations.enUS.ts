@@ -881,6 +881,7 @@ export const enUSTranslations = {
   'configuration.inputPrice': 'Input price / 1k tokens',
   'configuration.outputPrice': 'Output price / 1k tokens',
   'configuration.invalidPrice': 'Enter a valid price greater than or equal to 0',
+  'configuration.loadFailed': 'Failed to load model settings',
   'configuration.saveFailed': 'Failed to save model settings',
   'configuration.supportsImageInput': 'Supports image input',
   'configuration.more': 'More',

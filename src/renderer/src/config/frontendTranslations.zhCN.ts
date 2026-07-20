@@ -853,6 +853,7 @@ export const zhCNTranslations = {
   'configuration.inputPrice': '输入价格 / 1k tokens',
   'configuration.outputPrice': '输出价格 / 1k tokens',
   'configuration.invalidPrice': '请输入大于或等于 0 的有效价格',
+  'configuration.loadFailed': '模型配置加载失败',
   'configuration.saveFailed': '模型配置保存失败',
   'configuration.supportsImageInput': '支持图像输入',
   'configuration.more': '更多',

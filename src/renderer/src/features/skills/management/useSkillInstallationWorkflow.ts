@@ -261,9 +261,9 @@ export function useSkillInstallationWorkflow({
 
   const updateUrl = useCallback(
     (url: string) => {
-    const current = stateRef.current
-    if (current.status !== 'urlInput') return
-    publish({ ...current, fieldError: false, url })
+      const current = stateRef.current
+      if (current.status !== 'urlInput') return
+      publish({ ...current, fieldError: false, url })
     },
     [publish]
   )
