@@ -2822,6 +2822,7 @@ impl AgentService {
                     result: continuation.result.clone(),
                 }));
             }
+            let mut cancelled_usage = None;
             let persisted = if let (
                 Some(conversation_id),
                 Some(assistant_message_id),
@@ -2841,7 +2842,7 @@ impl AgentService {
                     &continuation.result,
                     REASON,
                 );
-                let output = AgentChatOutput {
+                let mut output = AgentChatOutput {
                     content: String::new(),
                     status: AgentRunStatus::Cancelled,
                     run_id: run_id.clone(),
@@ -2853,7 +2854,15 @@ impl AgentService {
                     proposed_actions: Vec::new(),
                     conversation_turn_trace: Some(trace),
                 };
-                self.persist_final_assistant_output(conversation_id, assistant_message_id, &output)
+                let persisted = self.persist_final_assistant_output(
+                    conversation_id,
+                    assistant_message_id,
+                    &mut output,
+                );
+                if persisted.is_ok() {
+                    cancelled_usage = output.usage.clone();
+                }
+                persisted
             } else {
                 Err("cancelled command is missing its conversation trace checkpoint".to_string())
             };
@@ -2889,7 +2898,7 @@ impl AgentService {
                 success: false,
                 status: Some(AgentRunStatus::Cancelled),
                 content: None,
-                usage: None,
+                usage: cancelled_usage,
                 finish_reason: Some(REASON.to_string()),
                 proposed_actions: Vec::new(),
             }));
@@ -2991,6 +3000,7 @@ impl AgentService {
             {
                 return;
             }
+            let event = emitter_service.project_cumulative_usage_onto_event(event);
             if let Some(event) = emitter_terminal_event_gate.route(event) {
                 let _ = emitter_notifications.send(agent_event_notification(event));
             }
@@ -3097,7 +3107,7 @@ impl AgentService {
         }
 
         match result {
-            Ok(agent_output) => {
+            Ok(mut agent_output) => {
                 let committed_durable_context = is_terminal_run_status(agent_output.status);
                 let owner_ids = (
                     record.snapshot.conversation_id.as_deref(),
@@ -3108,7 +3118,7 @@ impl AgentService {
                         .persist_final_assistant_output(
                             conversation_id,
                             assistant_message_id,
-                            &agent_output,
+                            &mut agent_output,
                         ),
                     _ => Err("审批续跑缺少 assistant 持久化身份。".to_string()),
                 };
@@ -3217,6 +3227,7 @@ impl AgentService {
                 } else {
                     Err("审批续跑缺少 assistant 持久化身份。".to_string())
                 };
+                let cumulative_usage = persisted.as_ref().ok().cloned().flatten();
                 let pending_transition = if persisted.is_ok() {
                     self.transition_pending_status(&record, final_pending_status)
                 } else {
@@ -3264,7 +3275,7 @@ impl AgentService {
                         success: false,
                         status: Some(AgentRunStatus::Failed),
                         content: Some(message),
-                        usage,
+                        usage: cumulative_usage,
                         finish_reason: None,
                         proposed_actions: Vec::new(),
                     }));

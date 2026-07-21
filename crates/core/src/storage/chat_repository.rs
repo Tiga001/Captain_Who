@@ -630,6 +630,10 @@ pub fn update_message_state(
     conversation_id: &str,
     message: &ChatMessageStateRecord,
 ) -> rusqlite::Result<()> {
+    let authoritative_usage =
+        get_authoritative_message_usage(connection, conversation_id, &message.id)?;
+    let agent_run_json =
+        overlay_authoritative_usage(message.agent_run_json.clone(), authoritative_usage.as_ref());
     connection.execute(
         "
         UPDATE messages
@@ -643,7 +647,7 @@ pub fn update_message_state(
         params![
             &message.content,
             &message.status,
-            &message.agent_run_json,
+            &agent_run_json,
             &message.ui_state_json,
             conversation_id,
             &message.id
@@ -658,15 +662,46 @@ fn list_messages(
 ) -> rusqlite::Result<Vec<ChatMessageRecord>> {
     let mut statement = connection.prepare(
         "
-        SELECT id, role, content, created_at, status, agent_run_json, ui_state_json
-        FROM messages
-        WHERE conversation_id = ?1
-        ORDER BY position ASC, created_at ASC
+        SELECT
+            message.id,
+            message.role,
+            message.content,
+            message.created_at,
+            message.status,
+            message.agent_run_json,
+            message.ui_state_json,
+            usage.run_id,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.output_thinking_tokens,
+            usage.total_tokens,
+            usage.cached_input_tokens,
+            usage.cache_creation_input_tokens,
+            usage.billable_request_count
+        FROM messages AS message
+        LEFT JOIN agent_usage_records AS usage
+          ON usage.conversation_id = message.conversation_id
+         AND usage.message_id = message.id
+        WHERE message.conversation_id = ?1
+        ORDER BY message.position ASC, message.created_at ASC
         ",
     )?;
 
     let messages = statement
         .query_map(params![conversation_id], |row| {
+            let authoritative_usage = match row.get::<_, Option<String>>(7)? {
+                Some(run_id) => Some(AuthoritativeMessageUsage {
+                    run_id,
+                    input_tokens: row.get(8)?,
+                    output_tokens: row.get(9)?,
+                    output_thinking_tokens: row.get(10)?,
+                    total_tokens: row.get(11)?,
+                    cached_input_tokens: row.get(12)?,
+                    cache_creation_input_tokens: row.get(13)?,
+                    billable_request_count: row.get::<_, Option<i64>>(14)?.unwrap_or_default(),
+                }),
+                None => None,
+            };
             Ok(ChatMessageRecord {
                 id: row.get(0)?,
                 role: row.get(1)?,
@@ -674,7 +709,10 @@ fn list_messages(
                 created_at: row.get(3)?,
                 status: row.get(4)?,
                 attachments: Vec::new(),
-                agent_run_json: row.get(5)?,
+                agent_run_json: overlay_authoritative_usage(
+                    row.get(5)?,
+                    authoritative_usage.as_ref(),
+                ),
                 ui_state_json: row.get(6)?,
             })
         })?
@@ -683,10 +721,118 @@ fn list_messages(
     messages
 }
 
+#[derive(Debug, Clone)]
+struct AuthoritativeMessageUsage {
+    run_id: String,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    output_thinking_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+    cached_input_tokens: Option<i64>,
+    cache_creation_input_tokens: Option<i64>,
+    billable_request_count: i64,
+}
+
+fn get_authoritative_message_usage(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+) -> rusqlite::Result<Option<AuthoritativeMessageUsage>> {
+    connection
+        .query_row(
+            "SELECT
+                run_id,
+                input_tokens,
+                output_tokens,
+                output_thinking_tokens,
+                total_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+                billable_request_count
+             FROM agent_usage_records
+             WHERE conversation_id = ?1 AND message_id = ?2",
+            params![conversation_id, message_id],
+            |row| {
+                Ok(AuthoritativeMessageUsage {
+                    run_id: row.get(0)?,
+                    input_tokens: row.get(1)?,
+                    output_tokens: row.get(2)?,
+                    output_thinking_tokens: row.get(3)?,
+                    total_tokens: row.get(4)?,
+                    cached_input_tokens: row.get(5)?,
+                    cache_creation_input_tokens: row.get(6)?,
+                    billable_request_count: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+}
+
+fn overlay_authoritative_usage(
+    agent_run_json: Option<String>,
+    usage: Option<&AuthoritativeMessageUsage>,
+) -> Option<String> {
+    let raw = agent_run_json?;
+    let Some(usage) = usage else {
+        return Some(raw);
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Some(raw);
+    };
+    let Some(run) = value.as_object_mut() else {
+        return Some(raw);
+    };
+    if run
+        .get("runId")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|run_id| run_id != usage.run_id)
+    {
+        return Some(raw);
+    }
+
+    let mut projected = serde_json::Map::new();
+    insert_usage_token(&mut projected, "inputTokens", usage.input_tokens);
+    insert_usage_token(&mut projected, "outputTokens", usage.output_tokens);
+    insert_usage_token(
+        &mut projected,
+        "outputThinkingTokens",
+        usage.output_thinking_tokens,
+    );
+    insert_usage_token(&mut projected, "totalTokens", usage.total_tokens);
+    insert_usage_token(
+        &mut projected,
+        "cachedInputTokens",
+        usage.cached_input_tokens,
+    );
+    insert_usage_token(
+        &mut projected,
+        "cacheCreationInputTokens",
+        usage.cache_creation_input_tokens,
+    );
+    projected.insert(
+        "billableRequestCount".to_string(),
+        usage.billable_request_count.max(0).into(),
+    );
+    run.insert("usage".to_string(), projected.into());
+
+    serde_json::to_string(&value).ok().or(Some(raw))
+}
+
+fn insert_usage_token(
+    usage: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: Option<i64>,
+) {
+    if let Some(value) = value {
+        usage.insert(key.to_string(), value.max(0).into());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{conversation_trace_repository, migrations};
+    use crate::storage::models::AgentUsageRecordInsert;
+    use crate::storage::{conversation_trace_repository, migrations, usage_repository};
     use crate::{
         ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
         CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
@@ -788,6 +934,106 @@ mod tests {
         assert_eq!(stored.messages.len(), 2);
         assert_eq!(stored.messages[1].id, "assistant-1");
         assert_eq!(stored.messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn authoritative_usage_repairs_loaded_json_and_rejects_stale_renderer_usage() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let mut stored = conversation();
+        stored.messages[1].agent_run_json = Some(
+            serde_json::json!({
+                "runId": "run-1",
+                "status": "completed",
+                "usage": {
+                    "inputTokens": 92_510,
+                    "outputTokens": 391,
+                    "totalTokens": 92_901,
+                    "billableRequestCount": 1
+                },
+                "timeline": [{ "id": "presentation-only" }]
+            })
+            .to_string(),
+        );
+        save_conversation(&mut connection, stored).unwrap();
+        usage_repository::upsert_usage_record(
+            &connection,
+            &AgentUsageRecordInsert {
+                id: "usage-run-1".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                message_id: "assistant-1".to_string(),
+                run_id: "run-1".to_string(),
+                project_id: None,
+                model_id: "model-1".to_string(),
+                model_name: "Model 1".to_string(),
+                started_at: Some(1),
+                completed_at: Some(2),
+                status: Some("completed".to_string()),
+                error: None,
+                created_at: 2,
+                input_tokens: Some(2_942_988),
+                output_tokens: Some(38_253),
+                output_thinking_tokens: Some(32_402),
+                total_tokens: Some(2_981_241),
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                billable_request_count: 42,
+                input_price: None,
+                output_price: None,
+                estimated_cost: None,
+            },
+        )
+        .unwrap();
+
+        let loaded = get_conversation(&connection, "conversation-1")
+            .unwrap()
+            .unwrap();
+        let run: serde_json::Value =
+            serde_json::from_str(loaded.messages[1].agent_run_json.as_deref().unwrap()).unwrap();
+        assert_eq!(run["usage"]["inputTokens"], 2_942_988);
+        assert_eq!(run["usage"]["outputTokens"], 38_253);
+        assert_eq!(run["usage"]["outputThinkingTokens"], 32_402);
+        assert_eq!(run["usage"]["totalTokens"], 2_981_241);
+        assert_eq!(run["usage"]["billableRequestCount"], 42);
+        assert_eq!(run["timeline"][0]["id"], "presentation-only");
+
+        update_message_state(
+            &connection,
+            "conversation-1",
+            &ChatMessageStateRecord {
+                id: "assistant-1".to_string(),
+                content: "final answer".to_string(),
+                status: Some("sent".to_string()),
+                agent_run_json: Some(
+                    serde_json::json!({
+                        "runId": "run-1",
+                        "status": "completed",
+                        "usage": {
+                            "inputTokens": 92_510,
+                            "outputTokens": 391,
+                            "totalTokens": 92_901,
+                            "billableRequestCount": 1
+                        },
+                        "timeline": [{ "id": "still-preserved" }]
+                    })
+                    .to_string(),
+                ),
+                ui_state_json: None,
+            },
+        )
+        .unwrap();
+        let raw: String = connection
+            .query_row(
+                "SELECT agent_run_json FROM messages WHERE id = 'assistant-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let run: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(run["usage"]["inputTokens"], 2_942_988);
+        assert_eq!(run["usage"]["outputTokens"], 38_253);
+        assert_eq!(run["usage"]["billableRequestCount"], 42);
+        assert_eq!(run["timeline"][0]["id"], "still-preserved");
     }
 
     #[test]

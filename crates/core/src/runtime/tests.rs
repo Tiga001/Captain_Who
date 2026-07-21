@@ -3295,8 +3295,9 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
 #[tokio::test]
 async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_checkpoints() {
     use crate::protocol::{
-        AgentActivatedSkillResources, AgentCommandPermission, AgentPatchPermission,
-        AgentPermissions, AgentReadPermission, AgentWritePermission,
+        AgentActivatedSkillResources, AgentApprovalDecision, AgentApprovalDecisionStatus,
+        AgentCommandPermission, AgentPatchPermission, AgentPermissions, AgentReadPermission,
+        AgentToolContinuation, AgentWritePermission,
     };
     use crate::skills::{
         memory_resource_session_for_test, SkillId, SkillPackageUri, SkillResourceKind,
@@ -3379,19 +3380,22 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
         )],
     )
     .unwrap();
+    let resources = Arc::new(session);
     let package = SkillPackageUri::new(skill_id.clone(), revision.clone());
     let resource_uri = package.resource(resource_path);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let second_request = Arc::new(std::sync::Mutex::new(None::<Value>));
-    let captured_request = Arc::clone(&second_request);
+    let captured_second_request = Arc::clone(&second_request);
+    let resumed_request = Arc::new(std::sync::Mutex::new(None::<Value>));
+    let captured_resumed_request = Arc::clone(&resumed_request);
     let server = tokio::spawn(async move {
-        for request_index in 0..2 {
+        for request_index in 0..3 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = read_json_request(&mut stream).await;
-            let response = if request_index == 0 {
-                json!({
+            let response = match request_index {
+                0 => json!({
                     "choices": [{
                         "message": {
                             "role": "assistant",
@@ -3404,10 +3408,10 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
                         },
                         "finish_reason": "tool_calls"
                     }]
-                })
-            } else {
-                *captured_request.lock().unwrap() = Some(request);
-                json!({
+                }),
+                1 => {
+                    *captured_second_request.lock().unwrap() = Some(request);
+                    json!({
                     "choices": [{
                         "message": {
                             "role": "assistant",
@@ -3424,7 +3428,20 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
                         },
                         "finish_reason": "tool_calls"
                     }]
-                })
+                    })
+                }
+                _ => {
+                    *captured_resumed_request.lock().unwrap() = Some(request);
+                    json!({
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "continued after approval"
+                            },
+                            "finish_reason": "stop"
+                        }]
+                    })
+                }
             };
             write_response(&mut stream, response).await;
         }
@@ -3494,15 +3511,14 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
 
     let output = AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
-            input,
+            input.clone(),
             Some("run-skill-resource-checkpoint".to_string()),
             None,
             AgentCancellationToken::new(),
-            Some(AgentRuntimeHostServices::new().with_skill_resources(Arc::new(session))),
+            Some(AgentRuntimeHostServices::new().with_skill_resources(Arc::clone(&resources))),
         )
         .await
         .unwrap();
-    server.await.unwrap();
 
     assert_eq!(output.status, AgentRunStatus::WaitingForApproval);
     let model_request = second_request.lock().unwrap().clone().unwrap();
@@ -3521,4 +3537,54 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
     assert!(!serde_json::to_string(&output.events)
         .unwrap()
         .contains(RESOURCE_MARKER));
+
+    let mut resume_input = input;
+    resume_input.messages.clear();
+    resume_input.skill_activation = None;
+    resume_input.resume_checkpoint = Some(checkpoint.clone());
+    resume_input.approval_decision = Some(AgentApprovalDecision {
+        action_id: "materialize-after-read".to_string(),
+        status: AgentApprovalDecisionStatus::Approved,
+        message: None,
+    });
+    resume_input.tool_continuation = Some(AgentToolContinuation {
+        call: AgentToolCall {
+            id: "materialize-after-read".to_string(),
+            tool: "apply_patch".to_string(),
+            args: json!({
+                "operation": "create",
+                "filePath": "report.txt",
+                "content": "report"
+            }),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: None,
+        },
+        result: AgentToolResult {
+            call_id: "materialize-after-read".to_string(),
+            tool: "apply_patch".to_string(),
+            ok: true,
+            result: Some(json!({ "status": "applied" })),
+            error: None,
+        },
+    });
+
+    let completed = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            resume_input,
+            Some("run-skill-resource-checkpoint".to_string()),
+            None,
+            AgentCancellationToken::new(),
+            Some(AgentRuntimeHostServices::new().with_skill_resources(resources)),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(completed.status, AgentRunStatus::Completed);
+    assert_eq!(completed.content, "continued after approval");
+    let resumed_request = resumed_request.lock().unwrap().clone().unwrap();
+    let resumed_messages = serde_json::to_string(&resumed_request["messages"]).unwrap();
+    assert!(resumed_messages.contains("materialize-after-read"));
+    assert!(resumed_messages.contains("applied"));
+    assert!(!resumed_messages.contains(RESOURCE_MARKER));
 }

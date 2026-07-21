@@ -88,6 +88,7 @@ impl AgentService {
                 {
                     return;
                 }
+                let event = emitter_service.project_cumulative_usage_onto_event(event);
                 if let Some(event) = emitter_terminal_event_gate.route(event) {
                     let _ = emitter_notifications.send(agent_event_notification(event));
                 }
@@ -171,12 +172,12 @@ impl AgentService {
             }
 
             match result {
-                Ok(agent_output) => {
+                Ok(mut agent_output) => {
                     let committed_durable_context = is_terminal_run_status(agent_output.status);
                     let persisted = service.persist_final_assistant_output(
                         &worker_conversation_id,
                         &worker_assistant_message_id,
-                        &agent_output,
+                        &mut agent_output,
                     );
                     if persisted.is_ok() && committed_durable_context {
                         service.emit_terminal_context_window_snapshot(
@@ -231,6 +232,7 @@ impl AgentService {
                         usage.clone(),
                         &conversation_turn_trace,
                     );
+                    let cumulative_usage = persisted.as_ref().ok().cloned().flatten();
                     if persisted.is_ok() {
                         service.emit_terminal_context_window_snapshot(
                             &notifications,
@@ -264,7 +266,7 @@ impl AgentService {
                             success: false,
                             status: Some(AgentRunStatus::Failed),
                             content: Some(message),
-                            usage,
+                            usage: cumulative_usage,
                             finish_reason: None,
                             proposed_actions: Vec::new(),
                         }));

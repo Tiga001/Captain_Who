@@ -126,15 +126,24 @@ impl RuntimeExtensions {
         let restores_skill_state = snapshots
             .iter()
             .any(|snapshot| snapshot.extension_id == SKILL_EXTENSION_ID);
-        let skills = SkillActivationExtension::new(
-            run_id.to_string(),
-            (!restores_skill_state).then_some(discovery).flatten(),
-            (!restores_skill_state)
-                .then_some(initial_activation)
-                .flatten(),
-            activation_resolver,
-            skill_resources,
-        )?;
+        let skills = if restores_skill_state {
+            // The checkpoint snapshot is the logical authority, while `skill_resources` is the
+            // matching Host-only byte authority restored from its immutable selections. Keep the
+            // shell private until `from_extensions` has restored and jointly validated both.
+            SkillActivationExtension::new_for_checkpoint_restore(
+                run_id.to_string(),
+                activation_resolver,
+                skill_resources,
+            )
+        } else {
+            SkillActivationExtension::new(
+                run_id.to_string(),
+                discovery,
+                initial_activation,
+                activation_resolver,
+                skill_resources,
+            )?
+        };
         let (todo, todo_handle) = TodoExtension::new(run_id.to_string());
         Self::from_extensions(
             vec![Box::new(skills), Box::new(todo)],
@@ -284,8 +293,11 @@ fn validate_extensions(extensions: &[Box<dyn RuntimeExtension>]) -> AgentResult<
 mod tests {
     use super::*;
     use crate::protocol::{
-        AgentApprovalStatus, AgentProposedAction, AgentToolCall, AgentToolDefinition,
-        AgentToolSafety,
+        AgentActivatedSkill, AgentActivatedSkillResources, AgentApprovalStatus,
+        AgentProposedAction, AgentToolCall, AgentToolDefinition, AgentToolSafety,
+    };
+    use crate::skills::{
+        memory_resource_session_for_test, SkillId, SkillResourceKind, SkillRevision, SkillSourceId,
     };
     use crate::tools::ToolExecutionContext;
     use serde_json::json;
@@ -348,6 +360,48 @@ mod tests {
             version: 1,
             order,
         }
+    }
+
+    fn resource_bound_skill_fixture(
+        revision_fill: char,
+    ) -> (AgentSkillActivation, Arc<SkillResourceSession>) {
+        let skill_id = SkillId::parse("bundled:application:spreadsheets").unwrap();
+        let revision = SkillRevision::parse(format!(
+            "skill-package-sha256-v3:{}",
+            revision_fill.to_string().repeat(64)
+        ))
+        .unwrap();
+        let session = Arc::new(
+            memory_resource_session_for_test(
+                skill_id.clone(),
+                revision.clone(),
+                SkillSourceId::parse("bundled:application").unwrap(),
+                vec![(
+                    "references/workflows.md".to_string(),
+                    SkillResourceKind::Reference,
+                    b"trusted spreadsheet workflow".to_vec(),
+                )],
+            )
+            .unwrap(),
+        );
+        let package = session.package_uris().into_iter().next().unwrap();
+        let activation = AgentSkillActivation {
+            activation_revision: "activation-sha256-v1:checkpoint-fixture".to_string(),
+            skills: vec![AgentActivatedSkill {
+                id: skill_id.to_string(),
+                name: "spreadsheets".to_string(),
+                revision: revision.to_string(),
+                source: "bundled:application".to_string(),
+                instructions: "Use the trusted spreadsheet workflow.".to_string(),
+                source_bytes: 37,
+                resources: Some(AgentActivatedSkillResources {
+                    root_uri: package.to_string(),
+                    resource_count: 1,
+                    kinds: vec!["reference".to_string()],
+                }),
+            }],
+        };
+        (activation, session)
     }
 
     #[test]
@@ -420,6 +474,163 @@ mod tests {
         let state = restored.todo_state().unwrap();
         assert_eq!(state.revision, 1);
         assert_eq!(state.items[0].title, "Persist plan");
+    }
+
+    #[test]
+    fn resource_bound_skill_restores_from_checkpoint_before_authority_validation() {
+        let (activation, resources) = resource_bound_skill_fixture('d');
+        let original = RuntimeExtensions::for_run_with_skills(
+            "run-original",
+            None,
+            Some(&activation),
+            None,
+            Some(Arc::clone(&resources)),
+            &[],
+        )
+        .unwrap();
+        let snapshots = original.snapshots().unwrap();
+
+        let restored = RuntimeExtensions::for_run_with_skills(
+            "run-restored",
+            None,
+            None,
+            None,
+            Some(resources),
+            &snapshots,
+        )
+        .unwrap();
+
+        let restored_snapshots = restored.snapshots().unwrap();
+        let skill_snapshot = restored_snapshots
+            .iter()
+            .find(|snapshot| snapshot.extension_id == SKILL_EXTENSION_ID)
+            .unwrap();
+        assert_eq!(
+            skill_snapshot.state["skills"][0]["id"],
+            "bundled:application:spreadsheets"
+        );
+        assert_eq!(skill_snapshot.state["skills"][0]["hasResources"], true);
+    }
+
+    #[test]
+    fn fresh_run_still_rejects_resource_authority_without_activation() {
+        let (_, resources) = resource_bound_skill_fixture('d');
+
+        let error = RuntimeExtensions::for_run_with_skills(
+            "run-fresh",
+            None,
+            None,
+            None,
+            Some(resources),
+            &[],
+        )
+        .err()
+        .expect("unactivated resource authority must remain fail-closed");
+
+        assert!(error.to_string().contains("unactivated Skill"));
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_mismatched_resource_revision() {
+        let (activation, checkpoint_resources) = resource_bound_skill_fixture('d');
+        let original = RuntimeExtensions::for_run_with_skills(
+            "run-original",
+            None,
+            Some(&activation),
+            None,
+            Some(checkpoint_resources),
+            &[],
+        )
+        .unwrap();
+        let snapshots = original.snapshots().unwrap();
+        let (_, mismatched_resources) = resource_bound_skill_fixture('e');
+
+        let error = RuntimeExtensions::for_run_with_skills(
+            "run-restored",
+            None,
+            None,
+            None,
+            Some(mismatched_resources),
+            &snapshots,
+        )
+        .err()
+        .expect("checkpoint restore must reject a different resource revision");
+
+        assert!(error.to_string().contains("has revision"));
+        assert!(error.to_string().contains("instead of"));
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_missing_resource_authority() {
+        let (activation, checkpoint_resources) = resource_bound_skill_fixture('d');
+        let original = RuntimeExtensions::for_run_with_skills(
+            "run-original",
+            None,
+            Some(&activation),
+            None,
+            Some(checkpoint_resources),
+            &[],
+        )
+        .unwrap();
+        let snapshots = original.snapshots().unwrap();
+
+        let error = RuntimeExtensions::for_run_with_skills(
+            "run-restored",
+            None,
+            None,
+            None,
+            None,
+            &snapshots,
+        )
+        .err()
+        .expect("resource-bearing checkpoint must require its exact Host authority");
+
+        assert!(error
+            .to_string()
+            .contains("resource metadata without exact run resource authority"));
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_resource_authority_for_another_skill() {
+        let (activation, checkpoint_resources) = resource_bound_skill_fixture('d');
+        let original = RuntimeExtensions::for_run_with_skills(
+            "run-original",
+            None,
+            Some(&activation),
+            None,
+            Some(checkpoint_resources),
+            &[],
+        )
+        .unwrap();
+        let snapshots = original.snapshots().unwrap();
+        let foreign_resources = Arc::new(
+            memory_resource_session_for_test(
+                SkillId::parse("bundled:application:documents").unwrap(),
+                SkillRevision::parse(format!("skill-package-sha256-v3:{}", "d".repeat(64)))
+                    .unwrap(),
+                SkillSourceId::parse("bundled:application").unwrap(),
+                vec![(
+                    "references/workflows.md".to_string(),
+                    SkillResourceKind::Reference,
+                    b"foreign document workflow".to_vec(),
+                )],
+            )
+            .unwrap(),
+        );
+
+        let error = RuntimeExtensions::for_run_with_skills(
+            "run-restored",
+            None,
+            None,
+            None,
+            Some(foreign_resources),
+            &snapshots,
+        )
+        .err()
+        .expect("checkpoint restore must reject authority for another Skill");
+
+        assert!(error.to_string().contains("unactivated Skill"));
+        assert!(error.to_string().contains("bundled:application:documents"));
     }
 
     #[test]

@@ -45,6 +45,34 @@ impl AgentService {
             .map(|(run_id, _)| run_id.clone())
     }
 
+    /// Projects one runtime segment onto the backend-owned logical run total without mutating it.
+    ///
+    /// A single agent run can cross several runtime invocations while approvals are resolved.
+    /// Runtime events only know about their current invocation, while renderer state must always
+    /// receive the cumulative logical-run value so replaying an event remains idempotent.
+    pub(super) fn preview_cumulative_run_usage(
+        &self,
+        run_id: &str,
+        next: Option<AgentUsage>,
+    ) -> Option<AgentUsage> {
+        let mut usage = {
+            let contexts = self
+                .usage_contexts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            contexts.get(run_id).and_then(|state| state.usage.clone())
+        };
+        merge_usage(&mut usage, next);
+        usage
+    }
+
+    pub(super) fn project_cumulative_usage_onto_event(&self, mut event: AgentEvent) -> AgentEvent {
+        if let AgentEvent::Done { run_id, usage, .. } = &mut event {
+            *usage = self.preview_cumulative_run_usage(run_id, usage.take());
+        }
+        event
+    }
+
     pub(super) fn persist_run_usage(
         &self,
         run_id: &str,

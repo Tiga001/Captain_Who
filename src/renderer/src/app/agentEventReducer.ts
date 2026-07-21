@@ -1225,6 +1225,8 @@ export function applyAgentEventToChatMessage(
           ? (currentRun.lastResponseAt ?? finalResponseAt)
           : currentRun.lastResponseAt,
       completedAt,
+      // Core-server publishes a cumulative snapshot for the logical run. Replacement keeps
+      // notification replay idempotent and avoids double-counting event/output delivery paths.
       usage: agentEvent.usage ?? currentRun.usage,
       finishReason: agentEvent.finishReason,
       approvals: getApprovalsForStatus(nextStatus, currentRun.approvals, proposedActions),
@@ -1271,6 +1273,7 @@ function applyAgentOutputToChatMessage(message: ChatMessage, output: AgentChatOu
       completedAt: outputCompletedAt,
       toolDefinitions: output.toolDefinitions,
       todo: output.todo ?? currentRun.todo,
+      // AgentChatOutput follows the same run-cumulative contract as Done events.
       usage: output.usage ?? currentRun.usage,
       finishReason: output.finishReason,
       approvals: getApprovalsForStatus(output.status, currentRun.approvals, output.proposedActions),

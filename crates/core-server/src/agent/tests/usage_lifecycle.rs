@@ -65,6 +65,178 @@ fn persists_usage_for_failed_runs() {
 }
 
 #[test]
+fn approval_segments_project_one_cumulative_usage_snapshot_to_chat_history() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-cumulative".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Cumulative usage".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "assistant-cumulative".to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: Some(
+                    json!({
+                        "runId": "run-cumulative",
+                        "status": "running",
+                        "usage": {
+                            "inputTokens": 0,
+                            "outputTokens": 0,
+                            "totalTokens": 0,
+                            "billableRequestCount": 0
+                        },
+                        "timeline": [{ "id": "keep-presentation" }]
+                    })
+                    .to_string(),
+                ),
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let service = AgentService::new(storage.clone());
+    service.register_usage_context(
+        "run-cumulative",
+        AgentRunUsageContext {
+            conversation_id: "conversation-cumulative".to_string(),
+            assistant_message_id: "assistant-cumulative".to_string(),
+            run_id: "run-cumulative".to_string(),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            model_name: "Model 1".to_string(),
+            input_price: None,
+            output_price: None,
+            started_at: 1,
+        },
+    );
+
+    let mut waiting = usage_output(
+        AgentRunStatus::WaitingForApproval,
+        AgentUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(20),
+            output_thinking_tokens: Some(8),
+            total_tokens: Some(120),
+            cached_input_tokens: Some(5),
+            cache_creation_input_tokens: None,
+            billable_request_count: Some(2),
+        },
+    );
+    service
+        .persist_final_assistant_output(
+            "conversation-cumulative",
+            "assistant-cumulative",
+            &mut waiting,
+        )
+        .unwrap();
+
+    let continuation_usage = AgentUsage {
+        input_tokens: Some(60),
+        output_tokens: Some(10),
+        output_thinking_tokens: Some(4),
+        total_tokens: Some(70),
+        cached_input_tokens: Some(3),
+        cache_creation_input_tokens: Some(2),
+        billable_request_count: Some(1),
+    };
+    let projected = service.project_cumulative_usage_onto_event(AgentEvent::Done {
+        run_id: "run-cumulative".to_string(),
+        success: true,
+        status: Some(AgentRunStatus::Completed),
+        content: Some("done".to_string()),
+        usage: Some(continuation_usage.clone()),
+        finish_reason: Some("stop".to_string()),
+        proposed_actions: Vec::new(),
+    });
+    assert!(matches!(
+        projected,
+        AgentEvent::Done {
+            usage: Some(AgentUsage {
+                input_tokens: Some(160),
+                output_tokens: Some(30),
+                total_tokens: Some(190),
+                billable_request_count: Some(3),
+                ..
+            }),
+            ..
+        }
+    ));
+
+    let mut completed = usage_output(AgentRunStatus::Completed, continuation_usage);
+    service
+        .persist_final_assistant_output(
+            "conversation-cumulative",
+            "assistant-cumulative",
+            &mut completed,
+        )
+        .unwrap();
+
+    assert_eq!(
+        completed.usage,
+        Some(AgentUsage {
+            input_tokens: Some(160),
+            output_tokens: Some(30),
+            output_thinking_tokens: Some(12),
+            total_tokens: Some(190),
+            cached_input_tokens: Some(8),
+            cache_creation_input_tokens: Some(2),
+            billable_request_count: Some(3),
+        })
+    );
+    let summary = service
+        .get_usage_summary(&AgentUsageSummaryInput {
+            range: AgentUsageSummaryRange::All,
+            from: None,
+            to: None,
+        })
+        .unwrap();
+    assert_eq!(summary.request_count, 3);
+    assert_eq!(summary.input_tokens, Some(160));
+    assert_eq!(summary.output_tokens, Some(30));
+    assert_eq!(summary.total_tokens, Some(190));
+
+    let conversation = storage
+        .load_conversation("conversation-cumulative")
+        .unwrap()
+        .unwrap();
+    let run: Value =
+        serde_json::from_str(conversation.messages[0].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(run["usage"]["inputTokens"], 160);
+    assert_eq!(run["usage"]["outputTokens"], 30);
+    assert_eq!(run["usage"]["outputThinkingTokens"], 12);
+    assert_eq!(run["usage"]["totalTokens"], 190);
+    assert_eq!(run["usage"]["cachedInputTokens"], 8);
+    assert_eq!(run["usage"]["cacheCreationInputTokens"], 2);
+    assert_eq!(run["usage"]["billableRequestCount"], 3);
+    assert_eq!(run["timeline"][0]["id"], "keep-presentation");
+}
+
+fn usage_output(status: AgentRunStatus, usage: AgentUsage) -> AgentChatOutput {
+    AgentChatOutput {
+        content: "done".to_string(),
+        status,
+        run_id: "run-cumulative".to_string(),
+        events: Vec::new(),
+        tool_definitions: Vec::new(),
+        todo: None,
+        usage: Some(usage),
+        finish_reason: Some("stop".to_string()),
+        proposed_actions: Vec::new(),
+        conversation_turn_trace: None,
+    }
+}
+
+#[test]
 fn deleting_project_cancels_runs_and_discards_usage_contexts() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());

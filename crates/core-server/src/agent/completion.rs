@@ -25,6 +25,11 @@ impl AgentTerminalEventGate {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()),
         );
+        for event in &mut events {
+            if let AgentEvent::Done { usage, .. } = event {
+                *usage = output.usage.clone();
+            }
+        }
         if !events
             .iter()
             .any(|event| matches!(event, AgentEvent::Done { .. }))

@@ -1418,6 +1418,47 @@ fn terminal_event_gate_defers_settled_state_and_done_until_commit() {
 }
 
 #[test]
+fn terminal_event_gate_replaces_deferred_segment_usage_with_run_total() {
+    let gate = AgentTerminalEventGate::default();
+    let mut output = completed_output_for_terminal_gate();
+    output.usage = Some(AgentUsage {
+        input_tokens: Some(160),
+        output_tokens: Some(30),
+        output_thinking_tokens: Some(12),
+        total_tokens: Some(190),
+        cached_input_tokens: Some(8),
+        cache_creation_input_tokens: Some(2),
+        billable_request_count: Some(3),
+    });
+    assert!(gate
+        .route(AgentEvent::Done {
+            run_id: output.run_id.clone(),
+            success: true,
+            status: Some(AgentRunStatus::Completed),
+            content: Some(output.content.clone()),
+            usage: Some(AgentUsage {
+                input_tokens: Some(60),
+                output_tokens: Some(10),
+                output_thinking_tokens: Some(4),
+                total_tokens: Some(70),
+                cached_input_tokens: Some(3),
+                cache_creation_input_tokens: Some(2),
+                billable_request_count: Some(1),
+            }),
+            finish_reason: Some("stop".to_string()),
+            proposed_actions: Vec::new(),
+        })
+        .is_none());
+
+    let committed = gate.take_after_persistence(&output);
+    assert!(matches!(
+        committed.as_slice(),
+        [AgentEvent::Done { usage, .. }]
+            if usage == &output.usage
+    ));
+}
+
+#[test]
 fn terminal_event_gate_never_exposes_a_nonrecoverable_error_before_commit() {
     let gate = AgentTerminalEventGate::default();
     assert!(gate

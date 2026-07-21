@@ -125,6 +125,37 @@ impl SkillActivationExtension {
             },
         })
     }
+
+    /// Creates the private shell used only while [`RuntimeExtensions`](super::RuntimeExtensions)
+    /// is restoring a checkpoint that contains this extension's snapshot.
+    ///
+    /// The Host resource session is already reconstructed from the checkpoint's immutable Skill
+    /// identities, while the matching logical activation records still live in the extension
+    /// snapshot. Validating those resources in this temporary empty state would compare them with
+    /// an empty activation map. The extension manager must therefore call `restore_state`
+    /// immediately; that method validates the complete restored activation and resource authority
+    /// before publishing either into this state handle.
+    pub(super) fn new_for_checkpoint_restore(
+        run_id: String,
+        resolver: Option<AgentSkillActivationResolver>,
+        resources: Option<Arc<SkillResourceSession>>,
+    ) -> Self {
+        Self {
+            run_id,
+            state: SkillActivationStateHandle {
+                inner: Arc::new(Mutex::new(SkillActivationState {
+                    discovery: None,
+                    active: BTreeMap::new(),
+                    order: Vec::new(),
+                    pending_context: BTreeMap::new(),
+                    resolver,
+                    resources,
+                    model_input_capacity: None,
+                    model_input_capacity_observed: false,
+                })),
+            },
+        }
+    }
 }
 
 impl RuntimeExtension for SkillActivationExtension {
