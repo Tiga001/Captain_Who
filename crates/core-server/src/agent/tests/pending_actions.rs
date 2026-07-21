@@ -14,6 +14,7 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
         "model": "test-model",
+        "modelCapabilities": { "imageInput": true },
         "messages": []
     }))
     .unwrap();
@@ -69,6 +70,7 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
             "managed-runtime-profile-pending",
         ))
         .unwrap();
+    assert!(stored.agent_input.model_capabilities.image_input);
     let AgentProposedAction::Command { command } = &stored.snapshot.action else {
         panic!("persisted action must remain a command")
     };
@@ -385,8 +387,9 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
 }
 
 #[test]
-fn terminal_pending_action_persistence_redacts_only_skill_instruction_bodies() {
+fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
     const MARKER: &str = "PENDING_SKILL_INSTRUCTION_BODY_MUST_NOT_SURVIVE";
+    const CATALOG_MARKER: &str = "PENDING_SKILL_CATALOG_BODY_MUST_NOT_SURVIVE";
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",
@@ -402,9 +405,30 @@ fn terminal_pending_action_persistence_redacts_only_skill_instruction_bodies() {
             revision: "package-revision".to_string(),
             source: "bundled:application".to_string(),
             instructions: MARKER.to_string(),
+            source_bytes: u64::try_from(MARKER.len()).unwrap(),
             resources: None,
         }],
     });
+    agent_input.skill_discovery = Some(mycopilot_core::skills::AgentSkillDiscoverySnapshot {
+        schema_version: mycopilot_core::skills::AGENT_SKILL_DISCOVERY_SCHEMA_VERSION,
+        catalog_revision: "skill-enabled-catalog-sha256-v1:redaction".to_string(),
+        prompt_token_budget: mycopilot_core::skills::DEFAULT_SKILL_DISCOVERY_PROMPT_TOKENS,
+        skills: vec![mycopilot_core::skills::AgentDiscoverableSkill {
+            activation_ref: mycopilot_core::skills::derive_skill_activation_ref(
+                "skill-enabled-catalog-sha256-v1:redaction",
+                "bundled:application:repository-evidence-auditor",
+                "package-revision",
+            ),
+            id: "bundled:application:repository-evidence-auditor".to_string(),
+            revision: "package-revision".to_string(),
+            name: "repository-evidence-auditor".to_string(),
+            description: CATALOG_MARKER.to_string(),
+            source_kind: "bundled".to_string(),
+        }],
+        max_activated_skills: 8,
+        max_total_source_bytes: 512 * 1024,
+    });
+    let checkpoint_discovery = agent_input.skill_discovery.clone().unwrap();
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
         version: 2,
         run_id: "run-skill-redaction".to_string(),
@@ -426,6 +450,21 @@ fn terminal_pending_action_persistence_redacts_only_skill_instruction_bodies() {
                 }),
             },
             mycopilot_core::AgentContextCheckpointItem {
+                role: "user".to_string(),
+                content: format!(
+                    "<backend_available_skills>{CATALOG_MARKER}</backend_available_skills>"
+                ),
+                images: Vec::new(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+                sources: vec!["skill_catalog".to_string()],
+                scope: "run".to_string(),
+                retention: "retained".to_string(),
+                group: None,
+                origin: None,
+            },
+            mycopilot_core::AgentContextCheckpointItem {
                 role: "system".to_string(),
                 content: "NON_SKILL_CHECKPOINT_CONTENT".to_string(),
                 images: Vec::new(),
@@ -442,7 +481,22 @@ fn terminal_pending_action_persistence_redacts_only_skill_instruction_bodies() {
         next_model_request_index: 1,
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
-        extension_snapshots: Vec::new(),
+        extension_snapshots: vec![mycopilot_core::AgentExtensionSnapshot {
+            extension_id: "skills".to_string(),
+            version: 2,
+            state: json!({
+                "discovery": checkpoint_discovery,
+                "skills": [{
+                    "id": "bundled:application:repository-evidence-auditor",
+                    "name": "repository-evidence-auditor",
+                    "revision": "package-revision",
+                    "source": "bundled:application",
+                    "sourceBytes": MARKER.len(),
+                    "hasResources": false,
+                    "activatedBy": "user"
+                }]
+            }),
+        }],
         pending_tool_call_id: "action-skill-redaction".to_string(),
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
@@ -482,6 +536,7 @@ fn terminal_pending_action_persistence_redacts_only_skill_instruction_bodies() {
         record.snapshot.status = status;
         let persisted = pending_storage_record(&record, 2);
         assert!(persisted.agent_input_json.contains(MARKER));
+        assert!(persisted.agent_input_json.contains(CATALOG_MARKER));
     }
 
     for status in [
@@ -493,9 +548,11 @@ fn terminal_pending_action_persistence_redacts_only_skill_instruction_bodies() {
         record.snapshot.status = status;
         let persisted = pending_storage_record(&record, 3);
         assert!(!persisted.agent_input_json.contains(MARKER));
+        assert!(!persisted.agent_input_json.contains(CATALOG_MARKER));
         assert!(!persisted.agent_input_json.contains("secret"));
         let restored: AgentChatInput = serde_json::from_str(&persisted.agent_input_json).unwrap();
         let activation = restored.skill_activation.unwrap();
+        assert!(restored.skill_discovery.is_none());
         assert_eq!(activation.activation_revision, "activation-revision");
         assert_eq!(activation.skills.len(), 1);
         assert_eq!(
@@ -515,9 +572,15 @@ fn terminal_pending_action_persistence_redacts_only_skill_instruction_bodies() {
             checkpoint.context_items[0].origin.as_ref().unwrap().id,
             "bundled:application:repository-evidence-auditor"
         );
+        assert_eq!(checkpoint.context_items[1].content, "");
+        assert_eq!(checkpoint.context_items[1].sources, vec!["skill_catalog"]);
         assert_eq!(
-            checkpoint.context_items[1].content,
+            checkpoint.context_items[2].content,
             "NON_SKILL_CHECKPOINT_CONTENT"
+        );
+        assert_eq!(
+            checkpoint.extension_snapshots[0].state["discovery"],
+            serde_json::Value::Null
         );
     }
 
@@ -525,6 +588,9 @@ fn terminal_pending_action_persistence_redacts_only_skill_instruction_bodies() {
     assert!(pending_storage_record(&record, 4)
         .agent_input_json
         .contains(MARKER));
+    assert!(pending_storage_record(&record, 4)
+        .agent_input_json
+        .contains(CATALOG_MARKER));
 }
 
 #[test]
@@ -548,6 +614,7 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
             revision: "package-missing-row".to_string(),
             source: "bundled:application".to_string(),
             instructions: MARKER.to_string(),
+            source_bytes: u64::try_from(MARKER.len()).unwrap(),
             resources: None,
         }],
     });
@@ -625,6 +692,7 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
             revision: "package-cancel-rollback".to_string(),
             source: "bundled:application".to_string(),
             instructions: MARKER.to_string(),
+            source_bytes: u64::try_from(MARKER.len()).unwrap(),
             resources: None,
         }],
     });

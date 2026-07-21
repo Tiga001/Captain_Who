@@ -6,7 +6,7 @@ use std::path::Path;
 use mycopilot_core::skills::{
     InstalledGitHubTrackingReference, InstalledSkillRecord, InstalledSkillSourcePresentation,
     ManagedSkillInstallerError, ManagedSkillInstallerErrorCode, ManagedSkillStoreCapacity,
-    SkillActivationError, SkillActivationScope, SkillCatalog, SkillDescriptor,
+    SkillActivationError, SkillActivationScope, SkillCatalog, SkillDescriptor, SkillDiagnosticCode,
     SkillDiagnosticSeverity, SkillErrorCode, SkillInstallationMutation, SkillInstallationOperation,
     SkillInstallationOutcome, SkillInstallationService, SkillInstallationServiceError,
     SkillInstallationWorkflow, SkillProvenance, SkillRecovery, SkillResourceSession,
@@ -15,7 +15,10 @@ use mycopilot_core::skills::{
 use mycopilot_core::storage::service::StorageService;
 use mycopilot_core::storage::skill_enablement_repository::SkillEnablementCompareAndSetOutcome;
 use mycopilot_core::storage::skill_enablement_repository::SkillEnablementState;
-use mycopilot_core::{AgentActivatedSkill, AgentActivatedSkillResources, AgentSkillActivation};
+use mycopilot_core::{
+    AgentActivatedSkill, AgentActivatedSkillResources, AgentError, AgentResolvedSkillActivation,
+    AgentSkillActivation, AgentSkillActivationResolver,
+};
 use mycopilot_protocol_rs::{
     ActivatedSkillSummaryDto, SkillActivationErrorCodeDto, SkillActivationErrorData,
     SkillActivationRecoveryDto, SkillCompatibilityReportDto, SkillCompatibilityStatusDto,
@@ -35,11 +38,13 @@ use sha2::{Digest, Sha256};
 
 mod activation;
 mod catalog;
+mod discovery;
 mod installation;
 mod management;
 
 pub(crate) use activation::*;
 pub(crate) use catalog::*;
+pub(crate) use discovery::*;
 pub(crate) use installation::*;
 pub(crate) use management::*;
 

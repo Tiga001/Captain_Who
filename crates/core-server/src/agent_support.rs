@@ -1,6 +1,8 @@
 // Support types and helper functions for core-server agent orchestration.
 use crate::agent::{AGENT_EVENT_NAME, ID_COUNTER, THINKING_PLACEHOLDER};
-use crate::skills_adapter::{activate_selected_skills, SkillActivationFailure};
+use crate::skills_adapter::{
+    activate_selected_skills, prepare_enabled_skill_discovery, SkillActivationFailure,
+};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,7 +27,7 @@ use mycopilot_core::{
     AgentProposedAction, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
     AgentSkillMaterializationRequest, AgentSkillScriptRequest, AgentToolCall, AgentToolResult,
     AgentUsage, AgentWorkspaceContext, ContextCompactionAuditBundle, ContextJournalCursor,
-    ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
+    ConversationTurnTrace, ConversationTurnTraceTerminalStatus, ModelCapabilities,
 };
 use mycopilot_protocol_rs::{
     ActivatedSkillSummaryDto, SkillActivationErrorData, SkillSelectionDto,

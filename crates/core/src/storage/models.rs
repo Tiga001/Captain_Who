@@ -2,6 +2,14 @@ use crate::protocol::AgentPermissions;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
+/// Backend-authoritative context capacity used when a model configuration omits an override.
+///
+/// The renderer exposes the same default while editing model settings, but persisted records keep
+/// the field optional for backwards compatibility. Backend callers must use
+/// [`ModelConfigRecord::effective_context_window_tokens`] instead of interpreting `None` as an
+/// unconfigured runtime.
+pub const DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS: u32 = 128_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelConnectionConfig {
     pub api_url: String,
@@ -60,6 +68,11 @@ fn validated_connection(
 }
 
 impl ModelConfigRecord {
+    pub fn effective_context_window_tokens(&self) -> u32 {
+        self.context_window_tokens
+            .unwrap_or(DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS)
+    }
+
     pub fn connection_override(&self) -> Result<Option<ModelConnectionConfig>, String> {
         let api_url = self.api_url_override.as_deref().unwrap_or_default().trim();
         let api_token = self
@@ -163,6 +176,24 @@ mod model_connection_tests {
         assert!(settings
             .effective_connection_for(&settings.models[0])
             .is_err());
+    }
+
+    #[test]
+    fn omitted_context_window_uses_the_backend_default() {
+        let model = model(None, None);
+
+        assert_eq!(
+            model.effective_context_window_tokens(),
+            DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS
+        );
+    }
+
+    #[test]
+    fn configured_context_window_overrides_the_backend_default() {
+        let mut model = model(None, None);
+        model.context_window_tokens = Some(256_000);
+
+        assert_eq!(model.effective_context_window_tokens(), 256_000);
     }
 }
 

@@ -126,6 +126,9 @@ impl AgentService {
                 .with_trace_observer(trace_observer)
                 .with_model_request_observer(model_request_observer)
                 .with_context_compaction(context_compaction_services);
+            host_services = host_services.with_skill_activation_resolver(
+                model_skill_activation_resolver(service.storage.clone(), service.skills.clone()),
+            );
             if let Some(resources) = skill_resources {
                 host_services = host_services.with_skill_resources(resources);
             }

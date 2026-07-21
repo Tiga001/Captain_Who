@@ -88,6 +88,18 @@ impl SkillsService {
         self.activation_policy
     }
 
+    /// Returns whether `value` is the exact id of a source registered in this service.
+    ///
+    /// Catalog diagnostics use a source id as their location only when aggregation itself could
+    /// not obtain a complete, contract-valid view of that source. Callers can use this boundary to
+    /// distinguish source-wide failures from isolated package diagnostics whose locations are
+    /// package-relative paths.
+    pub fn is_registered_source_id(&self, value: &str) -> bool {
+        self.registry
+            .keys()
+            .any(|source_id| source_id.as_str() == value)
+    }
+
     /// List every source registered in this service instance.
     pub fn list(&self) -> Result<SkillCatalog, SkillDiscoveryError> {
         Ok(self.aggregate_catalog())

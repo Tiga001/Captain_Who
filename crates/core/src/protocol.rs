@@ -5,12 +5,28 @@ use serde_json::Value;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+/// Backend-authoritative capabilities frozen for one logical model run.
+///
+/// This provider-neutral contract is intentionally separate from tool
+/// definitions. Tools remain registered consistently for prompt-cache
+/// stability and enforce unsupported capabilities at execution time.
+#[derive(Debug, Default, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCapabilities {
+    #[serde(default)]
+    pub image_input: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentChatInput {
     pub api_url: String,
     pub api_token: String,
     pub model: String,
+    /// Resolved by the backend from the selected model configuration and kept
+    /// immutable across approval pause/resume for this logical run.
+    #[serde(default)]
+    pub model_capabilities: ModelCapabilities,
     pub api_style: Option<AgentApiStyle>,
     #[serde(default)]
     pub context_window_tokens: Option<u32>,
@@ -39,6 +55,10 @@ pub struct AgentChatInput {
     /// conversation context configuration fingerprint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_activation: Option<AgentSkillActivation>,
+    /// Backend-authoritative, run-scoped metadata for globally enabled Skills that the model may
+    /// choose to activate. Full Skill instructions and resource authority are intentionally absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_discovery: Option<crate::skills::AgentSkillDiscoverySnapshot>,
     pub messages: Vec<AgentChatMessage>,
 }
 
@@ -68,6 +88,9 @@ pub struct AgentActivatedSkill {
     pub revision: String,
     pub source: String,
     pub instructions: String,
+    /// Exact verified SKILL.md source size used for aggregate activation policy enforcement.
+    #[serde(default)]
+    pub source_bytes: u64,
     /// Lightweight discovery hint for the run-scoped Resource Runtime. The
     /// resource index and bytes remain behind the host capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,6 +104,23 @@ pub struct AgentActivatedSkillResources {
     pub resource_count: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSkillActivationActor {
+    User,
+    Model,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkillActivatedEvent {
+    pub id: String,
+    pub name: String,
+    pub revision: String,
+    pub source: String,
+    pub activated_by: AgentSkillActivationActor,
 }
 
 impl std::fmt::Debug for AgentActivatedSkill {
@@ -1614,6 +1654,10 @@ pub enum AgentEvent {
         run_id: String,
         todo: AgentTodoState,
     },
+    SkillActivated {
+        run_id: String,
+        skill: AgentSkillActivatedEvent,
+    },
     FileDraftUpdated {
         run_id: String,
         draft: AgentFileDraftSnapshot,
@@ -1803,6 +1847,47 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn skill_activated_event_uses_the_stable_frontend_contract() {
+        let value = serde_json::to_value(AgentEvent::SkillActivated {
+            run_id: "run-1".to_string(),
+            skill: AgentSkillActivatedEvent {
+                id: "bundled:application:documents".to_string(),
+                name: "documents".to_string(),
+                revision: "skill-package-sha256-v2:test".to_string(),
+                source: "bundled:application".to_string(),
+                activated_by: AgentSkillActivationActor::Model,
+            },
+        })
+        .unwrap();
+
+        assert_eq!(value["type"], "skill_activated");
+        assert_eq!(value["runId"], "run-1");
+        assert_eq!(value["skill"]["activatedBy"], "model");
+        assert_eq!(value["skill"]["name"], "documents");
+    }
+
+    #[test]
+    fn model_capabilities_are_camel_case_and_legacy_agent_inputs_fail_closed() {
+        let mut input = serde_json::from_value::<AgentChatInput>(json!({
+            "apiUrl": "https://example.test/v1/chat/completions",
+            "apiToken": "secret",
+            "model": "text-only-model",
+            "messages": []
+        }))
+        .unwrap();
+
+        assert!(!input.model_capabilities.image_input);
+
+        input.model_capabilities.image_input = true;
+        let serialized = serde_json::to_value(&input).unwrap();
+        assert_eq!(serialized["modelCapabilities"]["imageInput"], true);
+        assert!(serialized.get("model_capabilities").is_none());
+
+        let round_trip = serde_json::from_value::<AgentChatInput>(serialized).unwrap();
+        assert!(round_trip.model_capabilities.image_input);
+    }
+
+    #[test]
     fn command_safety_policy_defaults_to_guarded_for_legacy_permissions() {
         let permissions: AgentPermissions = serde_json::from_value(json!({
             "read": "all",
@@ -1864,6 +1949,7 @@ mod tests {
                 revision: "skill-sha256-v1:test".to_string(),
                 source: "workspace".to_string(),
                 instructions: "PRIVATE_SKILL_INSTRUCTIONS".to_string(),
+                source_bytes: 26,
                 resources: None,
             }],
         };

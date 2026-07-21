@@ -83,6 +83,7 @@ export type AgentToolName =
   | 'apply_patch'
   | 'write_file'
   | 'run_command'
+  | 'skills_activate'
   | 'skills_list_resources'
   | 'skills_read_resource'
   | 'skills_materialize_resource'
@@ -1387,6 +1388,17 @@ export type AgentEvent =
   | { type: 'tool_call'; runId: string; call: AgentToolCall }
   | { type: 'tool_result'; runId: string; result: AgentToolResult }
   | { type: 'todo_updated'; runId: string; todo: AgentTodoState }
+  | {
+      type: 'skill_activated'
+      runId: string
+      skill: {
+        id: string
+        name: string
+        revision: string
+        source: string
+        activatedBy: 'user' | 'model'
+      }
+    }
   | { type: 'file_draft_updated'; runId: string; draft: AgentFileDraftSnapshot }
   | {
       type: 'context_window_updated'

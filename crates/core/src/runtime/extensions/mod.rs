@@ -12,15 +12,23 @@
 //! the rebuilt agent-work request. Extensions may later contribute purpose-specific context to a
 //! compaction-generation request, but they never control that restart.
 
+mod skills;
 mod todo;
 
-use crate::context::{ContextFrame, ContextItem};
+use crate::context::{ContextFrame, ContextItem, ContextTextBudget};
 use crate::protocol::{
-    AgentError, AgentEvent, AgentExtensionSnapshot, AgentResult, AgentTodoState, AgentToolResult,
+    AgentError, AgentEvent, AgentExtensionSnapshot, AgentResult, AgentSkillActivation,
+    AgentTodoState, AgentToolResult,
 };
+use crate::runtime::AgentSkillActivationResolver;
+use crate::skills::{AgentSkillDiscoverySnapshot, SkillResourceSession};
 use crate::tools::{AgentTool, ToolRegistry};
 use serde_json::Value;
+pub(in crate::runtime) use skills::checkpoint_authority_from_snapshots;
+pub(in crate::runtime) use skills::redact_discovery_from_snapshots;
+use skills::{SkillActivationExtension, SKILL_EXTENSION_ID};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use todo::{TodoExtension, TodoStateHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +49,17 @@ pub(super) struct ModelRequestContext {
     pub(super) purpose: ModelRequestPurpose,
 }
 
+/// Capacity left after the exact request frame has passed the runtime's sendability gate.
+///
+/// The allowance carries the same estimator used for that request. Extensions may reserve part
+/// of it for tool protocol messages before accepting context that will be retained on the next
+/// request.
+#[derive(Debug, Clone)]
+pub(super) struct ModelInputCapacity {
+    pub(super) remaining_tokens: u64,
+    pub(super) text_budget: ContextTextBudget,
+}
+
 impl ModelRequestContext {
     pub(super) fn agent_work() -> Self {
         Self {
@@ -55,6 +74,7 @@ pub(super) enum RuntimeExtensionEvent<'a> {
 
 pub(super) enum RuntimeEffect {
     EmitEvent(AgentEvent),
+    AppendRetainedContext(ContextItem),
 }
 
 trait RuntimeExtension: Send {
@@ -67,6 +87,10 @@ trait RuntimeExtension: Send {
     fn request_context(&self, _request: &ModelRequestContext) -> AgentResult<Vec<ContextItem>> {
         Ok(Vec::new())
     }
+
+    fn update_model_input_capacity(&mut self, _capacity: Option<ModelInputCapacity>) {}
+
+    fn consume_model_input_capacity(&mut self, _tokens: u64) {}
 
     fn on_event(&mut self, _event: &RuntimeExtensionEvent<'_>) -> AgentResult<Vec<RuntimeEffect>> {
         Ok(Vec::new())
@@ -83,9 +107,40 @@ pub(super) struct RuntimeExtensions {
 }
 
 impl RuntimeExtensions {
+    #[cfg(test)]
     pub(super) fn for_run(run_id: &str, snapshots: &[AgentExtensionSnapshot]) -> AgentResult<Self> {
+        Self::for_run_with_skills(run_id, None, None, None, None, snapshots)
+    }
+
+    pub(super) fn for_run_with_skills(
+        run_id: &str,
+        discovery: Option<AgentSkillDiscoverySnapshot>,
+        initial_activation: Option<&AgentSkillActivation>,
+        activation_resolver: Option<AgentSkillActivationResolver>,
+        skill_resources: Option<Arc<SkillResourceSession>>,
+        snapshots: &[AgentExtensionSnapshot],
+    ) -> AgentResult<Self> {
+        // A checkpoint is the authority for the logical run. Resume payloads may be rebuilt from
+        // newer UI or settings state, so they must not replace the catalog or activations frozen
+        // before an approval pause. The Skill snapshot restores both below.
+        let restores_skill_state = snapshots
+            .iter()
+            .any(|snapshot| snapshot.extension_id == SKILL_EXTENSION_ID);
+        let skills = SkillActivationExtension::new(
+            run_id.to_string(),
+            (!restores_skill_state).then_some(discovery).flatten(),
+            (!restores_skill_state)
+                .then_some(initial_activation)
+                .flatten(),
+            activation_resolver,
+            skill_resources,
+        )?;
         let (todo, todo_handle) = TodoExtension::new(run_id.to_string());
-        Self::from_extensions(vec![Box::new(todo)], Some(todo_handle), snapshots)
+        Self::from_extensions(
+            vec![Box::new(skills), Box::new(todo)],
+            Some(todo_handle),
+            snapshots,
+        )
     }
 
     fn from_extensions(
@@ -150,6 +205,18 @@ impl RuntimeExtensions {
             context.push(item);
         }
         Ok(())
+    }
+
+    pub(super) fn update_model_input_capacity(&mut self, capacity: Option<ModelInputCapacity>) {
+        for extension in &mut self.extensions {
+            extension.update_model_input_capacity(capacity.clone());
+        }
+    }
+
+    pub(super) fn consume_model_input_capacity(&mut self, tokens: u64) {
+        for extension in &mut self.extensions {
+            extension.consume_model_input_capacity(tokens);
+        }
     }
 
     pub(super) fn on_event(

@@ -455,6 +455,7 @@ mod tests {
             api_url,
             api_token: "secret-token".to_string(),
             model: "summary-model".to_string(),
+            model_capabilities: crate::ModelCapabilities::default(),
             api_style: Some(api_style),
             context_window_tokens: Some(128_000),
             context_window_indicator_enabled: false,
@@ -471,6 +472,7 @@ mod tests {
             assistant_message_id: None,
             context_compaction_summary: None,
             skill_activation: None,
+            skill_discovery: None,
             messages: Vec::new(),
         }
     }

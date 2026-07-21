@@ -14,7 +14,7 @@ use super::workspace::{percent_encode, SKILL_FILE_NAME};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 const SKILL_PACKAGE_URI_PREFIX: &str = "skill://package/";
 pub const MAX_SKILL_RESOURCE_URI_BYTES: usize = 64 * 1024;
@@ -669,9 +669,14 @@ impl SkillResourceError {
 impl fmt::Display for SkillResourceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidRequest { reason } => write!(formatter, "invalid resource request: {reason}"),
+            Self::InvalidRequest { reason } => {
+                write!(formatter, "invalid resource request: {reason}")
+            }
             Self::SkillNotActivated { skill_id } => {
-                write!(formatter, "Skill `{skill_id}` is not activated in this resource session")
+                write!(
+                    formatter,
+                    "Skill `{skill_id}` is not activated in this resource session"
+                )
             }
             Self::RevisionNotActivated {
                 skill_id,
@@ -681,14 +686,21 @@ impl fmt::Display for SkillResourceError {
                 formatter,
                 "Skill `{skill_id}` resource URI requests revision `{requested_revision}`, but this session grants `{activated_revision}`"
             ),
-            Self::ResourceNotFound { uri } => write!(formatter, "Skill resource `{uri}` was not found"),
-            Self::ResourceNotText { uri } => write!(formatter, "Skill resource `{uri}` is not valid UTF-8 text"),
+            Self::ResourceNotFound { uri } => {
+                write!(formatter, "Skill resource `{uri}` was not found")
+            }
+            Self::ResourceNotText { uri } => {
+                write!(formatter, "Skill resource `{uri}` is not valid UTF-8 text")
+            }
             Self::InvalidOffset { uri, offset } => write!(
                 formatter,
                 "byte offset {offset} is outside `{uri}` or does not align to a UTF-8 boundary"
             ),
             Self::IntegrityMismatch { uri, reason } => {
-                write!(formatter, "Skill resource `{uri}` failed integrity validation: {reason}")
+                write!(
+                    formatter,
+                    "Skill resource `{uri}` failed integrity validation: {reason}"
+                )
             }
             Self::SnapshotIntegrityMismatch {
                 skill_id,
@@ -777,14 +789,24 @@ struct SessionBinding {
     reader: Option<SkillResourceReaderRef>,
 }
 
-/// Immutable resource grants for one Agent run.
+/// Revision-bound resource grants for one Agent run.
 ///
 /// Construct one session from an [`ActivatedSkillSet`](super::ActivatedSkillSet)
 /// or restore it from persisted exact selections through [`SkillsService`](super::SkillsService).
-/// The session never consults a mutable installation receipt during reads.
+/// Each binding is immutable and never follows a mutable installation receipt. The authorized set
+/// may grow atomically when the model activates another Skill during the same run; clones share the
+/// same run-scoped authority so runtime tools and the Host executor observe one consistent set.
 #[derive(Clone)]
 pub struct SkillResourceSession {
-    bindings: Arc<BTreeMap<SkillId, SessionBinding>>,
+    bindings: Arc<RwLock<BTreeMap<SkillId, SessionBinding>>>,
+}
+
+impl Default for SkillResourceSession {
+    fn default() -> Self {
+        Self {
+            bindings: Arc::new(RwLock::new(BTreeMap::new())),
+        }
+    }
 }
 
 impl SkillResourceSession {
@@ -817,23 +839,133 @@ impl SkillResourceSession {
             }
         }
         Ok(Self {
-            bindings: Arc::new(indexed),
+            bindings: Arc::new(RwLock::new(indexed)),
         })
     }
 
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Atomically adds exact bindings prepared by a trusted activation resolver.
+    ///
+    /// Existing bindings are never replaced. Repeating the same id + revision is idempotent;
+    /// attempting to redirect an activated id to another revision fails before any insertion.
+    pub(crate) fn extend_from(&self, candidate: &Self) -> Result<(), SkillResourceError> {
+        if Arc::ptr_eq(&self.bindings, &candidate.bindings) {
+            return Ok(());
+        }
+        let additions = candidate.read_bindings().clone();
+        let mut current = self.write_bindings();
+        for (skill_id, addition) in &additions {
+            if let Some(existing) = current.get(skill_id) {
+                if existing.package != addition.package
+                    || existing.source_id != addition.source_id
+                    || existing.resources != addition.resources
+                {
+                    return Err(SkillResourceError::RevisionNotActivated {
+                        skill_id: skill_id.clone(),
+                        requested_revision: addition.package.revision().clone(),
+                        activated_revision: existing.package.revision().clone(),
+                    });
+                }
+            }
+        }
+        for (skill_id, addition) in additions {
+            current.entry(skill_id).or_insert(addition);
+        }
+        Ok(())
+    }
+
     pub fn len(&self) -> usize {
-        self.bindings.len()
+        self.read_bindings().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.bindings.is_empty()
+        self.read_bindings().is_empty()
     }
 
     pub fn package_uris(&self) -> Vec<SkillPackageUri> {
-        self.bindings
+        self.read_bindings()
             .values()
             .map(|binding| binding.package.clone())
             .collect()
+    }
+
+    /// Freeze the candidate session's sole binding for one expected package.
+    ///
+    /// An empty candidate is represented by `None`. Any non-empty candidate
+    /// must contain exactly the requested Skill id + revision; a resolver may
+    /// not smuggle grants for another package into an activation result.
+    pub(crate) fn freeze_exact_activation_binding(
+        &self,
+        expected: &SkillPackageUri,
+    ) -> Result<Option<Self>, SkillResourceError> {
+        let bindings = self.read_bindings();
+        if bindings.is_empty() {
+            return Ok(None);
+        }
+        if bindings.len() != 1 {
+            return Err(SkillResourceError::InvalidRequest {
+                reason: format!(
+                    "activation candidate for `{expected}` contains {} package bindings; expected exactly one",
+                    bindings.len()
+                ),
+            });
+        }
+        let binding = bindings
+            .values()
+            .next()
+            .expect("non-empty binding map must have one value");
+        if binding.package != *expected {
+            return Err(SkillResourceError::InvalidRequest {
+                reason: format!(
+                    "activation candidate grants `{}` instead of `{expected}`",
+                    binding.package
+                ),
+            });
+        }
+
+        let detached = Self {
+            bindings: Arc::new(RwLock::new(BTreeMap::from([(
+                expected.skill_id().clone(),
+                binding.clone(),
+            )]))),
+        };
+        Ok(Some(detached))
+    }
+
+    /// Return canonical metadata for an exact, detached activation binding.
+    pub(crate) fn sole_activation_binding_manifest(
+        &self,
+    ) -> Result<(SkillPackageUri, u64, Vec<SkillResourceKind>), SkillResourceError> {
+        let bindings = self.read_bindings();
+        if bindings.len() != 1 {
+            return Err(SkillResourceError::InvalidRequest {
+                reason: format!(
+                    "activation binding snapshot contains {} packages; expected exactly one",
+                    bindings.len()
+                ),
+            });
+        }
+        let binding = bindings
+            .values()
+            .next()
+            .expect("one-element binding map must have one value");
+        let mut kinds = binding
+            .resources
+            .entries()
+            .iter()
+            .map(SkillResourceDescriptor::kind)
+            .collect::<Vec<_>>();
+        kinds.sort_unstable_by_key(|kind| kind.stable_name());
+        kinds.dedup();
+        kinds.shrink_to_fit();
+        Ok((
+            binding.package.clone(),
+            u64::try_from(binding.resources.len()).unwrap_or(u64::MAX),
+            kinds,
+        ))
     }
 
     pub fn list(
@@ -954,8 +1086,9 @@ impl SkillResourceSession {
         })
     }
 
-    fn binding(&self, package: &SkillPackageUri) -> Result<&SessionBinding, SkillResourceError> {
-        let binding = self.bindings.get(package.skill_id()).ok_or_else(|| {
+    fn binding(&self, package: &SkillPackageUri) -> Result<SessionBinding, SkillResourceError> {
+        let bindings = self.read_bindings();
+        let binding = bindings.get(package.skill_id()).ok_or_else(|| {
             SkillResourceError::SkillNotActivated {
                 skill_id: package.skill_id().clone(),
             }
@@ -967,7 +1100,19 @@ impl SkillResourceSession {
                 activated_revision: binding.package.revision().clone(),
             });
         }
-        Ok(binding)
+        Ok(binding.clone())
+    }
+
+    fn read_bindings(&self) -> RwLockReadGuard<'_, BTreeMap<SkillId, SessionBinding>> {
+        self.bindings
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write_bindings(&self) -> RwLockWriteGuard<'_, BTreeMap<SkillId, SessionBinding>> {
+        self.bindings
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -1094,6 +1239,31 @@ mod tests {
         .unwrap()
     }
 
+    fn memory_session_with_identity(
+        skill_id: SkillId,
+        revision: SkillRevision,
+        source_id: SkillSourceId,
+    ) -> SkillResourceSession {
+        memory_resource_session_for_test(
+            skill_id,
+            revision,
+            source_id,
+            vec![
+                (
+                    "assets/icon.bin".to_string(),
+                    SkillResourceKind::Asset,
+                    vec![0xff, 0x00],
+                ),
+                (
+                    "references/guide.md".to_string(),
+                    SkillResourceKind::Reference,
+                    b"alpha\n\xE4\xB8\xAD\xE6\x96\x87\nomega\n".to_vec(),
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn canonical_uris_roundtrip_and_reject_aliases() {
         let (skill_id, revision, _) = identity();
@@ -1214,5 +1384,97 @@ mod tests {
                 .code(),
             SkillResourceErrorCode::RevisionNotActivated
         );
+    }
+
+    #[test]
+    fn empty_session_clones_share_subsequent_activations() {
+        let empty = SkillResourceSession::empty();
+        let clone = empty.clone();
+        assert!(empty.is_empty());
+        assert!(clone.is_empty());
+
+        empty.extend_from(&session()).unwrap();
+
+        assert_eq!(empty.len(), 1);
+        assert_eq!(clone.len(), 1);
+        assert_eq!(empty.package_uris(), clone.package_uris());
+    }
+
+    #[test]
+    fn extending_with_the_same_exact_binding_is_idempotent() {
+        let active_session = session();
+        let exact_duplicate = session();
+        let packages_before = active_session.package_uris();
+
+        active_session.extend_from(&exact_duplicate).unwrap();
+        active_session.extend_from(&exact_duplicate).unwrap();
+
+        assert_eq!(active_session.len(), 1);
+        assert_eq!(active_session.package_uris(), packages_before);
+    }
+
+    #[test]
+    fn conflicting_revision_rejects_the_whole_extension_atomically() {
+        let session = session();
+        let (skill_id, activated_revision, source_id) = identity();
+        let requested_revision =
+            SkillRevision::parse(format!("skill-package-sha256-v2:{}", "b".repeat(64))).unwrap();
+        let candidate = memory_session_with_identity(
+            skill_id.clone(),
+            requested_revision.clone(),
+            source_id.clone(),
+        );
+        let new_skill_id =
+            SkillId::parse("installed:user:00000000-0000-4000-8000-000000000001").unwrap();
+        let new_binding =
+            memory_session_with_identity(new_skill_id, activated_revision.clone(), source_id);
+        let new_package = new_binding.package_uris().remove(0);
+        candidate.extend_from(&new_binding).unwrap();
+        assert_eq!(candidate.len(), 2);
+
+        let error = session.extend_from(&candidate).unwrap_err();
+
+        assert!(matches!(
+            error,
+            SkillResourceError::RevisionNotActivated {
+                skill_id: rejected_skill_id,
+                requested_revision: rejected_revision,
+                activated_revision: current_revision,
+            } if rejected_skill_id == skill_id
+                && rejected_revision == requested_revision
+                && current_revision == activated_revision
+        ));
+        assert_eq!(session.len(), 1);
+        assert_eq!(
+            session
+                .list(&new_package, &SkillResourceListOptions::default())
+                .unwrap_err()
+                .code(),
+            SkillResourceErrorCode::SkillNotActivated
+        );
+    }
+
+    #[test]
+    fn preexisting_clone_reads_resources_immediately_after_activation() {
+        let empty = SkillResourceSession::empty();
+        let runtime_clone = empty.clone();
+        let activated = session();
+        let package = activated.package_uris().remove(0);
+        let uri = package.resource(SkillResourcePath::parse("references/guide.md").unwrap());
+
+        assert_eq!(
+            runtime_clone
+                .read_text(&uri, SkillResourceTextReadOptions::default())
+                .unwrap_err()
+                .code(),
+            SkillResourceErrorCode::SkillNotActivated
+        );
+
+        empty.extend_from(&activated).unwrap();
+
+        let page = runtime_clone
+            .read_text(&uri, SkillResourceTextReadOptions::default())
+            .unwrap();
+        assert_eq!(page.text(), "alpha\n中文\nomega\n");
     }
 }

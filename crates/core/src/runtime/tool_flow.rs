@@ -80,6 +80,24 @@ pub(super) fn tool_calls_from_response(
         .unwrap_or_default()
 }
 
+/// Makes progressive Skill disclosure a model-request boundary.
+///
+/// Calls planned alongside `skills_activate` were generated before the model could read the
+/// Skill's complete instructions. They are therefore discarded and must be reconsidered on the
+/// next model request. Multiple activation calls may remain in one batch so the next request sees
+/// all requested Skill instructions together.
+pub(super) fn enforce_skill_activation_barrier(
+    mut calls: Vec<LlmToolCall>,
+) -> (Vec<LlmToolCall>, usize) {
+    if !calls.iter().any(|call| call.name == "skills_activate") {
+        return (calls, 0);
+    }
+    let original_len = calls.len();
+    calls.retain(|call| call.name == "skills_activate");
+    let deferred = original_len.saturating_sub(calls.len());
+    (calls, deferred)
+}
+
 fn extract_json_value(content: &str) -> Option<Value> {
     let trimmed = content.trim();
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
@@ -354,6 +372,48 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn skill_activation_barrier_defers_calls_planned_without_full_instructions() {
+        let calls = vec![
+            LlmToolCall {
+                id: "read-before-skill".to_string(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "draft.docx" }),
+            },
+            LlmToolCall {
+                id: "activate-documents".to_string(),
+                name: "skills_activate".to_string(),
+                args: json!({ "skillRef": "s1", "reason": "Need document guidance" }),
+            },
+            LlmToolCall {
+                id: "activate-review".to_string(),
+                name: "skills_activate".to_string(),
+                args: json!({ "skillRef": "s2", "reason": "Need review guidance" }),
+            },
+        ];
+
+        let (calls, deferred) = enforce_skill_activation_barrier(calls);
+
+        assert_eq!(deferred, 1);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "activate-documents");
+        assert_eq!(calls[1].id, "activate-review");
+    }
+
+    #[test]
+    fn ordinary_parallel_calls_are_not_changed_by_the_skill_barrier() {
+        let calls = vec![LlmToolCall {
+            id: "read-1".to_string(),
+            name: "read_file".to_string(),
+            args: json!({ "path": "notes.md" }),
+        }];
+
+        let (filtered, deferred) = enforce_skill_activation_barrier(calls.clone());
+
+        assert_eq!(deferred, 0);
+        assert_eq!(filtered, calls);
+    }
 
     #[tokio::test]
     async fn cancelling_a_host_action_waits_for_its_authoritative_result() {

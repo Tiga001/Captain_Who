@@ -34,6 +34,7 @@ fn conversation_turn_resolves_skill_snapshot_before_persisting_the_run() {
     .unwrap();
 
     let activation = prepared.agent_input.skill_activation.as_ref().unwrap();
+    assert!(prepared.agent_input.skill_discovery.is_none());
     assert_eq!(activation.skills.len(), 1);
     assert_eq!(activation.skills[0].instructions.trim(), INSTRUCTIONS);
     assert_eq!(prepared.output.activated_skills.len(), 1);
@@ -170,6 +171,103 @@ fn bundled_skill_activates_without_a_project_in_turn_and_preview_paths() {
         })
         .unwrap();
     assert!(preview.snapshot.is_some());
+}
+
+#[test]
+fn projectless_turn_discovers_enabled_managed_skills_without_explicit_activation() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage.save_model_settings(test_model_settings()).unwrap();
+    let skills = SkillsService::new().with_bundled_source().unwrap();
+    let input = AgentConversationTurnInput {
+        conversation_id: Some("conversation-projectless-discovery".to_string()),
+        project_id: None,
+        model_id: "model-1".to_string(),
+        context_window_indicator_enabled: true,
+        content: "Create a spreadsheet.".to_string(),
+        attachments: Vec::new(),
+        skills: Vec::new(),
+        title: None,
+        user_message_id: Some("user-projectless-discovery".to_string()),
+        assistant_message_id: Some("assistant-projectless-discovery".to_string()),
+        max_tokens: None,
+        temperature: None,
+        prompt_preferences: None,
+        permissions: AgentPermissions::default(),
+    };
+
+    let prepared =
+        prepare_conversation_turn(&storage, &skills, input, "run-projectless-discovery").unwrap();
+
+    assert!(prepared.agent_input.skill_activation.is_none());
+    let discovery = prepared
+        .agent_input
+        .skill_discovery
+        .as_ref()
+        .expect("enabled bundled Skills should be discoverable");
+    assert_eq!(
+        discovery.skills.len(),
+        skills.list().unwrap().skills().len()
+    );
+    assert!(prepared
+        .skill_resources
+        .as_ref()
+        .is_some_and(|resources| resources.is_empty()));
+    assert!(prepared.output.activated_skills.is_empty());
+}
+
+#[test]
+fn omitted_model_context_window_uses_the_same_backend_default_for_turn_and_preview() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let mut settings = test_model_settings();
+    settings.models[0].context_window_tokens = None;
+    storage.save_model_settings(settings).unwrap();
+    let skills = Arc::new(SkillsService::new());
+    let input = AgentConversationTurnInput {
+        conversation_id: Some("conversation-default-context-window".to_string()),
+        project_id: None,
+        model_id: "model-1".to_string(),
+        context_window_indicator_enabled: true,
+        content: "Verify the default context capacity.".to_string(),
+        attachments: Vec::new(),
+        skills: Vec::new(),
+        title: None,
+        user_message_id: Some("user-default-context-window".to_string()),
+        assistant_message_id: Some("assistant-default-context-window".to_string()),
+        max_tokens: Some(30_000),
+        temperature: None,
+        prompt_preferences: None,
+        permissions: AgentPermissions::default(),
+    };
+
+    let prepared =
+        prepare_conversation_turn(&storage, &skills, input, "run-default-context-window").unwrap();
+    assert_eq!(
+        prepared.agent_input.context_window_tokens,
+        Some(mycopilot_core::storage::models::DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS)
+    );
+
+    let service = AgentService::new(Arc::clone(&storage)).with_skills_service(skills);
+    let preview = service
+        .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+            conversation_id: None,
+            project_id: None,
+            model_id: "model-1".to_string(),
+            max_tokens: Some(30_000),
+            prompt_preferences: None,
+            permissions: AgentPermissions::default(),
+            skills: Vec::new(),
+        })
+        .unwrap()
+        .snapshot
+        .unwrap();
+    assert_eq!(
+        preview.context_window_tokens,
+        Some(u64::from(
+            mycopilot_core::storage::models::DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS
+        ))
+    );
 }
 
 #[test]
@@ -430,6 +528,68 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         .permissions
         .write = AgentWritePermission::WorkspaceOnly;
     let service = AgentService::new(Arc::clone(&storage)).with_skills_service(Arc::clone(&skills));
+    let mut dynamically_activated_input = prepared.agent_input.clone();
+    dynamically_activated_input.skill_activation = None;
+    let frozen_discovery = dynamically_activated_input
+        .skill_discovery
+        .clone()
+        .expect("managed Skills must have a discovery snapshot");
+    dynamically_activated_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        version: 2,
+        run_id: "run-dynamic-installed-skill".to_string(),
+        context_items: Vec::new(),
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        suppressed_narration: false,
+        extension_snapshots: vec![mycopilot_core::AgentExtensionSnapshot {
+            extension_id: "skills".to_string(),
+            version: 2,
+            state: json!({
+                "discovery": frozen_discovery,
+                "skills": [{
+                    "id": activation.skills[0].id.clone(),
+                    "name": activation.skills[0].name.clone(),
+                    "revision": activation.skills[0].revision.clone(),
+                    "source": activation.skills[0].source.clone(),
+                    "sourceBytes": activation.skills[0].source_bytes,
+                    "hasResources": true,
+                    "activatedBy": "model"
+                }]
+            }),
+        }],
+        pending_tool_call_id: "pending-after-dynamic-skill".to_string(),
+        conversation_trace_items: Vec::new(),
+        next_conversation_trace_sequence: 0,
+        conversation_trace_truncated: false,
+        model_visible_trace_item_count: 0,
+    });
+    let dynamically_restored = service
+        .restore_skill_resource_session(&dynamically_activated_input)
+        .unwrap()
+        .expect("dynamic checkpoint must restore exact Skill resources");
+    let dynamically_restored_text = dynamically_restored
+        .read_text(
+            template_entry.uri(),
+            mycopilot_core::skills::SkillResourceTextReadOptions::new(0, 1024).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        dynamically_restored_text.text(),
+        "revision-bound resource marker"
+    );
+    let mut tampered_dynamic_input = dynamically_activated_input.clone();
+    tampered_dynamic_input
+        .resume_checkpoint
+        .as_mut()
+        .unwrap()
+        .extension_snapshots[0]
+        .state["skills"][0]["id"] = json!("installed:user:00000000-0000-4000-8000-000000000001");
+    let tampered_error = service
+        .restore_skill_resource_session(&tampered_dynamic_input)
+        .unwrap_err();
+    assert!(tampered_error
+        .to_string()
+        .contains("absent from the frozen catalog"));
     let request = AgentSkillMaterializationRequest {
         id: "materialize-runtime-template".to_string(),
         source_uri: template_entry.uri().to_string(),

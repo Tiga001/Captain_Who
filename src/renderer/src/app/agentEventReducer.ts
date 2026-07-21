@@ -1109,6 +1109,13 @@ export function applyAgentEventToChatMessage(
     }
   }
 
+  if (agentEvent.type === 'skill_activated') {
+    // Backend-authoritative activation is already represented by the paired skills_activate
+    // ToolCall/ToolResult. Keep the run alive until the dedicated Skill activity projection is
+    // implemented instead of letting this non-terminal notification fall through to finalization.
+    return message
+  }
+
   if (agentEvent.type === 'approval_required') {
     const call = getActionToolCall(agentEvent.action)
     const timeline = call

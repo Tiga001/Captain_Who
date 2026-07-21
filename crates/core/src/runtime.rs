@@ -60,7 +60,10 @@ use checkpoint::{
     ToolCallBatch,
 };
 use context_compaction::{ContextCompactionExecution, ContextCompactionExecutor};
-use extensions::{ModelRequestContext, RuntimeEffect, RuntimeExtensionEvent, RuntimeExtensions};
+use extensions::{
+    ModelInputCapacity, ModelRequestContext, RuntimeEffect, RuntimeExtensionEvent,
+    RuntimeExtensions,
+};
 use file_transactions::{
     FileTransactionRunGuard, FileTransactionState, MAX_RESPONSE_FENCE_CORRECTIONS,
 };
@@ -71,10 +74,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tool_flow::{
     approve_proposed_action, build_tool_observation_message, cancelled_output, done_event,
-    execute_host_action_on_blocking_thread, execute_tool_on_blocking_thread,
-    extract_reason_from_args, failed_tool_call_result, file_draft_from_tool_result,
-    generate_run_id, llm_image_message_from_tool_result, redact_tool_result_for_event,
-    sanitize_max_tokens, sanitize_temperature, state_event, tool_calls_from_response,
+    enforce_skill_activation_barrier, execute_host_action_on_blocking_thread,
+    execute_tool_on_blocking_thread, extract_reason_from_args, failed_tool_call_result,
+    file_draft_from_tool_result, generate_run_id, llm_image_message_from_tool_result,
+    redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
+    tool_calls_from_response,
 };
 use tool_input_stream::ToolInputStreamObservers;
 
@@ -181,11 +185,13 @@ impl AgentRuntime {
             model_request_observer,
             context_compaction_services,
             skill_resources,
+            skill_activation_resolver,
             office_engine,
             command_runtime_profile_resolver,
         } = host_services.unwrap_or_default();
         let run_id = run_id.unwrap_or_else(generate_run_id);
         let context = input.context.clone();
+        let model_capabilities = input.model_capabilities;
         let trace_conversation_id = context
             .as_ref()
             .and_then(|context| context.conversation_id.clone());
@@ -224,12 +230,14 @@ impl AgentRuntime {
             command_permissions,
             command_workspace_root,
             patch_auto_approve,
-        } = prepare_runtime_capabilities(
+        } = prepare_runtime_capabilities_with_skills(
             &input,
             &run_id,
             extension_snapshots,
             host_executor.is_some(),
             office_engine,
+            skill_activation_resolver,
+            skill_resources.clone(),
         )
         .map_err(|error| {
             attach_failed_runtime_trace(
@@ -286,6 +294,7 @@ impl AgentRuntime {
             .tool_output_text_budget(llm_request.context_window_tokens, llm_request.max_tokens);
         let tool_context = ToolExecutionContext::from_run_context(context.as_ref())
             .with_cancellation(cancellation_token.clone())
+            .with_model_capabilities(model_capabilities)
             .with_runtime_services(run_id.clone(), storage)
             .with_skill_resources(skill_resources)
             .with_command_runtime_profile_resolver(command_runtime_profile_resolver)
@@ -375,7 +384,7 @@ impl AgentRuntime {
                             &request_context,
                             &llm_request.tools,
                         );
-                        if let Some(detector) = &context_capacity_detector {
+                        let model_input_capacity = if let Some(detector) = &context_capacity_detector {
                             let report = detector.inspect(
                                 &mut request_context,
                                 llm_request.context_window_tokens,
@@ -503,8 +512,18 @@ impl AgentRuntime {
                             }
                             request_estimate =
                                 Some(ModelRequestEstimate::from_budget_report(&report));
+                            let remaining_tokens = report
+                                .remaining_input_tokens
+                                .map(|remaining| u64::try_from(remaining.max(0)).unwrap_or(0));
                             detector.ensure_sendable(report)?;
-                        }
+                            remaining_tokens.map(|remaining_tokens| ModelInputCapacity {
+                                remaining_tokens,
+                                text_budget: detector.text_budget(remaining_tokens.max(1)),
+                            })
+                        } else {
+                            None
+                        };
+                        runtime_extensions.update_model_input_capacity(model_input_capacity);
                         break (request_context, request_estimate);
                     };
                     let observation_builder = ModelRequestObservationBuilder::new(
@@ -522,6 +541,7 @@ impl AgentRuntime {
                     );
                     let request = llm_request.request(request_context);
                     let mut committed_message_stream_id = None;
+                    let mut committed_tool_input_preview = None;
                     let llm_response_result = if request.stream {
                         let delta_run_id = run_id.clone();
                         let stream_id = format!("{}-stream-{}", run_id, model_request_index + 1);
@@ -636,6 +656,8 @@ impl AgentRuntime {
                                                 preview,
                                             );
                                         }
+                                        committed_tool_input_preview =
+                                            Some((stream_id.clone(), tool_input_stream.attempt()));
                                         if !user_text_blocked {
                                             committed_message_stream_id = Some(stream_id.clone());
                                         }
@@ -706,6 +728,54 @@ impl AgentRuntime {
                         &run_id,
                         model_request_index,
                     );
+                    let (tool_requests, deferred_for_skill_activation) =
+                        enforce_skill_activation_barrier(tool_requests);
+                    let retained_assistant_content = if user_text_blocked {
+                        ""
+                    } else {
+                        llm_response.content.as_str()
+                    };
+                    let suppressed_narration =
+                        user_text_blocked && !llm_response.content.trim().is_empty();
+                    let deferred_activation_guard =
+                        (deferred_for_skill_activation > 0).then(|| {
+                            format!(
+                                "The runtime deferred {deferred_for_skill_activation} tool call(s) that were planned in the same response as skills_activate. Re-evaluate those actions after the Skill activation results and complete instructions are available."
+                            )
+                        });
+                    if let Some(detector) = &context_capacity_detector {
+                        let mut retained_tokens = detector
+                            .estimate_assistant_tool_batch_tokens(
+                                retained_assistant_content,
+                                &tool_requests,
+                            );
+                        if let Some(guard) = &deferred_activation_guard {
+                            retained_tokens = retained_tokens.saturating_add(
+                                detector.estimate_message_tokens(&LlmMessage::text(
+                                    LlmMessageRole::System,
+                                    guard,
+                                )),
+                            );
+                        }
+                        if suppressed_narration {
+                            for message in ContextFrame::new(vec![
+                                suppressed_narration_context_item(),
+                            ])
+                            .into_messages()
+                            {
+                                retained_tokens = retained_tokens.saturating_add(
+                                    detector.estimate_message_tokens(&message),
+                                );
+                            }
+                        }
+                        runtime_extensions.consume_model_input_capacity(retained_tokens);
+                    }
+                    clear_deferred_tool_input_preview(
+                        &event_stream,
+                        &run_id,
+                        deferred_for_skill_activation,
+                        &mut committed_tool_input_preview,
+                    );
                     if !tool_requests.is_empty()
                         && !user_text_blocked
                         && !llm_response.content.trim().is_empty()
@@ -766,8 +836,15 @@ impl AgentRuntime {
                         return Err(AgentError::new(message));
                     }
 
-                    let suppressed_narration =
-                        user_text_blocked && !llm_response.content.trim().is_empty();
+                    if let Some(guard) = deferred_activation_guard {
+                        active_context.push(ContextItem::text(
+                            LlmMessageRole::System,
+                            guard,
+                            ContextSource::RuntimeGuard,
+                            ContextScope::Run,
+                            ContextRetention::Retained,
+                        ));
+                    }
                     tool_batch = ToolCallBatch::from_model_response(
                         &run_id,
                         model_request_index,
@@ -1185,13 +1262,6 @@ impl AgentRuntime {
                             draft,
                         });
                     }
-                    for effect in runtime_extensions
-                        .on_event(RuntimeExtensionEvent::ToolCompleted { result: &result })?
-                    {
-                        match effect {
-                            RuntimeEffect::EmitEvent(event) => event_stream.emit(event),
-                        }
-                    }
 
                     active_context.push(
                         ContextItem::tool_result(
@@ -1221,6 +1291,19 @@ impl AgentRuntime {
                             )
                             .with_group(tool_exchange_group.clone()),
                         ));
+                    }
+                    let extension_effects = runtime_extensions
+                        .on_event(RuntimeExtensionEvent::ToolCompleted { result: &result })?;
+                    // A tool result must remain adjacent to its assistant tool call. Runtime
+                    // extensions may append retained context only after the paired result has
+                    // entered the frame, otherwise provider tool-call protocol would be invalid.
+                    for effect in extension_effects {
+                        match effect {
+                            RuntimeEffect::EmitEvent(event) => event_stream.emit(event),
+                            RuntimeEffect::AppendRetainedContext(item) => {
+                                active_context.push(item)
+                            }
+                        }
                     }
                     if cancellation_token.is_cancelled() {
                         return Ok(cancelled_output(
@@ -1295,6 +1378,28 @@ impl AgentRuntime {
             trace_assistant_message_id.as_deref(),
         )
     }
+}
+
+fn clear_deferred_tool_input_preview(
+    event_stream: &AgentEventStream,
+    run_id: &str,
+    deferred_call_count: usize,
+    committed_preview: &mut Option<(String, usize)>,
+) {
+    if deferred_call_count == 0 {
+        return;
+    }
+    let Some((stream_id, attempt)) = committed_preview.take() else {
+        return;
+    };
+    // The activation barrier discards every non-activation call from this model response. Any
+    // streamed write preview belongs to one of those discarded calls and must not survive into
+    // the replanning request.
+    event_stream.emit_transient(AgentEvent::FileWritePreviewCleared {
+        run_id: run_id.to_string(),
+        stream_id,
+        attempt,
+    });
 }
 
 #[cfg(test)]

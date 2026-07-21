@@ -14,6 +14,28 @@ pub type AgentHostActionExecutor = Arc<
         + Sync
         + 'static,
 >;
+pub type AgentSkillActivationResolver = Arc<
+    dyn Fn(&crate::skills::SkillSelection) -> AgentResult<AgentResolvedSkillActivation>
+        + Send
+        + Sync
+        + 'static,
+>;
+
+#[derive(Clone)]
+pub struct AgentResolvedSkillActivation {
+    pub skill: crate::protocol::AgentActivatedSkill,
+    pub resources: Arc<crate::skills::SkillResourceSession>,
+}
+
+impl std::fmt::Debug for AgentResolvedSkillActivation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentResolvedSkillActivation")
+            .field("skill", &self.skill)
+            .field("resource_packages", &self.resources.package_uris())
+            .finish()
+    }
+}
 
 /// Optional capabilities supplied by the process that hosts the agent runtime.
 ///
@@ -27,6 +49,7 @@ pub struct AgentRuntimeHostServices {
     pub(super) model_request_observer: Option<AgentModelRequestObserver>,
     pub(super) context_compaction_services: Option<AgentContextCompactionServices>,
     pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
+    pub(super) skill_activation_resolver: Option<AgentSkillActivationResolver>,
     pub(super) office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
     pub(super) command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
@@ -78,6 +101,17 @@ impl AgentRuntimeHostServices {
         self
     }
 
+    /// Supplies the trusted, host-owned resolver for one exact Skill selection. The model never
+    /// receives this capability directly; `skills_activate` can only address selections frozen in
+    /// the run's discovery snapshot.
+    pub fn with_skill_activation_resolver(
+        mut self,
+        resolver: AgentSkillActivationResolver,
+    ) -> Self {
+        self.skill_activation_resolver = Some(resolver);
+        self
+    }
+
     /// Supplies the application-owned Office provider used by both read-only
     /// runtime tools and approval-gated Host operations. The provider remains
     /// outside model input and persisted checkpoints.
@@ -96,6 +130,50 @@ impl AgentRuntimeHostServices {
         self
     }
 }
+
+/// Extracts exact resource-bearing Skill selections from the versioned Skill extension state in
+/// an approval checkpoint. Hosts use this before resuming so model-activated resource authority is
+/// restored from immutable package revisions rather than mutable installation receipts. The host
+/// must additionally prove that selections not present in the explicit activation belong to the
+/// same run's frozen discovery snapshot before opening package bytes.
+pub fn skill_resource_selections_from_checkpoint(
+    checkpoint: &crate::protocol::AgentRunCheckpoint,
+) -> AgentResult<Vec<crate::skills::SkillSelection>> {
+    Ok(skill_checkpoint_authority(checkpoint)?
+        .map(|authority| authority.resource_selections)
+        .unwrap_or_default())
+}
+
+/// Trusted Skill authority frozen at an approval boundary.
+///
+/// A resumed run must use this catalog and these immutable package revisions instead of accepting
+/// replacement Skill metadata from the continuation payload or current installation receipts.
+#[derive(Debug, Clone)]
+pub struct AgentSkillCheckpointAuthority {
+    pub discovery: Option<crate::skills::AgentSkillDiscoverySnapshot>,
+    pub resource_selections: Vec<crate::skills::SkillSelection>,
+}
+
+pub fn skill_checkpoint_authority(
+    checkpoint: &crate::protocol::AgentRunCheckpoint,
+) -> AgentResult<Option<AgentSkillCheckpointAuthority>> {
+    Ok(
+        super::extensions::checkpoint_authority_from_snapshots(&checkpoint.extension_snapshots)?
+            .map(
+                |(discovery, resource_selections)| AgentSkillCheckpointAuthority {
+                    discovery,
+                    resource_selections,
+                },
+            ),
+    )
+}
+
+/// Removes the run-scoped discovery catalog from a terminal checkpoint while retaining bounded
+/// activation summaries for audit. Unknown Skill extension versions are dropped fail-closed.
+pub fn redact_terminal_skill_discovery(checkpoint: &mut crate::protocol::AgentRunCheckpoint) {
+    super::extensions::redact_discovery_from_snapshots(&mut checkpoint.extension_snapshots);
+}
+
 pub use super::context_compaction::{
     AgentContextCompactionCommitOutcome, AgentContextCompactionCommitRequest,
     AgentContextCompactionGenerationOutput, AgentContextCompactionGenerationRequest,
@@ -177,10 +255,15 @@ pub fn next_run_id() -> String {
 pub fn inspect_context_window(
     mut input: AgentChatInput,
 ) -> AgentResult<Option<AgentContextWindowSnapshot>> {
+    let skill_discovery = input.skill_discovery.take();
     let skill_activation = input.skill_activation.take();
     let mut state = create_conversation_context_state(input)?;
     state
-        .snapshot_with_skill_activation(AgentContextWindowPhase::Idle, skill_activation.as_ref())
+        .snapshot_with_skill_overlays(
+            AgentContextWindowPhase::Idle,
+            skill_discovery.as_ref(),
+            skill_activation.as_ref(),
+        )
         .map(Some)
 }
 
@@ -195,6 +278,7 @@ pub fn create_conversation_context_state(
     let assembled = assemble_context_preview(
         input.context_compaction_summary.clone(),
         input.messages,
+        None,
         None,
         input.context.as_ref(),
         input.prompt_preferences.as_ref(),
@@ -217,7 +301,7 @@ pub fn create_conversation_context_state(
 }
 
 pub(super) struct PreparedConversationContext {
-    tool_definitions: Vec<AgentToolDefinition>,
+    pub(super) tool_definitions: Vec<AgentToolDefinition>,
     api_style: crate::protocol::AgentApiStyle,
     configuration_revision: String,
 }

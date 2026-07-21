@@ -184,6 +184,13 @@ impl ContextTextBudget {
         self.estimator.estimate_text(value)
     }
 
+    /// Measures a complete provider-facing message with the same estimator as the owning
+    /// request. Runtime extensions use this for retained protocol messages whose structure,
+    /// tool-call ids, or tool arguments cannot be represented by a plain text allowance.
+    pub(crate) fn estimate_message(&self, message: &LlmMessage) -> u64 {
+        self.estimator.estimate_message(message).total_tokens()
+    }
+
     pub(crate) fn fits(&self, value: &str) -> bool {
         self.estimate(value) <= self.max_tokens
     }

@@ -46,6 +46,21 @@ impl AgentTool for ReadImageTool {
 
     fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value> {
         context.check_cancelled()?;
+        if !context.model_capabilities().image_input {
+            return Err(AgentError::structured(
+                "agent.model_capability_unsupported",
+                "当前模型不支持图片输入；read_image 无法把图片作为视觉输入提供给该模型，文件尚未读取。请切换到支持图片输入的模型后重试。",
+                json!({
+                    "type": "model_capability",
+                    "code": "modelCapabilityUnsupported",
+                    "capability": "imageInput",
+                    "required": true,
+                    "actual": false,
+                    "tool": "read_image",
+                    "recovery": "switchToImageCapableModel"
+                }),
+            ));
+        }
         let args: ReadImageArgs = serde_json::from_value(args)
             .map_err(|error| AgentError::new(format!("read_image 参数无效：{error}")))?;
         let path = args.path()?;

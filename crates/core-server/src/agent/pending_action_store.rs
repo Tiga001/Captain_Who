@@ -895,6 +895,7 @@ pub(super) fn persisted_pending_agent_input_json(
     // need its continuation input. Once the action is terminal, the live continuation owns any
     // remaining in-memory copy; the durable row only retains Skill identity and revision metadata.
     if pending_status_redacts_run_scoped_input(status) {
+        persisted_agent_input.skill_discovery = None;
         if let Some(activation) = persisted_agent_input.skill_activation.as_mut() {
             for skill in &mut activation.skills {
                 skill.instructions.clear();
@@ -902,18 +903,17 @@ pub(super) fn persisted_pending_agent_input_json(
         }
         if let Some(checkpoint) = persisted_agent_input.resume_checkpoint.as_mut() {
             for item in &mut checkpoint.context_items {
-                let is_skill_instructions = item
-                    .sources
-                    .iter()
-                    .any(|source| source == "skill_instructions")
-                    || item
-                        .origin
-                        .as_ref()
-                        .is_some_and(|origin| origin.kind == "skill");
-                if is_skill_instructions {
+                let is_skill_context = item.sources.iter().any(|source| {
+                    matches!(source.as_str(), "skill_instructions" | "skill_catalog")
+                }) || item
+                    .origin
+                    .as_ref()
+                    .is_some_and(|origin| origin.kind == "skill");
+                if is_skill_context {
                     item.content.clear();
                 }
             }
+            mycopilot_core::redact_terminal_skill_discovery(checkpoint);
         }
     }
     serialize_json(&persisted_agent_input)

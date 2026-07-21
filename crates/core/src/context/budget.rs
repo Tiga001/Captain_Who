@@ -9,6 +9,7 @@ use super::measurement::{
     combine_context_revisions, ContextMessageEstimate, ContextRevisionHasher, ContextTextBudget,
     ContextTokenEstimator, HeuristicTokenEstimator,
 };
+use crate::llm::{LlmMessage, LlmToolCall};
 use crate::protocol::{
     AgentApiStyle, AgentContextWindowPhase, AgentContextWindowSnapshot, AgentContextWindowStatus,
     AgentError, AgentResult, AgentToolDefinition,
@@ -383,6 +384,43 @@ impl ContextCapacityDetector {
             .unwrap_or(ContextTextBudget::DEFAULT_MAX_TOKENS)
             .clamp(1, ContextTextBudget::DEFAULT_MAX_TOKENS);
         ContextTextBudget::new(self.estimator.clone(), max_tokens)
+    }
+
+    /// Creates a text allowance backed by the exact estimator selected for this run.
+    ///
+    /// Runtime extensions use this when a newly disclosed context fragment must fit the
+    /// remaining model-input capacity before they commit any activation side effects.
+    pub(crate) fn text_budget(&self, max_tokens: u64) -> ContextTextBudget {
+        ContextTextBudget::new(self.estimator.clone(), max_tokens)
+    }
+
+    /// Estimates the assistant messages retained by `ToolCallBatch` after runtime filtering.
+    ///
+    /// The runtime stores parallel calls as adjacent one-call messages (only the first keeps the
+    /// assistant narration), so measuring one synthetic multi-call message would undercount
+    /// structure and would charge calls discarded by a progressive-disclosure barrier.
+    pub(crate) fn estimate_assistant_tool_batch_tokens(
+        &self,
+        content: &str,
+        tool_calls: &[LlmToolCall],
+    ) -> u64 {
+        tool_calls
+            .iter()
+            .enumerate()
+            .fold(0_u64, |total, (index, tool_call)| {
+                total.saturating_add(
+                    self.estimator
+                        .estimate_message(&LlmMessage::assistant(
+                            if index == 0 { content } else { "" },
+                            vec![tool_call.clone()],
+                        ))
+                        .total_tokens(),
+                )
+            })
+    }
+
+    pub(crate) fn estimate_message_tokens(&self, message: &LlmMessage) -> u64 {
+        self.estimator.estimate_message(message).total_tokens()
     }
 
     pub(crate) fn inspect(

@@ -250,7 +250,8 @@ impl ToolRegistry {
             };
         };
 
-        match tool.execute(context, call.args.clone()) {
+        let call_context = context.clone().with_tool_call_id(call.id.clone());
+        match tool.execute(&call_context, call.args.clone()) {
             Ok(result) => match context.check_cancelled() {
                 Ok(()) => AgentToolResult {
                     call_id: call.id.clone(),
@@ -458,7 +459,7 @@ mod tests {
     use crate::protocol::{
         AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachmentKind,
         AgentRunContext, AgentSearchConfig, AgentSearchMode, AgentToolCall, AgentToolSafety,
-        AgentWorkspaceContext,
+        AgentWorkspaceContext, ModelCapabilities,
     };
     use serde_json::json;
     use std::fs;
@@ -924,6 +925,39 @@ mod tests {
     }
 
     #[test]
+    fn read_image_rejects_text_only_models_before_resolving_the_path() {
+        let context = ToolExecutionContext::from_run_context(None);
+        let registry = ToolRegistry::defaults_with_search(None);
+        let result = registry.execute(
+            &context,
+            &AgentToolCall {
+                id: "call-image-unsupported".to_string(),
+                tool: "read_image".to_string(),
+                args: json!({ "path": "/path/that/must/not/be-resolved.png" }),
+                approval_status: crate::protocol::AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
+
+        assert!(!result.ok);
+        assert_eq!(result.call_id, "call-image-unsupported");
+        assert_eq!(result.tool, "read_image");
+        let value = result.result.as_ref().expect("structured capability error");
+        assert_eq!(value["type"], "model_capability");
+        assert_eq!(value["code"], "modelCapabilityUnsupported");
+        assert_eq!(value["errorCode"], "agent.model_capability_unsupported");
+        assert_eq!(value["capability"], "imageInput");
+        assert_eq!(value["required"], true);
+        assert_eq!(value["actual"], false);
+        assert_eq!(value["tool"], "read_image");
+        assert_eq!(value["recovery"], "switchToImageCapableModel");
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("文件尚未读取")));
+    }
+
+    #[test]
     fn read_image_reads_attachment_visual_payload() {
         let fixture = TestWorkspace::new();
         let attachment_root = fixture.root.join("attachments");
@@ -956,7 +990,8 @@ mod tests {
                 project_attachments: Vec::new(),
             }),
             permissions: Default::default(),
-        }));
+        }))
+        .with_model_capabilities(ModelCapabilities { image_input: true });
         let registry = ToolRegistry::defaults_with_search(None);
         let result = registry.execute(
             &context,

@@ -7,7 +7,34 @@ pub(super) fn prepare_runtime_capabilities(
     host_actions_available: bool,
     office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
 ) -> AgentResult<PreparedRuntimeCapabilities> {
-    let runtime_extensions = RuntimeExtensions::for_run(run_id, extension_snapshots)?;
+    prepare_runtime_capabilities_with_skills(
+        input,
+        run_id,
+        extension_snapshots,
+        host_actions_available,
+        office_engine,
+        None,
+        None,
+    )
+}
+
+pub(super) fn prepare_runtime_capabilities_with_skills(
+    input: &AgentChatInput,
+    run_id: &str,
+    extension_snapshots: &[AgentExtensionSnapshot],
+    host_actions_available: bool,
+    office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
+    skill_activation_resolver: Option<AgentSkillActivationResolver>,
+    skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
+) -> AgentResult<PreparedRuntimeCapabilities> {
+    let runtime_extensions = RuntimeExtensions::for_run_with_skills(
+        run_id,
+        input.skill_discovery.clone(),
+        input.skill_activation.as_ref(),
+        skill_activation_resolver,
+        skill_resources,
+        extension_snapshots,
+    )?;
     let mut tool_registry =
         ToolRegistry::defaults_with_search_and_office(input.search_config.as_ref(), office_engine);
     let context = input.context.as_ref();
@@ -86,6 +113,7 @@ pub(super) fn prepare_runtime_capabilities(
 pub(super) fn assemble_context_preview(
     compaction_summary: Option<crate::ContextCompactionSummary>,
     messages: Vec<AgentChatMessage>,
+    skill_discovery: Option<crate::skills::AgentSkillDiscoverySnapshot>,
     skill_activation: Option<AgentSkillActivation>,
     context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
@@ -101,6 +129,7 @@ pub(super) fn assemble_context_preview(
             system_prompt: build_system_prompt(context, prompt_preferences, tool_definitions),
             compaction_summary,
             messages,
+            skill_discovery,
             skill_activation,
             attachments: ContextAttachments::default(),
         });
@@ -168,19 +197,24 @@ pub(super) fn build_llm_request(
         None => {
             let attachment_context = build_attachment_context(&input.attachments)?;
             let skill_activation = input.skill_activation;
+            let skill_discovery = input.skill_discovery;
             let mut context = match shared_context_baseline {
                 Some(baseline) => {
                     let mut context = baseline.into_frame();
-                    ContextAssembler::append_skill_activation(
+                    ContextAssembler::append_skill_overlays(
                         &mut context,
+                        skill_discovery.as_ref(),
                         skill_activation.as_ref(),
                     )?;
                     context
                 }
-                None => assemble_initial_context(
+                None => assemble_initial_context_with_skill_overlays(
                     input.context_compaction_summary,
                     input.messages,
-                    skill_activation,
+                    InitialSkillOverlays {
+                        discovery: skill_discovery,
+                        activation: skill_activation,
+                    },
                     AttachmentContext {
                         text: String::new(),
                         images: Vec::new(),
@@ -368,6 +402,7 @@ pub(super) fn set_schema_property_description(
     }
 }
 
+#[cfg(test)]
 pub(super) fn assemble_initial_context(
     compaction_summary: Option<crate::ContextCompactionSummary>,
     messages: Vec<AgentChatMessage>,
@@ -377,11 +412,40 @@ pub(super) fn assemble_initial_context(
     prompt_preferences: Option<&AgentPromptPreferences>,
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<ContextFrame> {
+    assemble_initial_context_with_skill_overlays(
+        compaction_summary,
+        messages,
+        InitialSkillOverlays {
+            discovery: None,
+            activation: skill_activation,
+        },
+        attachment_context,
+        context,
+        prompt_preferences,
+        tool_definitions,
+    )
+}
+
+struct InitialSkillOverlays {
+    discovery: Option<crate::skills::AgentSkillDiscoverySnapshot>,
+    activation: Option<AgentSkillActivation>,
+}
+
+fn assemble_initial_context_with_skill_overlays(
+    compaction_summary: Option<crate::ContextCompactionSummary>,
+    messages: Vec<AgentChatMessage>,
+    skills: InitialSkillOverlays,
+    attachment_context: AttachmentContext,
+    context: Option<&AgentRunContext>,
+    prompt_preferences: Option<&AgentPromptPreferences>,
+    tool_definitions: &[AgentToolDefinition],
+) -> AgentResult<ContextFrame> {
     ContextAssembler::assemble(ContextAssemblyInput {
         system_prompt: build_system_prompt(context, prompt_preferences, tool_definitions),
         compaction_summary,
         messages,
-        skill_activation,
+        skill_discovery: skills.discovery,
+        skill_activation: skills.activation,
         attachments: ContextAttachments {
             text: attachment_context.text,
             images: attachment_context.images,

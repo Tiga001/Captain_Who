@@ -6,7 +6,9 @@ pub use crate::agent_support::{
     AgentFileDraftContentPage, AgentFileWriteDiffPage, AgentServiceError, PendingActionStatus,
     PendingAgentActionSnapshot,
 };
-use crate::skills_adapter::activate_selected_skills;
+use crate::skills_adapter::{
+    activate_selected_skills, model_skill_activation_resolver, prepare_enabled_skill_discovery,
+};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
@@ -65,6 +67,7 @@ use mycopilot_core::{
     AgentToolResult, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
     AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
     ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
+    ModelCapabilities,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -213,24 +216,61 @@ impl AgentService {
         &self,
         input: &AgentChatInput,
     ) -> AgentResult<Option<Arc<SkillResourceSession>>> {
-        let Some(activation) = input.skill_activation.as_ref() else {
-            return Ok(None);
+        let checkpoint_authority = input
+            .resume_checkpoint
+            .as_ref()
+            .map(mycopilot_core::skill_checkpoint_authority)
+            .transpose()?
+            .flatten();
+        let discovery = match checkpoint_authority.as_ref() {
+            Some(authority) => authority.discovery.clone(),
+            None => input.skill_discovery.clone(),
         };
-        let selections = activation
-            .skills
-            .iter()
-            .filter(|skill| skill.resources.is_some())
-            .map(|skill| {
-                SkillSelection::parse(skill.id.clone(), skill.revision.clone()).map_err(|error| {
-                    AgentError::new(format!(
-                        "cannot restore activated Skill resource identity `{}`: {error}",
-                        skill.id
-                    ))
+        if let Some(discovery) = discovery.as_ref() {
+            discovery.validate().map_err(|error| {
+                AgentError::new(format!(
+                    "cannot restore an invalid frozen Skill discovery catalog: {error}"
+                ))
+            })?;
+        }
+        let selections = match checkpoint_authority {
+            Some(authority) => authority.resource_selections,
+            None => input
+                .skill_activation
+                .iter()
+                .flat_map(|activation| activation.skills.iter())
+                .filter(|skill| skill.resources.is_some())
+                .map(|skill| {
+                    SkillSelection::parse(skill.id.clone(), skill.revision.clone()).map_err(
+                        |error| {
+                            AgentError::new(format!(
+                                "cannot restore activated Skill resource identity `{}`: {error}",
+                                skill.id
+                            ))
+                        },
+                    )
                 })
-            })
-            .collect::<AgentResult<Vec<_>>>()?;
+                .collect::<AgentResult<Vec<_>>>()?,
+        };
+        let mut unique =
+            std::collections::BTreeMap::<mycopilot_core::skills::SkillId, SkillSelection>::new();
+        for selection in selections {
+            match unique.get(selection.skill_id()) {
+                Some(existing) if existing.expected_revision() != selection.expected_revision() => {
+                    return Err(AgentError::new(format!(
+                        "cannot restore two revisions of Skill `{}`",
+                        selection.skill_id()
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    unique.insert(selection.skill_id().clone(), selection);
+                }
+            }
+        }
+        let selections = unique.into_values().collect::<Vec<_>>();
         if selections.is_empty() {
-            return Ok(None);
+            return Ok(discovery.map(|_| Arc::new(SkillResourceSession::empty())));
         }
         self.skills
             .restore_resource_session(&selections)

@@ -1,4 +1,5 @@
 mod acquisition_provenance;
+mod agent_discovery;
 mod bundled;
 mod digest;
 mod discovery;
@@ -30,6 +31,11 @@ pub use acquisition_provenance::{
     SkillInstallationAuthority, SkillInstallationAuthorityView, SkillInstallationProvenance,
     SkillInstallationProvenanceError, SkillInstallationProvenanceView, SkillInstallationRefresh,
     SkillInstallationRefreshView, MAX_SKILL_PROVENANCE_PAYLOAD_BYTES,
+};
+pub use agent_discovery::{
+    derive_skill_activation_ref, AgentDiscoverableSkill, AgentSkillDiscoverySnapshot,
+    SkillDiscoverySnapshotError, AGENT_SKILL_DISCOVERY_SCHEMA_VERSION,
+    DEFAULT_SKILL_DISCOVERY_PROMPT_TOKENS,
 };
 pub use bundled::{
     APPLICATION_BUNDLED_SKILL_SOURCE_ID, DOCUMENTS_LOCAL_ID, PRESENTATIONS_LOCAL_ID,

@@ -22,6 +22,7 @@ impl AgentService {
         if !model.enabled {
             return Err(format!("模型未启用：{model_id}").into());
         }
+        let context_window_tokens = model.effective_context_window_tokens();
         let connection = settings.effective_connection_for(&model)?;
 
         let conversation_id = normalized_optional(input.conversation_id.as_deref());
@@ -44,6 +45,8 @@ impl AgentService {
             .map(|(project, root)| (project.id.as_str(), root));
         let prepared_skills =
             activate_selected_skills(&self.storage, &self.skills, workspace, &input.skills)?;
+        let skill_discovery =
+            prepare_enabled_skill_discovery(&self.storage, &self.skills, context_window_tokens)?;
         let attachment_library = conversation_id
             .as_deref()
             .map(|conversation_id| {
@@ -81,8 +84,11 @@ impl AgentService {
             api_url: connection.api_url,
             api_token: String::new(),
             model: model.id.clone(),
+            model_capabilities: ModelCapabilities {
+                image_input: model.supports_image,
+            },
             api_style: None,
-            context_window_tokens: model.context_window_tokens,
+            context_window_tokens: Some(context_window_tokens),
             context_window_indicator_enabled: true,
             max_tokens: input.max_tokens,
             temperature: None,
@@ -112,6 +118,7 @@ impl AgentService {
             assistant_message_id: None,
             context_compaction_summary,
             skill_activation: prepared_skills.runtime,
+            skill_discovery,
             messages,
         };
 
@@ -210,8 +217,9 @@ impl AgentService {
                     entry.last_access = access;
                     return entry
                         .state
-                        .snapshot_with_skill_activation(
+                        .snapshot_with_skill_overlays(
                             phase,
+                            agent_input.skill_discovery.as_ref(),
                             agent_input.skill_activation.as_ref(),
                         )
                         .map(Some)
@@ -246,7 +254,11 @@ impl AgentService {
         let snapshot = if agent_input.context_window_indicator_enabled {
             Some(
                 state
-                    .snapshot_with_skill_activation(phase, snapshot_skill_activation)
+                    .snapshot_with_skill_overlays(
+                        phase,
+                        agent_input.skill_discovery.as_ref(),
+                        snapshot_skill_activation,
+                    )
                     .map_err(|error| error.to_string())?,
             )
         } else {

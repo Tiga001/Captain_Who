@@ -211,9 +211,20 @@ impl AgentConversationContextState {
         phase: AgentContextWindowPhase,
         activation: Option<&AgentSkillActivation>,
     ) -> AgentResult<AgentContextWindowSnapshot> {
+        self.snapshot_with_skill_overlays(phase, None, activation)
+    }
+
+    /// Measures the current run's discoverable catalog and activated instructions on top of the
+    /// immutable durable cache. Neither overlay enters the conversation's persistent revision.
+    pub fn snapshot_with_skill_overlays(
+        &mut self,
+        phase: AgentContextWindowPhase,
+        discovery: Option<&crate::skills::AgentSkillDiscoverySnapshot>,
+        activation: Option<&AgentSkillActivation>,
+    ) -> AgentResult<AgentContextWindowSnapshot> {
         let baseline = self.shared_baseline()?;
         let mut preview = baseline.into_frame();
-        ContextAssembler::append_skill_activation(&mut preview, activation)?;
+        ContextAssembler::append_skill_overlays(&mut preview, discovery, activation)?;
         Ok(self
             .detector
             .inspect(

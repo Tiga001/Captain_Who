@@ -40,6 +40,7 @@ pub(crate) fn prepare_conversation_turn(
     if !model.enabled {
         return Err(format!("模型未启用：{model_id}").into());
     }
+    let context_window_tokens = model.effective_context_window_tokens();
     // Resolve the complete pair once and carry it through the run. Model-level credentials
     // take priority; otherwise both values come from global settings. This prevents a URL
     // from one provider from ever being combined with a token from another.
@@ -86,6 +87,8 @@ pub(crate) fn prepare_conversation_turn(
         .map(|(project, root)| (project.id.as_str(), root));
     let prepared_skills =
         activate_selected_skills(storage, skills_service, workspace, &input.skills)?;
+    let skill_discovery =
+        prepare_enabled_skill_discovery(storage, skills_service, context_window_tokens)?;
 
     let mut conversation = existing.unwrap_or_else(|| ChatConversationRecord {
         id: conversation_id.clone(),
@@ -167,8 +170,11 @@ pub(crate) fn prepare_conversation_turn(
         api_url: connection.api_url,
         api_token: connection.api_token,
         model: model.id.clone(),
+        model_capabilities: ModelCapabilities {
+            image_input: model.supports_image,
+        },
         api_style: None,
-        context_window_tokens: model.context_window_tokens,
+        context_window_tokens: Some(context_window_tokens),
         context_window_indicator_enabled: input.context_window_indicator_enabled,
         max_tokens: input.max_tokens,
         temperature: input.temperature,
@@ -196,11 +202,20 @@ pub(crate) fn prepare_conversation_turn(
         assistant_message_id: Some(assistant_message_id.clone()),
         context_compaction_summary,
         skill_activation: prepared_skills.runtime,
+        skill_discovery: skill_discovery.clone(),
         messages: agent_messages,
     };
 
+    let skill_resources = match (prepared_skills.resources, skill_discovery.as_ref()) {
+        (Some(resources), _) => Some(resources),
+        (None, Some(_)) => Some(std::sync::Arc::new(
+            mycopilot_core::skills::SkillResourceSession::empty(),
+        )),
+        (None, None) => None,
+    };
+
     Ok(PreparedConversationTurn {
-        skill_resources: prepared_skills.resources,
+        skill_resources,
         usage_context: AgentRunUsageContext {
             conversation_id: conversation_id.clone(),
             assistant_message_id: assistant_message_id.clone(),

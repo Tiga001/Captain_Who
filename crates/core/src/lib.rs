@@ -88,7 +88,7 @@ pub use protocol::{
     AgentToolApprovalMode, AgentToolCall, AgentToolContinuation, AgentToolDefinition,
     AgentToolResult, AgentToolSafety, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
     AgentUsageModelSummary, AgentUsageSummaryInput, AgentUsageSummaryOutput,
-    AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission,
+    AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission, ModelCapabilities,
     AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION, AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
     AGENT_OFFICE_OPERATION_SCHEMA_VERSION, AGENT_OFFICE_REASON_MAX_CHARS,
@@ -96,13 +96,15 @@ pub use protocol::{
 pub use revision::content_revision;
 pub use runtime::{
     conversation_context_configuration_revision, create_conversation_context_state,
-    inspect_context_window, next_run_id, send_chat, send_chat_with_events,
-    send_chat_with_events_and_cancellation, send_chat_with_host_executor,
-    send_chat_with_host_services, AgentContextCompactionCommitOutcome,
+    inspect_context_window, next_run_id, redact_terminal_skill_discovery, send_chat,
+    send_chat_with_events, send_chat_with_events_and_cancellation, send_chat_with_host_executor,
+    send_chat_with_host_services, skill_checkpoint_authority,
+    skill_resource_selections_from_checkpoint, AgentContextCompactionCommitOutcome,
     AgentContextCompactionCommitRequest, AgentContextCompactionGenerationOutput,
     AgentContextCompactionGenerationRequest, AgentContextCompactionModelGenerator,
     AgentContextCompactionPrepareOutcome, AgentContextCompactionPrepareRequest,
     AgentContextCompactionServices, AgentConversationTraceObserver, AgentEventEmitter,
-    AgentHostActionExecutor, AgentModelRequestObserver, AgentRuntime, AgentRuntimeHostServices,
+    AgentHostActionExecutor, AgentModelRequestObserver, AgentResolvedSkillActivation, AgentRuntime,
+    AgentRuntimeHostServices, AgentSkillActivationResolver, AgentSkillCheckpointAuthority,
 };
 pub use system_paths::expand_system_path;

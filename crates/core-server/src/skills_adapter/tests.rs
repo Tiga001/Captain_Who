@@ -11,6 +11,236 @@ use std::sync::Arc;
 const FIRST_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const SECOND_COMMIT: &str = "89abcdef0123456789abcdef0123456789abcdef";
 
+#[test]
+fn agent_discovery_freezes_every_enabled_managed_skill_with_deterministic_refs() {
+    const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b335";
+    let fixture = tempfile::tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let store_root = fixture.path().join("skills");
+    write_installed_skill(
+        &store_root,
+        INSTALLATION_ID,
+        concat!(
+            "---\n",
+            "name: installed-discovery-test\n",
+            "description: Verify installed Skill discovery.\n",
+            "---\n",
+            "# Instructions\n",
+            "Inspect the requested evidence.\n"
+        ),
+    );
+    let service = SkillsService::new()
+        .with_bundled_source()
+        .unwrap()
+        .with_installed_source(&store_root)
+        .unwrap();
+
+    let first = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+        .unwrap()
+        .unwrap();
+    let second = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.skills.len(), service.list().unwrap().skills().len());
+    assert!(first
+        .skills
+        .iter()
+        .any(|skill| skill.id == format!("installed:user:{INSTALLATION_ID}")));
+    assert!(first
+        .skills
+        .iter()
+        .all(|skill| matches!(skill.source_kind.as_str(), "bundled" | "installed")));
+    assert!(first.skills.windows(2).all(|pair| pair[0].id < pair[1].id));
+    assert!(first
+        .skills
+        .iter()
+        .all(|skill| skill.activation_ref.starts_with("s_") && skill.activation_ref.len() == 26));
+}
+
+#[test]
+fn agent_discovery_isolates_a_broken_receipt_and_keeps_valid_skills() {
+    const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b338";
+    let fixture = tempfile::tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let store_root = fixture.path().join("skills");
+    write_installed_skill(
+        &store_root,
+        INSTALLATION_ID,
+        concat!(
+            "---\n",
+            "name: valid-alongside-broken-receipt\n",
+            "description: Remain discoverable when another receipt is invalid.\n",
+            "---\n",
+            "# Instructions\n",
+            "Inspect the requested evidence.\n"
+        ),
+    );
+    let receipts = store_root.join("installations");
+    std::fs::create_dir_all(&receipts).unwrap();
+    std::fs::write(receipts.join("broken.json"), b"{}").unwrap();
+    let service = SkillsService::new()
+        .with_bundled_source()
+        .unwrap()
+        .with_installed_source(&store_root)
+        .unwrap();
+
+    let catalog = service.list().unwrap();
+    assert!(catalog.diagnostics().iter().any(|diagnostic| {
+        diagnostic.severity() == SkillDiagnosticSeverity::Error
+            && diagnostic.code() == SkillDiagnosticCode::InvalidInstallationReceipt
+    }));
+    let discovery = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+        .unwrap()
+        .unwrap();
+
+    assert!(discovery
+        .skills
+        .iter()
+        .any(|skill| skill.id == format!("installed:user:{INSTALLATION_ID}")));
+    assert!(discovery
+        .skills
+        .iter()
+        .any(|skill| skill.source_kind == "bundled"));
+}
+
+#[test]
+fn agent_discovery_rejects_an_unavailable_registered_source() {
+    let fixture = tempfile::tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let store_root = fixture.path().join("skills-as-file");
+    std::fs::write(&store_root, b"not a directory").unwrap();
+    let service = SkillsService::new()
+        .with_bundled_source()
+        .unwrap()
+        .with_installed_source(&store_root)
+        .unwrap();
+
+    let catalog = service.list().unwrap();
+    assert!(catalog.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code() == SkillDiagnosticCode::SourceUnavailable
+            && diagnostic.path() == "installed:user"
+    }));
+    let error = prepare_enabled_skill_discovery(&storage, &service, 128_000).unwrap_err();
+
+    assert!(error.contains("source-level error"));
+}
+
+#[test]
+fn agent_discovery_keeps_complete_catalogs_with_nonfatal_warnings() {
+    const INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b336";
+    const SECOND_INSTALLATION_ID: &str = "0190b0f2-7c50-7cc0-8b25-3bb80f08b337";
+    let fixture = tempfile::tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let store_root = fixture.path().join("skills");
+    let source = concat!(
+        "---\n",
+        "name: shared-warning-name\n",
+        "description: Verify warning-tolerant discovery.\n",
+        "---\n",
+        "# Instructions\n",
+        "Inspect the requested evidence.\n"
+    );
+    write_installed_skill(&store_root, INSTALLATION_ID, source);
+    write_installed_skill(&store_root, SECOND_INSTALLATION_ID, source);
+    let service = SkillsService::new()
+        .with_installed_source(&store_root)
+        .unwrap();
+
+    let catalog = service.list().unwrap();
+    assert!(catalog
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.severity() == SkillDiagnosticSeverity::Warning));
+    let discovery = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(discovery.skills.len(), 2);
+    assert!(discovery
+        .skills
+        .iter()
+        .any(|skill| skill.id == format!("installed:user:{INSTALLATION_ID}")));
+    assert!(discovery
+        .skills
+        .iter()
+        .any(|skill| skill.id == format!("installed:user:{SECOND_INSTALLATION_ID}")));
+}
+
+#[test]
+fn agent_discovery_honors_settings_enablement_and_revises_the_frozen_catalog() {
+    let fixture = tempfile::tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let service = SkillsService::new().with_bundled_source().unwrap();
+    let descriptor = service.list().unwrap().skills()[0].clone();
+
+    let enabled = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+        .unwrap()
+        .unwrap();
+    assert!(enabled
+        .skills
+        .iter()
+        .any(|skill| skill.id == descriptor.id().as_str()));
+
+    storage
+        .set_skill_enablement_override(descriptor.id().as_str(), false)
+        .unwrap();
+    let disabled = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+        .unwrap()
+        .unwrap();
+    assert!(disabled
+        .skills
+        .iter()
+        .all(|skill| skill.id != descriptor.id().as_str()));
+    assert_ne!(disabled.catalog_revision, enabled.catalog_revision);
+
+    storage
+        .set_skill_enablement_override(descriptor.id().as_str(), true)
+        .unwrap();
+    let restored = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored, enabled);
+
+    for skill in service.list().unwrap().skills() {
+        storage
+            .set_skill_enablement_override(skill.id().as_str(), false)
+            .unwrap();
+    }
+    assert!(prepare_enabled_skill_discovery(&storage, &service, 128_000)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn model_activation_resolver_rechecks_enablement_after_discovery_is_frozen() {
+    let fixture = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = Arc::new(SkillsService::new().with_bundled_source().unwrap());
+    let discovery = prepare_enabled_skill_discovery(&storage, &service, 128_000)
+        .unwrap()
+        .unwrap();
+    let entry = discovery.skills.first().unwrap();
+    let selection = SkillSelection::parse(entry.id.clone(), entry.revision.clone()).unwrap();
+    let resolver = model_skill_activation_resolver(Arc::clone(&storage), Arc::clone(&service));
+
+    let resolved = resolver(&selection).unwrap();
+    assert_eq!(resolved.skill.id, entry.id);
+    assert_eq!(resolved.skill.revision, entry.revision);
+
+    storage
+        .set_skill_enablement_override(&entry.id, false)
+        .unwrap();
+    let error = resolver(&selection).unwrap_err();
+    assert_eq!(error.code(), Some("skill.disabled"));
+    assert!(error.details().is_some_and(|details| {
+        details["type"] == "skillActivation"
+            && details["code"] == "skill.disabled"
+            && details["recovery"] == "enableSkill"
+    }));
+}
+
 struct NeverGitHubTransport;
 
 impl GitHubAcquisitionTransport for NeverGitHubTransport {

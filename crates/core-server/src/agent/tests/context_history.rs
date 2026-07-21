@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn prepared_turn_uses_backend_model_capabilities() {
+    let fixture = tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    let mut settings = test_model_settings();
+    settings.models[0].supports_image = true;
+    storage.save_model_settings(settings).unwrap();
+
+    let prepared = prepare_conversation_turn(
+        &storage,
+        &SkillsService::new(),
+        AgentConversationTurnInput {
+            conversation_id: Some("conversation-model-capabilities".to_string()),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            context_window_indicator_enabled: true,
+            content: "Inspect an image later".to_string(),
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            title: None,
+            user_message_id: Some("user-model-capabilities".to_string()),
+            assistant_message_id: Some("assistant-model-capabilities".to_string()),
+            max_tokens: None,
+            temperature: None,
+            prompt_preferences: None,
+            permissions: AgentPermissions::default(),
+        },
+        "run-model-capabilities",
+    )
+    .unwrap();
+
+    assert!(prepared.agent_input.model_capabilities.image_input);
+}
+
+#[test]
 fn compaction_cannot_cross_the_model_visible_trace_boundary() {
     let trace = ConversationTurnTrace {
         schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,

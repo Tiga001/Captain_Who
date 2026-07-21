@@ -84,6 +84,98 @@ pub(crate) fn activate_selected_skills(
     prepare_activated_skills(service, activated, expected_workspace_id)
 }
 
+/// Creates the host-only resolver used by the model-facing `skills_activate` tool.
+///
+/// The resolver accepts only exact identities recovered from the run's frozen discovery snapshot.
+/// It rechecks durable enablement and current catalog revision immediately before resolving bytes;
+/// it never accepts a model-provided path, source, description, or revision override.
+pub(crate) fn model_skill_activation_resolver(
+    storage: std::sync::Arc<StorageService>,
+    service: std::sync::Arc<SkillsService>,
+) -> AgentSkillActivationResolver {
+    std::sync::Arc::new(move |selection: &SkillSelection| {
+        let source_kind = selection
+            .skill_id()
+            .source_id()
+            .as_str()
+            .split_once(':')
+            .map(|(kind, _)| kind);
+        if !matches!(source_kind, Some("bundled" | "installed")) {
+            return Err(AgentError::structured(
+                "skill.notImplicitlyDiscoverable",
+                "Only globally managed Skills can be activated through skills_activate.",
+                serde_json::json!({
+                    "type": "skillActivation",
+                    "code": "skill.notImplicitlyDiscoverable",
+                    "recovery": "useExplicitWorkspaceSelection",
+                    "skillId": selection.skill_id().as_str(),
+                }),
+            ));
+        }
+        let skill_id = selection.skill_id().as_str().to_string();
+        let enablement = storage
+            .load_skill_enablement(std::slice::from_ref(&skill_id))
+            .map_err(|error| {
+                AgentError::structured(
+                    "skill.enablementUnavailable",
+                    format!("Cannot verify Skill enablement: {error}"),
+                    serde_json::json!({
+                        "type": "skillActivation",
+                        "code": "skill.enablementUnavailable",
+                        "recovery": "retry",
+                        "skillId": skill_id,
+                    }),
+                )
+            })?;
+        if enablement.get(&skill_id) != Some(&true) {
+            return Err(AgentError::structured(
+                "skill.disabled",
+                format!("Skill `{skill_id}` is disabled in Settings."),
+                serde_json::json!({
+                    "type": "skillActivation",
+                    "code": "skill.disabled",
+                    "recovery": "enableSkill",
+                    "skillId": skill_id,
+                }),
+            ));
+        }
+
+        let activated = service
+            .activate(std::slice::from_ref(selection))
+            .map_err(activation_failure)
+            .map_err(agent_activation_error)?;
+        let prepared =
+            prepare_activated_skills(&service, activated, None).map_err(agent_activation_error)?;
+        let mut runtime = prepared.runtime.ok_or_else(|| {
+            AgentError::new("Skill resolver produced no runtime activation snapshot.")
+        })?;
+        if runtime.skills.len() != 1 {
+            return Err(AgentError::new(
+                "Skill resolver must return exactly one activated Skill.",
+            ));
+        }
+        let skill = runtime.skills.remove(0);
+        let resources = prepared.resources.ok_or_else(|| {
+            AgentError::new("Skill resolver produced no revision-bound resource session.")
+        })?;
+        Ok(AgentResolvedSkillActivation { skill, resources })
+    })
+}
+
+fn agent_activation_error(failure: SkillActivationFailure) -> AgentError {
+    let message = failure.to_string();
+    let data = failure.into_data();
+    let details = serde_json::to_value(&data).unwrap_or_else(|_| {
+        serde_json::json!({
+            "type": "skillActivation",
+            "code": "invalidSelection",
+            "recovery": "refreshCatalog",
+            "message": message,
+        })
+    });
+    AgentError::structured("skill.activationFailed", message, details)
+}
+
 pub(super) fn parse_selections(
     selections: &[SkillSelectionDto],
 ) -> Result<Vec<SkillSelection>, SkillActivationFailure> {
@@ -168,6 +260,7 @@ pub(super) fn prepare_activated_skills(
                     revision: skill.revision().as_str().to_string(),
                     source: skill.id().source_id().as_str().to_string(),
                     instructions: skill.instructions().to_string(),
+                    source_bytes: u64::try_from(skill.source_text().len()).unwrap_or(u64::MAX),
                     resources,
                 }
             })

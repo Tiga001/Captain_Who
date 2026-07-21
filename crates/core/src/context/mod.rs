@@ -18,7 +18,8 @@ mod state;
 mod trace_renderer;
 
 pub(crate) use assembler::{
-    AssembledContext, ContextAssembler, ContextAssemblyInput, ContextAttachments,
+    activated_skill_context_item, AssembledContext, ContextAssembler, ContextAssemblyInput,
+    ContextAttachments,
 };
 pub(crate) use budget::{
     ContextBudgetReport, ContextBudgetStatus, ContextCapacityDetector, ContextCompactionQuery,

@@ -1,5 +1,6 @@
 // Tests for runtime message construction and tool-flow helpers.
 use super::*;
+use crate::llm::LlmToolCall;
 use crate::protocol::{
     AgentActivatedSkill, AgentInputAttachment, AgentInputAttachmentEncoding,
     AgentInputAttachmentKind, AgentPatchPermission, AgentRunContext, AgentSkillActivation,
@@ -28,6 +29,65 @@ fn empty_attachment_context() -> AttachmentContext {
     }
 }
 
+#[test]
+fn skill_activation_barrier_clears_committed_stream_write_previews() {
+    let captured = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
+    let captured_for_emitter = Arc::clone(&captured);
+    let emitter: AgentEventEmitter = Arc::new(move |event| {
+        captured_for_emitter.lock().unwrap().push(event);
+    });
+    let event_stream = AgentEventStream::new(Some(emitter));
+    let mut committed_preview = Some(("run-1-stream-1".to_string(), 2));
+
+    clear_deferred_tool_input_preview(&event_stream, "run-1", 1, &mut committed_preview);
+
+    assert!(committed_preview.is_none());
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(matches!(
+        &captured[0],
+        AgentEvent::FileWritePreviewCleared {
+            run_id,
+            stream_id,
+            attempt: 2,
+        } if run_id == "run-1" && stream_id == "run-1-stream-1"
+    ));
+    drop(captured);
+    assert!(event_stream.into_events().is_empty());
+}
+
+#[test]
+fn skill_activation_capacity_measures_only_calls_retained_by_the_barrier() {
+    let detector = ContextCapacityDetector::for_model(
+        "test-model",
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &[],
+    );
+    let activation = LlmToolCall {
+        id: "activate-documents".to_string(),
+        name: "skills_activate".to_string(),
+        args: json!({
+            "skillRef": "s_000000000000000000000000",
+            "reason": "Need document guidance"
+        }),
+    };
+    let discarded = LlmToolCall {
+        id: "discarded-read".to_string(),
+        name: "read_file".to_string(),
+        args: json!({ "path": "丢".repeat(10_000) }),
+    };
+    let original = vec![discarded, activation.clone()];
+    let original_tokens =
+        detector.estimate_assistant_tool_batch_tokens("Activating first.", &original);
+    let (retained, deferred) = enforce_skill_activation_barrier(original);
+    let retained_tokens =
+        detector.estimate_assistant_tool_batch_tokens("Activating first.", &retained);
+
+    assert_eq!(deferred, 1);
+    assert_eq!(retained, vec![activation]);
+    assert!(retained_tokens < original_tokens);
+}
+
 fn activated_skill(instructions: &str) -> AgentSkillActivation {
     AgentSkillActivation {
         activation_revision: "activation-sha256-v1:test".to_string(),
@@ -37,8 +97,34 @@ fn activated_skill(instructions: &str) -> AgentSkillActivation {
             revision: "skill-sha256-v1:test".to_string(),
             source: "workspace".to_string(),
             instructions: instructions.to_string(),
+            source_bytes: u64::try_from(instructions.len()).unwrap(),
             resources: None,
         }],
+    }
+}
+
+fn discoverable_skill(description: &str) -> crate::skills::AgentSkillDiscoverySnapshot {
+    const CATALOG_REVISION: &str = "skill-enabled-catalog-sha256-v1:test";
+    const SKILL_ID: &str = "bundled:application:documents";
+    let revision = format!("skill-package-sha256-v2:{}", "d".repeat(64));
+    crate::skills::AgentSkillDiscoverySnapshot {
+        schema_version: crate::skills::AGENT_SKILL_DISCOVERY_SCHEMA_VERSION,
+        catalog_revision: CATALOG_REVISION.to_string(),
+        prompt_token_budget: crate::skills::DEFAULT_SKILL_DISCOVERY_PROMPT_TOKENS,
+        skills: vec![crate::skills::AgentDiscoverableSkill {
+            activation_ref: crate::skills::derive_skill_activation_ref(
+                CATALOG_REVISION,
+                SKILL_ID,
+                &revision,
+            ),
+            id: SKILL_ID.to_string(),
+            revision,
+            name: "documents".to_string(),
+            description: description.to_string(),
+            source_kind: "bundled".to_string(),
+        }],
+        max_activated_skills: 8,
+        max_total_source_bytes: 512 * 1024,
     }
 }
 
@@ -302,6 +388,24 @@ fn read_image_tool_result_is_redacted_but_creates_visual_message() {
 }
 
 #[test]
+fn failed_read_image_capability_result_never_creates_visual_input() {
+    let result = AgentToolResult {
+        call_id: "call-image-unsupported".to_string(),
+        tool: "read_image".to_string(),
+        ok: false,
+        result: Some(json!({
+            "type": "model_capability",
+            "code": "modelCapabilityUnsupported",
+            "errorCode": "agent.model_capability_unsupported",
+            "capability": "imageInput"
+        })),
+        error: Some("当前模型不支持图片输入；文件尚未读取。".to_string()),
+    };
+
+    assert!(llm_image_message_from_tool_result(&result).is_none());
+}
+
+#[test]
 fn file_write_tail_is_available_to_llm_but_not_persisted_in_events() {
     let result = AgentToolResult {
         call_id: "call-write".to_string(),
@@ -388,6 +492,7 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         api_url: "https://example.test/v1/chat/completions".to_string(),
         api_token: String::new(),
         model: "test-model".to_string(),
+        model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(128_000),
         context_window_indicator_enabled: true,
@@ -404,6 +509,7 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         assistant_message_id: None,
         context_compaction_summary: None,
         skill_activation: None,
+        skill_discovery: None,
         messages,
     }
 }
@@ -444,6 +550,35 @@ fn runtime_command_definition_advertises_effective_approval_routing() {
         assert!(!definition.requires_approval);
         assert_eq!(definition.approval_mode, expected_mode);
     }
+}
+
+#[test]
+fn model_capabilities_do_not_change_tool_definitions_or_context_revision() {
+    let mut input = conversation_context_input(vec![message("user", "Inspect the image")]);
+    input.model_capabilities.image_input = false;
+    let text_only =
+        prepare_runtime_capabilities(&input, "model-capabilities-text-only", &[], true, None)
+            .unwrap();
+    let text_only_revision = conversation_context_configuration_revision(&input).unwrap();
+
+    input.model_capabilities.image_input = true;
+    let image_capable =
+        prepare_runtime_capabilities(&input, "model-capabilities-image", &[], true, None).unwrap();
+    let image_capable_revision = conversation_context_configuration_revision(&input).unwrap();
+
+    assert!(text_only
+        .tool_definitions
+        .iter()
+        .any(|definition| definition.name == "read_image"));
+    assert!(image_capable
+        .tool_definitions
+        .iter()
+        .any(|definition| definition.name == "read_image"));
+    assert_eq!(
+        serde_json::to_value(&text_only.tool_definitions).unwrap(),
+        serde_json::to_value(&image_capable.tool_definitions).unwrap()
+    );
+    assert_eq!(text_only_revision, image_capable_revision);
 }
 
 #[test]
@@ -668,6 +803,167 @@ async fn effective_tool_definitions_are_also_the_execution_allowlist() {
     let request = String::from_utf8(second_request.lock().unwrap().clone()).unwrap();
     assert!(request.contains("agent.tool_not_available"));
     assert!(request.contains("toolNotAvailable"));
+}
+
+#[tokio::test]
+async fn text_only_model_receives_paired_read_image_capability_failure_without_image_payload() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_json_request(stream: &mut TcpStream) -> Value {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+        let mut expected_length = None;
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request completed");
+            request.extend_from_slice(&buffer[..read]);
+            if expected_length.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    expected_length = Some(header_end + 4 + content_length);
+                }
+            }
+            if expected_length.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        let body_start = request
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        serde_json::from_slice(&request[body_start..expected_length.unwrap()]).unwrap()
+    }
+
+    async fn write_json_response(stream: &mut TcpStream, body: Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let second_request = Arc::new(Mutex::new(None::<Value>));
+    let captured_second_request = Arc::clone(&second_request);
+    let server = tokio::spawn(async move {
+        for request_index in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_json_request(&mut stream).await;
+            if request_index == 1 {
+                *captured_second_request.lock().unwrap() = Some(request);
+            }
+            let response = if request_index == 0 {
+                json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "I will inspect the image.",
+                            "tool_calls": [{
+                                "id": "read-image-unsupported",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_image",
+                                    "arguments": serde_json::to_string(&json!({
+                                        "path": "/path/that/must/not/be-read.png"
+                                    }))
+                                    .unwrap()
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+            } else {
+                json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": "This model cannot inspect images." },
+                        "finish_reason": "stop"
+                    }]
+                })
+            };
+            write_json_response(&mut stream, response).await;
+        }
+    });
+
+    let mut input = conversation_context_input(vec![message("user", "Inspect this image")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    input.model_capabilities.image_input = false;
+    let output = AgentRuntime::default().send_chat(input).await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(output.content, "This model cannot inspect images.");
+    let call_index = output
+        .events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::ToolCall { call, .. } if call.id == "read-image-unsupported"))
+        .expect("read_image tool call event");
+    let (result_index, result) = output
+        .events
+        .iter()
+        .enumerate()
+        .find_map(|(index, event)| match event {
+            AgentEvent::ToolResult { result, .. } if result.call_id == "read-image-unsupported" => {
+                Some((index, result))
+            }
+            _ => None,
+        })
+        .expect("paired read_image tool result event");
+    assert!(call_index < result_index);
+    assert!(!result.ok);
+    assert_eq!(result.tool, "read_image");
+    let structured = result
+        .result
+        .as_ref()
+        .expect("structured capability failure");
+    assert_eq!(structured["code"], "modelCapabilityUnsupported");
+    assert_eq!(
+        structured["errorCode"],
+        "agent.model_capability_unsupported"
+    );
+
+    let second_request = second_request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("second model request");
+    let messages = second_request["messages"].as_array().unwrap();
+    let tool_call_index = messages
+        .iter()
+        .position(|message| {
+            message["role"] == "assistant"
+                && message["tool_calls"][0]["id"] == "read-image-unsupported"
+        })
+        .expect("assistant tool call in provider payload");
+    let tool_result_index = messages
+        .iter()
+        .position(|message| {
+            message["role"] == "tool" && message["tool_call_id"] == "read-image-unsupported"
+        })
+        .expect("paired tool result in provider payload");
+    assert!(tool_call_index < tool_result_index);
+
+    let request = serde_json::to_string(&second_request).unwrap();
+    assert!(request.contains("modelCapabilityUnsupported"));
+    assert!(request.contains("agent.model_capability_unsupported"));
+    assert!(!request.contains("modelCapabilities"));
+    assert!(!request.contains("image_url"));
+    assert!(!request.contains("data:image/"));
 }
 
 #[test]
@@ -1049,6 +1345,305 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     assert!(!debug.contains(INSTRUCTIONS));
 }
 
+#[test]
+fn discoverable_skill_catalog_is_a_measured_dynamic_overlay_not_a_cache_input() {
+    let mut input = conversation_context_input(vec![message("user", "Create a document")]);
+    input.skill_discovery = Some(discoverable_skill("Create and verify Word documents."));
+    let mut changed_catalog = input.clone();
+    changed_catalog.skill_discovery = Some(discoverable_skill("Updated routing metadata."));
+
+    assert_eq!(
+        conversation_context_configuration_revision(&input).unwrap(),
+        conversation_context_configuration_revision(&changed_catalog).unwrap()
+    );
+
+    let capabilities =
+        prepare_runtime_capabilities(&input, "skill-discovery-overlay", &[], true, None).unwrap();
+    let activation_ref = input.skill_discovery.as_ref().unwrap().skills[0]
+        .activation_ref
+        .clone();
+    let mut with_catalog =
+        build_llm_request(input.clone(), &capabilities.tool_definitions, None, None).unwrap();
+    let catalog_entry = with_catalog
+        .context
+        .manifest()
+        .entries
+        .into_iter()
+        .find(|entry| entry.sources == vec!["skill_catalog"])
+        .unwrap();
+    assert_eq!(catalog_entry.scope, "run");
+    assert_eq!(catalog_entry.retention, "retained");
+
+    let rendered = with_catalog
+        .context
+        .to_messages()
+        .into_iter()
+        .find(|message| message.content.contains("backend_available_skills"))
+        .unwrap()
+        .content;
+    assert!(rendered.contains(&format!("\"ref\":\"{activation_ref}\"")));
+    assert!(rendered.contains("Create and verify Word documents."));
+    assert!(!rendered.contains("bundled:application:documents"));
+    assert!(!rendered.contains("skill-package-sha256-v2:"));
+
+    let detector = ContextCapacityDetector::for_model(
+        &input.model,
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &capabilities.tool_definitions,
+    );
+    let catalog_report = detector.inspect(
+        &mut with_catalog.context,
+        input.context_window_tokens,
+        sanitize_max_tokens(input.max_tokens),
+    );
+    let mut without_catalog = input.clone();
+    without_catalog.skill_discovery = None;
+    let mut plain = build_llm_request(
+        without_catalog.clone(),
+        &capabilities.tool_definitions,
+        None,
+        None,
+    )
+    .unwrap();
+    let plain_report = detector.inspect(
+        &mut plain.context,
+        without_catalog.context_window_tokens,
+        sanitize_max_tokens(without_catalog.max_tokens),
+    );
+    assert_eq!(
+        catalog_report.usage.persistent_revision,
+        plain_report.usage.persistent_revision
+    );
+    assert!(
+        catalog_report.usage.request_input_tokens() > plain_report.usage.request_input_tokens()
+    );
+}
+
+#[tokio::test]
+async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    const INSTRUCTIONS: &str =
+        "DYNAMIC_SKILL_INSTRUCTION_MARKER: verify the document before reporting success.";
+
+    async fn read_json_request(stream: &mut TcpStream) -> Value {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+        let mut expected_length = None;
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0);
+            request.extend_from_slice(&buffer[..read]);
+            if expected_length.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap();
+                    expected_length = Some(header_end + 4 + content_length);
+                }
+            }
+            if expected_length.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        let body_start = request
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .unwrap();
+        serde_json::from_slice(&request[body_start..expected_length.unwrap()]).unwrap()
+    }
+
+    async fn write_json_response(stream: &mut TcpStream, body: Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    }
+
+    let discovery = discoverable_skill("Create and verify Word documents.");
+    let activation_ref = discovery.skills[0].activation_ref.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests_for_server = Arc::clone(&requests);
+    let server = tokio::spawn(async move {
+        for request_index in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_json_request(&mut stream).await;
+            requests_for_server.lock().unwrap().push(request);
+            let response = if request_index == 0 {
+                json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [
+                                {
+                                    "id": "read-before-skill",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": serde_json::to_string(&json!({
+                                            "path": "draft.docx"
+                                        })).unwrap()
+                                    }
+                                },
+                                {
+                                    "id": "activate-documents",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "skills_activate",
+                                        "arguments": serde_json::to_string(&json!({
+                                            "skillRef": activation_ref,
+                                            "reason": "Create and verify the requested document"
+                                        })).unwrap()
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+            } else {
+                json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "Skill loaded and applied."
+                        },
+                        "finish_reason": "stop"
+                    }]
+                })
+            };
+            write_json_response(&mut stream, response).await;
+        }
+    });
+
+    let entry = discovery.skills[0].clone();
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let resolver_calls_for_host = Arc::clone(&resolver_calls);
+    let resolver: AgentSkillActivationResolver = Arc::new(move |selection| {
+        resolver_calls_for_host.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(selection.skill_id().as_str(), entry.id);
+        assert_eq!(selection.expected_revision().as_str(), entry.revision);
+        Ok(AgentResolvedSkillActivation {
+            skill: AgentActivatedSkill {
+                id: entry.id.clone(),
+                name: entry.name.clone(),
+                revision: entry.revision.clone(),
+                source: "bundled:application".to_string(),
+                instructions: INSTRUCTIONS.to_string(),
+                source_bytes: u64::try_from(INSTRUCTIONS.len()).unwrap(),
+                resources: None,
+            },
+            resources: Arc::new(crate::skills::SkillResourceSession::empty()),
+        })
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_emitter = Arc::clone(&events);
+    let emitter: AgentEventEmitter = Arc::new(move |event| {
+        events_for_emitter.lock().unwrap().push(event);
+    });
+    let mut input = conversation_context_input(vec![message("user", "Create a Word guide")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    input.skill_discovery = Some(discovery);
+
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            Some("run-dynamic-skill".to_string()),
+            Some(emitter),
+            AgentCancellationToken::new(),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_skill_activation_resolver(resolver)
+                    .with_skill_resources(Arc::new(crate::skills::SkillResourceSession::empty())),
+            ),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(output.content, "Skill loaded and applied.");
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let first_serialized = serde_json::to_string(&requests[0]).unwrap();
+    assert!(first_serialized.contains("backend_available_skills"));
+    assert!(first_serialized.contains("skills_activate"));
+    assert!(!first_serialized.contains(INSTRUCTIONS));
+
+    let second_messages = requests[1]["messages"].as_array().unwrap();
+    let tool_result_index = second_messages
+        .iter()
+        .position(|message| {
+            message["role"] == "tool" && message["tool_call_id"] == "activate-documents"
+        })
+        .unwrap();
+    let skill_context_index = second_messages
+        .iter()
+        .position(|message| {
+            message["role"] == "user"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains(INSTRUCTIONS))
+        })
+        .unwrap();
+    assert!(tool_result_index < skill_context_index);
+    assert!(!second_messages[tool_result_index]["content"]
+        .as_str()
+        .unwrap()
+        .contains(INSTRUCTIONS));
+    assert_eq!(
+        serde_json::to_string(&requests[1])
+            .unwrap()
+            .matches(INSTRUCTIONS)
+            .count(),
+        1
+    );
+    assert!(!serde_json::to_string(&requests[1])
+        .unwrap()
+        .contains("read-before-skill"));
+    assert!(second_messages.iter().any(|message| {
+        message["role"] == "system"
+            && message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("deferred 1 tool call"))
+    }));
+
+    let events = events.lock().unwrap();
+    let result_index = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::ToolResult { result, .. } if result.call_id == "activate-documents"))
+        .unwrap();
+    let activated_index = events
+        .iter()
+        .position(|event| matches!(event, AgentEvent::SkillActivated { skill, .. } if skill.id == "bundled:application:documents"))
+        .unwrap();
+    assert!(result_index < activated_index);
+    assert!(!events.iter().any(|event| {
+        matches!(event, AgentEvent::ToolCall { call, .. } if call.id == "read-before-skill")
+    }));
+    assert!(!serde_json::to_string(&*events)
+        .unwrap()
+        .contains(INSTRUCTIONS));
+}
+
 #[tokio::test]
 async fn anthropic_payload_keeps_current_user_skill_and_attachment_compatible() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1296,6 +1891,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         model: "test-model".to_string(),
+        model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(50_000),
         context_window_indicator_enabled: false,
@@ -1318,6 +1914,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         assistant_message_id: Some("assistant-current".to_string()),
         context_compaction_summary: None,
         skill_activation: None,
+        skill_discovery: None,
         messages: vec![old_user, old_assistant, current_user.clone()],
     };
     let durable_prefix = Arc::new(ContextCompactionPrefix {
@@ -1575,6 +2172,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         model: "test-model".to_string(),
+        model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(8_000),
         context_window_indicator_enabled: false,
@@ -1591,6 +2189,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
         assistant_message_id: None,
         context_compaction_summary: None,
         skill_activation: None,
+        skill_discovery: None,
         messages: vec![AgentChatMessage {
             message_id: None,
             role: "user".to_string(),
@@ -1732,6 +2331,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         model: "test-model".to_string(),
+        model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(80_000),
         context_window_indicator_enabled: true,
@@ -1764,6 +2364,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
         assistant_message_id: None,
         context_compaction_summary: None,
         skill_activation: None,
+        skill_discovery: None,
         messages: vec![message("user", "Read large.txt and summarize it")],
     };
 
@@ -1987,6 +2588,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         model: "test-model".to_string(),
+        model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(128_000),
         context_window_indicator_enabled: true,
@@ -2019,6 +2621,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         assistant_message_id: Some("assistant-preview".to_string()),
         context_compaction_summary: None,
         skill_activation: None,
+        skill_discovery: None,
         messages: vec![message("user", "create a preview")],
     };
     let output = AgentRuntime::default()
@@ -2253,6 +2856,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         model: "test-model".to_string(),
+        model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(128_000),
         context_window_indicator_enabled: true,
@@ -2285,6 +2889,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         assistant_message_id: Some("assistant-checkpoint".to_string()),
         context_compaction_summary: None,
         skill_activation: Some(activated_skill("SKILL_SNAPSHOT_BEFORE_APPROVAL")),
+        skill_discovery: None,
         messages: vec![message("user", "collect evidence and write report.txt")],
     };
     let waiting = AgentRuntime::default()
@@ -2309,7 +2914,10 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         .unwrap();
     assert_eq!(checkpoint.pending_tool_call_id, "patch-approval");
     assert_eq!(checkpoint.queued_tool_calls.len(), 1);
-    assert_eq!(checkpoint.extension_snapshots[0].extension_id, "todo");
+    assert!(checkpoint
+        .extension_snapshots
+        .iter()
+        .any(|snapshot| snapshot.extension_id == "todo"));
     assert!(checkpoint.context_items.iter().any(|item| {
         item.sources == vec!["skill_instructions"]
             && item.content.contains("SKILL_SNAPSHOT_BEFORE_APPROVAL")
@@ -2565,6 +3173,7 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
         api_url: format!("http://{address}/v1/chat/completions"),
         api_token: "test-token".to_string(),
         model: "test-model".to_string(),
+        model_capabilities: crate::ModelCapabilities::default(),
         api_style: Some(crate::protocol::AgentApiStyle::OpenAiCompatible),
         context_window_tokens: Some(128_000),
         context_window_indicator_enabled: true,
@@ -2604,6 +3213,7 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
                 revision: revision.as_str().to_string(),
                 source: "installed:user".to_string(),
                 instructions: "Read references progressively.".to_string(),
+                source_bytes: 30,
                 resources: Some(AgentActivatedSkillResources {
                     root_uri: package.to_string(),
                     resource_count: 1,
@@ -2611,6 +3221,7 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
                 }),
             }],
         }),
+        skill_discovery: None,
         messages: vec![message(
             "user",
             "Read the Skill reference, then prepare a report.",

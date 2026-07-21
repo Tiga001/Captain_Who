@@ -4,7 +4,7 @@ use crate::cancellation::AgentCancellationToken;
 use crate::context::ContextTextBudget;
 use crate::protocol::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentError, AgentPermissions,
-    AgentReadPermission, AgentResult, AgentRunContext,
+    AgentReadPermission, AgentResult, AgentRunContext, ModelCapabilities,
 };
 use crate::storage::service::StorageService;
 use crate::system_paths::expand_system_path;
@@ -16,10 +16,12 @@ pub struct ToolExecutionContext {
     workspace_root: Option<PathBuf>,
     attachment_library: Option<AgentAttachmentLibraryContext>,
     cancellation_token: AgentCancellationToken,
+    model_capabilities: ModelCapabilities,
     permissions: AgentPermissions,
     conversation_id: Option<String>,
     project_id: Option<String>,
     run_id: Option<String>,
+    tool_call_id: Option<String>,
     storage: Option<Arc<StorageService>>,
     text_output_budget: ContextTextBudget,
     skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
@@ -44,10 +46,12 @@ impl ToolExecutionContext {
             workspace_root,
             attachment_library,
             cancellation_token: AgentCancellationToken::new(),
+            model_capabilities: ModelCapabilities::default(),
             permissions,
             conversation_id,
             project_id,
             run_id: None,
+            tool_call_id: None,
             storage: None,
             text_output_budget: ContextTextBudget::heuristic_default(),
             skill_resources: None,
@@ -60,6 +64,11 @@ impl ToolExecutionContext {
         self
     }
 
+    pub(crate) fn with_model_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
+        self.model_capabilities = capabilities;
+        self
+    }
+
     pub fn with_runtime_services(
         mut self,
         run_id: String,
@@ -67,6 +76,15 @@ impl ToolExecutionContext {
     ) -> Self {
         self.run_id = Some(run_id);
         self.storage = storage;
+        self
+    }
+
+    /// Binds one registry dispatch to its immutable model tool-call identity.
+    ///
+    /// Tools may use this only for result framing, audit, and other non-authority metadata. The
+    /// id is never accepted from model arguments and must not influence permissions.
+    pub(crate) fn with_tool_call_id(mut self, tool_call_id: String) -> Self {
+        self.tool_call_id = Some(tool_call_id);
         self
     }
 
@@ -93,6 +111,10 @@ impl ToolExecutionContext {
 
     pub(super) fn cancellation_token(&self) -> AgentCancellationToken {
         self.cancellation_token.clone()
+    }
+
+    pub(super) fn model_capabilities(&self) -> ModelCapabilities {
+        self.model_capabilities
     }
 
     pub(super) fn text_output_budget(&self) -> &ContextTextBudget {
@@ -151,6 +173,12 @@ impl ToolExecutionContext {
         self.run_id
             .as_deref()
             .ok_or_else(|| AgentError::new("当前运行缺少 runId，不能创建文件草稿。"))
+    }
+
+    pub(crate) fn tool_call_id(&self) -> AgentResult<&str> {
+        self.tool_call_id
+            .as_deref()
+            .ok_or_else(|| AgentError::new("当前工具执行缺少可信 tool call id。"))
     }
 
     pub(super) fn storage(&self) -> AgentResult<&Arc<StorageService>> {

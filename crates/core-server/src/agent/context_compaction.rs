@@ -363,8 +363,9 @@ impl AgentService {
         let snapshot = if agent_input.context_window_indicator_enabled {
             Some(
                 state
-                    .snapshot_with_skill_activation(
+                    .snapshot_with_skill_overlays(
                         AgentContextWindowPhase::DurableCommit,
+                        agent_input.skill_discovery.as_ref(),
                         agent_input.skill_activation.as_ref(),
                     )
                     .map_err(|error| error.to_string())?,
@@ -497,8 +498,9 @@ impl AgentService {
                                 Some(
                                     entry
                                         .state
-                                        .snapshot_with_skill_activation(
+                                        .snapshot_with_skill_overlays(
                                             AgentContextWindowPhase::DurableCommit,
+                                            agent_input.skill_discovery.as_ref(),
                                             agent_input.skill_activation.as_ref(),
                                         )
                                         .map_err(|error| error.to_string())?,
