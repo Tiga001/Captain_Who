@@ -45,6 +45,7 @@ import {
   reconcileSkillActivationSelections,
   type SkillActivationRecoveryPlan
 } from '../features/skills/skillActivationRecovery'
+import { mergeActivatedSkillSummaries } from '../features/skills/activatedSkillInventory'
 import { mergeSkillSelections } from '../features/skills/skillSelection'
 import {
   defaultUiPreferences,
@@ -156,6 +157,8 @@ export function AppShell() {
   const pendingActionsHydratedRef = useRef(false)
   const cancelledPendingMessageIdsRef = useRef<Set<string>>(new Set())
   const cancelledRunIdsRef = useRef<Set<string>>(new Set())
+  const stopRequestedPendingMessageIdsRef = useRef<Set<string>>(new Set())
+  const stopRequestedRunIdsRef = useRef<Set<string>>(new Set())
   const editSubmissionSeqRef = useRef(0)
   const contextWindowRequestSeqRef = useRef(0)
   const contextWindowEventSeqRef = useRef<Map<string, number>>(new Map())
@@ -659,6 +662,7 @@ export function AppShell() {
       )
 
       if (agentEvent.type === 'done') {
+        stopRequestedRunIdsRef.current.delete(agentEvent.runId)
         if (agentEvent.success && agentEvent.status !== 'waiting_for_approval') {
           const completedAt = Date.now()
           let conversationToSave: ChatConversation | null = null
@@ -689,6 +693,7 @@ export function AppShell() {
       }
 
       if (agentEvent.type === 'error' && !agentEvent.recoverable && agentEvent.runId) {
+        stopRequestedRunIdsRef.current.delete(agentEvent.runId)
         cleanupRunBinding(agentEvent.runId)
       }
     },
@@ -786,8 +791,12 @@ export function AppShell() {
           return
         }
 
+        const stopWasRequested =
+          stopRequestedPendingMessageIdsRef.current.delete(assistantMessageId)
+
         const resolvedConversationId = startOutput.conversationId
         const resolvedAssistantMessageId = startOutput.assistantMessageId
+        let resolvedAssistantMessage: ChatMessage | null = null
 
         const nextConversations = conversationsRef.current.map((conversation) =>
           conversation.id === conversationId
@@ -804,16 +813,21 @@ export function AppShell() {
                       message,
                       startOutput.assistantMessage
                     )
-                    return {
+                    resolvedAssistantMessage = {
                       ...mergedMessage,
                       content: mergedMessage.content || message.content || THINKING_PLACEHOLDER,
                       status: 'pending' as const,
                       agentRun: {
                         ...ensureAgentRun(mergedMessage.agentRun, startOutput.runId, 'running'),
-                        activatedSkills: startOutput.activatedSkills,
-                        skillActivationRevision: startOutput.skillActivationRevision
+                        activatedSkills: mergeActivatedSkillSummaries(
+                          [],
+                          startOutput.activatedSkills
+                        ),
+                        skillActivationRevision: startOutput.skillActivationRevision,
+                        explicitSkillSelections: [...skills]
                       }
                     }
+                    return resolvedAssistantMessage
                   }
 
                   return message
@@ -822,6 +836,9 @@ export function AppShell() {
             : conversation
         )
         setConversationsWithRef(nextConversations)
+        if (resolvedAssistantMessage) {
+          enqueueChatMessageStateSave(resolvedConversationId, resolvedAssistantMessage)
+        }
 
         if (resolvedConversationId !== conversationId) {
           setActiveConversationId((currentActiveConversationId) =>
@@ -844,9 +861,51 @@ export function AppShell() {
         bufferedEvents.forEach((agentEvent) => {
           handleBoundAgentEvent(resolvedConversationId, resolvedAssistantMessageId, agentEvent)
         })
+
+        if (stopWasRequested && activeRunBindingsRef.current.has(startOutput.runId)) {
+          stopRequestedRunIdsRef.current.add(startOutput.runId)
+          void cancelAgentRun(startOutput.runId)
+            .then((cancelled) => {
+              if (cancelled || !activeRunBindingsRef.current.has(startOutput.runId)) return
+              stopRequestedRunIdsRef.current.delete(startOutput.runId)
+              showToast(t('chat.stopFailed'))
+            })
+            .catch((error) => {
+              console.error('Failed to cancel agent run', error)
+              if (!activeRunBindingsRef.current.has(startOutput.runId)) return
+              stopRequestedRunIdsRef.current.delete(startOutput.runId)
+              showToast(t('chat.stopFailed'))
+            })
+        }
       } catch (error) {
         if (cancelledPendingMessageIdsRef.current.has(assistantMessageId)) {
           cancelledPendingMessageIdsRef.current.delete(assistantMessageId)
+          return
+        }
+        if (stopRequestedPendingMessageIdsRef.current.delete(assistantMessageId)) {
+          const stoppedAt = Date.now()
+          updateAssistantMessage(
+            conversationId,
+            assistantMessageId,
+            (currentMessage) => ({
+              ...currentMessage,
+              content:
+                currentMessage.content && currentMessage.content !== THINKING_PLACEHOLDER
+                  ? currentMessage.content
+                  : '',
+              status: 'sent',
+              agentRun: settleAgentRunToolActivities(
+                {
+                  ...ensureAgentRun(currentMessage.agentRun, null, 'cancelled'),
+                  completedAt: stoppedAt,
+                  todo: undefined
+                },
+                'cancelled',
+                stoppedAt
+              )
+            }),
+            { touchConversation: true }
+          )
           return
         }
 
@@ -879,10 +938,13 @@ export function AppShell() {
     [
       cancelBackendAgentRun,
       contextWindowIndicatorEnabled,
+      enqueueChatMessageStateSave,
       handleBoundAgentEvent,
       reconcileFailedSkillActivation,
       requestSkillCatalogRefresh,
       setConversationsWithRef,
+      showToast,
+      t,
       uiPreferences.customPermissions,
       updateAssistantMessage
     ]
@@ -1024,10 +1086,12 @@ export function AppShell() {
       const modelId = activeDraftSelectedModel.id
       const permissionMode = activeDraft.permissionMode
       const editedSkillSelections =
+        latestEditableTurn.assistantMessage.agentRun?.explicitSkillSelections ??
         latestEditableTurn.assistantMessage.agentRun?.activatedSkills?.map((skill) => ({
           id: skill.id,
           revision: skill.revision
-        })) ?? []
+        })) ??
+        []
       const userMessage = createUserMessage(messageContent, attachments)
       const assistantMessage = createAssistantMessage(THINKING_PLACEHOLDER, 'pending')
       const messagesBeforeEditedTurn = latestConversation.messages.slice(
@@ -1208,7 +1272,8 @@ export function AppShell() {
         setSettingsOpen(false)
       } catch (error) {
         console.error('Failed to continue conversation in a new task', error)
-        showToast(t('chat.continueInNewTaskFailed'))
+        const message = error instanceof Error ? error.message.trim() : ''
+        showToast(message || t('chat.continueInNewTaskFailed'))
       }
     },
     [drafts, setConversationsWithRef, setDraftsWithRef, showToast, t]
@@ -1428,7 +1493,6 @@ export function AppShell() {
 
   const stopActiveGeneration = useCallback(() => {
     if (!activeConversationId) return
-    const stoppedAt = Date.now()
     const activeConversationSnapshot = conversations.find(
       (conversation) => conversation.id === activeConversationId
     )
@@ -1437,48 +1501,30 @@ export function AppShell() {
       .find((message) => message.role === 'assistant' && message.status === 'pending')
 
     if (!pendingMessage) return
-    cancelledPendingMessageIdsRef.current.add(pendingMessage.id)
-
-    if (pendingMessage.agentRun?.runId) {
-      cancelledRunIdsRef.current.add(pendingMessage.agentRun.runId)
-      cancelBackendAgentRun(pendingMessage.agentRun.runId)
-      cleanupRunBinding(pendingMessage.agentRun.runId)
+    const runId = pendingMessage.agentRun?.runId
+    if (!runId) {
+      stopRequestedPendingMessageIdsRef.current.add(pendingMessage.id)
+      return
     }
+    if (stopRequestedRunIdsRef.current.has(runId)) return
 
-    updateAssistantMessage(
-      activeConversationId,
-      pendingMessage.id,
-      (message) => {
-        const currentRun = ensureAgentRun(
-          message.agentRun,
-          pendingMessage.agentRun?.runId ?? null,
-          'cancelled'
-        )
-        return {
-          ...message,
-          content:
-            message.content && message.content !== THINKING_PLACEHOLDER ? message.content : '',
-          status: 'sent',
-          agentRun: settleAgentRunToolActivities(
-            {
-              ...currentRun,
-              completedAt: stoppedAt,
-              todo: undefined
-            },
-            'cancelled',
-            stoppedAt
-          )
-        }
-      },
-      { touchConversation: true }
-    )
-  }, [
-    activeConversationId,
-    cancelBackendAgentRun,
-    cleanupRunBinding,
-    conversations,
-    updateAssistantMessage
-  ])
+    // The backend emits terminal Done only after the assistant message and trace have been
+    // committed atomically. Keep the binding alive and let that event authoritatively settle the
+    // UI instead of persisting a renderer-invented cancelled state ahead of durable storage.
+    stopRequestedRunIdsRef.current.add(runId)
+    void cancelAgentRun(runId)
+      .then((cancelled) => {
+        if (cancelled || !activeRunBindingsRef.current.has(runId)) return
+        stopRequestedRunIdsRef.current.delete(runId)
+        showToast(t('chat.stopFailed'))
+      })
+      .catch((error) => {
+        console.error('Failed to cancel agent run', error)
+        if (!activeRunBindingsRef.current.has(runId)) return
+        stopRequestedRunIdsRef.current.delete(runId)
+        showToast(t('chat.stopFailed'))
+      })
+  }, [activeConversationId, conversations, showToast, t])
 
   const handleApproveAgentAction = useCallback(
     (messageId: string, action: AgentProposedAction) => {

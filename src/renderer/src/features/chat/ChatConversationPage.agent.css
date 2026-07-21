@@ -521,6 +521,63 @@
   overflow-wrap: anywhere;
 }
 
+.office-activity__item {
+  display: grid;
+  grid-template-columns: minmax(74px, auto) minmax(0, 1fr);
+  align-items: start;
+  padding: 5px 0;
+  gap: 9px;
+}
+
+.office-activity__item + .office-activity__item {
+  border-top: 1px solid var(--mc-color-border-subtle);
+}
+
+.office-activity__item-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.office-activity__item-status svg {
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
+  stroke-width: var(--mc-icon-stroke-medium);
+}
+
+.office-activity__item[data-status='completed'] .office-activity__item-status {
+  color: var(--mc-color-diff-addition-text);
+}
+
+.office-activity__item[data-status='failed'] .office-activity__item-status,
+.office-activity__item[data-status='conflict'] .office-activity__item-status,
+.office-activity__item[data-status='rejected'] .office-activity__item-status {
+  color: var(--mc-color-text-danger);
+}
+
+.office-activity__item[data-status='waiting'] .office-activity__item-status svg,
+.office-activity__item[data-status='running'] .office-activity__item-status svg {
+  animation: mc-agent-tool-spin 0.9s linear infinite;
+}
+
+.office-activity__item-content {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.office-activity__item-error {
+  color: var(--mc-color-text-danger) !important;
+}
+
+@media (max-width: 620px) {
+  .office-activity__item {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+
 .agent-activity--skill-resource:has(.agent-running-text) .agent-activity__icon > svg,
 .agent-activity--skill-script:has(.agent-running-text) .agent-activity__icon > svg,
 .agent-activity--office:has(.agent-running-text) .agent-activity__icon > svg {

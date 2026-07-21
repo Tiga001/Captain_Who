@@ -41,6 +41,7 @@ import {
   filterSkillDescriptors,
   matchSkillSelection,
   removeSkillSelection,
+  retainGlobalSkillSelections,
   toggleSkillSelection,
   updateSkillSelectionRevision
 } from '../../skills/skillSelection'
@@ -148,8 +149,7 @@ export function ChatComposer({
     return enabledModels.find((model) => model.id === selectedModelId) ?? enabledModels[0]
   }, [enabledModels, selectedModelId])
   const selectedProject = projects.find((project) => project.id === selectedProjectId)
-  const skillCatalogEnabled =
-    Boolean(selectedProjectId) && (isSkillMenuOpen || draft.skills.length > 0)
+  const skillCatalogEnabled = isSkillMenuOpen || draft.skills.length > 0
   const skillCatalogRefreshKey = `${skillCatalogRefreshToken}\u0002${
     isSkillMenuOpen
       ? 'picker-open'
@@ -265,12 +265,16 @@ export function ChatComposer({
     previousSkillScopeRef.current = { projectId: draft.projectId, resetKey }
 
     const scopeChanged = previousScope.resetKey !== resetKey
-    if (scopeChanged || previousScope.projectId === draft.projectId || draft.skills.length === 0) {
-      return
-    }
+    const projectChanged = previousScope.projectId !== draft.projectId
+    const shouldValidateProjectlessDraft = draft.projectId === null
+    if ((scopeChanged && !shouldValidateProjectlessDraft) || draft.skills.length === 0) return
+    if (!projectChanged && !shouldValidateProjectlessDraft) return
 
-    updateDraft({ skills: [] })
-  }, [draft.projectId, draft.skills.length, resetKey, updateDraft])
+    const retainedSkills = retainGlobalSkillSelections(draft.skills)
+    if (retainedSkills.length !== draft.skills.length) {
+      updateDraft({ skills: retainedSkills })
+    }
+  }, [draft.projectId, draft.skills, resetKey, updateDraft])
 
   const appendAttachments = (nextAttachments: ComposerAttachment[]) => {
     if (nextAttachments.length === 0) return
@@ -282,13 +286,19 @@ export function ChatComposer({
 
   useEffect(() => {
     if (showProjectSelector && defaultProjectId !== null && defaultProjectId !== draft.projectId) {
-      updateDraft({ projectId: defaultProjectId, skills: [] })
+      updateDraft({
+        projectId: defaultProjectId,
+        skills: retainGlobalSkillSelections(draftRef.current.skills)
+      })
     }
   }, [defaultProjectId, draft.projectId, showProjectSelector, updateDraft])
 
   useEffect(() => {
     if (draft.projectId && !projects.some((project) => project.id === draft.projectId)) {
-      updateDraft({ projectId: null, skills: [] })
+      updateDraft({
+        projectId: null,
+        skills: retainGlobalSkillSelections(draftRef.current.skills)
+      })
     }
   }, [draft.projectId, projects, updateDraft])
 
@@ -423,7 +433,10 @@ export function ChatComposer({
 
     updateDraft({
       projectId: project.id,
-      skills: draftRef.current.projectId === project.id ? draftRef.current.skills : []
+      skills:
+        draftRef.current.projectId === project.id
+          ? draftRef.current.skills
+          : retainGlobalSkillSelections(draftRef.current.skills)
     })
     setProjectSearch('')
     setIsProjectMenuOpen(false)
@@ -829,7 +842,7 @@ export function ChatComposer({
                             skills:
                               draftRef.current.projectId === project.id
                                 ? draftRef.current.skills
-                                : []
+                                : retainGlobalSkillSelections(draftRef.current.skills)
                           })
                           setProjectSearch('')
                           setIsProjectMenuOpen(false)
@@ -860,7 +873,10 @@ export function ChatComposer({
                   className="composer-project-command"
                   type="button"
                   onClick={() => {
-                    updateDraft({ projectId: null, skills: [] })
+                    updateDraft({
+                      projectId: null,
+                      skills: retainGlobalSkillSelections(draftRef.current.skills)
+                    })
                     setProjectSearch('')
                     setIsProjectMenuOpen(false)
                   }}

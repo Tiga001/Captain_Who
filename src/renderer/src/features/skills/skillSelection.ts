@@ -69,6 +69,19 @@ export function mergeSkillSelections(
   return normalizeSkillSelections([...preferred, ...fallback])
 }
 
+/**
+ * Keeps only selections whose source is valid without a workspace. Unknown source prefixes are
+ * dropped fail-closed so changing project scope can never leak a workspace-bound selection into a
+ * project-less run.
+ */
+export function retainGlobalSkillSelections(
+  selections: readonly SkillSelection[]
+): SkillSelection[] {
+  return selections.filter(
+    (selection) => selection.id.startsWith('bundled:') || selection.id.startsWith('installed:')
+  )
+}
+
 export function toggleSkillSelection(
   selections: readonly SkillSelection[],
   descriptor: SkillDescriptor

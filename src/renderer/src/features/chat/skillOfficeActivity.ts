@@ -51,6 +51,7 @@ export interface OfficeActivityView {
   error?: string
   mode: OfficeActivityMode
   operation: OfficeOperation
+  reason?: string
   result?: AgentToolResult
   status: AgentActivityStatus
 }
@@ -77,6 +78,7 @@ const OFFICE_TOOLS = new Set<AgentToolCall['tool']>([
 ])
 
 const HIDDEN_SKILL_TOOLS = new Set<AgentToolCall['tool']>([
+  'skills_activate',
   'skills_list_resources',
   'skills_preflight_script'
 ])
@@ -187,6 +189,7 @@ export function getToolActivityStatus(
   options: { requireResultForSuccess?: boolean } = {}
 ): AgentActivityStatus {
   if (!result) {
+    if (call.approvalStatus === 'rejected') return 'rejected'
     if (settledStatus === 'cancelled') return 'cancelled'
     if (settledStatus === 'failed') return 'failed'
     if (settledStatus === 'completed') {
@@ -396,14 +399,16 @@ export function getOfficeActivityView(
   const records = resultRecords(result)
   const resultError =
     result?.error ?? firstString(records, 'error') ?? firstString(records, 'message')
+  const reason = call.reason?.trim() || undefined
 
   return {
     call,
-    detail: status === 'failed' || status === 'conflict' ? resultError : call.reason?.trim(),
+    detail: reason,
     documentKind,
     error: resultError,
     mode: officeMode(operation, stringValue(args, 'outputPath')),
     operation,
+    reason,
     result,
     status
   }

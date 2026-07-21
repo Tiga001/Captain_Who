@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 pub const CONVERSATION_TURN_TRACE_SCHEMA_VERSION: u32 = 2;
+const BINARY_OMITTED_MARKER: &str = "[binary/base64 omitted]";
+const BINARY_OMITTED_FROM_HISTORY_KEY: &str = "binaryomittedfromhistory";
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -724,7 +726,7 @@ fn sanitize_text(value: &str) -> (String, bool) {
     if value.trim_start().to_ascii_lowercase().starts_with("data:")
         && value.to_ascii_lowercase().contains(";base64,")
     {
-        return ("[binary/base64 omitted]".to_string(), true);
+        return (BINARY_OMITTED_MARKER.to_string(), true);
     }
     (value.to_string(), false)
 }
@@ -740,8 +742,12 @@ fn sanitize_value(value: &Value) -> (Value, bool) {
                     .filter(|character| character.is_ascii_alphanumeric())
                     .flat_map(char::to_lowercase)
                     .collect::<String>();
-                if canonical_key.contains("base64") || canonical_key.contains("dataurl") {
-                    output.insert(key.clone(), json!("[binary/base64 omitted]"));
+                if canonical_key == BINARY_OMITTED_FROM_HISTORY_KEY && value.as_bool() == Some(true)
+                {
+                    output.insert(key.clone(), value.clone());
+                    redacted = true;
+                } else if canonical_key.contains("base64") || canonical_key.contains("dataurl") {
+                    output.insert(key.clone(), json!(BINARY_OMITTED_MARKER));
                     redacted = true;
                 } else {
                     let (value, item_redacted) = sanitize_value(value);
@@ -781,7 +787,10 @@ fn ensure_no_binary_text(label: &str, value: &str) -> Result<(), String> {
 }
 
 fn ensure_no_binary_value(label: &str, value: &Value) -> Result<(), String> {
-    if sanitize_value(value).1 {
+    // Durable values may intentionally retain a binary-named field with the canonical omission
+    // marker. Validate whether sanitization would change the value instead of treating the
+    // already-safe marker as fresh binary material.
+    if sanitize_value(value).0 != *value {
         return Err(format!(
             "conversation trace {label} contains binary material"
         ));
@@ -872,6 +881,51 @@ mod tests {
             "[binary/base64 omitted]"
         );
         assert_eq!(result.result.as_ref().unwrap()["note"], "keep me");
+    }
+
+    #[test]
+    fn binary_sanitization_is_idempotent_and_the_durable_trace_validates() {
+        let call = AgentToolCall {
+            id: "call-image".to_string(),
+            tool: "read_image".to_string(),
+            args: json!({ "path": "image.png" }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let raw = AgentToolResult {
+            call_id: call.id.clone(),
+            tool: call.tool.clone(),
+            ok: true,
+            result: Some(json!({
+                "path": "image.png",
+                "thumbnailDataUrl": "data:image/png;base64,dGh1bWI=",
+                "image": {
+                    "mimeType": "image/png",
+                    "dataBase64": "ZnVsbC1pbWFnZQ=="
+                }
+            })),
+            error: None,
+        };
+        let once = canonical_tool_result_for_context(&raw);
+        let twice = canonical_tool_result_for_context(&once);
+
+        assert_eq!(once.result, twice.result);
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_tool_call(&call);
+        recorder.record_tool_result(&call, &once);
+        let trace = recorder.finish(
+            "run-image",
+            "conversation-image",
+            "assistant-image",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+        trace.validate().unwrap();
+        assert!(trace.truncated);
+        let serialized = serde_json::to_string(&trace).unwrap();
+        assert!(!serialized.contains("data:image/png;base64"));
+        assert!(!serialized.contains("ZnVsbC1pbWFnZQ=="));
+        assert!(!serialized.contains("dGh1bWI="));
     }
 
     #[test]

@@ -196,9 +196,10 @@ function TestComposer({
 beforeEach(() => {
   draftChangeSpy.mockReset()
   listSkillsSpy.mockReset()
-  listSkillsSpy.mockImplementation(async (projectId: string) =>
-    projectId === 'project-b' ? catalog([projectBSkill, bundledAuditorSkill]) : catalog()
-  )
+  listSkillsSpy.mockImplementation(async (projectId: string | null) => {
+    if (projectId === null) return catalog([bundledAuditorSkill, installedAuditorSkill])
+    return projectId === 'project-b' ? catalog([projectBSkill, bundledAuditorSkill]) : catalog()
+  })
   submitSpy.mockReset()
 })
 
@@ -357,6 +358,42 @@ describe('Composer permission confirmation', () => {
 })
 
 describe('ChatComposer Skill picker', () => {
+  it('lists and submits bundled and installed Skills without a project', async () => {
+    const screen = await render(
+      <TestComposer initialDraft={createComposerDraft({ modelId: 'model-1', projectId: null })} />
+    )
+
+    await screen.getByRole('button', { name: 'chat.addContext' }).click()
+    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
+    await expect.poll(() => listSkillsSpy.mock.calls.length).toBe(1)
+    expect(listSkillsSpy).toHaveBeenCalledWith(null)
+    await expect
+      .element(
+        screen.getByRole('button', { name: /^skills\.bundled\.repositoryEvidenceAuditor\.name/ })
+      )
+      .toBeVisible()
+    await expect
+      .element(screen.getByRole('button', { name: /^Installed dependency auditor/ }))
+      .toBeVisible()
+    expect(screen.container.textContent).not.toContain('chat.skillProjectRequired')
+
+    await screen
+      .getByRole('button', { name: /^skills\.bundled\.repositoryEvidenceAuditor\.name/ })
+      .click()
+    await screen.getByRole('button', { name: /^Installed dependency auditor/ }).click()
+    await screen.getByRole('textbox', { name: 'chat.inputAria' }).fill('Audit without a project')
+    await screen.getByRole('button', { name: 'chat.send' }).click()
+    await expect.poll(() => submitSpy.mock.calls.length).toBe(1)
+
+    expect(submitSpy.mock.calls[0]?.[1]).toMatchObject({
+      projectId: null,
+      skills: [
+        { id: bundledAuditorSkill.id, revision: bundledAuditorSkill.revision },
+        { id: installedAuditorSkill.id, revision: installedAuditorSkill.revision }
+      ]
+    })
+  })
+
   it('never renders a ready catalog from a different project scope', async () => {
     const screen = await render(
       <ComposerSkillPicker
@@ -709,14 +746,17 @@ describe('ChatComposer Skill picker', () => {
     expect(draftChangeSpy).not.toHaveBeenCalled()
   })
 
-  it('clears workspace Skill selections before switching projects', async () => {
+  it('drops workspace Skills but preserves global Skills when switching projects', async () => {
     const screen = await render(
       <TestComposer
         initialDraft={createComposerDraft({
           message: 'Inspect the other project',
           modelId: 'model-1',
           projectId: 'project-a',
-          skills: [{ id: auditorSkill.id, revision: auditorSkill.revision }]
+          skills: [
+            { id: auditorSkill.id, revision: auditorSkill.revision },
+            { id: bundledAuditorSkill.id, revision: bundledAuditorSkill.revision }
+          ]
         })}
         showProjectSelector
       />
@@ -726,11 +766,15 @@ describe('ChatComposer Skill picker', () => {
     await screen.getByRole('option', { name: /Project B/ }).click()
     await expect
       .poll(() => screen.container.querySelectorAll('.composer-skill-chip').length)
-      .toBe(0)
+      .toBe(1)
+    expect(screen.container.textContent).not.toContain(auditorSkill.name)
+    expect(screen.container.textContent).toContain('skills.bundled.repositoryEvidenceAuditor.name')
 
     await screen.getByRole('button', { name: 'chat.send' }).click()
     await expect.poll(() => submitSpy.mock.calls.length).toBe(1)
     expect(submitSpy.mock.calls[0]?.[1].projectId).toBe('project-b')
-    expect(submitSpy.mock.calls[0]?.[1].skills).toEqual([])
+    expect(submitSpy.mock.calls[0]?.[1].skills).toEqual([
+      { id: bundledAuditorSkill.id, revision: bundledAuditorSkill.revision }
+    ])
   })
 })

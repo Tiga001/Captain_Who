@@ -42,6 +42,7 @@ mod lifecycle;
 mod messages;
 mod pending_actions;
 mod settings;
+mod trace_reconciliation;
 
 use attachments::*;
 pub use lifecycle::*;

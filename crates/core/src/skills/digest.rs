@@ -65,14 +65,27 @@ fn package_tree_revision(
 pub(super) fn activation_revision<'a>(
     descriptors: impl IntoIterator<Item = &'a SkillDescriptor>,
 ) -> SkillActivationRevision {
-    let descriptors = descriptors.into_iter().collect::<Vec<_>>();
+    activation_revision_for_identities(
+        descriptors
+            .into_iter()
+            .map(|descriptor| (descriptor.id().as_str(), descriptor.revision().as_str())),
+    )
+}
+
+/// Computes the canonical ordered activation-set revision without requiring resolved package
+/// bodies. Runtime progressive activation and eager host activation must share this exact digest
+/// so the public revision keeps one stable meaning across both entry paths.
+pub(crate) fn activation_revision_for_identities<'a>(
+    identities: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> SkillActivationRevision {
+    let identities = identities.into_iter().collect::<Vec<_>>();
     let mut digest = Sha256::new();
     digest.update(ACTIVATION_DOMAIN);
     digest.update(1_u32.to_be_bytes());
-    digest.update((descriptors.len() as u64).to_be_bytes());
-    for descriptor in descriptors {
-        update_bytes(&mut digest, descriptor.id().as_str().as_bytes());
-        update_bytes(&mut digest, descriptor.revision().as_str().as_bytes());
+    digest.update((identities.len() as u64).to_be_bytes());
+    for (id, revision) in identities {
+        update_bytes(&mut digest, id.as_bytes());
+        update_bytes(&mut digest, revision.as_bytes());
     }
     SkillActivationRevision::trusted(format_digest(
         "skill-activation-sha256-v1:",
@@ -268,6 +281,32 @@ mod tests {
         assert_ne!(
             catalog_revision(&[bundled], &[], false),
             catalog_revision(&[other], &[], false)
+        );
+    }
+
+    #[test]
+    fn activation_descriptor_and_identity_apis_share_one_revision_contract() {
+        let source_id = SkillSourceId::parse("bundled:application").unwrap();
+        let descriptor = SkillDescriptor::new(SkillDescriptorParts {
+            id: SkillId::from_parts(source_id.clone(), "documents").unwrap(),
+            name: "Documents".to_string(),
+            description: "Create and edit documents.".to_string(),
+            source_kind: SkillSourceKind::Bundled,
+            trust: SkillTrust::Application,
+            activation_scope: SkillActivationScope::Run,
+            revision: package_revision(b"documents skill"),
+            provenance: SkillProvenance::Bundled {
+                source_id,
+                relative_path: "documents/SKILL.md".to_string(),
+            },
+        });
+
+        assert_eq!(
+            activation_revision([&descriptor]),
+            activation_revision_for_identities([(
+                descriptor.id().as_str(),
+                descriptor.revision().as_str(),
+            )])
         );
     }
 }

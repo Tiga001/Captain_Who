@@ -20,10 +20,32 @@ const translations: Record<string, string> = {
   'agent.skill.resource.completed': '已{action}「{skill}」技能{subject}',
   'agent.office.kind.spreadsheet': '电子表格',
   'agent.office.kind.document': '文档',
+  'agent.office.kind.presentation': '演示文稿',
+  'agent.office.failed': '{kind}处理失败',
+  'agent.office.cancelled': '已取消{kind}处理',
+  'agent.office.rejected': '已拒绝{kind}处理',
+  'agent.office.conflict': '{kind}存在冲突',
   'agent.office.edited': '已编辑{kind}',
+  'agent.office.created': '已创建{kind}',
   'agent.office.viewed': '已查看{kind}信息',
   'agent.office.groupOperations': '{label} · {count} 项操作',
   'agent.office.groupChecks': '{label} · {count} 项检查',
+  'agent.office.groupOperationSummary': '{kind}操作',
+  'agent.office.groupCheckSummary': '{kind}检查',
+  'agent.office.groupStatus.waiting': '等待审批 {count} 项',
+  'agent.office.groupStatus.running': '进行中 {count} 项',
+  'agent.office.groupStatus.completed': '成功 {count} 项',
+  'agent.office.groupStatus.failed': '失败 {count} 项',
+  'agent.office.groupStatus.conflict': '冲突 {count} 项',
+  'agent.office.groupStatus.rejected': '拒绝 {count} 项',
+  'agent.office.groupStatus.cancelled': '取消 {count} 项',
+  'agent.office.itemStatus.waiting': '等待审批',
+  'agent.office.itemStatus.running': '进行中',
+  'agent.office.itemStatus.completed': '成功',
+  'agent.office.itemStatus.failed': '失败',
+  'agent.office.itemStatus.conflict': '冲突',
+  'agent.office.itemStatus.rejected': '已拒绝',
+  'agent.office.itemStatus.cancelled': '已取消',
   'agent.office.files': 'Office 文件',
   'agent.office.reveal': '在文件夹中打开',
   'agent.office.revealUnavailable': '无法定位',
@@ -230,6 +252,104 @@ describe('Skill and Office chat timeline', () => {
     expect(screen.container.textContent).toContain('更新了项目结论。')
     expect(screen.container.textContent).toContain('检查了标题层级。')
     expect(screen.container.textContent).toContain('检查了页面布局。')
+  })
+
+  it('reports mixed Office outcomes accurately and keeps every operation inspectable', async () => {
+    const calls = [
+      {
+        id: 'edit-failed',
+        tool: 'office_document',
+        approvalStatus: 'approved' as const,
+        args: { operation: 'set', path: 'report.docx' },
+        reason: '替换文档中的指定文字。'
+      },
+      ...['添加内容概述。', '添加主要内容。', '添加性质说明。'].map((reason, index) => ({
+        id: `edit-success-${index + 1}`,
+        tool: 'office_document',
+        approvalStatus: 'approved' as const,
+        args: { operation: 'add', path: 'report.docx' },
+        reason
+      }))
+    ]
+    const message = assistantMessage({
+      toolCalls: calls,
+      toolResults: calls.map((call, index) =>
+        index === 0
+          ? {
+              callId: call.id,
+              tool: call.tool,
+              ok: false,
+              error: 'Office replacement find cannot be empty.'
+            }
+          : {
+              callId: call.id,
+              tool: call.tool,
+              ok: true,
+              result: { exitCode: 0 }
+            }
+      ),
+      timeline: calls.map((call) => ({
+        id: call.id,
+        type: 'tool_call' as const,
+        callId: call.id
+      }))
+    })
+    const screen = await render(
+      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
+    )
+
+    expect(screen.container.textContent).toContain('文档操作 · 成功 3 项 · 失败 1 项')
+    expect(screen.container.querySelectorAll('.office-activity__item')).toHaveLength(4)
+    expect(
+      screen.container.querySelectorAll('.office-activity__item[data-status="completed"]')
+    ).toHaveLength(3)
+    expect(
+      screen.container.querySelectorAll('.office-activity__item[data-status="failed"]')
+    ).toHaveLength(1)
+    expect(screen.container.textContent).toContain('替换文档中的指定文字。')
+    expect(screen.container.textContent).toContain('Office replacement find cannot be empty.')
+    expect(screen.container.textContent).toContain('添加内容概述。')
+    expect(screen.container.textContent).not.toContain('文档处理失败 · 4 项操作')
+  })
+
+  it('renders multiple Office outputs as rows in one connected card with Office icons', async () => {
+    const paths = ['图片描述_副本1.docx', '图片描述_副本2.docx', '图片描述_副本3.docx']
+    const calls = paths.map((path, index) => ({
+      id: `create-${index + 1}`,
+      tool: 'office_document',
+      approvalStatus: 'approved' as const,
+      args: { operation: 'create', path },
+      reason: `创建第 ${index + 1} 份文档。`
+    }))
+    const message = assistantMessage({
+      toolCalls: calls,
+      toolResults: calls.map((call) => ({
+        callId: call.id,
+        tool: call.tool,
+        ok: true,
+        result: { exitCode: 0 }
+      })),
+      timeline: calls.map((call) => ({
+        id: call.id,
+        type: 'tool_call' as const,
+        callId: call.id
+      }))
+    })
+    const screen = await render(
+      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
+    )
+
+    expect(screen.container.querySelectorAll('.office-artifact-list')).toHaveLength(1)
+    const rows = screen.container.querySelectorAll('.office-artifact-card')
+    expect(rows).toHaveLength(3)
+    expect(rows[0]?.parentElement).toBe(rows[1]?.parentElement)
+    expect(rows[1]?.parentElement).toBe(rows[2]?.parentElement)
+    rows.forEach((row) => {
+      expect(row.querySelector('.office-artifact-card__icon img')).not.toBeNull()
+      expect(row.querySelector('.office-artifact-card__icon svg')).toBeNull()
+    })
+    paths.forEach((path) => expect(screen.container.textContent).toContain(path))
+    expect(screen.getByRole('button', { name: '在文件夹中打开' }).elements()).toHaveLength(3)
   })
 
   it('does not render a success file card for a failed observed command', async () => {

@@ -461,6 +461,7 @@ mod tests {
         AgentRunContext, AgentSearchConfig, AgentSearchMode, AgentToolCall, AgentToolSafety,
         AgentWorkspaceContext, ModelCapabilities,
     };
+    use image::ImageEncoder;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
@@ -474,6 +475,19 @@ mod tests {
             args["reason"] = reason;
         }
         args
+    }
+
+    fn valid_test_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(
+                &[0x20, 0x40, 0x80, 0xff],
+                1,
+                1,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        bytes
     }
 
     struct InvalidSchemaTool;
@@ -964,7 +978,8 @@ mod tests {
         let storage_rel_path = PathBuf::from("conversations/c1/m1/image1/pixel.png");
         let attachment_path = attachment_root.join(&storage_rel_path);
         fs::create_dir_all(attachment_path.parent().unwrap()).unwrap();
-        fs::write(&attachment_path, b"not-a-real-png-but-valid-tool-bytes").unwrap();
+        let image_bytes = valid_test_png();
+        fs::write(&attachment_path, &image_bytes).unwrap();
 
         let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
             conversation_id: Some("c1".to_string()),
@@ -982,7 +997,7 @@ mod tests {
                     kind: AgentInputAttachmentKind::Image,
                     name: "pixel.png".to_string(),
                     mime_type: Some("image/png".to_string()),
-                    size_bytes: 31,
+                    size_bytes: image_bytes.len() as u64,
                     read_path: "@attachments/image1/pixel.png".to_string(),
                     storage_rel_path: "conversations/c1/m1/image1/pixel.png".to_string(),
                     created_at: 1,
@@ -1008,6 +1023,9 @@ mod tests {
         let value = result.result.as_ref().unwrap();
         assert_eq!(value["path"], "@attachments/image1/pixel.png");
         assert_eq!(value["mimeType"], "image/png");
+        assert!(value["thumbnailDataUrl"]
+            .as_str()
+            .is_some_and(|thumbnail| thumbnail.starts_with("data:image/png;base64,")));
         assert!(value["image"]["dataBase64"].as_str().unwrap().len() > 10);
     }
 

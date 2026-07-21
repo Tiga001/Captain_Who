@@ -366,6 +366,7 @@ fn read_image_tool_result_is_redacted_but_creates_visual_message() {
             "format": "png",
             "mimeType": "image/png",
             "sizeBytes": 3,
+            "thumbnailDataUrl": "data:image/png;base64,dGh1bWI=",
             "image": {
                 "mimeType": "image/png",
                 "dataBase64": "YWJj"
@@ -374,11 +375,14 @@ fn read_image_tool_result_is_redacted_but_creates_visual_message() {
         error: None,
     };
 
-    let event_result = redact_tool_result_for_event(&result);
+    let registry = ToolRegistry::defaults_with_search(None);
+    let event_result = redact_tool_result_for_event(&registry.event_projection(&result));
+    let event_value = event_result.result.as_ref().unwrap();
     assert_eq!(
-        event_result.result.as_ref().unwrap()["image"]["dataBase64"],
-        "[binary/base64 omitted]"
+        event_value["thumbnailDataUrl"],
+        "data:image/png;base64,dGh1bWI="
     );
+    assert!(event_value.get("image").is_none());
 
     let image_message = llm_image_message_from_tool_result(&result).unwrap();
     assert_eq!(image_message.role, LlmMessageRole::User);
@@ -964,6 +968,266 @@ async fn text_only_model_receives_paired_read_image_capability_failure_without_i
     assert!(!request.contains("modelCapabilities"));
     assert!(!request.contains("image_url"));
     assert!(!request.contains("data:image/"));
+}
+
+#[tokio::test]
+async fn image_capable_read_image_round_trip_is_legal_for_openai_and_anthropic() {
+    use base64::Engine;
+    use image::ImageEncoder;
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_json_request(stream: &mut TcpStream) -> Value {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+        let mut body_start = None;
+        let mut expected_length = None;
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request completed");
+            request.extend_from_slice(&buffer[..read]);
+            if body_start.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    let start = header_end + 4;
+                    body_start = Some(start);
+                    expected_length = Some(start + content_length);
+                }
+            }
+            if expected_length.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        serde_json::from_slice(
+            &request[body_start.unwrap()..expected_length.expect("content length")],
+        )
+        .unwrap()
+    }
+
+    async fn write_json_response(stream: &mut TcpStream, body: Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    }
+
+    async fn run_case(style: crate::protocol::AgentApiStyle) {
+        let fixture = tempdir().unwrap();
+        let image_path = fixture.path().join("pixel.png");
+        let mut image_bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut image_bytes)
+            .write_image(
+                &[0x10, 0x40, 0x90, 0xff],
+                1,
+                1,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        std::fs::write(&image_path, &image_bytes).unwrap();
+        let full_image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let second_request = Arc::new(Mutex::new(None::<Value>));
+        let captured_second_request = Arc::clone(&second_request);
+        let server = tokio::spawn(async move {
+            for request_index in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_json_request(&mut stream).await;
+                if request_index == 1 {
+                    *captured_second_request.lock().unwrap() = Some(request);
+                }
+                let response = match (style, request_index) {
+                    (crate::protocol::AgentApiStyle::OpenAiCompatible, 0) => json!({
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "I will inspect the image.",
+                                "tool_calls": [{
+                                    "id": "read-image-success",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "read_image",
+                                        "arguments": "{\"path\":\"pixel.png\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }]
+                    }),
+                    (crate::protocol::AgentApiStyle::OpenAiCompatible, _) => json!({
+                        "choices": [{
+                            "message": { "role": "assistant", "content": "image inspected" },
+                            "finish_reason": "stop"
+                        }]
+                    }),
+                    (crate::protocol::AgentApiStyle::AnthropicCompatible, 0) => json!({
+                        "content": [
+                            { "type": "text", "text": "I will inspect the image." },
+                            {
+                                "type": "tool_use",
+                                "id": "read-image-success",
+                                "name": "read_image",
+                                "input": { "path": "pixel.png" }
+                            }
+                        ],
+                        "stop_reason": "tool_use"
+                    }),
+                    (crate::protocol::AgentApiStyle::AnthropicCompatible, _) => json!({
+                        "content": [{ "type": "text", "text": "image inspected" }],
+                        "stop_reason": "end_turn"
+                    }),
+                };
+                write_json_response(&mut stream, response).await;
+            }
+        });
+
+        let mut input = conversation_context_input(vec![message("user", "Inspect pixel.png")]);
+        input.api_url = format!("http://{address}/v1/messages");
+        input.api_token = "test-token".to_string();
+        input.api_style = Some(style);
+        input.stream = Some(false);
+        input.model_capabilities.image_input = true;
+        input.assistant_message_id = Some("assistant-image".to_string());
+        input.context = Some(AgentRunContext {
+            conversation_id: Some("conversation-image".to_string()),
+            project_id: Some("project-image".to_string()),
+            workspace: Some(AgentWorkspaceContext {
+                project_id: Some("project-image".to_string()),
+                display_name: Some("Image workspace".to_string()),
+                root_path: Some(fixture.path().to_string_lossy().to_string()),
+            }),
+            attachment_library: None,
+            permissions: Default::default(),
+        });
+
+        let output = AgentRuntime::default().send_chat(input).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(output.content, "image inspected");
+
+        let event_result = output
+            .events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolResult { result, .. } if result.call_id == "read-image-success" => {
+                    Some(result)
+                }
+                _ => None,
+            })
+            .expect("read_image result event");
+        let event_value = event_result.result.as_ref().unwrap();
+        assert!(event_value["thumbnailDataUrl"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("data:image/png;base64,")));
+        assert!(event_value.get("image").is_none());
+
+        let trace = output
+            .conversation_turn_trace
+            .as_ref()
+            .expect("terminal conversation trace");
+        trace.validate().unwrap();
+        assert!(trace.truncated);
+        assert!(trace.items.iter().any(|item| matches!(
+            item,
+            ConversationTurnTraceItem::ToolResult {
+                call_id,
+                truncated: true,
+                ..
+            } if call_id == "read-image-success"
+        )));
+        let durable = serde_json::to_string(trace).unwrap();
+        assert!(!durable.contains(&full_image_base64));
+        assert!(!durable.contains("data:image"));
+        assert!(!durable.contains("thumbnailDataUrl"));
+        assert!(!durable.contains("dataBase64"));
+
+        let request = second_request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("second provider request");
+        let messages = request["messages"].as_array().unwrap();
+        match style {
+            crate::protocol::AgentApiStyle::OpenAiCompatible => {
+                let tool_call_index = messages
+                    .iter()
+                    .position(|message| {
+                        message["role"] == "assistant"
+                            && message["tool_calls"][0]["id"] == "read-image-success"
+                    })
+                    .expect("OpenAI assistant tool call");
+                let tool_result_index = messages
+                    .iter()
+                    .position(|message| {
+                        message["role"] == "tool" && message["tool_call_id"] == "read-image-success"
+                    })
+                    .expect("OpenAI paired tool result");
+                let image_index = messages
+                    .iter()
+                    .position(|message| {
+                        message["role"] == "user"
+                            && message["content"].as_array().is_some_and(|parts| {
+                                parts.iter().any(|part| part["type"] == "image_url")
+                            })
+                    })
+                    .expect("OpenAI visual input");
+                assert!(tool_call_index < tool_result_index && tool_result_index < image_index);
+                assert!(messages[image_index]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|part| {
+                        part["image_url"]["url"]
+                            == format!("data:image/png;base64,{full_image_base64}")
+                    }));
+            }
+            crate::protocol::AgentApiStyle::AnthropicCompatible => {
+                let tool_call_index = messages
+                    .iter()
+                    .position(|message| {
+                        message["role"] == "assistant"
+                            && message["content"].as_array().is_some_and(|parts| {
+                                parts.iter().any(|part| {
+                                    part["type"] == "tool_use" && part["id"] == "read-image-success"
+                                })
+                            })
+                    })
+                    .expect("Anthropic assistant tool_use");
+                let result_and_image_index = messages
+                    .iter()
+                    .position(|message| {
+                        message["role"] == "user"
+                            && message["content"].as_array().is_some_and(|parts| {
+                                parts.iter().any(|part| {
+                                    part["type"] == "tool_result"
+                                        && part["tool_use_id"] == "read-image-success"
+                                }) && parts.iter().any(|part| {
+                                    part["type"] == "image"
+                                        && part["source"]["data"] == full_image_base64
+                                })
+                            })
+                    })
+                    .expect("Anthropic paired tool_result and visual input");
+                assert!(tool_call_index < result_and_image_index);
+            }
+        }
+    }
+
+    run_case(crate::protocol::AgentApiStyle::OpenAiCompatible).await;
+    run_case(crate::protocol::AgentApiStyle::AnthropicCompatible).await;
 }
 
 #[test]

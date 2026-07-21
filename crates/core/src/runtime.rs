@@ -1079,7 +1079,9 @@ impl AgentRuntime {
                                 )?;
                                 event_stream.emit(AgentEvent::ToolResult {
                                     run_id: run_id.clone(),
-                                    result: redact_tool_result_for_event(&result),
+                                    result: redact_tool_result_for_event(
+                                        &tool_registry.event_projection(&result),
+                                    ),
                                 });
                                 active_context.push(ContextItem::tool_result(
                                     call.id.clone(),

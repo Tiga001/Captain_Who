@@ -15,7 +15,7 @@ export function useShellLayout() {
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT_WIDTH)
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT_WIDTH)
   const [leftOpen, setLeftOpen] = useState(true)
-  const [rightOpen, setRightOpen] = useState(true)
+  const [rightOpen, setRightOpen] = useState(false)
   const [rightMaximized, setRightMaximized] = useState(false)
 
   const resizeSide = useCallback(

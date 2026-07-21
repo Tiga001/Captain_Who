@@ -4,6 +4,7 @@ import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 import { formatTranslation, type Translate } from '../../../../config/translationFormat'
 import { loadImageFile } from '../../../storage/storageClient'
+import { normalizeReadImageThumbnailDataUrl } from '../../agentReadActivities'
 import type { ChatReadActivity, ChatReadActivityKind } from '../../chatTypes'
 import { useImagePreview, useImagePreviewNotice } from '../ImagePreview'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
@@ -122,16 +123,6 @@ function getStatusIcon(kind: ChatReadActivityKind) {
   return FileText
 }
 
-function normalizeThumbnailDataUrl(activity: ChatReadActivity | undefined) {
-  const thumbnailDataUrl = activity?.thumbnailDataUrl?.trim()
-  return thumbnailDataUrl?.startsWith('data:image/') ? thumbnailDataUrl : undefined
-}
-
-function normalizeFullDataUrl(activity: ChatReadActivity | undefined) {
-  const fullDataUrl = activity?.fullDataUrl?.trim()
-  return fullDataUrl?.startsWith('data:image/') ? fullDataUrl : undefined
-}
-
 function imageDataUrlFromRecord(image: { data: string; mimeType: string }) {
   return `data:${image.mimeType};base64,${image.data}`
 }
@@ -239,22 +230,13 @@ function ReadActivityCard({ activity, call, projectId, result }: ReadToolActivit
   const openImagePreview = useImagePreview()
   const showImagePreviewNotice = useImagePreviewNotice()
   const kind = getKind(call, activity)
-  const thumbnailDataUrl = kind === 'image' ? normalizeThumbnailDataUrl(activity) : undefined
-  const fullDataUrl = kind === 'image' ? normalizeFullDataUrl(activity) : undefined
+  const thumbnailDataUrl =
+    kind === 'image' ? normalizeReadImageThumbnailDataUrl(activity?.thumbnailDataUrl) : undefined
   const error = activity?.error ?? result?.error
   const displayName = getDisplayName(activity, call, t)
   const sourcePath = activity?.path || getPathFromCall(call)
 
   const openReadImagePreview = async () => {
-    if (fullDataUrl) {
-      openImagePreview({
-        alt: displayName,
-        fileName: displayName,
-        src: fullDataUrl
-      })
-      return
-    }
-
     if (!sourcePath) {
       showImagePreviewNotice(t('imagePreview.originalMissing'))
       return

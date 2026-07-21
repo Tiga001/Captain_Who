@@ -27,6 +27,8 @@ mod source;
 mod source_resolution;
 mod workspace;
 
+pub(crate) use digest::activation_revision_for_identities;
+
 pub use acquisition_provenance::{
     SkillInstallationAuthority, SkillInstallationAuthorityView, SkillInstallationProvenance,
     SkillInstallationProvenanceError, SkillInstallationProvenanceView, SkillInstallationRefresh,

@@ -115,12 +115,20 @@ pub enum AgentSkillActivationActor {
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentSkillSourceSummary {
+    pub kind: String,
+    pub id: String,
+}
+
+/// The same presentation-safe Skill identity returned for explicit activation at turn start.
+/// Runtime activation metadata deliberately excludes instructions and resource locations.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentSkillActivatedEvent {
     pub id: String,
     pub name: String,
     pub revision: String,
-    pub source: String,
-    pub activated_by: AgentSkillActivationActor,
+    pub source: AgentSkillSourceSummary,
 }
 
 impl std::fmt::Debug for AgentActivatedSkill {
@@ -1656,6 +1664,8 @@ pub enum AgentEvent {
     },
     SkillActivated {
         run_id: String,
+        activation_revision: String,
+        activated_by: AgentSkillActivationActor,
         skill: AgentSkillActivatedEvent,
     },
     FileDraftUpdated {
@@ -1850,20 +1860,27 @@ mod tests {
     fn skill_activated_event_uses_the_stable_frontend_contract() {
         let value = serde_json::to_value(AgentEvent::SkillActivated {
             run_id: "run-1".to_string(),
+            activation_revision: "activation-sha256-v1:test".to_string(),
+            activated_by: AgentSkillActivationActor::Model,
             skill: AgentSkillActivatedEvent {
                 id: "bundled:application:documents".to_string(),
                 name: "documents".to_string(),
                 revision: "skill-package-sha256-v2:test".to_string(),
-                source: "bundled:application".to_string(),
-                activated_by: AgentSkillActivationActor::Model,
+                source: AgentSkillSourceSummary {
+                    kind: "bundled".to_string(),
+                    id: "bundled:application".to_string(),
+                },
             },
         })
         .unwrap();
 
         assert_eq!(value["type"], "skill_activated");
         assert_eq!(value["runId"], "run-1");
-        assert_eq!(value["skill"]["activatedBy"], "model");
+        assert_eq!(value["activationRevision"], "activation-sha256-v1:test");
+        assert_eq!(value["activatedBy"], "model");
         assert_eq!(value["skill"]["name"], "documents");
+        assert_eq!(value["skill"]["source"]["kind"], "bundled");
+        assert_eq!(value["skill"]["source"]["id"], "bundled:application");
     }
 
     #[test]

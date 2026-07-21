@@ -213,164 +213,150 @@ export function ComposerSkillPicker({
         </button>
       </div>
 
-      {!projectId ? (
-        <div className="composer-skill-menu__state">
-          <Sparkles aria-hidden="true" />
-          <strong>{t('chat.skillProjectRequired')}</strong>
-          <span>{t('chat.skillProjectRequiredDescription')}</span>
+      <label className="composer-skill-menu__search">
+        <Search aria-hidden="true" />
+        <input
+          autoFocus
+          value={search}
+          placeholder={t('chat.searchSkills')}
+          aria-label={t('chat.searchSkills')}
+          onChange={(event) => onSearchChange(event.target.value)}
+        />
+      </label>
+
+      {catalogState.status === 'loading' && (
+        <div className="composer-skill-menu__state" role="status">
+          <LoaderCircle className="composer-skill-menu__spinner" aria-hidden="true" />
+          <span>{t('chat.loadingSkills')}</span>
         </div>
-      ) : (
+      )}
+
+      {catalogState.status === 'error' && (
+        <div className="composer-skill-menu__state" role="alert">
+          <AlertTriangle aria-hidden="true" />
+          <strong>{t('chat.skillsLoadFailed')}</strong>
+          <span>{catalogState.message}</span>
+          <button type="button" onClick={onRefresh}>
+            <RefreshCw aria-hidden="true" />
+            <span>{t('chat.retrySkills')}</span>
+          </button>
+        </div>
+      )}
+
+      {readyOutput && (
         <>
-          <label className="composer-skill-menu__search">
-            <Search aria-hidden="true" />
-            <input
-              autoFocus
-              value={search}
-              placeholder={t('chat.searchSkills')}
-              aria-label={t('chat.searchSkills')}
-              onChange={(event) => onSearchChange(event.target.value)}
-            />
-          </label>
-
-          {catalogState.status === 'loading' && (
-            <div className="composer-skill-menu__state" role="status">
-              <LoaderCircle className="composer-skill-menu__spinner" aria-hidden="true" />
-              <span>{t('chat.loadingSkills')}</span>
-            </div>
-          )}
-
-          {catalogState.status === 'error' && (
-            <div className="composer-skill-menu__state" role="alert">
+          {(staleSelections.length > 0 || unavailableSelections.length > 0) && (
+            <div className="composer-skill-menu__notice" role="alert">
               <AlertTriangle aria-hidden="true" />
-              <strong>{t('chat.skillsLoadFailed')}</strong>
-              <span>{catalogState.message}</span>
-              <button type="button" onClick={onRefresh}>
-                <RefreshCw aria-hidden="true" />
-                <span>{t('chat.retrySkills')}</span>
-              </button>
+              <span>
+                {staleSelections.length > 0
+                  ? t('chat.skillStaleDescription')
+                  : t('chat.skillUnavailableDescription')}
+              </span>
             </div>
           )}
 
-          {readyOutput && (
-            <>
-              {(staleSelections.length > 0 || unavailableSelections.length > 0) && (
-                <div className="composer-skill-menu__notice" role="alert">
-                  <AlertTriangle aria-hidden="true" />
-                  <span>
-                    {staleSelections.length > 0
-                      ? t('chat.skillStaleDescription')
-                      : t('chat.skillUnavailableDescription')}
-                  </span>
-                </div>
-              )}
+          {readyOutput.truncated && (
+            <div className="composer-skill-menu__notice" role="status">
+              <AlertTriangle aria-hidden="true" />
+              <span>{t('chat.skillCatalogTruncated')}</span>
+            </div>
+          )}
 
-              {readyOutput.truncated && (
-                <div className="composer-skill-menu__notice" role="status">
-                  <AlertTriangle aria-hidden="true" />
-                  <span>{t('chat.skillCatalogTruncated')}</span>
-                </div>
-              )}
+          {readyOutput.diagnostics.length > 0 && (
+            <details className="composer-skill-menu__diagnostics">
+              <summary>
+                {t('chat.skillDiagnostics').replace(
+                  '{count}',
+                  String(readyOutput.diagnostics.length)
+                )}
+              </summary>
+              <ul>
+                {readyOutput.diagnostics.slice(0, 5).map((diagnostic, index) => (
+                  <li key={`${diagnostic.code}:${diagnostic.skillId ?? 'catalog'}:${index}`}>
+                    {diagnostic.message}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
 
-              {readyOutput.diagnostics.length > 0 && (
-                <details className="composer-skill-menu__diagnostics">
-                  <summary>
-                    {t('chat.skillDiagnostics').replace(
-                      '{count}',
-                      String(readyOutput.diagnostics.length)
-                    )}
-                  </summary>
-                  <ul>
-                    {readyOutput.diagnostics.slice(0, 5).map((diagnostic, index) => (
-                      <li key={`${diagnostic.code}:${diagnostic.skillId ?? 'catalog'}:${index}`}>
-                        {diagnostic.message}
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
+          {allSkills.length === 0 ? (
+            <div className="composer-skill-menu__state">
+              <Sparkles aria-hidden="true" />
+              <strong>{t('chat.noSkills')}</strong>
+              <span>{t('chat.noSkillsDescription')}</span>
+            </div>
+          ) : visibleSkills.length === 0 ? (
+            <div className="composer-skill-menu__state">
+              <Search aria-hidden="true" />
+              <span>{t('chat.noMatchingSkills')}</span>
+            </div>
+          ) : (
+            <div className="composer-skill-menu__items" role="list" aria-label={t('chat.skills')}>
+              {visibleSkills.map((skill) => {
+                const selected = selections.find((selection) => selection.id === skill.id)
+                const isStale = Boolean(selected && selected.revision !== skill.revision)
+                const atLimit = !selected && selections.length >= MAX_SELECTED_SKILLS
+                const sourceLabel = getSkillSourceLabel(skill.source.kind, t)
+                const trustLabel =
+                  skill.trust === 'untrusted'
+                    ? t('chat.skillTrustUntrusted')
+                    : t('chat.skillTrustApplication')
+                const provenanceLabel = `${sourceLabel} · ${trustLabel}`
 
-              {allSkills.length === 0 ? (
-                <div className="composer-skill-menu__state">
-                  <Sparkles aria-hidden="true" />
-                  <strong>{t('chat.noSkills')}</strong>
-                  <span>{t('chat.noSkillsDescription')}</span>
-                </div>
-              ) : visibleSkills.length === 0 ? (
-                <div className="composer-skill-menu__state">
-                  <Search aria-hidden="true" />
-                  <span>{t('chat.noMatchingSkills')}</span>
-                </div>
-              ) : (
-                <div
-                  className="composer-skill-menu__items"
-                  role="list"
-                  aria-label={t('chat.skills')}
-                >
-                  {visibleSkills.map((skill) => {
-                    const selected = selections.find((selection) => selection.id === skill.id)
-                    const isStale = Boolean(selected && selected.revision !== skill.revision)
-                    const atLimit = !selected && selections.length >= MAX_SELECTED_SKILLS
-                    const sourceLabel = getSkillSourceLabel(skill.source.kind, t)
-                    const trustLabel =
-                      skill.trust === 'untrusted'
-                        ? t('chat.skillTrustUntrusted')
-                        : t('chat.skillTrustApplication')
-                    const provenanceLabel = `${sourceLabel} · ${trustLabel}`
-
-                    return (
-                      <div
-                        className="composer-skill-option"
-                        data-selected={Boolean(selected) || undefined}
-                        data-source-kind={skill.source.kind}
-                        data-stale={isStale || undefined}
-                        data-trust={skill.trust}
-                        key={skill.id}
-                        role="listitem"
+                return (
+                  <div
+                    className="composer-skill-option"
+                    data-selected={Boolean(selected) || undefined}
+                    data-source-kind={skill.source.kind}
+                    data-stale={isStale || undefined}
+                    data-trust={skill.trust}
+                    key={skill.id}
+                    role="listitem"
+                  >
+                    <Tooltip
+                      anchorClassName="composer-skill-option__tooltip-anchor"
+                      content={skill.description}
+                      describeTrigger
+                      preferredPlacement="top"
+                    >
+                      <button
+                        className="composer-skill-option__main"
+                        type="button"
+                        aria-label={`${skill.name} · ${provenanceLabel}`}
+                        aria-pressed={Boolean(selected)}
+                        disabled={atLimit}
+                        onClick={() => onToggle(skill)}
                       >
-                        <Tooltip
-                          anchorClassName="composer-skill-option__tooltip-anchor"
-                          content={skill.description}
-                          describeTrigger
-                          preferredPlacement="top"
-                        >
-                          <button
-                            className="composer-skill-option__main"
-                            type="button"
-                            aria-label={`${skill.name} · ${provenanceLabel}`}
-                            aria-pressed={Boolean(selected)}
-                            disabled={atLimit}
-                            onClick={() => onToggle(skill)}
-                          >
-                            <SkillIcon
-                              className="composer-skill-option__icon"
-                              skillId={skill.id}
-                              source={skill.source}
-                            />
-                            <strong className="composer-skill-option__name">{skill.name}</strong>
-                            {isStale && <AlertTriangle aria-hidden="true" />}
-                          </button>
-                        </Tooltip>
-                        {isStale && (
-                          <button
-                            className="composer-skill-option__update"
-                            type="button"
-                            onClick={() => onUseLatest(skill)}
-                          >
-                            {t('chat.useLatestSkill')}
-                          </button>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
+                        <SkillIcon
+                          className="composer-skill-option__icon"
+                          skillId={skill.id}
+                          source={skill.source}
+                        />
+                        <strong className="composer-skill-option__name">{skill.name}</strong>
+                        {isStale && <AlertTriangle aria-hidden="true" />}
+                      </button>
+                    </Tooltip>
+                    {isStale && (
+                      <button
+                        className="composer-skill-option__update"
+                        type="button"
+                        onClick={() => onUseLatest(skill)}
+                      >
+                        {t('chat.useLatestSkill')}
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
 
-              {selections.length >= MAX_SELECTED_SKILLS && (
-                <p className="composer-skill-menu__limit" role="status">
-                  {t('chat.skillSelectionLimit').replace('{maximum}', String(MAX_SELECTED_SKILLS))}
-                </p>
-              )}
-            </>
+          {selections.length >= MAX_SELECTED_SKILLS && (
+            <p className="composer-skill-menu__limit" role="status">
+              {t('chat.skillSelectionLimit').replace('{maximum}', String(MAX_SELECTED_SKILLS))}
+            </p>
           )}
         </>
       )}

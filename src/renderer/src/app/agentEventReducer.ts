@@ -31,6 +31,7 @@ import {
   upsertWebSearchActivityFromCall,
   upsertWebSearchActivityFromResult
 } from '../features/chat/agentWebSearch'
+import { mergeActivatedSkillSummaries } from '../features/skills/activatedSkillInventory'
 
 function createAgentRun(
   runId: string | null,
@@ -1110,10 +1111,18 @@ export function applyAgentEventToChatMessage(
   }
 
   if (agentEvent.type === 'skill_activated') {
-    // Backend-authoritative activation is already represented by the paired skills_activate
-    // ToolCall/ToolResult. Keep the run alive until the dedicated Skill activity projection is
-    // implemented instead of letting this non-terminal notification fall through to finalization.
-    return message
+    return {
+      ...message,
+      status: 'pending',
+      agentRun: {
+        ...currentRun,
+        status: 'running',
+        activatedSkills: mergeActivatedSkillSummaries(currentRun.activatedSkills, [
+          agentEvent.skill
+        ]),
+        skillActivationRevision: agentEvent.activationRevision
+      }
+    }
   }
 
   if (agentEvent.type === 'approval_required') {

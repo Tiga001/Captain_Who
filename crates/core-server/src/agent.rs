@@ -153,6 +153,11 @@ impl AgentService {
         storage
             .reconcile_interrupted_pending_agent_actions(now_ms())
             .map_err(|error| format!("failed to reconcile interrupted pending actions: {error}"))?;
+        storage
+            .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), now_ms())
+            .map_err(|error| {
+                format!("failed to reconcile orphaned conversation traces: {error}")
+            })?;
         let pending_actions = load_persisted_pending_actions(&storage)?;
         let office_engine = resolve_default_office_engine();
         let artifact_runtime = resolve_default_artifact_runtime();

@@ -1,12 +1,28 @@
 // Renderer UI for native Office tool activity. It deliberately exposes only user-facing action
 // summaries and never renders engine, staging, normalized path, or frozen execution metadata.
 
-import { FileCheck2, FilePenLine, FilePlus2, FileSearch, LoaderCircle, XCircle } from 'lucide-react'
+import {
+  AlertTriangle,
+  CheckCircle2,
+  CircleSlash2,
+  FileCheck2,
+  FilePenLine,
+  FilePlus2,
+  FileSearch,
+  ListChecks,
+  LoaderCircle,
+  XCircle
+} from 'lucide-react'
 import type { AgentToolCall } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
+import type { TranslationKey } from '../../../../config/frontendTranslations'
 import { formatTranslation } from '../../../../config/translationFormat'
 import type { ChatAgentRunView } from '../../chatTypes'
-import { getOfficeActivityView, type AgentActivityStatus } from '../../skillOfficeActivity'
+import {
+  getOfficeActivityView,
+  type AgentActivityStatus,
+  type OfficeActivityView
+} from '../../skillOfficeActivity'
 import { AgentActivityDisclosure } from './AgentActivityDisclosure'
 import type { SettledToolStatus } from './toolActivityUtils'
 
@@ -103,6 +119,127 @@ function officeGroupLabel(
   )
 }
 
+type OfficeStatusCounts = Record<AgentActivityStatus, number>
+
+const OFFICE_STATUS_ORDER: readonly AgentActivityStatus[] = [
+  'waiting',
+  'running',
+  'completed',
+  'failed',
+  'conflict',
+  'rejected',
+  'cancelled'
+]
+
+const OFFICE_STATUS_COUNT_KEY: Readonly<Record<AgentActivityStatus, TranslationKey>> = {
+  waiting: 'agent.office.groupStatus.waiting',
+  running: 'agent.office.groupStatus.running',
+  completed: 'agent.office.groupStatus.completed',
+  failed: 'agent.office.groupStatus.failed',
+  conflict: 'agent.office.groupStatus.conflict',
+  rejected: 'agent.office.groupStatus.rejected',
+  cancelled: 'agent.office.groupStatus.cancelled'
+}
+
+const OFFICE_ITEM_STATUS_KEY: Readonly<Record<AgentActivityStatus, TranslationKey>> = {
+  waiting: 'agent.office.itemStatus.waiting',
+  running: 'agent.office.itemStatus.running',
+  completed: 'agent.office.itemStatus.completed',
+  failed: 'agent.office.itemStatus.failed',
+  conflict: 'agent.office.itemStatus.conflict',
+  rejected: 'agent.office.itemStatus.rejected',
+  cancelled: 'agent.office.itemStatus.cancelled'
+}
+
+function countOfficeStatuses(statuses: AgentActivityStatus[]): OfficeStatusCounts {
+  const counts: OfficeStatusCounts = {
+    waiting: 0,
+    running: 0,
+    completed: 0,
+    failed: 0,
+    conflict: 0,
+    rejected: 0,
+    cancelled: 0
+  }
+  statuses.forEach((status) => {
+    counts[status] += 1
+  })
+  return counts
+}
+
+function officeStatusCountLabel(
+  status: AgentActivityStatus,
+  count: number,
+  t: ReturnType<typeof useFrontendConfig>['t']
+) {
+  return formatTranslation(t, OFFICE_STATUS_COUNT_KEY[status], { count: String(count) })
+}
+
+function mixedOfficeGroupLabel(
+  mode: 'create' | 'edit' | 'view' | 'query' | 'validate' | 'export',
+  kind: string,
+  counts: OfficeStatusCounts,
+  t: ReturnType<typeof useFrontendConfig>['t']
+) {
+  const category = formatTranslation(
+    t,
+    mode === 'view' || mode === 'query' || mode === 'validate'
+      ? 'agent.office.groupCheckSummary'
+      : 'agent.office.groupOperationSummary',
+    { kind }
+  )
+  const statusParts = OFFICE_STATUS_ORDER.flatMap((status) =>
+    counts[status] > 0 ? [officeStatusCountLabel(status, counts[status], t)] : []
+  )
+  return [category, ...statusParts].join(' · ')
+}
+
+function officeItemStatusLabel(
+  status: AgentActivityStatus,
+  t: ReturnType<typeof useFrontendConfig>['t']
+) {
+  return t(OFFICE_ITEM_STATUS_KEY[status])
+}
+
+function OfficeItemStatusIcon({ status }: { status: AgentActivityStatus }) {
+  if (status === 'completed') return <CheckCircle2 aria-hidden="true" />
+  if (status === 'waiting' || status === 'running') return <LoaderCircle aria-hidden="true" />
+  if (status === 'cancelled' || status === 'rejected') return <CircleSlash2 aria-hidden="true" />
+  if (status === 'conflict') return <AlertTriangle aria-hidden="true" />
+  return <XCircle aria-hidden="true" />
+}
+
+function OfficeActivityDetail({
+  kind,
+  t,
+  view
+}: {
+  kind: string
+  t: ReturnType<typeof useFrontendConfig>['t']
+  view: OfficeActivityView
+}) {
+  const summary = view.reason ?? view.error ?? officeLabel(view.status, view.mode, kind, t)
+  const showError =
+    view.status === 'failed' ||
+    view.status === 'conflict' ||
+    view.status === 'rejected' ||
+    view.status === 'cancelled'
+  const secondaryError = showError && view.error !== summary ? view.error : undefined
+
+  return (
+    <div className="office-activity__item" data-status={view.status}>
+      <span className="office-activity__item-status">
+        <OfficeItemStatusIcon status={view.status} />
+        <span>{officeItemStatusLabel(view.status, t)}</span>
+      </span>
+      <div className="office-activity__item-content">
+        <p>{summary}</p>
+        {secondaryError && <p className="office-activity__item-error">{secondaryError}</p>}
+      </div>
+    </div>
+  )
+}
+
 export function OfficeToolActivity({
   call,
   run,
@@ -116,7 +253,7 @@ export function OfficeToolActivity({
   const view = getOfficeActivityView(run, call, settledStatus)
   if (!view) return null
   const kind = documentKindLabel(view.documentKind, t)
-  const hasDetails = Boolean(view.detail)
+  const hasDetails = Boolean(view.reason || view.error)
 
   return (
     <AgentActivityDisclosure
@@ -128,7 +265,7 @@ export function OfficeToolActivity({
     >
       {hasDetails && (
         <div className="agent-activity__details office-activity__details">
-          <p>{view.detail}</p>
+          <OfficeActivityDetail kind={kind} t={t} view={view} />
         </div>
       )}
     </AgentActivityDisclosure>
@@ -155,33 +292,39 @@ export function OfficeToolActivityGroup({
     .filter((view) => view !== undefined)
   if (views.length === 0) return null
   const firstView = views[0]
-  const status = aggregateOfficeStatus(views.map((view) => view.status))
+  const statuses = views.map((view) => view.status)
+  const status = aggregateOfficeStatus(statuses)
+  const counts = countOfficeStatuses(statuses)
+  const mixedStatuses = OFFICE_STATUS_ORDER.filter((candidate) => counts[candidate] > 0).length > 1
   const kind = documentKindLabel(firstView.documentKind, t)
-  const details = views.flatMap((view) =>
-    view.detail ? [{ id: view.call.id, text: view.detail }] : []
-  )
-  const label = officeGroupLabel(
-    officeLabel(status, firstView.mode, kind, t),
-    firstView.mode,
-    views.length,
-    t
-  )
+  const label = mixedStatuses
+    ? mixedOfficeGroupLabel(firstView.mode, kind, counts, t)
+    : officeGroupLabel(
+        officeLabel(status, firstView.mode, kind, t),
+        firstView.mode,
+        views.length,
+        t
+      )
+  const isPending = counts.running > 0 || counts.waiting > 0
+  const GroupIcon = mixedStatuses
+    ? isPending
+      ? LoaderCircle
+      : ListChecks
+    : officeIcon(status, firstView.mode)
 
   return (
     <AgentActivityDisclosure
       className="agent-activity--office"
-      hasDetails={details.length > 0}
-      icon={officeIcon(status, firstView.mode)}
-      isPending={status === 'running' || status === 'waiting'}
+      hasDetails
+      icon={GroupIcon}
+      isPending={isPending}
       label={label}
     >
-      {details.length > 0 && (
-        <div className="agent-activity__details office-activity__details">
-          {details.map((detail) => (
-            <p key={detail.id}>{detail.text}</p>
-          ))}
-        </div>
-      )}
+      <div className="agent-activity__details office-activity__details">
+        {views.map((view) => (
+          <OfficeActivityDetail kind={kind} key={view.call.id} t={t} view={view} />
+        ))}
+      </div>
     </AgentActivityDisclosure>
   )
 }

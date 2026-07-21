@@ -4,9 +4,9 @@ import { listSkills } from './skillsClient'
 
 export type SkillCatalogState =
   | { status: 'idle' }
-  | { status: 'loading'; projectId: string }
-  | { status: 'ready'; projectId: string; output: SkillsListOutput }
-  | { status: 'error'; projectId: string; message: string }
+  | { status: 'loading'; projectId: string | null }
+  | { status: 'ready'; projectId: string | null; output: SkillsListOutput }
+  | { status: 'error'; projectId: string | null; message: string }
 
 export function useSkillCatalog(projectId: string | null, enabled: boolean, refreshKey: string) {
   const requestSequenceRef = useRef(0)
@@ -18,7 +18,7 @@ export function useSkillCatalog(projectId: string | null, enabled: boolean, refr
   }, [])
 
   useEffect(() => {
-    if (!enabled || !projectId) {
+    if (!enabled) {
       requestSequenceRef.current += 1
       setState({ status: 'idle' })
       return

@@ -10,6 +10,7 @@ mod conversations;
 mod message_deletion;
 mod reconciliation;
 mod settings;
+mod trace_reconciliation;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 

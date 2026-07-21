@@ -1391,13 +1391,9 @@ export type AgentEvent =
   | {
       type: 'skill_activated'
       runId: string
-      skill: {
-        id: string
-        name: string
-        revision: string
-        source: string
-        activatedBy: 'user' | 'model'
-      }
+      activationRevision: string
+      activatedBy: 'user' | 'model'
+      skill: ActivatedSkillSummary
     }
   | { type: 'file_draft_updated'; runId: string; draft: AgentFileDraftSnapshot }
   | {

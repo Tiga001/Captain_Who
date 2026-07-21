@@ -1,5 +1,10 @@
 import { HostInvocationError } from '@mycopilot/host-api'
-import type { SkillSelection } from '@mycopilot/protocol'
+import type {
+  AgentConversationTurnInput,
+  AgentConversationTurnOutput,
+  AgentEvent,
+  SkillSelection
+} from '@mycopilot/protocol'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import type {
@@ -9,15 +14,20 @@ import type {
 } from '../../features/chat/chatTypes'
 
 const testState = vi.hoisted(() => ({
+  cancelAgentRun: vi.fn(),
   deleteChatMessages: vi.fn(),
+  forkConversation: vi.fn(),
   getContextWindowSnapshot: vi.fn(),
   loadComposerDrafts: vi.fn(),
   loadConversations: vi.fn(),
   loadInputAttachments: vi.fn(),
   loadUiPreferences: vi.fn(),
+  onAgentEvent: vi.fn(),
+  agentEventListeners: new Set<(event: AgentEvent) => void>(),
   saveChatMessageState: vi.fn(),
   saveComposerDraft: vi.fn(),
   saveConversationMeta: vi.fn(),
+  showToast: vi.fn(),
   startConversationTurn: vi.fn(),
   upsertChatMessages: vi.fn(),
   enabledModels: [
@@ -55,7 +65,7 @@ vi.mock('../../config/ProjectSettingsProvider', () => ({
 }))
 
 vi.mock('../../components/toast/ToastContext', () => ({
-  useToast: () => ({ showToast: vi.fn() })
+  useToast: () => ({ showToast: testState.showToast })
 }))
 
 vi.mock('../useShellLayout', () => ({
@@ -89,10 +99,10 @@ vi.mock('../../features/gitReview/useGitRepositoryCapability', () => ({
 vi.mock('../../features/agent/agentClient', () => ({
   approveAgentAction: vi.fn(),
   cancelAgentAction: vi.fn(),
-  cancelAgentRun: vi.fn(),
+  cancelAgentRun: testState.cancelAgentRun,
   getContextWindowSnapshot: testState.getContextWindowSnapshot,
   listPendingAgentActions: vi.fn().mockResolvedValue([]),
-  onAgentEvent: vi.fn(() => () => undefined),
+  onAgentEvent: testState.onAgentEvent,
   rejectAgentAction: vi.fn(),
   startConversationTurn: testState.startConversationTurn
 }))
@@ -102,7 +112,7 @@ vi.mock('../../features/storage/storageClient', async (importOriginal) => {
   return {
     ...original,
     deleteChatMessages: testState.deleteChatMessages,
-    forkConversation: vi.fn(),
+    forkConversation: testState.forkConversation,
     loadComposerDrafts: testState.loadComposerDrafts,
     loadConversations: testState.loadConversations,
     loadInputAttachments: testState.loadInputAttachments,
@@ -125,14 +135,18 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     composerDraft,
     conversation,
     onComposerDraftChange,
+    onContinueInNewTask,
     onEditLastUserMessage,
+    onStopGenerating,
     onSubmitMessage,
     skillCatalogRefreshToken
   }: {
     composerDraft: ChatComposerDraft
     conversation: ChatConversation
     onComposerDraftChange: (draft: ChatComposerDraft) => void
+    onContinueInNewTask?: (messageId: string) => void
     onEditLastUserMessage: (messageId: string, content: string) => Promise<void>
+    onStopGenerating: () => void
     onSubmitMessage: (message: string, options: ChatSubmitOptions) => void
     skillCatalogRefreshToken?: number
   }) => (
@@ -144,11 +158,26 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       <output data-testid="last-assistant-status">
         {conversation.messages.at(-1)?.status ?? ''}
       </output>
+      <output data-testid="activated-skill-ids">
+        {conversation.messages
+          .at(-1)
+          ?.agentRun?.activatedSkills?.map((skill) => skill.id)
+          .join(',') ?? ''}
+      </output>
       <button
         type="button"
-        onClick={() => void onEditLastUserMessage(conversation.messages[0]?.id ?? '', 'edited')}
+        onClick={() => void onEditLastUserMessage(conversation.messages.at(-2)?.id ?? '', 'edited')}
       >
         edit-last-message
+      </button>
+      <button type="button" onClick={onStopGenerating}>
+        stop-generating
+      </button>
+      <button
+        type="button"
+        onClick={() => onContinueInNewTask?.(conversation.messages.at(-1)?.id ?? '')}
+      >
+        continue-in-new-task
       </button>
       <button
         type="button"
@@ -162,6 +191,19 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
         }
       >
         submit-with-skill
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          onSubmitMessage('follow up', {
+            modelId: 'model-1',
+            permissionMode: 'full',
+            projectId: 'project-a',
+            skills: []
+          })
+        }
+      >
+        submit-without-skill
       </button>
       <button
         type="button"
@@ -193,6 +235,65 @@ const skillSelection: SkillSelection = {
 const latestSkillSelection: SkillSelection = {
   ...skillSelection,
   revision: 'skill-sha256-v1:auditor-latest'
+}
+
+const explicitSkillSummary = {
+  ...skillSelection,
+  name: 'Repository auditor',
+  source: { id: 'project-a', kind: 'workspace' as const }
+}
+
+const modelSkillSummary = {
+  id: 'bundled:application:documents',
+  name: 'documents',
+  revision: 'skill-package-sha256-v2:documents',
+  source: { id: 'bundled:application', kind: 'bundled' as const }
+}
+
+function successfulTurnOutput(
+  input: AgentConversationTurnInput,
+  runSequence: number
+): AgentConversationTurnOutput {
+  const conversationId = input.conversationId ?? 'conversation-a'
+  const userMessageId = input.userMessageId ?? `user-${runSequence}`
+  const assistantMessageId = input.assistantMessageId ?? `assistant-${runSequence}`
+  return {
+    runId: `run-${runSequence}`,
+    eventName: 'agent.event',
+    conversationId,
+    userMessageId,
+    assistantMessageId,
+    userMessage: {
+      id: userMessageId,
+      role: 'user',
+      content: input.content,
+      createdAt: 10 + runSequence,
+      status: 'sent'
+    },
+    assistantMessage: {
+      id: assistantMessageId,
+      role: 'assistant',
+      content: '',
+      createdAt: 20 + runSequence,
+      status: 'pending'
+    },
+    activatedSkills: input.skills?.length ? [explicitSkillSummary] : [],
+    skillActivationRevision: input.skills?.length ? 'activation-sha256-v1:explicit' : undefined
+  }
+}
+
+function mockSuccessfulTurnStarts() {
+  let runSequence = 0
+  testState.startConversationTurn.mockImplementation(
+    async (input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput> => {
+      runSequence += 1
+      return successfulTurnOutput(input, runSequence)
+    }
+  )
+}
+
+function emitAgentEvent(event: AgentEvent) {
+  for (const listener of testState.agentEventListeners) listener(event)
 }
 
 function deferred<T>() {
@@ -253,7 +354,9 @@ function storedConversation(): ChatConversation {
 }
 
 beforeEach(() => {
+  testState.cancelAgentRun.mockReset().mockResolvedValue(true)
   testState.deleteChatMessages.mockReset().mockResolvedValue(undefined)
+  testState.forkConversation.mockReset()
   testState.getContextWindowSnapshot.mockReset().mockResolvedValue({ snapshot: null })
   testState.loadComposerDrafts.mockReset().mockResolvedValue({
     'conversation-a': createComposerDraft({ modelId: 'model-1', projectId: 'project-a' })
@@ -265,10 +368,151 @@ beforeEach(() => {
     showContextWindowUsage: false
   })
   testState.saveChatMessageState.mockReset().mockResolvedValue(undefined)
+  testState.agentEventListeners.clear()
+  testState.onAgentEvent.mockReset().mockImplementation((listener: (event: AgentEvent) => void) => {
+    testState.agentEventListeners.add(listener)
+    return () => testState.agentEventListeners.delete(listener)
+  })
   testState.saveComposerDraft.mockReset().mockResolvedValue(undefined)
   testState.saveConversationMeta.mockReset().mockResolvedValue(undefined)
+  testState.showToast.mockReset()
   testState.startConversationTurn.mockReset()
   testState.upsertChatMessages.mockReset().mockResolvedValue(undefined)
+})
+
+describe('unified activated Skill inventory', () => {
+  it('restores the unified inventory from persisted message state', async () => {
+    const restored = storedConversation()
+    const assistantMessage = restored.messages.at(-1)
+    if (!assistantMessage?.agentRun) throw new Error('missing assistant run fixture')
+    assistantMessage.agentRun.activatedSkills = [explicitSkillSummary, modelSkillSummary]
+    assistantMessage.agentRun.explicitSkillSelections = [skillSelection]
+    assistantMessage.agentRun.skillActivationRevision = 'activation-sha256-v1:explicit-and-model'
+    testState.loadConversations.mockResolvedValueOnce([restored])
+
+    const screen = await render(<AppShell />)
+
+    await expect
+      .element(screen.getByTestId('activated-skill-ids'))
+      .toHaveTextContent(`${explicitSkillSummary.id},${modelSkillSummary.id}`)
+  })
+
+  it('merges and persists model activation without turning it into an explicit edit selection', async () => {
+    mockSuccessfulTurnStarts()
+    const screen = await render(<AppShell />)
+
+    await screen.getByRole('button', { name: 'submit-with-skill' }).click()
+    await expect
+      .element(screen.getByTestId('activated-skill-ids'))
+      .toHaveTextContent(explicitSkillSummary.id)
+
+    emitAgentEvent({
+      type: 'skill_activated',
+      runId: 'run-1',
+      activationRevision: 'activation-sha256-v1:explicit-and-model',
+      activatedBy: 'model',
+      skill: modelSkillSummary
+    })
+
+    await expect
+      .element(screen.getByTestId('activated-skill-ids'))
+      .toHaveTextContent(`${explicitSkillSummary.id},${modelSkillSummary.id}`)
+    await expect
+      .poll(() =>
+        testState.saveChatMessageState.mock.calls.some(
+          (call) =>
+            (call[1] as ChatConversation['messages'][number]).agentRun?.activatedSkills?.length ===
+            2
+        )
+      )
+      .toBe(true)
+    const persistedMessage = testState.saveChatMessageState.mock.calls
+      .map((call) => call[1] as ChatConversation['messages'][number])
+      .find((candidate) => candidate.agentRun?.activatedSkills?.length === 2)
+
+    expect(persistedMessage?.agentRun?.skillActivationRevision).toBe(
+      'activation-sha256-v1:explicit-and-model'
+    )
+    expect(persistedMessage?.agentRun?.explicitSkillSelections).toEqual([skillSelection])
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: true,
+      status: 'completed',
+      content: 'done'
+    })
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(2)
+
+    expect(
+      (testState.startConversationTurn.mock.calls[1]?.[0] as AgentConversationTurnInput).skills
+    ).toEqual([skillSelection])
+  })
+
+  it('keeps a model-only activation out of an edited turn explicit selections', async () => {
+    mockSuccessfulTurnStarts()
+    const screen = await render(<AppShell />)
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    emitAgentEvent({
+      type: 'skill_activated',
+      runId: 'run-1',
+      activationRevision: 'activation-sha256-v1:model-only',
+      activatedBy: 'model',
+      skill: modelSkillSummary
+    })
+    await expect
+      .element(screen.getByTestId('activated-skill-ids'))
+      .toHaveTextContent(modelSkillSummary.id)
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: true,
+      status: 'completed',
+      content: 'done'
+    })
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    await screen.getByRole('button', { name: 'edit-last-message' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(2)
+
+    expect(
+      (testState.startConversationTurn.mock.calls[1]?.[0] as AgentConversationTurnInput).skills
+    ).toBeUndefined()
+  })
+
+  it('replays a model activation buffered before the turn start response', async () => {
+    const start = deferred<AgentConversationTurnOutput>()
+    testState.startConversationTurn.mockReturnValueOnce(start.promise)
+    const screen = await render(<AppShell />)
+
+    await screen.getByRole('button', { name: 'submit-with-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    const input = testState.startConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnInput
+    emitAgentEvent({
+      type: 'skill_activated',
+      runId: 'run-1',
+      activationRevision: 'activation-sha256-v1:explicit-and-model',
+      activatedBy: 'model',
+      skill: modelSkillSummary
+    })
+    start.resolve(successfulTurnOutput(input, 1))
+
+    await expect
+      .element(screen.getByTestId('activated-skill-ids'))
+      .toHaveTextContent(`${explicitSkillSummary.id},${modelSkillSummary.id}`)
+    await expect
+      .poll(() =>
+        testState.saveChatMessageState.mock.calls.some(
+          (call) =>
+            (call[1] as ChatConversation['messages'][number]).agentRun?.skillActivationRevision ===
+            'activation-sha256-v1:explicit-and-model'
+        )
+      )
+      .toBe(true)
+  })
 })
 
 describe('activation failure recovery', () => {
@@ -406,4 +650,73 @@ describe('edited turn Skill recovery', () => {
       await expect.element(screen.getByTestId('draft-skills')).toHaveTextContent(skillSelection.id)
     }
   )
+})
+
+describe('authoritative run cancellation and conversation forking', () => {
+  it('keeps a stopped run pending until the backend terminal event is received', async () => {
+    mockSuccessfulTurnStarts()
+    const cancellation = deferred<boolean>()
+    testState.cancelAgentRun.mockReturnValueOnce(cancellation.promise)
+    const screen = await render(<AppShell />)
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('pending')
+    await screen.getByRole('button', { name: 'stop-generating' }).click()
+
+    expect(testState.cancelAgentRun).toHaveBeenCalledWith('run-1')
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('pending')
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: false,
+      status: 'cancelled',
+      content: ''
+    })
+    cancellation.resolve(true)
+
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+    const persistedTerminal = testState.saveChatMessageState.mock.calls
+      .map((call) => call[1] as ChatConversation['messages'][number])
+      .find((message) => message.agentRun?.runId === 'run-1' && message.status === 'sent')
+    expect(persistedTerminal?.agentRun?.status).toBe('cancelled')
+  })
+
+  it('binds a run before cancelling when stop is requested during the start RPC', async () => {
+    const start = deferred<AgentConversationTurnOutput>()
+    testState.startConversationTurn.mockReturnValueOnce(start.promise)
+    const screen = await render(<AppShell />)
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    await screen.getByRole('button', { name: 'stop-generating' }).click()
+    expect(testState.cancelAgentRun).not.toHaveBeenCalled()
+
+    const input = testState.startConversationTurn.mock.calls[0]?.[0] as AgentConversationTurnInput
+    start.resolve(successfulTurnOutput(input, 1))
+    await expect.poll(() => testState.cancelAgentRun.mock.calls.length).toBe(1)
+    expect(testState.cancelAgentRun).toHaveBeenCalledWith('run-1')
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('pending')
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: false,
+      status: 'cancelled',
+      content: ''
+    })
+    await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+  })
+
+  it('shows the backend fork rejection instead of replacing it with a generic toast', async () => {
+    testState.forkConversation.mockRejectedValueOnce(
+      new Error('这条回复仍在生成，结束后才能在新任务中继续。')
+    )
+    const screen = await render(<AppShell />)
+
+    await screen.getByRole('button', { name: 'continue-in-new-task' }).click()
+
+    await expect.poll(() => testState.forkConversation.mock.calls.length).toBe(1)
+    expect(testState.showToast).toHaveBeenCalledWith('这条回复仍在生成，结束后才能在新任务中继续。')
+  })
 })

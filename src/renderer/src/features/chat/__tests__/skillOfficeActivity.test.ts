@@ -8,6 +8,7 @@ import {
   getOfficeArtifactEntries,
   getSkillResourceActivityItem,
   getToolActivityStatus,
+  isHiddenSkillTool,
   parseSkillResourceUri
 } from '../skillOfficeActivity'
 
@@ -59,6 +60,10 @@ describe('Skill and Office activity derivation', () => {
     })
 
     expect(getActivatedSkills(currentRun)).toEqual([spreadsheetSkill])
+  })
+
+  it('hides the activation transport after the authoritative loaded-Skill activity appears', () => {
+    expect(isHiddenSkillTool('skills_activate')).toBe(true)
   })
 
   it('parses a Skill URI only when its decoded id belongs to the activated run', () => {
@@ -132,6 +137,43 @@ describe('Skill and Office activity derivation', () => {
         toolResult({ callId: call.id, tool: call.tool, result: { timedOut: true } })
       )
     ).toBe('failed')
+  })
+
+  it('treats an approval rejection without a ToolResult as rejected', () => {
+    const call = toolCall({
+      id: 'office-rejected',
+      tool: 'office_document',
+      approvalStatus: 'rejected'
+    })
+
+    expect(getToolActivityStatus(call, undefined)).toBe('rejected')
+  })
+
+  it('keeps the user-facing reason and execution error separate for failed Office calls', () => {
+    const call = toolCall({
+      id: 'office-failed',
+      tool: 'office_document',
+      approvalStatus: 'approved',
+      args: { operation: 'set', path: 'report.docx' },
+      reason: '替换文档中的指定文字。'
+    })
+    const currentRun = run({
+      toolResults: [
+        toolResult({
+          callId: call.id,
+          tool: call.tool,
+          ok: false,
+          error: 'Office replacement find cannot be empty.'
+        })
+      ]
+    })
+
+    expect(getOfficeActivityView(currentRun, call)).toMatchObject({
+      detail: '替换文档中的指定文字。',
+      error: 'Office replacement find cannot be empty.',
+      reason: '替换文档中的指定文字。',
+      status: 'failed'
+    })
   })
 
   it('keeps one Office card moving from approval to execution to the paired result', () => {

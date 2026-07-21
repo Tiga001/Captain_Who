@@ -4,7 +4,7 @@ use super::{
     MAX_MAX_TOKENS, RUN_COUNTER,
 };
 use crate::cancellation::AgentCancellationToken;
-use crate::conversation_trace::{canonical_tool_result_for_context, render_tool_observation};
+use crate::conversation_trace::render_tool_observation;
 use crate::llm::{LlmImage, LlmMessage, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
     AgentApprovalStatus, AgentChatOutput, AgentError, AgentEvent, AgentProposedAction, AgentResult,
@@ -206,7 +206,9 @@ pub(super) fn failed_tool_call_result(call: &AgentToolCall, error: AgentError) -
 }
 
 pub(super) fn redact_tool_result_for_event(result: &AgentToolResult) -> AgentToolResult {
-    let mut redacted = canonical_tool_result_for_context(result);
+    // The caller must pass the tool-owned event projection. Re-running the durable sanitizer here
+    // would erase presentation-only fields such as read_image's bounded thumbnail.
+    let mut redacted = result.clone();
     if redacted.tool == "write_file" {
         if let Some(object) = redacted.result.as_mut().and_then(Value::as_object_mut) {
             object.remove("tail");

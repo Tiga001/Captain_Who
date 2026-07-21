@@ -1,7 +1,7 @@
 // Renderer summary cards for successfully created or modified Office artifacts in one agent run.
 
-import { FileSpreadsheet, FileText, Presentation } from 'lucide-react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { OfficeFileIcon } from '../../../components/files/OfficeFileIcon'
 import type { ChatAgentRunView } from '../chatTypes'
 import {
   getOfficeArtifactEntries,
@@ -27,9 +27,7 @@ function artifactTypeLabel(
 }
 
 function ArtifactIcon({ kind }: { kind: OfficeArtifactEntry['artifactKind'] }) {
-  if (kind === 'spreadsheet') return <FileSpreadsheet aria-hidden="true" />
-  if (kind === 'presentation') return <Presentation aria-hidden="true" />
-  return <FileText aria-hidden="true" />
+  return <OfficeFileIcon kind={kind} />
 }
 
 function OfficeArtifactCard({

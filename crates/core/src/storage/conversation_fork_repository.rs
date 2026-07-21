@@ -792,6 +792,21 @@ mod tests {
 
         message.agent_run_json = Some(json!({ "status": "completed" }).to_string());
         assert!(ensure_settled_assistant(&message, None).is_ok());
+
+        let stale_trace = ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-stale".to_string(),
+            conversation_id: "conversation-stale".to_string(),
+            assistant_message_id: message.id.clone(),
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            terminal_error: None,
+            truncated: false,
+            items: Vec::new(),
+        };
+        assert!(
+            ensure_settled_assistant(&message, Some(&stale_trace)).is_err(),
+            "a renderer-owned completed status must not bypass an in-progress backend trace"
+        );
     }
 
     #[test]

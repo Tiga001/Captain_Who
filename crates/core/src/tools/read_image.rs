@@ -1,5 +1,8 @@
 use super::{AgentTool, ToolExecutionContext};
-use crate::protocol::{AgentError, AgentResult, AgentToolDefinition, AgentToolSafety};
+use crate::conversation_trace::canonical_tool_result_for_context;
+use crate::protocol::{
+    AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
+};
 use base64::Engine;
 use image::codecs::png::PngEncoder;
 use image::{ImageEncoder, ImageReader};
@@ -11,6 +14,7 @@ use std::path::Path;
 
 const MAX_READ_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const THUMBNAIL_MAX_EDGE: u32 = 160;
+const MAX_THUMBNAIL_DATA_URL_BYTES: usize = 192 * 1024;
 
 pub(super) struct ReadImageTool;
 
@@ -102,6 +106,76 @@ impl AgentTool for ReadImageTool {
             }
         }))
     }
+
+    fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        read_image_history_projection(result)
+    }
+
+    fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        read_image_event_projection(result)
+    }
+
+    fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        read_image_history_projection(result)
+    }
+}
+
+fn read_image_history_projection(result: &AgentToolResult) -> AgentToolResult {
+    let mut projected = result.clone();
+    if let Some(object) = projected.result.as_mut().and_then(Value::as_object_mut) {
+        let thumbnail_omitted = object.remove("thumbnailDataUrl").is_some();
+        let image_data_omitted = object
+            .get_mut("image")
+            .and_then(Value::as_object_mut)
+            .is_some_and(|image| image.remove("dataBase64").is_some());
+        if thumbnail_omitted || image_data_omitted {
+            object.insert("binaryOmittedFromHistory".to_string(), json!(true));
+        }
+    }
+    canonical_tool_result_for_context(&projected)
+}
+
+fn read_image_event_projection(result: &AgentToolResult) -> AgentToolResult {
+    let thumbnail = result
+        .result
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("thumbnailDataUrl"))
+        .and_then(Value::as_str)
+        .filter(|value| is_bounded_thumbnail_data_url(value))
+        .map(ToString::to_string);
+
+    // Canonicalize every other field, then deliberately restore only the bounded thumbnail that
+    // belongs to presentation. The full image payload remains exclusively in the runtime result.
+    let mut projected = canonical_tool_result_for_context(result);
+    if let Some(object) = projected.result.as_mut().and_then(Value::as_object_mut) {
+        object.remove("image");
+        object.remove("thumbnailDataUrl");
+        if let Some(thumbnail) = thumbnail {
+            object.insert("thumbnailDataUrl".to_string(), Value::String(thumbnail));
+        } else if result
+            .result
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some_and(|raw| raw.contains_key("thumbnailDataUrl"))
+        {
+            object.insert("thumbnailOmittedFromEvent".to_string(), json!(true));
+        }
+    }
+    projected
+}
+
+fn is_bounded_thumbnail_data_url(value: &str) -> bool {
+    const PREFIX: &str = "data:image/png;base64,";
+    value.len() <= MAX_THUMBNAIL_DATA_URL_BYTES
+        && value
+            .strip_prefix(PREFIX)
+            .filter(|encoded| !encoded.is_empty())
+            .is_some_and(|encoded| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .is_ok()
+            })
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,5 +237,83 @@ fn image_mime_type(extension: &str) -> AgentResult<&'static str> {
         _ => Err(AgentError::new(format!(
             "不支持的图片类型：.{extension}。支持：.png, .jpg, .jpeg, .gif, .webp"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image_result(thumbnail: String) -> AgentToolResult {
+        AgentToolResult {
+            call_id: "call-image".to_string(),
+            tool: "read_image".to_string(),
+            ok: true,
+            result: Some(json!({
+                "path": "preview.png",
+                "format": "png",
+                "mimeType": "image/png",
+                "sizeBytes": 3,
+                "thumbnailDataUrl": thumbnail,
+                "image": {
+                    "mimeType": "image/png",
+                    "dataBase64": "ZnVsbC1pbWFnZQ=="
+                }
+            })),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn projections_keep_runtime_image_private_and_event_thumbnail_bounded() {
+        let thumbnail = "data:image/png;base64,dGh1bWI=".to_string();
+        let result = image_result(thumbnail.clone());
+
+        let trace = ReadImageTool.trace_projection(&result);
+        let checkpoint = ReadImageTool.checkpoint_projection(&result);
+        for durable in [&trace, &checkpoint] {
+            let serialized = serde_json::to_string(durable).unwrap();
+            assert!(!serialized.contains("data:image"));
+            assert!(!serialized.contains("ZnVsbC1pbWFnZQ=="));
+            assert!(!serialized.contains("dGh1bWI="));
+            assert_eq!(durable.result.as_ref().unwrap()["path"], "preview.png");
+            assert_eq!(
+                durable.result.as_ref().unwrap()["binaryOmittedFromHistory"],
+                true
+            );
+        }
+
+        let event = ReadImageTool.event_projection(&result);
+        let event_value = event.result.as_ref().unwrap();
+        assert_eq!(event_value["thumbnailDataUrl"], thumbnail);
+        assert!(event_value.get("image").is_none());
+        assert!(!serde_json::to_string(&event)
+            .unwrap()
+            .contains("ZnVsbC1pbWFnZQ=="));
+
+        // Projection must never mutate or replace the runtime observation used to build the
+        // current model's visual message.
+        assert_eq!(
+            result.result.as_ref().unwrap()["image"]["dataBase64"],
+            "ZnVsbC1pbWFnZQ=="
+        );
+    }
+
+    #[test]
+    fn oversized_or_non_png_thumbnail_is_omitted_from_presentation() {
+        for thumbnail in [
+            format!(
+                "data:image/png;base64,{}",
+                "A".repeat(MAX_THUMBNAIL_DATA_URL_BYTES)
+            ),
+            "data:image/jpeg;base64,dGh1bWI=".to_string(),
+            "data:image/png;base64,not-valid-base64!".to_string(),
+        ] {
+            let event = ReadImageTool.event_projection(&image_result(thumbnail));
+            let value = event.result.as_ref().unwrap();
+            assert!(value.get("thumbnailDataUrl").is_none());
+            assert_eq!(value["thumbnailOmittedFromEvent"], true);
+            assert!(value.get("image").is_none());
+        }
     }
 }

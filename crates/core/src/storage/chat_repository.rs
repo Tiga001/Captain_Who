@@ -505,6 +505,70 @@ pub fn update_message_run_terminal_state(
     Ok(())
 }
 
+/// Repairs an assistant lifecycle after process restart using the backend-owned trace identity.
+///
+/// Unlike the normal terminal update, startup reconciliation must also canonicalize `runId`:
+/// older renderer-owned shutdown paths could persist a terminal-looking message independently
+/// from its still-running trace. A valid JSON object is preserved, while missing or malformed
+/// presentation state is replaced with the smallest backend lifecycle record needed by storage
+/// consumers. Timeline fields remain presentation-only and are never consulted by reconciliation.
+pub(crate) fn reconcile_message_run_terminal_state(
+    connection: &Connection,
+    conversation_id: &str,
+    message_id: &str,
+    run_id: &str,
+    message_status: &str,
+    run_status: &str,
+    completed_at: i64,
+) -> rusqlite::Result<()> {
+    let existing_agent_run_json = connection
+        .query_row(
+            "SELECT agent_run_json FROM messages WHERE conversation_id = ?1 AND id = ?2",
+            params![conversation_id, message_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let mut run = existing_agent_run_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    run.insert("runId".to_string(), run_id.into());
+    run.insert("assistantMessageId".to_string(), message_id.into());
+    run.insert("status".to_string(), run_status.into());
+    run.insert("completedAt".to_string(), completed_at.into());
+    run.insert(
+        "messageStreamCheckpoints".to_string(),
+        serde_json::json!({}),
+    );
+    let state = run
+        .entry("state".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !state.is_object() {
+        *state = serde_json::json!({});
+    }
+    let state = state
+        .as_object_mut()
+        .expect("startup reconciliation installs an object state");
+    state.insert("status".to_string(), run_status.into());
+    state.insert("activeRunId".to_string(), serde_json::Value::Null);
+    state.insert("updatedAt".to_string(), completed_at.into());
+    let run_json = serde_json::to_string(&serde_json::Value::Object(run))
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+
+    connection.execute(
+        "UPDATE messages
+         SET status = ?1, agent_run_json = ?2
+         WHERE conversation_id = ?3 AND id = ?4",
+        params![message_status, run_json, conversation_id, message_id],
+    )?;
+    // Startup maintenance is not new user activity. Do not move an old repaired conversation to
+    // the top of the sidebar by rewriting `conversations.updated_at`.
+    Ok(())
+}
+
 /// Repairs a non-terminal run whose next approval checkpoint is already durable.
 ///
 /// The pending-action row remains the authority for the approval payload. This function only
@@ -724,6 +788,59 @@ mod tests {
         assert_eq!(stored.messages.len(), 2);
         assert_eq!(stored.messages[1].id, "assistant-1");
         assert_eq!(stored.messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn normal_terminal_update_refreshes_conversation_but_startup_repair_does_not() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let mut stored = conversation();
+        stored.messages[1].agent_run_json = Some(
+            serde_json::json!({
+                "runId": "run-1",
+                "status": "running",
+                "state": { "status": "running", "activeRunId": "run-1" }
+            })
+            .to_string(),
+        );
+        save_conversation(&mut connection, stored).unwrap();
+
+        update_message_run_terminal_state(
+            &connection,
+            "conversation-1",
+            "assistant-1",
+            Some("sent"),
+            "completed",
+            50,
+        )
+        .unwrap();
+        let updated_at: i64 = connection
+            .query_row(
+                "SELECT updated_at FROM conversations WHERE id = 'conversation-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated_at, 50);
+
+        reconcile_message_run_terminal_state(
+            &connection,
+            "conversation-1",
+            "assistant-1",
+            "run-1",
+            "error",
+            "failed",
+            100,
+        )
+        .unwrap();
+        let updated_at: i64 = connection
+            .query_row(
+                "SELECT updated_at FROM conversations WHERE id = 'conversation-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(updated_at, 50);
     }
 
     fn conversation() -> ChatConversationRecord {

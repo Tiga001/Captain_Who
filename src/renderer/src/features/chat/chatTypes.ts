@@ -105,6 +105,8 @@ export interface ChatAgentRunView {
   finishReason?: string
   activatedSkills?: ActivatedSkillSummary[]
   skillActivationRevision?: string
+  /** User-selected inputs for this run; excludes Skills activated later by the model. */
+  explicitSkillSelections?: SkillSelection[]
 }
 
 export interface ChatMessageUiState {

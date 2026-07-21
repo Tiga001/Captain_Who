@@ -60,6 +60,11 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
             unread_at: None,
         })
         .unwrap();
+    // Construct the service before publishing the current run's trace. Any in-progress trace
+    // already present when AgentService starts is, by definition, owned by the previous process
+    // and is retired by startup reconciliation.
+    let service = AgentService::new(storage.clone())
+        .with_context_compaction_summary_generator(test_context_compaction_generator());
     storage
         .append_in_progress_conversation_turn_trace(
             &ConversationTurnTrace {
@@ -76,8 +81,6 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
             4,
         )
         .unwrap();
-    let service = AgentService::new(storage.clone())
-        .with_context_compaction_summary_generator(test_context_compaction_generator());
     let agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://example.test/v1/chat/completions",
         "apiToken": "secret",

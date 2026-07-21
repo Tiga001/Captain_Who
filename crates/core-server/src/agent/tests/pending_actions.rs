@@ -387,6 +387,85 @@ fn startup_reconciliation_failure_prevents_agent_service_startup() {
 }
 
 #[test]
+fn agent_service_startup_retires_an_orphaned_cancelled_conversation_trace() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-orphaned-trace".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "orphaned trace".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "assistant-orphaned-trace".to_string(),
+                role: "assistant".to_string(),
+                content: "partial response".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: Some(
+                    json!({
+                        "runId": "run-orphaned-trace",
+                        "status": "cancelled",
+                        "completedAt": 20,
+                        "state": {
+                            "status": "running",
+                            "activeRunId": null,
+                            "updatedAt": 10
+                        }
+                    })
+                    .to_string(),
+                ),
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 2,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-orphaned-trace".to_string(),
+        conversation_id: "conversation-orphaned-trace".to_string(),
+        assistant_message_id: "assistant-orphaned-trace".to_string(),
+        terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::AssistantNarration {
+            sequence: 0,
+            content: "Reading the image.".to_string(),
+            truncated: false,
+        }],
+    };
+    storage
+        .append_in_progress_conversation_turn_trace(&trace, 10, 15)
+        .unwrap();
+
+    let _service = AgentService::new(storage.clone());
+
+    let repaired = storage
+        .get_conversation_turn_trace("assistant-orphaned-trace")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        repaired.terminal_status,
+        ConversationTurnTraceTerminalStatus::Cancelled
+    );
+    assert_eq!(repaired.items, trace.items);
+    let conversation = storage
+        .load_conversation("conversation-orphaned-trace")
+        .unwrap()
+        .unwrap();
+    assert_eq!(conversation.updated_at, 2);
+    let run: Value =
+        serde_json::from_str(conversation.messages[0].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(run["status"], "cancelled");
+    assert_eq!(run["state"]["status"], "cancelled");
+}
+
+#[test]
 fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
     const MARKER: &str = "PENDING_SKILL_INSTRUCTION_BODY_MUST_NOT_SURVIVE";
     const CATALOG_MARKER: &str = "PENDING_SKILL_CATALOG_BODY_MUST_NOT_SURVIVE";

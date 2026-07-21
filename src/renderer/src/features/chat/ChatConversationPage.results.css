@@ -227,7 +227,10 @@
   display: grid;
   width: 100%;
   max-width: 900px;
-  gap: 10px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--mc-color-surface-card) 88%, var(--mc-color-text-primary) 2%);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-2xl);
 }
 
 .office-artifact-card {
@@ -239,9 +242,10 @@
   padding: 10px 14px;
   gap: 12px;
   color: var(--mc-color-text-primary);
-  background: color-mix(in srgb, var(--mc-color-surface-card) 88%, var(--mc-color-text-primary) 2%);
-  border: 1px solid var(--mc-color-border-subtle);
-  border-radius: var(--mc-radius-2xl);
+}
+
+.office-artifact-card + .office-artifact-card {
+  border-top: 1px solid var(--mc-color-border-subtle);
 }
 
 .office-artifact-card__icon {
@@ -250,23 +254,13 @@
   height: 40px;
   flex: 0 0 auto;
   place-items: center;
-  color: var(--mc-color-icon-default);
   background: var(--mc-color-surface-muted);
   border-radius: var(--mc-radius-lg);
 }
 
-.office-artifact-card[data-kind='spreadsheet'] .office-artifact-card__icon {
-  color: var(--mc-color-diff-addition-text);
-}
-
-.office-artifact-card[data-kind='presentation'] .office-artifact-card__icon {
-  color: var(--mc-color-diff-deletion-text);
-}
-
-.office-artifact-card__icon svg {
-  width: 22px;
-  height: 22px;
-  stroke-width: var(--mc-icon-stroke-medium);
+.office-artifact-card__icon img {
+  width: 30px;
+  height: 30px;
 }
 
 .office-artifact-card__content {

@@ -2,19 +2,19 @@ use super::{
     ExtensionDescriptor, ModelInputCapacity, ModelRequestContext, RuntimeEffect, RuntimeExtension,
     RuntimeExtensionEvent,
 };
-use crate::content_revision;
 use crate::context::{activated_skill_context_item, ContextFrame};
 use crate::conversation_trace::{canonical_tool_result_for_context, render_tool_observation};
 use crate::llm::LlmMessage;
 use crate::protocol::{
     AgentActivatedSkill, AgentError, AgentEvent, AgentExtensionSnapshot, AgentResult,
     AgentSkillActivatedEvent, AgentSkillActivation, AgentSkillActivationActor,
-    AgentToolApprovalMode, AgentToolDefinition, AgentToolResult, AgentToolSafety,
+    AgentSkillSourceSummary, AgentToolApprovalMode, AgentToolDefinition, AgentToolResult,
+    AgentToolSafety,
 };
 use crate::runtime::{AgentResolvedSkillActivation, AgentSkillActivationResolver};
 use crate::skills::{
-    AgentDiscoverableSkill, AgentSkillDiscoverySnapshot, SkillId, SkillPackageUri,
-    SkillResourceSession, SkillRevision, SkillSelection,
+    activation_revision_for_identities, AgentDiscoverableSkill, AgentSkillDiscoverySnapshot,
+    SkillId, SkillPackageUri, SkillResourceSession, SkillRevision, SkillSelection,
 };
 use crate::tools::{AgentTool, AgentToolPermissionPolicy, ToolExecutionContext};
 use serde::{Deserialize, Serialize};
@@ -195,16 +195,36 @@ impl RuntimeExtension for SkillActivationExtension {
                 "activated Skill `{skill_id}` is missing from runtime state."
             ))
         })?;
+        let source_kind = state
+            .discovery
+            .as_ref()
+            .and_then(|discovery| {
+                discovery
+                    .skills
+                    .iter()
+                    .find(|entry| entry.id == record.id && entry.revision == record.revision)
+            })
+            .map(|entry| entry.source_kind.clone())
+            .ok_or_else(|| {
+                AgentError::new(format!(
+                    "activated Skill `{skill_id}` is absent from the frozen discovery catalog."
+                ))
+            })?;
+        let activation_revision = state.activation_revision()?;
         let event_skill = AgentSkillActivatedEvent {
             id: record.id.clone(),
             name: record.name.clone(),
             revision: record.revision.clone(),
-            source: record.source.clone(),
-            activated_by: record.activated_by,
+            source: AgentSkillSourceSummary {
+                kind: source_kind,
+                id: record.source.clone(),
+            },
         };
         Ok(vec![
             RuntimeEffect::EmitEvent(AgentEvent::SkillActivated {
                 run_id: self.run_id.clone(),
+                activation_revision,
+                activated_by: record.activated_by,
                 skill: event_skill,
             }),
             RuntimeEffect::AppendRetainedContext(context),
@@ -620,32 +640,27 @@ fn consume_failed_activation_result_capacity(
 
 impl SkillActivationState {
     fn activation_revision(&self) -> AgentResult<String> {
-        let material = self
-            .order
-            .iter()
-            .filter_map(|id| self.active.get(id))
-            .map(|skill| (&skill.id, &skill.revision))
-            .collect::<Vec<_>>();
-        serde_json::to_vec(&material)
-            .map(|bytes| content_revision(&bytes))
-            .map_err(|error| {
-                AgentError::new(format!("cannot compute Skill activation revision: {error}"))
-            })
+        Ok(activation_revision_for_identities(
+            self.order
+                .iter()
+                .filter_map(|id| self.active.get(id))
+                .map(|skill| (skill.id.as_str(), skill.revision.as_str())),
+        )
+        .as_str()
+        .to_string())
     }
 
     fn activation_revision_with(&self, additional: &ActivatedSkillRecord) -> AgentResult<String> {
-        let mut material = self
+        let mut identities = self
             .order
             .iter()
             .filter_map(|id| self.active.get(id))
-            .map(|skill| (&skill.id, &skill.revision))
+            .map(|skill| (skill.id.as_str(), skill.revision.as_str()))
             .collect::<Vec<_>>();
-        material.push((&additional.id, &additional.revision));
-        serde_json::to_vec(&material)
-            .map(|bytes| content_revision(&bytes))
-            .map_err(|error| {
-                AgentError::new(format!("cannot compute Skill activation revision: {error}"))
-            })
+        identities.push((additional.id.as_str(), additional.revision.as_str()));
+        Ok(activation_revision_for_identities(identities)
+            .as_str()
+            .to_string())
     }
 }
 
@@ -1101,7 +1116,7 @@ mod tests {
             id: entry.id.clone(),
             name: entry.name.clone(),
             revision: entry.revision.clone(),
-            source: format!("bundled:application/{}/SKILL.md", entry.name),
+            source: "bundled:application".to_string(),
             instructions: instructions.to_string(),
             source_bytes: u64::try_from(instructions.len()).unwrap(),
             resources: None,
@@ -1317,6 +1332,10 @@ mod tests {
             .unwrap()
             .is_empty());
 
+        let expected_activation_revision = value["activationRevision"]
+            .as_str()
+            .expect("activation result revision")
+            .to_string();
         let result = successful_result(value);
         let effects = extension
             .on_event(&RuntimeExtensionEvent::ToolCompleted { result: &result })
@@ -1327,11 +1346,19 @@ mod tests {
         let mut context = None;
         for effect in effects {
             match effect {
-                RuntimeEffect::EmitEvent(AgentEvent::SkillActivated { run_id, skill }) => {
+                RuntimeEffect::EmitEvent(AgentEvent::SkillActivated {
+                    run_id,
+                    activation_revision,
+                    activated_by,
+                    skill,
+                }) => {
                     emitted_event = true;
                     assert_eq!(run_id, "run-1");
                     assert_eq!(skill.id, entry.id);
-                    assert_eq!(skill.activated_by, AgentSkillActivationActor::Model);
+                    assert_eq!(activated_by, AgentSkillActivationActor::Model);
+                    assert_eq!(activation_revision, expected_activation_revision);
+                    assert_eq!(skill.source.kind, "bundled");
+                    assert_eq!(skill.source.id, "bundled:application");
                 }
                 RuntimeEffect::AppendRetainedContext(item) => context = Some(item),
                 RuntimeEffect::EmitEvent(_) => panic!("unexpected runtime event"),
@@ -1426,6 +1453,95 @@ mod tests {
         assert_eq!(result["status"], "alreadyActivated");
         assert_eq!(result["activatedBy"], "user");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn model_activation_extends_user_selection_with_the_canonical_inventory_revision() {
+        let user_entry = discoverable_skill("user", "documents", "Documents", &revision('a'));
+        let model_entry =
+            discoverable_skill("model", "spreadsheets", "Spreadsheets", &revision('b'));
+        let initial_activation = AgentSkillActivation {
+            // The extension derives the current inventory revision from the frozen identities;
+            // callers cannot give progressive activation a second revision meaning.
+            activation_revision: "untrusted-caller-revision".to_string(),
+            skills: vec![activated_skill(&user_entry, "user-selected instructions")],
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut extension = SkillActivationExtension::new(
+            "run-mixed-activation".to_string(),
+            Some(discovery(
+                vec![user_entry.clone(), model_entry.clone()],
+                4,
+                16_384,
+            )),
+            Some(&initial_activation),
+            Some(resolver_for(
+                vec![resolved_without_resources(
+                    &model_entry,
+                    "model-activated instructions",
+                )],
+                calls.clone(),
+            )),
+            Some(Arc::new(SkillResourceSession::empty())),
+        )
+        .unwrap();
+        let tool = SkillsActivateTool {
+            state: extension.state.clone(),
+        };
+
+        let value = tool
+            .execute(
+                &tool_context(),
+                json!({
+                    "skillRef": model_entry.activation_ref,
+                    "reason": "Need spreadsheet guidance"
+                }),
+            )
+            .unwrap();
+        let expected_revision = activation_revision_for_identities([
+            (user_entry.id.as_str(), user_entry.revision.as_str()),
+            (model_entry.id.as_str(), model_entry.revision.as_str()),
+        ])
+        .as_str()
+        .to_string();
+
+        assert_eq!(value["activationRevision"], expected_revision);
+        assert_eq!(value["activatedBy"], "model");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let effects = extension
+            .on_event(&RuntimeExtensionEvent::ToolCompleted {
+                result: &successful_result(value),
+            })
+            .unwrap();
+        let activated_event = effects
+            .iter()
+            .find_map(|effect| match effect {
+                RuntimeEffect::EmitEvent(AgentEvent::SkillActivated {
+                    activation_revision,
+                    activated_by,
+                    skill,
+                    ..
+                }) => Some((activation_revision, activated_by, skill)),
+                _ => None,
+            })
+            .expect("model activation event");
+        assert_eq!(activated_event.0, &expected_revision);
+        assert_eq!(activated_event.1, &AgentSkillActivationActor::Model);
+        assert_eq!(activated_event.2.id, model_entry.id);
+
+        let snapshot = extension.snapshot_state().unwrap();
+        assert_eq!(
+            snapshot["skills"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|skill| skill["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![user_entry.id.as_str(), model_entry.id.as_str()]
+        );
+        assert_eq!(snapshot["skills"][0]["activatedBy"], "user");
+        assert_eq!(snapshot["skills"][1]["activatedBy"], "model");
     }
 
     #[test]
