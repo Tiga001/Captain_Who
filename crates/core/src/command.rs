@@ -8,8 +8,8 @@ use crate::{
     AgentCommandArtifactScope, AgentCommandArtifactSnapshotCoverage,
     AgentCommandArtifactValidation, AgentCommandArtifactValidationStatus,
     AgentCommandExpectedArtifactOutcome, AgentCommandExpectedArtifactOutcomeKind,
-    AgentCommandRequest, AgentCommandRiskLevel, AgentCommandRuntimeKind,
-    AgentCommandRuntimeRequest, AgentCommandRuntimeResolution, AgentCommandRuntimeResolvedPackage,
+    AgentCommandRequest, AgentCommandRiskLevel, AgentCommandRuntimeBinding,
+    AgentCommandRuntimeKind, AgentCommandRuntimeRequest, AgentCommandRuntimeResolution,
     AgentCommandSafetyPolicy, AgentPermissions, AgentReadPermission, AgentToolResult,
     AgentWritePermission, AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
@@ -33,6 +33,7 @@ mod lexer;
 mod managed_runtime;
 mod policy;
 mod risk;
+mod runtime_profile;
 mod segment;
 mod types;
 
@@ -45,10 +46,20 @@ pub use execution::*;
 use lexer::*;
 pub use managed_runtime::run_authorized_command_with_artifact_runtime;
 pub(crate) use managed_runtime::{
-    validate_command_runtime_request, validate_managed_artifact_command_shape,
+    infer_managed_artifact_command_kind, validate_command_runtime_request,
+    validate_managed_artifact_command_shape,
 };
 pub use policy::*;
 use risk::*;
+#[cfg(test)]
+pub(crate) use runtime_profile::runtime_profile_revision;
+pub(crate) use runtime_profile::{
+    prepare_command_runtime_profile, validate_command_runtime_binding,
+};
+pub use runtime_profile::{
+    CommandRuntimeProfileError, CommandRuntimeProfileResolver,
+    COMMAND_RUNTIME_PROFILE_ERROR_BINDING_MISMATCH, COMMAND_RUNTIME_PROFILE_ERROR_LEGACY_REPREPARE,
+};
 use segment::*;
 pub use types::*;
 

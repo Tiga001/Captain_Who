@@ -427,7 +427,7 @@ fn validate_frozen_manual_file_effect_tool_call(
                     )
                 },
             )?;
-            office_operation.reason.clone()
+            Some(office_operation.reason.clone())
         }
         _ => unreachable!("manual_file_effect_identity already rejected this action"),
     };

@@ -58,6 +58,7 @@ fn manual_command_settlement(
             reason: Some("test atomic settlement".to_string()),
             observe: None,
             runtime: None,
+            runtime_binding: None,
         },
     };
     let action_json = serde_json::to_string(&action).unwrap();
@@ -268,7 +269,13 @@ impl ManualNonCommandFileEffect {
                             } else {
                                 "budget.xlsx".to_string()
                             }),
-                            arguments: Vec::new(),
+                            parameters: crate::office::OfficeRequestParameters::Typed(
+                                crate::office::OfficeOperationParameters::Create {
+                                    locale: None,
+                                    minimal: false,
+                                    overwrite: false,
+                                },
+                            ),
                             output_path: None,
                             destination_path: None,
                             timeout_ms: None,
@@ -288,7 +295,7 @@ impl ManualNonCommandFileEffect {
                         resource_preconditions: Vec::new(),
                     },
                     approval_status: crate::AgentApprovalStatus::Required,
-                    reason: Some("create the reviewed workbook".to_string()),
+                    reason: "create the reviewed workbook".to_string(),
                 }),
             },
             Self::SkillScript => AgentProposedAction::SkillScript {
@@ -345,8 +352,11 @@ impl ManualNonCommandFileEffect {
             (Self::OfficeOperation, AgentProposedAction::OfficeOperation { office_operation }) => {
                 let request = &office_operation.prepared.request;
                 serde_json::json!({
-                    "operation": request.operation,
-                    "path": request.document_path,
+                    "request": {
+                        "operation": request.operation,
+                        "filePath": request.document_path,
+                    },
+                    "reason": office_operation.reason,
                 })
             }
             (Self::SkillScript, AgentProposedAction::SkillScript { script }) => {

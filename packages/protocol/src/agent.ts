@@ -992,6 +992,9 @@ export type AgentCommandRuntimeProvider = 'managedArtifact'
 
 export type AgentCommandRuntimeKind = 'node' | 'python'
 
+/** Model-visible selection of an application-owned reproducible artifact environment. */
+export type AgentCommandRuntimeProfile = 'documents' | 'spreadsheets' | 'presentations'
+
 export interface AgentCommandRuntimePackageRequirement {
   name: string
   version: string
@@ -1009,10 +1012,26 @@ export interface AgentCommandRuntimeResolvedPackage {
   version: string
 }
 
+/** Approval-time runtime identity. Host-private executable and environment data are excluded. */
+export interface AgentCommandRuntimeBinding {
+  schemaVersion: number
+  profile: AgentCommandRuntimeProfile
+  profileRevision: string
+  providerId: string
+  bundleVersion: string
+  bundleRevision: string
+  kind: AgentCommandRuntimeKind
+  runtimeVersion: string
+  runtimeFingerprint: string
+  resolvedPackages: AgentCommandRuntimeResolvedPackage[]
+}
+
 /** Public runtime evidence; private executable and component paths are intentionally absent. */
 export interface AgentCommandRuntimeResolution {
   schemaVersion: number
   providerId: string
+  profile?: AgentCommandRuntimeProfile
+  profileRevision?: string
   bundleVersion?: string
   bundleRevision?: string
   kind: AgentCommandRuntimeKind
@@ -1033,7 +1052,9 @@ export interface AgentCommandRequest {
   riskLevel?: AgentCommandRiskLevel
   reason?: string
   observe?: AgentCommandArtifactObservationRequest
+  /** @deprecated Only present on legacy pending actions, which the host refuses and reprepares. */
   runtime?: AgentCommandRuntimeRequest
+  runtimeBinding?: AgentCommandRuntimeBinding
 }
 
 export type AgentSkillMaterializationResultStatus =
@@ -1144,15 +1165,104 @@ export type OfficeOperation =
  */
 export type OfficeOperationAccess = 'readOnly' | 'fileWrite'
 
-export interface OfficeExecutionRequest {
+export type OfficeHelpVerb = 'get' | 'query' | 'set' | 'add' | 'remove' | 'move' | 'swap'
+
+export type OfficeViewMode =
+  'text' | 'annotated' | 'outline' | 'stats' | 'issues' | 'html' | 'svg' | 'screenshot' | 'forms'
+
+export type OfficeViewRenderMode = 'auto' | 'html'
+
+export type OfficeGridLayout = { mode: 'auto' } | { mode: 'columns'; columns: number }
+
+export type OfficeCellShift = 'left' | 'up'
+
+export type OfficeElementPosition =
+  | { type: 'index'; index: number }
+  | { type: 'after'; target: string }
+  | { type: 'before'; target: string }
+
+export interface OfficeTextReplacement {
+  find: string
+  replace: string
+}
+
+export interface OfficePageRange {
+  start: number
+  end?: number
+}
+
+export interface OfficeViewport {
+  width: number
+  height: number
+}
+
+export type OfficePropertyValue = string | number | boolean | { resourcePath: string }
+
+export type OfficePropertyMap = Record<string, OfficePropertyValue>
+
+export type OfficeOperationParameters =
+  | { type: 'help'; verb?: OfficeHelpVerb; element?: string }
+  | { type: 'create'; locale?: string; minimal?: boolean; overwrite?: boolean }
+  | {
+      type: 'view'
+      mode: OfficeViewMode
+      start?: number
+      end?: number
+      maxLines?: number
+      issueType?: string
+      limit?: number
+      columns?: string[]
+      pages?: OfficePageRange[]
+      range?: string
+      viewport?: OfficeViewport
+      grid?: OfficeGridLayout
+      renderMode?: OfficeViewRenderMode
+      pageCount?: boolean
+    }
+  | { type: 'get'; target?: string; depth?: number }
+  | { type: 'query'; selector: string; contains?: string; compact?: boolean; fields?: string[] }
+  | { type: 'validate' }
+  | {
+      type: 'set'
+      target: string
+      properties?: OfficePropertyMap
+      replacement?: OfficeTextReplacement
+      force?: boolean
+    }
+  | {
+      type: 'add'
+      parent: string
+      elementType: string
+      copyFrom?: string
+      position?: OfficeElementPosition
+      properties?: OfficePropertyMap
+      force?: boolean
+    }
+  | { type: 'remove'; target: string; shift?: OfficeCellShift; properties?: OfficePropertyMap }
+  | {
+      type: 'move'
+      target: string
+      newParent?: string
+      position?: OfficeElementPosition
+      properties?: OfficePropertyMap
+    }
+  | { type: 'swap'; firstTarget: string; secondTarget: string }
+
+interface OfficeExecutionRequestBase {
   documentKind: OfficeDocumentKind
   operation: OfficeOperation
   documentPath?: string
-  arguments?: string[]
   outputPath?: string
   destinationPath?: string
   timeoutMs?: number
 }
+
+export type OfficeExecutionRequest = OfficeExecutionRequestBase &
+  (
+    | { parameters: OfficeOperationParameters; arguments?: never }
+    /** @deprecated Schema-v3 compatibility only; schema-v4 actions use typed parameters. */
+    | { parameters?: never; arguments: string[] }
+  )
 
 export type OfficeFilePreconditionState = 'missing' | 'present'
 
@@ -1225,7 +1335,7 @@ export interface AgentOfficeOperationRequest {
   id: string
   prepared: OfficePreparedExecution
   approvalStatus: AgentApprovalStatus
-  reason?: string
+  reason: string
 }
 
 export type AgentProposedAction =

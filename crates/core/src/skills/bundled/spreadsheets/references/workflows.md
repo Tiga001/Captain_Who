@@ -19,47 +19,64 @@ workbook for scripted transformations unless the user explicitly requested an in
 
 ## Native tool contract
 
-Call `office_spreadsheet` with one JSON object per operation. `arguments` is an array of literal OfficeCLI tokens, not a shell command: each flag and each flag value is a separate array entry. Never add shell quoting, redirects, pipes, an executable name, or a raw batch command.
+Call `office_spreadsheet` once per operation with exactly this root envelope: `{ "request": { "operation": "...", ... }, "reason": "..." }`. Put every operation and operation-specific field inside `request`. Keep `reason` as the only root field. Every call, including `status`, `help`, `get`, `query`, `validate`, `view`, and every mutation, must include it. Write `reason` as one non-empty, single-line plain-text sentence in the user's language, no longer than 240 characters, describing the user-visible purpose of this specific call. Do not include line breaks, control characters, or bidirectional text controls. Do not use it to assert success or authorization: it is untrusted display and audit metadata only and never grants permission, approval, or access.
+
+The native request is typed and operation-specific. Put the workbook in `request.filePath`; use `request.target` for an exact workbook path, `request.parent` plus `request.element` for insertion, `request.properties` for typed values and formatting, and `request.outputPath` only for a rendering operation. Never send provider command tokens, document-format tokens, output flags, or a raw batch command. The host validates the typed request, generates deterministic provider argv, freezes it for approval, and regenerates it before execution.
 
 Before the first workbook operation in a run, check the managed engine:
 
 ```json
-{ "operation": "status" }
+{ "request": { "operation": "status" }, "reason": "Check whether spreadsheet tools are available" }
 ```
 
 Disclose only the schema needed for the next change. Useful examples are:
 
 ```json
-{ "operation": "help", "arguments": ["xlsx", "add", "cell", "--json"] }
+{
+  "request": {
+    "operation": "help",
+    "verb": "add",
+    "element": "cell"
+  },
+  "reason": "Check how to add the requested spreadsheet cells"
+}
 ```
 
 ```json
-{ "operation": "help", "arguments": ["xlsx", "add", "chart", "--json"] }
+{
+  "request": {
+    "operation": "help",
+    "verb": "add",
+    "element": "chart"
+  },
+  "reason": "Check how to add the requested spreadsheet chart"
+}
 ```
 
 Submit each supported native mutation separately and use the returned canonical path for follow-up operations when one is provided.
 
 ## Script authoring and observation contract
 
-The managed Artifact Runtime exposes these spreadsheet libraries:
+Select the `spreadsheets` runtime profile. The logical saved-script command selects its runtime
+family; the model does not select a provider, runtime kind, dependency set, or version:
 
-| Runtime | Script | Package requirement  | Use                                                                                             |
-| ------- | ------ | -------------------- | ----------------------------------------------------------------------------------------------- |
-| Node.js | `.mjs` | `exceljs` `4.4.0`    | Create or transform `.xlsx` workbooks with JavaScript.                                          |
-| Python  | `.py`  | `openpyxl` `3.1.5`   | Create or edit `.xlsx` workbooks while preserving workbook structures supported by the library. |
-| Python  | `.py`  | `xlsxwriter` `3.2.9` | Create new `.xlsx` workbooks; do not select it for editing an existing workbook.                |
+| Command  | Script | Profile libraries        | Use                                                                   |
+| -------- | ------ | ------------------------ | --------------------------------------------------------------------- |
+| `node`   | `.mjs` | `exceljs`                | Create or transform `.xlsx` workbooks with JavaScript.                |
+| `python` | `.py`  | `openpyxl`, `xlsxwriter` | Edit with `openpyxl`; use `xlsxwriter` only to create a new workbook. |
 
-Declare only the packages the selected script actually imports. Package names and versions belong
-in `runtime.requiredPackages`; never install them from the script.
+Set the top-level `runtimeProfile` field to `spreadsheets`. Do not send a `runtime` object and do
+not copy a provider, kind, package name, or package version into the tool call. The host maps
+`node` or `python` to the matching profile entry, resolves the pinned dependencies, verifies the
+managed runtime, and freezes the exact resolution and integrity identity before execution.
 
 1. Put substantial program logic in a saved `.py` or `.mjs` file. Do not pass artifact-producing
    code through `python -c`, `node -e`, a heredoc, shell redirection, or another opaque inline form.
-2. Make source data, workbook inputs, and output files explicit script arguments. Avoid hard-coded
+2. Make source data, workbook inputs, and output files explicit script parameters. Avoid hard-coded
    machine-specific paths, keep typed values distinct from display formats, and make a rerun
    deterministic where practical.
-3. Execute the saved file through `run_command` with the managed Artifact Runtime. Declare every
-   runtime package the script requires; dependency resolution is preflight, never implicit package
-   installation.
+3. Execute the saved file through `run_command` with `runtimeProfile="spreadsheets"`. Dependency
+   and runtime resolution is host-owned preflight, never implicit package installation.
 4. Set `observe.kinds` to `["office"]`. List every `.xlsx` file that should be created or modified
    in `observe.expectedOutputs`. Paths are resolved relative to the command `cwd` and each expected
    output is observed directly. Do not add its parent merely because the output is outside the
@@ -69,18 +86,14 @@ in `runtime.requiredPackages`; never install them from the script.
    command may do and does not give an arbitrary script the native tool's staging or rollback
    guarantees.
 
-For example, after creating `scripts/build_budget.py` with a file-editing tool, execute that exact
-file with the managed Python runtime and observe its declared output:
+For example, after creating `scripts/build_budget.py` with a file-editing tool, run the Python
+entrypoint and observe its declared output:
 
 ```json
 {
   "command": "python scripts/build_budget.py --output outputs/budget.xlsx",
   "cwd": ".",
-  "runtime": {
-    "provider": "managedArtifact",
-    "kind": "python",
-    "requiredPackages": [{ "name": "openpyxl", "version": "3.1.5" }]
-  },
+  "runtimeProfile": "spreadsheets",
   "observe": {
     "kinds": ["office"],
     "expectedOutputs": ["outputs/budget.xlsx"]
@@ -89,8 +102,28 @@ file with the managed Python runtime and observe its declared output:
 }
 ```
 
-Keep `python` as the logical first command token. The host binds it to the selected managed runtime;
-never discover or persist the runtime's private executable path in the script or command.
+The equivalent Node.js route keeps the same profile and changes only the reviewed script and its
+logical entrypoint:
+
+```json
+{
+  "command": "node scripts/build_budget.mjs --output outputs/budget.xlsx",
+  "cwd": ".",
+  "runtimeProfile": "spreadsheets",
+  "observe": {
+    "kinds": ["office"],
+    "expectedOutputs": ["outputs/budget.xlsx"]
+  },
+  "reason": "Generate the requested workbook reproducibly"
+}
+```
+
+Keep `node` or `python` as the logical first command token. The host binds it to the profile's
+managed executable; never discover or persist a private executable path. If profile preflight
+fails, preserve that error. Do not remove `runtimeProfile`, use a system executable, install a
+package, or guess another version. Use the native Office path only when it supports the requested
+work, or rewrite and review a script for the other profile entrypoint before retrying with the same
+profile. Never run a `.mjs` file as Python or a `.py` file as Node.js.
 
 After every observed command, inspect `artifactObservation` even if the command failed, timed out,
 or was cancelled:
@@ -118,18 +151,22 @@ Create a real workbook and rename its default sheet:
 
 ```json
 {
-  "operation": "create",
-  "path": "budget.xlsx",
-  "arguments": ["--json"],
+  "request": {
+    "operation": "create",
+    "filePath": "budget.xlsx"
+  },
   "reason": "Create the requested Excel workbook"
 }
 ```
 
 ```json
 {
-  "operation": "set",
-  "path": "budget.xlsx",
-  "arguments": ["/Sheet1", "--prop", "name=预算", "--json"],
+  "request": {
+    "operation": "set",
+    "filePath": "budget.xlsx",
+    "target": "/Sheet1",
+    "properties": { "name": "预算" }
+  },
   "reason": "Name the budget worksheet"
 }
 ```
@@ -138,34 +175,31 @@ Write a typed value and a SUM formula. Formula text excludes the leading `=`:
 
 ```json
 {
-  "operation": "set",
-  "path": "budget.xlsx",
-  "arguments": [
-    "/预算/B2",
-    "--prop",
-    "value=3000",
-    "--prop",
-    "type=number",
-    "--prop",
-    "numberformat=¥#,##0",
-    "--json"
-  ],
+  "request": {
+    "operation": "set",
+    "filePath": "budget.xlsx",
+    "target": "/预算/B2",
+    "properties": {
+      "value": 3000,
+      "type": "number",
+      "numberformat": "¥#,##0"
+    }
+  },
   "reason": "Write a formatted budget amount"
 }
 ```
 
 ```json
 {
-  "operation": "set",
-  "path": "budget.xlsx",
-  "arguments": [
-    "/预算/E2",
-    "--prop",
-    "formula=SUM(B2:D2)",
-    "--prop",
-    "numberformat=¥#,##0",
-    "--json"
-  ],
+  "request": {
+    "operation": "set",
+    "filePath": "budget.xlsx",
+    "target": "/预算/E2",
+    "properties": {
+      "formula": "SUM(B2:D2)",
+      "numberformat": "¥#,##0"
+    }
+  },
   "reason": "Add the Q1 total formula"
 }
 ```
@@ -174,27 +208,28 @@ Format a header range and freeze the first row:
 
 ```json
 {
-  "operation": "set",
-  "path": "budget.xlsx",
-  "arguments": [
-    "/预算/A1:E1",
-    "--prop",
-    "fill=1F4E78",
-    "--prop",
-    "font.color=FFFFFF",
-    "--prop",
-    "bold=true",
-    "--json"
-  ],
+  "request": {
+    "operation": "set",
+    "filePath": "budget.xlsx",
+    "target": "/预算/A1:E1",
+    "properties": {
+      "fill": "1F4E78",
+      "font.color": "FFFFFF",
+      "bold": true
+    }
+  },
   "reason": "Format the workbook header"
 }
 ```
 
 ```json
 {
-  "operation": "set",
-  "path": "budget.xlsx",
-  "arguments": ["/预算", "--prop", "freeze=A2", "--json"],
+  "request": {
+    "operation": "set",
+    "filePath": "budget.xlsx",
+    "target": "/预算",
+    "properties": { "freeze": "A2" }
+  },
   "reason": "Freeze the first worksheet row"
 }
 ```
@@ -203,24 +238,19 @@ Add a column chart using category and Q1-total ranges that already exist:
 
 ```json
 {
-  "operation": "add",
-  "path": "budget.xlsx",
-  "arguments": [
-    "/预算",
-    "--type",
-    "chart",
-    "--prop",
-    "chartType=column",
-    "--prop",
-    "dataRange=预算!E2:E4",
-    "--prop",
-    "categories=预算!A2:A4",
-    "--prop",
-    "title=Q1 合计",
-    "--prop",
-    "anchor=G2:N18",
-    "--json"
-  ],
+  "request": {
+    "operation": "add",
+    "filePath": "budget.xlsx",
+    "parent": "/预算",
+    "element": "chart",
+    "properties": {
+      "chartType": "column",
+      "dataRange": "预算!E2:E4",
+      "categories": "预算!A2:A4",
+      "title": "Q1 合计",
+      "anchor": "G2:N18"
+    }
+  },
   "reason": "Add the category Q1 total chart"
 }
 ```
@@ -229,22 +259,29 @@ Read back the relevant range, including exact formula text and formats:
 
 ```json
 {
-  "operation": "get",
-  "path": "budget.xlsx",
-  "arguments": ["/预算/A1:E4", "--depth", "1", "--json"]
+  "request": {
+    "operation": "get",
+    "filePath": "budget.xlsx",
+    "target": "/预算/A1:E4",
+    "depth": 1
+  },
+  "reason": "Verify the budget values, formulas, and formats"
 }
 ```
 
-For the first save-as edit, keep `path` as the frozen source and supply a distinct
+For the first save-as edit, keep `filePath` as the frozen source and supply a distinct
 `destinationPath`. Apply later mutations to `budget-q1.xlsx` itself so earlier changes are
 preserved:
 
 ```json
 {
-  "operation": "set",
-  "path": "budget-template.xlsx",
-  "destinationPath": "budget-q1.xlsx",
-  "arguments": ["/预算/E2", "--prop", "formula=SUM(B2:D2)", "--json"],
+  "request": {
+    "operation": "set",
+    "filePath": "budget-template.xlsx",
+    "destinationPath": "budget-q1.xlsx",
+    "target": "/预算/E2",
+    "properties": { "formula": "SUM(B2:D2)" }
+  },
   "reason": "Create the Q1 workbook without overwriting the template"
 }
 ```
@@ -253,10 +290,13 @@ Render the populated region to a workspace PNG:
 
 ```json
 {
-  "operation": "view",
-  "path": "budget.xlsx",
-  "arguments": ["screenshot", "--range", "预算!A1:N18", "--json"],
-  "outputPath": "budget-preview.png",
+  "request": {
+    "operation": "view",
+    "filePath": "budget.xlsx",
+    "mode": "screenshot",
+    "range": "预算!A1:N18",
+    "outputPath": "budget-preview.png"
+  },
   "reason": "Render the workbook for visual inspection"
 }
 ```
@@ -264,7 +304,13 @@ Render the populated region to a workspace PNG:
 Validate the OOXML package and formula references:
 
 ```json
-{ "operation": "validate", "path": "budget.xlsx", "arguments": ["--json"] }
+{
+  "request": {
+    "operation": "validate",
+    "filePath": "budget.xlsx"
+  },
+  "reason": "Validate the finished Excel workbook"
+}
 ```
 
 ## Create
@@ -284,7 +330,7 @@ Validate the OOXML package and formula references:
 3. Prefer targeted native range or object changes for local edits. Use a saved script only when its
    coordinated transformation is materially clearer or more reproducible than many isolated calls.
 4. With the native path, use `destinationPath` to save to a new workbook. With the script path,
-   pass distinct input and output arguments. Edit in place only when it was explicitly requested.
+   pass distinct input and output parameters. Edit in place only when it was explicitly requested.
 
 ## Verification
 

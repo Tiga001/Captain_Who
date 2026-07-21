@@ -124,6 +124,33 @@ const installedAuditorSkill: SkillDescriptor = {
   trust: 'untrusted'
 }
 
+const bundledOfficeSkills: SkillDescriptor[] = [
+  {
+    ...bundledAuditorSkill,
+    description: 'Create and edit document files.',
+    id: 'bundled:application:documents',
+    location: 'skills/documents/SKILL.md',
+    name: 'Documents',
+    source: { id: 'application:documents', kind: 'bundled' }
+  },
+  {
+    ...bundledAuditorSkill,
+    description: 'Create and edit spreadsheet files.',
+    id: 'bundled:application:spreadsheets',
+    location: 'skills/spreadsheets/SKILL.md',
+    name: 'Spreadsheets',
+    source: { id: 'application:spreadsheets', kind: 'bundled' }
+  },
+  {
+    ...bundledAuditorSkill,
+    description: 'Create and edit presentation files.',
+    id: 'bundled:application:presentations',
+    location: 'skills/presentations/SKILL.md',
+    name: 'Presentations',
+    source: { id: 'application:presentations', kind: 'bundled' }
+  }
+]
+
 function catalog(
   skills: SkillDescriptor[] = [auditorSkill, testSkill],
   overrides: Partial<SkillsListOutput> = {}
@@ -457,7 +484,7 @@ describe('ChatComposer Skill picker', () => {
       .toBe(0)
   })
 
-  it('displays registered source and trust metadata and submits opaque selections', async () => {
+  it('keeps source and trust metadata accessible without adding it to compact list rows', async () => {
     listSkillsSpy.mockResolvedValue(
       catalog([auditorSkill, testSkill, bundledAuditorSkill, installedAuditorSkill])
     )
@@ -466,13 +493,19 @@ describe('ChatComposer Skill picker', () => {
     await screen.getByRole('button', { name: 'chat.addContext' }).click()
     await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
 
-    await expect.element(screen.getByText(/chat\.bundledSkill/)).toBeVisible()
-    await expect.element(screen.getByText(/chat\.installedSkill/)).toBeVisible()
-    await expect.element(screen.getByText(/chat\.skillTrustApplication/)).toBeVisible()
-    expect(screen.container.textContent).toContain('chat.workspaceSkill')
-    expect(screen.container.textContent).toContain('chat.skillTrustUntrusted')
+    const bundledOption = screen.getByRole('button', {
+      name: /^skills\.bundled\.repositoryEvidenceAuditor\.name.*chat\.bundledSkill.*chat\.skillTrustApplication/
+    })
+    await expect.element(bundledOption).toBeVisible()
+    expect(screen.container.textContent).not.toContain('chat.bundledSkill')
+    expect(screen.container.textContent).not.toContain('chat.installedSkill')
+    expect(screen.container.textContent).not.toContain('chat.workspaceSkill')
+    ;(bundledOption.element() as HTMLButtonElement).focus()
+    await expect
+      .element(screen.getByRole('tooltip'))
+      .toHaveTextContent('skills.bundled.repositoryEvidenceAuditor.description')
 
-    await screen.getByRole('button', { name: /^Repository evidence auditor/ }).click()
+    await bundledOption.click()
     await screen.getByRole('textbox', { name: 'chat.inputAria' }).fill('Audit this claim')
     await screen.getByRole('button', { name: 'chat.send' }).click()
     await expect.poll(() => submitSpy.mock.calls.length).toBe(1)
@@ -480,6 +513,26 @@ describe('ChatComposer Skill picker', () => {
     expect(submitSpy.mock.calls[0]?.[1].skills).toEqual([
       { id: bundledAuditorSkill.id, revision: bundledAuditorSkill.revision }
     ])
+  })
+
+  it('uses dedicated Office icons for the three bundled Office skills', async () => {
+    listSkillsSpy.mockResolvedValue(catalog(bundledOfficeSkills))
+    const screen = await render(<TestComposer />)
+
+    await screen.getByRole('button', { name: 'chat.addContext' }).click()
+    await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
+
+    for (const [name, kind] of [
+      ['skills.bundled.documents.name', 'document'],
+      ['skills.bundled.spreadsheets.name', 'spreadsheet'],
+      ['skills.bundled.presentations.name', 'presentation']
+    ] as const) {
+      const option = screen.getByRole('button', { name: new RegExp(`^${name}`) })
+      await expect.element(option).toBeVisible()
+      const icon = option.element().querySelector(`[data-office-kind="${kind}"]`)
+      expect(icon?.querySelector('img')).not.toBeNull()
+      expect(icon?.querySelector('svg')).toBeNull()
+    }
   })
 
   it('keeps same-named selected skills visibly and accessibly distinct by provenance', async () => {
@@ -523,7 +576,7 @@ describe('ChatComposer Skill picker', () => {
 
     expect(workspaceChip?.textContent).toContain(auditorSkill.name)
     expect(workspaceChip?.textContent).toContain('chat.workspaceSkill · chat.skillTrustUntrusted')
-    expect(bundledChip?.textContent).toContain(auditorSkill.name)
+    expect(bundledChip?.textContent).toContain('skills.bundled.repositoryEvidenceAuditor.name')
     expect(bundledChip?.textContent).toContain('chat.bundledSkill · chat.skillTrustApplication')
     expect(installedChip?.textContent).toContain(auditorSkill.name)
     expect(installedChip?.textContent).toContain('chat.installedSkill · chat.skillTrustUntrusted')
@@ -544,7 +597,7 @@ describe('ChatComposer Skill picker', () => {
     await expect
       .element(
         screen.getByRole('button', {
-          name: 'chat.removeSkill Repository auditor · chat.bundledSkill · chat.skillTrustApplication'
+          name: 'chat.removeSkill skills.bundled.repositoryEvidenceAuditor.name · chat.bundledSkill · chat.skillTrustApplication'
         })
       )
       .toBeVisible()

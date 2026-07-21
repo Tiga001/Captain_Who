@@ -1,5 +1,5 @@
 use super::discovery::discover_with_test_path;
-use super::execution::{install_commit_test_hook, CommitTestPhase};
+use super::execution::{compile_office_arguments, install_commit_test_hook, CommitTestPhase};
 use super::*;
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentCancellationToken,
@@ -43,14 +43,82 @@ impl Fixture {
             document_kind: OfficeDocumentKind::Document,
             operation,
             document_path: Some("sample.docx".to_string()),
-            arguments: match operation {
-                OfficeOperation::Set => vec!["/body".to_string()],
-                _ => Vec::new(),
-            },
+            parameters: OfficeRequestParameters::Typed(default_parameters(operation)),
             output_path: None,
             destination_path: None,
             timeout_ms: Some(10_000),
         }
+    }
+}
+
+fn default_parameters(operation: OfficeOperation) -> OfficeOperationParameters {
+    match operation {
+        OfficeOperation::Help => OfficeOperationParameters::Help {
+            verb: None,
+            element: None,
+        },
+        OfficeOperation::Create => OfficeOperationParameters::Create {
+            locale: None,
+            minimal: false,
+            overwrite: false,
+        },
+        OfficeOperation::View => OfficeOperationParameters::View {
+            mode: OfficeViewMode::Text,
+            start: None,
+            end: None,
+            max_lines: None,
+            issue_type: None,
+            limit: None,
+            columns: Vec::new(),
+            pages: Vec::new(),
+            range: None,
+            viewport: None,
+            grid: None,
+            render_mode: None,
+            page_count: false,
+        },
+        OfficeOperation::Get => OfficeOperationParameters::Get {
+            target: None,
+            depth: None,
+        },
+        OfficeOperation::Query => OfficeOperationParameters::Query {
+            selector: "*".to_string(),
+            contains: None,
+            compact: false,
+            fields: Vec::new(),
+        },
+        OfficeOperation::Validate => OfficeOperationParameters::Validate,
+        OfficeOperation::Set => OfficeOperationParameters::Set {
+            target: "/body".to_string(),
+            properties: [("text".to_string(), serde_json::json!("updated"))]
+                .into_iter()
+                .collect(),
+            replacement: None,
+            force: false,
+        },
+        OfficeOperation::Add => OfficeOperationParameters::Add {
+            parent: "/body".to_string(),
+            element_type: "paragraph".to_string(),
+            copy_from: None,
+            position: None,
+            properties: std::collections::BTreeMap::new(),
+            force: false,
+        },
+        OfficeOperation::Remove => OfficeOperationParameters::Remove {
+            target: "/body/p[1]".to_string(),
+            shift: None,
+            properties: std::collections::BTreeMap::new(),
+        },
+        OfficeOperation::Move => OfficeOperationParameters::Move {
+            target: "/body/p[1]".to_string(),
+            new_parent: None,
+            position: Some(OfficeElementPosition::Index { index: 0 }),
+            properties: std::collections::BTreeMap::new(),
+        },
+        OfficeOperation::Swap => OfficeOperationParameters::Swap {
+            first_target: "/body/p[1]".to_string(),
+            second_target: "/body/p[2]".to_string(),
+        },
     }
 }
 
@@ -206,6 +274,39 @@ fn changed_engine_or_document_invalidates_prepared_execution() {
 }
 
 #[test]
+fn typed_request_tampering_cannot_reuse_frozen_provider_argv() {
+    let fixture = Fixture::new(basic_script());
+    let document = fixture.workspace.path().join("sample.docx");
+    write_docx(&document, "original");
+    let before = fs::read(&document).unwrap();
+    let mut prepared = fixture
+        .engine
+        .prepare(
+            &workspace_context(fixture.workspace.path()),
+            &fixture.request(OfficeOperation::Set),
+        )
+        .unwrap();
+    let OfficeRequestParameters::Typed(OfficeOperationParameters::Set { properties, .. }) =
+        &mut prepared.request.parameters
+    else {
+        panic!("fixture must prepare a typed set request");
+    };
+    properties.insert("text".to_string(), serde_json::json!("tampered"));
+
+    let error = fixture
+        .engine
+        .execute_prepared(
+            &workspace_context(fixture.workspace.path()),
+            &prepared,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::PreconditionFailed);
+    assert_eq!(fs::read(document).unwrap(), before);
+}
+
+#[test]
 fn packaged_component_layout_is_discovered_before_path() {
     let workspace = tempfile::tempdir().unwrap();
     let resources = tempfile::tempdir().unwrap();
@@ -265,8 +366,7 @@ fn execute_preserves_exit_stdout_and_stderr() {
         "#!/bin/sh\nprintf 'created:%s\\n' \"$2\"\nprintf 'warning:%s\\n' \"$3\" >&2\nexit 7\n",
     );
     fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
-    let mut request = fixture.request(OfficeOperation::Validate);
-    request.arguments = vec!["--json".to_string()];
+    let request = fixture.request(OfficeOperation::Validate);
     let result = fixture
         .engine
         .execute(
@@ -289,7 +389,12 @@ fn argv_is_not_interpreted_by_a_shell() {
     fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
     let marker = fixture.workspace.path().join("should-not-exist");
     let mut request = fixture.request(OfficeOperation::Query);
-    request.arguments = vec![format!("$(touch {})", marker.display())];
+    request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Query {
+        selector: format!("$(touch {})", marker.display()),
+        contains: None,
+        compact: false,
+        fields: Vec::new(),
+    });
     let result = fixture
         .engine
         .execute(
@@ -401,7 +506,9 @@ fn parallel_short_lived_office_process_groups_do_not_cross_signal() {
                         document_kind: OfficeDocumentKind::Document,
                         operation: OfficeOperation::Validate,
                         document_path: Some("sample.docx".to_string()),
-                        arguments: Vec::new(),
+                        parameters: OfficeRequestParameters::Typed(
+                            OfficeOperationParameters::Validate,
+                        ),
                         output_path: None,
                         destination_path: None,
                         timeout_ms: Some(10_000),
@@ -437,11 +544,14 @@ fn document_writes_publish_valid_output_atomically() {
     let document = fixture.workspace.path().join("sample.docx");
     write_docx(&document, "original");
     let mut request = fixture.request(OfficeOperation::Set);
-    request.arguments = vec![
-        "/body/p[1]".to_string(),
-        "--prop".to_string(),
-        "text=updated".to_string(),
-    ];
+    request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Set {
+        target: "/body/p[1]".to_string(),
+        properties: [("text".to_string(), serde_json::json!("updated"))]
+            .into_iter()
+            .collect(),
+        replacement: None,
+        force: false,
+    });
     let before = fs::read(&document).unwrap();
     let result = fixture
         .engine
@@ -581,10 +691,26 @@ fn create_and_render_publish_only_the_valid_staged_artifact() {
         fs::read(replacement.path()).unwrap()
     );
 
-    let fixture = Fixture::new("#!/bin/sh\nprintf '\\211PNG\\r\\n\\032\\nbody' > \"$5\"\n");
+    let fixture = Fixture::new(
+        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf '\\211PNG\\r\\n\\032\\nbody' > \"$output\"\n",
+    );
     fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
     let mut request = fixture.request(OfficeOperation::View);
-    request.arguments = vec!["screenshot".to_string()];
+    request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::View {
+        mode: OfficeViewMode::Screenshot,
+        start: None,
+        end: None,
+        max_lines: None,
+        issue_type: None,
+        limit: None,
+        columns: Vec::new(),
+        pages: Vec::new(),
+        range: None,
+        viewport: None,
+        grid: None,
+        render_mode: None,
+        page_count: false,
+    });
     request.output_path = Some("preview.png".to_string());
     let result = fixture
         .engine
@@ -612,7 +738,10 @@ fn unavailable_engine_is_a_stable_null_object() {
                 document_kind: OfficeDocumentKind::Document,
                 operation: OfficeOperation::Help,
                 document_path: None,
-                arguments: Vec::new(),
+                parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::Help {
+                    verb: None,
+                    element: None,
+                }),
                 output_path: None,
                 destination_path: None,
                 timeout_ms: None,
@@ -623,188 +752,254 @@ fn unavailable_engine_is_a_stable_null_object() {
 }
 
 #[test]
-fn dangerous_commands_and_flags_are_rejected() {
+fn unsupported_commands_and_legacy_argv_requests_fail_closed() {
     for command in ["install", "config", "watch", "raw-set", "batch", "mcp"] {
         let error = OfficeOperation::parse_supported(command).unwrap_err();
         assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
     }
 
     let fixture = Fixture::new(basic_script());
-    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
-    let mut request = fixture.request(OfficeOperation::View);
-    request.arguments = vec!["text".to_string(), "--browser".to_string()];
-    let error = fixture
-        .engine
-        .execute(
-            &workspace_context(fixture.workspace.path()),
-            &request,
-            AgentCancellationToken::new(),
-            None,
-        )
-        .unwrap_err();
-    assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
+    let mut legacy = fixture.request(OfficeOperation::View);
+    legacy.parameters =
+        OfficeRequestParameters::Legacy(vec!["text".to_string(), "--browser".to_string()]);
+    let error = compile_office_arguments(&legacy).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::UnsupportedOperation);
 }
 
 #[test]
-fn hidden_write_aliases_and_unknown_options_fail_closed() {
+fn typed_operations_compile_to_deterministic_host_owned_argv() {
     let fixture = Fixture::new(basic_script());
-    write_docx(&fixture.workspace.path().join("sample.docx"), "original");
-
-    for (operation, arguments) in [
-        (
-            OfficeOperation::Get,
-            vec![
-                "/picture[1]".to_string(),
-                "--save".to_string(),
-                "leak.bin".to_string(),
-            ],
-        ),
-        (
-            OfficeOperation::Get,
-            vec!["/picture[1]".to_string(), "--save=leak.bin".to_string()],
-        ),
-        (
-            OfficeOperation::Get,
-            vec!["/picture[1]".to_string(), "--SaVe=leak.bin".to_string()],
-        ),
-        (
-            OfficeOperation::View,
-            vec![
-                "text".to_string(),
-                "--out".to_string(),
-                "leak.txt".to_string(),
-            ],
-        ),
-        (
-            OfficeOperation::View,
-            vec!["text".to_string(), "--OUT=leak.txt".to_string()],
-        ),
-        (
-            OfficeOperation::View,
-            vec!["text".to_string(), "-oleak.txt".to_string()],
-        ),
-    ] {
-        let mut request = fixture.request(operation);
-        request.arguments = arguments;
-        let error = fixture
-            .engine
-            .prepare(&workspace_context(fixture.workspace.path()), &request)
-            .unwrap_err();
-        assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
-    }
-
-    for arguments in [
-        vec!["--future-option".to_string()],
-        vec!["--".to_string(), "--save".to_string()],
-    ] {
-        let mut request = fixture.request(OfficeOperation::Validate);
-        request.arguments = arguments;
-        let error = fixture
-            .engine
-            .prepare(&workspace_context(fixture.workspace.path()), &request)
-            .unwrap_err();
-        assert!(matches!(
-            error.code(),
-            OfficeEngineErrorCode::InvalidRequest | OfficeEngineErrorCode::UnsafeOperation
-        ));
-    }
-    for arguments in [
-        vec!["screenshot".to_string(), "--render=native".to_string()],
-        vec!["pdf".to_string()],
-    ] {
-        let mut request = fixture.request(OfficeOperation::View);
-        request.arguments = arguments;
-        let error = fixture
-            .engine
-            .prepare(&workspace_context(fixture.workspace.path()), &request)
-            .unwrap_err();
-        assert!(matches!(
-            error.code(),
-            OfficeEngineErrorCode::InvalidRequest | OfficeEngineErrorCode::UnsafeOperation
-        ));
-    }
-    assert!(!fixture.workspace.path().join("leak.bin").exists());
-    assert!(!fixture.workspace.path().join("leak.txt").exists());
-}
-
-#[test]
-fn managed_argument_profile_accepts_pinned_options_and_rejects_prop_equals() {
-    let fixture = Fixture::new(basic_script());
-    write_docx(&fixture.workspace.path().join("sample.docx"), "original");
-
-    let supported = [
-        (
-            OfficeOperation::Help,
-            vec!["docx".to_string(), "add".to_string(), "--json".to_string()],
-        ),
-        (
-            OfficeOperation::View,
-            vec![
-                "text".to_string(),
-                "--max-lines=20".to_string(),
-                "--json".to_string(),
-            ],
-        ),
-        (
-            OfficeOperation::Get,
-            vec![
-                "/body".to_string(),
-                "--depth=2".to_string(),
-                "--json".to_string(),
-            ],
-        ),
-        (
-            OfficeOperation::Query,
-            vec![
-                "*".to_string(),
-                "--compact".to_string(),
-                "--fields=x,y".to_string(),
-            ],
-        ),
+    let expected = [
+        (OfficeOperation::Help, vec!["docx", "--json"]),
+        (OfficeOperation::Create, vec!["--json"]),
+        (OfficeOperation::View, vec!["text", "--json"]),
+        (OfficeOperation::Get, vec!["--json"]),
+        (OfficeOperation::Query, vec!["*", "--json"]),
+        (OfficeOperation::Validate, vec!["--json"]),
         (
             OfficeOperation::Set,
-            vec![
-                "/body/p[1]".to_string(),
-                "--prop".to_string(),
-                "text=updated".to_string(),
-                "--force".to_string(),
-            ],
+            vec!["/body", "--prop", "text=updated", "--json"],
         ),
         (
             OfficeOperation::Add,
-            vec!["/body".to_string(), "--type=paragraph".to_string()],
+            vec!["/body", "--type", "paragraph", "--json"],
         ),
-        (
-            OfficeOperation::Remove,
-            vec!["/body/p[1]".to_string(), "--json".to_string()],
-        ),
+        (OfficeOperation::Remove, vec!["/body/p[1]", "--json"]),
         (
             OfficeOperation::Move,
-            vec!["/body/p[1]".to_string(), "--index=0".to_string()],
+            vec!["/body/p[1]", "--index", "0", "--json"],
         ),
         (
             OfficeOperation::Swap,
-            vec!["/body/p[1]".to_string(), "/body/p[2]".to_string()],
+            vec!["/body/p[1]", "/body/p[2]", "--json"],
         ),
-        (OfficeOperation::Validate, vec!["--json".to_string()]),
     ];
-    for (operation, arguments) in supported {
-        let mut request = fixture.request(operation);
-        request.document_path =
-            (operation != OfficeOperation::Help).then(|| "sample.docx".to_string());
-        request.arguments = arguments;
-        fixture
-            .engine
-            .prepare(&workspace_context(fixture.workspace.path()), &request)
-            .unwrap_or_else(|error| panic!("{}: {}", operation.cli_name(), error));
+
+    for (operation, expected) in expected {
+        let request = fixture.request(operation);
+        assert_eq!(
+            compile_office_arguments(&request).unwrap(),
+            expected.into_iter().map(str::to_string).collect::<Vec<_>>(),
+            "{}",
+            operation.cli_name()
+        );
     }
 
     let mut request = fixture.request(OfficeOperation::Set);
-    request.arguments = vec!["/body/p[1]".to_string(), "--prop=text=updated".to_string()];
-    let error = fixture
-        .engine
-        .prepare(&workspace_context(fixture.workspace.path()), &request)
-        .unwrap_err();
+    request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Set {
+        target: "/body/p[1]".to_string(),
+        properties: [
+            ("zeta".to_string(), serde_json::json!(2)),
+            ("alpha".to_string(), serde_json::json!(1)),
+        ]
+        .into_iter()
+        .collect(),
+        replacement: None,
+        force: true,
+    });
+    assert_eq!(
+        compile_office_arguments(&request).unwrap(),
+        vec![
+            "/body/p[1]",
+            "--prop",
+            "alpha=1",
+            "--prop",
+            "zeta=2",
+            "--force",
+            "--json",
+        ]
+    );
+
+    let mut contact_sheet = fixture.request(OfficeOperation::View);
+    contact_sheet.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::View {
+        mode: OfficeViewMode::Screenshot,
+        start: None,
+        end: None,
+        max_lines: None,
+        issue_type: None,
+        limit: None,
+        columns: Vec::new(),
+        pages: Vec::new(),
+        range: None,
+        viewport: None,
+        grid: Some(OfficeGridLayout::Auto),
+        render_mode: None,
+        page_count: false,
+    });
+    assert_eq!(
+        compile_office_arguments(&contact_sheet).unwrap(),
+        vec!["screenshot", "--grid", "auto", "--json"]
+    );
+}
+
+#[test]
+fn typed_operation_parameters_serialize_with_camel_case_fields() {
+    let view = OfficeOperationParameters::View {
+        mode: OfficeViewMode::Screenshot,
+        start: None,
+        end: None,
+        max_lines: Some(120),
+        issue_type: Some("format".to_string()),
+        limit: None,
+        columns: Vec::new(),
+        pages: Vec::new(),
+        range: None,
+        viewport: None,
+        grid: Some(OfficeGridLayout::Columns { columns: 3 }),
+        render_mode: Some(OfficeViewRenderMode::Html),
+        page_count: true,
+    };
+    let serialized = serde_json::to_value(&view).unwrap();
+    assert_eq!(serialized["maxLines"], 120);
+    assert_eq!(serialized["issueType"], "format");
+    assert_eq!(
+        serialized["grid"],
+        serde_json::json!({ "mode": "columns", "columns": 3 })
+    );
+    assert_eq!(serialized["renderMode"], "html");
+    assert_eq!(serialized["pageCount"], true);
+    for legacy_name in [
+        "max_lines",
+        "issue_type",
+        "grid_columns",
+        "render_mode",
+        "page_count",
+    ] {
+        assert!(serialized.get(legacy_name).is_none());
+    }
+    assert_eq!(
+        serde_json::from_value::<OfficeOperationParameters>(serialized).unwrap(),
+        view
+    );
+
+    let add = OfficeOperationParameters::Add {
+        parent: "/body".to_string(),
+        element_type: "paragraph".to_string(),
+        copy_from: Some("/body/p[1]".to_string()),
+        position: None,
+        properties: OfficePropertyMap::new(),
+        force: false,
+    };
+    let serialized = serde_json::to_value(&add).unwrap();
+    assert_eq!(serialized["elementType"], "paragraph");
+    assert_eq!(serialized["copyFrom"], "/body/p[1]");
+    assert!(serialized.get("element_type").is_none());
+    assert!(serialized.get("copy_from").is_none());
+
+    let swap = OfficeOperationParameters::Swap {
+        first_target: "/body/p[1]".to_string(),
+        second_target: "/body/p[2]".to_string(),
+    };
+    let serialized = serde_json::to_value(&swap).unwrap();
+    assert_eq!(serialized["firstTarget"], "/body/p[1]");
+    assert_eq!(serialized["secondTarget"], "/body/p[2]");
+}
+
+#[test]
+fn typed_operation_validation_reports_domain_errors_before_spawn() {
+    let fixture = Fixture::new(basic_script());
+
+    let mut query = fixture.request(OfficeOperation::Query);
+    query.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Query {
+        selector: "/slide".to_string(),
+        contains: None,
+        compact: false,
+        fields: Vec::new(),
+    });
+    let error = compile_office_arguments(&query).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+    assert!(error.message().contains("use get"));
+
+    let mut mismatched = fixture.request(OfficeOperation::Validate);
+    mismatched.parameters =
+        OfficeRequestParameters::Typed(default_parameters(OfficeOperation::Get));
+    let error = compile_office_arguments(&mismatched).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+
+    let mut nested_property = fixture.request(OfficeOperation::Set);
+    nested_property.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Set {
+        target: "/body".to_string(),
+        properties: [("text".to_string(), serde_json::json!({"nested": true}))]
+            .into_iter()
+            .collect(),
+        replacement: None,
+        force: false,
+    });
+    let error = compile_office_arguments(&nested_property).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+
+    let mut spreadsheet_view = fixture.request(OfficeOperation::View);
+    spreadsheet_view.document_kind = OfficeDocumentKind::Spreadsheet;
+    spreadsheet_view.document_path = Some("budget.xlsx".to_string());
+    let OfficeRequestParameters::Typed(OfficeOperationParameters::View { mode, grid, .. }) =
+        &mut spreadsheet_view.parameters
+    else {
+        panic!("fixture must build a typed view request");
+    };
+    *mode = OfficeViewMode::Screenshot;
+    *grid = Some(OfficeGridLayout::Columns { columns: 2 });
+    let error = compile_office_arguments(&spreadsheet_view).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+
+    let mut spreadsheet_query = fixture.request(OfficeOperation::Query);
+    spreadsheet_query.document_kind = OfficeDocumentKind::Spreadsheet;
+    spreadsheet_query.document_path = Some("budget.xlsx".to_string());
+    let OfficeRequestParameters::Typed(OfficeOperationParameters::Query { compact, .. }) =
+        &mut spreadsheet_query.parameters
+    else {
+        panic!("fixture must build a typed query request");
+    };
+    *compact = true;
+    let error = compile_office_arguments(&spreadsheet_query).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+
+    let mut issues = fixture.request(OfficeOperation::View);
+    issues.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::View {
+        mode: OfficeViewMode::Issues,
+        start: None,
+        end: None,
+        max_lines: None,
+        issue_type: Some("formula_eval_error".to_string()),
+        limit: None,
+        columns: Vec::new(),
+        pages: Vec::new(),
+        range: None,
+        viewport: None,
+        grid: None,
+        render_mode: None,
+        page_count: false,
+    });
+    let error = compile_office_arguments(&issues).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+
+    let mut zero_start = fixture.request(OfficeOperation::View);
+    let OfficeRequestParameters::Typed(OfficeOperationParameters::View { start, .. }) =
+        &mut zero_start.parameters
+    else {
+        panic!("fixture must build a typed view request");
+    };
+    *start = Some(0);
+    let error = compile_office_arguments(&zero_start).unwrap_err();
     assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
 }
 
@@ -826,11 +1021,19 @@ fn workspace_paths_and_file_properties_are_contained() {
 
     fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
     let mut request = fixture.request(OfficeOperation::Add);
-    request.arguments = vec![
-        "/body".to_string(),
-        "--prop".to_string(),
-        "src=/etc/passwd".to_string(),
-    ];
+    request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Add {
+        parent: "/body".to_string(),
+        element_type: "picture".to_string(),
+        copy_from: None,
+        position: None,
+        properties: [(
+            "src".to_string(),
+            serde_json::json!({ "resourcePath": "/etc/passwd" }),
+        )]
+        .into_iter()
+        .collect(),
+        force: false,
+    });
     let error = fixture
         .engine
         .execute(
@@ -861,12 +1064,19 @@ fn path_bearing_properties_are_frozen_and_snapshotted() {
     write_docx(&document, "original");
     fs::write(&resource, b"approved-resource").unwrap();
     let mut request = fixture.request(OfficeOperation::Add);
-    request.arguments = vec![
-        "/body".to_string(),
-        "--type=picture".to_string(),
-        "--prop".to_string(),
-        "src=asset.bin".to_string(),
-    ];
+    request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Add {
+        parent: "/body".to_string(),
+        element_type: "picture".to_string(),
+        copy_from: None,
+        position: None,
+        properties: [(
+            "src".to_string(),
+            serde_json::json!({ "resourcePath": "asset.bin" }),
+        )]
+        .into_iter()
+        .collect(),
+        force: false,
+    });
     let prepared = fixture
         .engine
         .prepare(&workspace_context(fixture.workspace.path()), &request)
@@ -908,11 +1118,19 @@ fn path_bearing_properties_are_frozen_and_snapshotted() {
 
     for alias in ["path", "fallback", "poster", "preview", "imagefill"] {
         let mut request = fixture.request(OfficeOperation::Add);
-        request.arguments = vec![
-            "/body".to_string(),
-            "--prop".to_string(),
-            format!("{alias}=/etc/passwd"),
-        ];
+        request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Add {
+            parent: "/body".to_string(),
+            element_type: "picture".to_string(),
+            copy_from: None,
+            position: None,
+            properties: [(
+                alias.to_string(),
+                serde_json::json!({ "resourcePath": "/etc/passwd" }),
+            )]
+            .into_iter()
+            .collect(),
+            force: false,
+        });
         let error = fixture
             .engine
             .prepare(&workspace_context(fixture.workspace.path()), &request)
@@ -922,17 +1140,23 @@ fn path_bearing_properties_are_frozen_and_snapshotted() {
 }
 
 #[test]
-fn composite_resources_and_browser_backed_diagrams_fail_closed() {
+fn composite_resources_and_diagram_rendering_are_host_controlled() {
     let fixture = Fixture::new(basic_script());
     write_docx(&fixture.workspace.path().join("sample.docx"), "original");
     fs::write(fixture.workspace.path().join("background.png"), b"png").unwrap();
 
     let mut background = fixture.request(OfficeOperation::Set);
-    background.arguments = vec![
-        "/body".to_string(),
-        "--prop".to_string(),
-        "background=image:background.png".to_string(),
-    ];
+    background.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Set {
+        target: "/body".to_string(),
+        properties: [(
+            "background".to_string(),
+            serde_json::json!({ "resourcePath": "background.png" }),
+        )]
+        .into_iter()
+        .collect(),
+        replacement: None,
+        force: false,
+    });
     let prepared = fixture
         .engine
         .prepare(&workspace_context(fixture.workspace.path()), &background)
@@ -942,13 +1166,19 @@ fn composite_resources_and_browser_backed_diagrams_fail_closed() {
         "background.png"
     );
 
-    for property in ["background=image:/etc/passwd", "imagefill=/etc/passwd"] {
+    for property in ["background", "imagefill"] {
         let mut request = fixture.request(OfficeOperation::Set);
-        request.arguments = vec![
-            "/body".to_string(),
-            "--prop".to_string(),
-            property.to_string(),
-        ];
+        request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Set {
+            target: "/body".to_string(),
+            properties: [(
+                property.to_string(),
+                serde_json::json!({ "resourcePath": "/etc/passwd" }),
+            )]
+            .into_iter()
+            .collect(),
+            replacement: None,
+            force: false,
+        });
         let error = fixture
             .engine
             .prepare(&workspace_context(fixture.workspace.path()), &request)
@@ -957,57 +1187,76 @@ fn composite_resources_and_browser_backed_diagrams_fail_closed() {
     }
 
     let mut data = fixture.request(OfficeOperation::Add);
-    data.arguments = vec![
-        "/body".to_string(),
-        "--type=table".to_string(),
-        "--prop".to_string(),
-        "data=/etc/passwd".to_string(),
-    ];
+    data.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Add {
+        parent: "/body".to_string(),
+        element_type: "table".to_string(),
+        copy_from: None,
+        position: None,
+        properties: [("data".to_string(), serde_json::json!("/etc/passwd"))]
+            .into_iter()
+            .collect(),
+        force: false,
+    });
     let error = fixture
         .engine
         .prepare(&workspace_context(fixture.workspace.path()), &data)
         .unwrap_err();
     assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
 
-    for render in [None, Some("auto"), Some("image")] {
+    for render in ["auto", "image"] {
         let mut diagram = fixture.request(OfficeOperation::Add);
-        diagram.arguments = vec!["/body".to_string(), "--type=diagram".to_string()];
-        if let Some(render) = render {
-            diagram
-                .arguments
-                .extend(["--prop".to_string(), format!("render={render}")]);
-        }
+        diagram.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Add {
+            parent: "/body".to_string(),
+            element_type: "diagram".to_string(),
+            copy_from: None,
+            position: None,
+            properties: [("render".to_string(), serde_json::json!(render))]
+                .into_iter()
+                .collect(),
+            force: false,
+        });
         let error = fixture
             .engine
             .prepare(&workspace_context(fixture.workspace.path()), &diagram)
             .unwrap_err();
-        assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
+        assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
     }
 
     let mut native_diagram = fixture.request(OfficeOperation::Add);
-    native_diagram.arguments = vec![
-        "/body".to_string(),
-        "--type=diagram".to_string(),
-        "--prop".to_string(),
-        "render=native".to_string(),
-    ];
-    fixture
+    native_diagram.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Add {
+        parent: "/body".to_string(),
+        element_type: "diagram".to_string(),
+        copy_from: None,
+        position: None,
+        properties: std::collections::BTreeMap::new(),
+        force: false,
+    });
+    let prepared = fixture
         .engine
         .prepare(
             &workspace_context(fixture.workspace.path()),
             &native_diagram,
         )
         .unwrap();
+    assert!(prepared
+        .argv
+        .windows(2)
+        .any(|pair| pair == ["--prop", "render=native"]));
 
-    for property in ["poster=true", "path=line"] {
+    for (name, value) in [
+        ("poster", serde_json::json!(true)),
+        ("path", serde_json::json!("line")),
+    ] {
         let mut ambiguous_but_non_file = fixture.request(OfficeOperation::Add);
-        ambiguous_but_non_file.arguments = vec![
-            "/body".to_string(),
-            "--type=shape".to_string(),
-            "--prop".to_string(),
-            property.to_string(),
-        ];
-        ambiguous_but_non_file.arguments.push("--json".to_string());
+        ambiguous_but_non_file.parameters =
+            OfficeRequestParameters::Typed(OfficeOperationParameters::Add {
+                parent: "/body".to_string(),
+                element_type: "shape".to_string(),
+                copy_from: None,
+                position: None,
+                properties: [(name.to_string(), value)].into_iter().collect(),
+                force: false,
+            });
         fixture
             .engine
             .prepare(
@@ -1121,11 +1370,6 @@ fn destination_path_is_rejected_outside_mutation_operations() {
         if operation == OfficeOperation::Help {
             request.document_path = None;
         }
-        request.arguments = match operation {
-            OfficeOperation::View => vec!["text".to_string()],
-            OfficeOperation::Query => vec!["*".to_string()],
-            _ => Vec::new(),
-        };
         request.destination_path = Some("destination.docx".to_string());
         let error = fixture
             .engine
@@ -1224,7 +1468,21 @@ fn rendering_requires_a_validated_output_path() {
     let fixture = Fixture::new(basic_script());
     fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
     let mut request = fixture.request(OfficeOperation::View);
-    request.arguments = vec!["screenshot".to_string()];
+    request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::View {
+        mode: OfficeViewMode::Screenshot,
+        start: None,
+        end: None,
+        max_lines: None,
+        issue_type: None,
+        limit: None,
+        columns: Vec::new(),
+        pages: Vec::new(),
+        range: None,
+        viewport: None,
+        grid: None,
+        render_mode: None,
+        page_count: false,
+    });
     let error = fixture
         .engine
         .execute(
@@ -1314,7 +1572,11 @@ fn office_paths_follow_the_read_write_permission_matrix() {
                 .to_string_lossy()
                 .into_owned(),
         ),
-        arguments: Vec::new(),
+        parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::Create {
+            locale: None,
+            minimal: false,
+            overwrite: false,
+        }),
         output_path: None,
         destination_path: None,
         timeout_ms: Some(10_000),
@@ -1498,7 +1760,11 @@ fn execution_rechecks_current_permissions_and_rejects_schema_v2() {
                 .to_string_lossy()
                 .into_owned(),
         ),
-        arguments: Vec::new(),
+        parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::Create {
+            locale: None,
+            minimal: false,
+            overwrite: false,
+        }),
         output_path: None,
         destination_path: None,
         timeout_ms: Some(10_000),
@@ -1537,7 +1803,11 @@ fn system_alias_targets_are_supported_only_with_write_all() {
         document_kind: OfficeDocumentKind::Document,
         operation: OfficeOperation::Create,
         document_path: Some(path),
-        arguments: Vec::new(),
+        parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::Create {
+            locale: None,
+            minimal: false,
+            overwrite: false,
+        }),
         output_path: None,
         destination_path: None,
         timeout_ms: Some(10_000),
@@ -1594,7 +1864,11 @@ fn real_officecli_creates_and_validates_all_supported_formats() {
                     document_kind,
                     operation: OfficeOperation::Create,
                     document_path: Some(path.to_string()),
-                    arguments: vec!["--json".to_string()],
+                    parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::Create {
+                        locale: None,
+                        minimal: false,
+                        overwrite: false,
+                    }),
                     output_path: None,
                     destination_path: None,
                     timeout_ms: Some(30_000),
@@ -1614,7 +1888,7 @@ fn real_officecli_creates_and_validates_all_supported_formats() {
                     document_kind,
                     operation: OfficeOperation::Validate,
                     document_path: Some(path.to_string()),
-                    arguments: vec!["--json".to_string()],
+                    parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::Validate),
                     output_path: None,
                     destination_path: None,
                     timeout_ms: Some(30_000),
@@ -1630,43 +1904,18 @@ fn real_officecli_creates_and_validates_all_supported_formats() {
 }
 
 #[test]
-#[ignore = "requires MYCOPILOT_OFFICECLI_PATH to point to the pinned OfficeCLI v1.0.139 component"]
-fn real_officecli_hidden_write_options_are_rejected_before_spawn() {
-    let executable = std::env::var_os("MYCOPILOT_OFFICECLI_PATH")
-        .expect("MYCOPILOT_OFFICECLI_PATH is required for the real provider security regression");
-    let workspace = tempfile::tempdir().unwrap();
-    let engine = OfficeCliEngine::discover(
-        &OfficeCliDiscoveryOptions::new()
-            .with_configured_executable(executable)
-            .with_workspace_root(workspace.path()),
-    )
-    .unwrap();
-    write_docx(&workspace.path().join("sample.docx"), "security-regression");
+fn schema_v3_argument_snapshots_deserialize_for_retirement_but_never_execute() {
+    let fixture = Fixture::new(basic_script());
+    let request = fixture.request(OfficeOperation::Validate);
+    let mut legacy_json = serde_json::to_value(&request).unwrap();
+    legacy_json.as_object_mut().unwrap().remove("parameters");
+    legacy_json["arguments"] = serde_json::json!(["--json"]);
 
-    for (operation, arguments) in [
-        (
-            OfficeOperation::Get,
-            vec!["/picture[1]".to_string(), "--save=payload.bin".to_string()],
-        ),
-        (
-            OfficeOperation::View,
-            vec!["html".to_string(), "--out=preview.html".to_string()],
-        ),
-    ] {
-        let request = OfficeExecutionRequest {
-            document_kind: OfficeDocumentKind::Document,
-            operation,
-            document_path: Some("sample.docx".to_string()),
-            arguments,
-            output_path: None,
-            destination_path: None,
-            timeout_ms: Some(10_000),
-        };
-        let error = engine
-            .prepare(&workspace_context(workspace.path()), &request)
-            .unwrap_err();
-        assert_eq!(error.code(), OfficeEngineErrorCode::UnsafeOperation);
-    }
-    assert!(!workspace.path().join("payload.bin").exists());
-    assert!(!workspace.path().join("preview.html").exists());
+    let legacy: OfficeExecutionRequest = serde_json::from_value(legacy_json).unwrap();
+    assert!(matches!(
+        legacy.parameters,
+        OfficeRequestParameters::Legacy(_)
+    ));
+    let error = compile_office_arguments(&legacy).unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::UnsupportedOperation);
 }

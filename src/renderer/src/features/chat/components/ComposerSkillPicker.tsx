@@ -1,6 +1,9 @@
 import type { SkillDescriptor, SkillSelection, SkillsListOutput } from '@mycopilot/protocol'
-import { AlertTriangle, Check, LoaderCircle, RefreshCw, Search, Sparkles, X } from 'lucide-react'
+import { AlertTriangle, LoaderCircle, RefreshCw, Search, Sparkles, X } from 'lucide-react'
+import { Tooltip } from '../../../components/overlay/Tooltip'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { SkillIcon } from '../../skills/SkillIcon'
+import { getSkillPresentation } from '../../skills/skillPresentation'
 import {
   filterSkillDescriptors,
   getSkillFallbackName,
@@ -78,7 +81,16 @@ export function ComposerSelectedSkills({
         const catalogMatch = catalog ? matchSkillSelection(selection, descriptors) : undefined
         const match =
           catalog?.truncated && catalogMatch?.status === 'unavailable' ? undefined : catalogMatch
-        const name = match?.descriptor?.name ?? getSkillFallbackName(selection.id)
+        const presentation = getSkillPresentation(
+          {
+            description: match?.descriptor?.description,
+            id: selection.id,
+            name: match?.descriptor?.name ?? getSkillFallbackName(selection.id),
+            source: match?.descriptor?.source
+          },
+          t
+        )
+        const name = presentation.name
         const provenance = getSkillDisplayProvenance(selection.id, match?.descriptor)
         const sourceLabel = provenance ? getSkillSourceLabel(provenance.sourceKind, t) : undefined
         const trustLabel = provenance
@@ -105,7 +117,11 @@ export function ComposerSelectedSkills({
                   : name
             }
           >
-            <Sparkles aria-hidden="true" />
+            <SkillIcon
+              className="composer-skill-chip__icon"
+              skillId={selection.id}
+              source={match?.descriptor?.source}
+            />
             <span className="composer-skill-chip__content">
               <span className="composer-skill-chip__name">{name}</span>
               {provenanceLabel && (
@@ -155,8 +171,11 @@ export function ComposerSkillPicker({
     catalogState.status === 'ready' && catalogState.projectId === projectId
       ? catalogState.output
       : undefined
-  const visibleSkills = readyOutput ? filterSkillDescriptors(readyOutput.skills, search) : []
-  const allSkills = readyOutput ? filterSkillDescriptors(readyOutput.skills, '') : []
+  const presentedSkills = readyOutput
+    ? readyOutput.skills.map((skill) => ({ ...skill, ...getSkillPresentation(skill, t) }))
+    : []
+  const visibleSkills = filterSkillDescriptors(presentedSkills, search)
+  const allSkills = filterSkillDescriptors(presentedSkills, '')
   const staleSelections = readyOutput
     ? selections.filter((selection) => matchSkillSelection(selection, allSkills).status === 'stale')
     : []
@@ -291,6 +310,12 @@ export function ComposerSkillPicker({
                     const selected = selections.find((selection) => selection.id === skill.id)
                     const isStale = Boolean(selected && selected.revision !== skill.revision)
                     const atLimit = !selected && selections.length >= MAX_SELECTED_SKILLS
+                    const sourceLabel = getSkillSourceLabel(skill.source.kind, t)
+                    const trustLabel =
+                      skill.trust === 'untrusted'
+                        ? t('chat.skillTrustUntrusted')
+                        : t('chat.skillTrustApplication')
+                    const provenanceLabel = `${sourceLabel} · ${trustLabel}`
 
                     return (
                       <div
@@ -302,31 +327,29 @@ export function ComposerSkillPicker({
                         key={skill.id}
                         role="listitem"
                       >
-                        <button
-                          className="composer-skill-option__main"
-                          type="button"
-                          aria-pressed={Boolean(selected)}
-                          disabled={atLimit}
-                          onClick={() => onToggle(skill)}
+                        <Tooltip
+                          anchorClassName="composer-skill-option__tooltip-anchor"
+                          content={skill.description}
+                          describeTrigger
+                          preferredPlacement="top"
                         >
-                          <span className="composer-skill-option__icon" aria-hidden="true">
-                            <Sparkles />
-                          </span>
-                          <span className="composer-skill-option__content">
-                            <strong>{skill.name}</strong>
-                            <span>{skill.description}</span>
-                            <small title={skill.location}>
-                              {getSkillSourceLabel(skill.source.kind, t)}
-                              {' · '}
-                              {skill.trust === 'untrusted'
-                                ? t('chat.skillTrustUntrusted')
-                                : t('chat.skillTrustApplication')}
-                              {skill.location ? ` · ${skill.location}` : ''}
-                            </small>
-                          </span>
-                          {selected && !isStale && <Check aria-hidden="true" />}
-                          {isStale && <AlertTriangle aria-hidden="true" />}
-                        </button>
+                          <button
+                            className="composer-skill-option__main"
+                            type="button"
+                            aria-label={`${skill.name} · ${provenanceLabel}`}
+                            aria-pressed={Boolean(selected)}
+                            disabled={atLimit}
+                            onClick={() => onToggle(skill)}
+                          >
+                            <SkillIcon
+                              className="composer-skill-option__icon"
+                              skillId={skill.id}
+                              source={skill.source}
+                            />
+                            <strong className="composer-skill-option__name">{skill.name}</strong>
+                            {isStale && <AlertTriangle aria-hidden="true" />}
+                          </button>
+                        </Tooltip>
                         {isStale && (
                           <button
                             className="composer-skill-option__update"

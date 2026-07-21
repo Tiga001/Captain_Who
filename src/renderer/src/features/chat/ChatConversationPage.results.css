@@ -223,6 +223,116 @@
   stroke-width: var(--mc-icon-stroke-medium);
 }
 
+.office-artifact-list {
+  display: grid;
+  width: 100%;
+  max-width: 900px;
+  gap: 10px;
+}
+
+.office-artifact-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  min-width: 0;
+  min-height: 72px;
+  padding: 10px 14px;
+  gap: 12px;
+  color: var(--mc-color-text-primary);
+  background: color-mix(in srgb, var(--mc-color-surface-card) 88%, var(--mc-color-text-primary) 2%);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-2xl);
+}
+
+.office-artifact-card__icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--mc-color-icon-default);
+  background: var(--mc-color-surface-muted);
+  border-radius: var(--mc-radius-lg);
+}
+
+.office-artifact-card[data-kind='spreadsheet'] .office-artifact-card__icon {
+  color: var(--mc-color-diff-addition-text);
+}
+
+.office-artifact-card[data-kind='presentation'] .office-artifact-card__icon {
+  color: var(--mc-color-diff-deletion-text);
+}
+
+.office-artifact-card__icon svg {
+  width: 22px;
+  height: 22px;
+  stroke-width: var(--mc-icon-stroke-medium);
+}
+
+.office-artifact-card__content {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.office-artifact-card__content p {
+  margin: 0;
+  overflow: hidden;
+  color: var(--mc-color-text-primary);
+  font-size: var(--mc-font-size-chat-activity);
+  font-weight: var(--mc-font-weight-heavy);
+  line-height: var(--mc-line-height-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.office-artifact-card__content span {
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-chat-activity-detail);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-tight);
+}
+
+.office-artifact-card > button {
+  min-height: 32px;
+  padding: 0 12px;
+  color: var(--mc-color-text-primary);
+  background: transparent;
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-lg);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--mc-font-size-chat-activity-detail);
+  font-weight: var(--mc-font-weight-heavy);
+}
+
+.office-artifact-card > button:hover:not(:disabled),
+.office-artifact-card > button:focus-visible:not(:disabled) {
+  background: var(--mc-color-state-hover);
+}
+
+.office-artifact-card > button:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 1px;
+}
+
+.office-artifact-card > button:disabled {
+  color: var(--mc-color-text-subtle);
+  cursor: not-allowed;
+  opacity: 0.64;
+}
+
+@media (max-width: 620px) {
+  .office-artifact-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .office-artifact-card > button {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
 .agent-activity--error {
   display: inline-flex;
   align-items: center;

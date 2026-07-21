@@ -1,7 +1,9 @@
 // Renderer skills management UI: renders backend-authorized actions without inferring permissions.
-import { AlertTriangle, LoaderCircle, RefreshCw, Trash2, WandSparkles } from 'lucide-react'
+import { AlertTriangle, LoaderCircle, RefreshCw, Trash2 } from 'lucide-react'
 import type { SkillManagementEntry } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
+import { SkillIcon } from '../SkillIcon'
+import { getSkillPresentation } from '../skillPresentation'
 import type { SkillRowPendingOperation } from './useSkillManagement'
 
 interface SkillManagementListProps {
@@ -29,6 +31,7 @@ export function SkillManagementList({
         const missingUninstallRevision = entry.actions.canUninstall && !entry.installationRevision
         const hasCompatibilityWarning =
           entry.compatibility.status !== 'compatible' || entry.compatibility.issues.length > 0
+        const presentation = getSkillPresentation(entry, t)
 
         return (
           <article
@@ -36,12 +39,14 @@ export function SkillManagementList({
             key={entry.id}
             aria-busy={Boolean(pendingOperation)}
           >
-            <span className="skill-management-row__icon" aria-hidden="true">
-              <WandSparkles />
-            </span>
+            <SkillIcon
+              className="skill-management-row__icon"
+              skillId={entry.id}
+              source={entry.source}
+            />
             <div className="skill-management-row__content">
               <div className="skill-management-row__heading">
-                <h2>{entry.name}</h2>
+                <h2>{presentation.name}</h2>
                 <span className="skill-source-badge">
                   {entry.source.kind === 'bundled'
                     ? t('skills.sourceBundled')
@@ -71,7 +76,7 @@ export function SkillManagementList({
               <div className="skill-management-row__actions">
                 {entry.actions.canUpdate && (
                   <button
-                    aria-label={replaceTokens(t('skills.updateNamed'), { name: entry.name })}
+                    aria-label={replaceTokens(t('skills.updateNamed'), { name: presentation.name })}
                     className="skill-row-action"
                     disabled={Boolean(pendingOperation) || missingUpdateRevision}
                     onClick={(event) => onUpdate(entry, event.currentTarget)}
@@ -83,7 +88,9 @@ export function SkillManagementList({
                 )}
                 {entry.actions.canUninstall && (
                   <button
-                    aria-label={replaceTokens(t('skills.uninstallNamed'), { name: entry.name })}
+                    aria-label={replaceTokens(t('skills.uninstallNamed'), {
+                      name: presentation.name
+                    })}
                     className="skill-row-action skill-row-action--danger"
                     disabled={Boolean(pendingOperation) || missingUninstallRevision}
                     onClick={() => onUninstall(entry)}
@@ -111,7 +118,9 @@ export function SkillManagementList({
               )}
               <button
                 aria-checked={entry.enabled}
-                aria-label={replaceTokens(t('skills.toggleEnabledNamed'), { name: entry.name })}
+                aria-label={replaceTokens(t('skills.toggleEnabledNamed'), {
+                  name: presentation.name
+                })}
                 className="settings-switch"
                 data-state={entry.enabled ? 'on' : 'off'}
                 disabled={!entry.actions.canSetEnabled || Boolean(pendingOperation)}

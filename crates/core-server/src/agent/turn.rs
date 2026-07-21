@@ -129,6 +129,9 @@ impl AgentService {
             if let Some(resources) = skill_resources {
                 host_services = host_services.with_skill_resources(resources);
             }
+            if let Some(resolver) = service.artifact_runtime.clone() {
+                host_services = host_services.with_command_runtime_profile_resolver(resolver);
+            }
             let result = send_chat_with_host_services(
                 prepared.agent_input,
                 worker_run_id.clone(),

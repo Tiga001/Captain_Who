@@ -1805,6 +1805,7 @@ impl AgentService {
             };
         }
         if office_operation.schema_version != mycopilot_core::AGENT_OFFICE_OPERATION_SCHEMA_VERSION
+            || !mycopilot_core::is_valid_agent_office_reason(&office_operation.reason)
             || office_operation.prepared.access
                 != mycopilot_core::office::OfficeOperationAccess::FileWrite
             || office_operation.prepared.request.access()
@@ -3053,6 +3054,9 @@ impl AgentService {
             .with_context_compaction(context_compaction_services);
         if let Some(resources) = skill_resources {
             host_services = host_services.with_skill_resources(resources);
+        }
+        if let Some(resolver) = self.artifact_runtime.clone() {
+            host_services = host_services.with_command_runtime_profile_resolver(resolver);
         }
         let result = send_chat_with_host_services(
             agent_input,

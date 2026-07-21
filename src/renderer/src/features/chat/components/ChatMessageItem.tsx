@@ -30,10 +30,12 @@ import {
   getAssistantFinalContent,
   getConversationHistoryGroupItems,
   getLastMessageTimelineContent,
+  getOfficeGroupItems,
   getPreviousSuccessfulTodoResult,
   getReadGroupItems,
   getRunCommandGroupItems,
   getSearchGroupItems,
+  getSkillResourceGroupItems,
   getSettledToolStatus,
   getToolResult,
   getUsageRows,
@@ -51,6 +53,7 @@ import {
   type RenderableTimelineItem
 } from './chatMessageItemUtils'
 import { EditSummaryCard } from './EditSummaryCard'
+import { OfficeArtifactsCard } from './OfficeArtifactsCard'
 import { useImagePreview, useImagePreviewNotice } from './ImagePreview'
 import { AgentToolActivity } from './toolActivities/AgentToolActivity'
 import { ContextCompactionActivity } from './toolActivities/ContextCompactionActivity'
@@ -59,9 +62,11 @@ import { FileWriteToolActivityGroup } from './toolActivities/FileWriteToolActivi
 import { ApplyPatchToolActivityGroup } from './toolActivities/ApplyPatchToolActivity'
 import { ReadToolActivityGroup } from './toolActivities/ReadToolActivity'
 import { RunCommandToolActivityGroup } from './toolActivities/RunCommandToolActivity'
+import { OfficeToolActivityGroup } from './toolActivities/OfficeToolActivity'
 import { SearchToolActivityGroup } from './toolActivities/SearchToolActivity'
 import { WebSearchToolActivityGroup } from './toolActivities/WebSearchToolActivity'
 import { AssistantSources } from './toolActivities/WebSearchSources'
+import { SkillLoadActivity, SkillResourceActivityGroup } from './toolActivities/SkillToolActivity'
 
 const ACTIVE_STREAMING_GRACE_MS = 1200
 const COPIED_INDICATOR_MS = 1300
@@ -274,6 +279,22 @@ function AgentTimelineItemView({
   projectId?: string | null
   run: ChatAgentRunView
 }) {
+  if (item.type === 'skill_load_group') {
+    return <SkillLoadActivity run={run} />
+  }
+
+  if (item.type === 'skill_resource_group') {
+    const items = getSkillResourceGroupItems(run, item.callIds)
+    if (items.length === 0) return null
+    return <SkillResourceActivityGroup items={items} kind={item.kind} />
+  }
+
+  if (item.type === 'office_group') {
+    const items = getOfficeGroupItems(run, item.callIds)
+    if (items.length === 0) return null
+    return <OfficeToolActivityGroup items={items} run={run} />
+  }
+
   if (item.type === 'read_group') {
     const items = getReadGroupItems(run, item.callIds)
     if (items.length === 0) return null
@@ -347,6 +368,7 @@ function AgentTimelineItemView({
         previousTodoResult={previousTodoResult}
         readActivity={readActivity}
         result={result}
+        run={run}
         settledStatus={settledStatus}
         webActivity={webActivity}
       />
@@ -373,9 +395,13 @@ function AgentRunView({
   const { t } = useFrontendConfig()
   const run = message.agentRun
   const timeline = useMemo(() => run?.timeline ?? [], [run?.timeline])
+  const displayTimeline = useMemo(
+    () => (run ? groupTimelineItems(run, timeline) : []),
+    [run, timeline]
+  )
   const runId = run?.runId
   const runIsSettled = !run || isRunSettled(run)
-  const hasTimeline = timeline.length > 0
+  const hasTimeline = displayTimeline.length > 0
   const hasTimelineError = timeline.some((item) => item.type === 'error')
   const canToggleTimeline = Boolean(
     run && isRunSettled(run) && hasCollapsibleTimelineContent(run, timeline)
@@ -423,11 +449,6 @@ function AgentRunView({
       })
     }
   }, [message.createdAt, now, run, t, timeline])
-  const displayTimeline = useMemo(
-    () => (run ? groupTimelineItems(run, timeline) : []),
-    [run, timeline]
-  )
-
   if (!run) {
     return hasDisplayableContent(message.content) ? (
       <ChatMarkdown className="chat-agent-text" content={message.content} />
@@ -475,6 +496,7 @@ function AgentRunView({
       {showFinalContent && (
         <ChatMarkdown className="chat-agent-text" content={finalAnswerContent} />
       )}
+      {isRunSettled(run) && <OfficeArtifactsCard projectId={projectId} run={run} />}
       {isRunSettled(run) && <EditSummaryCard projectId={projectId} run={run} />}
       {isRunSettled(run) && <AssistantSources sources={webSearchSources} />}
       {showTokenLimitNotice && (

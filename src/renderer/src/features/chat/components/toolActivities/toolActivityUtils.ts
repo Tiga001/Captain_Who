@@ -31,6 +31,11 @@ export function getToolDisplayName(tool: string, t: Translate) {
     run_command: 'tool.runCommand',
     search_code: 'tool.searchCode',
     search_files: 'tool.searchFiles',
+    skills_materialize_resource: 'tool.skillsMaterializeResource',
+    skills_run_script: 'tool.skillsRunScript',
+    office_document: 'tool.officeDocument',
+    office_spreadsheet: 'tool.officeSpreadsheet',
+    office_presentation: 'tool.officePresentation',
     workspace_map: 'tool.workspaceMap',
     web_fetch: 'tool.webFetch',
     web_search: 'tool.webSearch'

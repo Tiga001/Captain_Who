@@ -547,7 +547,13 @@ mod tests {
                         document_kind: crate::office::OfficeDocumentKind::Spreadsheet,
                         operation: crate::office::OfficeOperation::Create,
                         document_path: Some("budget.xlsx".to_string()),
-                        arguments: Vec::new(),
+                        parameters: crate::office::OfficeRequestParameters::Typed(
+                            crate::office::OfficeOperationParameters::Create {
+                                locale: None,
+                                minimal: false,
+                                overwrite: false,
+                            },
+                        ),
                         output_path: None,
                         destination_path: None,
                         timeout_ms: None,
@@ -560,7 +566,7 @@ mod tests {
                     resource_preconditions: Vec::new(),
                 },
                 approval_status: AgentApprovalStatus::Approved,
-                reason: None,
+                reason: "create the reviewed workbook".to_string(),
             }),
         };
 
@@ -592,6 +598,7 @@ mod tests {
                     reason: None,
                     observe: None,
                     runtime: None,
+                    runtime_binding: None,
                 },
             }
         ));

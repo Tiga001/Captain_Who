@@ -774,10 +774,52 @@ pub enum AgentSkillDependencyStatus {
 
 /// Version of the persisted, approval-gated Office action envelope.
 ///
-/// Version 2 binds the action to the permission-aware Office prepared-execution
-/// schema. Persisted version 1 actions must be prepared again instead of being
-/// interpreted with the broader external-path semantics.
-pub const AGENT_OFFICE_OPERATION_SCHEMA_VERSION: u32 = 2;
+/// Version 4 binds a provider-neutral typed operation request and a normalized,
+/// non-empty, user-facing reason of at most [`AGENT_OFFICE_REASON_MAX_CHARS`]
+/// characters to the frozen Office action. Provider argv is generated and
+/// revalidated by the trusted host. Older actions must be prepared again instead
+/// of being interpreted under this stricter contract.
+pub const AGENT_OFFICE_OPERATION_SCHEMA_VERSION: u32 = 4;
+
+/// Maximum number of Unicode scalar values accepted in an Office call reason.
+pub const AGENT_OFFICE_REASON_MAX_CHARS: usize = 240;
+
+fn is_agent_office_reason_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
+pub(crate) fn has_unsafe_agent_office_reason_character(reason: &str) -> bool {
+    reason.chars().any(|character| {
+        character.is_control()
+            || matches!(character, '\u{0085}' | '\u{2028}' | '\u{2029}')
+            || is_agent_office_reason_bidi_control(character)
+    })
+}
+
+pub(crate) fn normalize_agent_office_reason(reason: &str) -> Option<String> {
+    if has_unsafe_agent_office_reason_character(reason) {
+        return None;
+    }
+    let reason = reason.trim();
+    (!reason.is_empty() && reason.chars().count() <= AGENT_OFFICE_REASON_MAX_CHARS)
+        .then(|| reason.to_string())
+}
+
+/// Returns whether an Office action reason is valid in its canonical persisted form.
+///
+/// Tool input is trimmed before an action is frozen. Persisted and host-submitted
+/// actions must already contain that normalized value so whitespace cannot be
+/// changed after approval without invalidating the snapshot.
+pub fn is_valid_agent_office_reason(reason: &str) -> bool {
+    normalize_agent_office_reason(reason).as_deref() == Some(reason)
+}
 
 /// Wire contract for an approval-gated Office mutation.
 ///
@@ -792,8 +834,7 @@ pub struct AgentOfficeOperationRequest {
     pub id: String,
     pub prepared: crate::office::OfficePreparedExecution,
     pub approval_status: AgentApprovalStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -1227,6 +1268,19 @@ pub enum AgentCommandRuntimeKind {
     Python,
 }
 
+/// Stable, model-visible identifier for an application-owned artifact runtime profile.
+///
+/// A profile selects a reproducible capability family. It is deliberately not a package
+/// request: package names, exact versions, provider identity, and runtime integrity evidence are
+/// resolved by the trusted host and frozen in [`AgentCommandRuntimeBinding`].
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentCommandRuntimeProfile {
+    Documents,
+    Spreadsheets,
+    Presentations,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentCommandRuntimePackageRequirement {
@@ -1249,7 +1303,30 @@ pub struct AgentCommandRuntimeResolvedPackage {
     pub version: String,
 }
 
-pub const AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION: u32 = 1;
+pub const AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION: u32 = 1;
+
+/// Approval-time identity of a host-resolved runtime profile.
+///
+/// This value is persisted with the frozen command action. It intentionally excludes executable
+/// paths, environment variables, bootstrap paths, and other host-private launch authority. The
+/// host resolves the profile again immediately before execution and requires an exact identity
+/// match before it starts a process.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentCommandRuntimeBinding {
+    pub schema_version: u32,
+    pub profile: AgentCommandRuntimeProfile,
+    pub profile_revision: String,
+    pub provider_id: String,
+    pub bundle_version: String,
+    pub bundle_revision: String,
+    pub kind: AgentCommandRuntimeKind,
+    pub runtime_version: String,
+    pub runtime_fingerprint: String,
+    pub resolved_packages: Vec<AgentCommandRuntimeResolvedPackage>,
+}
+
+pub const AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION: u32 = 2;
 
 /// Public execution evidence for a managed command runtime.
 ///
@@ -1261,6 +1338,10 @@ pub const AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION: u32 = 1;
 pub struct AgentCommandRuntimeResolution {
     pub schema_version: u32,
     pub provider_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<AgentCommandRuntimeProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_revision: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1297,7 +1378,11 @@ pub struct AgentCommandRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observe: Option<AgentCommandArtifactObservationRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Legacy exact-package request retained only so old pending actions can be deserialized and
+    /// retired safely. New model calls never populate this field and the host never executes it.
     pub runtime: Option<AgentCommandRuntimeRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_binding: Option<Box<AgentCommandRuntimeBinding>>,
 }
 
 /// Frozen request to copy one immutable Skill resource, or one resource-tree

@@ -189,6 +189,26 @@ impl ToolRegistry {
             .and_then(|tool| tool.input_stream_observer(context))
     }
 
+    /// Produces the canonical clone stored in the durable conversation trace.
+    /// Execution and approval always retain the original model call; this
+    /// projection carries no authorization meaning.
+    pub(crate) fn trace_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        self.tools
+            .get(&call.tool)
+            .map(|tool| tool.trace_call_projection(call))
+            .unwrap_or_else(|| call.clone())
+    }
+
+    /// Produces the presentation-safe clone emitted to event consumers. This
+    /// is deliberately separate from durable trace storage so UI redaction
+    /// cannot silently alter the model's historical context.
+    pub(crate) fn event_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        self.tools
+            .get(&call.tool)
+            .map(|tool| tool.event_call_projection(call))
+            .unwrap_or_else(|| call.clone())
+    }
+
     pub(crate) fn contains_tool(&self, tool_name: &str) -> bool {
         self.tools.contains_key(tool_name)
     }
@@ -383,6 +403,20 @@ pub(crate) trait AgentTool: Send + Sync {
         None
     }
 
+    /// Returns the canonical clone stored in the durable conversation trace.
+    /// Implementations may normalize unsafe display-only fields, but must never
+    /// use this hook for execution, permission, or approval decisions.
+    fn trace_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        call.clone()
+    }
+
+    /// Returns the presentation-safe clone emitted to event consumers. By
+    /// default it shares the trace representation; tools with private event
+    /// payloads can redact only this projection without changing history.
+    fn event_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        self.trace_call_projection(call)
+    }
+
     fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         canonical_tool_result_for_context(result)
     }
@@ -432,6 +466,14 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+    fn office_tool_args(request: Value, reason: Option<Value>) -> Value {
+        let mut args = json!({ "request": request });
+        if let Some(reason) = reason {
+            args["reason"] = reason;
+        }
+        args
+    }
 
     struct InvalidSchemaTool;
 
@@ -576,28 +618,76 @@ mod tests {
                 crate::protocol::AgentToolApprovalMode::Dynamic
             );
             assert!(!definition.requires_workspace);
-            assert!(
-                !registry.requires_approval_for_call(tool_name, &json!({ "operation": "status" }))
+            assert_eq!(
+                definition.input_schema["properties"]["reason"]["minLength"],
+                1
             );
+            assert_eq!(
+                definition.input_schema["properties"]["reason"]["maxLength"],
+                crate::AGENT_OFFICE_REASON_MAX_CHARS
+            );
+            assert!(definition.input_schema["required"]
+                .as_array()
+                .is_some_and(|required| required.contains(&json!("reason"))));
+            assert!(!registry.requires_approval_for_call(
+                tool_name,
+                &office_tool_args(
+                    json!({ "operation": "status" }),
+                    Some(json!("Check Office engine status")),
+                )
+            ));
             for args in [
-                json!({ "operation": "help" }),
-                json!({ "operation": "get", "path": document_path }),
-                json!({ "operation": "query", "path": document_path, "arguments": ["/sheet[1]"] }),
-                json!({ "operation": "validate", "path": document_path }),
+                office_tool_args(
+                    json!({ "operation": "help" }),
+                    Some(json!("Inspect supported operations")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "get", "filePath": document_path, "target": "/" }),
+                    Some(json!("Inspect document structure")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "query", "filePath": document_path, "selector": "*" }),
+                    Some(json!("Inspect matching elements")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "validate", "filePath": document_path }),
+                    Some(json!("Validate the document")),
+                ),
             ] {
                 assert!(!registry.requires_approval_for_call(tool_name, &args));
             }
             assert!(!registry.requires_approval_for_call(
                 tool_name,
-                &json!({ "operation": "view", "path": document_path, "arguments": ["text"] })
+                &office_tool_args(
+                    json!({ "operation": "view", "filePath": document_path, "mode": "text" }),
+                    Some(json!("Inspect rendered text")),
+                )
             ));
             for args in [
-                json!({ "operation": "create", "path": document_path }),
-                json!({ "operation": "set", "path": document_path, "arguments": ["/sheet[1]"] }),
-                json!({ "operation": "add", "path": document_path, "arguments": ["/sheet[1]"] }),
-                json!({ "operation": "remove", "path": document_path, "arguments": ["/sheet[1]"] }),
-                json!({ "operation": "move", "path": document_path, "arguments": ["/sheet[1]"] }),
-                json!({ "operation": "swap", "path": document_path, "arguments": ["/sheet[1]", "/sheet[2]"] }),
+                office_tool_args(
+                    json!({ "operation": "create", "filePath": document_path }),
+                    Some(json!("Create the Office file")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "set", "filePath": document_path, "target": "/sheet[1]", "properties": { "name": "Updated" } }),
+                    Some(json!("Update the first sheet")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "add", "filePath": document_path, "parent": "/", "element": "paragraph" }),
+                    Some(json!("Add document content")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "remove", "filePath": document_path, "target": "/sheet[1]" }),
+                    Some(json!("Remove the first sheet")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "move", "filePath": document_path, "target": "/sheet[1]" }),
+                    Some(json!("Move the first sheet")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "swap", "filePath": document_path, "firstTarget": "/sheet[1]", "secondTarget": "/sheet[2]" }),
+                    Some(json!("Swap the first two sheets")),
+                ),
             ] {
                 assert!(
                     registry.requires_approval_for_call(tool_name, &args),
@@ -606,23 +696,58 @@ mod tests {
             }
             assert!(registry.requires_approval_for_call(
                 tool_name,
-                &json!({
-                    "operation": "view",
-                    "path": document_path,
-                    "arguments": ["html"],
-                    "outputPath": "preview.html"
-                })
+                &office_tool_args(
+                    json!({
+                        "operation": "view",
+                        "filePath": document_path,
+                        "mode": "html",
+                        "outputPath": "preview.html"
+                    }),
+                    Some(json!("Render an HTML preview")),
+                )
             ));
-            assert!(registry
-                .requires_approval_for_call(tool_name, &json!({ "operation": "unsupported" })));
+            assert!(registry.requires_approval_for_call(
+                tool_name,
+                &office_tool_args(
+                    json!({ "operation": "unsupported" }),
+                    Some(json!("Try an unsupported operation")),
+                )
+            ));
             for invalid in [
-                json!({ "operation": "status", "path": document_path }),
-                json!({ "operation": "help", "path": document_path }),
-                json!({ "operation": "query", "path": document_path }),
-                json!({ "operation": "validate", "path": document_path, "arguments": ["--output", "stolen.xlsx"] }),
-                json!({ "operation": "validate", "path": document_path, "outputPath": "preview.html" }),
-                json!({ "operation": "validate", "path": document_path, "access": "readOnly" }),
-                json!({ "operation": "validate", "path": "wrong-extension.bin" }),
+                office_tool_args(json!({ "operation": "status" }), None),
+                office_tool_args(json!({ "operation": "status" }), Some(json!("   "))),
+                office_tool_args(
+                    json!({ "operation": "status" }),
+                    Some(json!("x".repeat(crate::AGENT_OFFICE_REASON_MAX_CHARS + 1))),
+                ),
+                office_tool_args(
+                    json!({ "operation": "status", "filePath": document_path }),
+                    Some(json!("Check Office engine status")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "help", "filePath": document_path }),
+                    Some(json!("Inspect supported operations")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "query", "filePath": document_path }),
+                    Some(json!("Inspect the document")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "validate", "filePath": document_path, "arguments": ["--output", "stolen.xlsx"] }),
+                    Some(json!("Validate the document")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "validate", "filePath": document_path, "outputPath": "preview.html" }),
+                    Some(json!("Validate the document")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "validate", "filePath": document_path, "access": "readOnly" }),
+                    Some(json!("Validate the document")),
+                ),
+                office_tool_args(
+                    json!({ "operation": "validate", "filePath": "wrong-extension.bin" }),
+                    Some(json!("Validate the document")),
+                ),
             ] {
                 assert!(
                     registry.requires_approval_for_call(tool_name, &invalid),
@@ -634,6 +759,56 @@ mod tests {
                 AgentToolPermissionPolicy::FileWrite(FileWriteToolAccess::ReadWrite)
             );
         }
+    }
+
+    #[test]
+    fn call_projections_are_tool_owned_and_have_no_execution_authority() {
+        let engine =
+            crate::office::resolve_office_engine(&crate::office::OfficeCliDiscoveryOptions::new());
+        let registry = ToolRegistry::defaults_with_search_and_office(None, Some(engine));
+        let unsafe_reason = "Inspect\u{202e}the workbook";
+        let office_call = AgentToolCall {
+            id: "office-observable".to_string(),
+            tool: "office_spreadsheet".to_string(),
+            args: office_tool_args(
+                json!({
+                    "operation": "get",
+                    "filePath": "budget.xlsx",
+                }),
+                Some(json!(unsafe_reason)),
+            ),
+            approval_status: crate::AgentApprovalStatus::NotRequired,
+            reason: Some(unsafe_reason.to_string()),
+        };
+
+        let trace = registry.trace_call_projection(&office_call);
+        let event = registry.event_call_projection(&office_call);
+        for projection in [&trace, &event] {
+            assert!(projection.args.get("reason").is_none());
+            assert_eq!(projection.reason, None);
+        }
+        assert_eq!(office_call.args["reason"], unsafe_reason);
+        assert_eq!(office_call.reason.as_deref(), Some(unsafe_reason));
+
+        let ordinary_call = AgentToolCall {
+            id: "read-observable".to_string(),
+            tool: "read_file".to_string(),
+            args: json!({ "path": "README.md" }),
+            approval_status: crate::AgentApprovalStatus::NotRequired,
+            reason: Some("Inspect the project overview".to_string()),
+        };
+        let ordinary_trace = registry.trace_call_projection(&ordinary_call);
+        let ordinary_event = registry.event_call_projection(&ordinary_call);
+        assert_eq!(ordinary_trace.args, ordinary_call.args);
+        assert_eq!(ordinary_trace.reason, ordinary_call.reason);
+        assert_eq!(ordinary_event.id, ordinary_trace.id);
+        assert_eq!(ordinary_event.tool, ordinary_trace.tool);
+        assert_eq!(ordinary_event.args, ordinary_trace.args);
+        assert_eq!(ordinary_event.reason, ordinary_trace.reason);
+        assert_eq!(
+            ordinary_event.approval_status,
+            ordinary_trace.approval_status
+        );
     }
 
     #[test]

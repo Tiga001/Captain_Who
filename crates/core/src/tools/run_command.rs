@@ -1,14 +1,14 @@
 use super::{clean_relative_path, AgentTool, ToolExecutionContext};
 use crate::command::{
-    classify_command_risk, validate_command_runtime_request,
-    validate_managed_artifact_command_shape, MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS,
-    MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
+    classify_command_risk, infer_managed_artifact_command_kind, validate_command_runtime_binding,
+    validate_command_runtime_request, validate_managed_artifact_command_shape,
+    MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS, MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
 };
 use crate::protocol::{
     AgentApprovalStatus, AgentCommandArtifactObservationKind,
-    AgentCommandArtifactObservationRequest, AgentCommandRequest, AgentCommandRuntimeRequest,
-    AgentError, AgentProposedAction, AgentResult, AgentToolCall, AgentToolDefinition,
-    AgentToolSafety,
+    AgentCommandArtifactObservationRequest, AgentCommandRequest, AgentCommandRuntimeProfile,
+    AgentCommandRuntimeRequest, AgentError, AgentProposedAction, AgentResult, AgentToolCall,
+    AgentToolDefinition, AgentToolSafety,
 };
 use crate::system_paths::expand_system_path;
 use serde::Deserialize;
@@ -61,28 +61,10 @@ impl AgentTool for RunCommandTool {
                         "required": ["kinds"],
                         "additionalProperties": false
                     },
-                    "runtime": {
-                        "type": "object",
-                        "description": "Resolve a saved .mjs or .py artifact script through the fixed, host-owned runtime. This does not install packages or grant command/file permission, and never falls back to PATH.",
-                        "properties": {
-                            "provider": { "type": "string", "enum": ["managedArtifact"] },
-                            "kind": { "type": "string", "enum": ["node", "python"] },
-                            "requiredPackages": {
-                                "type": "array",
-                                "maxItems": 32,
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
-                                        "version": { "type": "string", "minLength": 1, "maxLength": 64 }
-                                    },
-                                    "required": ["name", "version"],
-                                    "additionalProperties": false
-                                }
-                            }
-                        },
-                        "required": ["provider", "kind", "requiredPackages"],
-                        "additionalProperties": false
+                    "runtimeProfile": {
+                        "type": "string",
+                        "enum": ["documents", "spreadsheets", "presentations"],
+                        "description": "Run a saved .mjs or .py artifact script in the matching fixed, host-owned Office environment. The host infers Node/Python from the direct script command and freezes exact packages, runtime version, and integrity identity. Never provide package versions. This does not grant command/file permission and never falls back to PATH."
                     }
                 },
                 "required": ["command"],
@@ -120,7 +102,7 @@ struct RunCommandArgs {
     timeout_ms: Option<u64>,
     reason: Option<String>,
     observe: Option<AgentCommandArtifactObservationRequest>,
-    runtime: Option<AgentCommandRuntimeRequest>,
+    runtime_profile: Option<AgentCommandRuntimeProfile>,
 }
 
 fn command_request_from_call(
@@ -137,9 +119,9 @@ fn command_request_from_call(
         .map(|reason| reason.trim().to_string())
         .filter(|reason| !reason.is_empty());
     let observe = args.observe.map(sanitize_observe).transpose()?;
-    let runtime = args
-        .runtime
-        .map(|runtime| sanitize_runtime(&command, runtime))
+    let runtime_binding = args
+        .runtime_profile
+        .map(|profile| prepare_runtime_binding(context, &command, profile))
         .transpose()?;
 
     Ok(AgentCommandRequest {
@@ -155,8 +137,56 @@ fn command_request_from_call(
         risk_level: Some(classify_command_risk(&command)),
         reason,
         observe,
-        runtime,
+        runtime: None,
+        runtime_binding: runtime_binding.map(Box::new),
     })
+}
+
+fn prepare_runtime_binding(
+    context: &ToolExecutionContext,
+    command: &str,
+    profile: AgentCommandRuntimeProfile,
+) -> AgentResult<crate::AgentCommandRuntimeBinding> {
+    let kind = infer_managed_artifact_command_kind(command).map_err(|message| {
+        AgentError::structured(
+            "artifactRuntime.invalidCommandShape",
+            message,
+            json!({
+                "type": "commandRuntimeProfile",
+                "code": "artifactRuntime.invalidCommandShape",
+                "recovery": "changeRequest",
+                "profile": profile
+            }),
+        )
+    })?;
+    let resolver = context.command_runtime_profile_resolver()?;
+    let binding = resolver.resolve_profile(profile, kind).map_err(|error| {
+        AgentError::structured(
+            error.code(),
+            error.message(),
+            json!({
+                "type": "commandRuntimeProfile",
+                "code": error.code(),
+                "recovery": error.recovery(),
+                "profile": profile,
+                "kind": kind
+            }),
+        )
+    })?;
+    validate_command_runtime_binding(&binding).map_err(|error| {
+        AgentError::structured(
+            error.code(),
+            error.message(),
+            json!({
+                "type": "commandRuntimeProfile",
+                "code": error.code(),
+                "recovery": error.recovery(),
+                "profile": profile,
+                "kind": kind
+            }),
+        )
+    })?;
+    Ok(binding)
 }
 
 /// Validates the original model-visible ToolCall arguments against the trusted frozen command.
@@ -170,7 +200,7 @@ pub(crate) fn validate_frozen_command_trace_args(
     frozen: &AgentCommandRequest,
     operation: &Value,
 ) -> Result<(), String> {
-    let args: RunCommandArgs = serde_json::from_value(operation.clone())
+    let args: FrozenRunCommandArgs = serde_json::from_value(operation.clone())
         .map_err(|error| format!("run_command frozen ToolCall arguments are invalid: {error}"))?;
     let command = sanitize_command(&args.command)
         .map_err(|_| "run_command frozen ToolCall command is invalid".to_string())?;
@@ -191,17 +221,34 @@ pub(crate) fn validate_frozen_command_trace_args(
         .map(sanitize_observe)
         .transpose()
         .map_err(|_| "run_command frozen ToolCall observe hint is invalid".to_string())?;
-    let runtime = args
-        .runtime
-        .map(|runtime| sanitize_runtime(&command, runtime))
-        .transpose()
-        .map_err(|_| "run_command frozen ToolCall runtime request is invalid".to_string())?;
+    let runtime_matches = match (&frozen.runtime_binding, &frozen.runtime) {
+        (Some(binding), None) => {
+            validate_command_runtime_binding(binding).is_ok()
+                && args.runtime.is_none()
+                && args.runtime_profile == Some(binding.profile)
+                && infer_managed_artifact_command_kind(&command).ok() == Some(binding.kind)
+        }
+        (None, Some(legacy)) => {
+            args.runtime_profile.is_none()
+                && args
+                    .runtime
+                    .map(|runtime| sanitize_runtime(&command, runtime))
+                    .transpose()
+                    .map_err(|_| {
+                        "run_command frozen ToolCall legacy runtime request is invalid".to_string()
+                    })?
+                    .as_ref()
+                    == Some(legacy)
+        }
+        (None, None) => args.runtime_profile.is_none() && args.runtime.is_none(),
+        (Some(_), Some(_)) => false,
+    };
 
     if command != frozen.command
         || cwd != frozen.cwd
         || timeout_ms != frozen.timeout_ms
         || observe != frozen.observe
-        || runtime != frozen.runtime
+        || !runtime_matches
         || (reason_was_present && reason != frozen.reason)
     {
         return Err(
@@ -209,6 +256,19 @@ pub(crate) fn validate_frozen_command_trace_args(
         );
     }
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FrozenRunCommandArgs {
+    command: String,
+    cwd: Option<String>,
+    timeout_ms: Option<u64>,
+    reason: Option<String>,
+    observe: Option<AgentCommandArtifactObservationRequest>,
+    runtime_profile: Option<AgentCommandRuntimeProfile>,
+    /// Legacy field accepted only while reconciling already-persisted pending actions.
+    runtime: Option<AgentCommandRuntimeRequest>,
 }
 
 fn normalize_trace_cwd(cwd: Option<String>) -> AgentResult<Option<String>> {
@@ -386,10 +446,90 @@ fn sanitize_cwd(
 mod tests {
     use super::*;
     use crate::protocol::{
-        AgentApprovalStatus, AgentCommandRiskLevel, AgentPermissions, AgentRunContext,
-        AgentToolCall, AgentWorkspaceContext, AgentWritePermission,
+        AgentApprovalStatus, AgentCommandRiskLevel, AgentCommandRuntimeBinding,
+        AgentCommandRuntimeKind, AgentCommandRuntimeResolvedPackage, AgentPermissions,
+        AgentRunContext, AgentToolCall, AgentWorkspaceContext, AgentWritePermission,
+        AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
     };
     use serde_json::json;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct FakeProfileResolver {
+        binding: AgentCommandRuntimeBinding,
+    }
+
+    impl crate::command::CommandRuntimeProfileResolver for FakeProfileResolver {
+        fn resolve_profile(
+            &self,
+            profile: AgentCommandRuntimeProfile,
+            kind: AgentCommandRuntimeKind,
+        ) -> Result<AgentCommandRuntimeBinding, crate::command::CommandRuntimeProfileError>
+        {
+            assert_eq!(profile, self.binding.profile);
+            assert_eq!(kind, self.binding.kind);
+            Ok(self.binding.clone())
+        }
+    }
+
+    fn test_binding(
+        profile: AgentCommandRuntimeProfile,
+        kind: AgentCommandRuntimeKind,
+        packages: &[(&str, &str)],
+    ) -> AgentCommandRuntimeBinding {
+        let resolved_packages = packages
+            .iter()
+            .map(|(name, version)| AgentCommandRuntimeResolvedPackage {
+                name: (*name).to_string(),
+                version: (*version).to_string(),
+            })
+            .collect::<Vec<_>>();
+        AgentCommandRuntimeBinding {
+            schema_version: AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
+            profile,
+            profile_revision: crate::command::runtime_profile_revision(
+                profile,
+                kind,
+                &resolved_packages,
+            ),
+            provider_id: crate::artifact_runtime::ARTIFACT_RUNTIME_PROVIDER_ID.to_string(),
+            bundle_version: "2026.07.3".to_string(),
+            bundle_revision: "artifact-runtime-bundle-sha256-v1:test".to_string(),
+            kind,
+            runtime_version: "22.23.1".to_string(),
+            runtime_fingerprint: "artifact-runtime-sha256-v1:test".to_string(),
+            resolved_packages,
+        }
+    }
+
+    fn with_profile_resolver(
+        context: ToolExecutionContext,
+        binding: AgentCommandRuntimeBinding,
+    ) -> ToolExecutionContext {
+        context
+            .with_command_runtime_profile_resolver(Some(Arc::new(FakeProfileResolver { binding })))
+    }
+
+    #[test]
+    fn model_schema_exposes_profiles_but_no_runtime_authority() {
+        let definition = RunCommandTool.definition();
+        let properties = definition.input_schema["properties"].as_object().unwrap();
+        assert!(properties.contains_key("runtimeProfile"));
+        assert!(!properties.contains_key("runtime"));
+        let serialized = serde_json::to_string(&definition.input_schema).unwrap();
+        for forbidden in [
+            "requiredPackages",
+            "managedArtifact",
+            "pptxgenjs",
+            "4.0.1",
+            "3.12.0",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "model schema leaked backend runtime authority: {forbidden}"
+            );
+        }
+    }
 
     #[test]
     fn builds_command_request_for_approval() {
@@ -433,46 +573,61 @@ mod tests {
         assert_eq!(request.reason.as_deref(), Some("verify tests"));
         assert!(request.observe.is_none());
         assert!(request.runtime.is_none());
+        assert!(request.runtime_binding.is_none());
     }
 
     #[test]
-    fn freezes_strict_managed_runtime_request() {
+    fn resolves_and_freezes_a_model_friendly_runtime_profile() {
         let call = AgentToolCall {
             id: "tool-runtime".to_string(),
             tool: "run_command".to_string(),
             args: json!({
                 "command": "node scripts/build.mjs --output outputs/report.xlsx",
-                "runtime": {
-                    "provider": "managedArtifact",
-                    "kind": "node",
-                    "requiredPackages": [
-                        {"name": "exceljs", "version": "4.4.0"}
-                    ]
-                }
+                "runtimeProfile": "spreadsheets"
             }),
             approval_status: AgentApprovalStatus::Required,
             reason: None,
         };
-        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
-            conversation_id: None,
-            project_id: None,
-            workspace: Some(AgentWorkspaceContext {
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: None,
                 project_id: None,
-                display_name: Some("temp".to_string()),
-                root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
-            }),
-            attachment_library: None,
-            permissions: AgentPermissions {
-                write: AgentWritePermission::WorkspaceOnly,
-                ..Default::default()
-            },
-        }));
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("temp".to_string()),
+                    root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..Default::default()
+                },
+            })),
+            test_binding(
+                AgentCommandRuntimeProfile::Spreadsheets,
+                AgentCommandRuntimeKind::Node,
+                &[("exceljs", "4.4.0")],
+            ),
+        );
 
         let request = command_request_from_call(&context, &call).unwrap();
         let frozen = serde_json::to_value(&request).unwrap();
-        assert_eq!(frozen["runtime"]["provider"], "managedArtifact");
-        assert_eq!(frozen["runtime"]["kind"], "node");
-        assert_eq!(frozen["runtime"]["requiredPackages"][0]["version"], "4.4.0");
+        assert!(frozen.get("runtime").is_none());
+        assert_eq!(frozen["runtimeBinding"]["profile"], "spreadsheets");
+        assert_eq!(
+            frozen["runtimeBinding"]["providerId"],
+            crate::artifact_runtime::ARTIFACT_RUNTIME_PROVIDER_ID
+        );
+        assert_eq!(frozen["runtimeBinding"]["kind"], "node");
+        assert_eq!(
+            frozen["runtimeBinding"]["resolvedPackages"][0]["version"],
+            "4.4.0"
+        );
+        assert_eq!(frozen["runtimeBinding"]["runtimeVersion"], "22.23.1");
+        assert!(frozen["runtimeBinding"]["runtimeFingerprint"]
+            .as_str()
+            .unwrap()
+            .starts_with("artifact-runtime-sha256-v1:"));
     }
 
     #[test]
@@ -487,13 +642,7 @@ mod tests {
                 "expectedOutputs": [" outputs/report.xlsx "],
                 "additionalRoots": []
             },
-            "runtime": {
-                "provider": "managedArtifact",
-                "kind": "node",
-                "requiredPackages": [
-                    {"name": "exceljs", "version": "4.4.0"}
-                ]
-            }
+            "runtimeProfile": "spreadsheets"
         });
         let call = AgentToolCall {
             id: "tool-runtime-trace".to_string(),
@@ -502,20 +651,27 @@ mod tests {
             approval_status: AgentApprovalStatus::Required,
             reason: None,
         };
-        let context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
-            conversation_id: None,
-            project_id: None,
-            workspace: Some(AgentWorkspaceContext {
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: None,
                 project_id: None,
-                display_name: Some("temp".to_string()),
-                root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
-            }),
-            attachment_library: None,
-            permissions: AgentPermissions {
-                write: AgentWritePermission::WorkspaceOnly,
-                ..Default::default()
-            },
-        }));
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("temp".to_string()),
+                    root_path: Some(std::env::temp_dir().to_string_lossy().to_string()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..Default::default()
+                },
+            })),
+            test_binding(
+                AgentCommandRuntimeProfile::Spreadsheets,
+                AgentCommandRuntimeKind::Node,
+                &[("exceljs", "4.4.0")],
+            ),
+        );
         let frozen = command_request_from_call(&context, &call).unwrap();
         validate_frozen_command_trace_args(&frozen, &args).unwrap();
 
@@ -533,9 +689,16 @@ mod tests {
         let mut observe = args.clone();
         observe["observe"]["expectedOutputs"] = json!(["outputs/other.xlsx"]);
         tampered.push(observe);
-        let mut runtime = args.clone();
-        runtime["runtime"]["requiredPackages"][0]["version"] = json!("9.9.9");
-        tampered.push(runtime);
+        let mut runtime_profile = args.clone();
+        runtime_profile["runtimeProfile"] = json!("presentations");
+        tampered.push(runtime_profile);
+        let mut hidden_runtime = args.clone();
+        hidden_runtime["runtime"] = json!({
+            "provider": "managedArtifact",
+            "kind": "node",
+            "requiredPackages": [{"name": "exceljs", "version": "4.4.0"}]
+        });
+        tampered.push(hidden_runtime);
         let mut unknown = args;
         unknown["executable"] = json!("/tmp/untrusted-node");
         tampered.push(unknown);

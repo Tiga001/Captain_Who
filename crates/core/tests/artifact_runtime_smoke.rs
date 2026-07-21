@@ -3,14 +3,14 @@ use mycopilot_core::artifact_runtime::{
 };
 use mycopilot_core::command::{
     run_authorized_command_with_artifact_runtime, CommandAuthorizationSource,
+    CommandRuntimeProfileResolver,
 };
 use mycopilot_core::{
     AgentApprovalStatus, AgentCancellationToken, AgentCommandArtifactObservationKind,
     AgentCommandArtifactObservationRequest, AgentCommandArtifactValidationStatus,
     AgentCommandExpectedArtifactOutcomeKind, AgentCommandPermission, AgentCommandRequest,
-    AgentCommandRuntimeKind, AgentCommandRuntimePackageRequirement, AgentCommandRuntimeProvider,
-    AgentCommandRuntimeRequest, AgentCommandSafetyPolicy, AgentPatchPermission, AgentPermissions,
-    AgentReadPermission, AgentWritePermission,
+    AgentCommandRuntimeKind, AgentCommandRuntimeProfile, AgentCommandSafetyPolicy,
+    AgentPatchPermission, AgentPermissions, AgentReadPermission, AgentWritePermission,
 };
 use std::fs;
 
@@ -48,6 +48,18 @@ print('created', sys.argv[1])
     )
     .expect("write Python smoke script");
     fs::write(
+        workspace.path().join("build-presentation.mjs"),
+        r#"import pptxgen from 'pptxgenjs'
+const presentation = new pptxgen()
+presentation.layout = 'LAYOUT_WIDE'
+const slide = presentation.addSlide()
+slide.addText('managed-node-presentation-ok', { x: 1, y: 1, w: 8, h: 1 })
+await presentation.writeFile({ fileName: process.argv[2] })
+console.log('created', process.argv[2])
+"#,
+    )
+    .expect("write Node presentation smoke script");
+    fs::write(
         workspace.path().join("build-presentation.py"),
         r#"import sys
 from pptx import Presentation
@@ -76,9 +88,8 @@ process.exitCode = 7
         &provider,
         "node build-sheet.mjs smoke.xlsx",
         "smoke.xlsx",
+        AgentCommandRuntimeProfile::Spreadsheets,
         AgentCommandRuntimeKind::Node,
-        "exceljs",
-        "4.4.0",
     );
     assert_successful_observed_creation(&node, "smoke.xlsx");
 
@@ -87,9 +98,8 @@ process.exitCode = 7
         &provider,
         "python build-document.py smoke.docx",
         "smoke.docx",
+        AgentCommandRuntimeProfile::Documents,
         AgentCommandRuntimeKind::Python,
-        "python-docx",
-        "1.2.0",
     );
     assert_successful_observed_creation(&python, "smoke.docx");
 
@@ -98,20 +108,39 @@ process.exitCode = 7
         &provider,
         "python build-presentation.py smoke.pptx",
         "smoke.pptx",
+        AgentCommandRuntimeProfile::Presentations,
         AgentCommandRuntimeKind::Python,
-        "python-pptx",
-        "1.0.2",
     );
     assert_successful_observed_creation(&presentation, "smoke.pptx");
+
+    let node_presentation = execute(
+        workspace.path(),
+        &provider,
+        "node build-presentation.mjs smoke-node.pptx",
+        "smoke-node.pptx",
+        AgentCommandRuntimeProfile::Presentations,
+        AgentCommandRuntimeKind::Node,
+    );
+    assert_successful_observed_creation(&node_presentation, "smoke-node.pptx");
+    assert_eq!(
+        node_presentation
+            .runtime
+            .as_ref()
+            .unwrap()
+            .resolved_packages,
+        [mycopilot_core::AgentCommandRuntimeResolvedPackage {
+            name: "pptxgenjs".to_string(),
+            version: "4.0.1".to_string(),
+        }]
+    );
 
     let failed = execute(
         workspace.path(),
         &provider,
         "node build-then-fail.mjs failed-but-created.xlsx",
         "failed-but-created.xlsx",
+        AgentCommandRuntimeProfile::Spreadsheets,
         AgentCommandRuntimeKind::Node,
-        "exceljs",
-        "4.4.0",
     );
     assert_eq!(failed.exit_code, Some(7));
     assert!(failed.stderr.contains("intentional failure after publish"));
@@ -123,10 +152,12 @@ fn execute(
     provider: &ArtifactRuntimeProvider,
     command: &str,
     expected_output: &str,
+    profile: AgentCommandRuntimeProfile,
     kind: AgentCommandRuntimeKind,
-    package: &str,
-    version: &str,
 ) -> mycopilot_core::command::AgentCommandExecutionResult {
+    let runtime_binding = provider
+        .resolve_profile(profile, kind)
+        .expect("resolve frozen runtime profile");
     let request = AgentCommandRequest {
         id: format!("artifact-smoke-{expected_output}"),
         command: command.to_string(),
@@ -140,14 +171,8 @@ fn execute(
             expected_outputs: vec![expected_output.to_string()],
             additional_roots: Vec::new(),
         }),
-        runtime: Some(AgentCommandRuntimeRequest {
-            provider: AgentCommandRuntimeProvider::ManagedArtifact,
-            kind,
-            required_packages: vec![AgentCommandRuntimePackageRequirement {
-                name: package.to_string(),
-                version: version.to_string(),
-            }],
-        }),
+        runtime: None,
+        runtime_binding: Some(Box::new(runtime_binding)),
     };
     run_authorized_command_with_artifact_runtime(
         Some(workspace),

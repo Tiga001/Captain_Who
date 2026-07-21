@@ -1,6 +1,7 @@
 import type { AgentDiffProposal, AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
 import type { ReactElement } from 'react'
 import type { ChatReadActivity, ChatWebSearchActivity } from '../../chatTypes'
+import type { ChatAgentRunView } from '../../chatTypes'
 import { isReadActivityTool } from '../../agentReadActivities'
 import { AttachmentListToolActivity } from './AttachmentListToolActivity'
 import { ApplyPatchToolActivity } from './ApplyPatchToolActivity'
@@ -13,6 +14,8 @@ import { SearchToolActivity } from './SearchToolActivity'
 import { TodoUpdateToolActivity } from './TodoUpdateToolActivity'
 import { WebSearchToolActivity } from './WebSearchToolActivity'
 import { WorkspaceMapToolActivity } from './WorkspaceMapToolActivity'
+import { OfficeToolActivity } from './OfficeToolActivity'
+import { SkillScriptToolActivity } from './SkillToolActivity'
 import type { SettledToolStatus } from './toolActivityUtils'
 
 interface AgentToolActivityProps {
@@ -24,6 +27,7 @@ interface AgentToolActivityProps {
   projectId?: string | null
   previousTodoResult?: AgentToolResult
   result?: AgentToolResult
+  run: ChatAgentRunView
   settledStatus?: SettledToolStatus
 }
 
@@ -36,6 +40,7 @@ export function AgentToolActivity({
   projectId,
   previousTodoResult,
   result,
+  run,
   settledStatus
 }: AgentToolActivityProps): ReactElement {
   if (call.tool === 'attachments_list' || call.tool === 'attachments_list_project') {
@@ -145,6 +150,18 @@ export function AgentToolActivity({
         items={[{ call, result, settledStatus: cancelled ? 'cancelled' : settledStatus }]}
       />
     )
+  }
+
+  if (
+    call.tool === 'office_document' ||
+    call.tool === 'office_spreadsheet' ||
+    call.tool === 'office_presentation'
+  ) {
+    return <OfficeToolActivity call={call} run={run} settledStatus={settledStatus} />
+  }
+
+  if (call.tool === 'skills_run_script') {
+    return <SkillScriptToolActivity callId={call.id} run={run} settledStatus={settledStatus} />
   }
 
   return (

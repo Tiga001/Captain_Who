@@ -137,6 +137,27 @@ const workspaceSkill: SkillManagementEntry = {
   source: { id: 'workspace-source-id', kind: 'workspace' }
 }
 
+const bundledOfficeSkills: SkillManagementEntry[] = [
+  {
+    ...bundledSkill,
+    id: 'bundled:application:documents',
+    name: 'Documents',
+    source: { id: 'application:documents', kind: 'bundled' }
+  },
+  {
+    ...bundledSkill,
+    id: 'bundled:application:spreadsheets',
+    name: 'Spreadsheets',
+    source: { id: 'application:spreadsheets', kind: 'bundled' }
+  },
+  {
+    ...bundledSkill,
+    id: 'bundled:application:presentations',
+    name: 'Presentations',
+    source: { id: 'application:presentations', kind: 'bundled' }
+  }
+]
+
 function managementOutput(
   skills: SkillManagementEntry[] = [bundledSkill, installedSkill, workspaceSkill],
   overrides: Partial<SkillsListManagementOutput> = {}
@@ -399,6 +420,23 @@ describe('Skills settings navigation and management inventory', () => {
     expect(installedRow.querySelectorAll('.skill-row-action')).toHaveLength(2)
     expect(installedRow.textContent).toContain('Scripts are stored but never executed')
     expect(screen.container.textContent).not.toContain(installedSkill.description)
+  })
+
+  it('uses dedicated Office icons for bundled document, spreadsheet, and presentation skills', async () => {
+    service.listManagement.mockResolvedValueOnce(managementOutput(bundledOfficeSkills))
+    const screen = await render(<SkillsSettingsPage />)
+
+    for (const [name, kind] of [
+      ['skills.bundled.documents.name', 'document'],
+      ['skills.bundled.spreadsheets.name', 'spreadsheet'],
+      ['skills.bundled.presentations.name', 'presentation']
+    ] as const) {
+      await expect.element(screen.getByText(name)).toBeVisible()
+      const row = findSkillRow(screen.container, name)
+      const icon = row.querySelector(`[data-office-kind="${kind}"]`)
+      expect(icon?.querySelector('img')).not.toBeNull()
+      expect(icon?.querySelector('svg')).toBeNull()
+    }
   })
 
   it('does not offer update when backend actions deny it for a local installation', async () => {

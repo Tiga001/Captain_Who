@@ -14,6 +14,7 @@ import type { ConversationHistoryActivityItem } from './toolActivities/Conversat
 import type { FileWriteToolActivityGroupItem } from './toolActivities/FileWriteToolActivity'
 import type { ReadToolActivityGroupItem } from './toolActivities/ReadToolActivity'
 import type { RunCommandToolActivityGroupItem } from './toolActivities/RunCommandToolActivity'
+import type { OfficeToolActivityGroupItem } from './toolActivities/OfficeToolActivity'
 import {
   getSearchKind,
   isSearchTool,
@@ -22,11 +23,37 @@ import {
 } from './toolActivities/SearchToolActivity'
 import type { SettledToolStatus } from './toolActivities/toolActivityUtils'
 import type { WebSearchToolActivityGroupItem } from './toolActivities/WebSearchToolActivity'
+import {
+  getActivatedSkills,
+  getOfficeActivityGroupIdentity,
+  getSkillResourceActivityItem,
+  isHiddenSkillTool,
+  isOfficeTool,
+  type SkillResourceActivityItem,
+  type SkillResourceActivityKind
+} from '../skillOfficeActivity'
 
 const FILE_WRITE_ACTIVITY_GRACE_MS = 2000
 
 export type RenderableTimelineItem =
   | ChatAgentTimelineItem
+  | {
+      id: string
+      type: 'skill_load_group'
+    }
+  | {
+      id: string
+      type: 'skill_resource_group'
+      kind: SkillResourceActivityKind
+      skillId?: string
+      callIds: string[]
+    }
+  | {
+      id: string
+      type: 'office_group'
+      groupKey: string
+      callIds: string[]
+    }
   | {
       id: string
       type: 'read_group'
@@ -197,8 +224,10 @@ export function hasDisplayableContent(content: string) {
 
 export function isTimelineItemRenderable(run: ChatAgentRunView, item: ChatAgentTimelineItem) {
   if (item.type === 'message') return Boolean(item.content.trim())
-  if (item.type === 'tool_call')
-    return run.toolCalls.some((candidate) => candidate.id === item.callId)
+  if (item.type === 'tool_call') {
+    const call = run.toolCalls.find((candidate) => candidate.id === item.callId)
+    return Boolean(call && !isHiddenSkillTool(call.tool))
+  }
   return true
 }
 
@@ -278,7 +307,10 @@ export function hasCollapsibleTimelineContent(
   run: ChatAgentRunView,
   timeline: ChatAgentTimelineItem[]
 ) {
-  return timeline.some((item) => item.type !== 'message' && isTimelineItemRenderable(run, item))
+  return (
+    getActivatedSkills(run).length > 0 ||
+    timeline.some((item) => item.type !== 'message' && isTimelineItemRenderable(run, item))
+  )
 }
 
 export function getReadKindForCall(run: ChatAgentRunView, call: AgentToolCall) {
@@ -293,6 +325,11 @@ export function groupTimelineItems(
   run: ChatAgentRunView,
   timeline: ChatAgentTimelineItem[]
 ): RenderableTimelineItem[] {
+  const activatedSkills = getActivatedSkills(run)
+  const initialItems: RenderableTimelineItem[] = activatedSkills.length
+    ? [{ id: `skill-load-${run.runId ?? 'pending'}`, type: 'skill_load_group' }]
+    : []
+
   return timeline.reduce<RenderableTimelineItem[]>((items, item) => {
     // Whitespace-only stream messages are invisible in the timeline, so they must not split
     // otherwise adjacent tool activity groups across model turns.
@@ -301,6 +338,63 @@ export function groupTimelineItems(
 
     const call = run.toolCalls.find((candidate) => candidate.id === item.callId)
     if (!call) return [...items, item]
+
+    if (isHiddenSkillTool(call.tool)) return items
+
+    if (isOfficeTool(call.tool)) {
+      const identity = getOfficeActivityGroupIdentity(call)
+      if (!identity) return [...items, item]
+      const previousItem = items[items.length - 1]
+      if (previousItem?.type === 'office_group' && previousItem.groupKey === identity.key) {
+        return [
+          ...items.slice(0, -1),
+          {
+            ...previousItem,
+            callIds: [...previousItem.callIds, item.callId]
+          }
+        ]
+      }
+
+      return [
+        ...items,
+        {
+          id: `office-group-${item.callId}`,
+          type: 'office_group',
+          groupKey: identity.key,
+          callIds: [item.callId]
+        }
+      ]
+    }
+
+    if (call.tool === 'skills_read_resource' || call.tool === 'skills_materialize_resource') {
+      const resource = getSkillResourceActivityItem(run, call)
+      if (!resource) return items
+      const previousItem = items[items.length - 1]
+      if (
+        previousItem?.type === 'skill_resource_group' &&
+        previousItem.kind === resource.kind &&
+        previousItem.skillId === resource.skill?.id
+      ) {
+        return [
+          ...items.slice(0, -1),
+          {
+            ...previousItem,
+            callIds: [...previousItem.callIds, item.callId]
+          }
+        ]
+      }
+
+      return [
+        ...items,
+        {
+          id: `skill-resource-group-${item.callId}`,
+          type: 'skill_resource_group',
+          kind: resource.kind,
+          skillId: resource.skill?.id,
+          callIds: [item.callId]
+        }
+      ]
+    }
 
     if (call.tool === 'conversation_history') {
       const previousItem = items[items.length - 1]
@@ -470,7 +564,40 @@ export function groupTimelineItems(
     }
 
     return [...items, item]
-  }, [])
+  }, initialItems)
+}
+
+export function getSkillResourceGroupItems(
+  run: ChatAgentRunView,
+  callIds: string[]
+): SkillResourceActivityItem[] {
+  const byResource = new Map<string, SkillResourceActivityItem>()
+
+  callIds.forEach((callId) => {
+    const call = run.toolCalls.find((candidate) => candidate.id === callId)
+    if (!call) return
+    const result = getToolResult(run, call.id)
+    const item = getSkillResourceActivityItem(run, call, getSettledToolStatus(run, result))
+    if (!item) return
+
+    // Progressive reads of one URI are one user-visible resource. Keep the latest page status
+    // while preserving the original insertion order of the resource in this activity group.
+    byResource.set(item.resourceKey, item)
+  })
+
+  return [...byResource.values()]
+}
+
+export function getOfficeGroupItems(
+  run: ChatAgentRunView,
+  callIds: string[]
+): OfficeToolActivityGroupItem[] {
+  return callIds.flatMap((callId) => {
+    const call = run.toolCalls.find((candidate) => candidate.id === callId)
+    if (!call) return []
+    const result = getToolResult(run, call.id)
+    return [{ call, settledStatus: getSettledToolStatus(run, result) }]
+  })
 }
 
 export function getWriteFileDraftId(

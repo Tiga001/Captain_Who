@@ -86,6 +86,19 @@ impl AgentTool for WriteFileTool {
     ) -> Option<Box<dyn ToolInputStreamObserver>> {
         Some(Box::new(WriteFileInputStreamObserver::new(context)))
     }
+
+    fn event_call_projection(&self, call: &AgentToolCall) -> AgentToolCall {
+        let mut projection = call.clone();
+        let Some(args) = projection.args.as_object_mut() else {
+            return projection;
+        };
+        if let Some(content) = args.get("content").and_then(Value::as_str) {
+            let content_bytes = content.len() as u64;
+            args.insert("content".to_string(), json!("[stored in private draft]"));
+            args.insert("contentBytes".to_string(), json!(content_bytes));
+        }
+        projection
+    }
 }
 
 fn input_schema() -> Value {
@@ -714,6 +727,34 @@ mod tests {
     fn diff_counts_create_and_replace() {
         assert_eq!(diff_counts("", "a\nb\n"), (2, 0));
         assert_eq!(diff_counts("a\nb\n", "a\nc\n"), (1, 1));
+    }
+
+    #[test]
+    fn event_call_projection_redacts_private_draft_without_changing_trace_or_execution() {
+        let call = AgentToolCall {
+            id: "write-observable".to_string(),
+            tool: "write_file".to_string(),
+            args: json!({
+                "phase": "append",
+                "draftId": "draft-1",
+                "index": 0,
+                "content": "secret draft content",
+            }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+
+        let trace_projection = WriteFileTool.trace_call_projection(&call);
+        let event_projection = WriteFileTool.event_call_projection(&call);
+
+        assert_eq!(call.args["content"], "secret draft content");
+        assert_eq!(trace_projection.args["content"], "secret draft content");
+        assert!(trace_projection.args.get("contentBytes").is_none());
+        assert_eq!(
+            event_projection.args["content"],
+            "[stored in private draft]"
+        );
+        assert_eq!(event_projection.args["contentBytes"], 20);
     }
 
     #[test]

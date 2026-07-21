@@ -28,6 +28,8 @@ pub struct AgentRuntimeHostServices {
     pub(super) context_compaction_services: Option<AgentContextCompactionServices>,
     pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
     pub(super) office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
+    pub(super) command_runtime_profile_resolver:
+        Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
 }
 
 impl AgentRuntimeHostServices {
@@ -81,6 +83,16 @@ impl AgentRuntimeHostServices {
     /// outside model input and persisted checkpoints.
     pub fn with_office_engine(mut self, engine: Arc<dyn crate::office::OfficeEngine>) -> Self {
         self.office_engine = Some(engine);
+        self
+    }
+
+    /// Supplies the trusted approval-time resolver for model-visible Artifact Runtime profiles.
+    /// Runtime bindings stay outside model input until the host has verified and frozen them.
+    pub fn with_command_runtime_profile_resolver(
+        mut self,
+        resolver: Arc<dyn crate::command::CommandRuntimeProfileResolver>,
+    ) -> Self {
+        self.command_runtime_profile_resolver = Some(resolver);
         self
     }
 }

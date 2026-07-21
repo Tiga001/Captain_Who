@@ -1,4 +1,6 @@
 use super::*;
+use mycopilot_core::office::{OfficeOperationParameters, OfficeRequestParameters};
+use serde_json::Map;
 
 pub(crate) fn action_id_for_action(action: &AgentProposedAction) -> String {
     match action {
@@ -76,17 +78,227 @@ pub(crate) fn office_operation_tool_call(
     AgentToolCall {
         id: office_operation.id.clone(),
         tool: office_tool_name(request.document_kind).to_string(),
-        args: json!({
-            "operation": request.operation,
-            "path": request.document_path,
-            "arguments": request.arguments,
-            "outputPath": request.output_path,
-            "destinationPath": request.destination_path,
-            "timeoutMs": request.timeout_ms,
-            "reason": office_operation.reason,
-        }),
+        args: office_operation_model_args(request, &office_operation.reason),
         approval_status: office_operation.approval_status,
-        reason: office_operation.reason.clone(),
+        reason: Some(office_operation.reason.clone()),
+    }
+}
+
+/// Reconstructs the provider-neutral model call from a frozen Office request.
+///
+/// Prepared actions intentionally contain both a typed request and host-generated argv. Only the
+/// typed request is projected back into the conversation. The model contract keeps the
+/// user-visible reason separate from the strict operation request:
+/// `{ "request": { "operation": "...", ... }, "reason": "..." }`.
+///
+/// Exposing `argv` (or the frozen request's internal `parameters` representation) would
+/// reintroduce the provider-specific surface the v4 contract removes. Schema-v3 requests remain
+/// loadable for historical recovery, but are represented only by a marker and never disclose
+/// their legacy argv.
+fn office_operation_model_args(
+    request: &mycopilot_core::office::OfficeExecutionRequest,
+    reason: &str,
+) -> Value {
+    let mut model_request = Map::new();
+    model_request.insert("operation".to_string(), json!(request.operation));
+    if let Some(file_path) = request.document_path.as_ref() {
+        model_request.insert("filePath".to_string(), json!(file_path));
+    }
+
+    match &request.parameters {
+        OfficeRequestParameters::Typed(parameters) => {
+            project_office_operation_parameters(&mut model_request, parameters);
+        }
+        OfficeRequestParameters::Legacy(_) => {
+            // Old pending actions are rejected by their outer schema version before execution.
+            // Keep historical rendering explicit without replaying or exposing raw OfficeCLI argv.
+            model_request.insert("legacyRequest".to_string(), Value::Bool(true));
+        }
+    }
+
+    insert_optional(
+        &mut model_request,
+        "outputPath",
+        request.output_path.as_ref(),
+    );
+    insert_optional(
+        &mut model_request,
+        "destinationPath",
+        request.destination_path.as_ref(),
+    );
+    insert_optional(&mut model_request, "timeoutMs", request.timeout_ms.as_ref());
+
+    let mut args = Map::new();
+    args.insert("request".to_string(), Value::Object(model_request));
+    args.insert("reason".to_string(), Value::String(reason.to_string()));
+    Value::Object(args)
+}
+
+fn project_office_operation_parameters(
+    args: &mut Map<String, Value>,
+    parameters: &OfficeOperationParameters,
+) {
+    match parameters {
+        OfficeOperationParameters::Help { verb, element } => {
+            insert_optional(args, "verb", verb.as_ref());
+            insert_optional(args, "element", element.as_ref());
+        }
+        OfficeOperationParameters::Create {
+            locale,
+            minimal,
+            overwrite,
+        } => {
+            insert_optional(args, "locale", locale.as_ref());
+            insert_if_true(args, "minimal", *minimal);
+            insert_if_true(args, "overwriteExisting", *overwrite);
+        }
+        OfficeOperationParameters::View {
+            mode,
+            start,
+            end,
+            max_lines,
+            issue_type,
+            limit,
+            columns,
+            pages,
+            range,
+            viewport,
+            grid,
+            render_mode,
+            page_count,
+        } => {
+            args.insert("mode".to_string(), json!(mode));
+            insert_optional(args, "start", start.as_ref());
+            insert_optional(args, "end", end.as_ref());
+            insert_optional(args, "maxLines", max_lines.as_ref());
+            insert_optional(args, "issueType", issue_type.as_ref());
+            insert_optional(args, "limit", limit.as_ref());
+            insert_if_non_empty(args, "columns", columns);
+            insert_if_non_empty(args, "pages", pages);
+            insert_optional(args, "range", range.as_ref());
+            insert_optional(args, "viewport", viewport.as_ref());
+            insert_optional(args, "grid", grid.as_ref());
+            insert_optional(args, "renderMode", render_mode.as_ref());
+            insert_if_true(args, "includePageCount", *page_count);
+        }
+        OfficeOperationParameters::Get { target, depth } => {
+            insert_optional(args, "target", target.as_ref());
+            insert_optional(args, "depth", depth.as_ref());
+        }
+        OfficeOperationParameters::Query {
+            selector,
+            contains,
+            compact,
+            fields,
+        } => {
+            args.insert("selector".to_string(), Value::String(selector.clone()));
+            insert_optional(args, "containsText", contains.as_ref());
+            insert_if_true(args, "compact", *compact);
+            insert_if_non_empty(args, "fields", fields);
+        }
+        OfficeOperationParameters::Validate => {}
+        OfficeOperationParameters::Set {
+            target,
+            properties,
+            replacement,
+            force,
+        } => {
+            args.insert("target".to_string(), Value::String(target.clone()));
+            insert_if_non_empty(args, "properties", properties);
+            insert_optional(args, "textReplacement", replacement.as_ref());
+            insert_if_true(args, "overrideProtection", *force);
+        }
+        OfficeOperationParameters::Add {
+            parent,
+            element_type,
+            copy_from,
+            position,
+            properties,
+            force,
+        } => {
+            args.insert("parent".to_string(), Value::String(parent.clone()));
+            args.insert("element".to_string(), Value::String(element_type.clone()));
+            insert_optional(args, "copyFrom", copy_from.as_ref());
+            insert_optional(args, "placement", position.as_ref());
+            insert_if_non_empty(args, "properties", properties);
+            insert_if_true(args, "overrideProtection", *force);
+        }
+        OfficeOperationParameters::Remove {
+            target,
+            shift,
+            properties,
+        } => {
+            args.insert("target".to_string(), Value::String(target.clone()));
+            insert_optional(args, "shift", shift.as_ref());
+            insert_if_non_empty(args, "properties", properties);
+        }
+        OfficeOperationParameters::Move {
+            target,
+            new_parent,
+            position,
+            properties,
+        } => {
+            args.insert("target".to_string(), Value::String(target.clone()));
+            insert_optional(args, "toParent", new_parent.as_ref());
+            insert_optional(args, "placement", position.as_ref());
+            insert_if_non_empty(args, "properties", properties);
+        }
+        OfficeOperationParameters::Swap {
+            first_target,
+            second_target,
+        } => {
+            args.insert(
+                "firstTarget".to_string(),
+                Value::String(first_target.clone()),
+            );
+            args.insert(
+                "secondTarget".to_string(),
+                Value::String(second_target.clone()),
+            );
+        }
+    }
+}
+
+fn insert_optional<T: Serialize>(args: &mut Map<String, Value>, name: &str, value: Option<&T>) {
+    if let Some(value) = value {
+        args.insert(
+            name.to_string(),
+            serde_json::to_value(value).expect("Office request fields must be serializable"),
+        );
+    }
+}
+
+fn insert_if_true(args: &mut Map<String, Value>, name: &str, value: bool) {
+    if value {
+        args.insert(name.to_string(), Value::Bool(true));
+    }
+}
+
+fn insert_if_non_empty<T>(args: &mut Map<String, Value>, name: &str, values: &T)
+where
+    T: IsEmpty + Serialize,
+{
+    if !values.is_empty() {
+        args.insert(
+            name.to_string(),
+            serde_json::to_value(values).expect("Office request fields must be serializable"),
+        );
+    }
+}
+
+trait IsEmpty {
+    fn is_empty(&self) -> bool;
+}
+
+impl<T> IsEmpty for Vec<T> {
+    fn is_empty(&self) -> bool {
+        Vec::is_empty(self)
+    }
+}
+
+impl<K, V> IsEmpty for std::collections::BTreeMap<K, V> {
+    fn is_empty(&self) -> bool {
+        std::collections::BTreeMap::is_empty(self)
     }
 }
 
@@ -162,10 +374,12 @@ pub(crate) fn command_tool_call(command: &AgentCommandRequest) -> AgentToolCall 
             "command": command.command.clone(),
             "cwd": command.cwd.clone(),
             "timeoutMs": command.timeout_ms,
-            "riskLevel": command.risk_level,
             "reason": command.reason.clone(),
             "observe": command.observe.clone(),
-            "runtime": command.runtime.clone()
+            "runtimeProfile": command.runtime_binding.as_ref().map(|binding| binding.profile),
+            // Retained only when reconstructing a legacy pending action so startup recovery can
+            // retire it explicitly. New actions never expose exact runtime authority to the model.
+            "runtime": command.runtime_binding.is_none().then(|| command.runtime.clone()).flatten()
         }),
         approval_status: command.approval_status,
         reason: command.reason.clone(),
@@ -523,5 +737,178 @@ pub(crate) fn failed_command_result(
         policy_evaluation,
         artifact_observation: None,
         runtime: None,
+    }
+}
+
+#[cfg(test)]
+mod office_projection_tests {
+    use super::*;
+    use mycopilot_core::office::{
+        OfficeCellShift, OfficeElementPosition, OfficeGridLayout, OfficeHelpVerb, OfficePageRange,
+        OfficeTextReplacement, OfficeViewMode, OfficeViewRenderMode, OfficeViewport,
+    };
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn typed_office_parameters_project_to_operation_request_fields() {
+        let cases = [
+            (
+                OfficeOperationParameters::Help {
+                    verb: Some(OfficeHelpVerb::Add),
+                    element: Some("chart".to_string()),
+                },
+                json!({ "verb": "add", "element": "chart" }),
+            ),
+            (
+                OfficeOperationParameters::Create {
+                    locale: Some("zh-CN".to_string()),
+                    minimal: true,
+                    overwrite: true,
+                },
+                json!({
+                    "locale": "zh-CN",
+                    "minimal": true,
+                    "overwriteExisting": true
+                }),
+            ),
+            (
+                OfficeOperationParameters::View {
+                    mode: OfficeViewMode::Screenshot,
+                    start: Some(1),
+                    end: Some(10),
+                    max_lines: Some(200),
+                    issue_type: Some("overflow".to_string()),
+                    limit: Some(5),
+                    columns: vec!["A".to_string(), "B".to_string()],
+                    pages: vec![OfficePageRange {
+                        start: 1,
+                        end: Some(5),
+                    }],
+                    range: Some("A1:D10".to_string()),
+                    viewport: Some(OfficeViewport {
+                        width: 1440,
+                        height: 900,
+                    }),
+                    grid: Some(OfficeGridLayout::Columns { columns: 3 }),
+                    render_mode: Some(OfficeViewRenderMode::Html),
+                    page_count: true,
+                },
+                json!({
+                    "mode": "screenshot",
+                    "start": 1,
+                    "end": 10,
+                    "maxLines": 200,
+                    "issueType": "overflow",
+                    "limit": 5,
+                    "columns": ["A", "B"],
+                    "pages": [{ "start": 1, "end": 5 }],
+                    "range": "A1:D10",
+                    "viewport": { "width": 1440, "height": 900 },
+                    "grid": { "mode": "columns", "columns": 3 },
+                    "renderMode": "html",
+                    "includePageCount": true
+                }),
+            ),
+            (
+                OfficeOperationParameters::Get {
+                    target: Some("/body".to_string()),
+                    depth: Some(3),
+                },
+                json!({ "target": "/body", "depth": 3 }),
+            ),
+            (
+                OfficeOperationParameters::Query {
+                    selector: "paragraph".to_string(),
+                    contains: Some("安全".to_string()),
+                    compact: true,
+                    fields: vec!["text".to_string()],
+                },
+                json!({
+                    "selector": "paragraph",
+                    "containsText": "安全",
+                    "compact": true,
+                    "fields": ["text"]
+                }),
+            ),
+            (OfficeOperationParameters::Validate, json!({})),
+            (
+                OfficeOperationParameters::Set {
+                    target: "/body/p[1]".to_string(),
+                    properties: BTreeMap::from([("fontSize".to_string(), json!(24))]),
+                    replacement: Some(OfficeTextReplacement {
+                        find: "old".to_string(),
+                        replace: "new".to_string(),
+                    }),
+                    force: true,
+                },
+                json!({
+                    "target": "/body/p[1]",
+                    "properties": { "fontSize": 24 },
+                    "textReplacement": { "find": "old", "replace": "new" },
+                    "overrideProtection": true
+                }),
+            ),
+            (
+                OfficeOperationParameters::Add {
+                    parent: "/slides".to_string(),
+                    element_type: "slide".to_string(),
+                    copy_from: Some("/slides/slide[1]".to_string()),
+                    position: Some(OfficeElementPosition::After {
+                        target: "/slides/slide[2]".to_string(),
+                    }),
+                    properties: BTreeMap::from([("title".to_string(), json!("Summary"))]),
+                    force: true,
+                },
+                json!({
+                    "parent": "/slides",
+                    "element": "slide",
+                    "copyFrom": "/slides/slide[1]",
+                    "placement": { "type": "after", "target": "/slides/slide[2]" },
+                    "properties": { "title": "Summary" },
+                    "overrideProtection": true
+                }),
+            ),
+            (
+                OfficeOperationParameters::Remove {
+                    target: "/Sheet1/A1".to_string(),
+                    shift: Some(OfficeCellShift::Up),
+                    properties: BTreeMap::from([("preserveStyle".to_string(), json!(true))]),
+                },
+                json!({
+                    "target": "/Sheet1/A1",
+                    "shift": "up",
+                    "properties": { "preserveStyle": true }
+                }),
+            ),
+            (
+                OfficeOperationParameters::Move {
+                    target: "/slides/slide[3]".to_string(),
+                    new_parent: Some("/slides".to_string()),
+                    position: Some(OfficeElementPosition::Index { index: 1 }),
+                    properties: BTreeMap::new(),
+                },
+                json!({
+                    "target": "/slides/slide[3]",
+                    "toParent": "/slides",
+                    "placement": { "type": "index", "index": 1 }
+                }),
+            ),
+            (
+                OfficeOperationParameters::Swap {
+                    first_target: "/slides/slide[1]".to_string(),
+                    second_target: "/slides/slide[2]".to_string(),
+                },
+                json!({
+                    "firstTarget": "/slides/slide[1]",
+                    "secondTarget": "/slides/slide[2]"
+                }),
+            ),
+        ];
+
+        for (parameters, expected) in cases {
+            let mut actual = Map::new();
+            project_office_operation_parameters(&mut actual, &parameters);
+            assert_eq!(Value::Object(actual), expected);
+        }
     }
 }

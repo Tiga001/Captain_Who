@@ -47,6 +47,7 @@ fn persist_settled_manual_command(
             reason: Some("build the reviewed artifact".to_string()),
             observe: None,
             runtime: None,
+            runtime_binding: None,
         },
     };
     let action_json = serde_json::to_string(&action).unwrap();

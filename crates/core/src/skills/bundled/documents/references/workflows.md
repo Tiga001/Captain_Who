@@ -19,45 +19,56 @@ scripted transformations unless the user explicitly requested an in-place edit.
 
 ## Native tool contract
 
-Call `office_document` with one JSON object per operation. `arguments` is an array of literal OfficeCLI tokens, not a shell command: keep every flag and every flag value in separate array entries. Never add shell quoting, redirects, pipes, or an executable name.
+Call `office_document` once per operation with exactly this root envelope: `{ "request": { "operation": "...", ... }, "reason": "..." }`. Put every operation and operation-specific field inside `request`. Keep `reason` as the only root field. Every call, including `status`, `help`, `get`, `query`, `validate`, `view`, and every mutation, must include it. Write `reason` as one non-empty, single-line plain-text sentence in the user's language, no longer than 240 characters, describing the user-visible purpose of this specific call. Do not include line breaks, control characters, or bidirectional text controls. Do not use it to assert success or authorization: it is untrusted display and audit metadata only and never grants permission, approval, or access.
+
+The native request is typed and operation-specific. Put the document in `request.filePath`; use `request.target` for an exact DOM path, `request.parent` plus `request.element` for insertion, `request.properties` for provider-neutral property values, and `request.outputPath` only for a rendering operation. Never send provider command tokens, document-format tokens, output flags, or shell syntax. The host validates the typed request, generates deterministic provider argv, freezes it for approval, and regenerates it before execution.
 
 Before the first document operation in a run, check the managed engine:
 
 ```json
-{ "operation": "status" }
+{ "request": { "operation": "status" }, "reason": "Check whether document tools are available" }
 ```
 
 When an element, property, or DOM path is uncertain, disclose only the relevant provider schema. For example:
 
 ```json
-{ "operation": "help", "arguments": ["docx", "add", "paragraph", "--json"] }
+{
+  "request": {
+    "operation": "help",
+    "verb": "add",
+    "element": "paragraph"
+  },
+  "reason": "Check how to add the requested document paragraph"
+}
 ```
 
 Do not use a raw batch command. Submit each supported native operation separately and inspect its result before depending on it.
 
-The managed runtime currently rejects the provider's ambiguous `data` property because it can be
-interpreted as either inline content or a local file. Build tables through explicit table, row, and
-cell operations instead of passing `--prop data=...`.
+The managed runtime rejects the provider's ambiguous `data` property because it can be interpreted
+as either inline content or a local file. Build tables through explicit typed table, row, and cell
+operations instead.
 
 ## Script authoring and observation contract
 
-The managed Artifact Runtime exposes these document libraries:
+Select the `documents` runtime profile. The logical saved-script command selects its runtime
+family; the model does not select a provider, runtime kind, dependency set, or version:
 
-| Runtime | Script | Package requirement   | Use                                                                        |
-| ------- | ------ | --------------------- | -------------------------------------------------------------------------- |
-| Node.js | `.mjs` | `docx` `9.6.1`        | Create data-driven `.docx` documents with reusable JavaScript layout code. |
-| Python  | `.py`  | `python-docx` `1.2.0` | Create or transform `.docx` content with Python.                           |
+| Command  | Script | Profile library               | Use                                                                        |
+| -------- | ------ | ----------------------------- | -------------------------------------------------------------------------- |
+| `node`   | `.mjs` | `docx`                        | Create data-driven `.docx` documents with reusable JavaScript layout code. |
+| `python` | `.py`  | `python-docx` (`docx` import) | Create or transform `.docx` content with Python.                           |
 
-Declare only the packages the selected script actually imports. Package names and versions belong
-in `runtime.requiredPackages`; never install them from the script.
+Set the top-level `runtimeProfile` field to `documents`. Do not send a `runtime` object and do not
+copy a provider, kind, package name, or package version into the tool call. The host maps `node`
+or `python` to the matching profile entry, resolves the pinned dependencies, verifies the managed
+runtime, and freezes the exact resolution and integrity identity before execution.
 
 1. Put substantial program logic in a saved `.py` or `.mjs` file. Do not pass artifact-producing
    code through `python -c`, `node -e`, a heredoc, shell redirection, or another opaque inline form.
-2. Make inputs and outputs explicit script arguments. Avoid hard-coded machine-specific paths, and
+2. Make inputs and outputs explicit script parameters. Avoid hard-coded machine-specific paths, and
    make a rerun deterministic where practical.
-3. Execute the saved file through `run_command` with the managed Artifact Runtime. Declare every
-   runtime package the script requires; dependency resolution is preflight, never implicit package
-   installation.
+3. Execute the saved file through `run_command` with `runtimeProfile="documents"`. Dependency and
+   runtime resolution is host-owned preflight, never implicit package installation.
 4. Set `observe.kinds` to `["office"]`. List every `.docx` file that should be created or modified
    in `observe.expectedOutputs`. Paths are resolved relative to the command `cwd` and each expected
    output is observed directly. Do not add its parent merely because the output is outside the
@@ -67,18 +78,14 @@ in `runtime.requiredPackages`; never install them from the script.
    command may do and does not give an arbitrary script the native tool's staging or rollback
    guarantees.
 
-For example, after creating `scripts/build_report.mjs` with a file-editing tool, execute that exact
-file with the managed Node.js runtime and observe its declared output:
+For example, after creating `scripts/build_report.mjs` with a file-editing tool, run the Node.js
+entrypoint and observe its declared output:
 
 ```json
 {
   "command": "node scripts/build_report.mjs --output outputs/report.docx",
   "cwd": ".",
-  "runtime": {
-    "provider": "managedArtifact",
-    "kind": "node",
-    "requiredPackages": [{ "name": "docx", "version": "9.6.1" }]
-  },
+  "runtimeProfile": "documents",
   "observe": {
     "kinds": ["office"],
     "expectedOutputs": ["outputs/report.docx"]
@@ -87,8 +94,28 @@ file with the managed Node.js runtime and observe its declared output:
 }
 ```
 
-Keep `node` as the logical first command token. The host binds it to the selected managed runtime;
-never discover or persist the runtime's private executable path in the script or command.
+The equivalent Python route keeps the same profile and changes only the reviewed script and its
+logical entrypoint:
+
+```json
+{
+  "command": "python scripts/build_report.py --output outputs/report.docx",
+  "cwd": ".",
+  "runtimeProfile": "documents",
+  "observe": {
+    "kinds": ["office"],
+    "expectedOutputs": ["outputs/report.docx"]
+  },
+  "reason": "Generate the requested report reproducibly"
+}
+```
+
+Keep `node` or `python` as the logical first command token. The host binds it to the profile's
+managed executable; never discover or persist a private executable path. If profile preflight
+fails, preserve that error. Do not remove `runtimeProfile`, use a system executable, install a
+package, or guess another version. Use the native Office path only when it supports the requested
+work, or rewrite and review a script for the other profile entrypoint before retrying with the same
+profile. Never run a `.mjs` file as Python or a `.py` file as Node.js.
 
 After every observed command, inspect `artifactObservation` even if the command failed, timed out,
 or was cancelled:
@@ -116,9 +143,11 @@ Create a real Word document:
 
 ```json
 {
-  "operation": "create",
-  "path": "report.docx",
-  "arguments": ["--locale", "zh-CN", "--json"],
+  "request": {
+    "operation": "create",
+    "filePath": "report.docx",
+    "locale": "zh-CN"
+  },
   "reason": "Create the requested Word document"
 }
 ```
@@ -127,36 +156,32 @@ Add a structurally styled heading, then a normal paragraph:
 
 ```json
 {
-  "operation": "add",
-  "path": "report.docx",
-  "arguments": [
-    "/body",
-    "--type",
-    "paragraph",
-    "--prop",
-    "text=Quarterly Report",
-    "--prop",
-    "style=Heading1",
-    "--json"
-  ],
+  "request": {
+    "operation": "add",
+    "filePath": "report.docx",
+    "parent": "/body",
+    "element": "paragraph",
+    "properties": {
+      "text": "Quarterly Report",
+      "style": "Heading1"
+    }
+  },
   "reason": "Add the document heading"
 }
 ```
 
 ```json
 {
-  "operation": "add",
-  "path": "report.docx",
-  "arguments": [
-    "/body",
-    "--type",
-    "paragraph",
-    "--prop",
-    "text=Revenue and operating results are summarized below.",
-    "--prop",
-    "style=Normal",
-    "--json"
-  ],
+  "request": {
+    "operation": "add",
+    "filePath": "report.docx",
+    "parent": "/body",
+    "element": "paragraph",
+    "properties": {
+      "text": "Revenue and operating results are summarized below.",
+      "style": "Normal"
+    }
+  },
   "reason": "Add the introductory paragraph"
 }
 ```
@@ -164,7 +189,15 @@ Add a structurally styled heading, then a normal paragraph:
 Read back the body structure and content:
 
 ```json
-{ "operation": "get", "path": "report.docx", "arguments": ["/body", "--depth", "2", "--json"] }
+{
+  "request": {
+    "operation": "get",
+    "filePath": "report.docx",
+    "target": "/body",
+    "depth": 2
+  },
+  "reason": "Verify the document body structure and content"
+}
 ```
 
 To preserve an existing source while editing, set `destinationPath` on the first mutation. The
@@ -173,10 +206,13 @@ new file. Apply later mutations to `revised.docx` itself so earlier changes are 
 
 ```json
 {
-  "operation": "set",
-  "path": "source.docx",
-  "destinationPath": "revised.docx",
-  "arguments": ["/body/p[1]", "--prop", "text=Revised heading", "--json"],
+  "request": {
+    "operation": "set",
+    "filePath": "source.docx",
+    "destinationPath": "revised.docx",
+    "target": "/body/p[1]",
+    "properties": { "text": "Revised heading" }
+  },
   "reason": "Create a revised copy without overwriting the source"
 }
 ```
@@ -185,10 +221,13 @@ Render the first page to a workspace PNG. Rendering writes `outputPath`, so it f
 
 ```json
 {
-  "operation": "view",
-  "path": "report.docx",
-  "arguments": ["screenshot", "--page", "1", "--json"],
-  "outputPath": "report-preview.png",
+  "request": {
+    "operation": "view",
+    "filePath": "report.docx",
+    "mode": "screenshot",
+    "pages": [{ "start": 1 }],
+    "outputPath": "report-preview.png"
+  },
   "reason": "Render the finished document for visual inspection"
 }
 ```
@@ -196,7 +235,13 @@ Render the first page to a workspace PNG. Rendering writes `outputPath`, so it f
 Validate the OOXML package:
 
 ```json
-{ "operation": "validate", "path": "report.docx", "arguments": ["--json"] }
+{
+  "request": {
+    "operation": "validate",
+    "filePath": "report.docx"
+  },
+  "reason": "Validate the finished Word document"
+}
 ```
 
 ## Create
@@ -215,7 +260,7 @@ Validate the OOXML package:
 3. Prefer targeted native operations for local changes. Use a saved script only when its coordinated
    transformation is materially clearer or more reproducible than many isolated calls.
 4. With the native path, use `destinationPath` for save-as edits. With the script path, pass distinct
-   input and output arguments. Omit the distinct destination only when the user clearly requested
+   input and output parameters. Omit the distinct destination only when the user clearly requested
    in-place editing.
 5. Re-inspect and render the result. Verify both the intended change and preservation of surrounding content, and reconcile those checks with the observed file effects.
 

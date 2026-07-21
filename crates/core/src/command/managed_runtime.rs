@@ -1,9 +1,14 @@
 use super::*;
+#[cfg(test)]
 use crate::artifact_runtime::{
-    ArtifactRuntimeError, ArtifactRuntimeErrorCode, ArtifactRuntimeInvocation, ArtifactRuntimeKind,
-    ArtifactRuntimePreflight, ArtifactRuntimeProvider, ArtifactRuntimeRecovery,
-    ArtifactRuntimeRequirement, ARTIFACT_RUNTIME_PROVIDER_ID,
+    ArtifactRuntimeError, ArtifactRuntimeKind, ArtifactRuntimePreflight, ArtifactRuntimeRequirement,
 };
+use crate::artifact_runtime::{
+    ArtifactRuntimeErrorCode, ArtifactRuntimeInvocation, ArtifactRuntimeProvider,
+    ArtifactRuntimeRecovery, ARTIFACT_RUNTIME_PROVIDER_ID,
+};
+#[cfg(test)]
+use crate::AgentCommandRuntimeResolvedPackage;
 use std::ffi::{OsStr, OsString};
 
 const MAX_RUNTIME_PACKAGES: usize = 32;
@@ -13,6 +18,7 @@ const MAX_PACKAGE_VERSION_BYTES: usize = 64;
 const ERROR_INVALID_REQUEST: &str = "artifactRuntime.invalidRequest";
 const ERROR_INVALID_COMMAND: &str = "artifactRuntime.invalidCommandShape";
 const ERROR_UNAVAILABLE: &str = "artifactRuntime.unavailable";
+#[cfg(test)]
 const ERROR_MISSING_DEPENDENCIES: &str = "artifactRuntime.missingDependencies";
 const ERROR_LAUNCH_FAILED: &str = "artifactRuntime.launchFailed";
 const ERROR_IO: &str = "artifactRuntime.io";
@@ -33,7 +39,7 @@ pub fn run_authorized_command_with_artifact_runtime(
     action_cancel_flag: Option<Arc<AtomicBool>>,
     artifact_runtime: Option<&ArtifactRuntimeProvider>,
 ) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
-    if request.runtime.is_none() {
+    if request.runtime.is_none() && request.runtime_binding.is_none() {
         return run_authorized_command(
             workspace_root,
             request,
@@ -72,83 +78,42 @@ pub fn run_authorized_command_with_artifact_runtime(
         )
     });
 
-    let runtime = request.runtime.as_ref().expect("runtime checked above");
-    let provider_metadata =
-        artifact_runtime.map(|provider| provider as &dyn ManagedRuntimeProvider);
-    let validation_error = validate_command_runtime_request(runtime)
-        .err()
-        .map(|message| (ERROR_INVALID_REQUEST, message))
-        .or_else(|| {
-            validate_managed_artifact_command_shape(&request.command, runtime)
-                .err()
-                .map(|message| (ERROR_INVALID_COMMAND, message))
-        });
-    let mut result = if let Some((code, message)) = validation_error {
-        runtime_failure_result(
-            root.as_deref(),
-            &cwd,
-            request,
-            runtime_resolution_error(
-                runtime,
-                provider_metadata,
-                code,
-                ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
-                &message,
-            ),
-            0,
-        )
-    } else if command_cancel_requested(&cancellation_token, action_cancel_flag.as_ref()) {
-        runtime_cancelled_result(
-            root.as_deref(),
-            &cwd,
-            request,
-            unresolved_runtime_resolution(runtime, provider_metadata),
-        )
-    } else if let Err(message) = validate_saved_script(
-        &cwd,
-        root.as_deref(),
-        permissions.read,
-        &parse_managed_artifact_command(&request.command, runtime)
-            .expect("shape validated above")
-            .script,
-    ) {
-        runtime_failure_result(
-            root.as_deref(),
-            &cwd,
-            request,
-            runtime_resolution_error(
-                runtime,
-                provider_metadata,
-                ERROR_INVALID_COMMAND,
-                ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
-                &message,
-            ),
-            0,
-        )
-    } else if let Some(provider) = artifact_runtime {
-        execute_with_provider(
+    let mut result = match (&request.runtime_binding, &request.runtime) {
+        (Some(binding), None) => execute_with_frozen_profile(
             root.as_deref(),
             &cwd,
             request,
             permissions,
             cancellation_token,
             action_cancel_flag,
-            provider,
-        )
-    } else {
-        runtime_failure_result(
+            artifact_runtime,
+            binding,
+        ),
+        (None, Some(legacy)) => runtime_failure_result(
             root.as_deref(),
             &cwd,
             request,
             runtime_resolution_error(
-                runtime,
-                None,
-                ERROR_UNAVAILABLE,
-                ArtifactRuntimeRecovery::InstallComponent.stable_name(),
-                "Managed Artifact Runtime 尚未安装或未由 host 配置。",
+                legacy,
+                super::COMMAND_RUNTIME_PROFILE_ERROR_LEGACY_REPREPARE,
+                "reprepare",
+                "该命令使用旧版模型提供的精确依赖请求，缺少审批前冻结的运行时身份；请重新准备命令。",
             ),
             0,
-        )
+        ),
+        (Some(binding), Some(_)) => runtime_failure_result(
+            root.as_deref(),
+            &cwd,
+            request,
+            binding_resolution_error(
+                binding,
+                ERROR_INVALID_REQUEST,
+                "reprepare",
+                "命令同时包含旧版 runtime request 和新版 runtime binding，已拒绝执行。",
+            ),
+            0,
+        ),
+        (None, None) => unreachable!("ordinary commands returned before runtime setup"),
     };
 
     if let Some((observer, before)) = observer.as_ref().zip(before) {
@@ -161,6 +126,144 @@ pub fn run_authorized_command_with_artifact_runtime(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn execute_with_frozen_profile(
+    root: Option<&Path>,
+    cwd: &Path,
+    request: &AgentCommandRequest,
+    permissions: AgentPermissions,
+    cancellation_token: AgentCancellationToken,
+    action_cancel_flag: Option<Arc<AtomicBool>>,
+    provider: Option<&ArtifactRuntimeProvider>,
+    binding: &AgentCommandRuntimeBinding,
+) -> AgentCommandExecutionResult {
+    if let Err(error) = super::validate_command_runtime_binding(binding) {
+        return runtime_failure_result(
+            root,
+            cwd,
+            request,
+            binding_resolution_error(binding, error.code(), error.recovery(), error.message()),
+            0,
+        );
+    }
+    if command_cancel_requested(&cancellation_token, action_cancel_flag.as_ref()) {
+        return runtime_cancelled_result(
+            root,
+            cwd,
+            request,
+            unresolved_binding_resolution(binding),
+        );
+    }
+    let parsed = match parse_managed_artifact_command(&request.command, binding.kind) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            return runtime_failure_result(
+                root,
+                cwd,
+                request,
+                binding_resolution_error(
+                    binding,
+                    ERROR_INVALID_COMMAND,
+                    ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
+                    &message,
+                ),
+                0,
+            )
+        }
+    };
+    if let Err(message) = validate_saved_script(cwd, root, permissions.read, &parsed.script) {
+        return runtime_failure_result(
+            root,
+            cwd,
+            request,
+            binding_resolution_error(
+                binding,
+                ERROR_INVALID_COMMAND,
+                ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
+                &message,
+            ),
+            0,
+        );
+    }
+    let Some(provider) = provider else {
+        return runtime_failure_result(
+            root,
+            cwd,
+            request,
+            binding_resolution_error(
+                binding,
+                ERROR_UNAVAILABLE,
+                ArtifactRuntimeRecovery::InstallComponent.stable_name(),
+                "Managed Artifact Runtime 尚未安装或未由 host 配置。",
+            ),
+            0,
+        );
+    };
+
+    // Resolve the trusted profile again immediately before spawn. Approval of a prepared binding
+    // never becomes approval of a subsequently upgraded, replaced, or reconfigured component.
+    let prepared =
+        match super::prepare_command_runtime_profile(provider, binding.profile, binding.kind) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return runtime_failure_result(
+                    root,
+                    cwd,
+                    request,
+                    binding_resolution_error(
+                        binding,
+                        error.code(),
+                        error.recovery(),
+                        error.message(),
+                    ),
+                    0,
+                )
+            }
+        };
+    if prepared.binding != *binding {
+        return runtime_failure_result(
+            root,
+            cwd,
+            request,
+            binding_resolution_error(
+                binding,
+                super::COMMAND_RUNTIME_PROFILE_ERROR_BINDING_MISMATCH,
+                "reprepare",
+                "Managed Artifact Runtime 在审批后发生变化；命令未启动，请重新准备并审批。",
+            ),
+            0,
+        );
+    }
+
+    let resolution = ready_binding_resolution(binding, &prepared.invocation);
+    let mut result = run_managed_process(
+        root,
+        cwd,
+        request,
+        &parsed,
+        &prepared.invocation,
+        resolution,
+        cancellation_token,
+        action_cancel_flag,
+    );
+    if let Err(error) = provider.verify_integrity() {
+        let code = format!("artifactRuntime.{}", error.code().stable_name());
+        let resolution = with_resolution_error(
+            result
+                .runtime
+                .take()
+                .unwrap_or_else(|| unresolved_binding_resolution(binding)),
+            &code,
+            error.recovery().stable_name(),
+            provider_error_message(error.code()),
+        );
+        result.error = resolution.message.clone();
+        result.runtime = Some(resolution);
+    }
+    result
+}
+
+#[cfg(test)]
 trait ManagedRuntimeProvider {
     fn preflight(
         &self,
@@ -175,6 +278,7 @@ trait ManagedRuntimeProvider {
     fn bundle_revision(&self) -> &str;
 }
 
+#[cfg(test)]
 impl ManagedRuntimeProvider for ArtifactRuntimeProvider {
     fn preflight(
         &self,
@@ -197,6 +301,7 @@ impl ManagedRuntimeProvider for ArtifactRuntimeProvider {
     }
 }
 
+#[cfg(test)]
 fn execute_with_provider<P: ManagedRuntimeProvider>(
     root: Option<&Path>,
     cwd: &Path,
@@ -222,7 +327,6 @@ fn execute_with_provider<P: ManagedRuntimeProvider>(
             request,
             runtime_resolution_error(
                 runtime,
-                Some(provider),
                 ERROR_INVALID_REQUEST,
                 ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
                 &message,
@@ -230,7 +334,7 @@ fn execute_with_provider<P: ManagedRuntimeProvider>(
             0,
         );
     }
-    let parsed = match parse_managed_artifact_command(&request.command, runtime) {
+    let parsed = match parse_managed_artifact_command(&request.command, runtime.kind) {
         Ok(parsed) => parsed,
         Err(message) => {
             return runtime_failure_result(
@@ -239,7 +343,6 @@ fn execute_with_provider<P: ManagedRuntimeProvider>(
                 request,
                 runtime_resolution_error(
                     runtime,
-                    Some(provider),
                     ERROR_INVALID_COMMAND,
                     ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
                     &message,
@@ -255,7 +358,6 @@ fn execute_with_provider<P: ManagedRuntimeProvider>(
             request,
             runtime_resolution_error(
                 runtime,
-                Some(provider),
                 ERROR_INVALID_COMMAND,
                 ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
                 &message,
@@ -277,7 +379,7 @@ fn execute_with_provider<P: ManagedRuntimeProvider>(
                 root,
                 cwd,
                 request,
-                resolution_from_provider_error(runtime, Some(provider), &error),
+                resolution_from_provider_error(runtime, &error),
                 0,
             );
         }
@@ -297,7 +399,6 @@ fn execute_with_provider<P: ManagedRuntimeProvider>(
             let resolved = resolved_packages(runtime, &status.dependencies);
             let mut resolution = runtime_resolution_error(
                 runtime,
-                Some(provider),
                 ERROR_MISSING_DEPENDENCIES,
                 ArtifactRuntimeRecovery::ChangeRequest.stable_name(),
                 &format!("Managed Artifact Runtime 缺少精确依赖：{missing}。"),
@@ -312,7 +413,7 @@ fn execute_with_provider<P: ManagedRuntimeProvider>(
                 root,
                 cwd,
                 request,
-                resolution_from_provider_error(runtime, Some(provider), &error),
+                resolution_from_provider_error(runtime, &error),
                 0,
             );
         }
@@ -360,13 +461,62 @@ pub(crate) fn validate_managed_artifact_command_shape(
     command: &str,
     runtime: &AgentCommandRuntimeRequest,
 ) -> Result<(), String> {
-    parse_managed_artifact_command(command, runtime).map(|_| ())
+    parse_managed_artifact_command(command, runtime.kind).map(|_| ())
+}
+
+pub(crate) fn infer_managed_artifact_command_kind(
+    command: &str,
+) -> Result<AgentCommandRuntimeKind, String> {
+    let tokens = managed_artifact_command_tokens(command)?;
+    let kind = match tokens[0].as_str() {
+        "node" => AgentCommandRuntimeKind::Node,
+        "python" | "python3" => AgentCommandRuntimeKind::Python,
+        _ => {
+            return Err(
+                "runtimeProfile 只支持以 `node <script>.mjs`、`python <script>.py` 或 `python3 <script>.py` 开始的直接脚本调用。"
+                    .to_string(),
+            )
+        }
+    };
+    parse_managed_artifact_command(command, kind)?;
+    Ok(kind)
 }
 
 fn parse_managed_artifact_command(
     command: &str,
-    runtime: &AgentCommandRuntimeRequest,
+    kind: AgentCommandRuntimeKind,
 ) -> Result<ManagedArtifactCommand, String> {
+    let tokens = managed_artifact_command_tokens(command)?;
+    let expected_programs: &[&str] = match kind {
+        AgentCommandRuntimeKind::Node => &["node"],
+        AgentCommandRuntimeKind::Python => &["python", "python3"],
+    };
+    if !expected_programs.contains(&tokens[0].as_str()) {
+        return Err(format!(
+            "runtime.kind={} 要求命令首 token 为 {}。",
+            runtime_kind_name(kind),
+            expected_programs.join(" 或 ")
+        ));
+    }
+    let script = &tokens[1];
+    let expected_extension = match kind {
+        AgentCommandRuntimeKind::Node => "mjs",
+        AgentCommandRuntimeKind::Python => "py",
+    };
+    if Path::new(script).extension().and_then(OsStr::to_str) != Some(expected_extension) {
+        return Err(format!(
+            "Managed Artifact Runtime 的 {} 调用必须以已保存的 .{expected_extension} 脚本作为第二个 token。",
+            runtime_kind_name(kind)
+        ));
+    }
+
+    Ok(ManagedArtifactCommand {
+        script: script.clone(),
+        process_arguments: tokens[1..].iter().map(OsString::from).collect(),
+    })
+}
+
+fn managed_artifact_command_tokens(command: &str) -> Result<Vec<String>, String> {
     let lexed = lex_command(command).map_err(|error| {
         format!(
             "Managed Artifact Runtime 命令语法无效（{}）：{}",
@@ -387,38 +537,13 @@ fn parse_managed_artifact_command(
     if tokens.len() < 2 {
         return Err("Managed Artifact Runtime 命令必须包含一个已保存的脚本路径。".to_string());
     }
-    let expected_programs: &[&str] = match runtime.kind {
-        AgentCommandRuntimeKind::Node => &["node"],
-        AgentCommandRuntimeKind::Python => &["python", "python3"],
-    };
-    if !expected_programs.contains(&tokens[0].as_str()) {
-        return Err(format!(
-            "runtime.kind={} 要求命令首 token 为 {}。",
-            runtime_kind_name(runtime.kind),
-            expected_programs.join(" 或 ")
-        ));
-    }
     let script = &tokens[1];
     if script.starts_with('-') {
         return Err(
             "Managed Artifact Runtime 禁止 -e、-c、-m 及其他内联代码或启动选项。".to_string(),
         );
     }
-    let expected_extension = match runtime.kind {
-        AgentCommandRuntimeKind::Node => "mjs",
-        AgentCommandRuntimeKind::Python => "py",
-    };
-    if Path::new(script).extension().and_then(OsStr::to_str) != Some(expected_extension) {
-        return Err(format!(
-            "Managed Artifact Runtime 的 {} 调用必须以已保存的 .{expected_extension} 脚本作为第二个 token。",
-            runtime_kind_name(runtime.kind)
-        ));
-    }
-
-    Ok(ManagedArtifactCommand {
-        script: script.clone(),
-        process_arguments: tokens[1..].iter().map(OsString::from).collect(),
-    })
+    Ok(tokens.clone())
 }
 
 pub(crate) fn validate_command_runtime_request(
@@ -714,6 +839,7 @@ fn configure_managed_environment(command: &mut Command, invocation: &ArtifactRun
     command.env("CI", "1");
 }
 
+#[cfg(test)]
 fn ready_resolution(
     runtime: &AgentCommandRuntimeRequest,
     invocation: &ArtifactRuntimeInvocation,
@@ -721,6 +847,8 @@ fn ready_resolution(
     AgentCommandRuntimeResolution {
         schema_version: AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
         provider_id: invocation.provider_id().to_string(),
+        profile: None,
+        profile_revision: None,
         bundle_version: Some(invocation.bundle_version().to_string()),
         bundle_revision: Some(invocation.bundle_revision().to_string()),
         kind: runtime.kind,
@@ -740,6 +868,28 @@ fn ready_resolution(
     }
 }
 
+fn ready_binding_resolution(
+    binding: &AgentCommandRuntimeBinding,
+    invocation: &ArtifactRuntimeInvocation,
+) -> AgentCommandRuntimeResolution {
+    AgentCommandRuntimeResolution {
+        schema_version: AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
+        provider_id: invocation.provider_id().to_string(),
+        profile: Some(binding.profile),
+        profile_revision: Some(binding.profile_revision.clone()),
+        bundle_version: Some(invocation.bundle_version().to_string()),
+        bundle_revision: Some(invocation.bundle_revision().to_string()),
+        kind: binding.kind,
+        runtime_version: Some(invocation.version().to_string()),
+        runtime_fingerprint: Some(invocation.runtime_fingerprint().to_string()),
+        resolved_packages: binding.resolved_packages.clone(),
+        error_code: None,
+        recovery: None,
+        message: None,
+    }
+}
+
+#[cfg(test)]
 fn resolved_packages(
     runtime: &AgentCommandRuntimeRequest,
     available: &[crate::artifact_runtime::ArtifactRuntimeDependency],
@@ -765,7 +915,6 @@ fn resolved_packages(
 
 fn runtime_resolution_error(
     runtime: &AgentCommandRuntimeRequest,
-    provider: Option<&dyn ManagedRuntimeProvider>,
     code: &str,
     recovery: &str,
     message: &str,
@@ -773,8 +922,10 @@ fn runtime_resolution_error(
     AgentCommandRuntimeResolution {
         schema_version: AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
         provider_id: ARTIFACT_RUNTIME_PROVIDER_ID.to_string(),
-        bundle_version: provider.map(|provider| provider.bundle_version().to_string()),
-        bundle_revision: provider.map(|provider| provider.bundle_revision().to_string()),
+        profile: None,
+        profile_revision: None,
+        bundle_version: None,
+        bundle_revision: None,
         kind: runtime.kind,
         runtime_version: None,
         runtime_fingerprint: None,
@@ -785,14 +936,36 @@ fn runtime_resolution_error(
     }
 }
 
+fn binding_resolution_error(
+    binding: &AgentCommandRuntimeBinding,
+    code: &str,
+    recovery: &str,
+    message: &str,
+) -> AgentCommandRuntimeResolution {
+    AgentCommandRuntimeResolution {
+        schema_version: AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
+        provider_id: binding.provider_id.clone(),
+        profile: Some(binding.profile),
+        profile_revision: Some(binding.profile_revision.clone()),
+        bundle_version: Some(binding.bundle_version.clone()),
+        bundle_revision: Some(binding.bundle_revision.clone()),
+        kind: binding.kind,
+        runtime_version: Some(binding.runtime_version.clone()),
+        runtime_fingerprint: Some(binding.runtime_fingerprint.clone()),
+        resolved_packages: binding.resolved_packages.clone(),
+        error_code: Some(code.to_string()),
+        recovery: Some(recovery.to_string()),
+        message: Some(message.to_string()),
+    }
+}
+
+#[cfg(test)]
 fn resolution_from_provider_error(
     runtime: &AgentCommandRuntimeRequest,
-    provider: Option<&dyn ManagedRuntimeProvider>,
     error: &ArtifactRuntimeError,
 ) -> AgentCommandRuntimeResolution {
     runtime_resolution_error(
         runtime,
-        provider,
         &format!("artifactRuntime.{}", error.code().stable_name()),
         error.recovery().stable_name(),
         provider_error_message(error.code()),
@@ -831,6 +1004,7 @@ fn with_resolution_error(
     resolution
 }
 
+#[cfg(test)]
 fn unresolved_runtime_resolution(
     runtime: &AgentCommandRuntimeRequest,
     provider: Option<&dyn ManagedRuntimeProvider>,
@@ -838,12 +1012,34 @@ fn unresolved_runtime_resolution(
     AgentCommandRuntimeResolution {
         schema_version: AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
         provider_id: ARTIFACT_RUNTIME_PROVIDER_ID.to_string(),
+        profile: None,
+        profile_revision: None,
         bundle_version: provider.map(|provider| provider.bundle_version().to_string()),
         bundle_revision: provider.map(|provider| provider.bundle_revision().to_string()),
         kind: runtime.kind,
         runtime_version: None,
         runtime_fingerprint: None,
         resolved_packages: Vec::new(),
+        error_code: None,
+        recovery: None,
+        message: None,
+    }
+}
+
+fn unresolved_binding_resolution(
+    binding: &AgentCommandRuntimeBinding,
+) -> AgentCommandRuntimeResolution {
+    AgentCommandRuntimeResolution {
+        schema_version: AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
+        provider_id: binding.provider_id.clone(),
+        profile: Some(binding.profile),
+        profile_revision: Some(binding.profile_revision.clone()),
+        bundle_version: Some(binding.bundle_version.clone()),
+        bundle_revision: Some(binding.bundle_revision.clone()),
+        kind: binding.kind,
+        runtime_version: Some(binding.runtime_version.clone()),
+        runtime_fingerprint: Some(binding.runtime_fingerprint.clone()),
+        resolved_packages: binding.resolved_packages.clone(),
         error_code: None,
         recovery: None,
         message: None,
@@ -899,6 +1095,7 @@ fn runtime_failure_result(
     }
 }
 
+#[cfg(test)]
 fn artifact_runtime_kind(kind: AgentCommandRuntimeKind) -> ArtifactRuntimeKind {
     match kind {
         AgentCommandRuntimeKind::Node => ArtifactRuntimeKind::Node,
@@ -1066,6 +1263,7 @@ mod tests {
             reason: None,
             observe: None,
             runtime: Some(runtime),
+            runtime_binding: None,
         };
         let provider = FakeProvider {
             preflight: std::sync::Mutex::new(Some(FakePreflight::Missing)),
@@ -1091,6 +1289,51 @@ mod tests {
     }
 
     #[test]
+    fn public_execution_retires_legacy_model_supplied_runtime_requests() {
+        let workspace = TempDir::new().unwrap();
+        fs::write(
+            workspace.path().join("build.py"),
+            "from pathlib import Path\nPath('must-not-exist').write_text('ran')\n",
+        )
+        .unwrap();
+        let request = AgentCommandRequest {
+            id: "runtime-legacy".to_string(),
+            command: "python build.py".to_string(),
+            cwd: None,
+            timeout_ms: Some(5_000),
+            approval_status: crate::AgentApprovalStatus::Approved,
+            risk_level: None,
+            reason: None,
+            observe: None,
+            runtime: Some(runtime(AgentCommandRuntimeKind::Python)),
+            runtime_binding: None,
+        };
+        let result = run_authorized_command_with_artifact_runtime(
+            Some(workspace.path()),
+            &request,
+            AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                command: crate::AgentCommandPermission::RequireApproval,
+                command_safety: crate::AgentCommandSafetyPolicy::Guarded,
+                patch: crate::AgentPatchPermission::RequireApproval,
+            },
+            CommandAuthorizationSource::ExplicitUser,
+            AgentCancellationToken::new(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, None);
+        assert_eq!(
+            result.runtime.unwrap().error_code.as_deref(),
+            Some(super::COMMAND_RUNTIME_PROFILE_ERROR_LEGACY_REPREPARE)
+        );
+        assert!(!workspace.path().join("must-not-exist").exists());
+    }
+
+    #[test]
     fn pre_cancelled_request_does_not_run_expensive_preflight() {
         let workspace = TempDir::new().unwrap();
         fs::write(workspace.path().join("build.py"), "print('never')\n").unwrap();
@@ -1104,6 +1347,7 @@ mod tests {
             reason: None,
             observe: None,
             runtime: Some(runtime(AgentCommandRuntimeKind::Python)),
+            runtime_binding: None,
         };
         let provider = FakeProvider {
             preflight: std::sync::Mutex::new(Some(FakePreflight::Missing)),
@@ -1179,6 +1423,7 @@ mod tests {
             reason: None,
             observe: None,
             runtime: Some(runtime(AgentCommandRuntimeKind::Node)),
+            runtime_binding: None,
         };
 
         let workspace_path = workspace.path().canonicalize().unwrap();

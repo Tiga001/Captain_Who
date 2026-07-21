@@ -1224,6 +1224,16 @@ fn io_error(operation: &str, error: std::io::Error) -> ArtifactRuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::CommandRuntimeProfileResolver;
+    use crate::command::{
+        run_authorized_command_with_artifact_runtime, CommandAuthorizationSource,
+        COMMAND_RUNTIME_PROFILE_ERROR_BINDING_MISMATCH,
+    };
+    use crate::{
+        AgentApprovalStatus, AgentCancellationToken, AgentCommandPermission, AgentCommandRequest,
+        AgentCommandRuntimeKind, AgentCommandRuntimeProfile, AgentCommandSafetyPolicy,
+        AgentPatchPermission, AgentPermissions, AgentReadPermission, AgentWritePermission,
+    };
     use std::fs::File;
     use std::io::Write;
 
@@ -1414,6 +1424,95 @@ mod tests {
             .unwrap()
             .starts_with(BUNDLE_REVISION_PREFIX));
         assert_eq!(status.runtimes.len(), 2);
+    }
+
+    #[test]
+    fn host_profiles_resolve_exact_versions_from_the_verified_receipt() {
+        let fixture = Fixture::new();
+        let provider = ArtifactRuntimeProvider::discover(&fixture.options()).unwrap();
+
+        let presentations = provider
+            .resolve_profile(
+                AgentCommandRuntimeProfile::Presentations,
+                AgentCommandRuntimeKind::Node,
+            )
+            .unwrap();
+        assert_eq!(presentations.runtime_version, ARTIFACT_RUNTIME_NODE_VERSION);
+        assert_eq!(presentations.bundle_revision, provider.bundle_revision());
+        assert_eq!(presentations.resolved_packages.len(), 1);
+        assert_eq!(presentations.resolved_packages[0].name, "pptxgenjs");
+        assert_eq!(presentations.resolved_packages[0].version, "4.0.1");
+        assert!(presentations
+            .profile_revision
+            .starts_with("artifact-runtime-profile-sha256-v1:"));
+
+        let spreadsheets = provider
+            .resolve_profile(
+                AgentCommandRuntimeProfile::Spreadsheets,
+                AgentCommandRuntimeKind::Python,
+            )
+            .unwrap();
+        assert_eq!(
+            spreadsheets.runtime_version,
+            ARTIFACT_RUNTIME_PYTHON_VERSION
+        );
+        assert_eq!(
+            spreadsheets
+                .resolved_packages
+                .iter()
+                .map(|package| (package.name.as_str(), package.version.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("openpyxl", "3.1.5"), ("xlsxwriter", "3.2.9")]
+        );
+    }
+
+    #[test]
+    fn execution_refuses_a_profile_binding_that_no_longer_matches_the_provider() {
+        let fixture = Fixture::new();
+        let provider = ArtifactRuntimeProvider::discover(&fixture.options()).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("build.mjs"), "// must never run\n").unwrap();
+        let mut binding = provider
+            .resolve_profile(
+                AgentCommandRuntimeProfile::Presentations,
+                AgentCommandRuntimeKind::Node,
+            )
+            .unwrap();
+        binding.bundle_revision.push_str("-replaced");
+        let request = AgentCommandRequest {
+            id: "runtime-binding-conflict".to_string(),
+            command: "node build.mjs".to_string(),
+            cwd: None,
+            timeout_ms: Some(5_000),
+            approval_status: AgentApprovalStatus::Approved,
+            risk_level: None,
+            reason: Some("verify frozen profile conflict".to_string()),
+            observe: None,
+            runtime: None,
+            runtime_binding: Some(Box::new(binding)),
+        };
+        let result = run_authorized_command_with_artifact_runtime(
+            Some(workspace.path()),
+            &request,
+            AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                command: AgentCommandPermission::RequireApproval,
+                command_safety: AgentCommandSafetyPolicy::Guarded,
+                patch: AgentPatchPermission::RequireApproval,
+            },
+            CommandAuthorizationSource::ExplicitUser,
+            AgentCancellationToken::new(),
+            None,
+            Some(&provider),
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, None);
+        assert_eq!(
+            result.runtime.unwrap().error_code.as_deref(),
+            Some(COMMAND_RUNTIME_PROFILE_ERROR_BINDING_MISMATCH)
+        );
     }
 
     #[test]

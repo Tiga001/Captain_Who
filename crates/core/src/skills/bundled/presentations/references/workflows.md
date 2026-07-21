@@ -19,52 +19,70 @@ scripted transformations unless the user explicitly requested an in-place edit.
 
 ## Native tool contract
 
-Call `office_presentation` with one JSON object per operation. `arguments` is an array of literal OfficeCLI tokens, not a shell command: keep each flag and flag value in separate entries. Never add shell quoting, redirects, pipes, an executable name, or a raw batch command.
+Call `office_presentation` once per operation with exactly this root envelope: `{ "request": { "operation": "...", ... }, "reason": "..." }`. Put every operation and operation-specific field inside `request`. Keep `reason` as the only root field. Every call, including `status`, `help`, `get`, `query`, `validate`, `view`, and every mutation, must include it. Write `reason` as one non-empty, single-line plain-text sentence in the user's language, no longer than 240 characters, describing the user-visible purpose of this specific call. Do not include line breaks, control characters, or bidirectional text controls. Do not use it to assert success or authorization: it is untrusted display and audit metadata only and never grants permission, approval, or access.
+
+The native request is typed and operation-specific. Put the deck in `request.filePath`; use `request.target` for an exact element path, `request.parent` plus `request.element` for insertion, `request.properties` for element content and layout, and `request.pages` plus `request.outputPath` for rendering. Never send provider command tokens, document-format tokens, output flags, or a raw batch command. The host validates the typed request, generates deterministic provider argv, freezes it for approval, and regenerates it before execution.
 
 Before the first presentation operation in a run, check the managed engine:
 
 ```json
-{ "operation": "status" }
+{ "request": { "operation": "status" }, "reason": "Check whether presentation tools are available" }
 ```
 
 Disclose only the schema needed for the next element. For example:
 
 ```json
-{ "operation": "help", "arguments": ["pptx", "add", "slide", "--json"] }
+{
+  "request": {
+    "operation": "help",
+    "verb": "add",
+    "element": "slide"
+  },
+  "reason": "Check how to add the requested presentation slide"
+}
 ```
 
 ```json
-{ "operation": "help", "arguments": ["pptx", "add", "shape", "--json"] }
+{
+  "request": {
+    "operation": "help",
+    "verb": "add",
+    "element": "shape"
+  },
+  "reason": "Check how to add the requested presentation shape"
+}
 ```
 
 Submit each supported native mutation separately. Prefer the stable canonical element path returned by `add` over guessing a positional shape index.
 
 The managed runtime currently rejects the provider's ambiguous `data` property because it can be
 interpreted as either inline content or a local file. Build tables through explicit table, row, and
-cell operations instead of passing `--prop data=...`. Diagram-like elements (`diagram`,
-`flowchart`, or `mermaid`) must explicitly use `--prop render=native`; browser-backed rendering is
-not permitted.
+cell operations instead of using a `data` property. For diagram-like elements (`diagram`,
+`flowchart`, or `mermaid`), the host forces the safe native renderer; browser-backed rendering is
+not permitted and the model does not select it.
 
 ## Script authoring and observation contract
 
-The managed Artifact Runtime exposes these presentation libraries:
+Select the `presentations` runtime profile. The logical saved-script command selects its runtime
+family; the model does not select a provider, runtime kind, dependency set, or version:
 
-| Runtime | Script | Package requirement   | Use                                                                    |
-| ------- | ------ | --------------------- | ---------------------------------------------------------------------- |
-| Node.js | `.mjs` | `pptxgenjs` `4.0.1`   | Create data-driven `.pptx` decks with reusable JavaScript layout code. |
-| Python  | `.py`  | `python-pptx` `1.0.2` | Create or transform `.pptx` content with Python.                       |
+| Command  | Script | Profile library               | Use                                                                    |
+| -------- | ------ | ----------------------------- | ---------------------------------------------------------------------- |
+| `node`   | `.mjs` | `pptxgenjs`                   | Create data-driven `.pptx` decks with reusable JavaScript layout code. |
+| `python` | `.py`  | `python-pptx` (`pptx` import) | Create or transform `.pptx` content with Python.                       |
 
-Declare only the packages the selected script actually imports. Package names and versions belong
-in `runtime.requiredPackages`; never install them from the script.
+Set the top-level `runtimeProfile` field to `presentations`. Do not send a `runtime` object and do
+not copy a provider, kind, package name, or package version into the tool call. The host maps
+`node` or `python` to the matching profile entry, resolves the pinned dependencies, verifies the
+managed runtime, and freezes the exact resolution and integrity identity before execution.
 
 1. Put substantial program logic in a saved `.py` or `.mjs` file. Do not pass artifact-producing
    code through `python -c`, `node -e`, a heredoc, shell redirection, or another opaque inline form.
-2. Make template, data, media, and output paths explicit script arguments. Avoid hard-coded
+2. Make template, data, media, and output paths explicit script parameters. Avoid hard-coded
    machine-specific paths, use deterministic slide and element ordering, and make a rerun
    deterministic where practical.
-3. Execute the saved file through `run_command` with the managed Artifact Runtime. Declare every
-   runtime package the script requires; dependency resolution is preflight, never implicit package
-   installation.
+3. Execute the saved file through `run_command` with `runtimeProfile="presentations"`. Dependency
+   and runtime resolution is host-owned preflight, never implicit package installation.
 4. Set `observe.kinds` to `["office"]`. List every `.pptx` file that should be created or modified
    in `observe.expectedOutputs`. Paths are resolved relative to the command `cwd` and each expected
    output is observed directly. Do not add its parent merely because the output is outside the
@@ -74,18 +92,14 @@ in `runtime.requiredPackages`; never install them from the script.
    command may do and does not give an arbitrary script the native tool's staging or rollback
    guarantees.
 
-For example, after creating `scripts/build_deck.mjs` with a file-editing tool, execute that exact
-file with the managed Node.js runtime and observe its declared output:
+For example, after creating `scripts/build_deck.mjs` with a file-editing tool, run the Node.js
+entrypoint and observe its declared output:
 
 ```json
 {
   "command": "node scripts/build_deck.mjs --output outputs/quarterly-plan.pptx",
   "cwd": ".",
-  "runtime": {
-    "provider": "managedArtifact",
-    "kind": "node",
-    "requiredPackages": [{ "name": "pptxgenjs", "version": "4.0.1" }]
-  },
+  "runtimeProfile": "presentations",
   "observe": {
     "kinds": ["office"],
     "expectedOutputs": ["outputs/quarterly-plan.pptx"]
@@ -94,8 +108,28 @@ file with the managed Node.js runtime and observe its declared output:
 }
 ```
 
-Keep `node` as the logical first command token. The host binds it to the selected managed runtime;
-never discover or persist the runtime's private executable path in the script or command.
+The equivalent Python route keeps the same profile and changes only the reviewed script and its
+logical entrypoint:
+
+```json
+{
+  "command": "python scripts/build_deck.py --output outputs/quarterly-plan.pptx",
+  "cwd": ".",
+  "runtimeProfile": "presentations",
+  "observe": {
+    "kinds": ["office"],
+    "expectedOutputs": ["outputs/quarterly-plan.pptx"]
+  },
+  "reason": "Generate the requested presentation reproducibly"
+}
+```
+
+Keep `node` or `python` as the logical first command token. The host binds it to the profile's
+managed executable; never discover or persist a private executable path. If profile preflight
+fails, preserve that error. Do not remove `runtimeProfile`, use a system executable, install a
+package, or guess another version. Use the native Office path only when it supports the requested
+work, or rewrite and review a script for the other profile entrypoint before retrying with the same
+profile. Never run a `.mjs` file as Python or a `.py` file as Node.js.
 
 After every observed command, inspect `artifactObservation` even if the command failed, timed out,
 or was cancelled:
@@ -123,9 +157,10 @@ Create a real presentation:
 
 ```json
 {
-  "operation": "create",
-  "path": "quarterly-plan.pptx",
-  "arguments": ["--json"],
+  "request": {
+    "operation": "create",
+    "filePath": "quarterly-plan.pptx"
+  },
   "reason": "Create the requested PowerPoint presentation"
 }
 ```
@@ -134,18 +169,16 @@ Add a slide with a structural title placeholder:
 
 ```json
 {
-  "operation": "add",
-  "path": "quarterly-plan.pptx",
-  "arguments": [
-    "/",
-    "--type",
-    "slide",
-    "--prop",
-    "title=Quarterly Plan",
-    "--prop",
-    "background=F4F7FB",
-    "--json"
-  ],
+  "request": {
+    "operation": "add",
+    "filePath": "quarterly-plan.pptx",
+    "parent": "/",
+    "element": "slide",
+    "properties": {
+      "title": "Quarterly Plan",
+      "background": "F4F7FB"
+    }
+  },
   "reason": "Add the title slide"
 }
 ```
@@ -154,30 +187,22 @@ Add a positioned text shape to the slide:
 
 ```json
 {
-  "operation": "add",
-  "path": "quarterly-plan.pptx",
-  "arguments": [
-    "/slide[1]",
-    "--type",
-    "shape",
-    "--prop",
-    "text=Revenue grew 18%",
-    "--prop",
-    "x=2cm",
-    "--prop",
-    "y=4cm",
-    "--prop",
-    "width=20cm",
-    "--prop",
-    "height=3cm",
-    "--prop",
-    "fill=4472C4",
-    "--prop",
-    "color=FFFFFF",
-    "--prop",
-    "size=24pt",
-    "--json"
-  ],
+  "request": {
+    "operation": "add",
+    "filePath": "quarterly-plan.pptx",
+    "parent": "/slide[1]",
+    "element": "shape",
+    "properties": {
+      "text": "Revenue grew 18%",
+      "x": "2cm",
+      "y": "4cm",
+      "width": "20cm",
+      "height": "3cm",
+      "fill": "4472C4",
+      "color": "FFFFFF",
+      "size": "24pt"
+    }
+  },
   "reason": "Add the key result shape"
 }
 ```
@@ -186,22 +211,29 @@ Read back the slide and its child elements:
 
 ```json
 {
-  "operation": "get",
-  "path": "quarterly-plan.pptx",
-  "arguments": ["/slide[1]", "--depth", "3", "--json"]
+  "request": {
+    "operation": "get",
+    "filePath": "quarterly-plan.pptx",
+    "target": "/slide[1]",
+    "depth": 3
+  },
+  "reason": "Verify the slide structure and content"
 }
 ```
 
-For the first save-as edit, keep `path` as the frozen source and supply a distinct
+For the first save-as edit, keep `filePath` as the frozen source and supply a distinct
 `destinationPath`. Apply later mutations to `quarterly-plan.pptx` itself so earlier changes are
 preserved:
 
 ```json
 {
-  "operation": "set",
-  "path": "template.pptx",
-  "destinationPath": "quarterly-plan.pptx",
-  "arguments": ["/slide[1]/shape[1]", "--prop", "text=Quarterly Plan", "--json"],
+  "request": {
+    "operation": "set",
+    "filePath": "template.pptx",
+    "destinationPath": "quarterly-plan.pptx",
+    "target": "/slide[1]/shape[1]",
+    "properties": { "text": "Quarterly Plan" }
+  },
   "reason": "Create the quarterly deck without overwriting the template"
 }
 ```
@@ -210,10 +242,13 @@ Render the changed slide to a workspace PNG:
 
 ```json
 {
-  "operation": "view",
-  "path": "quarterly-plan.pptx",
-  "arguments": ["screenshot", "--page", "1", "--json"],
-  "outputPath": "quarterly-plan-slide-1.png",
+  "request": {
+    "operation": "view",
+    "filePath": "quarterly-plan.pptx",
+    "mode": "screenshot",
+    "pages": [{ "start": 1 }],
+    "outputPath": "quarterly-plan-slide-1.png"
+  },
   "reason": "Render the changed slide for visual inspection"
 }
 ```
@@ -221,7 +256,13 @@ Render the changed slide to a workspace PNG:
 Validate the OOXML package:
 
 ```json
-{ "operation": "validate", "path": "quarterly-plan.pptx", "arguments": ["--json"] }
+{
+  "request": {
+    "operation": "validate",
+    "filePath": "quarterly-plan.pptx"
+  },
+  "reason": "Validate the finished PowerPoint presentation"
+}
 ```
 
 ## Create
@@ -241,7 +282,7 @@ Validate the OOXML package:
 3. Prefer targeted native slide or object operations for local edits. Use a saved script only when
    its coordinated transformation is materially clearer or more reproducible than many isolated calls.
 4. With the native path, use `destinationPath` to save to a new deck. With the script path, pass
-   distinct input and output arguments. Edit in place only when it was explicitly requested.
+   distinct input and output parameters. Edit in place only when it was explicitly requested.
 5. Render every changed slide and compare it with surrounding slides for continuity.
 
 ## Quality checks

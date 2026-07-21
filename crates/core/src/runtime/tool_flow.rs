@@ -197,22 +197,6 @@ pub(super) fn redact_tool_result_for_event(result: &AgentToolResult) -> AgentToo
     redacted
 }
 
-pub(super) fn redact_tool_call_for_event(call: &AgentToolCall) -> AgentToolCall {
-    let mut redacted = call.clone();
-    if redacted.tool != "write_file" {
-        return redacted;
-    }
-    let Some(args) = redacted.args.as_object_mut() else {
-        return redacted;
-    };
-    if let Some(content) = args.get("content").and_then(Value::as_str) {
-        let content_bytes = content.len() as u64;
-        args.insert("content".to_string(), json!("[stored in private draft]"));
-        args.insert("contentBytes".to_string(), json!(content_bytes));
-    }
-    redacted
-}
-
 pub(super) fn file_draft_from_tool_result(
     result: &AgentToolResult,
 ) -> Option<crate::protocol::AgentFileDraftSnapshot> {

@@ -141,10 +141,18 @@
   border-color: var(--mc-color-border-error);
 }
 
-.composer-skill-chip > svg {
+.composer-skill-chip__icon {
+  display: grid;
   width: var(--mc-icon-size-sm);
   height: var(--mc-icon-size-sm);
   flex: 0 0 auto;
+  place-items: center;
+}
+
+.composer-skill-chip__icon svg,
+.composer-skill-chip__icon img {
+  width: var(--mc-icon-size-sm);
+  height: var(--mc-icon-size-sm);
 }
 
 .composer-skill-chip__content {
@@ -466,9 +474,9 @@
   bottom: calc(100% + 10px);
   left: -12px;
   display: grid;
-  width: 316px;
-  padding: 12px;
-  gap: 4px;
+  width: 286px;
+  padding: 8px;
+  gap: 1px;
   background: var(--mc-color-surface-popover);
   border: 1px solid var(--mc-color-border-default);
   border-radius: var(--mc-radius-popover);
@@ -484,8 +492,8 @@
   width: 420px;
   max-width: min(420px, calc(100vw - 40px));
   max-height: min(540px, calc(100vh - 120px));
-  padding: 14px;
-  gap: 10px;
+  padding: 10px;
+  gap: 7px;
   overflow: hidden;
   color: var(--mc-color-text-primary);
   background: var(--mc-color-surface-popover);
@@ -498,13 +506,13 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 
 .composer-skill-menu__header > div {
   display: grid;
   min-width: 0;
-  gap: 2px;
+  gap: 1px;
 }
 
 .composer-skill-menu__header strong {
@@ -519,8 +527,8 @@
 
 .composer-skill-menu__header > button {
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   padding: 0;
   place-items: center;
   color: var(--mc-color-icon-subtle);
@@ -540,9 +548,9 @@
 .composer-skill-menu__search {
   display: flex;
   align-items: center;
-  min-height: 38px;
-  padding: 0 11px;
-  gap: 9px;
+  min-height: 36px;
+  padding: 0 10px;
+  gap: 8px;
   color: var(--mc-color-icon-subtle);
   background: var(--mc-color-surface-input);
   border: 1px solid var(--mc-color-border-subtle);
@@ -668,7 +676,7 @@
   display: grid;
   min-height: 0;
   max-height: 310px;
-  gap: 3px;
+  gap: 1px;
   overflow-y: auto;
   scrollbar-width: thin;
 }
@@ -676,8 +684,8 @@
 .composer-skill-option {
   display: grid;
   background: transparent;
-  border: 1px solid transparent;
-  border-radius: var(--mc-radius-xl);
+  border: 0;
+  border-radius: var(--mc-radius-lg);
 }
 
 .composer-skill-option:hover,
@@ -687,20 +695,19 @@
 
 .composer-skill-option[data-stale='true'] {
   background: var(--mc-color-surface-danger-subtle);
-  border-color: var(--mc-color-border-error);
 }
 
 .composer-skill-option__main {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
   align-items: center;
-  min-height: 62px;
-  padding: 8px 10px;
-  gap: 10px;
+  min-height: 38px;
+  padding: 3px 7px;
+  gap: 8px;
   color: var(--mc-color-text-primary);
   text-align: left;
   background: transparent;
-  border-radius: var(--mc-radius-xl);
+  border-radius: var(--mc-radius-lg);
 }
 
 .composer-skill-option__main:disabled {
@@ -709,52 +716,39 @@
 
 .composer-skill-option__icon {
   display: grid;
-  width: 32px;
-  height: 32px;
+  width: 24px;
+  height: 24px;
   place-items: center;
   color: var(--mc-color-text-accent);
-  background: var(--mc-color-surface-info-subtle);
-  border-radius: var(--mc-radius-lg);
+  background: transparent;
+  border-radius: var(--mc-radius-sm);
 }
 
 .composer-skill-option__icon svg,
+.composer-skill-option__icon img,
 .composer-skill-option__main > svg {
-  width: var(--mc-icon-size-base);
-  height: var(--mc-icon-size-base);
+  width: 22px;
+  height: 22px;
 }
 
-.composer-skill-option__content {
+.composer-skill-option__tooltip-anchor {
   display: grid;
+  width: 100%;
   min-width: 0;
-  gap: 3px;
 }
 
-.composer-skill-option__content strong,
-.composer-skill-option__content > span,
-.composer-skill-option__content > small {
+.composer-skill-option__name {
+  min-width: 0;
   overflow: hidden;
+  font-size: var(--mc-font-size-md);
+  font-weight: var(--mc-font-weight-strong);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.composer-skill-option__content strong {
-  font-size: var(--mc-font-size-md);
-  font-weight: var(--mc-font-weight-strong);
-}
-
-.composer-skill-option__content > span {
-  color: var(--mc-color-text-muted);
-  font-size: var(--mc-font-size-xs);
-}
-
-.composer-skill-option__content > small {
-  color: var(--mc-color-text-subtle);
-  font-size: var(--mc-font-size-xs);
-}
-
 .composer-skill-option__update {
   min-height: 28px;
-  padding: 0 10px 6px 52px;
+  padding: 0 10px 5px 39px;
   color: var(--mc-color-text-accent);
   text-align: left;
   background: transparent;
@@ -774,8 +768,8 @@
 }
 
 .composer-add-menu p {
-  margin: 0 0 4px;
-  padding: 0 10px;
+  margin: 0 0 2px;
+  padding: 0 8px;
   color: var(--mc-color-text-subtle);
   font-size: var(--mc-font-size-md);
   font-weight: var(--mc-font-weight-strong);
@@ -786,14 +780,14 @@
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  min-height: 48px;
-  padding: 0 10px;
-  gap: 14px;
+  min-height: 40px;
+  padding: 0 8px;
+  gap: 10px;
   color: var(--mc-color-text-secondary);
   text-align: left;
   background: transparent;
   border: 0;
-  border-radius: var(--mc-radius-2xl);
+  border-radius: var(--mc-radius-lg);
 }
 
 .composer-add-menu button:hover {
@@ -801,14 +795,14 @@
 }
 
 .composer-add-menu button svg {
-  width: var(--mc-icon-size-xl);
-  height: var(--mc-icon-size-xl);
+  width: var(--mc-icon-size-lg);
+  height: var(--mc-icon-size-lg);
   color: var(--mc-color-icon-muted);
 }
 
 .composer-add-menu button span {
   color: var(--mc-color-text-primary);
-  font-size: var(--mc-font-size-lg);
+  font-size: var(--mc-font-size-md);
   font-weight: var(--mc-font-weight-heavy);
   line-height: var(--mc-line-height-none);
   white-space: nowrap;

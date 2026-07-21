@@ -73,9 +73,8 @@ use tool_flow::{
     approve_proposed_action, build_tool_observation_message, cancelled_output, done_event,
     execute_host_action_on_blocking_thread, execute_tool_on_blocking_thread,
     extract_reason_from_args, failed_tool_call_result, file_draft_from_tool_result,
-    generate_run_id, llm_image_message_from_tool_result, redact_tool_call_for_event,
-    redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
-    tool_calls_from_response,
+    generate_run_id, llm_image_message_from_tool_result, redact_tool_result_for_event,
+    sanitize_max_tokens, sanitize_temperature, state_event, tool_calls_from_response,
 };
 use tool_input_stream::ToolInputStreamObservers;
 
@@ -183,6 +182,7 @@ impl AgentRuntime {
             context_compaction_services,
             skill_resources,
             office_engine,
+            command_runtime_profile_resolver,
         } = host_services.unwrap_or_default();
         let run_id = run_id.unwrap_or_else(generate_run_id);
         let context = input.context.clone();
@@ -288,6 +288,7 @@ impl AgentRuntime {
             .with_cancellation(cancellation_token.clone())
             .with_runtime_services(run_id.clone(), storage)
             .with_skill_resources(skill_resources)
+            .with_command_runtime_profile_resolver(command_runtime_profile_resolver)
             .with_text_output_budget(tool_output_budget);
         event_stream.emit(state_event(
             &run_id,
@@ -822,7 +823,7 @@ impl AgentRuntime {
                         } else {
                             AgentApprovalStatus::NotRequired
                         },
-                        reason: reason.or_else(|| Some("agent requested tool call".to_string())),
+                        reason,
                     };
                     let is_policy_process_tool =
                         call.tool == "run_command" || call.tool == "skills_run_script";
@@ -942,15 +943,17 @@ impl AgentRuntime {
                             };
                         }
                     }
+                    let trace_call = tool_registry.trace_call_projection(&call);
                     conversation_trace
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
-                        .record_tool_call(&call);
+                        .record_tool_call(&trace_call);
                     pending_trace_baseline =
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+                    let event_call = tool_registry.event_call_projection(&call);
                     event_stream.emit(AgentEvent::ToolCall {
                         run_id: run_id.clone(),
-                        call: redact_tool_call_for_event(&call),
+                        call: event_call,
                     });
                     if cancellation_token.is_cancelled() {
                         return Ok(cancelled_output(

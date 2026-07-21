@@ -1,31 +1,32 @@
 {
-  "contractVersion": 2,
+  "contractVersion": 4,
   "engine": "officecli",
   "tool": "office_document",
   "extensions": [".docx"],
   "modes": {
     "native": {
       "tool": "office_document",
-      "bestFor": "targeted_structured_operations"
+      "bestFor": "targeted_structured_operations",
+      "requestStyle": "typed_request_envelope",
+      "envelopeField": "request",
+      "reasonField": "reason",
+      "filePathField": "filePath",
+      "providerArguments": "host_generated"
     },
     "script": {
       "editTools": ["apply_patch", "write_file"],
       "executionTool": "run_command",
-      "runtimes": [
-        {
-          "provider": "managedArtifact",
-          "kind": "python",
-          "extension": ".py",
-          "availablePackages": [{ "name": "python-docx", "version": "1.2.0" }]
-        },
-        {
-          "provider": "managedArtifact",
-          "kind": "node",
-          "extension": ".mjs",
-          "availablePackages": [{ "name": "docx", "version": "9.6.1" }]
-        }
+      "runtimeProfile": "documents",
+      "runtimeProfileField": "runtimeProfile",
+      "entrypoints": [
+        { "command": "python", "extension": ".py" },
+        { "command": "node", "extension": ".mjs" }
       ],
-      "requiredPackagesField": "runtime.requiredPackages",
+      "resolution": {
+        "authority": "host",
+        "runtimeKindFrom": "command",
+        "dependencyPolicy": "profilePinned"
+      },
       "observation": {
         "kind": "office",
         "expectedOutputsField": "observe.expectedOutputs",

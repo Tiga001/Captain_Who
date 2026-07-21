@@ -322,6 +322,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         reason: Some("verify approval cancellation race".to_string()),
         observe: None,
         runtime: None,
+        runtime_binding: None,
     };
     let call = command_tool_call(&command);
     let checkpoint = AgentRunCheckpoint {
@@ -633,6 +634,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         reason: Some("exercise cancellation".to_string()),
         observe: None,
         runtime: None,
+        runtime_binding: None,
     };
     let call = command_tool_call(&command);
     let checkpoint = AgentRunCheckpoint {

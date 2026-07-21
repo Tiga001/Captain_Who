@@ -23,6 +23,8 @@ pub struct ToolExecutionContext {
     storage: Option<Arc<StorageService>>,
     text_output_budget: ContextTextBudget,
     skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
+    command_runtime_profile_resolver:
+        Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
 }
 
 impl ToolExecutionContext {
@@ -49,6 +51,7 @@ impl ToolExecutionContext {
             storage: None,
             text_output_budget: ContextTextBudget::heuristic_default(),
             skill_resources: None,
+            command_runtime_profile_resolver: None,
         }
     }
 
@@ -77,6 +80,14 @@ impl ToolExecutionContext {
         resources: Option<Arc<crate::skills::SkillResourceSession>>,
     ) -> Self {
         self.skill_resources = resources;
+        self
+    }
+
+    pub(crate) fn with_command_runtime_profile_resolver(
+        mut self,
+        resolver: Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
+    ) -> Self {
+        self.command_runtime_profile_resolver = resolver;
         self
     }
 
@@ -152,6 +163,24 @@ impl ToolExecutionContext {
         self.skill_resources.as_ref().ok_or_else(|| {
             AgentError::new("当前运行没有激活可访问资源的 Skill；请先选择并激活一个 Skill。")
         })
+    }
+
+    pub(super) fn command_runtime_profile_resolver(
+        &self,
+    ) -> AgentResult<&Arc<dyn crate::command::CommandRuntimeProfileResolver>> {
+        self.command_runtime_profile_resolver
+            .as_ref()
+            .ok_or_else(|| {
+                AgentError::structured(
+                    "artifactRuntime.unavailable",
+                    "Managed Artifact Runtime 尚未安装或未由 host 配置。",
+                    serde_json::json!({
+                        "type": "commandRuntimeProfile",
+                        "code": "artifactRuntime.unavailable",
+                        "recovery": "installComponent"
+                    }),
+                )
+            })
     }
 
     pub(super) fn resolve_existing_path(&self, input_path: &str) -> AgentResult<PathBuf> {

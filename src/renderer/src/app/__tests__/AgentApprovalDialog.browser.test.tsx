@@ -84,12 +84,12 @@ describe('AgentApprovalDialog Skill script approval', () => {
 })
 
 describe('AgentApprovalDialog Office approval', () => {
-  it('shows the backend-frozen path purposes, scopes, and write dispositions', async () => {
+  it('shows logical Office paths without exposing frozen execution details', async () => {
     const parentIdentity = { revision: 'office-path-parent-v1:test', device: 1, inode: 2 }
     const action: AgentProposedAction = {
       type: 'office_operation',
       officeOperation: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         id: 'office-action',
         approvalStatus: 'required',
         reason: '导出预算工作簿',
@@ -140,13 +140,12 @@ describe('AgentApprovalDialog Office approval', () => {
 
     const snapshot = screen.container.querySelector('.agent-approval-dialog__command')
     expect(snapshot?.getAttribute('data-multiline')).toBe('true')
-    expect(snapshot?.textContent).toContain('officecli')
-    expect(snapshot?.textContent).toContain('readSource')
-    expect(snapshot?.textContent).toContain('writeTarget')
+    expect(snapshot?.textContent).toContain('budget.xlsx')
     expect(snapshot?.textContent).toContain('@downloads/budget-preview.html')
-    expect(snapshot?.textContent).toContain('/Users/test/Downloads/budget-preview.html')
-    expect(snapshot?.textContent).toContain('outsideWorkspace')
-    expect(snapshot?.textContent).toContain('createNew')
+    expect(snapshot?.textContent).not.toContain('officecli')
+    expect(snapshot?.textContent).not.toContain('/Users/test/Downloads/budget-preview.html')
+    expect(snapshot?.textContent).not.toContain('readSource')
+    expect(snapshot?.textContent).not.toContain('createNew')
     expect(screen.container.querySelector('[data-choice="remember"]')).toBeNull()
   })
 })

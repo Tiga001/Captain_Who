@@ -61,6 +61,7 @@ fn command_dispatch_fixture(command: &str) -> (AgentToolCall, AgentProposedActio
             reason: None,
             observe: None,
             runtime: None,
+            runtime_binding: None,
         },
     };
     (call, action)
@@ -655,6 +656,15 @@ async fn effective_tool_definitions_are_also_the_execution_allowlist() {
     server.await.unwrap();
 
     assert_eq!(output.content, "done");
+    let call = output
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCall { call, .. } if call.id == "hidden-tool-call" => Some(call),
+            _ => None,
+        })
+        .expect("the unavailable tool call remains observable");
+    assert_eq!(call.reason, None);
     let request = String::from_utf8(second_request.lock().unwrap().clone()).unwrap();
     assert!(request.contains("agent.tool_not_available"));
     assert!(request.contains("toolNotAvailable"));
@@ -2006,7 +2016,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         tool_continuation: None,
         attachments: Vec::new(),
         resume_checkpoint: None,
-        assistant_message_id: None,
+        assistant_message_id: Some("assistant-preview".to_string()),
         context_compaction_summary: None,
         skill_activation: None,
         messages: vec![message("user", "create a preview")],
@@ -2059,6 +2069,32 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         AgentEvent::FileWritePreviewUpdated { .. } | AgentEvent::FileWritePreviewCleared { .. }
     )));
     assert_eq!(output.content, "done");
+    let append_event = output
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCall { call, .. } if call.id == "call-append" => Some(call),
+            _ => None,
+        })
+        .expect("write_file append event");
+    assert_eq!(append_event.args["content"], "[stored in private draft]");
+    assert_eq!(append_event.args["contentBytes"], 28);
+
+    let append_trace = output
+        .conversation_turn_trace
+        .as_ref()
+        .expect("durable conversation trace")
+        .items
+        .iter()
+        .find_map(|item| match item {
+            ConversationTurnTraceItem::ToolCall {
+                call_id, operation, ..
+            } if call_id == "call-append" => Some(operation),
+            _ => None,
+        })
+        .expect("write_file append trace item");
+    assert_eq!(append_trace["content"], "line 1\nline 2\nline 3\nline 4\n");
+    assert!(append_trace.get("contentBytes").is_none());
     assert_eq!(
         storage
             .list_agent_file_drafts_for_run("run-preview")

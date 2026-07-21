@@ -86,26 +86,13 @@ function getApprovalCode(action: AgentProposedAction) {
       2
     )
   if (action.type === 'office_operation') {
-    const { prepared } = action.officeOperation
-    return JSON.stringify(
-      {
-        application: prepared.request.documentKind,
-        operation: prepared.request.operation,
-        provider: prepared.providerId,
-        engineRevision: prepared.engineRevision,
-        paths: prepared.paths.map((path) => ({
-          slot: path.slot,
-          purpose: path.purpose,
-          path: path.logicalPath,
-          resolvedPath: path.normalizedPath,
-          scope: path.scope,
-          outsideWorkspace: path.scope === 'external',
-          expectedChange: path.writeDisposition
-        }))
-      },
-      null,
-      2
-    )
+    // Office approval only exposes user-facing logical paths. Engine, staging, normalized
+    // paths and frozen execution metadata remain implementation details.
+    return [
+      ...new Set(
+        action.officeOperation.prepared.paths.map((path) => path.logicalPath.trim()).filter(Boolean)
+      )
+    ].join('\n')
   }
   return action.call.tool
 }

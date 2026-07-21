@@ -130,6 +130,12 @@
     background: none;
     animation: none;
   }
+
+  .agent-activity--skill-resource .agent-activity__icon > svg,
+  .agent-activity--skill-script .agent-activity__icon > svg,
+  .agent-activity--office .agent-activity__icon > svg {
+    animation: none;
+  }
 }
 
 .agent-todo-progress {
@@ -502,6 +508,29 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.skill-activity__details,
+.office-activity__details {
+  max-width: min(100%, 68ch);
+  gap: 4px;
+}
+
+.skill-activity__details p,
+.office-activity__details p {
+  overflow-wrap: anywhere;
+}
+
+.agent-activity--skill-resource:has(.agent-running-text) .agent-activity__icon > svg,
+.agent-activity--skill-script:has(.agent-running-text) .agent-activity__icon > svg,
+.agent-activity--office:has(.agent-running-text) .agent-activity__icon > svg {
+  animation: mc-agent-tool-spin 0.9s linear infinite;
+}
+
+@keyframes mc-agent-tool-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .run-command-activity__details {

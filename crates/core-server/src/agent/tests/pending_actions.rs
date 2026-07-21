@@ -1,8 +1,83 @@
 use super::*;
 use mycopilot_core::{
-    AgentCommandRuntimeKind, AgentCommandRuntimePackageRequirement, AgentCommandRuntimeProvider,
-    AgentCommandRuntimeRequest,
+    AgentCommandRuntimeBinding, AgentCommandRuntimeKind, AgentCommandRuntimePackageRequirement,
+    AgentCommandRuntimeProfile, AgentCommandRuntimeProvider, AgentCommandRuntimeRequest,
+    AgentCommandRuntimeResolvedPackage, AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
 };
+
+#[test]
+fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    let binding = AgentCommandRuntimeBinding {
+        schema_version: AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
+        profile: AgentCommandRuntimeProfile::Presentations,
+        profile_revision: "artifact-runtime-profile-sha256-v1:test".to_string(),
+        provider_id: "mycopilot.artifact-runtime".to_string(),
+        bundle_version: "2026.07.3".to_string(),
+        bundle_revision: "artifact-runtime-bundle-sha256-v1:test".to_string(),
+        kind: AgentCommandRuntimeKind::Node,
+        runtime_version: "22.23.1".to_string(),
+        runtime_fingerprint: "artifact-runtime-sha256-v1:test".to_string(),
+        resolved_packages: vec![AgentCommandRuntimeResolvedPackage {
+            name: "pptxgenjs".to_string(),
+            version: "4.0.1".to_string(),
+        }],
+    };
+    let action = AgentProposedAction::Command {
+        command: AgentCommandRequest {
+            id: "managed-runtime-profile-pending".to_string(),
+            command: "node scripts/build.mjs".to_string(),
+            cwd: Some(".".to_string()),
+            timeout_ms: Some(30_000),
+            approval_status: AgentApprovalStatus::Required,
+            risk_level: None,
+            reason: Some("build an Office artifact".to_string()),
+            observe: None,
+            runtime: None,
+            runtime_binding: Some(Box::new(binding.clone())),
+        },
+    };
+
+    assert!(service
+        .store_pending_action(
+            "managed-runtime-profile-run",
+            "managed-runtime-profile-conversation",
+            "managed-runtime-profile-assistant",
+            action,
+            agent_input,
+        )
+        .unwrap());
+    drop(service);
+
+    let reloaded = AgentService::new(Arc::clone(&storage));
+    let pending = reloaded
+        .pending_actions
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let stored = pending
+        .get(&pending_action_storage_id(
+            "managed-runtime-profile-run",
+            "managed-runtime-profile-pending",
+        ))
+        .unwrap();
+    let AgentProposedAction::Command { command } = &stored.snapshot.action else {
+        panic!("persisted action must remain a command")
+    };
+    assert_eq!(command.runtime_binding.as_deref(), Some(&binding));
+    assert!(command.runtime.is_none());
+    let resumed_call = tool_call_for_action(&stored.snapshot.action);
+    assert_eq!(resumed_call.args["runtimeProfile"], "presentations");
+    assert!(resumed_call.args["runtime"].is_null());
+}
 
 #[test]
 fn pending_command_round_trip_keeps_the_frozen_runtime_request() {
@@ -34,6 +109,7 @@ fn pending_command_round_trip_keeps_the_frozen_runtime_request() {
                     version: "3.1.5".to_string(),
                 }],
             }),
+            runtime_binding: None,
         },
     };
 

@@ -1,8 +1,47 @@
 use super::*;
 use mycopilot_core::{
-    AgentCommandRuntimeKind, AgentCommandRuntimePackageRequirement, AgentCommandRuntimeProvider,
-    AgentCommandRuntimeRequest,
+    AgentCommandRuntimeBinding, AgentCommandRuntimeKind, AgentCommandRuntimePackageRequirement,
+    AgentCommandRuntimeProfile, AgentCommandRuntimeProvider, AgentCommandRuntimeRequest,
+    AgentCommandRuntimeResolvedPackage, AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
 };
+
+#[test]
+fn command_tool_call_projects_only_the_model_visible_runtime_profile() {
+    let request = AgentCommandRequest {
+        id: "command-runtime-profile-1".to_string(),
+        command: "node scripts/build.mjs".to_string(),
+        cwd: Some("workspace".to_string()),
+        timeout_ms: Some(30_000),
+        approval_status: mycopilot_core::AgentApprovalStatus::Required,
+        risk_level: None,
+        reason: Some("build a presentation".to_string()),
+        observe: None,
+        runtime: None,
+        runtime_binding: Some(Box::new(AgentCommandRuntimeBinding {
+            schema_version: AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
+            profile: AgentCommandRuntimeProfile::Presentations,
+            profile_revision: "artifact-runtime-profile-sha256-v1:test".to_string(),
+            provider_id: "mycopilot.artifact-runtime".to_string(),
+            bundle_version: "2026.07.3".to_string(),
+            bundle_revision: "artifact-runtime-bundle-sha256-v1:test".to_string(),
+            kind: AgentCommandRuntimeKind::Node,
+            runtime_version: "22.23.1".to_string(),
+            runtime_fingerprint: "artifact-runtime-sha256-v1:test".to_string(),
+            resolved_packages: vec![AgentCommandRuntimeResolvedPackage {
+                name: "pptxgenjs".to_string(),
+                version: "4.0.1".to_string(),
+            }],
+        })),
+    };
+
+    let call = command_tool_call(&request);
+    assert_eq!(call.args["runtimeProfile"], "presentations");
+    assert!(call.args["runtime"].is_null());
+    let model_args = serde_json::to_string(&call.args).unwrap();
+    assert!(!model_args.contains("pptxgenjs"));
+    assert!(!model_args.contains("4.0.1"));
+    assert!(!model_args.contains("runtimeFingerprint"));
+}
 
 #[test]
 fn command_tool_call_keeps_the_frozen_managed_runtime_request() {
@@ -23,6 +62,7 @@ fn command_tool_call_keeps_the_frozen_managed_runtime_request() {
                 version: "4.4.0".to_string(),
             }],
         }),
+        runtime_binding: None,
     };
 
     let call = command_tool_call(&request);
@@ -92,6 +132,7 @@ fn policy_rejection_keeps_stable_structured_diagnostics_in_tool_result() {
         reason: None,
         observe: None,
         runtime: None,
+        runtime_binding: None,
     };
     let evaluation = evaluate_command_policy(
         &request.command,

@@ -90,9 +90,13 @@
   color: var(--mc-color-icon-muted);
 }
 
-.skill-management-row__icon svg {
+.skill-management-row__icon svg,
+.skill-management-row__icon img {
   width: var(--mc-icon-size-lg);
   height: var(--mc-icon-size-lg);
+}
+
+.skill-management-row__icon svg {
   stroke-width: var(--mc-icon-stroke-regular);
 }
 

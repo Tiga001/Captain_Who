@@ -17,6 +17,7 @@ fn request(command: &str, timeout_ms: Option<u64>) -> AgentCommandRequest {
         reason: None,
         observe: None,
         runtime: None,
+        runtime_binding: None,
     }
 }
 

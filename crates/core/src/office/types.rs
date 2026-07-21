@@ -2,6 +2,8 @@ use crate::{
     AgentAttachmentLibraryContext, AgentCancellationToken, AgentPermissions, AgentRunContext,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -10,7 +12,7 @@ use std::sync::Arc;
 
 pub const OFFICECLI_PROVIDER_ID: &str = "officecli";
 pub const OFFICE_ENGINE_STATUS_SCHEMA_VERSION: u32 = 1;
-pub const OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION: u32 = 3;
+pub const OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -135,6 +137,307 @@ pub enum OfficeOperationAccess {
     /// each frozen path's [`OfficePathScope`].
     #[serde(alias = "workspaceWrite")]
     FileWrite,
+}
+
+/// Element-oriented Office help verbs exposed to the model.
+///
+/// The document format is derived from the selected Office tool, so callers never need to repeat
+/// `docx`, `xlsx`, or `pptx` as a provider token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OfficeHelpVerb {
+    Get,
+    Query,
+    Set,
+    Add,
+    Remove,
+    Move,
+    Swap,
+}
+
+impl OfficeHelpVerb {
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Query => "query",
+            Self::Set => "set",
+            Self::Add => "add",
+            Self::Remove => "remove",
+            Self::Move => "move",
+            Self::Swap => "swap",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OfficeViewMode {
+    Text,
+    Annotated,
+    Outline,
+    Stats,
+    Issues,
+    Html,
+    Svg,
+    Screenshot,
+    Forms,
+}
+
+impl OfficeViewMode {
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Annotated => "annotated",
+            Self::Outline => "outline",
+            Self::Stats => "stats",
+            Self::Issues => "issues",
+            Self::Html => "html",
+            Self::Svg => "svg",
+            Self::Screenshot => "screenshot",
+            Self::Forms => "forms",
+        }
+    }
+
+    pub fn writes_output(self) -> bool {
+        matches!(self, Self::Html | Self::Svg | Self::Screenshot)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OfficeViewRenderMode {
+    Auto,
+    Html,
+}
+
+impl OfficeViewRenderMode {
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Html => "html",
+        }
+    }
+}
+
+/// Contact-sheet layout for document and presentation screenshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
+pub enum OfficeGridLayout {
+    Auto,
+    Columns { columns: u16 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OfficeCellShift {
+    Left,
+    Up,
+}
+
+impl OfficeCellShift {
+    pub fn cli_name(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Up => "up",
+        }
+    }
+}
+
+/// A mutually exclusive insertion or movement anchor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum OfficeElementPosition {
+    Index { index: u32 },
+    After { target: String },
+    Before { target: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OfficeTextReplacement {
+    pub find: String,
+    pub replace: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OfficePageRange {
+    pub start: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OfficeViewport {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Provider-neutral Office property values.
+///
+/// Nested JSON is deliberately excluded by the canonical compiler. OfficeCLI's property surface
+/// accepts scalar `key=value` pairs; representing that surface as a sorted map removes quoting,
+/// ordering, and repeated-flag decisions from the model while keeping element-specific properties
+/// extensible.
+pub type OfficePropertyMap = BTreeMap<String, Value>;
+
+/// Typed, provider-neutral parameters for one managed Office operation.
+///
+/// `OfficeExecutionRequest.operation` is repeated outside this enum for compact UI routing and
+/// legacy protocol compatibility. The trusted compiler requires the two discriminants to agree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum OfficeOperationParameters {
+    Help {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        verb: Option<OfficeHelpVerb>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        element: Option<String>,
+    },
+    Create {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        locale: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        minimal: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        overwrite: bool,
+    },
+    View {
+        mode: OfficeViewMode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        start: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        end: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_lines: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        issue_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        columns: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pages: Vec<OfficePageRange>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        range: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        viewport: Option<OfficeViewport>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        grid: Option<OfficeGridLayout>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        render_mode: Option<OfficeViewRenderMode>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        page_count: bool,
+    },
+    Get {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        depth: Option<u32>,
+    },
+    Query {
+        selector: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        contains: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        compact: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        fields: Vec<String>,
+    },
+    Validate,
+    Set {
+        target: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        properties: OfficePropertyMap,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        replacement: Option<OfficeTextReplacement>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
+    },
+    Add {
+        parent: String,
+        element_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        copy_from: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        position: Option<OfficeElementPosition>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        properties: OfficePropertyMap,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        force: bool,
+    },
+    Remove {
+        target: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shift: Option<OfficeCellShift>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        properties: OfficePropertyMap,
+    },
+    Move {
+        target: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        new_parent: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        position: Option<OfficeElementPosition>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        properties: OfficePropertyMap,
+    },
+    Swap {
+        first_target: String,
+        second_target: String,
+    },
+}
+
+impl OfficeOperationParameters {
+    pub fn operation(&self) -> OfficeOperation {
+        match self {
+            Self::Help { .. } => OfficeOperation::Help,
+            Self::Create { .. } => OfficeOperation::Create,
+            Self::View { .. } => OfficeOperation::View,
+            Self::Get { .. } => OfficeOperation::Get,
+            Self::Query { .. } => OfficeOperation::Query,
+            Self::Validate => OfficeOperation::Validate,
+            Self::Set { .. } => OfficeOperation::Set,
+            Self::Add { .. } => OfficeOperation::Add,
+            Self::Remove { .. } => OfficeOperation::Remove,
+            Self::Move { .. } => OfficeOperation::Move,
+            Self::Swap { .. } => OfficeOperation::Swap,
+        }
+    }
+
+    pub fn view_mode(&self) -> Option<OfficeViewMode> {
+        match self {
+            Self::View { mode, .. } => Some(*mode),
+            _ => None,
+        }
+    }
+}
+
+/// Version bridge for persisted schema-v3 actions.
+///
+/// New actions always serialize the typed object. The legacy vector remains deserializable only
+/// so startup and audit code can load old pending actions and reject their schema explicitly; it
+/// is never accepted by the schema-v4 compiler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OfficeRequestParameters {
+    Typed(OfficeOperationParameters),
+    Legacy(Vec<String>),
+}
+
+impl OfficeRequestParameters {
+    pub fn typed(&self) -> Option<&OfficeOperationParameters> {
+        match self {
+            Self::Typed(parameters) => Some(parameters),
+            Self::Legacy(_) => None,
+        }
+    }
 }
 
 /// Host-owned execution inputs used to resolve and authorize Office paths.
@@ -272,12 +575,14 @@ pub struct OfficeExecutionRequest {
     /// for which this must be absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document_path: Option<String>,
-    /// Structured process arguments after the operation and primary document.
-    /// They are never interpreted by a shell.
-    #[serde(default)]
-    pub arguments: Vec<String>,
-    /// Managed render output. The engine owns `-o` construction so callers
-    /// cannot smuggle an unvalidated output path through `arguments`.
+    /// Provider-neutral operation parameters. The model never supplies OfficeCLI argv.
+    ///
+    /// `arguments` is accepted as a deserialize-only alias for schema-v3 pending actions. Such
+    /// actions retain their original outer schema version and are rejected before execution.
+    #[serde(rename = "parameters", alias = "arguments")]
+    pub parameters: OfficeRequestParameters,
+    /// Managed render output. The engine owns provider output-flag construction;
+    /// callers cannot inject an unvalidated output target through typed fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,
     /// Managed save-as target for mutation operations. The provider edits a
@@ -292,6 +597,15 @@ pub struct OfficeExecutionRequest {
 impl OfficeExecutionRequest {
     pub fn access(&self) -> OfficeOperationAccess {
         self.operation.access(self.output_path.is_some())
+    }
+
+    pub fn typed_parameters(&self) -> Option<&OfficeOperationParameters> {
+        self.parameters.typed()
+    }
+
+    pub fn view_mode(&self) -> Option<OfficeViewMode> {
+        self.typed_parameters()
+            .and_then(OfficeOperationParameters::view_mode)
     }
 }
 

@@ -7,7 +7,9 @@ import type {
   AgentFileWritePreview,
   AgentProposedAction,
   AgentToolCall,
-  AgentToolResult
+  AgentToolResult,
+  OfficeExecutionRequest,
+  OfficeOperationParameters
 } from '@mycopilot/protocol'
 import type {
   ChatAgentRunView,
@@ -328,15 +330,7 @@ function getActionToolCall(action: AgentProposedAction): AgentToolCall | null {
     return {
       id: action.officeOperation.id,
       tool,
-      args: {
-        operation: request.operation,
-        path: request.documentPath,
-        arguments: request.arguments,
-        outputPath: request.outputPath,
-        destinationPath: request.destinationPath,
-        timeoutMs: request.timeoutMs,
-        reason: action.officeOperation.reason
-      },
+      args: getOfficeOperationModelArgs(request, action.officeOperation.reason),
       approvalStatus: action.officeOperation.approvalStatus,
       reason: action.officeOperation.reason
     }
@@ -357,6 +351,133 @@ function getActionToolCall(action: AgentProposedAction): AgentToolCall | null {
     approvalStatus: action.command.approvalStatus,
     reason: action.command.reason
   }
+}
+
+/**
+ * Reconstructs the model-facing Office call from the immutable request.
+ *
+ * The prepared action also contains host-owned argv, normalized paths and a provider identity.
+ * Those fields are execution authority and must never be projected into the conversation. The v4
+ * model surface keeps the strict operation object nested under `request` and the user-visible
+ * explanation under `reason`.
+ */
+function getOfficeOperationModelArgs(
+  request: OfficeExecutionRequest,
+  reason: string
+): Record<string, unknown> {
+  const modelRequest: Record<string, unknown> = {
+    operation: request.operation
+  }
+
+  copyIfDefined(modelRequest, 'filePath', request.documentPath)
+  if ('parameters' in request && request.parameters) {
+    projectOfficeOperationParameters(modelRequest, request.parameters)
+  } else {
+    // Schema-v3 pending actions are retained only so history can recover and retire them. Do not
+    // expose their provider argv in a new ToolCall projection.
+    modelRequest.legacyRequest = true
+  }
+  copyIfDefined(modelRequest, 'outputPath', request.outputPath)
+  copyIfDefined(modelRequest, 'destinationPath', request.destinationPath)
+  copyIfDefined(modelRequest, 'timeoutMs', request.timeoutMs)
+
+  return { request: modelRequest, reason }
+}
+
+function projectOfficeOperationParameters(
+  args: Record<string, unknown>,
+  parameters: OfficeOperationParameters
+) {
+  switch (parameters.type) {
+    case 'help':
+      copyIfDefined(args, 'verb', parameters.verb)
+      copyIfDefined(args, 'element', parameters.element)
+      return
+    case 'create':
+      copyIfDefined(args, 'locale', parameters.locale)
+      copyIfTrue(args, 'minimal', parameters.minimal)
+      copyIfTrue(args, 'overwriteExisting', parameters.overwrite)
+      return
+    case 'view':
+      args.mode = parameters.mode
+      copyIfDefined(args, 'start', parameters.start)
+      copyIfDefined(args, 'end', parameters.end)
+      copyIfDefined(args, 'maxLines', parameters.maxLines)
+      copyIfDefined(args, 'issueType', parameters.issueType)
+      copyIfDefined(args, 'limit', parameters.limit)
+      copyIfNonEmpty(args, 'columns', parameters.columns)
+      copyIfNonEmpty(args, 'pages', parameters.pages)
+      copyIfDefined(args, 'range', parameters.range)
+      copyIfDefined(args, 'viewport', parameters.viewport)
+      copyIfDefined(args, 'grid', parameters.grid)
+      copyIfDefined(args, 'renderMode', parameters.renderMode)
+      copyIfTrue(args, 'includePageCount', parameters.pageCount)
+      return
+    case 'get':
+      copyIfDefined(args, 'target', parameters.target)
+      copyIfDefined(args, 'depth', parameters.depth)
+      return
+    case 'query':
+      args.selector = parameters.selector
+      copyIfDefined(args, 'containsText', parameters.contains)
+      copyIfTrue(args, 'compact', parameters.compact)
+      copyIfNonEmpty(args, 'fields', parameters.fields)
+      return
+    case 'validate':
+      return
+    case 'set':
+      args.target = parameters.target
+      copyIfNonEmptyRecord(args, 'properties', parameters.properties)
+      copyIfDefined(args, 'textReplacement', parameters.replacement)
+      copyIfTrue(args, 'overrideProtection', parameters.force)
+      return
+    case 'add':
+      args.parent = parameters.parent
+      args.element = parameters.elementType
+      copyIfDefined(args, 'copyFrom', parameters.copyFrom)
+      copyIfDefined(args, 'placement', parameters.position)
+      copyIfNonEmptyRecord(args, 'properties', parameters.properties)
+      copyIfTrue(args, 'overrideProtection', parameters.force)
+      return
+    case 'remove':
+      args.target = parameters.target
+      copyIfDefined(args, 'shift', parameters.shift)
+      copyIfNonEmptyRecord(args, 'properties', parameters.properties)
+      return
+    case 'move':
+      args.target = parameters.target
+      copyIfDefined(args, 'toParent', parameters.newParent)
+      copyIfDefined(args, 'placement', parameters.position)
+      copyIfNonEmptyRecord(args, 'properties', parameters.properties)
+      return
+    case 'swap':
+      args.firstTarget = parameters.firstTarget
+      args.secondTarget = parameters.secondTarget
+  }
+}
+
+function copyIfDefined(target: Record<string, unknown>, name: string, value: unknown) {
+  if (value !== undefined && value !== null) target[name] = value
+}
+
+function copyIfTrue(target: Record<string, unknown>, name: string, value: boolean | undefined) {
+  if (value === true) target[name] = true
+}
+
+function copyIfNonEmpty(
+  target: Record<string, unknown>,
+  name: string,
+  value: unknown[] | undefined
+) {
+  if (value && value.length > 0) target[name] = value
+}
+
+function copyIfNonEmptyRecord(
+  target: Record<string, unknown>,
+  name: string,
+  value: Record<string, unknown> | undefined
+) {
+  if (value && Object.keys(value).length > 0) target[name] = value
 }
 
 function withActionApprovalStatus(

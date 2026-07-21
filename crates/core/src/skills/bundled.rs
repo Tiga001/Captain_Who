@@ -412,6 +412,61 @@ mod tests {
         SKILL_PACKAGE_FORMAT_VERSION_V3,
     };
     use crate::skills::{SkillResourcePath, SkillResourceTextReadOptions, SkillsService};
+    use serde_json::Value;
+
+    fn markdown_json_examples(document_name: &str, markdown: &str) -> Vec<(usize, Value)> {
+        let mut examples = Vec::new();
+        let mut lines = markdown.lines().enumerate();
+
+        while let Some((line_index, line)) = lines.next() {
+            if line.trim() != "```json" {
+                continue;
+            }
+
+            let mut source = String::new();
+            let mut closed = false;
+            for (_, line) in lines.by_ref() {
+                if line.trim() == "```" {
+                    closed = true;
+                    break;
+                }
+                source.push_str(line);
+                source.push('\n');
+            }
+            assert!(
+                closed,
+                "{document_name}:{} contains an unterminated JSON code block",
+                line_index + 1
+            );
+            let value = serde_json::from_str(&source).unwrap_or_else(|error| {
+                panic!(
+                    "{document_name}:{} contains invalid JSON: {error}",
+                    line_index + 1
+                )
+            });
+            examples.push((line_index + 1, value));
+        }
+
+        examples
+    }
+
+    fn is_bidirectional_text_control(character: char) -> bool {
+        matches!(
+            character,
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{202a}'
+                | '\u{202b}'
+                | '\u{202c}'
+                | '\u{202d}'
+                | '\u{202e}'
+                | '\u{2066}'
+                | '\u{2067}'
+                | '\u{2068}'
+                | '\u{2069}'
+        )
+    }
 
     #[test]
     fn embedded_source_has_a_stable_read_only_package_contract() {
@@ -478,41 +533,19 @@ mod tests {
         let source = BundledSkillSource::new().unwrap();
         let catalog = source.list().unwrap();
 
-        for (
-            local_id,
-            tool,
-            extension,
-            python_package,
-            python_version,
-            node_package,
-            node_version,
-        ) in [
-            (
-                DOCUMENTS_LOCAL_ID,
-                "office_document",
-                ".docx",
-                "python-docx",
-                "1.2.0",
-                "docx",
-                "9.6.1",
-            ),
+        for (local_id, tool, extension, runtime_profile) in [
+            (DOCUMENTS_LOCAL_ID, "office_document", ".docx", "documents"),
             (
                 PRESENTATIONS_LOCAL_ID,
                 "office_presentation",
                 ".pptx",
-                "python-pptx",
-                "1.0.2",
-                "pptxgenjs",
-                "4.0.1",
+                "presentations",
             ),
             (
                 SPREADSHEETS_LOCAL_ID,
                 "office_spreadsheet",
                 ".xlsx",
-                "openpyxl",
-                "3.1.5",
-                "exceljs",
-                "4.4.0",
+                "spreadsheets",
             ),
         ] {
             let descriptor = catalog
@@ -547,77 +580,155 @@ mod tests {
             assert!(package.instructions().contains(tool));
             assert!(package.instructions().contains("`status`"));
             assert!(package.instructions().contains("managed Artifact Runtime"));
+            assert!(package.instructions().contains("runtimeProfile"));
             assert!(package.instructions().contains("observe.expectedOutputs"));
             assert!(package.instructions().contains("artifactObservation"));
 
             let reader = source.open_resource_reader(&package).unwrap().unwrap();
             let capability = reader.read(&package.resources().entries()[0]).unwrap();
             let capability: serde_json::Value = serde_json::from_slice(&capability).unwrap();
-            assert_eq!(capability["contractVersion"], 2);
+            assert_eq!(capability["contractVersion"], 4);
             assert_eq!(capability["engine"], "officecli");
             assert_eq!(capability["tool"], tool);
             assert_eq!(capability["extensions"][0], extension);
             assert_eq!(capability["modes"]["native"]["tool"], tool);
             assert_eq!(
-                capability["modes"]["script"]["executionTool"],
-                "run_command"
+                capability["modes"]["native"]["requestStyle"],
+                "typed_request_envelope"
             );
+            assert_eq!(capability["modes"]["native"]["envelopeField"], "request");
+            assert_eq!(capability["modes"]["native"]["reasonField"], "reason");
+            assert_eq!(capability["modes"]["native"]["filePathField"], "filePath");
             assert_eq!(
-                capability["modes"]["script"]["runtimes"][0]["provider"],
-                "managedArtifact"
+                capability["modes"]["native"]["providerArguments"],
+                "host_generated"
             );
+            let script = &capability["modes"]["script"];
+            assert_eq!(script["executionTool"], "run_command");
+            assert_eq!(script["runtimeProfile"], runtime_profile);
+            assert_eq!(script["runtimeProfileField"], "runtimeProfile");
+            assert_eq!(script["entrypoints"][0]["command"], "python");
+            assert_eq!(script["entrypoints"][0]["extension"], ".py");
+            assert_eq!(script["entrypoints"][1]["command"], "node");
+            assert_eq!(script["entrypoints"][1]["extension"], ".mjs");
+            assert_eq!(script["resolution"]["authority"], "host");
+            assert_eq!(script["resolution"]["runtimeKindFrom"], "command");
+            assert_eq!(script["resolution"]["dependencyPolicy"], "profilePinned");
+            assert!(script.get("runtimes").is_none());
+            assert!(script.get("requiredPackagesField").is_none());
+            assert_eq!(script["observation"]["kind"], "office");
             assert_eq!(
-                capability["modes"]["script"]["runtimes"][0]["kind"],
-                "python"
-            );
-            assert_eq!(
-                capability["modes"]["script"]["runtimes"][0]["availablePackages"][0]["name"],
-                python_package
-            );
-            assert_eq!(
-                capability["modes"]["script"]["runtimes"][0]["availablePackages"][0]["version"],
-                python_version
-            );
-            assert_eq!(capability["modes"]["script"]["runtimes"][1]["kind"], "node");
-            assert_eq!(
-                capability["modes"]["script"]["runtimes"][1]["availablePackages"][0]["name"],
-                node_package
-            );
-            assert_eq!(
-                capability["modes"]["script"]["runtimes"][1]["availablePackages"][0]["version"],
-                node_version
-            );
-            assert_eq!(
-                capability["modes"]["script"]["requiredPackagesField"],
-                "runtime.requiredPackages"
-            );
-            if local_id == SPREADSHEETS_LOCAL_ID {
-                assert_eq!(
-                    capability["modes"]["script"]["runtimes"][0]["availablePackages"][1]["name"],
-                    "xlsxwriter"
-                );
-                assert_eq!(
-                    capability["modes"]["script"]["runtimes"][0]["availablePackages"][1]["version"],
-                    "3.2.9"
-                );
-            }
-            assert_eq!(
-                capability["modes"]["script"]["observation"]["kind"],
-                "office"
-            );
-            assert_eq!(
-                capability["modes"]["script"]["observation"]["expectedOutputsField"],
+                script["observation"]["expectedOutputsField"],
                 "observe.expectedOutputs"
             );
             assert_eq!(
-                capability["modes"]["script"]["observation"]["additionalRootsField"],
+                script["observation"]["additionalRootsField"],
                 "observe.additionalRoots"
             );
-            assert_eq!(
-                capability["modes"]["script"]["observation"]["resultField"],
-                "artifactObservation"
-            );
+            assert_eq!(script["observation"]["resultField"], "artifactObservation");
         }
+    }
+
+    #[test]
+    fn office_skill_native_json_examples_use_typed_request_envelopes() {
+        let documents = [
+            ("documents/SKILL.md", DOCUMENTS_SOURCE),
+            (
+                "documents/references/workflows.md",
+                include_str!("bundled/documents/references/workflows.md"),
+            ),
+            ("spreadsheets/SKILL.md", SPREADSHEETS_SOURCE),
+            (
+                "spreadsheets/references/workflows.md",
+                include_str!("bundled/spreadsheets/references/workflows.md"),
+            ),
+            ("presentations/SKILL.md", PRESENTATIONS_SOURCE),
+            (
+                "presentations/references/workflows.md",
+                include_str!("bundled/presentations/references/workflows.md"),
+            ),
+        ];
+        let mut native_example_count = 0;
+
+        for (document_name, markdown) in documents {
+            for (line_number, example) in markdown_json_examples(document_name, markdown) {
+                let Some(object) = example.as_object() else {
+                    continue;
+                };
+                assert!(
+                    !object.contains_key("operation"),
+                    "{document_name}:{line_number} native Office operation must be nested under request"
+                );
+                let Some(request) = object.get("request") else {
+                    continue;
+                };
+                native_example_count += 1;
+                assert_eq!(
+                    object.len(),
+                    2,
+                    "{document_name}:{line_number} native Office envelope may contain only request and reason"
+                );
+                let request = request.as_object().unwrap_or_else(|| {
+                    panic!(
+                        "{document_name}:{line_number} native Office request must be a JSON object"
+                    )
+                });
+                assert!(
+                    request
+                        .get("operation")
+                        .and_then(Value::as_str)
+                        .is_some_and(|operation| !operation.trim().is_empty()),
+                    "{document_name}:{line_number} native Office request must include a non-empty operation"
+                );
+                assert!(
+                    !request.contains_key("arguments"),
+                    "{document_name}:{line_number} native Office example must use typed fields instead of arguments"
+                );
+                assert!(
+                    !request.contains_key("path"),
+                    "{document_name}:{line_number} native Office example must use filePath instead of path"
+                );
+                assert!(
+                    !request.contains_key("reason"),
+                    "{document_name}:{line_number} reason must stay at the native Office envelope root"
+                );
+
+                let reason = object
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{document_name}:{line_number} native Office example must include a string reason"
+                        )
+                    });
+                assert_eq!(
+                    reason,
+                    reason.trim(),
+                    "{document_name}:{line_number} reason must not have surrounding whitespace"
+                );
+                assert!(
+                    !reason.is_empty(),
+                    "{document_name}:{line_number} reason must not be empty"
+                );
+                assert!(
+                    reason.chars().count() <= crate::AGENT_OFFICE_REASON_MAX_CHARS,
+                    "{document_name}:{line_number} reason exceeds the Office limit"
+                );
+                assert!(
+                    !reason.chars().any(char::is_control),
+                    "{document_name}:{line_number} reason contains a control character"
+                );
+                assert!(
+                    !reason.chars().any(is_bidirectional_text_control),
+                    "{document_name}:{line_number} reason contains a bidirectional text control"
+                );
+            }
+        }
+
+        assert!(
+            native_example_count > 0,
+            "the bundled Office Skill documents must retain native JSON examples"
+        );
     }
 
     #[test]
@@ -648,8 +759,9 @@ mod tests {
 
             assert!(page.text().contains(heading));
             assert!(page.text().contains("managed Artifact Runtime"));
-            assert!(page.text().contains("runtime.requiredPackages"));
-            assert!(page.text().contains("\"provider\": \"managedArtifact\""));
+            assert!(page.text().contains("\"runtimeProfile\":"));
+            assert!(!page.text().contains("runtime.requiredPackages"));
+            assert!(!page.text().contains("\"provider\": \"managedArtifact\""));
             assert!(page.text().contains("observe.expectedOutputs"));
             assert!(page.text().contains("observe.additionalRoots"));
             assert!(page.text().contains("artifactObservation.expectedOutputs"));

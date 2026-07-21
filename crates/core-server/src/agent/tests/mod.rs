@@ -84,6 +84,7 @@ fn command_request(id: &str, command: &str) -> AgentCommandRequest {
         reason: Some("exercise server authorization boundary".to_string()),
         observe: None,
         runtime: None,
+        runtime_binding: None,
     }
 }
 

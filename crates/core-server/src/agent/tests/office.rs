@@ -3,10 +3,12 @@ use mycopilot_core::office::{
     OfficeDocumentKind, OfficeEngine, OfficeEngineAvailability, OfficeEngineCapabilities,
     OfficeEngineErrorCode, OfficeEngineRecovery, OfficeEngineSource, OfficeEngineStatus,
     OfficeExecutionContext, OfficeExecutionRequest, OfficeFileState, OfficeFrozenPath,
-    OfficeOperation, OfficeOperationAccess, OfficePathIdentity, OfficePathPurpose, OfficePathScope,
-    OfficePathSlot, OfficePreparedExecution, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
+    OfficeOperation, OfficeOperationAccess, OfficeOperationParameters, OfficePathIdentity,
+    OfficePathPurpose, OfficePathScope, OfficePathSlot, OfficePreparedExecution,
+    OfficeRequestParameters, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
     OFFICE_ENGINE_STATUS_SCHEMA_VERSION, OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
 };
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Barrier;
 
@@ -184,11 +186,12 @@ fn prepared_spreadsheet_operation() -> OfficePreparedExecution {
             document_kind: OfficeDocumentKind::Spreadsheet,
             operation: OfficeOperation::Set,
             document_path: Some("budget.xlsx".to_string()),
-            arguments: vec![
-                "/Sheet1/A1".to_string(),
-                "--prop".to_string(),
-                "value=42".to_string(),
-            ],
+            parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::Set {
+                target: "/Sheet1/A1".to_string(),
+                properties: BTreeMap::from([("value".to_string(), serde_json::json!(42))]),
+                replacement: None,
+                force: false,
+            }),
             output_path: None,
             destination_path: None,
             timeout_ms: Some(5_000),
@@ -238,7 +241,7 @@ fn prepared_office_action(id: &str) -> AgentProposedAction {
             id: id.to_string(),
             prepared: prepared_spreadsheet_operation(),
             approval_status: AgentApprovalStatus::Approved,
-            reason: Some("Update the approved workbook cell".to_string()),
+            reason: "Update the approved workbook cell".to_string(),
         }),
     }
 }
@@ -256,7 +259,7 @@ fn approved_office_failure_preserves_exit_stdout_and_stderr() {
         id: "office-call-1".to_string(),
         prepared: prepared_spreadsheet_operation(),
         approval_status: AgentApprovalStatus::Approved,
-        reason: Some("Update the approved workbook cell".to_string()),
+        reason: "Update the approved workbook cell".to_string(),
     };
 
     let result =
@@ -341,13 +344,58 @@ fn legacy_office_action_envelope_is_rejected_before_provider_execution() {
 }
 
 #[test]
+fn host_rejects_noncanonical_or_overlong_frozen_office_reasons_before_execution() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let executions = Arc::new(AtomicUsize::new(0));
+    let service =
+        AgentService::new(storage).with_office_engine(Arc::new(SuccessfulTrackingOfficeEngine {
+            executions: Arc::clone(&executions),
+        }));
+    let input = command_test_input(fixture.path());
+
+    for (index, reason) in [
+        String::new(),
+        " reason with surrounding whitespace ".to_string(),
+        "界".repeat(mycopilot_core::AGENT_OFFICE_REASON_MAX_CHARS + 1),
+        "Inspect\nthe workbook".to_string(),
+        "Inspect\u{0007}the workbook".to_string(),
+        "Inspect\u{202e}the workbook".to_string(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut operation = match prepared_office_action(&format!("office-invalid-reason-{index}"))
+        {
+            AgentProposedAction::OfficeOperation { office_operation } => office_operation,
+            _ => unreachable!(),
+        };
+        operation.reason = reason;
+
+        let result = service.execute_office_operation(
+            &input,
+            &operation,
+            AgentCancellationToken::new(),
+            None,
+        );
+
+        assert!(!result.ok);
+        assert_eq!(
+            result.result.as_ref().unwrap()["code"],
+            "invalidApprovedSnapshot"
+        );
+    }
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn office_action_helpers_expose_stable_identity_without_executable_path() {
     let request = mycopilot_core::AgentOfficeOperationRequest {
         schema_version: mycopilot_core::AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
         id: "office-call-2".to_string(),
         prepared: prepared_spreadsheet_operation(),
         approval_status: AgentApprovalStatus::Required,
-        reason: Some("Update budget".to_string()),
+        reason: "Update budget".to_string(),
     };
     let action = AgentProposedAction::OfficeOperation {
         office_operation: Box::new(request),
@@ -358,8 +406,16 @@ fn office_action_helpers_expose_stable_identity_without_executable_path() {
     assert_eq!(tool_name_for_action(&action), "office_spreadsheet");
     let call = tool_call_for_action(&action);
     assert_eq!(call.tool, "office_spreadsheet");
-    assert_eq!(call.args["operation"], "set");
-    assert_eq!(call.args["path"], "budget.xlsx");
+    assert_eq!(call.args["request"]["operation"], "set");
+    assert_eq!(call.args["request"]["filePath"], "budget.xlsx");
+    assert_eq!(call.args["request"]["target"], "/Sheet1/A1");
+    assert_eq!(call.args["request"]["properties"]["value"], 42);
+    assert_eq!(call.args["reason"], "Update budget");
+    assert!(call.args.get("operation").is_none());
+    assert!(call.args.get("parameters").is_none());
+    assert!(call.args.get("arguments").is_none());
+    assert!(call.args["request"].get("parameters").is_none());
+    assert!(call.args["request"].get("arguments").is_none());
     assert!(serde_json::to_string(&call)
         .unwrap()
         .contains("office_spreadsheet"));
@@ -746,7 +802,7 @@ fn office_audit_path_scope_summarizes_every_frozen_path_purpose_and_scope() {
             id: "office-path-audit".to_string(),
             prepared,
             approval_status: AgentApprovalStatus::Approved,
-            reason: None,
+            reason: "Audit Office path scopes".to_string(),
         }),
     };
 
