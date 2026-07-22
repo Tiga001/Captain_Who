@@ -1,4 +1,4 @@
-import type { OfficeEngineStatus } from '@mycopilot/protocol'
+import type { OfficeEngineStatus, OfficeHelpVerb } from '@mycopilot/protocol'
 import { OFFICE_GET_STATUS_METHOD } from '@mycopilot/protocol'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -29,6 +29,21 @@ const status = {
   }
 } satisfies OfficeEngineStatus
 
+const officeHelpTopics = [
+  'status',
+  'help',
+  'create',
+  'view',
+  'get',
+  'query',
+  'validate',
+  'set',
+  'add',
+  'remove',
+  'move',
+  'swap'
+] as const satisfies readonly OfficeHelpVerb[]
+
 describe('CoreServer Office status client', () => {
   beforeEach(() => rpcRequest.mockReset())
 
@@ -37,6 +52,23 @@ describe('CoreServer Office status client', () => {
 
     await expect(new CoreServer().getOfficeStatus()).resolves.toEqual(status)
     expect(rpcRequest).toHaveBeenCalledWith(OFFICE_GET_STATUS_METHOD)
+  })
+
+  it('keeps Host-managed and provider element help topics in the shared protocol', () => {
+    expect(officeHelpTopics).toEqual([
+      'status',
+      'help',
+      'create',
+      'view',
+      'get',
+      'query',
+      'validate',
+      'set',
+      'add',
+      'remove',
+      'move',
+      'swap'
+    ])
   })
 
   it.each([

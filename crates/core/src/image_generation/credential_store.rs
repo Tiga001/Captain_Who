@@ -1,0 +1,548 @@
+//! Secure credential storage for image-generation provider secrets.
+//!
+//! This module deliberately keeps credential bytes out of configuration records,
+//! debug output, and error values. Persist only [`CredentialReference`] values in
+//! application storage; the referenced secret remains in the operating system's
+//! native credential store.
+
+use std::{
+    collections::HashMap,
+    error::Error,
+    fmt,
+    sync::{Mutex, MutexGuard},
+};
+
+use keyring::v1::{Entry, Error as KeyringError};
+use uuid::Uuid;
+use zeroize::Zeroize;
+
+/// Stable service name used for image-provider credentials in the native store.
+///
+/// The per-credential username is an opaque [`CredentialReference`]. Keeping the
+/// service stable lets configuration records rotate references without changing
+/// the native-store namespace.
+pub const IMAGE_GENERATION_CREDENTIAL_SERVICE: &str = "com.mycopilot.next.image-generation";
+
+const OPAQUE_REFERENCE_PREFIX: &str = "image-generation/api-key/";
+const OPAQUE_REFERENCE_UUID_BYTES: usize = 32;
+const MAX_CREDENTIAL_SERVICE_BYTES: usize = 512;
+
+/// An opaque, non-secret identifier for one credential-store entry.
+///
+/// This value is safe to persist. It never contains the credential itself.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct CredentialReference(String);
+
+impl CredentialReference {
+    /// Validates a reference loaded from persistent configuration.
+    pub fn parse(value: impl Into<String>) -> Result<Self, CredentialStoreError> {
+        let value = value.into();
+        validate_reference(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Creates a fresh opaque reference suitable for credential rotation.
+    ///
+    /// A configuration transaction can write the new secret under this reference,
+    /// commit the new reference with compare-and-swap, and only then delete the old
+    /// reference. Failed configuration commits can safely delete the new reference.
+    #[must_use]
+    pub fn new_opaque() -> Self {
+        Self(format!(
+            "{OPAQUE_REFERENCE_PREFIX}{}",
+            Uuid::new_v4().simple()
+        ))
+    }
+
+    /// Returns the non-secret reference value for persistence or keyring lookup.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for CredentialReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("CredentialReference")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+/// A credential value whose memory is cleared when it is dropped.
+///
+/// The type intentionally does not implement `Clone`, `Display`, serialization,
+/// or direct string access. Callers that must construct a provider header can use
+/// [`CredentialSecret::with_secret_bytes`] for a narrowly scoped borrow.
+pub struct CredentialSecret(String);
+
+impl CredentialSecret {
+    /// Wraps a non-empty secret without trimming or otherwise changing its bytes.
+    pub fn new(value: impl Into<String>) -> Result<Self, CredentialStoreError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(CredentialStoreError::InvalidSecret);
+        }
+        Ok(Self(value))
+    }
+
+    /// Temporarily exposes the credential bytes to a caller-provided closure.
+    ///
+    /// The borrowed slice cannot outlive this call. The closure must still avoid
+    /// copying the value into logs, diagnostics, or long-lived request metadata.
+    pub fn with_secret_bytes<T>(&self, expose: impl FnOnce(&[u8]) -> T) -> T {
+        expose(self.0.as_bytes())
+    }
+}
+
+impl fmt::Debug for CredentialSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CredentialSecret([REDACTED])")
+    }
+}
+
+impl Drop for CredentialSecret {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+/// Outcome of an idempotent credential deletion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialDeleteOutcome {
+    Deleted,
+    NotFound,
+}
+
+/// Operation that failed against the credential backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialStoreOperation {
+    Open,
+    Replace,
+    Get,
+    Delete,
+}
+
+impl fmt::Display for CredentialStoreOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Open => "open",
+            Self::Replace => "replace",
+            Self::Get => "get",
+            Self::Delete => "delete",
+        };
+        formatter.write_str(name)
+    }
+}
+
+/// Stable, redacted failures returned by [`CredentialStore`].
+///
+/// Platform errors are intentionally classified rather than embedded, because
+/// native backend messages are not part of the public contract and may contain
+/// values that should not enter logs or protocol errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialStoreError {
+    InvalidReference,
+    InvalidServiceName,
+    InvalidSecret,
+    BackendUnavailable { operation: CredentialStoreOperation },
+    AccessDenied { operation: CredentialStoreOperation },
+    Unsupported { operation: CredentialStoreOperation },
+    CorruptedEntry { operation: CredentialStoreOperation },
+    AmbiguousEntry { operation: CredentialStoreOperation },
+    InvalidBackendInput { operation: CredentialStoreOperation },
+    BackendFailure { operation: CredentialStoreOperation },
+}
+
+impl fmt::Display for CredentialStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidReference => formatter.write_str("credential reference is invalid"),
+            Self::InvalidServiceName => {
+                formatter.write_str("credential store service name is invalid")
+            }
+            Self::InvalidSecret => formatter.write_str("credential secret must not be empty"),
+            Self::BackendUnavailable { operation } => {
+                write!(
+                    formatter,
+                    "credential store is unavailable during {operation}"
+                )
+            }
+            Self::AccessDenied { operation } => {
+                write!(
+                    formatter,
+                    "credential store access was denied during {operation}"
+                )
+            }
+            Self::Unsupported { operation } => {
+                write!(formatter, "credential store does not support {operation}")
+            }
+            Self::CorruptedEntry { operation } => {
+                write!(
+                    formatter,
+                    "credential entry is malformed during {operation}"
+                )
+            }
+            Self::AmbiguousEntry { operation } => {
+                write!(
+                    formatter,
+                    "credential reference is ambiguous during {operation}"
+                )
+            }
+            Self::InvalidBackendInput { operation } => {
+                write!(
+                    formatter,
+                    "credential backend rejected input during {operation}"
+                )
+            }
+            Self::BackendFailure { operation } => {
+                write!(formatter, "credential backend failed during {operation}")
+            }
+        }
+    }
+}
+
+impl Error for CredentialStoreError {}
+
+/// Thread-safe, object-safe storage for provider credentials.
+///
+/// `replace` has create-or-overwrite semantics. `get` returns `Ok(None)` for a
+/// missing entry. `delete` is idempotent and reports whether an entry existed.
+pub trait CredentialStore: Send + Sync {
+    fn replace(
+        &self,
+        reference: &CredentialReference,
+        secret: CredentialSecret,
+    ) -> Result<(), CredentialStoreError>;
+
+    fn get(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<Option<CredentialSecret>, CredentialStoreError>;
+
+    fn delete(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<CredentialDeleteOutcome, CredentialStoreError>;
+}
+
+/// Native operating-system implementation backed by keyring-rs.
+///
+/// keyring-rs selects Keychain Services on macOS, Windows Credential Manager on
+/// Windows, and Secret Service on supported Unix desktops. Operations are
+/// serialized process-wide because Windows does not guarantee ordering for
+/// concurrent access to the same credential.
+pub struct SystemCredentialStore {
+    service: String,
+}
+
+static SYSTEM_CREDENTIAL_LOCK: Mutex<()> = Mutex::new(());
+
+impl SystemCredentialStore {
+    pub fn new(service: impl Into<String>) -> Result<Self, CredentialStoreError> {
+        let service = service.into();
+        validate_service_name(&service)?;
+        Ok(Self { service })
+    }
+
+    #[must_use]
+    pub fn image_generation() -> Self {
+        Self {
+            service: IMAGE_GENERATION_CREDENTIAL_SERVICE.to_owned(),
+        }
+    }
+
+    fn entry(&self, reference: &CredentialReference) -> Result<Entry, CredentialStoreError> {
+        Entry::new(&self.service, reference.as_str())
+            .map_err(|error| classify_keyring_error(CredentialStoreOperation::Open, error))
+    }
+}
+
+impl fmt::Debug for SystemCredentialStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SystemCredentialStore")
+            .field("service", &self.service)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CredentialStore for SystemCredentialStore {
+    fn replace(
+        &self,
+        reference: &CredentialReference,
+        secret: CredentialSecret,
+    ) -> Result<(), CredentialStoreError> {
+        let _guard = lock_system_credentials();
+        let entry = self.entry(reference)?;
+        entry
+            .set_password(&secret.0)
+            .map_err(|error| classify_keyring_error(CredentialStoreOperation::Replace, error))
+    }
+
+    fn get(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<Option<CredentialSecret>, CredentialStoreError> {
+        let _guard = lock_system_credentials();
+        let entry = self.entry(reference)?;
+        match entry.get_password() {
+            Ok(secret) => CredentialSecret::new(secret).map(Some),
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(error) => Err(classify_keyring_error(CredentialStoreOperation::Get, error)),
+        }
+    }
+
+    fn delete(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<CredentialDeleteOutcome, CredentialStoreError> {
+        let _guard = lock_system_credentials();
+        let entry = self.entry(reference)?;
+        match entry.delete_credential() {
+            Ok(()) => Ok(CredentialDeleteOutcome::Deleted),
+            Err(KeyringError::NoEntry) => Ok(CredentialDeleteOutcome::NotFound),
+            Err(error) => Err(classify_keyring_error(
+                CredentialStoreOperation::Delete,
+                error,
+            )),
+        }
+    }
+}
+
+/// Deterministic test implementation that never touches the operating system.
+#[derive(Default)]
+pub struct InMemoryCredentialStore {
+    credentials: Mutex<HashMap<CredentialReference, CredentialSecret>>,
+}
+
+impl fmt::Debug for InMemoryCredentialStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("InMemoryCredentialStore([REDACTED])")
+    }
+}
+
+impl CredentialStore for InMemoryCredentialStore {
+    fn replace(
+        &self,
+        reference: &CredentialReference,
+        secret: CredentialSecret,
+    ) -> Result<(), CredentialStoreError> {
+        self.lock_credentials(CredentialStoreOperation::Replace)?
+            .insert(reference.clone(), secret);
+        Ok(())
+    }
+
+    fn get(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<Option<CredentialSecret>, CredentialStoreError> {
+        self.lock_credentials(CredentialStoreOperation::Get)?
+            .get(reference)
+            .map(|secret| CredentialSecret::new(secret.0.clone()))
+            .transpose()
+    }
+
+    fn delete(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<CredentialDeleteOutcome, CredentialStoreError> {
+        let removed = self
+            .lock_credentials(CredentialStoreOperation::Delete)?
+            .remove(reference);
+        Ok(if removed.is_some() {
+            CredentialDeleteOutcome::Deleted
+        } else {
+            CredentialDeleteOutcome::NotFound
+        })
+    }
+}
+
+impl InMemoryCredentialStore {
+    fn lock_credentials(
+        &self,
+        operation: CredentialStoreOperation,
+    ) -> Result<MutexGuard<'_, HashMap<CredentialReference, CredentialSecret>>, CredentialStoreError>
+    {
+        self.credentials
+            .lock()
+            .map_err(|_| CredentialStoreError::BackendFailure { operation })
+    }
+}
+
+fn validate_reference(value: &str) -> Result<(), CredentialStoreError> {
+    let Some(uuid) = value.strip_prefix(OPAQUE_REFERENCE_PREFIX) else {
+        return Err(CredentialStoreError::InvalidReference);
+    };
+    if uuid.len() != OPAQUE_REFERENCE_UUID_BYTES
+        || !uuid.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(CredentialStoreError::InvalidReference);
+    }
+    Ok(())
+}
+
+fn validate_service_name(value: &str) -> Result<(), CredentialStoreError> {
+    if value.is_empty()
+        || value.len() > MAX_CREDENTIAL_SERVICE_BYTES
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        return Err(CredentialStoreError::InvalidServiceName);
+    }
+    Ok(())
+}
+
+fn lock_system_credentials() -> MutexGuard<'static, ()> {
+    SYSTEM_CREDENTIAL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn classify_keyring_error(
+    operation: CredentialStoreOperation,
+    error: KeyringError,
+) -> CredentialStoreError {
+    match error {
+        KeyringError::NoDefaultStore => CredentialStoreError::BackendUnavailable { operation },
+        KeyringError::NoStorageAccess(_) => CredentialStoreError::AccessDenied { operation },
+        KeyringError::NotSupportedByStore(_) => CredentialStoreError::Unsupported { operation },
+        KeyringError::BadEncoding(_)
+        | KeyringError::BadDataFormat(_, _)
+        | KeyringError::BadStoreFormat(_) => CredentialStoreError::CorruptedEntry { operation },
+        KeyringError::Ambiguous(_) => CredentialStoreError::AmbiguousEntry { operation },
+        KeyringError::TooLong(_, _) | KeyringError::Invalid(_, _) => {
+            CredentialStoreError::InvalidBackendInput { operation }
+        }
+        KeyringError::NoEntry | KeyringError::PlatformFailure(_) => {
+            CredentialStoreError::BackendFailure { operation }
+        }
+        _ => CredentialStoreError::BackendFailure { operation },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn secret_text(secret: &CredentialSecret) -> String {
+        secret.with_secret_bytes(|bytes| String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[test]
+    fn opaque_references_are_unique_and_valid() {
+        let first = CredentialReference::new_opaque();
+        let second = CredentialReference::new_opaque();
+
+        assert_ne!(first, second);
+        assert!(first.as_str().starts_with(OPAQUE_REFERENCE_PREFIX));
+        assert!(CredentialReference::parse(first.as_str()).is_ok());
+    }
+
+    #[test]
+    fn invalid_references_are_rejected_without_echoing_input() {
+        let invalid = "secret-looking\nreference";
+        let error = CredentialReference::parse(invalid).unwrap_err();
+
+        assert_eq!(error, CredentialStoreError::InvalidReference);
+        assert!(!error.to_string().contains(invalid));
+    }
+
+    #[test]
+    fn credential_secret_debug_output_is_always_redacted() {
+        let value = "super-secret-api-key";
+        let secret = CredentialSecret::new(value).unwrap();
+        let debug = format!("{secret:?}");
+
+        assert_eq!(debug, "CredentialSecret([REDACTED])");
+        assert!(!debug.contains(value));
+    }
+
+    #[test]
+    fn empty_credential_secrets_are_rejected() {
+        assert_eq!(
+            CredentialSecret::new("").unwrap_err(),
+            CredentialStoreError::InvalidSecret
+        );
+    }
+
+    #[test]
+    fn in_memory_store_has_explicit_replace_get_and_delete_semantics() {
+        let store = InMemoryCredentialStore::default();
+        let reference = CredentialReference::new_opaque();
+
+        assert!(store.get(&reference).unwrap().is_none());
+
+        store
+            .replace(&reference, CredentialSecret::new("first-secret").unwrap())
+            .unwrap();
+        assert_eq!(
+            secret_text(&store.get(&reference).unwrap().unwrap()),
+            "first-secret"
+        );
+
+        store
+            .replace(
+                &reference,
+                CredentialSecret::new("replacement-secret").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            secret_text(&store.get(&reference).unwrap().unwrap()),
+            "replacement-secret"
+        );
+
+        assert_eq!(
+            store.delete(&reference).unwrap(),
+            CredentialDeleteOutcome::Deleted
+        );
+        assert_eq!(
+            store.delete(&reference).unwrap(),
+            CredentialDeleteOutcome::NotFound
+        );
+        assert!(store.get(&reference).unwrap().is_none());
+    }
+
+    #[test]
+    fn credential_store_is_object_safe_and_thread_safe() {
+        let store: Arc<dyn CredentialStore> = Arc::new(InMemoryCredentialStore::default());
+        let reference = CredentialReference::new_opaque();
+
+        let writer_store = Arc::clone(&store);
+        let writer_reference = reference.clone();
+        std::thread::spawn(move || {
+            writer_store
+                .replace(
+                    &writer_reference,
+                    CredentialSecret::new("thread-secret").unwrap(),
+                )
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(
+            secret_text(&store.get(&reference).unwrap().unwrap()),
+            "thread-secret"
+        );
+    }
+
+    #[test]
+    fn store_debug_output_does_not_contain_credentials() {
+        let store = InMemoryCredentialStore::default();
+        let reference = CredentialReference::new_opaque();
+        store
+            .replace(
+                &reference,
+                CredentialSecret::new("never-print-this").unwrap(),
+            )
+            .unwrap();
+
+        let debug = format!("{store:?}");
+        assert_eq!(debug, "InMemoryCredentialStore([REDACTED])");
+        assert!(!debug.contains("never-print-this"));
+    }
+}

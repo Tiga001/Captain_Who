@@ -12,6 +12,7 @@ pub mod conversation_fork_repository;
 pub mod conversation_history_repository;
 pub mod conversation_trace_repository;
 pub mod file_draft_repository;
+pub mod image_generation_repository;
 pub mod migrations;
 pub mod model_request_observation_repository;
 pub mod models;

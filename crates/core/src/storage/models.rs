@@ -45,6 +45,29 @@ pub struct ModelSettingsRecord {
     pub models: Vec<ModelConfigRecord>,
 }
 
+/// Credential-free persisted state for one image-generation provider profile.
+///
+/// The secret itself lives in the platform credential store. `credential_ref` is an opaque
+/// lookup identity and is safe to persist, but it must never be interpreted as a credential.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageGenerationProfileRecord {
+    pub id: String,
+    pub schema_version: u32,
+    pub adapter_id: String,
+    pub endpoint_url: String,
+    pub model_id: String,
+    pub credential_ref: Option<String>,
+    pub enabled: bool,
+    pub text_to_image: bool,
+    pub image_to_image: bool,
+    pub default_size_preset: String,
+    pub default_watermark: bool,
+    pub generation: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 fn validated_connection(
     model_id: &str,
     source_label: &str,

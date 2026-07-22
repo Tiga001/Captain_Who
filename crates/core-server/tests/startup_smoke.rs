@@ -10,7 +10,7 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[test]
-fn production_bootstrap_serves_skill_management_and_shuts_down_cleanly() {
+fn production_bootstrap_serves_management_configuration_and_shuts_down_cleanly() {
     let profile = tempfile::tempdir().expect("temporary profile");
     let database = profile.path().join("storage.sqlite");
     let mut child = Command::new(env!("CARGO_BIN_EXE_core-server"))
@@ -82,11 +82,34 @@ fn production_bootstrap_serves_skill_management_and_shuts_down_cleanly() {
         json!({
             "jsonrpc": "2.0",
             "id": 3,
+            "method": "imageGeneration.getConfiguration"
+        }),
+    );
+    let image_generation = receive_response(&line_rx);
+    assert_eq!(image_generation["id"], 3);
+    assert_eq!(image_generation["result"]["schemaVersion"], 1);
+    assert_eq!(
+        image_generation["result"]["configuration"]["adapterId"],
+        "smartmlSeedream"
+    );
+    assert_eq!(
+        image_generation["result"]["configuration"]["readiness"],
+        "disabled"
+    );
+    assert!(image_generation["result"]["configuration"]
+        .get("credential")
+        .is_none());
+
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
             "method": "core.shutdown"
         }),
     );
     let shutdown = receive_response(&line_rx);
-    assert_eq!(shutdown["id"], 3);
+    assert_eq!(shutdown["id"], 4);
     assert!(shutdown["result"].is_object());
     drop(stdin);
 

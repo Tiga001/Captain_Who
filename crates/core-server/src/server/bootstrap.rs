@@ -4,6 +4,7 @@ use std::path::Path;
 
 pub(crate) struct CoreServerBootstrap {
     pub(crate) storage: Arc<StorageService>,
+    pub(crate) image_generation_configuration: Arc<ImageGenerationConfigurationService>,
     pub(crate) agent_service: AgentService,
     pub(crate) skill_services: SkillServices,
     pub(crate) git_review_service: Arc<GitReviewService>,
@@ -22,6 +23,15 @@ impl CoreServerBootstrap {
             Arc::new(StorageService::open(&database_path).map_err(|error| {
                 io::Error::other(format!("failed to initialize storage: {error}"))
             })?);
+        let image_generation_configuration = Arc::new(ImageGenerationConfigurationService::new(
+            Arc::clone(&storage),
+            Arc::new(SystemCredentialStore::image_generation()),
+        ));
+        if let Err(error) = image_generation_configuration.reconcile_credentials() {
+            // The service remains available so settings can expose a structured, retryable error.
+            // Credential-store errors are deliberately redacted by the domain boundary.
+            eprintln!("failed to reconcile image-generation credentials: {error}");
+        }
         let git_review_service = Arc::new(GitReviewService::new());
         let skills_service = Arc::new(
             SkillsService::new()
@@ -93,6 +103,7 @@ impl CoreServerBootstrap {
         };
         Ok(Self {
             storage,
+            image_generation_configuration,
             agent_service,
             skill_services,
             git_review_service,
@@ -168,15 +179,21 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skill_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let skill_acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let image_generation_configuration_dispatcher =
+        ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
     let request_dispatchers = RequestDispatchers {
         git: &git_dispatcher,
         skills: &skill_dispatcher,
         skill_acquisition: &skill_acquisition_dispatcher,
+        image_generation_configuration: &image_generation_configuration_dispatcher,
     };
 
     let input_result = run_request_loop(
         BufReader::new(io::stdin()),
-        Arc::clone(&bootstrap.storage),
+        CoreRequestServices {
+            storage: Arc::clone(&bootstrap.storage),
+            image_generation_configuration: Arc::clone(&bootstrap.image_generation_configuration),
+        },
         &bootstrap.agent_service,
         bootstrap.skill_services.clone(),
         Arc::clone(&bootstrap.git_review_service),
@@ -192,11 +209,13 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         git_dispatcher_result,
         skill_dispatcher_result,
         skill_acquisition_dispatcher_result,
+        image_generation_configuration_dispatcher_result,
         (cancelled_runs, timed_out),
     ) = tokio::join!(
         git_dispatcher.shutdown(),
         skill_dispatcher.shutdown(),
         skill_acquisition_dispatcher.shutdown(),
+        image_generation_configuration_dispatcher.shutdown(),
         bootstrap
             .agent_service
             .shutdown_active_runs(Duration::from_secs(2))
@@ -230,6 +249,8 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     git_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
     skill_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
     skill_acquisition_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
+    image_generation_configuration_dispatcher_result
+        .map_err(|error| io::Error::other(error.to_string()))?;
     if let Some(error) = outbound_error {
         return Err(error);
     }

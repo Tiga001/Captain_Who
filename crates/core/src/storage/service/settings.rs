@@ -43,6 +43,87 @@ pub(super) fn validate_skill_enablement_id(skill_id: &str) -> Result<(), String>
 }
 
 impl StorageService {
+    pub fn load_image_generation_profile(
+        &self,
+        profile_id: &str,
+    ) -> Result<Option<ImageGenerationProfileRecord>, String> {
+        let connection = self.state.connection()?;
+        image_generation_repository::load_image_generation_profile(&connection, profile_id)
+            .map_err(storage_error)
+    }
+
+    pub fn compare_and_set_image_generation_profile(
+        &self,
+        profile_id: &str,
+        expected_generation: u64,
+        replacement: &ImageGenerationProfileRecord,
+    ) -> Result<image_generation_repository::ImageGenerationProfileCompareAndSetOutcome, String>
+    {
+        let mut connection = self.state.connection()?;
+        image_generation_repository::compare_and_set_image_generation_profile(
+            &mut connection,
+            profile_id,
+            expected_generation,
+            replacement,
+        )
+        .map_err(storage_error)
+    }
+
+    pub fn stage_image_generation_credential(
+        &self,
+        profile_id: &str,
+        expected_generation: u64,
+        credential_ref: &str,
+    ) -> Result<image_generation_repository::ImageGenerationCredentialStageOutcome, String> {
+        let mut connection = self.state.connection()?;
+        image_generation_repository::stage_image_generation_credential(
+            &mut connection,
+            profile_id,
+            expected_generation,
+            credential_ref,
+        )
+        .map_err(storage_error)
+    }
+
+    pub fn complete_image_generation_credential_staging(
+        &self,
+        credential_ref: &str,
+    ) -> Result<bool, String> {
+        let connection = self.state.connection()?;
+        image_generation_repository::complete_image_generation_credential_staging(
+            &connection,
+            credential_ref,
+        )
+        .map_err(storage_error)
+    }
+
+    pub fn list_image_generation_credential_staging(
+        &self,
+    ) -> Result<Vec<image_generation_repository::ImageGenerationCredentialStagingRecord>, String>
+    {
+        let connection = self.state.connection()?;
+        image_generation_repository::list_image_generation_credential_staging(&connection)
+            .map_err(storage_error)
+    }
+
+    pub fn list_image_generation_credential_cleanup(&self) -> Result<Vec<String>, String> {
+        let connection = self.state.connection()?;
+        image_generation_repository::list_image_generation_credential_cleanup(&connection)
+            .map_err(storage_error)
+    }
+
+    pub fn complete_image_generation_credential_cleanup(
+        &self,
+        credential_ref: &str,
+    ) -> Result<bool, String> {
+        let connection = self.state.connection()?;
+        image_generation_repository::complete_image_generation_credential_cleanup(
+            &connection,
+            credential_ref,
+        )
+        .map_err(storage_error)
+    }
+
     pub fn load_model_settings(&self) -> Result<Option<ModelSettingsRecord>, String> {
         let connection = self.state.connection()?;
         config_repository::load_model_settings(&connection).map_err(storage_error)

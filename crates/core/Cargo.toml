@@ -12,6 +12,7 @@ base64 = "0.22"
 dirs = "6"
 futures-util = "0.3"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+keyring = "4"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 pdf-extract = "0.12"
@@ -27,6 +28,7 @@ time = { version = "0.3", features = ["formatting", "local-offset"] }
 tokio = { version = "1", features = ["macros", "net", "rt", "time"] }
 uuid.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
+zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true

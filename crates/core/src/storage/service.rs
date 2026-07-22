@@ -9,17 +9,18 @@ use crate::storage::models::{
     AgentUnsettledFileEffect, AgentUsageRecordInsert, AttachmentImageRecord, AttachmentRecord,
     ChatConversationMetaRecord, ChatConversationRecord, ChatMessageAttachmentRecord,
     ChatMessageRecord, ChatMessageStateRecord, ChatSearchInput, ChatSearchResult,
-    ComposerDraftRecord, ForkConversationInput, ModelSettingsRecord, ProjectRecord,
-    UiPreferencesRecord,
+    ComposerDraftRecord, ForkConversationInput, ImageGenerationProfileRecord, ModelSettingsRecord,
+    ProjectRecord, UiPreferencesRecord,
 };
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
     chat_repository, chat_search_repository, composer_draft_repository, config_repository,
     context_compaction_audit_repository, context_compaction_receipt_repository,
     context_compaction_repository, conversation_fork_repository, conversation_history_repository,
-    conversation_trace_repository, file_draft_repository, model_request_observation_repository,
-    now_ms, pending_action_repository, preferences_repository, project_repository,
-    skill_enablement_repository, storage_error, usage_repository, StorageState,
+    conversation_trace_repository, file_draft_repository, image_generation_repository,
+    model_request_observation_repository, now_ms, pending_action_repository,
+    preferences_repository, project_repository, skill_enablement_repository, storage_error,
+    usage_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentChatInput, AgentInputAttachment,

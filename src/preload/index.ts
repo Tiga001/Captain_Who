@@ -4,6 +4,7 @@ import type { AppWindowState, HostApi } from '@mycopilot/host-api'
 import type { AgentEvent, TerminalExitEvent, TerminalOutputEvent } from '@mycopilot/protocol'
 import { createSkillsIpcBridge } from './SkillsIpcBridge'
 import { createOfficeIpcBridge } from './OfficeIpcBridge'
+import { createImageGenerationIpcBridge } from './ImageGenerationIpcBridge'
 import { TerminalEventRouter } from './TerminalEventRouter'
 
 const AGENT_EVENT_CHANNEL = 'host:agent.event'
@@ -88,6 +89,7 @@ const host: HostApi = {
     getReviewFileContent: (input) => ipcRenderer.invoke('host:git.getReviewFileContent', input),
     mutateReviewFile: (input) => ipcRenderer.invoke('host:git.mutateReviewFile', input)
   },
+  imageGeneration: createImageGenerationIpcBridge(ipcRenderer),
   office: createOfficeIpcBridge(ipcRenderer),
   resources: {
     resolveFavicon: (input) => ipcRenderer.invoke('host:resources.resolveFavicon', input)

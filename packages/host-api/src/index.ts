@@ -35,6 +35,12 @@ import type {
   GitReviewFileMutationInput,
   GitReviewSummary,
   GitReviewSummaryInput,
+  ImageGenerationGetConfigurationOutput,
+  ImageGenerationSetEnabledInput,
+  ImageGenerationSetEnabledOutput,
+  ImageGenerationStatus,
+  ImageGenerationUpdateConfigurationInput,
+  ImageGenerationUpdateConfigurationOutput,
   ResourceFaviconRequest,
   ResourceFaviconResponse,
   ChatSearchInput,
@@ -144,6 +150,17 @@ export interface SearchHostApi {
   searchChats(input: ChatSearchInput): Promise<ChatSearchResult[]>
 }
 
+export interface ImageGenerationHostApi {
+  getConfiguration(): Promise<HostInvocationResult<ImageGenerationGetConfigurationOutput>>
+  updateConfiguration(
+    input: ImageGenerationUpdateConfigurationInput
+  ): Promise<HostInvocationResult<ImageGenerationUpdateConfigurationOutput>>
+  setEnabled(
+    input: ImageGenerationSetEnabledInput
+  ): Promise<HostInvocationResult<ImageGenerationSetEnabledOutput>>
+  getStatus(): Promise<HostInvocationResult<ImageGenerationStatus>>
+}
+
 export interface SkillsHostApi {
   list(input: SkillsListInput): Promise<SkillsListOutput>
   /** Opens a native single-directory picker. Cancellation is not an error. */
@@ -249,6 +266,7 @@ export interface HostApi {
   attachments: AttachmentsHostApi
   browser: BrowserHostApi
   git: GitHostApi
+  imageGeneration: ImageGenerationHostApi
   office: OfficeHostApi
   resources: ResourcesHostApi
   search: SearchHostApi

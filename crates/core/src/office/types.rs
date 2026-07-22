@@ -141,10 +141,10 @@ pub enum OfficeOperationAccess {
 
 /// Provider-neutral Office help topics exposed to the model.
 ///
-/// `status`, `help`, `create`, `view`, and `validate` describe Host-managed operations and never
-/// become provider argv. The remaining topics may be used for OfficeCLI's element-oriented schema
-/// help. The document format is always derived from the selected Office tool, so callers never
-/// repeat `docx`, `xlsx`, or `pptx` as a provider token.
+/// `status`, `help`, `create`, `view`, `validate`, `move`, and `swap` describe Host-managed
+/// operations and never become provider argv. The remaining topics may be used for OfficeCLI's
+/// element-oriented schema help. The document format is always derived from the selected Office
+/// tool, so callers never repeat `docx`, `xlsx`, or `pptx` as a provider token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OfficeHelpVerb {
@@ -184,14 +184,16 @@ impl OfficeHelpVerb {
     /// Host-managed topics deliberately return `None` so they cannot cross the provider boundary.
     pub fn provider_element_cli_name(self) -> Option<&'static str> {
         match self {
-            Self::Get
-            | Self::Query
-            | Self::Set
-            | Self::Add
-            | Self::Remove
+            Self::Get | Self::Query | Self::Set | Self::Add | Self::Remove => {
+                Some(self.stable_name())
+            }
+            Self::Status
+            | Self::Help
+            | Self::Create
+            | Self::View
+            | Self::Validate
             | Self::Move
-            | Self::Swap => Some(self.stable_name()),
-            Self::Status | Self::Help | Self::Create | Self::View | Self::Validate => None,
+            | Self::Swap => None,
         }
     }
 

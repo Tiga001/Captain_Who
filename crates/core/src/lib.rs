@@ -7,6 +7,7 @@ mod context_compaction_receipt;
 mod conversation_trace;
 pub mod file_write;
 pub mod git_review;
+pub mod image_generation;
 mod llm;
 mod model_request_observation;
 pub mod office;

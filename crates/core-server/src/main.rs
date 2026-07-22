@@ -1,6 +1,7 @@
 mod agent;
 mod agent_support;
 mod git_dispatcher;
+mod image_generation_dispatcher;
 mod skill_installation_workflow_adapter;
 mod skill_source_resolution_adapter;
 mod skills_adapter;
@@ -16,7 +17,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent::{AgentConversationTurnInput, AgentService, AgentServiceError};
 use git_dispatcher::{GitDispatcher, GitJobPriority};
+use image_generation_dispatcher::{
+    ImageGenerationConfigurationDispatcher, ImageGenerationConfigurationJobKind,
+};
 use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
+#[cfg(test)]
+use mycopilot_core::image_generation::InMemoryCredentialStore;
+use mycopilot_core::image_generation::{
+    ImageGenerationConfigurationService, SystemCredentialStore,
+};
 use mycopilot_core::skills::{
     GitHubAcquisitionTransport, GitHubInstallationSourceResolver, GitHubSkillAcquirer,
     GitHubWorkflowAcquisitionAdapter, LocalSkillInstallRequest, LocalSkillUpdateRequest,
@@ -50,13 +59,16 @@ use mycopilot_protocol_rs::{
     AGENT_READ_FILE_DRAFT_METHOD, AGENT_REJECT_ACTION_METHOD, AGENT_START_CONVERSATION_TURN_METHOD,
     CORE_PING_METHOD, CORE_SHUTDOWN_METHOD, GIT_GET_REVIEW_FILE_CONTENT_METHOD,
     GIT_GET_REVIEW_FILE_DIFF_METHOD, GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD,
-    GIT_MUTATE_REVIEW_FILE_METHOD, OFFICE_GET_STATUS_METHOD, SEARCH_SEARCH_CHATS_METHOD,
-    SKILLS_CANCEL_PREPARATION_METHOD, SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD,
-    SKILLS_CHANGED_NOTIFICATION_METHOD, SKILLS_COMMIT_INSTALLATION_METHOD,
-    SKILLS_INSPECT_INSTALLATION_METHOD, SKILLS_INSTALL_LOCAL_METHOD, SKILLS_LIST_MANAGEMENT_METHOD,
-    SKILLS_LIST_METHOD, SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD, SKILLS_SET_ENABLED_METHOD,
-    SKILLS_UNINSTALL_METHOD, SKILLS_UPDATE_LOCAL_METHOD, SKILL_INSPECTION_ERROR_CODE,
-    SKILL_INSTALLATION_ERROR_CODE, SKILL_MANAGEMENT_ERROR_CODE, SKILL_MANAGEMENT_SCHEMA_VERSION,
+    GIT_MUTATE_REVIEW_FILE_METHOD, IMAGE_GENERATION_GET_CONFIGURATION_METHOD,
+    IMAGE_GENERATION_GET_STATUS_METHOD, IMAGE_GENERATION_SET_ENABLED_METHOD,
+    IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD, OFFICE_GET_STATUS_METHOD,
+    SEARCH_SEARCH_CHATS_METHOD, SKILLS_CANCEL_PREPARATION_METHOD,
+    SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD, SKILLS_CHANGED_NOTIFICATION_METHOD,
+    SKILLS_COMMIT_INSTALLATION_METHOD, SKILLS_INSPECT_INSTALLATION_METHOD,
+    SKILLS_INSTALL_LOCAL_METHOD, SKILLS_LIST_MANAGEMENT_METHOD, SKILLS_LIST_METHOD,
+    SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD, SKILLS_SET_ENABLED_METHOD, SKILLS_UNINSTALL_METHOD,
+    SKILLS_UPDATE_LOCAL_METHOD, SKILL_INSPECTION_ERROR_CODE, SKILL_INSTALLATION_ERROR_CODE,
+    SKILL_MANAGEMENT_ERROR_CODE, SKILL_MANAGEMENT_SCHEMA_VERSION,
     SKILL_SOURCE_RESOLUTION_ERROR_CODE, STORAGE_DELETE_CHAT_MESSAGES_METHOD,
     STORAGE_DELETE_CONVERSATION_METHOD, STORAGE_DELETE_PROJECT_METHOD,
     STORAGE_FORK_CONVERSATION_METHOD, STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD,
@@ -115,6 +127,17 @@ fn main() -> io::Result<()> {
     drop(runtime);
     drop(bootstrap);
     result
+}
+
+#[cfg(test)]
+fn test_core_request_services(storage: Arc<StorageService>) -> CoreRequestServices {
+    CoreRequestServices {
+        image_generation_configuration: Arc::new(ImageGenerationConfigurationService::new(
+            Arc::clone(&storage),
+            Arc::new(InMemoryCredentialStore::default()),
+        )),
+        storage,
+    }
 }
 
 #[cfg(test)]

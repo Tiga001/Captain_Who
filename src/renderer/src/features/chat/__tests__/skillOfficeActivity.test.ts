@@ -1,6 +1,7 @@
 import type { ActivatedSkillSummary, AgentToolCall, AgentToolResult } from '@mycopilot/protocol'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { ChatAgentRunView } from '../chatTypes'
+import { groupTimelineItems } from '../components/chatMessageItemUtils'
 import {
   getActivatedSkills,
   getOfficeActivityGroupIdentity,
@@ -11,6 +12,8 @@ import {
   isHiddenSkillTool,
   parseSkillResourceUri
 } from '../skillOfficeActivity'
+
+vi.mock('../../../host/hostClient', () => ({ hostClient: {} }))
 
 const spreadsheetSkill: ActivatedSkillSummary = {
   id: 'bundled:application:spreadsheets',
@@ -205,7 +208,7 @@ describe('Skill and Office activity derivation', () => {
     })
   })
 
-  it('groups Office calls only when document kind, normalized file identity and operation mode match', () => {
+  it('groups Office reads by document kind and read category while retaining mutation targets', () => {
     const firstEdit = toolCall({
       id: 'edit-1',
       tool: 'office_spreadsheet',
@@ -226,6 +229,41 @@ describe('Skill and Office activity derivation', () => {
       tool: 'office_spreadsheet',
       args: { operation: 'add', path: 'forecast.xlsx' }
     })
+    const readCalls = [
+      toolCall({ id: 'help', tool: 'office_spreadsheet', args: { operation: 'help' } }),
+      toolCall({ id: 'status', tool: 'office_spreadsheet', args: { operation: 'status' } }),
+      view,
+      toolCall({
+        id: 'query',
+        tool: 'office_spreadsheet',
+        args: { operation: 'query', path: 'forecast.xlsx' }
+      }),
+      toolCall({
+        id: 'view',
+        tool: 'office_spreadsheet',
+        args: { operation: 'view', path: 'archive.xlsx' }
+      }),
+      toolCall({
+        id: 'validate',
+        tool: 'office_spreadsheet',
+        args: { operation: 'validate', path: 'other.xlsx' }
+      })
+    ]
+    const presentationRead = toolCall({
+      id: 'presentation-help',
+      tool: 'office_presentation',
+      args: { operation: 'help' }
+    })
+    const firstExport = toolCall({
+      id: 'export-1',
+      tool: 'office_spreadsheet',
+      args: { operation: 'view', path: 'budget.xlsx', outputPath: 'preview-1.png' }
+    })
+    const secondExport = toolCall({
+      id: 'export-2',
+      tool: 'office_spreadsheet',
+      args: { operation: 'view', path: 'budget.xlsx', outputPath: 'preview-2.png' }
+    })
 
     expect(getOfficeActivityGroupIdentity(firstEdit)?.key).toBe(
       getOfficeActivityGroupIdentity(secondEdit)?.key
@@ -235,6 +273,173 @@ describe('Skill and Office activity derivation', () => {
     )
     expect(getOfficeActivityGroupIdentity(firstEdit)?.key).not.toBe(
       getOfficeActivityGroupIdentity(otherFile)?.key
+    )
+    expect(new Set(readCalls.map((call) => getOfficeActivityGroupIdentity(call)?.key))).toEqual(
+      new Set([getOfficeActivityGroupIdentity(view)?.key])
+    )
+    expect(getOfficeActivityGroupIdentity(view)).toMatchObject({
+      category: 'read',
+      fileIdentity: 'read-check'
+    })
+    expect(getOfficeActivityGroupIdentity(view)?.key).not.toBe(
+      getOfficeActivityGroupIdentity(presentationRead)?.key
+    )
+    expect(getOfficeActivityGroupIdentity(firstExport)?.key).not.toBe(
+      getOfficeActivityGroupIdentity(secondExport)?.key
+    )
+    expect(getOfficeActivityView(run(), readCalls[1])).toMatchObject({
+      category: 'read',
+      mode: 'view',
+      operation: 'status'
+    })
+  })
+
+  it('groups only consecutive Office read checks and preserves narration and tool boundaries', () => {
+    const readCalls = [
+      toolCall({ id: 'help', tool: 'office_document', args: { operation: 'help' } }),
+      toolCall({ id: 'status', tool: 'office_document', args: { operation: 'status' } }),
+      toolCall({
+        id: 'get',
+        tool: 'office_document',
+        args: { operation: 'get', path: 'report.docx' }
+      }),
+      toolCall({
+        id: 'query',
+        tool: 'office_document',
+        args: { operation: 'query', path: 'appendix.docx' }
+      }),
+      toolCall({
+        id: 'view',
+        tool: 'office_document',
+        args: { operation: 'view', path: 'other.docx' }
+      }),
+      toolCall({
+        id: 'validate',
+        tool: 'office_document',
+        args: { operation: 'validate', path: 'checked.docx' }
+      })
+    ]
+    const afterNarration = toolCall({
+      id: 'status-after-narration',
+      tool: 'office_document',
+      args: { operation: 'status' }
+    })
+    const command = toolCall({ id: 'command', tool: 'run_command' })
+    const afterTool = toolCall({
+      id: 'get-after-tool',
+      tool: 'office_document',
+      args: { operation: 'get', path: 'report.docx' }
+    })
+    const currentRun = run({
+      toolCalls: [...readCalls, afterNarration, command, afterTool],
+      timeline: [
+        ...readCalls.map((call) => ({
+          id: call.id,
+          type: 'tool_call' as const,
+          callId: call.id
+        })),
+        { id: 'narration', type: 'message', content: '继续核对渲染状态。' },
+        {
+          id: afterNarration.id,
+          type: 'tool_call',
+          callId: afterNarration.id
+        },
+        { id: command.id, type: 'tool_call', callId: command.id },
+        { id: afterTool.id, type: 'tool_call', callId: afterTool.id }
+      ]
+    })
+
+    const grouped = groupTimelineItems(currentRun, currentRun.timeline)
+    const officeGroups = grouped.filter((item) => item.type === 'office_group')
+
+    expect(officeGroups.map((item) => item.callIds)).toEqual([
+      readCalls.map((call) => call.id),
+      [afterNarration.id],
+      [afterTool.id]
+    ])
+    expect(grouped.map((item) => item.type)).toEqual([
+      'office_group',
+      'message',
+      'office_group',
+      'run_command_group',
+      'office_group'
+    ])
+  })
+
+  it('keeps nine adjacent help outcomes in one group but separates write targets', () => {
+    const helpCalls = Array.from({ length: 9 }, (_, index) =>
+      toolCall({
+        id: `help-${index + 1}`,
+        tool: 'office_document',
+        args: {
+          request:
+            index === 0
+              ? { operation: 'help', verb: 'create', element: 'document' }
+              : { operation: 'help', verb: 'add', element: `element-${index + 1}` }
+        },
+        reason: `检查第 ${index + 1} 项文档能力。`
+      })
+    )
+    const writes = [
+      toolCall({
+        id: 'create-a',
+        tool: 'office_document',
+        args: { operation: 'create', path: 'a.docx' }
+      }),
+      toolCall({
+        id: 'create-b',
+        tool: 'office_document',
+        args: { operation: 'create', path: 'b.docx' }
+      }),
+      toolCall({
+        id: 'edit-a',
+        tool: 'office_document',
+        args: { operation: 'set', path: 'a.docx' }
+      }),
+      toolCall({
+        id: 'edit-b',
+        tool: 'office_document',
+        args: { operation: 'set', path: 'b.docx' }
+      }),
+      toolCall({
+        id: 'export-a',
+        tool: 'office_document',
+        args: { operation: 'view', path: 'a.docx', outputPath: 'a.png' }
+      }),
+      toolCall({
+        id: 'export-b',
+        tool: 'office_document',
+        args: { operation: 'view', path: 'a.docx', outputPath: 'b.png' }
+      })
+    ]
+    const calls = [...helpCalls, ...writes]
+    const currentRun = run({
+      toolCalls: calls,
+      toolResults: helpCalls.map((call, index) =>
+        index === 0
+          ? toolResult({
+              callId: call.id,
+              tool: call.tool,
+              ok: false,
+              error: 'Office help probe failed.'
+            })
+          : toolResult({ callId: call.id, tool: call.tool, result: { exitCode: 0 } })
+      ),
+      timeline: calls.map((call) => ({
+        id: call.id,
+        type: 'tool_call' as const,
+        callId: call.id
+      }))
+    })
+
+    const officeGroups = groupTimelineItems(currentRun, currentRun.timeline).filter(
+      (item) => item.type === 'office_group'
+    )
+
+    expect(officeGroups[0]?.callIds).toEqual(helpCalls.map((call) => call.id))
+    expect(officeGroups).toHaveLength(7)
+    expect(officeGroups.slice(1).map((item) => item.callIds)).toEqual(
+      writes.map((call) => [call.id])
     )
   })
 

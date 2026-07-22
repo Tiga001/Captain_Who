@@ -87,10 +87,13 @@ async fn queued_source_cancellation_cannot_overtake_the_resolution_it_fences() {
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let image_generation_dispatcher =
+        ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
     let dispatchers = RequestDispatchers {
         git: &git_dispatcher,
         skills: &skills_dispatcher,
         skill_acquisition: &acquisition_dispatcher,
+        image_generation_configuration: &image_generation_dispatcher,
     };
     let workflow = SkillInstallationWorkflow::new(
         SkillInstallationService::new(temp.path().join("skills")).unwrap(),
@@ -122,7 +125,7 @@ async fn queued_source_cancellation_cannot_overtake_the_resolution_it_fences() {
 
     let shutdown_id = run_request_loop(
         BufReader::new(input.as_bytes()),
-        Arc::clone(&storage),
+        test_core_request_services(Arc::clone(&storage)),
         &agent_service,
         SkillServices {
             catalog: Arc::new(SkillsService::new()),
@@ -167,6 +170,7 @@ async fn queued_source_cancellation_cannot_overtake_the_resolution_it_fences() {
     git_dispatcher.shutdown().await.unwrap();
     skills_dispatcher.shutdown().await.unwrap();
     acquisition_dispatcher.shutdown().await.unwrap();
+    image_generation_dispatcher.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -178,10 +182,13 @@ async fn request_loop_resolves_and_hands_off_a_candidate_on_one_acquisition_lane
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let image_generation_dispatcher =
+        ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
     let dispatchers = RequestDispatchers {
         git: &git_dispatcher,
         skills: &skills_dispatcher,
         skill_acquisition: &acquisition_dispatcher,
+        image_generation_configuration: &image_generation_dispatcher,
     };
     let workflow = SkillInstallationWorkflow::new(
         SkillInstallationService::new(temp.path().join("skills")).unwrap(),
@@ -210,7 +217,7 @@ async fn request_loop_resolves_and_hands_off_a_candidate_on_one_acquisition_lane
 
     let shutdown_id = run_request_loop(
         BufReader::new(input.as_bytes()),
-        Arc::clone(&storage),
+        test_core_request_services(Arc::clone(&storage)),
         &agent_service,
         SkillServices {
             catalog: Arc::new(SkillsService::new()),
@@ -285,6 +292,7 @@ async fn request_loop_resolves_and_hands_off_a_candidate_on_one_acquisition_lane
     git_dispatcher.shutdown().await.unwrap();
     skills_dispatcher.shutdown().await.unwrap();
     acquisition_dispatcher.shutdown().await.unwrap();
+    image_generation_dispatcher.shutdown().await.unwrap();
 }
 
 #[test]

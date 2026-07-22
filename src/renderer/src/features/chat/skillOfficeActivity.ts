@@ -44,19 +44,27 @@ export interface SkillScriptActivityView {
 
 export type OfficeActivityMode = 'create' | 'edit' | 'view' | 'query' | 'validate' | 'export'
 
+/** Renderer-only operation for the typed Host status probe, which is not an OfficeExecution
+ * operation. It is presentation metadata only and never feeds execution. */
+export type OfficeActivityOperation = OfficeOperation | 'status'
+
+export type OfficeActivityCategory = 'read' | 'create' | 'edit' | 'export'
+
 export interface OfficeActivityView {
   call: AgentToolCall
+  category: OfficeActivityCategory
   detail?: string
   documentKind: OfficeDocumentKind
   error?: string
   mode: OfficeActivityMode
-  operation: OfficeOperation
+  operation: OfficeActivityOperation
   reason?: string
   result?: AgentToolResult
   status: AgentActivityStatus
 }
 
 export interface OfficeActivityGroupIdentity {
+  category: OfficeActivityCategory
   documentKind: OfficeDocumentKind
   fileIdentity: string
   key: string
@@ -328,9 +336,10 @@ function officeRequestArgs(value: unknown): Record<string, unknown> | undefined 
   return asRecord(args?.request) ?? args
 }
 
-function officeOperation(value: unknown): OfficeOperation {
-  const operations: OfficeOperation[] = [
+function officeOperation(value: unknown): OfficeActivityOperation {
+  const operations: OfficeActivityOperation[] = [
     'help',
+    'status',
     'create',
     'view',
     'get',
@@ -342,13 +351,13 @@ function officeOperation(value: unknown): OfficeOperation {
     'move',
     'swap'
   ]
-  return typeof value === 'string' && operations.includes(value as OfficeOperation)
-    ? (value as OfficeOperation)
+  return typeof value === 'string' && operations.includes(value as OfficeActivityOperation)
+    ? (value as OfficeActivityOperation)
     : 'get'
 }
 
 function officeMode(
-  operation: OfficeOperation,
+  operation: OfficeActivityOperation,
   outputPath: string | undefined
 ): OfficeActivityMode {
   if (operation === 'create') return 'create'
@@ -359,6 +368,11 @@ function officeMode(
   return 'view'
 }
 
+function officeActivityCategory(mode: OfficeActivityMode): OfficeActivityCategory {
+  if (mode === 'view' || mode === 'query' || mode === 'validate') return 'read'
+  return mode
+}
+
 export function getOfficeActivityGroupIdentity(
   call: AgentToolCall
 ): OfficeActivityGroupIdentity | undefined {
@@ -367,18 +381,32 @@ export function getOfficeActivityGroupIdentity(
   const args = officeRequestArgs(call.args)
   const operation = officeOperation(args?.operation)
   const mode = officeMode(operation, stringValue(args, 'outputPath'))
+  const category = officeActivityCategory(mode)
   const sourcePath =
     stringValue(args, 'filePath') ?? stringValue(args, 'documentPath') ?? stringValue(args, 'path')
   const destinationPath = stringValue(args, 'destinationPath')
-  const logicalPath = mode === 'edit' && destinationPath ? destinationPath : sourcePath
-  // Missing-path operations such as help must remain isolated instead of accidentally merging
-  // unrelated calls merely because they share the same document kind and operation category.
-  const fileIdentity = logicalPath ? normalizedArtifactPath(logicalPath) : `call:${call.id}`
+  const outputPath = stringValue(args, 'outputPath')
+  const logicalPath =
+    category === 'edit'
+      ? (destinationPath ?? sourcePath)
+      : category === 'export'
+        ? (outputPath ?? sourcePath)
+        : sourcePath
+  // Consecutive information reads are one user-visible check even when OfficeCLI consults
+  // multiple files or starts with pathless help/status probes. File-writing activities retain a
+  // normalized target identity so unrelated create/edit/export work never shares a card.
+  const fileIdentity =
+    category === 'read'
+      ? 'read-check'
+      : logicalPath
+        ? normalizedArtifactPath(logicalPath)
+        : `call:${call.id}`
 
   return {
+    category,
     documentKind,
     fileIdentity,
-    key: `${documentKind}:${fileIdentity}:${mode}`,
+    key: `${documentKind}:${category}:${fileIdentity}`,
     mode
   }
 }
@@ -393,6 +421,7 @@ export function getOfficeActivityView(
   const result = run.toolResults.find((candidate) => candidate.callId === call.id)
   const args = officeRequestArgs(call.args)
   const operation = officeOperation(args?.operation)
+  const mode = officeMode(operation, stringValue(args, 'outputPath'))
   const status = getToolActivityStatus(call, result, settledStatus, {
     requireResultForSuccess: true
   })
@@ -403,10 +432,11 @@ export function getOfficeActivityView(
 
   return {
     call,
+    category: officeActivityCategory(mode),
     detail: reason,
     documentKind,
     error: resultError,
-    mode: officeMode(operation, stringValue(args, 'outputPath')),
+    mode,
     operation,
     reason,
     result,

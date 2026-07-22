@@ -76,10 +76,13 @@ async fn office_status_probe_runs_off_the_request_loop_and_returns_a_strict_resu
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let image_generation_dispatcher =
+        ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
     let dispatchers = RequestDispatchers {
         git: &git_dispatcher,
         skills: &skills_dispatcher,
         skill_acquisition: &skills_dispatcher,
+        image_generation_configuration: &image_generation_dispatcher,
     };
     let input = concat!(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"office.getStatus\"}\n",
@@ -88,7 +91,7 @@ async fn office_status_probe_runs_off_the_request_loop_and_returns_a_strict_resu
 
     run_request_loop(
         BufReader::new(input.as_bytes()),
-        storage,
+        test_core_request_services(storage),
         &agent_service,
         SkillServices {
             catalog: Arc::new(SkillsService::new()),
@@ -127,6 +130,7 @@ async fn office_status_probe_runs_off_the_request_loop_and_returns_a_strict_resu
 
     git_dispatcher.shutdown().await.unwrap();
     skills_dispatcher.shutdown().await.unwrap();
+    image_generation_dispatcher.shutdown().await.unwrap();
 }
 
 #[test]
@@ -175,10 +179,13 @@ async fn request_loop_routes_skills_list_through_the_bounded_dispatcher() {
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let image_generation_dispatcher =
+        ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
     let dispatchers = RequestDispatchers {
         git: &git_dispatcher,
         skills: &skills_dispatcher,
         skill_acquisition: &skills_dispatcher,
+        image_generation_configuration: &image_generation_dispatcher,
     };
     let input = concat!(
         "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"skills.list\",",
@@ -187,7 +194,7 @@ async fn request_loop_routes_skills_list_through_the_bounded_dispatcher() {
 
     let shutdown_id = run_request_loop(
         BufReader::new(input.as_bytes()),
-        storage,
+        test_core_request_services(storage),
         &agent_service,
         SkillServices {
             catalog: Arc::new(SkillsService::new()),
@@ -216,6 +223,7 @@ async fn request_loop_routes_skills_list_through_the_bounded_dispatcher() {
     );
     git_dispatcher.shutdown().await.unwrap();
     skills_dispatcher.shutdown().await.unwrap();
+    image_generation_dispatcher.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -254,15 +262,18 @@ async fn changed_enablement_emits_one_invalidation_notification() {
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let image_generation_dispatcher =
+        ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
     let dispatchers = RequestDispatchers {
         git: &git_dispatcher,
         skills: &skills_dispatcher,
         skill_acquisition: &skills_dispatcher,
+        image_generation_configuration: &image_generation_dispatcher,
     };
 
     run_request_loop(
         BufReader::new(input.as_bytes()),
-        Arc::clone(&storage),
+        test_core_request_services(Arc::clone(&storage)),
         &agent_service,
         SkillServices {
             catalog: Arc::clone(&skills_service),
@@ -303,6 +314,7 @@ async fn changed_enablement_emits_one_invalidation_notification() {
 
     git_dispatcher.shutdown().await.unwrap();
     skills_dispatcher.shutdown().await.unwrap();
+    image_generation_dispatcher.shutdown().await.unwrap();
 }
 
 #[test]
@@ -504,10 +516,13 @@ async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() 
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
     let dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skill_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let image_generation_dispatcher =
+        ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
     let request_dispatchers = RequestDispatchers {
         git: &dispatcher,
         skills: &skill_dispatcher,
         skill_acquisition: &skill_dispatcher,
+        image_generation_configuration: &image_generation_dispatcher,
     };
     let (started_tx, started_rx) = std_mpsc::channel();
     let mut release_senders = Vec::new();
@@ -551,7 +566,7 @@ async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() 
     );
     let shutdown_id = run_request_loop(
         BufReader::new(input.as_bytes()),
-        storage,
+        test_core_request_services(storage),
         &agent_service,
         SkillServices {
             catalog: skills_service,
@@ -579,4 +594,5 @@ async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() 
     skill_release_tx.send(()).unwrap();
     dispatcher.shutdown().await.unwrap();
     skill_dispatcher.shutdown().await.unwrap();
+    image_generation_dispatcher.shutdown().await.unwrap();
 }

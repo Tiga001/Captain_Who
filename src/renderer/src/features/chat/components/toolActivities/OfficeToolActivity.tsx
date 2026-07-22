@@ -297,20 +297,16 @@ export function OfficeToolActivityGroup({
   const counts = countOfficeStatuses(statuses)
   const mixedStatuses = OFFICE_STATUS_ORDER.filter((candidate) => counts[candidate] > 0).length > 1
   const kind = documentKindLabel(firstView.documentKind, t)
+  const groupMode = firstView.category === 'read' ? 'view' : firstView.mode
   const label = mixedStatuses
-    ? mixedOfficeGroupLabel(firstView.mode, kind, counts, t)
-    : officeGroupLabel(
-        officeLabel(status, firstView.mode, kind, t),
-        firstView.mode,
-        views.length,
-        t
-      )
+    ? mixedOfficeGroupLabel(groupMode, kind, counts, t)
+    : officeGroupLabel(officeLabel(status, groupMode, kind, t), groupMode, views.length, t)
   const isPending = counts.running > 0 || counts.waiting > 0
   const GroupIcon = mixedStatuses
     ? isPending
       ? LoaderCircle
       : ListChecks
-    : officeIcon(status, firstView.mode)
+    : officeIcon(status, groupMode)
 
   return (
     <AgentActivityDisclosure

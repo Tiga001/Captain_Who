@@ -641,6 +641,27 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             updated_at INTEGER NOT NULL CHECK (updated_at >= created_at)
         );
 
+        CREATE TABLE IF NOT EXISTS image_generation_credential_staging (
+            credential_ref TEXT PRIMARY KEY CHECK (
+                typeof(credential_ref) = 'text'
+                AND length(CAST(credential_ref AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            profile_id TEXT NOT NULL CHECK (
+                typeof(profile_id) = 'text'
+                AND length(CAST(profile_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            expected_generation INTEGER NOT NULL CHECK (expected_generation >= 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0)
+        );
+
+        CREATE TABLE IF NOT EXISTS image_generation_credential_cleanup (
+            credential_ref TEXT PRIMARY KEY CHECK (
+                typeof(credential_ref) = 'text'
+                AND length(CAST(credential_ref AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0)
+        );
+
         CREATE TABLE IF NOT EXISTS models (
             id TEXT PRIMARY KEY,
             display_name TEXT NOT NULL,

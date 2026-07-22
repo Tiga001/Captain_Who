@@ -118,7 +118,7 @@ impl OfficeTool {
                 |error| AgentError::new(format!("cannot serialize Office status: {error}")),
             );
         }
-        if let Some((topic, requested_element)) = args.host_managed_help() {
+        if let Some((topic, requested_element)) = args.host_managed_help()? {
             return Ok(host_managed_operation_help(
                 self.document_kind,
                 self.tool_name(),
@@ -167,7 +167,7 @@ impl OfficeTool {
                 "The Office status operation is read-only and does not create an approval action.",
             ));
         }
-        if args.host_managed_help().is_some() {
+        if args.host_managed_help()?.is_some() {
             return Err(AgentError::new(
                 "Host-managed Office operation help is read-only and does not create an approval action.",
             ));
@@ -227,8 +227,10 @@ impl OfficeTool {
         if args.is_status() {
             return args.validate_status_call(self.tool_name()).is_err();
         }
-        if args.host_managed_help().is_some() {
-            return false;
+        match args.host_managed_help() {
+            Ok(Some(_)) => return false,
+            Err(_) => return true,
+            Ok(None) => {}
         }
         let Ok(request) = args.into_request(self.document_kind) else {
             return true;
@@ -427,16 +429,30 @@ impl OfficeToolArgs {
         Ok(())
     }
 
-    fn host_managed_help(&self) -> Option<(OfficeHelpVerb, Option<&str>)> {
-        let OfficeToolOperationWire::Help { verb, element, .. } = &self.operation else {
-            return None;
+    fn host_managed_help(&self) -> AgentResult<Option<(OfficeHelpVerb, Option<&str>)>> {
+        let OfficeToolOperationWire::Help {
+            verb,
+            element,
+            timeout_ms,
+        } = &self.operation
+        else {
+            return Ok(None);
         };
-        let topic = verb.filter(|verb| verb.is_host_managed())?;
+        let Some(topic) = verb.filter(|verb| verb.is_host_managed()) else {
+            return Ok(None);
+        };
+        if let Some(timeout_ms) = timeout_ms {
+            if !(1..=MAX_OFFICE_TIMEOUT_MS).contains(timeout_ms) {
+                return Err(AgentError::new(format!(
+                    "Office timeout must be between 1 and {MAX_OFFICE_TIMEOUT_MS} milliseconds."
+                )));
+            }
+        }
         let requested_element = element
             .as_deref()
             .map(str::trim)
             .filter(|element| !element.is_empty());
-        Some((topic, requested_element))
+        Ok(Some((topic, requested_element)))
     }
 
     fn into_request(
@@ -867,7 +883,7 @@ fn host_managed_operation_help(
             json!({ "operation": "status" }),
         ),
         OfficeHelpVerb::Help => (
-            "Read Host-owned managed-operation help, or request element-schema help with get, query, set, add, remove, move, or swap.",
+            "Read Host-owned managed-operation help, or request OfficeCLI element-schema help with get, query, set, add, or remove.",
             "readOnly",
             "notRequired",
             help_schema(),
@@ -894,13 +910,25 @@ fn host_managed_operation_help(
             validate_schema(document_kind),
             json!({ "operation": "validate", "filePath": example_file }),
         ),
+        OfficeHelpVerb::Move => (
+            "Move or reorder an existing Office element through a frozen Host-managed write. Use target plus an optional destination parent and placement anchor.",
+            "fileWrite",
+            "required",
+            move_schema(document_kind),
+            json!({ "operation": "move", "filePath": example_file, "target": "/body/p[2]", "placement": { "type": "index", "index": 0 } }),
+        ),
+        OfficeHelpVerb::Swap => (
+            "Swap two existing Office elements through a frozen Host-managed write. Both targets are validated and bound into the approved request.",
+            "fileWrite",
+            "required",
+            swap_schema(document_kind),
+            json!({ "operation": "swap", "filePath": example_file, "firstTarget": "/body/p[1]", "secondTarget": "/body/p[2]" }),
+        ),
         OfficeHelpVerb::Get
         | OfficeHelpVerb::Query
         | OfficeHelpVerb::Set
         | OfficeHelpVerb::Add
-        | OfficeHelpVerb::Remove
-        | OfficeHelpVerb::Move
-        | OfficeHelpVerb::Swap => unreachable!("provider element help is not Host-managed"),
+        | OfficeHelpVerb::Remove => unreachable!("provider element help is not Host-managed"),
     };
     let mut notes = vec![
         "Place operation fields inside `request` and provide the concise audit `reason` beside it."
@@ -913,6 +941,11 @@ fn host_managed_operation_help(
             "The requested element `{element}` is not applicable to `{}` managed-operation help and was not forwarded to OfficeCLI.",
             topic.stable_name()
         ));
+        if topic == OfficeHelpVerb::Create {
+            notes.push(format!(
+                "To inspect properties for an element such as `{element}` after creating the file, request help with `verb=add` and that element."
+            ));
+        }
     }
     json!({
         "schemaVersion": MANAGED_OFFICE_HELP_SCHEMA_VERSION,
@@ -1001,7 +1034,7 @@ fn help_schema() -> Value {
                 json!({
                     "type": "string",
                     "enum": ["status", "help", "create", "view", "get", "query", "validate", "set", "add", "remove", "move", "swap"],
-                    "description": "Optional provider-neutral help topic. status, help, create, view, and validate return Host-owned managed-operation help without invoking OfficeCLI. get, query, set, add, remove, move, and swap select OfficeCLI element-schema help. The document format is inferred from the selected tool.",
+                    "description": "Optional provider-neutral help topic. status, help, create, view, validate, move, and swap return Host-owned managed-operation help without invoking OfficeCLI. get, query, set, add, and remove select OfficeCLI element-schema help. The document format is inferred from the selected tool.",
                 }),
             ),
             (
@@ -1009,7 +1042,7 @@ fn help_schema() -> Value {
                 json!({
                     "type": "string",
                     "minLength": 1,
-                    "description": "Optional element name for get, query, set, add, remove, move, or swap provider-schema help. For Host-managed status, help, create, view, or validate topics it is accepted for recovery from an over-specified model call, reported as not applicable, and never forwarded to OfficeCLI.",
+                    "description": "Optional element name for get, query, set, add, or remove provider-schema help. For Host-managed status, help, create, view, validate, move, or swap topics it is accepted for recovery from an over-specified model call, reported as not applicable, and never forwarded to OfficeCLI. To inspect element properties after create, use verb=add with the element name.",
                 }),
             ),
             ("timeoutMs", timeout_schema()),
@@ -1649,6 +1682,37 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ProviderMustNotRunOfficeEngine;
+
+    impl OfficeEngine for ProviderMustNotRunOfficeEngine {
+        fn capabilities(&self) -> OfficeEngineCapabilities {
+            OfficeEngineCapabilities::office_cli()
+        }
+
+        fn status(&self, _cancellation: AgentCancellationToken) -> OfficeEngineStatus {
+            panic!("Host-managed operation help must not query provider status")
+        }
+
+        fn prepare(
+            &self,
+            _context: &OfficeExecutionContext,
+            _request: &OfficeExecutionRequest,
+        ) -> Result<OfficePreparedExecution, OfficeEngineError> {
+            panic!("Host-managed operation help must not prepare provider execution")
+        }
+
+        fn execute_prepared(
+            &self,
+            _context: &OfficeExecutionContext,
+            _prepared: &OfficePreparedExecution,
+            _cancellation: AgentCancellationToken,
+            _action_cancel_flag: Option<Arc<AtomicBool>>,
+        ) -> Result<OfficeExecutionResult, OfficeEngineError> {
+            panic!("Host-managed operation help must not execute the provider")
+        }
+    }
+
     fn office_args(operation: &str, reason: Option<Value>) -> Value {
         let mut request = json!({ "operation": operation });
         if operation != "status" {
@@ -1727,6 +1791,93 @@ mod tests {
         assert_eq!(details["type"], "office_operation");
         assert_eq!(details["code"], "reasonUnsafe");
         assert_eq!(details["recovery"], "changeRequest");
+    }
+
+    #[test]
+    fn managed_create_help_accepts_the_2157_call_shape_without_running_officecli() {
+        let tool = OfficeTool::new(
+            OfficeDocumentKind::Document,
+            Arc::new(ProviderMustNotRunOfficeEngine),
+        );
+        let call = typed_call(json!({
+            "operation": "help",
+            "verb": "create",
+            "element": "document",
+            "reason": "了解创建文档和添加元素的操作参数"
+        }));
+
+        assert!(!tool.requires_approval_for_call(&call));
+        let result = tool
+            .execute(&ToolExecutionContext::from_run_context(None), call)
+            .expect("managed create help should be returned by the Host");
+
+        assert_eq!(result["schemaVersion"], MANAGED_OFFICE_HELP_SCHEMA_VERSION);
+        assert_eq!(result["kind"], "managedOfficeOperationHelp");
+        assert_eq!(result["source"], "host");
+        assert_eq!(result["providerNeutral"], true);
+        assert_eq!(result["tool"], "office_document");
+        assert_eq!(result["documentKind"], "document");
+        assert_eq!(result["operation"], "create");
+        assert_eq!(result["access"], "fileWrite");
+        assert_eq!(result["approval"], "required");
+        assert_eq!(
+            result["requestSchema"]["properties"]["operation"]["enum"],
+            json!(["create"])
+        );
+        assert!(result.get("argv").is_none());
+        let notes = result["notes"].as_array().expect("managed help notes");
+        assert!(notes.iter().any(|note| {
+            note.as_str().is_some_and(|note| {
+                note.contains("not applicable") && note.contains("not forwarded")
+            })
+        }));
+        assert!(notes.iter().any(|note| note
+            .as_str()
+            .is_some_and(|note| note.contains("verb=add") && note.contains("document"))));
+
+        let invalid_timeout = typed_call(json!({
+            "operation": "help",
+            "verb": "create",
+            "timeoutMs": 0,
+            "reason": "Inspect create help with an invalid timeout"
+        }));
+        assert!(tool.requires_approval_for_call(&invalid_timeout));
+        let error = tool
+            .execute(
+                &ToolExecutionContext::from_run_context(None),
+                invalid_timeout,
+            )
+            .expect_err("Host-managed help must still validate the shared timeout field");
+        assert!(error
+            .to_string()
+            .contains("Office timeout must be between 1 and"));
+    }
+
+    #[test]
+    fn every_non_provider_help_topic_is_host_owned_and_read_only_to_query() {
+        let tool = OfficeTool::new(
+            OfficeDocumentKind::Document,
+            Arc::new(ProviderMustNotRunOfficeEngine),
+        );
+        for topic in [
+            "status", "help", "create", "view", "validate", "move", "swap",
+        ] {
+            let call = typed_call(json!({
+                "operation": "help",
+                "verb": topic,
+                "reason": format!("Inspect managed {topic} help")
+            }));
+            assert!(
+                !tool.requires_approval_for_call(&call),
+                "querying {topic} help must remain read-only"
+            );
+            let result = tool
+                .execute(&ToolExecutionContext::from_run_context(None), call)
+                .unwrap_or_else(|error| panic!("managed {topic} help failed: {error}"));
+            assert_eq!(result["operation"], topic);
+            assert_eq!(result["source"], "host");
+            assert_eq!(result["providerNeutral"], true);
+        }
     }
 
     #[test]
@@ -1910,6 +2061,13 @@ mod tests {
             ] {
                 request_schema_for(&schema, operation);
             }
+            assert_eq!(
+                request_schema_for(&schema, "help")["properties"]["verb"]["enum"],
+                json!([
+                    "status", "help", "create", "view", "get", "query", "validate", "set", "add",
+                    "remove", "move", "swap"
+                ])
+            );
             for field in [
                 "filePath",
                 "verb",

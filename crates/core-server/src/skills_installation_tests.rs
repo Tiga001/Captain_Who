@@ -408,10 +408,13 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let image_generation_dispatcher =
+        ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
     let dispatchers = RequestDispatchers {
         git: &git_dispatcher,
         skills: &skills_dispatcher,
         skill_acquisition: &skills_dispatcher,
+        image_generation_configuration: &image_generation_dispatcher,
     };
     let input = format!(
         "{}\n{}\n",
@@ -434,7 +437,7 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
 
     let shutdown_id = run_request_loop(
         BufReader::new(input.as_bytes()),
-        storage,
+        test_core_request_services(storage),
         &agent_service,
         SkillServices {
             catalog,
@@ -471,6 +474,7 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
     assert_eq!(notifications[0]["params"]["reason"], "installed");
     git_dispatcher.shutdown().await.unwrap();
     skills_dispatcher.shutdown().await.unwrap();
+    image_generation_dispatcher.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -510,15 +514,18 @@ async fn two_phase_rpc_runs_install_update_activation_and_uninstall_end_to_end()
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let image_generation_dispatcher =
+        ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
     let dispatchers = RequestDispatchers {
         git: &git_dispatcher,
         skills: &skills_dispatcher,
         skill_acquisition: &acquisition_dispatcher,
+        image_generation_configuration: &image_generation_dispatcher,
     };
     let (mut input_writer, input_reader) = io::duplex(64 * 1024);
     let server = run_request_loop(
         BufReader::new(input_reader),
-        Arc::clone(&storage),
+        test_core_request_services(Arc::clone(&storage)),
         &agent_service,
         SkillServices {
             catalog: Arc::clone(&catalog),
@@ -770,4 +777,5 @@ async fn two_phase_rpc_runs_install_update_activation_and_uninstall_end_to_end()
     git_dispatcher.shutdown().await.unwrap();
     skills_dispatcher.shutdown().await.unwrap();
     acquisition_dispatcher.shutdown().await.unwrap();
+    image_generation_dispatcher.shutdown().await.unwrap();
 }

@@ -3,6 +3,87 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[test]
+fn image_generation_configuration_contract_is_strict_and_text_to_image_is_explicit() {
+    assert_eq!(
+        IMAGE_GENERATION_GET_CONFIGURATION_METHOD,
+        "imageGeneration.getConfiguration"
+    );
+    assert_eq!(
+        IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD,
+        "imageGeneration.updateConfiguration"
+    );
+
+    let request =
+        serde_json::from_value::<ImageGenerationUpdateConfigurationRequest>(serde_json::json!({
+            "schemaVersion": IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+            "expectedRevision": "image-generation:v1:0",
+            "adapterId": "smartmlSeedream",
+            "endpointUrl": "https://zju.smartml.cn/userapi/v1/images/generations",
+            "modelId": "doubao-seedream-4-0-250828",
+            "capabilities": {
+                "textToImage": true,
+                "imageToImage": false
+            },
+            "defaults": {
+                "sizePreset": "2K",
+                "watermark": true
+            },
+            "credentialMutation": {
+                "type": "replace",
+                "value": "test-only-secret"
+            }
+        }))
+        .unwrap();
+    assert!(request.capabilities.text_to_image);
+    assert!(!request.capabilities.image_to_image);
+    assert!(matches!(
+        request.credential_mutation,
+        ImageGenerationCredentialMutationDto::Replace { .. }
+    ));
+
+    let unknown =
+        serde_json::from_value::<ImageGenerationUpdateConfigurationRequest>(serde_json::json!({
+            "schemaVersion": IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+            "expectedRevision": "image-generation:v1:0",
+            "adapterId": "smartmlSeedream",
+            "endpointUrl": "https://example.com/images/generations",
+            "modelId": "model",
+            "capabilities": { "textToImage": true, "imageToImage": false },
+            "defaults": { "sizePreset": "2K", "watermark": true },
+            "credentialMutation": { "type": "keep" },
+            "rawProviderPayload": {}
+        }));
+    assert!(unknown.is_err());
+}
+
+#[test]
+fn image_generation_update_request_debug_redacts_credentials() {
+    let secret = "never-print-this-api-key";
+    let request =
+        serde_json::from_value::<ImageGenerationUpdateConfigurationRequest>(serde_json::json!({
+            "schemaVersion": IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+            "expectedRevision": "image-generation:v1:0",
+            "adapterId": "smartmlSeedream",
+            "endpointUrl": "https://example.com/images/generations",
+            "modelId": "model",
+            "capabilities": { "textToImage": true, "imageToImage": false },
+            "defaults": { "sizePreset": "2K", "watermark": true },
+            "credentialMutation": { "type": "replace", "value": secret }
+        }))
+        .unwrap();
+
+    let mutation_debug = format!("{:?}", request.credential_mutation);
+    assert!(mutation_debug.contains("Replace"));
+    assert!(mutation_debug.contains("[REDACTED]"));
+    assert!(!mutation_debug.contains(secret));
+
+    let request_debug = format!("{request:?}");
+    assert!(request_debug.contains("ImageGenerationUpdateConfigurationRequest"));
+    assert!(request_debug.contains("[REDACTED]"));
+    assert!(!request_debug.contains(secret));
+}
+
+#[test]
 fn skill_catalog_v4_serializes_explicit_source_and_trust_unions() {
     let response = SkillsListResponse {
         schema_version: SKILL_CATALOG_SCHEMA_VERSION,

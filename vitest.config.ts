@@ -14,6 +14,7 @@ const terminalRendererTests = 'src/renderer/src/features/terminal/__tests__'
 const skillsTests = 'src/renderer/src/features/skills/__tests__'
 const appTests = 'src/renderer/src/app/__tests__'
 const chatTests = 'src/renderer/src/features/chat/__tests__'
+const protocolTests = 'packages/protocol/src'
 
 export default defineConfig({
   optimizeDeps: {
@@ -56,7 +57,8 @@ export default defineConfig({
             `${terminalRendererTests}/**/*.test.ts`,
             `${skillsTests}/**/*.test.ts`,
             `${appTests}/**/*.test.ts`,
-            `${chatTests}/**/*.test.ts`
+            `${chatTests}/**/*.test.ts`,
+            `${protocolTests}/**/*.test.ts`
           ],
           name: 'unit'
         }

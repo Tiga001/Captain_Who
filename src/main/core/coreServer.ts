@@ -34,6 +34,12 @@ import type {
   GitReviewFileMutationInput,
   GitReviewSummary,
   GitReviewSummaryInput,
+  ImageGenerationGetConfigurationOutput,
+  ImageGenerationSetEnabledInput,
+  ImageGenerationSetEnabledOutput,
+  ImageGenerationStatus,
+  ImageGenerationUpdateConfigurationInput,
+  ImageGenerationUpdateConfigurationOutput,
   ChatSearchInput,
   ChatSearchResult,
   SkillInstallationCommitOutput,
@@ -88,6 +94,18 @@ import {
   parseSkillsResolveInstallationSourceInput,
   parseSkillsResolveInstallationSourceOutput,
   parseSkillsSetEnabledOutput,
+  IMAGE_GENERATION_CONFIGURATION_ERROR_CODE,
+  IMAGE_GENERATION_GET_CONFIGURATION_METHOD,
+  IMAGE_GENERATION_GET_STATUS_METHOD,
+  IMAGE_GENERATION_SET_ENABLED_METHOD,
+  IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD,
+  parseImageGenerationConfigurationErrorData,
+  parseImageGenerationGetConfigurationOutput,
+  parseImageGenerationSetEnabledInput,
+  parseImageGenerationSetEnabledOutput,
+  parseImageGenerationStatus,
+  parseImageGenerationUpdateConfigurationInput,
+  parseImageGenerationUpdateConfigurationOutput,
   SKILLS_CANCEL_PREPARATION_METHOD,
   SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD,
   SKILLS_CHANGED_NOTIFICATION_METHOD,
@@ -200,6 +218,27 @@ function rethrowValidatedSkillSourceResolutionError(error: unknown): never {
   )
 }
 
+function rethrowValidatedImageGenerationConfigurationError(error: unknown): never {
+  if (
+    typeof error !== 'object' ||
+    error === null ||
+    Array.isArray(error) ||
+    !('code' in error) ||
+    error.code !== IMAGE_GENERATION_CONFIGURATION_ERROR_CODE
+  ) {
+    throw error
+  }
+
+  const data = parseImageGenerationConfigurationErrorData('data' in error ? error.data : undefined)
+  // The validated, bounded domain message is authoritative. A provider or transport error message
+  // must never be forwarded because it could contain a URL, response body, or credential material.
+  throw Object.assign(new Error(data.message), {
+    name: 'ImageGenerationConfigurationError',
+    code: IMAGE_GENERATION_CONFIGURATION_ERROR_CODE,
+    data
+  })
+}
+
 export class CoreServer {
   private readonly rpc = new CoreJsonRpcClient()
 
@@ -241,6 +280,46 @@ export class CoreServer {
 
   getOfficeStatus(): Promise<OfficeEngineStatus> {
     return this.rpc.request<unknown>(OFFICE_GET_STATUS_METHOD).then(parseOfficeEngineStatus)
+  }
+
+  getImageGenerationConfiguration(): Promise<ImageGenerationGetConfigurationOutput> {
+    return this.rpc
+      .request<unknown>(IMAGE_GENERATION_GET_CONFIGURATION_METHOD)
+      .then(parseImageGenerationGetConfigurationOutput)
+      .catch(rethrowValidatedImageGenerationConfigurationError)
+  }
+
+  updateImageGenerationConfiguration(
+    input: ImageGenerationUpdateConfigurationInput
+  ): Promise<ImageGenerationUpdateConfigurationOutput> {
+    const request = parseImageGenerationUpdateConfigurationInput(input)
+    return this.rpc
+      .request<unknown, ImageGenerationUpdateConfigurationInput>(
+        IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD,
+        request
+      )
+      .then(parseImageGenerationUpdateConfigurationOutput)
+      .catch(rethrowValidatedImageGenerationConfigurationError)
+  }
+
+  setImageGenerationEnabled(
+    input: ImageGenerationSetEnabledInput
+  ): Promise<ImageGenerationSetEnabledOutput> {
+    const request = parseImageGenerationSetEnabledInput(input)
+    return this.rpc
+      .request<unknown, ImageGenerationSetEnabledInput>(
+        IMAGE_GENERATION_SET_ENABLED_METHOD,
+        request
+      )
+      .then(parseImageGenerationSetEnabledOutput)
+      .catch(rethrowValidatedImageGenerationConfigurationError)
+  }
+
+  getImageGenerationStatus(): Promise<ImageGenerationStatus> {
+    return this.rpc
+      .request<unknown>(IMAGE_GENERATION_GET_STATUS_METHOD)
+      .then(parseImageGenerationStatus)
+      .catch(rethrowValidatedImageGenerationConfigurationError)
   }
 
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput> {

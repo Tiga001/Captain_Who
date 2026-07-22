@@ -4,6 +4,18 @@ pub(crate) struct RequestDispatchers<'a> {
     pub(crate) git: &'a GitDispatcher,
     pub(crate) skills: &'a SkillsDispatcher,
     pub(crate) skill_acquisition: &'a SkillsDispatcher,
+    pub(crate) image_generation_configuration: &'a ImageGenerationConfigurationDispatcher,
+}
+
+/// Process-wide services used directly by JSON-RPC request handlers.
+///
+/// Keep these dependencies grouped so new configuration domains do not turn the request-loop
+/// signature into a growing service locator. Bounded filesystem dispatchers remain explicit
+/// because they have independent admission and shutdown lifecycles.
+#[derive(Clone)]
+pub(crate) struct CoreRequestServices {
+    pub(crate) storage: Arc<StorageService>,
+    pub(crate) image_generation_configuration: Arc<ImageGenerationConfigurationService>,
 }
 
 fn is_blocking_read_method(method: &str) -> bool {
@@ -31,7 +43,7 @@ fn is_blocking_read_method(method: &str) -> bool {
 
 pub(crate) async fn run_request_loop<R>(
     input: R,
-    storage: Arc<StorageService>,
+    services: CoreRequestServices,
     agent_service: &AgentService,
     skill_services: SkillServices,
     git_review_service: Arc<GitReviewService>,
@@ -41,6 +53,8 @@ pub(crate) async fn run_request_loop<R>(
 where
     R: AsyncBufRead + Unpin,
 {
+    let storage = services.storage;
+    let image_generation_configuration = services.image_generation_configuration;
     let mut lines = input.lines();
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
@@ -68,6 +82,28 @@ where
         }
 
         if request.jsonrpc == "2.0" {
+            if let Some(operation) = image_generation_configuration_operation(&request.method) {
+                let request_id = request.id.clone();
+                let request_service = Arc::clone(&image_generation_configuration);
+                let kind = ImageGenerationConfigurationJobKind::for_operation(operation);
+                if dispatchers
+                    .image_generation_configuration
+                    .try_submit(request_id.clone(), kind, move || {
+                        handle_image_generation_configuration_request(&request_service, request)
+                    })
+                    .is_err()
+                {
+                    enqueue_outbound(
+                        outbound,
+                        image_generation_configuration_error_response(
+                            request_id,
+                            operation,
+                            mycopilot_core::image_generation::ImageGenerationConfigurationError::Unavailable,
+                        ),
+                    )?;
+                }
+                continue;
+            }
             if request.method == OFFICE_GET_STATUS_METHOD {
                 let request_outbound = outbound.clone();
                 let request_service = agent_service.clone();

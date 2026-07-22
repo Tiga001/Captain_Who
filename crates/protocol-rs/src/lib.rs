@@ -1,4 +1,5 @@
 mod git;
+mod image_generation;
 mod methods;
 mod office;
 mod rpc;
@@ -8,6 +9,7 @@ mod skill_management;
 mod skill_mutation;
 
 pub use git::*;
+pub use image_generation::*;
 pub use methods::*;
 pub use office::*;
 pub use rpc::*;

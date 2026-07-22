@@ -254,6 +254,58 @@ describe('Skill and Office chat timeline', () => {
     expect(screen.container.textContent).toContain('检查了页面布局。')
   })
 
+  it('renders adjacent mixed-result Office help probes as one document check', async () => {
+    const calls = Array.from({ length: 9 }, (_, index) => ({
+      id: `help-${index + 1}`,
+      tool: 'office_document' as const,
+      approvalStatus: 'not_required' as const,
+      args: {
+        request:
+          index === 0
+            ? { operation: 'help', verb: 'create', element: 'document' }
+            : { operation: 'help', verb: 'add', element: `element-${index + 1}` }
+      },
+      reason: `检查第 ${index + 1} 项文档能力。`
+    }))
+    const message = assistantMessage({
+      toolCalls: calls,
+      toolResults: calls.map((call, index) =>
+        index === 0
+          ? {
+              callId: call.id,
+              tool: call.tool,
+              ok: false,
+              error: 'Office help probe failed.'
+            }
+          : {
+              callId: call.id,
+              tool: call.tool,
+              ok: true,
+              result: { exitCode: 0 }
+            }
+      ),
+      timeline: calls.map((call) => ({
+        id: call.id,
+        type: 'tool_call' as const,
+        callId: call.id
+      }))
+    })
+    const screen = await render(
+      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
+    )
+
+    expect(screen.container.querySelectorAll('.agent-activity--office')).toHaveLength(1)
+    expect(screen.container.textContent).toContain('文档检查 · 成功 8 项 · 失败 1 项')
+    expect(screen.container.querySelectorAll('.office-activity__item')).toHaveLength(9)
+    expect(
+      screen.container.querySelectorAll('.office-activity__item[data-status="completed"]')
+    ).toHaveLength(8)
+    expect(
+      screen.container.querySelectorAll('.office-activity__item[data-status="failed"]')
+    ).toHaveLength(1)
+    expect(screen.container.textContent).toContain('Office help probe failed.')
+  })
+
   it('reports mixed Office outcomes accurately and keeps every operation inspectable', async () => {
     const calls = [
       {

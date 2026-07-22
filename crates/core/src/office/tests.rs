@@ -876,6 +876,45 @@ fn typed_operations_compile_to_deterministic_host_owned_argv() {
 }
 
 #[test]
+fn host_managed_help_topics_never_compile_to_officecli_verbs() {
+    let fixture = Fixture::new(basic_script());
+    for topic in [
+        OfficeHelpVerb::Status,
+        OfficeHelpVerb::Help,
+        OfficeHelpVerb::Create,
+        OfficeHelpVerb::View,
+        OfficeHelpVerb::Validate,
+        OfficeHelpVerb::Move,
+        OfficeHelpVerb::Swap,
+    ] {
+        let mut request = fixture.request(OfficeOperation::Help);
+        request.document_path = None;
+        request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Help {
+            verb: Some(topic),
+            element: Some("document".to_string()),
+        });
+
+        let error = compile_office_arguments(&request)
+            .expect_err("Host-managed help must fail closed at the provider boundary");
+        assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+        assert!(error.message().contains("Host-managed"));
+        assert!(error.message().contains(topic.stable_name()));
+        assert!(!error.message().contains("unknown element"));
+    }
+
+    let mut provider_help = fixture.request(OfficeOperation::Help);
+    provider_help.document_path = None;
+    provider_help.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Help {
+        verb: Some(OfficeHelpVerb::Add),
+        element: Some("document".to_string()),
+    });
+    assert_eq!(
+        compile_office_arguments(&provider_help).unwrap(),
+        vec!["docx", "add", "document", "--json"]
+    );
+}
+
+#[test]
 fn typed_operation_parameters_serialize_with_camel_case_fields() {
     let view = OfficeOperationParameters::View {
         mode: OfficeViewMode::Screenshot,

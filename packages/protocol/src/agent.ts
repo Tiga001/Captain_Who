@@ -1166,7 +1166,24 @@ export type OfficeOperation =
  */
 export type OfficeOperationAccess = 'readOnly' | 'fileWrite'
 
-export type OfficeHelpVerb = 'get' | 'query' | 'set' | 'add' | 'remove' | 'move' | 'swap'
+/** Provider-neutral help topic.
+ *
+ * status/help/create/view/validate/move/swap are served by the Host. The remaining topics select
+ * provider element-schema help and may be paired with an element name.
+ */
+export type OfficeHelpVerb =
+  | 'status'
+  | 'help'
+  | 'create'
+  | 'view'
+  | 'get'
+  | 'query'
+  | 'validate'
+  | 'set'
+  | 'add'
+  | 'remove'
+  | 'move'
+  | 'swap'
 
 export type OfficeViewMode =
   'text' | 'annotated' | 'outline' | 'stats' | 'issues' | 'html' | 'svg' | 'screenshot' | 'forms'
