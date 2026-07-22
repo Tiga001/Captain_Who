@@ -413,8 +413,20 @@ beforeEach(() => {
   testState.upsertChatMessages.mockReset().mockResolvedValue(undefined)
 })
 
+async function renderSelectedConversation() {
+  const screen = await render(<AppShell />)
+  const selectConversation = screen.getByRole('button', {
+    name: 'select-conversation-a',
+    exact: true
+  })
+  await expect.element(selectConversation).toBeVisible()
+  await selectConversation.click()
+  await expect.element(screen.getByRole('button', { name: 'submit-with-skill' })).toBeVisible()
+  return screen
+}
+
 describe('conversation startup loading', () => {
-  it('loads sidebar metadata first and hydrates only the initial non-archived conversation', async () => {
+  it('starts on a new conversation and hydrates a stored conversation only after selection', async () => {
     const active = storedConversation()
     const archived = {
       ...storedConversation(),
@@ -434,6 +446,10 @@ describe('conversation startup loading', () => {
     const screen = await render(<AppShell />)
 
     await expect.poll(() => testState.loadConversationMetas.mock.calls.length).toBe(1)
+    await expect.element(screen.getByTestId('new-conversation-draft')).toBeInTheDocument()
+    expect(testState.loadConversation).not.toHaveBeenCalled()
+
+    await screen.getByRole('button', { name: 'select-conversation-a', exact: true }).click()
     await expect.poll(() => testState.loadConversation.mock.calls).toEqual([['conversation-a']])
     await expect.element(screen.getByText('chat.loadingConversation')).toBeVisible()
     expect(testState.loadConversation).not.toHaveBeenCalledWith('conversation-archived')
@@ -476,7 +492,7 @@ describe('unified activated Skill inventory', () => {
     assistantMessage.agentRun.skillActivationRevision = 'activation-sha256-v1:explicit-and-model'
     testState.loadConversation.mockResolvedValueOnce(restored)
 
-    const screen = await render(<AppShell />)
+    const screen = await renderSelectedConversation()
 
     await expect
       .element(screen.getByTestId('activated-skill-ids'))
@@ -485,7 +501,7 @@ describe('unified activated Skill inventory', () => {
 
   it('merges and persists model activation without turning it into an explicit edit selection', async () => {
     mockSuccessfulTurnStarts()
-    const screen = await render(<AppShell />)
+    const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'submit-with-skill' }).click()
     await expect
@@ -539,7 +555,7 @@ describe('unified activated Skill inventory', () => {
 
   it('keeps a model-only activation out of an edited turn explicit selections', async () => {
     mockSuccessfulTurnStarts()
-    const screen = await render(<AppShell />)
+    const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'submit-without-skill' }).click()
     emitAgentEvent({
@@ -572,7 +588,7 @@ describe('unified activated Skill inventory', () => {
   it('replays a model activation buffered before the turn start response', async () => {
     const start = deferred<AgentConversationTurnOutput>()
     testState.startConversationTurn.mockReturnValueOnce(start.promise)
-    const screen = await render(<AppShell />)
+    const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'submit-with-skill' }).click()
     await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
@@ -616,7 +632,7 @@ describe('activation failure recovery', () => {
       })
     )
 
-    const screen = await render(<AppShell />)
+    const screen = await renderSelectedConversation()
     await screen.getByRole('button', { name: 'submit-with-skill' }).click()
 
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('error')
@@ -645,7 +661,7 @@ describe('activation failure recovery', () => {
       })
     )
 
-    const screen = await render(<AppShell />)
+    const screen = await renderSelectedConversation()
     await screen.getByRole('button', { name: 'submit-with-skill' }).click()
 
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('error')
@@ -657,7 +673,7 @@ describe('activation failure recovery', () => {
     const start = deferred<never>()
     testState.startConversationTurn.mockReturnValueOnce(start.promise)
 
-    const screen = await render(<AppShell />)
+    const screen = await renderSelectedConversation()
     await screen.getByRole('button', { name: 'submit-with-skill' }).click()
     await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
     await screen.getByRole('button', { name: 'select-latest-skill' }).click()
@@ -690,7 +706,7 @@ describe('activation failure recovery', () => {
     const start = deferred<never>()
     testState.startConversationTurn.mockReturnValueOnce(start.promise)
 
-    const screen = await render(<AppShell />)
+    const screen = await renderSelectedConversation()
     await screen.getByRole('button', { name: 'submit-with-skill' }).click()
     await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
     await screen.getByRole('button', { name: 'select-latest-skill' }).click()
@@ -720,7 +736,7 @@ describe('edited turn Skill recovery', () => {
   it.each(['saveConversationMeta', 'deleteChatMessages', 'upsertChatMessages'] as const)(
     'restores the prior Skill selection when %s fails',
     async (failureStage) => {
-      const screen = await render(<AppShell />)
+      const screen = await renderSelectedConversation()
       await expect.element(screen.getByRole('button', { name: 'edit-last-message' })).toBeVisible()
 
       testState[failureStage].mockRejectedValueOnce(new Error(`${failureStage} failed`))
@@ -743,7 +759,7 @@ describe('authoritative run cancellation and conversation forking', () => {
     mockSuccessfulTurnStarts()
     const cancellation = deferred<boolean>()
     testState.cancelAgentRun.mockReturnValueOnce(cancellation.promise)
-    const screen = await render(<AppShell />)
+    const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'submit-without-skill' }).click()
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('pending')
@@ -771,7 +787,7 @@ describe('authoritative run cancellation and conversation forking', () => {
   it('binds a run before cancelling when stop is requested during the start RPC', async () => {
     const start = deferred<AgentConversationTurnOutput>()
     testState.startConversationTurn.mockReturnValueOnce(start.promise)
-    const screen = await render(<AppShell />)
+    const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'submit-without-skill' }).click()
     await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
@@ -798,7 +814,7 @@ describe('authoritative run cancellation and conversation forking', () => {
     testState.forkConversation.mockRejectedValueOnce(
       new Error('这条回复仍在生成，结束后才能在新任务中继续。')
     )
-    const screen = await render(<AppShell />)
+    const screen = await renderSelectedConversation()
 
     await screen.getByRole('button', { name: 'continue-in-new-task' }).click()
 

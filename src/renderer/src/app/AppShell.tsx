@@ -492,30 +492,19 @@ export function AppShell() {
       .then((storedConversations) => {
         if (cancelled) return
 
-        let mergedConversations: ChatConversation[] = []
         setConversationsWithRef((currentConversations) => {
           const currentById = new Map(
             currentConversations.map((conversation) => [conversation.id, conversation])
           )
           const storedIds = new Set(storedConversations.map((conversation) => conversation.id))
-          mergedConversations = [
+          return [
             ...storedConversations.map((conversation) => {
               const current = currentById.get(conversation.id)
               return current && current.messagesLoaded !== false ? current : conversation
             }),
             ...currentConversations.filter((conversation) => !storedIds.has(conversation.id))
           ]
-          return mergedConversations
         })
-
-        if (activeConversationIdRef.current) return
-        const initialConversation = mergedConversations.find(
-          (conversation) => !conversation.archivedAt
-        )
-        if (!initialConversation) return
-        activeConversationIdRef.current = initialConversation.id
-        setActiveConversationId(initialConversation.id)
-        void hydrateConversation(initialConversation.id)
       })
       .catch((error) => {
         if (!cancelled) console.error('Failed to load conversation metadata', error)
@@ -523,7 +512,7 @@ export function AppShell() {
     return () => {
       cancelled = true
     }
-  }, [hydrateConversation, setConversationsWithRef])
+  }, [setConversationsWithRef])
 
   const updateUiPreferences = useCallback((patch: Partial<UiPreferencesSnapshot>) => {
     setUiPreferences((currentPreferences) => {
