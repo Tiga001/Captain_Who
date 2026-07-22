@@ -52,7 +52,8 @@ import {
   deleteChatMessages,
   forkConversation,
   loadComposerDrafts,
-  loadConversations,
+  loadConversation,
+  loadConversationMetas,
   loadInputAttachments,
   loadUiPreferences,
   saveComposerDraft,
@@ -139,6 +140,11 @@ export function AppShell() {
   const [conversationScrollToBottomSignal, setConversationScrollToBottomSignal] = useState(0)
   const [scrollTargetMessageId, setScrollTargetMessageId] = useState<string | null>(null)
   const activeConversationIdRef = useRef<string | null>(null)
+  const conversationDetailRequestsRef = useRef<Map<string, Promise<ChatConversation | null>>>(
+    new Map()
+  )
+  const conversationDetailEpochRef = useRef<Map<string, number>>(new Map())
+  const [conversationLoadErrors, setConversationLoadErrors] = useState<Record<string, string>>({})
   const conversationScrollPositionsRef = useRef<Map<string, number>>(new Map())
   const activeRunBindingsRef = useRef<Map<string, ActiveRunBinding>>(new Map())
   const bufferedAgentEventsRef = useRef<Map<string, AgentEvent[]>>(new Map())
@@ -154,7 +160,7 @@ export function AppShell() {
     waitForMessageStateSaves,
     waitForMessageUpserts
   } = useConversationPersistence()
-  const pendingActionsHydratedRef = useRef(false)
+  const pendingActionsHydratedRef = useRef<Set<string>>(new Set())
   const cancelledPendingMessageIdsRef = useRef<Set<string>>(new Set())
   const cancelledRunIdsRef = useRef<Set<string>>(new Set())
   const stopRequestedPendingMessageIdsRef = useRef<Set<string>>(new Set())
@@ -291,6 +297,81 @@ export function AppShell() {
     []
   )
 
+  const hydrateConversation = useCallback(
+    (conversationId: string): Promise<ChatConversation | null> => {
+      const currentConversation = conversationsRef.current.find(
+        (conversation) => conversation.id === conversationId
+      )
+      if (currentConversation?.messagesLoaded !== false) {
+        return Promise.resolve(currentConversation ?? null)
+      }
+
+      const pendingRequest = conversationDetailRequestsRef.current.get(conversationId)
+      if (pendingRequest) return pendingRequest
+
+      const requestEpoch = (conversationDetailEpochRef.current.get(conversationId) ?? 0) + 1
+      conversationDetailEpochRef.current.set(conversationId, requestEpoch)
+      setConversationLoadErrors((current) => {
+        if (!(conversationId in current)) return current
+        const next = { ...current }
+        delete next[conversationId]
+        return next
+      })
+
+      const request = loadConversation(conversationId)
+        .then((storedConversation) => {
+          if (conversationDetailEpochRef.current.get(conversationId) !== requestEpoch) return null
+          if (!storedConversation) {
+            throw new Error('Conversation not found')
+          }
+
+          let hydratedConversation: ChatConversation | null = null
+          setConversationsWithRef((currentConversations) =>
+            currentConversations.map((conversation) => {
+              if (conversation.id !== conversationId) return conversation
+              // Metadata may have changed while SQLite loaded the message history. Keep the latest
+              // sidebar fields and attach only the lazily fetched message payload.
+              if (conversation.messagesLoaded !== false) {
+                hydratedConversation = conversation
+                return conversation
+              }
+              hydratedConversation = {
+                ...storedConversation,
+                projectId: conversation.projectId,
+                modelId: conversation.modelId,
+                title: conversation.title,
+                createdAt: conversation.createdAt,
+                updatedAt: conversation.updatedAt,
+                pinnedAt: conversation.pinnedAt,
+                archivedAt: conversation.archivedAt,
+                unreadAt: conversation.unreadAt,
+                messagesLoaded: true
+              }
+              return hydratedConversation
+            })
+          )
+          return hydratedConversation
+        })
+        .catch((error) => {
+          if (conversationDetailEpochRef.current.get(conversationId) === requestEpoch) {
+            const message = error instanceof Error ? error.message : String(error)
+            setConversationLoadErrors((current) => ({ ...current, [conversationId]: message }))
+            console.error('Failed to load conversation messages', error)
+          }
+          return null
+        })
+        .finally(() => {
+          if (conversationDetailRequestsRef.current.get(conversationId) === request) {
+            conversationDetailRequestsRef.current.delete(conversationId)
+          }
+        })
+
+      conversationDetailRequestsRef.current.set(conversationId, request)
+      return request
+    },
+    [setConversationsWithRef]
+  )
+
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId
   }, [activeConversationId])
@@ -375,24 +456,74 @@ export function AppShell() {
 
   useEffect(() => {
     let cancelled = false
-    void Promise.all([loadUiPreferences(), loadConversations(), loadComposerDrafts()]).then(
-      ([preferences, storedConversations, storedDrafts]) => {
+    void loadUiPreferences()
+      .then((preferences) => {
+        if (!cancelled) setUiPreferences(preferences)
+      })
+      .catch((error) => {
+        if (!cancelled) console.error('Failed to load UI preferences', error)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void loadComposerDrafts()
+      .then((storedDrafts) => {
         if (cancelled) return
-        setUiPreferences(preferences)
-        setConversationsWithRef(storedConversations)
         setDraftsWithRef({
           [NEW_CONVERSATION_DRAFT_ID]: createComposerDraft(),
           ...storedDrafts
         })
-        setActiveConversationId(
-          storedConversations.find((conversation) => !conversation.archivedAt)?.id ?? null
-        )
-      }
-    )
+      })
+      .catch((error) => {
+        if (!cancelled) console.error('Failed to load composer drafts', error)
+      })
     return () => {
       cancelled = true
     }
-  }, [setConversationsWithRef, setDraftsWithRef])
+  }, [setDraftsWithRef])
+
+  useEffect(() => {
+    let cancelled = false
+    void loadConversationMetas()
+      .then((storedConversations) => {
+        if (cancelled) return
+
+        let mergedConversations: ChatConversation[] = []
+        setConversationsWithRef((currentConversations) => {
+          const currentById = new Map(
+            currentConversations.map((conversation) => [conversation.id, conversation])
+          )
+          const storedIds = new Set(storedConversations.map((conversation) => conversation.id))
+          mergedConversations = [
+            ...storedConversations.map((conversation) => {
+              const current = currentById.get(conversation.id)
+              return current && current.messagesLoaded !== false ? current : conversation
+            }),
+            ...currentConversations.filter((conversation) => !storedIds.has(conversation.id))
+          ]
+          return mergedConversations
+        })
+
+        if (activeConversationIdRef.current) return
+        const initialConversation = mergedConversations.find(
+          (conversation) => !conversation.archivedAt
+        )
+        if (!initialConversation) return
+        activeConversationIdRef.current = initialConversation.id
+        setActiveConversationId(initialConversation.id)
+        void hydrateConversation(initialConversation.id)
+      })
+      .catch((error) => {
+        if (!cancelled) console.error('Failed to load conversation metadata', error)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [hydrateConversation, setConversationsWithRef])
 
   const updateUiPreferences = useCallback((patch: Partial<UiPreferencesSnapshot>) => {
     setUiPreferences((currentPreferences) => {
@@ -591,8 +722,19 @@ export function AppShell() {
   )
 
   useEffect(() => {
-    if (pendingActionsHydratedRef.current || conversations.length === 0) return
-    pendingActionsHydratedRef.current = true
+    const newlyHydratedConversationIds = conversations
+      .filter(
+        (conversation) =>
+          conversation.messagesLoaded !== false &&
+          !pendingActionsHydratedRef.current.has(conversation.id)
+      )
+      .map((conversation) => conversation.id)
+    if (newlyHydratedConversationIds.length === 0) return
+
+    for (const conversationId of newlyHydratedConversationIds) {
+      pendingActionsHydratedRef.current.add(conversationId)
+    }
+    const newlyHydratedConversationIdSet = new Set(newlyHydratedConversationIds)
 
     void listPendingAgentActions()
       .then((pendingActions) => {
@@ -607,6 +749,7 @@ export function AppShell() {
             conversationId: pendingAction.conversationId,
             pendingMessageId: pendingAction.assistantMessageId
           })
+          if (!newlyHydratedConversationIdSet.has(pendingAction.conversationId)) continue
           updateAssistantMessage(
             pendingAction.conversationId,
             pendingAction.assistantMessageId,
@@ -621,9 +764,12 @@ export function AppShell() {
         }
       })
       .catch((error) => {
+        for (const conversationId of newlyHydratedConversationIds) {
+          pendingActionsHydratedRef.current.delete(conversationId)
+        }
         console.error('Failed to hydrate pending agent actions', error)
       })
-  }, [conversations.length, updateAssistantMessage])
+  }, [conversations, updateAssistantMessage])
 
   const handleBoundAgentEvent = useCallback(
     (conversationId: string, assistantMessageId: string, agentEvent: AgentEvent) => {
@@ -970,6 +1116,7 @@ export function AppShell() {
             modelId: options.modelId,
             title,
             messages: [userMessage, assistantMessage],
+            messagesLoaded: true,
             createdAt: now,
             updatedAt: now,
             pinnedAt: null,
@@ -1230,8 +1377,9 @@ export function AppShell() {
       }
 
       setActiveConversationId(conversationId)
+      void hydrateConversation(conversationId)
     },
-    [setConversationsWithRef]
+    [hydrateConversation, setConversationsWithRef]
   )
 
   const continueInNewTask = useCallback(
@@ -1735,54 +1883,72 @@ export function AppShell() {
 
         <div className="main-panel__surface">
           {activeConversation ? (
-            <ChatConversationPage
-              composerDraft={activeDraft}
-              conversation={activeConversation}
-              contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
-              contextWindowSnapshot={activeContextWindowSnapshot}
-              editSelectedModelAvailable={Boolean(activeDraftSelectedModel)}
-              editSelectedModelSupportsImage={Boolean(activeDraftSelectedModel?.supportsImage)}
-              initialScrollTop={activeConversationInitialScrollTop}
-              permissionModeAvailability={permissionModeAvailability}
-              skillCatalogRefreshToken={activeSkillCatalogRefreshToken}
-              scrollToBottomSignal={conversationScrollToBottomSignal}
-              scrollTargetMessageId={scrollTargetMessageId}
-              showTokenUsageDetails={uiPreferences.showTokenUsageDetails}
-              onApproveAgentAction={handleApproveAgentAction}
-              onCancelAgentAction={handleCancelAgentAction}
-              onComposerDraftChange={(draft) => updateDraft(activeConversation.id, draft)}
-              onEditLastUserMessage={submitEditedLastUserMessage}
-              onContinueInNewTask={(messageId) =>
-                continueInNewTask(activeConversation.id, messageId)
-              }
-              onMessageUiStateChange={(messageId, uiState: ChatMessageUiState | undefined) => {
-                const currentMessage = activeConversation.messages.find(
-                  (message) => message.id === messageId
-                )
-                const messageToSave: ChatMessage | null = currentMessage
-                  ? { ...currentMessage, uiState }
-                  : null
-                setConversationsWithRef((currentConversations) =>
-                  currentConversations.map((conversation) =>
-                    conversation.id === activeConversation.id
-                      ? {
-                          ...conversation,
-                          messages: conversation.messages.map((message) =>
-                            message.id === messageId ? (messageToSave ?? message) : message
-                          )
-                        }
-                      : conversation
-                  )
-                )
-                if (messageToSave) {
-                  enqueueChatMessageStateSave(activeConversation.id, messageToSave)
+            activeConversation.messagesLoaded === false ? (
+              <div className="conversation-load-state" role="status">
+                <p>
+                  {conversationLoadErrors[activeConversation.id]
+                    ? t('chat.conversationLoadFailed')
+                    : t('chat.loadingConversation')}
+                </p>
+                {conversationLoadErrors[activeConversation.id] ? (
+                  <button
+                    type="button"
+                    onClick={() => void hydrateConversation(activeConversation.id)}
+                  >
+                    {t('chat.retryConversationLoad')}
+                  </button>
+                ) : null}
+              </div>
+            ) : (
+              <ChatConversationPage
+                composerDraft={activeDraft}
+                conversation={activeConversation}
+                contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
+                contextWindowSnapshot={activeContextWindowSnapshot}
+                editSelectedModelAvailable={Boolean(activeDraftSelectedModel)}
+                editSelectedModelSupportsImage={Boolean(activeDraftSelectedModel?.supportsImage)}
+                initialScrollTop={activeConversationInitialScrollTop}
+                permissionModeAvailability={permissionModeAvailability}
+                skillCatalogRefreshToken={activeSkillCatalogRefreshToken}
+                scrollToBottomSignal={conversationScrollToBottomSignal}
+                scrollTargetMessageId={scrollTargetMessageId}
+                showTokenUsageDetails={uiPreferences.showTokenUsageDetails}
+                onApproveAgentAction={handleApproveAgentAction}
+                onCancelAgentAction={handleCancelAgentAction}
+                onComposerDraftChange={(draft) => updateDraft(activeConversation.id, draft)}
+                onEditLastUserMessage={submitEditedLastUserMessage}
+                onContinueInNewTask={(messageId) =>
+                  continueInNewTask(activeConversation.id, messageId)
                 }
-              }}
-              onRejectAgentAction={handleRejectAgentAction}
-              onScrollPositionChange={rememberConversationScrollPosition}
-              onStopGenerating={stopActiveGeneration}
-              onSubmitMessage={submitMessage}
-            />
+                onMessageUiStateChange={(messageId, uiState: ChatMessageUiState | undefined) => {
+                  const currentMessage = activeConversation.messages.find(
+                    (message) => message.id === messageId
+                  )
+                  const messageToSave: ChatMessage | null = currentMessage
+                    ? { ...currentMessage, uiState }
+                    : null
+                  setConversationsWithRef((currentConversations) =>
+                    currentConversations.map((conversation) =>
+                      conversation.id === activeConversation.id
+                        ? {
+                            ...conversation,
+                            messages: conversation.messages.map((message) =>
+                              message.id === messageId ? (messageToSave ?? message) : message
+                            )
+                          }
+                        : conversation
+                    )
+                  )
+                  if (messageToSave) {
+                    enqueueChatMessageStateSave(activeConversation.id, messageToSave)
+                  }
+                }}
+                onRejectAgentAction={handleRejectAgentAction}
+                onScrollPositionChange={rememberConversationScrollPosition}
+                onStopGenerating={stopActiveGeneration}
+                onSubmitMessage={submitMessage}
+              />
+            )
           ) : (
             <NewConversationPage
               contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}

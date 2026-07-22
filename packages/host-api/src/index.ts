@@ -109,6 +109,8 @@ export interface StorageHostApi {
   deleteProject(projectId: string): Promise<void>
   showProjectInFolder(projectId: string): Promise<void>
   revealProjectFile(input: { projectId?: string | null; filePath: string }): Promise<void>
+  loadConversationMetas(): Promise<StorageChatConversationMetaRecord[]>
+  loadConversation(conversationId: string): Promise<StorageChatConversationRecord | null>
   loadConversations(): Promise<StorageChatConversationRecord[]>
   forkConversation(input: StorageForkConversationRequest): Promise<StorageChatConversationRecord>
   saveConversationMeta(

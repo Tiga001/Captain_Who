@@ -141,6 +141,19 @@ pub(crate) fn handle_request(
         STORAGE_LOAD_CONVERSATIONS_METHOD => {
             storage_response(request.id, storage.load_conversations())
         }
+        STORAGE_LOAD_CONVERSATION_METAS_METHOD => {
+            storage_response(request.id, storage.load_conversation_metas())
+        }
+        STORAGE_LOAD_CONVERSATION_METHOD => {
+            let input = match parse_params::<ConversationIdRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            storage_response(
+                request.id,
+                storage.load_conversation(&input.conversation_id),
+            )
+        }
         STORAGE_FORK_CONVERSATION_METHOD => {
             let input = match parse_params::<ForkConversationInput>(request.params) {
                 Ok(input) => input,

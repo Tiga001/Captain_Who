@@ -163,6 +163,8 @@ export interface ChatConversation {
   modelId: string | null
   title: string
   messages: ChatMessage[]
+  /** False only for sidebar metadata whose message history has not been requested yet. */
+  messagesLoaded?: boolean
   createdAt: number
   updatedAt: number
   pinnedAt?: number | null

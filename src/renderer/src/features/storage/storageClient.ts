@@ -131,6 +131,15 @@ export async function loadConversations(): Promise<ChatConversation[]> {
   return (await hostClient.storage.loadConversations()).map(mapConversationFromStorage)
 }
 
+export async function loadConversationMetas(): Promise<ChatConversation[]> {
+  return (await hostClient.storage.loadConversationMetas()).map(mapConversationMetaFromStorage)
+}
+
+export async function loadConversation(conversationId: string): Promise<ChatConversation | null> {
+  const conversation = await hostClient.storage.loadConversation(conversationId)
+  return conversation ? mapConversationFromStorage(conversation) : null
+}
+
 export async function forkConversation(
   sourceConversationId: string,
   throughAssistantMessageId: string,
@@ -344,6 +353,25 @@ function mapConversationFromStorage(conversation: StorageChatConversationRecord)
     modelId: conversation.modelId ?? null,
     title: conversation.title,
     messages: conversation.messages.map(mapMessageFromStorage),
+    messagesLoaded: true,
+    createdAt: conversation.createdAt,
+    updatedAt: conversation.updatedAt,
+    pinnedAt: conversation.pinnedAt ?? null,
+    archivedAt: conversation.archivedAt ?? null,
+    unreadAt: conversation.unreadAt ?? null
+  }
+}
+
+function mapConversationMetaFromStorage(
+  conversation: StorageChatConversationMetaRecord
+): ChatConversation {
+  return {
+    id: conversation.id,
+    projectId: conversation.projectId ?? null,
+    modelId: conversation.modelId ?? null,
+    title: conversation.title,
+    messages: [],
+    messagesLoaded: false,
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
     pinnedAt: conversation.pinnedAt ?? null,

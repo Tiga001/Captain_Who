@@ -229,6 +229,31 @@ html[data-theme='zju-light'] .settings-page__drag-region::before {
   background: var(--main-panel);
 }
 
+.conversation-load-state {
+  display: grid;
+  min-height: 100%;
+  padding: 24px;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  color: var(--mc-color-text-secondary);
+  text-align: center;
+}
+
+.conversation-load-state p {
+  margin: 0;
+}
+
+.conversation-load-state button {
+  min-height: 32px;
+  padding: 0 16px;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-muted);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-sm);
+  cursor: pointer;
+}
+
 .main-panel__toolbar {
   position: absolute;
   z-index: 30;

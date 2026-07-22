@@ -430,6 +430,10 @@ export function registerHostIpc(
     revealProjectFile(coreServer, input)
   )
   ipcMain.handle('host:storage.loadConversations', () => coreServer.loadConversations())
+  ipcMain.handle('host:storage.loadConversationMetas', () => coreServer.loadConversationMetas())
+  ipcMain.handle('host:storage.loadConversation', (_event, conversationId) =>
+    coreServer.loadConversation(conversationId)
+  )
   ipcMain.handle('host:storage.forkConversation', (_event, input) =>
     coreServer.forkConversation(input)
   )

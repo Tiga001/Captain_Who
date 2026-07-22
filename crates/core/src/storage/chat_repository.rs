@@ -19,6 +19,22 @@ pub fn conversation_exists(
 pub fn list_conversations(
     connection: &Connection,
 ) -> rusqlite::Result<Vec<ChatConversationRecord>> {
+    let conversation_metas = list_conversation_metas(connection)?;
+    let mut conversations = conversation_metas
+        .into_iter()
+        .map(conversation_from_meta)
+        .collect::<Vec<_>>();
+
+    for conversation in &mut conversations {
+        conversation.messages = list_messages(connection, &conversation.id)?;
+    }
+
+    Ok(conversations)
+}
+
+pub fn list_conversation_metas(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<ChatConversationMetaRecord>> {
     let mut conversation_statement = connection.prepare(
         "
         SELECT id, project_id, model_id, title, created_at, updated_at, pinned_at, archived_at, unread_at
@@ -30,14 +46,9 @@ pub fn list_conversations(
         ",
     )?;
 
-    let mut conversations = conversation_statement
-        .query_map([], conversation_from_row)?
+    let conversations = conversation_statement
+        .query_map([], conversation_meta_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    for conversation in &mut conversations {
-        conversation.messages = list_messages(connection, &conversation.id)?;
-    }
-
     Ok(conversations)
 }
 
@@ -81,18 +92,36 @@ pub fn get_assistant_message_created_at(
 }
 
 fn conversation_from_row(row: &Row<'_>) -> rusqlite::Result<ChatConversationRecord> {
-    Ok(ChatConversationRecord {
+    Ok(conversation_from_meta(conversation_meta_from_row(row)?))
+}
+
+fn conversation_meta_from_row(row: &Row<'_>) -> rusqlite::Result<ChatConversationMetaRecord> {
+    Ok(ChatConversationMetaRecord {
         id: row.get(0)?,
         project_id: row.get(1)?,
         model_id: row.get(2)?,
         title: row.get(3)?,
-        messages: Vec::new(),
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
         pinned_at: row.get(6)?,
         archived_at: row.get(7)?,
         unread_at: row.get(8)?,
     })
+}
+
+fn conversation_from_meta(meta: ChatConversationMetaRecord) -> ChatConversationRecord {
+    ChatConversationRecord {
+        id: meta.id,
+        project_id: meta.project_id,
+        model_id: meta.model_id,
+        title: meta.title,
+        messages: Vec::new(),
+        created_at: meta.created_at,
+        updated_at: meta.updated_at,
+        pinned_at: meta.pinned_at,
+        archived_at: meta.archived_at,
+        unread_at: meta.unread_at,
+    }
 }
 
 pub fn save_conversation(
@@ -837,6 +866,20 @@ mod tests {
         ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
         CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
+
+    #[test]
+    fn conversation_metadata_listing_does_not_require_message_hydration() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let conversation = conversation();
+        save_conversation(&mut connection, conversation.clone()).unwrap();
+
+        let metas = list_conversation_metas(&connection).unwrap();
+
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].id, conversation.id);
+        assert_eq!(metas[0].title, conversation.title);
+    }
 
     #[test]
     fn full_conversation_save_preserves_retained_trace_and_deletes_missing_trace() {

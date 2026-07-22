@@ -138,6 +138,8 @@ const STORAGE_LOAD_PROJECTS_METHOD = 'storage.loadProjects'
 const STORAGE_SAVE_PROJECT_METHOD = 'storage.saveProject'
 const STORAGE_DELETE_PROJECT_METHOD = 'storage.deleteProject'
 const STORAGE_LOAD_CONVERSATIONS_METHOD = 'storage.loadConversations'
+const STORAGE_LOAD_CONVERSATION_METAS_METHOD = 'storage.loadConversationMetas'
+const STORAGE_LOAD_CONVERSATION_METHOD = 'storage.loadConversation'
 const STORAGE_SAVE_CONVERSATION_META_METHOD = 'storage.saveConversationMeta'
 const STORAGE_DELETE_CONVERSATION_METHOD = 'storage.deleteConversation'
 const STORAGE_DELETE_CHAT_MESSAGES_METHOD = 'storage.deleteChatMessages'
@@ -529,6 +531,19 @@ export class CoreServer {
 
   loadConversations(): Promise<StorageChatConversationRecord[]> {
     return this.rpc.request<StorageChatConversationRecord[]>(STORAGE_LOAD_CONVERSATIONS_METHOD)
+  }
+
+  loadConversationMetas(): Promise<StorageChatConversationMetaRecord[]> {
+    return this.rpc.request<StorageChatConversationMetaRecord[]>(
+      STORAGE_LOAD_CONVERSATION_METAS_METHOD
+    )
+  }
+
+  loadConversation(conversationId: string): Promise<StorageChatConversationRecord | null> {
+    return this.rpc.request<StorageChatConversationRecord | null, { conversationId: string }>(
+      STORAGE_LOAD_CONVERSATION_METHOD,
+      { conversationId }
+    )
   }
 
   forkConversation(input: StorageForkConversationRequest): Promise<StorageChatConversationRecord> {

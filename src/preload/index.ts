@@ -109,6 +109,9 @@ const host: HostApi = {
     showProjectInFolder: (projectId) =>
       ipcRenderer.invoke('host:storage.showProjectInFolder', projectId),
     revealProjectFile: (input) => ipcRenderer.invoke('host:storage.revealProjectFile', input),
+    loadConversationMetas: () => ipcRenderer.invoke('host:storage.loadConversationMetas'),
+    loadConversation: (conversationId) =>
+      ipcRenderer.invoke('host:storage.loadConversation', conversationId),
     loadConversations: () => ipcRenderer.invoke('host:storage.loadConversations'),
     forkConversation: (input) => ipcRenderer.invoke('host:storage.forkConversation', input),
     saveConversationMeta: (conversation) =>

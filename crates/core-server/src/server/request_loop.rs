@@ -6,6 +6,29 @@ pub(crate) struct RequestDispatchers<'a> {
     pub(crate) skill_acquisition: &'a SkillsDispatcher,
 }
 
+fn is_blocking_read_method(method: &str) -> bool {
+    matches!(
+        method,
+        AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD
+            | AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD
+            | AGENT_LIST_PENDING_ACTIONS_METHOD
+            | AGENT_GET_USAGE_SUMMARY_METHOD
+            | AGENT_READ_FILE_DRAFT_METHOD
+            | AGENT_GET_FILE_WRITE_DIFF_METHOD
+            | SEARCH_SEARCH_CHATS_METHOD
+            | STORAGE_LOAD_MODEL_SETTINGS_METHOD
+            | STORAGE_LOAD_AGENT_PROMPT_PREFERENCES_METHOD
+            | STORAGE_LOAD_PROJECTS_METHOD
+            | STORAGE_LOAD_CONVERSATIONS_METHOD
+            | STORAGE_LOAD_CONVERSATION_METAS_METHOD
+            | STORAGE_LOAD_CONVERSATION_METHOD
+            | STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD
+            | STORAGE_LOAD_INPUT_ATTACHMENTS_METHOD
+            | STORAGE_LOAD_COMPOSER_DRAFTS_METHOD
+            | STORAGE_LOAD_UI_PREFERENCES_METHOD
+    )
+}
+
 pub(crate) async fn run_request_loop<R>(
     input: R,
     storage: Arc<StorageService>,
@@ -60,6 +83,34 @@ where
                             Some(request_id),
                             -32000,
                             format!("Office status probe task failed: {error}"),
+                        ),
+                    };
+                    let _ = enqueue_outbound(&request_outbound, response);
+                });
+                continue;
+            }
+            if is_blocking_read_method(&request.method) {
+                let request_id = request.id.clone();
+                let request_storage = Arc::clone(&storage);
+                let request_service = agent_service.clone();
+                let request_outbound = outbound.clone();
+                let request_notifications = request_outbound.clone();
+                tokio::spawn(async move {
+                    let response = match tokio::task::spawn_blocking(move || {
+                        handle_request(
+                            &request_storage,
+                            &request_service,
+                            request_notifications,
+                            request,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => response_error(
+                            Some(request_id),
+                            -32000,
+                            format!("Storage read task failed: {error}"),
                         ),
                     };
                     let _ = enqueue_outbound(&request_outbound, response);
@@ -274,4 +325,23 @@ pub(crate) fn is_skills_method(method: &str) -> bool {
             | SKILLS_LIST_MANAGEMENT_METHOD
             | SKILLS_SET_ENABLED_METHOD
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_reads_use_the_non_blocking_dispatch_path() {
+        assert!(is_blocking_read_method(
+            STORAGE_LOAD_CONVERSATION_METAS_METHOD
+        ));
+        assert!(is_blocking_read_method(STORAGE_LOAD_CONVERSATION_METHOD));
+        assert!(is_blocking_read_method(STORAGE_LOAD_UI_PREFERENCES_METHOD));
+        assert!(is_blocking_read_method(STORAGE_LOAD_COMPOSER_DRAFTS_METHOD));
+        assert!(!is_blocking_read_method(
+            STORAGE_SAVE_CONVERSATION_META_METHOD
+        ));
+        assert!(!is_blocking_read_method(STORAGE_DELETE_CONVERSATION_METHOD));
+    }
 }

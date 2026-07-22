@@ -56,6 +56,11 @@ impl StorageService {
         Ok(conversations)
     }
 
+    pub fn load_conversation_metas(&self) -> Result<Vec<ChatConversationMetaRecord>, String> {
+        let connection = self.state.connection()?;
+        chat_repository::list_conversation_metas(&connection).map_err(storage_error)
+    }
+
     pub fn load_conversation(
         &self,
         conversation_id: &str,

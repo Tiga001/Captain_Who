@@ -19,7 +19,8 @@ const testState = vi.hoisted(() => ({
   forkConversation: vi.fn(),
   getContextWindowSnapshot: vi.fn(),
   loadComposerDrafts: vi.fn(),
-  loadConversations: vi.fn(),
+  loadConversation: vi.fn(),
+  loadConversationMetas: vi.fn(),
   loadInputAttachments: vi.fn(),
   loadUiPreferences: vi.fn(),
   onAgentEvent: vi.fn(),
@@ -114,7 +115,8 @@ vi.mock('../../features/storage/storageClient', async (importOriginal) => {
     deleteChatMessages: testState.deleteChatMessages,
     forkConversation: testState.forkConversation,
     loadComposerDrafts: testState.loadComposerDrafts,
-    loadConversations: testState.loadConversations,
+    loadConversation: testState.loadConversation,
+    loadConversationMetas: testState.loadConversationMetas,
     loadInputAttachments: testState.loadInputAttachments,
     loadUiPreferences: testState.loadUiPreferences,
     saveChatMessageState: testState.saveChatMessageState,
@@ -126,10 +128,37 @@ vi.mock('../../features/storage/storageClient', async (importOriginal) => {
 })
 
 vi.mock('../../components/layout/ResizeHandle', () => ({ ResizeHandle: () => null }))
-vi.mock('../../components/sidebar/LeftSidebar', () => ({ LeftSidebar: () => null }))
+vi.mock('../../components/sidebar/LeftSidebar', () => ({
+  LeftSidebar: ({
+    conversations,
+    onSelectConversation,
+    uiPreferences
+  }: {
+    conversations: ChatConversation[]
+    onSelectConversation: (conversationId: string) => void
+    uiPreferences: { translucentSidebar: boolean }
+  }) => (
+    <div>
+      <output data-testid="sidebar-translucent">{String(uiPreferences.translucentSidebar)}</output>
+      {conversations.map((conversation: ChatConversation) => (
+        <button
+          key={conversation.id}
+          type="button"
+          onClick={() => onSelectConversation(conversation.id)}
+        >
+          select-{conversation.id}
+        </button>
+      ))}
+    </div>
+  )
+}))
 vi.mock('../../components/sidebar/RightSidebar', () => ({ RightSidebar: () => null }))
 vi.mock('../AppShellSettingsView', () => ({ AppShellSettingsView: () => null }))
-vi.mock('../../features/chat/NewConversationPage', () => ({ NewConversationPage: () => null }))
+vi.mock('../../features/chat/NewConversationPage', () => ({
+  NewConversationPage: ({ draft }: { draft: ChatComposerDraft }) => (
+    <output data-testid="new-conversation-draft">{draft.message}</output>
+  )
+}))
 vi.mock('../../features/chat/ChatConversationPage', () => ({
   ChatConversationPage: ({
     composerDraft,
@@ -361,7 +390,11 @@ beforeEach(() => {
   testState.loadComposerDrafts.mockReset().mockResolvedValue({
     'conversation-a': createComposerDraft({ modelId: 'model-1', projectId: 'project-a' })
   })
-  testState.loadConversations.mockReset().mockResolvedValue([storedConversation()])
+  const stored = storedConversation()
+  testState.loadConversation.mockReset().mockResolvedValue(stored)
+  testState.loadConversationMetas
+    .mockReset()
+    .mockResolvedValue([{ ...stored, messages: [], messagesLoaded: false }])
   testState.loadInputAttachments.mockReset().mockResolvedValue([])
   testState.loadUiPreferences.mockReset().mockResolvedValue({
     ...defaultUiPreferences(),
@@ -380,6 +413,59 @@ beforeEach(() => {
   testState.upsertChatMessages.mockReset().mockResolvedValue(undefined)
 })
 
+describe('conversation startup loading', () => {
+  it('loads sidebar metadata first and hydrates only the initial non-archived conversation', async () => {
+    const active = storedConversation()
+    const archived = {
+      ...storedConversation(),
+      id: 'conversation-archived',
+      title: 'Archived',
+      messages: [],
+      messagesLoaded: false,
+      archivedAt: 10
+    }
+    const activeDetail = deferred<ChatConversation>()
+    testState.loadConversationMetas.mockResolvedValueOnce([
+      { ...active, messages: [], messagesLoaded: false },
+      archived
+    ])
+    testState.loadConversation.mockReturnValueOnce(activeDetail.promise)
+
+    const screen = await render(<AppShell />)
+
+    await expect.poll(() => testState.loadConversationMetas.mock.calls.length).toBe(1)
+    await expect.poll(() => testState.loadConversation.mock.calls).toEqual([['conversation-a']])
+    await expect.element(screen.getByText('chat.loadingConversation')).toBeVisible()
+    expect(testState.loadConversation).not.toHaveBeenCalledWith('conversation-archived')
+
+    activeDetail.resolve(active)
+    await expect.element(screen.getByRole('button', { name: 'submit-with-skill' })).toBeVisible()
+    expect(testState.loadConversation).not.toHaveBeenCalledWith('conversation-archived')
+  })
+
+  it('commits preferences and drafts without waiting for the conversation catalog', async () => {
+    const conversationMetas = deferred<ChatConversation[]>()
+    testState.loadConversationMetas.mockReturnValueOnce(conversationMetas.promise)
+    testState.loadUiPreferences.mockResolvedValueOnce({
+      ...defaultUiPreferences(),
+      translucentSidebar: true,
+      showContextWindowUsage: false
+    })
+    testState.loadComposerDrafts.mockResolvedValueOnce({
+      'new-conversation': createComposerDraft({ message: 'independent draft' })
+    })
+
+    const screen = await render(<AppShell />)
+
+    await expect.element(screen.getByTestId('sidebar-translucent')).toHaveTextContent('true')
+    await expect
+      .element(screen.getByTestId('new-conversation-draft'))
+      .toHaveTextContent('independent draft')
+
+    conversationMetas.resolve([])
+  })
+})
+
 describe('unified activated Skill inventory', () => {
   it('restores the unified inventory from persisted message state', async () => {
     const restored = storedConversation()
@@ -388,7 +474,7 @@ describe('unified activated Skill inventory', () => {
     assistantMessage.agentRun.activatedSkills = [explicitSkillSummary, modelSkillSummary]
     assistantMessage.agentRun.explicitSkillSelections = [skillSelection]
     assistantMessage.agentRun.skillActivationRevision = 'activation-sha256-v1:explicit-and-model'
-    testState.loadConversations.mockResolvedValueOnce([restored])
+    testState.loadConversation.mockResolvedValueOnce(restored)
 
     const screen = await render(<AppShell />)
 
