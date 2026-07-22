@@ -39,6 +39,7 @@ mod attachments;
 mod compaction;
 mod conversations;
 mod file_drafts;
+mod image_generation;
 mod lifecycle;
 mod messages;
 mod pending_actions;

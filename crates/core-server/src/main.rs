@@ -24,7 +24,9 @@ use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, Gi
 #[cfg(test)]
 use mycopilot_core::image_generation::InMemoryCredentialStore;
 use mycopilot_core::image_generation::{
-    ImageGenerationConfigurationService, SystemCredentialStore,
+    ImageArtifactStoreConfig, ImageGenerationAdapterRegistry, ImageGenerationConfigurationService,
+    ImageGenerationExecutionLimits, ImageGenerationExecutionService,
+    ManagedImageGenerationArtifactStore, SmartMlSeedreamProviderFactory, SystemCredentialStore,
 };
 use mycopilot_core::skills::{
     GitHubAcquisitionTransport, GitHubInstallationSourceResolver, GitHubSkillAcquirer,

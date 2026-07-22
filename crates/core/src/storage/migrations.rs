@@ -662,6 +662,108 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             created_at INTEGER NOT NULL CHECK (created_at >= 0)
         );
 
+        CREATE TABLE IF NOT EXISTS image_generation_executions (
+            execution_id TEXT PRIMARY KEY CHECK (
+                typeof(execution_id) = 'text'
+                AND length(CAST(execution_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            request_fingerprint TEXT NOT NULL CHECK (
+                length(request_fingerprint) = 71
+                AND substr(request_fingerprint, 1, 7) = 'sha256:'
+                AND substr(request_fingerprint, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            safe_request_json TEXT NOT NULL CHECK (
+                length(CAST(safe_request_json AS BLOB)) BETWEEN 2 AND 65536
+            ),
+            profile_id TEXT NOT NULL CHECK (
+                length(CAST(profile_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            adapter_id TEXT NOT NULL CHECK (
+                length(CAST(adapter_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            profile_revision INTEGER NOT NULL CHECK (profile_revision > 0),
+            model_id TEXT NOT NULL CHECK (
+                length(CAST(model_id AS BLOB)) BETWEEN 1 AND 512
+            ),
+            operation TEXT NOT NULL CHECK (operation IN ('generate', 'edit')),
+            status TEXT NOT NULL CHECK (status IN (
+                'executing',
+                'publishing',
+                'succeeded',
+                'failed',
+                'cancelled',
+                'outcome_indeterminate',
+                'commit_indeterminate'
+            )),
+            remote_outcome_unknown INTEGER NOT NULL DEFAULT 0 CHECK (
+                remote_outcome_unknown IN (0, 1)
+            ),
+            provider_succeeded INTEGER NOT NULL DEFAULT 0 CHECK (
+                provider_succeeded IN (0, 1)
+            ),
+            commit_may_have_succeeded INTEGER NOT NULL DEFAULT 0 CHECK (
+                commit_may_have_succeeded IN (0, 1)
+            ),
+            provider_request_id TEXT CHECK (
+                provider_request_id IS NULL
+                OR length(CAST(provider_request_id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            http_status INTEGER CHECK (http_status IS NULL OR http_status BETWEEN 100 AND 599),
+            terminal_result_json TEXT CHECK (
+                terminal_result_json IS NULL
+                OR length(CAST(terminal_result_json AS BLOB)) BETWEEN 2 AND 65536
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            completed_at INTEGER CHECK (
+                (status IN ('executing', 'publishing') AND completed_at IS NULL AND terminal_result_json IS NULL)
+                OR
+                (status NOT IN ('executing', 'publishing') AND completed_at IS NOT NULL AND terminal_result_json IS NOT NULL)
+            )
+        );
+
+        CREATE INDEX IF NOT EXISTS image_generation_executions_status_idx
+            ON image_generation_executions (status, updated_at, execution_id);
+
+        CREATE TABLE IF NOT EXISTS image_generation_artifacts (
+            execution_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            artifact_id TEXT NOT NULL CHECK (
+                length(artifact_id) = 71
+                AND substr(artifact_id, 1, 7) = 'sha256:'
+                AND substr(artifact_id, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            state TEXT NOT NULL CHECK (state IN (
+                'candidate', 'published', 'discarded', 'indeterminate'
+            )),
+            storage_relative_path TEXT NOT NULL CHECK (
+                length(CAST(storage_relative_path AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            format TEXT NOT NULL CHECK (format IN ('png', 'jpeg', 'webp')),
+            media_type TEXT NOT NULL CHECK (media_type IN ('image/png', 'image/jpeg', 'image/webp')),
+            width INTEGER NOT NULL CHECK (width BETWEEN 1 AND 16384),
+            height INTEGER NOT NULL CHECK (height BETWEEN 1 AND 16384),
+            size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+            sha256 TEXT NOT NULL CHECK (
+                length(sha256) = 64
+                AND sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            published_at INTEGER,
+            PRIMARY KEY (execution_id, ordinal),
+            FOREIGN KEY (execution_id) REFERENCES image_generation_executions(execution_id)
+                ON DELETE CASCADE,
+            CHECK (
+                (state = 'published' AND published_at IS NOT NULL)
+                OR (state != 'published' AND published_at IS NULL)
+            )
+        );
+
+        CREATE INDEX IF NOT EXISTS image_generation_artifacts_identity_idx
+            ON image_generation_artifacts (artifact_id, state);
+
         CREATE TABLE IF NOT EXISTS models (
             id TEXT PRIMARY KEY,
             display_name TEXT NOT NULL,

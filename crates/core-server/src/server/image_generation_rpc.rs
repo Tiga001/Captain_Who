@@ -255,9 +255,8 @@ fn configuration_dto(
 }
 
 fn adapter_id_dto(adapter_id: ImageGenerationAdapterId) -> ImageGenerationAdapterIdDto {
-    match adapter_id {
-        ImageGenerationAdapterId::SmartMlSeedream => ImageGenerationAdapterIdDto::SmartMlSeedream,
-    }
+    debug_assert_eq!(adapter_id, ImageGenerationAdapterId::SmartMlSeedream);
+    ImageGenerationAdapterIdDto::SmartMlSeedream
 }
 
 fn defaults_dto(defaults: ImageGenerationDefaults) -> ImageGenerationDefaultsDto {

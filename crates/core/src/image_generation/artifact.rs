@@ -1,0 +1,1463 @@
+//! Safe transfer and durable publication of provider-generated image artifacts.
+//!
+//! Provider output URLs are untrusted, ephemeral capabilities. This module consumes them without
+//! forwarding provider credentials, validates every network hop against an SSRF policy, fully
+//! decodes the downloaded image, and publishes it into an application-managed immutable store.
+
+use super::types::ImageGenerationUrlOutput;
+use crate::durable_fs::{atomic_rename_noreplace, sync_directory};
+use crate::AgentCancellationToken;
+use futures_util::future::BoxFuture;
+use futures_util::StreamExt;
+use image::{ImageFormat, ImageReader, Limits};
+use reqwest::header::{
+    HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, LOCATION,
+};
+use reqwest::{Client, StatusCode, Url};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Cursor, Read};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::Semaphore;
+use uuid::Uuid;
+
+pub const DEFAULT_IMAGE_ARTIFACT_MAX_BYTES: usize = 32 * 1024 * 1024;
+pub const DEFAULT_IMAGE_ARTIFACT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_IMAGE_ARTIFACT_DNS_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_IMAGE_ARTIFACT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DEFAULT_IMAGE_ARTIFACT_MAX_REDIRECTS: usize = 3;
+pub const MAX_IMAGE_ARTIFACT_DIMENSION: u32 = 16_384;
+pub const MAX_IMAGE_ARTIFACT_PIXELS: u64 = 64 * 1024 * 1024;
+const MAX_IMAGE_ARTIFACT_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_IMAGE_ARTIFACT_URL_BYTES: usize = 16 * 1024;
+const MANAGED_ARTIFACT_OBJECTS_DIRECTORY: &str = "objects";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageArtifactNetworkPolicy {
+    PublicHttpsOnly,
+    /// Test-only escape hatch. HTTP and non-public addresses remain limited to loopback.
+    AllowLoopbackHttpForTests,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageArtifactStoreConfig {
+    pub network_policy: ImageArtifactNetworkPolicy,
+    pub connect_timeout: Duration,
+    pub dns_timeout: Duration,
+    pub download_timeout: Duration,
+    pub max_download_bytes: usize,
+    pub max_redirects: usize,
+}
+
+impl Default for ImageArtifactStoreConfig {
+    fn default() -> Self {
+        Self {
+            network_policy: ImageArtifactNetworkPolicy::PublicHttpsOnly,
+            connect_timeout: DEFAULT_IMAGE_ARTIFACT_CONNECT_TIMEOUT,
+            dns_timeout: DEFAULT_IMAGE_ARTIFACT_DNS_TIMEOUT,
+            download_timeout: DEFAULT_IMAGE_ARTIFACT_DOWNLOAD_TIMEOUT,
+            max_download_bytes: DEFAULT_IMAGE_ARTIFACT_MAX_BYTES,
+            max_redirects: DEFAULT_IMAGE_ARTIFACT_MAX_REDIRECTS,
+        }
+    }
+}
+
+impl ImageArtifactStoreConfig {
+    fn validate(self) -> Result<Self, ImageArtifactError> {
+        if self.connect_timeout.is_zero()
+            || self.dns_timeout.is_zero()
+            || self.download_timeout.is_zero()
+            || self.connect_timeout > self.download_timeout
+            || self.dns_timeout > self.download_timeout
+            || self.download_timeout > Duration::from_secs(10 * 60)
+        {
+            return Err(ImageArtifactError::new(
+                ImageArtifactErrorCode::InvalidConfiguration,
+                "image Artifact transfer timeouts are invalid",
+                false,
+            ));
+        }
+        if self.max_download_bytes == 0 || self.max_download_bytes > 128 * 1024 * 1024 {
+            return Err(ImageArtifactError::new(
+                ImageArtifactErrorCode::InvalidConfiguration,
+                "image Artifact byte limit is invalid",
+                false,
+            ));
+        }
+        if self.max_redirects > 5 {
+            return Err(ImageArtifactError::new(
+                ImageArtifactErrorCode::InvalidConfiguration,
+                "image Artifact redirect limit is invalid",
+                false,
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ImageArtifactFormat {
+    Png,
+    Jpeg,
+    Webp,
+}
+
+impl ImageArtifactFormat {
+    #[must_use]
+    pub const fn media_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
+        }
+    }
+
+    #[must_use]
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Webp => "webp",
+        }
+    }
+
+    const fn image_format(self) -> ImageFormat {
+        match self {
+            Self::Png => ImageFormat::Png,
+            Self::Jpeg => ImageFormat::Jpeg,
+            Self::Webp => ImageFormat::WebP,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageGenerationArtifactCandidate {
+    pub artifact_id: String,
+    pub storage_relative_path: String,
+    pub format: ImageArtifactFormat,
+    pub media_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+impl ImageGenerationArtifactCandidate {
+    #[must_use]
+    pub fn artifact_uri(&self) -> String {
+        format!("image-artifact://sha256/{}", self.sha256)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageArtifactPublicationStatus {
+    Created,
+    AlreadyPresent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedImageArtifact {
+    pub candidate: ImageGenerationArtifactCandidate,
+    pub absolute_path: PathBuf,
+    pub status: ImageArtifactPublicationStatus,
+}
+
+/// A validated but unpublished Artifact. Dropping it removes its private staging file.
+pub struct PreparedImageArtifact {
+    candidate: ImageGenerationArtifactCandidate,
+    staging_path: PathBuf,
+    target_path: PathBuf,
+    published: bool,
+}
+
+impl PreparedImageArtifact {
+    #[must_use]
+    pub fn candidate(&self) -> &ImageGenerationArtifactCandidate {
+        &self.candidate
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_parts(
+        candidate: ImageGenerationArtifactCandidate,
+        staging_path: PathBuf,
+        target_path: PathBuf,
+    ) -> Self {
+        Self {
+            candidate,
+            staging_path,
+            target_path,
+            published: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_published_for_test(&mut self) {
+        self.published = true;
+    }
+}
+
+impl fmt::Debug for PreparedImageArtifact {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedImageArtifact")
+            .field("candidate", &self.candidate)
+            .field("published", &self.published)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for PreparedImageArtifact {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = fs::remove_file(&self.staging_path);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ImageArtifactErrorCode {
+    InvalidConfiguration,
+    UnsafeUrl,
+    DnsRejected,
+    RedirectRejected,
+    TransportFailed,
+    DownloadTimedOut,
+    HttpRejected,
+    ResponseTooLarge,
+    UnsupportedMediaType,
+    InvalidImage,
+    Io,
+    Conflict,
+    Cancelled,
+    CommitIndeterminate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageArtifactError {
+    pub code: ImageArtifactErrorCode,
+    pub message: String,
+    pub retryable: bool,
+    pub http_status: Option<u16>,
+    pub commit_may_have_succeeded: bool,
+}
+
+impl ImageArtifactError {
+    #[must_use]
+    pub fn new(code: ImageArtifactErrorCode, message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            retryable,
+            http_status: None,
+            commit_may_have_succeeded: false,
+        }
+    }
+
+    fn cancelled() -> Self {
+        Self::new(
+            ImageArtifactErrorCode::Cancelled,
+            "image Artifact transfer was cancelled",
+            false,
+        )
+    }
+
+    fn commit_indeterminate() -> Self {
+        Self {
+            code: ImageArtifactErrorCode::CommitIndeterminate,
+            message: "image Artifact publication outcome is indeterminate".to_string(),
+            retryable: false,
+            http_status: None,
+            commit_may_have_succeeded: true,
+        }
+    }
+
+    #[must_use]
+    pub fn with_http_status(mut self, status: u16) -> Self {
+        self.http_status = Some(status);
+        self
+    }
+}
+
+impl fmt::Display for ImageArtifactError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ImageArtifactError {}
+
+pub trait ImageGenerationArtifactStore: Send + Sync {
+    fn stage<'a>(
+        &'a self,
+        source: &'a ImageGenerationUrlOutput,
+        cancellation: &'a AgentCancellationToken,
+    ) -> BoxFuture<'a, Result<PreparedImageArtifact, ImageArtifactError>>;
+
+    fn publish(
+        &self,
+        prepared: PreparedImageArtifact,
+        cancellation: &AgentCancellationToken,
+    ) -> Result<PublishedImageArtifact, ImageArtifactError>;
+
+    fn inspect(
+        &self,
+        candidate: &ImageGenerationArtifactCandidate,
+    ) -> Result<Option<PublishedImageArtifact>, ImageArtifactError>;
+
+    /// Reconciles an uncertain atomic publication and confirms its directory entry is durable.
+    /// Implementations must not return `Some` until both content identity and parent-directory
+    /// persistence have been verified.
+    fn confirm_published(
+        &self,
+        candidate: &ImageGenerationArtifactCandidate,
+    ) -> Result<Option<PublishedImageArtifact>, ImageArtifactError>;
+}
+
+#[derive(Clone)]
+pub struct ManagedImageGenerationArtifactStore {
+    objects_root: Arc<PathBuf>,
+    config: ImageArtifactStoreConfig,
+    validation_workers: Arc<Semaphore>,
+}
+
+impl ManagedImageGenerationArtifactStore {
+    pub fn new(
+        root: impl AsRef<Path>,
+        config: ImageArtifactStoreConfig,
+    ) -> Result<Self, ImageArtifactError> {
+        let config = config.validate()?;
+        let root = root.as_ref();
+        fs::create_dir_all(root).map_err(io_error)?;
+        reject_symlink_or_non_directory(root)?;
+        set_private_directory_permissions(root)?;
+        let root = fs::canonicalize(root).map_err(io_error)?;
+        let objects_root = root.join(MANAGED_ARTIFACT_OBJECTS_DIRECTORY);
+        fs::create_dir_all(&objects_root).map_err(io_error)?;
+        reject_symlink_or_non_directory(&objects_root)?;
+        set_private_directory_permissions(&objects_root)?;
+        sync_directory(&root).map_err(io_error)?;
+        Ok(Self {
+            objects_root: Arc::new(objects_root),
+            config,
+            // Full image decoding is deliberately kept off Tokio workers and bounded separately
+            // from the runtime's global blocking pool.
+            validation_workers: Arc::new(Semaphore::new(2)),
+        })
+    }
+
+    #[must_use]
+    pub fn config(&self) -> ImageArtifactStoreConfig {
+        self.config
+    }
+
+    async fn stage_inner(
+        &self,
+        source: &ImageGenerationUrlOutput,
+        cancellation: &AgentCancellationToken,
+    ) -> Result<PreparedImageArtifact, ImageArtifactError> {
+        let mut staging = StagingArtifactFile::new(&self.objects_root)?;
+        let mut staging_writer =
+            tokio::fs::File::from_std(staging.file.try_clone().map_err(io_error)?);
+        let content_type = self
+            .download(
+                source.expose_url_for_download(),
+                &mut staging_writer,
+                cancellation,
+            )
+            .await?;
+        staging_writer.flush().await.map_err(io_error)?;
+        staging_writer.sync_all().await.map_err(io_error)?;
+        drop(staging_writer);
+        let staging_path = staging.path().to_path_buf();
+        let validation_worker = tokio::select! {
+            _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
+            worker = Arc::clone(&self.validation_workers).acquire_owned() => {
+                worker.map_err(|_| ImageArtifactError::new(
+                    ImageArtifactErrorCode::InvalidConfiguration,
+                    "image Artifact validation pool is unavailable",
+                    true,
+                ))?
+            }
+        };
+        let validation_path = staging_path.clone();
+        let max_download_bytes = self.config.max_download_bytes;
+        let metadata = tokio::task::spawn_blocking(move || {
+            let _validation_worker = validation_worker;
+            validate_staged_image(
+                &validation_path,
+                content_type.as_deref(),
+                max_download_bytes,
+                None,
+            )
+        })
+        .await
+        .map_err(|_| {
+            ImageArtifactError::new(
+                ImageArtifactErrorCode::Io,
+                "image Artifact validation worker stopped unexpectedly",
+                true,
+            )
+        })??;
+        cancellation_check(cancellation)?;
+        let target_name = format!("{}.{}", metadata.sha256, metadata.format.extension());
+        let target_path = self.objects_root.join(&target_name);
+        let candidate = ImageGenerationArtifactCandidate {
+            artifact_id: format!("sha256:{}", metadata.sha256),
+            storage_relative_path: format!("{MANAGED_ARTIFACT_OBJECTS_DIRECTORY}/{target_name}"),
+            format: metadata.format,
+            media_type: metadata.format.media_type().to_string(),
+            width: metadata.width,
+            height: metadata.height,
+            size_bytes: metadata.size_bytes,
+            sha256: metadata.sha256,
+        };
+        staging.disarm();
+        Ok(PreparedImageArtifact {
+            candidate,
+            staging_path,
+            target_path,
+            published: false,
+        })
+    }
+
+    async fn download(
+        &self,
+        initial_url: &str,
+        staging: &mut tokio::fs::File,
+        cancellation: &AgentCancellationToken,
+    ) -> Result<Option<String>, ImageArtifactError> {
+        let download = async {
+            let mut url = validate_artifact_url(initial_url, self.config.network_policy)?;
+            for redirect_count in 0..=self.config.max_redirects {
+                cancellation_check(cancellation)?;
+                let resolved = resolve_artifact_target(&url, self.config, cancellation).await?;
+                let client = client_for_resolved_target(&resolved, self.config)?;
+                let response = tokio::select! {
+                    _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
+                    response = client
+                        .get(url.clone())
+                        .header(ACCEPT, HeaderValue::from_static("image/png, image/jpeg, image/webp"))
+                        .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
+                        .send() => response.map_err(classify_transport_error)?,
+                };
+                verify_remote_address(&response, &resolved)?;
+                if response.status().is_redirection() {
+                    if redirect_count == self.config.max_redirects {
+                        return Err(ImageArtifactError::new(
+                            ImageArtifactErrorCode::RedirectRejected,
+                            "image Artifact redirect limit was exceeded",
+                            false,
+                        ));
+                    }
+                    url = redirect_target(
+                        &url,
+                        response.status(),
+                        response.headers(),
+                        self.config.network_policy,
+                    )?;
+                    continue;
+                }
+                if !response.status().is_success() {
+                    return Err(ImageArtifactError::new(
+                        ImageArtifactErrorCode::HttpRejected,
+                        "image Artifact server returned an unsuccessful status",
+                        response.status().is_server_error(),
+                    )
+                    .with_http_status(response.status().as_u16()));
+                }
+                validate_content_encoding(response.headers())?;
+                if response.content_length().is_some_and(|length| {
+                    length == 0 || length > self.config.max_download_bytes as u64
+                }) {
+                    return Err(ImageArtifactError::new(
+                        ImageArtifactErrorCode::ResponseTooLarge,
+                        "image Artifact exceeds the configured byte limit",
+                        false,
+                    ));
+                }
+                let content_type = normalized_content_type(response.headers());
+                let mut total = 0usize;
+                let mut stream = response.bytes_stream();
+                while let Some(chunk) = tokio::select! {
+                    _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
+                    chunk = stream.next() => chunk,
+                } {
+                    let chunk = chunk.map_err(classify_transport_error)?;
+                    total = total.checked_add(chunk.len()).ok_or_else(|| {
+                        ImageArtifactError::new(
+                            ImageArtifactErrorCode::ResponseTooLarge,
+                            "image Artifact exceeds the configured byte limit",
+                            false,
+                        )
+                    })?;
+                    if total > self.config.max_download_bytes {
+                        return Err(ImageArtifactError::new(
+                            ImageArtifactErrorCode::ResponseTooLarge,
+                            "image Artifact exceeds the configured byte limit",
+                            false,
+                        ));
+                    }
+                    staging.write_all(&chunk).await.map_err(io_error)?;
+                }
+                if total == 0 {
+                    return Err(ImageArtifactError::new(
+                        ImageArtifactErrorCode::InvalidImage,
+                        "image Artifact response was empty",
+                        false,
+                    ));
+                }
+                return Ok(content_type);
+            }
+            Err(ImageArtifactError::new(
+                ImageArtifactErrorCode::RedirectRejected,
+                "image Artifact redirect could not be resolved",
+                false,
+            ))
+        };
+        tokio::select! {
+            _ = cancellation.cancelled() => Err(ImageArtifactError::cancelled()),
+            result = tokio::time::timeout(self.config.download_timeout, download) => {
+                result.unwrap_or_else(|_| Err(ImageArtifactError::new(
+                    ImageArtifactErrorCode::DownloadTimedOut,
+                    "image Artifact download timed out",
+                    true,
+                )))
+            }
+        }
+    }
+
+    fn validate_candidate_path(
+        &self,
+        candidate: &ImageGenerationArtifactCandidate,
+    ) -> Result<PathBuf, ImageArtifactError> {
+        let expected_name = format!("{}.{}", candidate.sha256, candidate.format.extension());
+        let expected_relative = format!("{MANAGED_ARTIFACT_OBJECTS_DIRECTORY}/{expected_name}");
+        if candidate.storage_relative_path != expected_relative
+            || candidate.artifact_id != format!("sha256:{}", candidate.sha256)
+            || !is_lower_hex_sha256(&candidate.sha256)
+            || candidate.media_type != candidate.format.media_type()
+            || candidate.size_bytes == 0
+            || candidate.size_bytes > self.config.max_download_bytes as u64
+            || candidate.width == 0
+            || candidate.height == 0
+            || candidate.width > MAX_IMAGE_ARTIFACT_DIMENSION
+            || candidate.height > MAX_IMAGE_ARTIFACT_DIMENSION
+            || u64::from(candidate.width)
+                .checked_mul(u64::from(candidate.height))
+                .is_none_or(|pixels| pixels > MAX_IMAGE_ARTIFACT_PIXELS)
+        {
+            return Err(ImageArtifactError::new(
+                ImageArtifactErrorCode::Conflict,
+                "image Artifact identity is invalid",
+                false,
+            ));
+        }
+        Ok(self.objects_root.join(expected_name))
+    }
+}
+
+impl fmt::Debug for ManagedImageGenerationArtifactStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ManagedImageGenerationArtifactStore")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ImageGenerationArtifactStore for ManagedImageGenerationArtifactStore {
+    fn stage<'a>(
+        &'a self,
+        source: &'a ImageGenerationUrlOutput,
+        cancellation: &'a AgentCancellationToken,
+    ) -> BoxFuture<'a, Result<PreparedImageArtifact, ImageArtifactError>> {
+        Box::pin(self.stage_inner(source, cancellation))
+    }
+
+    fn publish(
+        &self,
+        mut prepared: PreparedImageArtifact,
+        cancellation: &AgentCancellationToken,
+    ) -> Result<PublishedImageArtifact, ImageArtifactError> {
+        cancellation_check(cancellation)?;
+        let expected_target = self.validate_candidate_path(&prepared.candidate)?;
+        if expected_target != prepared.target_path {
+            return Err(ImageArtifactError::new(
+                ImageArtifactErrorCode::Conflict,
+                "prepared image Artifact target identity changed",
+                false,
+            ));
+        }
+        verify_file_matches_candidate(
+            &prepared.staging_path,
+            &prepared.candidate,
+            self.config.max_download_bytes,
+        )?;
+        let file = open_regular_file_no_follow(&prepared.staging_path).map_err(io_error)?;
+        file.sync_all().map_err(io_error)?;
+        cancellation_check(cancellation)?;
+        // Cancellation after this linearization point cannot turn a committed Artifact into a
+        // cancelled result. The caller must finish authoritative reconciliation instead.
+        match atomic_rename_noreplace(&prepared.staging_path, &prepared.target_path) {
+            Ok(()) => {
+                prepared.published = true;
+                verify_file_matches_candidate(
+                    &prepared.target_path,
+                    &prepared.candidate,
+                    self.config.max_download_bytes,
+                )
+                .map_err(|_| ImageArtifactError::commit_indeterminate())?;
+                sync_directory(&self.objects_root)
+                    .map_err(|_| ImageArtifactError::commit_indeterminate())?;
+                Ok(PublishedImageArtifact {
+                    candidate: prepared.candidate.clone(),
+                    absolute_path: prepared.target_path.clone(),
+                    status: ImageArtifactPublicationStatus::Created,
+                })
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                verify_file_matches_candidate(
+                    &prepared.target_path,
+                    &prepared.candidate,
+                    self.config.max_download_bytes,
+                )?;
+                sync_directory(&self.objects_root)
+                    .map_err(|_| ImageArtifactError::commit_indeterminate())?;
+                Ok(PublishedImageArtifact {
+                    candidate: prepared.candidate.clone(),
+                    absolute_path: prepared.target_path.clone(),
+                    status: ImageArtifactPublicationStatus::AlreadyPresent,
+                })
+            }
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                Err(ImageArtifactError::new(
+                    ImageArtifactErrorCode::InvalidConfiguration,
+                    "this platform cannot atomically publish image Artifacts",
+                    false,
+                ))
+            }
+            Err(error) => Err(io_error(error)),
+        }
+    }
+
+    fn inspect(
+        &self,
+        candidate: &ImageGenerationArtifactCandidate,
+    ) -> Result<Option<PublishedImageArtifact>, ImageArtifactError> {
+        let target = self.validate_candidate_path(candidate)?;
+        match fs::symlink_metadata(&target) {
+            Ok(_) => {
+                verify_file_matches_candidate(&target, candidate, self.config.max_download_bytes)?;
+                Ok(Some(PublishedImageArtifact {
+                    candidate: candidate.clone(),
+                    absolute_path: target,
+                    status: ImageArtifactPublicationStatus::AlreadyPresent,
+                }))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(io_error(error)),
+        }
+    }
+
+    fn confirm_published(
+        &self,
+        candidate: &ImageGenerationArtifactCandidate,
+    ) -> Result<Option<PublishedImageArtifact>, ImageArtifactError> {
+        let published = self.inspect(candidate)?;
+        if published.is_some() {
+            sync_directory(&self.objects_root)
+                .map_err(|_| ImageArtifactError::commit_indeterminate())?;
+        }
+        Ok(published)
+    }
+}
+
+struct StagingArtifactFile {
+    path: PathBuf,
+    file: File,
+    armed: bool,
+}
+
+impl StagingArtifactFile {
+    fn new(parent: &Path) -> Result<Self, ImageArtifactError> {
+        for _ in 0..16 {
+            let path = parent.join(format!(".staging-{}", Uuid::new_v4().simple()));
+            let mut options = OpenOptions::new();
+            options.create_new(true).read(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+                options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+            }
+            match options.open(&path) {
+                Ok(file) => {
+                    return Ok(Self {
+                        path,
+                        file,
+                        armed: true,
+                    })
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(io_error(error)),
+            }
+        }
+        Err(ImageArtifactError::new(
+            ImageArtifactErrorCode::Io,
+            "could not allocate a private image Artifact staging file",
+            true,
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingArtifactFile {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+struct ResolvedArtifactTarget {
+    host: String,
+    addresses: Vec<SocketAddr>,
+}
+
+async fn resolve_artifact_target(
+    url: &Url,
+    config: ImageArtifactStoreConfig,
+    cancellation: &AgentCancellationToken,
+) -> Result<ResolvedArtifactTarget, ImageArtifactError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| unsafe_url("image Artifact URL has no host"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| unsafe_url("image Artifact URL uses an unsupported network scheme"))?;
+    let addresses = if let Ok(address) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(address, port)]
+    } else {
+        let lookup = tokio::net::lookup_host((host, port));
+        tokio::select! {
+            _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
+            result = tokio::time::timeout(config.dns_timeout, lookup) => {
+                result
+                    .map_err(|_| ImageArtifactError::new(
+                        ImageArtifactErrorCode::DnsRejected,
+                        "image Artifact DNS lookup timed out",
+                        true,
+                    ))?
+                    .map_err(|_| ImageArtifactError::new(
+                        ImageArtifactErrorCode::DnsRejected,
+                        "image Artifact host could not be resolved",
+                        true,
+                    ))?
+                    .collect::<Vec<_>>()
+            }
+        }
+    };
+    let addresses = addresses
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|address| !address_allowed(address.ip(), config.network_policy))
+    {
+        return Err(ImageArtifactError::new(
+            ImageArtifactErrorCode::DnsRejected,
+            "image Artifact host resolved to a disallowed network address",
+            false,
+        ));
+    }
+    Ok(ResolvedArtifactTarget {
+        host: host.to_string(),
+        addresses,
+    })
+}
+
+fn client_for_resolved_target(
+    target: &ResolvedArtifactTarget,
+    config: ImageArtifactStoreConfig,
+) -> Result<Client, ImageArtifactError> {
+    Client::builder()
+        .connect_timeout(config.connect_timeout)
+        .timeout(config.download_timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .resolve_to_addrs(&target.host, &target.addresses)
+        .build()
+        .map_err(|_| {
+            ImageArtifactError::new(
+                ImageArtifactErrorCode::InvalidConfiguration,
+                "image Artifact HTTP client could not be initialized",
+                false,
+            )
+        })
+}
+
+fn verify_remote_address(
+    response: &reqwest::Response,
+    target: &ResolvedArtifactTarget,
+) -> Result<(), ImageArtifactError> {
+    let remote = response.remote_addr().ok_or_else(|| {
+        ImageArtifactError::new(
+            ImageArtifactErrorCode::DnsRejected,
+            "image Artifact connection identity could not be verified",
+            false,
+        )
+    })?;
+    if target
+        .addresses
+        .iter()
+        .any(|approved| approved.ip() == remote.ip())
+    {
+        Ok(())
+    } else {
+        Err(ImageArtifactError::new(
+            ImageArtifactErrorCode::DnsRejected,
+            "image Artifact connection did not use an approved network address",
+            false,
+        ))
+    }
+}
+
+fn validate_artifact_url(
+    value: &str,
+    policy: ImageArtifactNetworkPolicy,
+) -> Result<Url, ImageArtifactError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > MAX_IMAGE_ARTIFACT_URL_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(unsafe_url("image Artifact URL is invalid"));
+    }
+    let url = Url::parse(value).map_err(|_| unsafe_url("image Artifact URL is invalid"))?;
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return Err(unsafe_url(
+            "image Artifact URL contains a disallowed component",
+        ));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| unsafe_url("image Artifact URL has no host"))?;
+    let loopback = literal_ip(host).is_some_and(|address| address.is_loopback())
+        || host.eq_ignore_ascii_case("localhost");
+    match url.scheme() {
+        "https" => {}
+        "http" if policy == ImageArtifactNetworkPolicy::AllowLoopbackHttpForTests && loopback => {}
+        _ => return Err(unsafe_url("image Artifact URL must use HTTPS")),
+    }
+    if policy == ImageArtifactNetworkPolicy::PublicHttpsOnly
+        && url.port().is_some_and(|port| port != 443)
+    {
+        return Err(unsafe_url(
+            "image Artifact URL must use the default HTTPS port",
+        ));
+    }
+    Ok(url)
+}
+
+fn redirect_target(
+    current: &Url,
+    status: StatusCode,
+    headers: &HeaderMap,
+    policy: ImageArtifactNetworkPolicy,
+) -> Result<Url, ImageArtifactError> {
+    if !matches!(
+        status,
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    ) {
+        return Err(ImageArtifactError::new(
+            ImageArtifactErrorCode::RedirectRejected,
+            "image Artifact server returned an unsupported redirect",
+            false,
+        ));
+    }
+    let location = headers
+        .get(LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            ImageArtifactError::new(
+                ImageArtifactErrorCode::RedirectRejected,
+                "image Artifact redirect is missing its destination",
+                false,
+            )
+        })?;
+    let next = current.join(location).map_err(|_| {
+        ImageArtifactError::new(
+            ImageArtifactErrorCode::RedirectRejected,
+            "image Artifact redirect destination is invalid",
+            false,
+        )
+    })?;
+    // Never return the destination in an error or Debug value: it may contain a signed query.
+    validate_artifact_url(next.as_str(), policy)
+}
+
+fn validate_content_encoding(headers: &HeaderMap) -> Result<(), ImageArtifactError> {
+    if let Some(value) = headers.get(CONTENT_ENCODING) {
+        let value = value.to_str().unwrap_or_default().trim();
+        if !value.is_empty() && !value.eq_ignore_ascii_case("identity") {
+            return Err(ImageArtifactError::new(
+                ImageArtifactErrorCode::UnsupportedMediaType,
+                "compressed image Artifact responses are not supported",
+                false,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn normalized_content_type(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+struct ValidatedImage {
+    format: ImageArtifactFormat,
+    width: u32,
+    height: u32,
+    size_bytes: u64,
+    sha256: String,
+}
+
+fn validate_staged_image(
+    path: &Path,
+    claimed_content_type: Option<&str>,
+    max_bytes: usize,
+    expected_size_bytes: Option<u64>,
+) -> Result<ValidatedImage, ImageArtifactError> {
+    let mut file = open_regular_file_no_follow(path).map_err(io_error)?;
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > max_bytes as u64 {
+        return Err(ImageArtifactError::new(
+            ImageArtifactErrorCode::InvalidImage,
+            "image Artifact staging file is empty, oversized, or not a regular file",
+            false,
+        ));
+    }
+    if expected_size_bytes.is_some_and(|expected| metadata.len() != expected) {
+        return Err(ImageArtifactError::new(
+            ImageArtifactErrorCode::Conflict,
+            "image Artifact size does not match its frozen identity",
+            false,
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes).map_err(io_error)?;
+    if bytes.len() as u64 != metadata.len() {
+        return Err(ImageArtifactError::new(
+            ImageArtifactErrorCode::Conflict,
+            "image Artifact changed while it was being validated",
+            false,
+        ));
+    }
+    let format = detect_image_format(&bytes)?;
+    if let Some(content_type) = claimed_content_type {
+        if content_type != "application/octet-stream" && content_type != format.media_type() {
+            return Err(ImageArtifactError::new(
+                ImageArtifactErrorCode::UnsupportedMediaType,
+                "image Artifact Content-Type does not match its bytes",
+                false,
+            ));
+        }
+    }
+    let dimensions = ImageReader::with_format(Cursor::new(&bytes), format.image_format())
+        .into_dimensions()
+        .map_err(|_| {
+            ImageArtifactError::new(
+                ImageArtifactErrorCode::InvalidImage,
+                "image Artifact dimensions could not be decoded",
+                false,
+            )
+        })?;
+    validate_image_dimensions(dimensions.0, dimensions.1)?;
+    let mut reader = ImageReader::with_format(Cursor::new(&bytes), format.image_format());
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_ARTIFACT_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_ARTIFACT_DIMENSION);
+    limits.max_alloc = Some(MAX_IMAGE_ARTIFACT_ALLOC_BYTES);
+    reader.limits(limits);
+    let decoded = reader.decode().map_err(|_| {
+        ImageArtifactError::new(
+            ImageArtifactErrorCode::InvalidImage,
+            "image Artifact could not be fully decoded",
+            false,
+        )
+    })?;
+    let width = decoded.width();
+    let height = decoded.height();
+    validate_image_dimensions(width, height)?;
+    let sha256 = hex_sha256(&bytes);
+    Ok(ValidatedImage {
+        format,
+        width,
+        height,
+        size_bytes: metadata.len(),
+        sha256,
+    })
+}
+
+fn verify_file_matches_candidate(
+    path: &Path,
+    candidate: &ImageGenerationArtifactCandidate,
+    max_bytes: usize,
+) -> Result<(), ImageArtifactError> {
+    if candidate.size_bytes == 0 || candidate.size_bytes > max_bytes as u64 {
+        return Err(ImageArtifactError::new(
+            ImageArtifactErrorCode::Conflict,
+            "image Artifact size is outside the managed store limit",
+            false,
+        ));
+    }
+    let validated = validate_staged_image(
+        path,
+        Some(&candidate.media_type),
+        max_bytes,
+        Some(candidate.size_bytes),
+    )?;
+    if validated.format != candidate.format
+        || validated.width != candidate.width
+        || validated.height != candidate.height
+        || validated.size_bytes != candidate.size_bytes
+        || validated.sha256 != candidate.sha256
+    {
+        return Err(ImageArtifactError::new(
+            ImageArtifactErrorCode::Conflict,
+            "image Artifact content does not match its frozen identity",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+fn detect_image_format(bytes: &[u8]) -> Result<ImageArtifactFormat, ImageArtifactError> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Ok(ImageArtifactFormat::Png)
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Ok(ImageArtifactFormat::Jpeg)
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Ok(ImageArtifactFormat::Webp)
+    } else {
+        Err(ImageArtifactError::new(
+            ImageArtifactErrorCode::UnsupportedMediaType,
+            "image Artifact is not a supported PNG, JPEG, or WebP image",
+            false,
+        ))
+    }
+}
+
+fn open_regular_file_no_follow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "path is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+fn reject_symlink_or_non_directory(path: &Path) -> Result<(), ImageArtifactError> {
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(ImageArtifactError::new(
+            ImageArtifactErrorCode::InvalidConfiguration,
+            "image Artifact store path is not a safe directory",
+            false,
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_directory_permissions(path: &Path) -> Result<(), ImageArtifactError> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(io_error)
+}
+
+#[cfg(not(unix))]
+fn set_private_directory_permissions(_path: &Path) -> Result<(), ImageArtifactError> {
+    Ok(())
+}
+
+fn address_allowed(address: IpAddr, policy: ImageArtifactNetworkPolicy) -> bool {
+    if policy == ImageArtifactNetworkPolicy::AllowLoopbackHttpForTests && address.is_loopback() {
+        return true;
+    }
+    match address {
+        IpAddr::V4(address) => public_ipv4(address),
+        IpAddr::V6(address) => public_ipv6(address),
+    }
+}
+
+fn public_ipv4(address: Ipv4Addr) -> bool {
+    let value = u32::from(address);
+    ![
+        ("0.0.0.0", 8),
+        ("10.0.0.0", 8),
+        ("100.64.0.0", 10),
+        ("127.0.0.0", 8),
+        ("169.254.0.0", 16),
+        ("172.16.0.0", 12),
+        ("192.0.0.0", 24),
+        ("192.0.2.0", 24),
+        ("192.168.0.0", 16),
+        ("198.18.0.0", 15),
+        ("198.51.100.0", 24),
+        ("203.0.113.0", 24),
+        ("224.0.0.0", 4),
+        ("240.0.0.0", 4),
+    ]
+    .into_iter()
+    .any(|(network, prefix)| {
+        let network = u32::from(network.parse::<Ipv4Addr>().expect("literal IPv4 network"));
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
+        value & mask == network & mask
+    })
+}
+
+fn public_ipv6(address: Ipv6Addr) -> bool {
+    if let Some(mapped) = address.to_ipv4_mapped() {
+        return public_ipv4(mapped);
+    }
+    let value = u128::from(address);
+    let global_unicast = value & (u128::MAX << 125) == u128::from(0x2000_u16) << 112;
+    if !global_unicast {
+        return false;
+    }
+    let denied = [
+        ("2001::", 32),
+        ("2001:10::", 28),
+        ("2001:20::", 28),
+        ("2001:db8::", 32),
+    ];
+    !denied.into_iter().any(|(network, prefix)| {
+        let network = u128::from(network.parse::<Ipv6Addr>().expect("literal IPv6 network"));
+        let mask = u128::MAX << (128 - prefix);
+        value & mask == network & mask
+    })
+}
+
+fn literal_ip(host: &str) -> Option<IpAddr> {
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse()
+        .ok()
+}
+
+fn classify_transport_error(error: reqwest::Error) -> ImageArtifactError {
+    if error.is_timeout() {
+        return ImageArtifactError::new(
+            ImageArtifactErrorCode::DownloadTimedOut,
+            "image Artifact download timed out",
+            true,
+        );
+    }
+    ImageArtifactError::new(
+        ImageArtifactErrorCode::TransportFailed,
+        "image Artifact transport failed",
+        error.is_connect(),
+    )
+}
+
+fn unsafe_url(message: &'static str) -> ImageArtifactError {
+    ImageArtifactError::new(ImageArtifactErrorCode::UnsafeUrl, message, false)
+}
+
+fn invalid_dimensions() -> ImageArtifactError {
+    ImageArtifactError::new(
+        ImageArtifactErrorCode::InvalidImage,
+        "image Artifact dimensions exceed the safety limit",
+        false,
+    )
+}
+
+fn validate_image_dimensions(width: u32, height: u32) -> Result<(), ImageArtifactError> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or_else(invalid_dimensions)?;
+    if width == 0
+        || height == 0
+        || width > MAX_IMAGE_ARTIFACT_DIMENSION
+        || height > MAX_IMAGE_ARTIFACT_DIMENSION
+        || pixels > MAX_IMAGE_ARTIFACT_PIXELS
+    {
+        return Err(invalid_dimensions());
+    }
+    Ok(())
+}
+
+fn io_error(_error: io::Error) -> ImageArtifactError {
+    ImageArtifactError::new(
+        ImageArtifactErrorCode::Io,
+        "image Artifact storage operation failed",
+        true,
+    )
+}
+
+fn cancellation_check(cancellation: &AgentCancellationToken) -> Result<(), ImageArtifactError> {
+    if cancellation.is_cancelled() {
+        Err(ImageArtifactError::cancelled())
+    } else {
+        Ok(())
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{DynamicImage, RgbaImage};
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread;
+    use tempfile::tempdir;
+
+    fn png_bytes() -> Vec<u8> {
+        let image =
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(2, 3, image::Rgba([1, 2, 3, 255])));
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    fn serve_once(status: &str, headers: &[(&str, &str)], body: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let headers = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect::<String>();
+        let status = status.to_string();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        format!("http://{address}/artifact?signature=private")
+    }
+
+    fn test_store(root: &Path) -> ManagedImageGenerationArtifactStore {
+        ManagedImageGenerationArtifactStore::new(
+            root,
+            ImageArtifactStoreConfig {
+                network_policy: ImageArtifactNetworkPolicy::AllowLoopbackHttpForTests,
+                ..ImageArtifactStoreConfig::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn downloads_validates_and_atomically_publishes_png() {
+        let directory = tempdir().unwrap();
+        let bytes = png_bytes();
+        let url = serve_once("200 OK", &[("Content-Type", "image/png")], bytes.clone());
+        let source = ImageGenerationUrlOutput::new(url.clone());
+        let store = test_store(directory.path());
+
+        let prepared = store
+            .stage(&source, &AgentCancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(prepared.candidate().width, 2);
+        assert_eq!(prepared.candidate().height, 3);
+        assert!(!format!("{prepared:?}").contains(&url));
+        let published = store
+            .publish(prepared, &AgentCancellationToken::new())
+            .unwrap();
+
+        assert_eq!(published.status, ImageArtifactPublicationStatus::Created);
+        assert_eq!(fs::read(&published.absolute_path).unwrap(), bytes);
+        assert!(store.inspect(&published.candidate).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn mismatched_content_type_is_rejected_without_publication() {
+        let directory = tempdir().unwrap();
+        let url = serve_once("200 OK", &[("Content-Type", "text/html")], png_bytes());
+        let source = ImageGenerationUrlOutput::new(url);
+        let store = test_store(directory.path());
+
+        let error = store
+            .stage(&source, &AgentCancellationToken::new())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, ImageArtifactErrorCode::UnsupportedMediaType);
+        assert!(fs::read_dir(directory.path().join("objects"))
+            .unwrap()
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn production_policy_rejects_private_and_special_networks() {
+        for address in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "100.64.0.1",
+            "169.254.169.254",
+            "192.168.1.1",
+            "198.18.0.1",
+            "203.0.113.1",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:10.0.0.1",
+            "2001:db8::1",
+        ] {
+            assert!(!address_allowed(
+                address.parse().unwrap(),
+                ImageArtifactNetworkPolicy::PublicHttpsOnly
+            ));
+        }
+        assert!(address_allowed(
+            "8.8.8.8".parse().unwrap(),
+            ImageArtifactNetworkPolicy::PublicHttpsOnly
+        ));
+        assert!(address_allowed(
+            "2606:4700:4700::1111".parse().unwrap(),
+            ImageArtifactNetworkPolicy::PublicHttpsOnly
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_removes_private_staging_file() {
+        let directory = tempdir().unwrap();
+        let store = test_store(directory.path());
+        let cancellation = AgentCancellationToken::new();
+        cancellation.cancel();
+        let source = ImageGenerationUrlOutput::new("http://127.0.0.1:9/a".to_string());
+
+        assert_eq!(
+            store.stage(&source, &cancellation).await.unwrap_err().code,
+            ImageArtifactErrorCode::Cancelled
+        );
+        assert!(fs::read_dir(directory.path().join("objects"))
+            .unwrap()
+            .next()
+            .is_none());
+    }
+
+    #[test]
+    fn store_rejects_a_symlink_root() {
+        let directory = tempdir().unwrap();
+        let real = directory.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let linked = directory.path().join("linked");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, &linked).unwrap();
+            let error = ManagedImageGenerationArtifactStore::new(
+                &linked,
+                ImageArtifactStoreConfig::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, ImageArtifactErrorCode::InvalidConfiguration);
+        }
+    }
+
+    #[test]
+    fn inspect_rejects_oversized_or_replaced_artifact_before_reading_it() {
+        let directory = tempdir().unwrap();
+        let store = test_store(directory.path());
+        let digest = "b".repeat(64);
+        let target = directory
+            .path()
+            .join(MANAGED_ARTIFACT_OBJECTS_DIRECTORY)
+            .join(format!("{digest}.png"));
+        let file = File::create(&target).unwrap();
+        file.set_len(DEFAULT_IMAGE_ARTIFACT_MAX_BYTES as u64 + 1)
+            .unwrap();
+        let candidate = ImageGenerationArtifactCandidate {
+            artifact_id: format!("sha256:{digest}"),
+            storage_relative_path: format!("{MANAGED_ARTIFACT_OBJECTS_DIRECTORY}/{digest}.png"),
+            format: ImageArtifactFormat::Png,
+            media_type: "image/png".to_string(),
+            width: 2,
+            height: 3,
+            size_bytes: 4,
+            sha256: digest,
+        };
+
+        let error = store.inspect(&candidate).unwrap_err();
+
+        assert_eq!(error.code, ImageArtifactErrorCode::InvalidImage);
+    }
+}

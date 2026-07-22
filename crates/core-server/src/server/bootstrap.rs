@@ -5,6 +5,7 @@ use std::path::Path;
 pub(crate) struct CoreServerBootstrap {
     pub(crate) storage: Arc<StorageService>,
     pub(crate) image_generation_configuration: Arc<ImageGenerationConfigurationService>,
+    pub(crate) image_generation_execution: Arc<ImageGenerationExecutionService>,
     pub(crate) agent_service: AgentService,
     pub(crate) skill_services: SkillServices,
     pub(crate) git_review_service: Arc<GitReviewService>,
@@ -32,6 +33,39 @@ impl CoreServerBootstrap {
             // Credential-store errors are deliberately redacted by the domain boundary.
             eprintln!("failed to reconcile image-generation credentials: {error}");
         }
+        let mut image_generation_adapters = ImageGenerationAdapterRegistry::new();
+        image_generation_adapters
+            .register(Arc::new(SmartMlSeedreamProviderFactory::default()))
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "failed to register image-generation provider adapter: {error}"
+                ))
+            })?;
+        let image_generation_artifacts = Arc::new(
+            ManagedImageGenerationArtifactStore::new(
+                image_generation_artifact_store_root(&database_path),
+                ImageArtifactStoreConfig::default(),
+            )
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize image-generation Artifact store: {error}"
+                ))
+            })?,
+        );
+        let image_generation_execution = Arc::new(
+            ImageGenerationExecutionService::new(
+                Arc::clone(&image_generation_configuration),
+                Arc::new(image_generation_adapters),
+                image_generation_artifacts,
+                Arc::clone(&storage),
+                ImageGenerationExecutionLimits::default(),
+            )
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "failed to initialize image-generation execution service: {error}"
+                ))
+            })?,
+        );
         let git_review_service = Arc::new(GitReviewService::new());
         let skills_service = Arc::new(
             SkillsService::new()
@@ -104,6 +138,7 @@ impl CoreServerBootstrap {
         Ok(Self {
             storage,
             image_generation_configuration,
+            image_generation_execution,
             agent_service,
             skill_services,
             git_review_service,
@@ -169,6 +204,15 @@ pub(crate) fn acquire_database_instance_lock(database_path: &Path) -> io::Result
 }
 
 pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Result<()> {
+    bootstrap
+        .image_generation_execution
+        .reconcile_interrupted()
+        .await
+        .map_err(|error| {
+            io::Error::other(format!(
+                "failed to reconcile interrupted image-generation executions: {error}"
+            ))
+        })?;
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
     let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
     let writer = tokio::spawn(run_outbound_writer(
@@ -210,12 +254,16 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         skill_dispatcher_result,
         skill_acquisition_dispatcher_result,
         image_generation_configuration_dispatcher_result,
+        image_generation_execution_shutdown,
         (cancelled_runs, timed_out),
     ) = tokio::join!(
         git_dispatcher.shutdown(),
         skill_dispatcher.shutdown(),
         skill_acquisition_dispatcher.shutdown(),
         image_generation_configuration_dispatcher.shutdown(),
+        bootstrap
+            .image_generation_execution
+            .shutdown(Duration::from_secs(2)),
         bootstrap
             .agent_service
             .shutdown_active_runs(Duration::from_secs(2))
@@ -251,6 +299,12 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
     skill_acquisition_dispatcher_result.map_err(|error| io::Error::other(error.to_string()))?;
     image_generation_configuration_dispatcher_result
         .map_err(|error| io::Error::other(error.to_string()))?;
+    if image_generation_execution_shutdown.timed_out {
+        eprintln!(
+            "image-generation execution shutdown timed out after cancelling {} active execution(s)",
+            image_generation_execution_shutdown.cancelled_executions
+        );
+    }
     if let Some(error) = outbound_error {
         return Err(error);
     }
@@ -298,6 +352,13 @@ pub(crate) fn skill_store_root(database_path: &std::path::Path) -> PathBuf {
         .parent()
         .map(|parent| parent.join("skills"))
         .unwrap_or_else(|| PathBuf::from("skills"))
+}
+
+pub(crate) fn image_generation_artifact_store_root(database_path: &std::path::Path) -> PathBuf {
+    database_path
+        .parent()
+        .map(|parent| parent.join("image-generation-artifacts"))
+        .unwrap_or_else(|| PathBuf::from("image-generation-artifacts"))
 }
 
 pub(crate) fn absolute_path(path: PathBuf) -> io::Result<PathBuf> {

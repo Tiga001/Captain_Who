@@ -1,5 +1,7 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 
@@ -7,18 +9,23 @@ pub const MAX_IMAGE_GENERATION_PROMPT_BYTES: usize = 32 * 1024;
 pub const MAX_IMAGE_GENERATION_INPUT_BYTES: usize = 20 * 1024 * 1024;
 pub const IMAGE_GENERATION_OUTPUT_COUNT: u8 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ImageGenerationAdapterId {
-    #[serde(rename = "smartmlSeedream")]
-    SmartMlSeedream,
-}
+/// Validated stable identifier for an image-generation adapter implementation.
+///
+/// This is deliberately an open identifier rather than a closed vendor enum. The current
+/// configuration protocol exposes only adapters supported by this application build, while the
+/// provider registry and execution pipeline can accept new factories without adding a central
+/// vendor match to core execution code.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ImageGenerationAdapterId(Cow<'static, str>);
 
 impl ImageGenerationAdapterId {
+    #[allow(non_upper_case_globals)]
+    pub const SmartMlSeedream: Self = Self(Cow::Borrowed("smartmlSeedream"));
+
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SmartMlSeedream => "smartmlSeedream",
-        }
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
     }
 }
 
@@ -32,12 +39,36 @@ impl TryFrom<&str> for ImageGenerationAdapterId {
     type Error = ImageGenerationError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "smartmlSeedream" => Ok(Self::SmartMlSeedream),
-            _ => Err(ImageGenerationError::invalid_configuration(
-                "image-generation adapter is unsupported",
-            )),
+        if value.is_empty()
+            || value.len() > 128
+            || value.trim() != value
+            || !value
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic())
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(ImageGenerationError::invalid_configuration(
+                "image-generation adapter id is invalid",
+            ));
         }
+        Ok(Self(Cow::Owned(value.to_string())))
+    }
+}
+
+impl TryFrom<String> for ImageGenerationAdapterId {
+    type Error = ImageGenerationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str()).map(|_| Self(Cow::Owned(value)))
+    }
+}
+
+impl From<ImageGenerationAdapterId> for String {
+    fn from(value: ImageGenerationAdapterId) -> Self {
+        value.0.into_owned()
     }
 }
 
@@ -343,6 +374,7 @@ pub struct ImageGenerationDataUrlInput {
     media_type: ImageGenerationInputMediaType,
     data_url: String,
     decoded_size_bytes: usize,
+    sha256: String,
 }
 
 impl ImageGenerationDataUrlInput {
@@ -376,6 +408,7 @@ impl ImageGenerationDataUrlInput {
             media_type,
             data_url: value,
             decoded_size_bytes: bytes.len(),
+            sha256: hex_sha256(&bytes),
         })
     }
 
@@ -393,6 +426,12 @@ impl ImageGenerationDataUrlInput {
     pub fn decoded_size_bytes(&self) -> usize {
         self.decoded_size_bytes
     }
+
+    /// Returns a content digest suitable for frozen execution identity and audit metadata.
+    #[must_use]
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
 }
 
 impl fmt::Debug for ImageGenerationDataUrlInput {
@@ -401,6 +440,7 @@ impl fmt::Debug for ImageGenerationDataUrlInput {
             .debug_struct("ImageGenerationDataUrlInput")
             .field("media_type", &self.media_type)
             .field("decoded_size_bytes", &self.decoded_size_bytes)
+            .field("sha256", &self.sha256)
             .field("data_url", &"[REDACTED]")
             .finish()
     }
@@ -414,6 +454,15 @@ pub enum ImageGenerationInputMediaType {
 }
 
 impl ImageGenerationInputMediaType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
+        }
+    }
+
     fn split_data_url(value: &str) -> Result<(Self, &str), ImageGenerationError> {
         const TYPES: [(&str, ImageGenerationInputMediaType); 3] = [
             ("data:image/png;base64,", ImageGenerationInputMediaType::Png),
@@ -524,7 +573,7 @@ impl PreparedImageGenerationRequest {
     ) -> Self {
         Self {
             provider_profile_id: profile.id.clone(),
-            adapter_id: profile.adapter_id,
+            adapter_id: profile.adapter_id.clone(),
             profile_revision: profile.revision,
             endpoint_url: profile.endpoint_url.clone(),
             model_id: profile.model_id.clone(),
@@ -538,8 +587,8 @@ impl PreparedImageGenerationRequest {
     }
 
     #[must_use]
-    pub fn adapter_id(&self) -> ImageGenerationAdapterId {
-        self.adapter_id
+    pub fn adapter_id(&self) -> &ImageGenerationAdapterId {
+        &self.adapter_id
     }
 
     #[must_use]
@@ -628,7 +677,7 @@ impl ImageGenerationResult {
         Self {
             status: ImageGenerationResultStatus::Ready,
             provider_profile_id: profile.id.clone(),
-            adapter_id: profile.adapter_id,
+            adapter_id: profile.adapter_id.clone(),
             profile_revision: profile.revision,
             model_id: profile.model_id.clone(),
             operation: ImageGenerationOperation::Status,
@@ -757,6 +806,11 @@ fn normalize_prompt(prompt: String) -> Result<String, ImageGenerationError> {
     Ok(prompt)
 }
 
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn validate_size_preset(
     profile: &ImageGenerationProviderProfile,
     size_preset: ImageGenerationSizePreset,
@@ -814,6 +868,20 @@ mod tests {
         let defaults = ImageGenerationDefaults::default();
         assert_eq!(defaults.size_preset, ImageGenerationSizePreset::TwoK);
         assert!(defaults.watermark);
+    }
+
+    #[test]
+    fn adapter_ids_are_open_but_strictly_validated() {
+        let adapter = ImageGenerationAdapterId::try_from("acme.images-v2").unwrap();
+        assert_eq!(adapter.as_str(), "acme.images-v2");
+        let encoded = serde_json::to_string(&adapter).unwrap();
+        assert_eq!(encoded, r#""acme.images-v2""#);
+        assert_eq!(
+            serde_json::from_str::<ImageGenerationAdapterId>(&encoded).unwrap(),
+            adapter
+        );
+        assert!(ImageGenerationAdapterId::try_from("../unsafe").is_err());
+        assert!(serde_json::from_str::<ImageGenerationAdapterId>(r#"" bad""#).is_err());
     }
 
     #[test]

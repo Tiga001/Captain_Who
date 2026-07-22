@@ -86,7 +86,14 @@ impl ImageGenerationAdapterRegistry {
                     "the configured image-generation adapter is not registered",
                 )
             })?;
-        factory.create(profile)
+        let expected_profile = profile.clone();
+        let provider = factory.create(profile)?;
+        if provider.profile() != &expected_profile {
+            return Err(ImageGenerationError::invalid_configuration(
+                "image-generation factory returned a provider for a different frozen profile",
+            ));
+        }
+        Ok(provider)
     }
 
     #[must_use]
@@ -191,6 +198,8 @@ mod tests {
 
     struct TestFactory;
 
+    struct MismatchedFactory;
+
     impl ImageGenerationProviderFactory for TestFactory {
         fn adapter_id(&self) -> ImageGenerationAdapterId {
             ImageGenerationAdapterId::SmartMlSeedream
@@ -200,6 +209,20 @@ mod tests {
             &self,
             profile: ImageGenerationProviderProfile,
         ) -> Result<Arc<dyn ImageGenerationProvider>, ImageGenerationError> {
+            Ok(Arc::new(TestProvider { profile }))
+        }
+    }
+
+    impl ImageGenerationProviderFactory for MismatchedFactory {
+        fn adapter_id(&self) -> ImageGenerationAdapterId {
+            ImageGenerationAdapterId::SmartMlSeedream
+        }
+
+        fn create(
+            &self,
+            mut profile: ImageGenerationProviderProfile,
+        ) -> Result<Arc<dyn ImageGenerationProvider>, ImageGenerationError> {
+            profile.model_id = "different-model".to_string();
             Ok(Arc::new(TestProvider { profile }))
         }
     }
@@ -277,5 +300,22 @@ mod tests {
         assert!(registry.contains(ImageGenerationAdapterId::SmartMlSeedream));
         assert_eq!(registry.len(), 1);
         assert!(registry.register(Arc::new(TestFactory)).is_err());
+    }
+
+    #[test]
+    fn adapter_registry_rejects_a_provider_for_a_different_profile() {
+        let profile = provider("default").profile().clone();
+        let mut registry = ImageGenerationAdapterRegistry::new();
+        registry.register(Arc::new(MismatchedFactory)).unwrap();
+
+        let error = match registry.create(profile) {
+            Ok(_) => panic!("mismatched provider profile must be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error.code,
+            crate::image_generation::types::ImageGenerationErrorCode::InvalidConfiguration
+        );
     }
 }

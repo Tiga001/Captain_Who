@@ -85,7 +85,7 @@ impl SmartMlSeedreamProvider {
         request: &PreparedImageGenerationRequest,
     ) -> Result<(), ImageGenerationError> {
         if request.provider_profile_id() != self.profile.id
-            || request.adapter_id() != self.profile.adapter_id
+            || request.adapter_id() != &self.profile.adapter_id
             || request.profile_revision() != self.profile.revision
             || request.endpoint_url() != self.profile.endpoint_url
             || request.model_id() != self.profile.model_id
@@ -238,7 +238,7 @@ fn map_seedream_response(
     Ok(ImageGenerationResult {
         status: ImageGenerationResultStatus::Succeeded,
         provider_profile_id: profile.id.clone(),
-        adapter_id: profile.adapter_id,
+        adapter_id: profile.adapter_id.clone(),
         profile_revision: profile.revision,
         model_id: profile.model_id.clone(),
         operation: request.normalized().operation(),

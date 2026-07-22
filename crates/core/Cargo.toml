@@ -25,7 +25,7 @@ sha2 = "0.10"
 similar = "2"
 tempfile = "3"
 time = { version = "0.3", features = ["formatting", "local-offset"] }
-tokio = { version = "1", features = ["macros", "net", "rt", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 uuid.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
 zeroize = "1"

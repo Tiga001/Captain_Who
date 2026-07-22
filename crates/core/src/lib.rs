@@ -5,6 +5,7 @@ mod context;
 mod context_compaction_audit;
 mod context_compaction_receipt;
 mod conversation_trace;
+mod durable_fs;
 pub mod file_write;
 pub mod git_review;
 pub mod image_generation;

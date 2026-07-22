@@ -111,13 +111,19 @@
       <div class="app-bootstrap-screen" role="status" aria-label="Starting MyCopilot">
         <div class="app-bootstrap-screen__drag-region" aria-hidden="true"></div>
         <div class="app-bootstrap-screen__content">
-          <img
-            class="app-bootstrap-screen__icon"
-            src="../../resources/icon.png"
-            alt=""
-            aria-hidden="true"
-            draggable="false"
-          />
+          <picture>
+            <source
+              media="(prefers-color-scheme: dark)"
+              srcset="../../resources/brand-mark-dark.png"
+            />
+            <img
+              class="app-bootstrap-screen__icon"
+              src="../../resources/brand-mark-light.png"
+              alt=""
+              aria-hidden="true"
+              draggable="false"
+            />
+          </picture>
           <div class="app-bootstrap-screen__ambient" aria-hidden="true">正在深度思考</div>
         </div>
       </div>

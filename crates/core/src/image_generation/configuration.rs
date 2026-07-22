@@ -71,7 +71,7 @@ impl ImageGenerationConfiguration {
         }
         ImageGenerationProviderProfile::new(
             DEFAULT_IMAGE_GENERATION_PROFILE_ID,
-            self.adapter_id,
+            self.adapter_id.clone(),
             self.endpoint_url.clone(),
             self.model_id.clone(),
             self.generation,
@@ -188,6 +188,26 @@ pub struct ImageGenerationConfigurationService {
     credentials: Arc<dyn CredentialStore>,
 }
 
+/// A single-use, revision-consistent execution binding.
+///
+/// This value is deliberately crate-private, non-cloneable, and non-serializable. The execution
+/// service keeps it only through the provider request and drops the zeroizing secret before it
+/// starts downloading the provider's output URL.
+pub(crate) struct ImageGenerationExecutionSnapshot {
+    pub(crate) profile: ImageGenerationProviderProfile,
+    pub(crate) credential: CredentialSecret,
+}
+
+impl fmt::Debug for ImageGenerationExecutionSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImageGenerationExecutionSnapshot")
+            .field("profile", &self.profile)
+            .field("credential", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl fmt::Debug for ImageGenerationConfigurationService {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -210,6 +230,73 @@ impl ImageGenerationConfigurationService {
     ) -> Result<ImageGenerationConfiguration, ImageGenerationConfigurationError> {
         let record = self.load_record()?;
         self.configuration_from_record(record.as_ref())
+    }
+
+    /// Resolves a profile and credential that are proven to belong to the same configuration
+    /// revision.
+    ///
+    /// Native credential reads are not transactional with SQLite. The service therefore reads
+    /// the profile before and after Keychain access and retries once if either the generation or
+    /// credential reference changed. It never exposes the persisted credential reference to the
+    /// execution layer.
+    pub(crate) fn resolve_execution_snapshot(
+        &self,
+    ) -> Result<ImageGenerationExecutionSnapshot, ImageGenerationConfigurationError> {
+        for _ in 0..2 {
+            let before = self.load_record()?;
+            let Some(before_record) = before.as_ref() else {
+                return Err(ImageGenerationConfigurationError::ConfigurationIncomplete(
+                    ImageGenerationReadiness::Disabled,
+                ));
+            };
+            let preliminary = self.configuration_from_record_with_credential_status(
+                Some(before_record),
+                ImageGenerationCredentialStatus::Configured,
+            )?;
+            if !preliminary.enabled {
+                return Err(ImageGenerationConfigurationError::ConfigurationIncomplete(
+                    ImageGenerationReadiness::Disabled,
+                ));
+            }
+            validate_enabled_configuration(
+                true,
+                &preliminary.endpoint_url,
+                &preliminary.model_id,
+                if before_record.credential_ref.is_some() {
+                    ImageGenerationCredentialStatus::Configured
+                } else {
+                    ImageGenerationCredentialStatus::Missing
+                },
+            )?;
+            let reference = before_record
+                .credential_ref
+                .as_deref()
+                .ok_or(ImageGenerationConfigurationError::MissingCredential)
+                .and_then(|value| {
+                    CredentialReference::parse(value)
+                        .map_err(|_| ImageGenerationConfigurationError::InvalidConfiguration)
+                })?;
+            let credential = self
+                .credentials
+                .get(&reference)
+                .map_err(map_credential_error)?
+                .ok_or(ImageGenerationConfigurationError::MissingCredential)?;
+            let after = self.load_record()?;
+            if after.as_ref() == before.as_ref() {
+                let configuration = self.configuration_from_record_with_credential_status(
+                    before.as_ref(),
+                    ImageGenerationCredentialStatus::Configured,
+                )?;
+                return Ok(ImageGenerationExecutionSnapshot {
+                    profile: configuration.provider_profile()?,
+                    credential,
+                });
+            }
+            // `credential` is zeroized here before attempting to resolve the new revision.
+            drop(credential);
+        }
+        let current = self.load_record()?;
+        Err(revision_conflict(current.as_ref()))
     }
 
     pub fn update_configuration(
@@ -523,6 +610,9 @@ impl ImageGenerationConfigurationService {
         }
         let adapter_id = ImageGenerationAdapterId::try_from(record.adapter_id.as_str())
             .map_err(|_| ImageGenerationConfigurationError::UnsupportedAdapter)?;
+        if adapter_id != ImageGenerationAdapterId::SmartMlSeedream {
+            return Err(ImageGenerationConfigurationError::UnsupportedAdapter);
+        }
         if !record.text_to_image {
             return Err(ImageGenerationConfigurationError::TextToImageRequired);
         }
@@ -828,9 +918,16 @@ mod tests {
     use crate::image_generation::credential_store::{
         CredentialDeleteOutcome, CredentialStoreOperation, InMemoryCredentialStore,
     };
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
 
     struct UnavailableCredentialStore;
+
+    struct RotatingCredentialStore {
+        delegate: InMemoryCredentialStore,
+        storage: Arc<StorageService>,
+        armed: AtomicBool,
+    }
 
     #[derive(Default)]
     struct UnreadableCredentialStore {
@@ -883,6 +980,52 @@ mod tests {
             Err(CredentialStoreError::BackendUnavailable {
                 operation: CredentialStoreOperation::Get,
             })
+        }
+
+        fn delete(
+            &self,
+            reference: &CredentialReference,
+        ) -> Result<CredentialDeleteOutcome, CredentialStoreError> {
+            self.delegate.delete(reference)
+        }
+    }
+
+    impl CredentialStore for RotatingCredentialStore {
+        fn replace(
+            &self,
+            reference: &CredentialReference,
+            secret: CredentialSecret,
+        ) -> Result<(), CredentialStoreError> {
+            self.delegate.replace(reference, secret)
+        }
+
+        fn get(
+            &self,
+            reference: &CredentialReference,
+        ) -> Result<Option<CredentialSecret>, CredentialStoreError> {
+            let secret = self.delegate.get(reference)?;
+            if self.armed.swap(false, Ordering::SeqCst) {
+                let mut record = self
+                    .storage
+                    .load_image_generation_profile(DEFAULT_IMAGE_GENERATION_PROFILE_ID)
+                    .unwrap()
+                    .unwrap();
+                let generation = record.generation;
+                record.model_id = "rotated-seedream-model".to_string();
+                let outcome = self
+                    .storage
+                    .compare_and_set_image_generation_profile(
+                        DEFAULT_IMAGE_GENERATION_PROFILE_ID,
+                        generation,
+                        &record,
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    outcome,
+                    ImageGenerationProfileCompareAndSetOutcome::Updated(_)
+                ));
+            }
+            Ok(secret)
         }
 
         fn delete(
@@ -956,6 +1099,40 @@ mod tests {
         assert_eq!(enabled.readiness, ImageGenerationReadiness::ReadyUnverified);
         assert_eq!(enabled.revision, "image-generation:v1:2");
         assert!(enabled.provider_profile().is_ok());
+    }
+
+    #[test]
+    fn execution_snapshot_never_pairs_a_rotated_profile_with_a_stale_read() {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(StorageService::open(&directory.path().join("app.db")).unwrap());
+        let credentials = Arc::new(RotatingCredentialStore {
+            delegate: InMemoryCredentialStore::default(),
+            storage: Arc::clone(&storage),
+            armed: AtomicBool::new(false),
+        });
+        let service = ImageGenerationConfigurationService::new(
+            storage,
+            Arc::clone(&credentials) as Arc<dyn CredentialStore>,
+        );
+        let configured = service
+            .update_configuration(update("image-generation:v1:0", "snapshot-secret"))
+            .unwrap()
+            .configuration;
+        service.set_enabled(&configured.revision, true).unwrap();
+        credentials.armed.store(true, Ordering::SeqCst);
+
+        let snapshot = service.resolve_execution_snapshot().unwrap();
+
+        assert_eq!(snapshot.profile.model_id, "rotated-seedream-model");
+        assert_eq!(
+            snapshot
+                .credential
+                .with_secret_bytes(|bytes| bytes.to_vec()),
+            b"snapshot-secret"
+        );
+        let debug = format!("{snapshot:?}");
+        assert!(!debug.contains("snapshot-secret"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]

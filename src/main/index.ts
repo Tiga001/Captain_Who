@@ -3,7 +3,7 @@ import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import type { AppWindowState } from '@mycopilot/host-api'
-import icon from '../../resources/icon.png?asset'
+import { getAdaptiveAppIcon, installAdaptiveAppIcon } from './appIcon'
 import {
   configureManagedWebviewHost,
   initializeManagedWebviewSessions
@@ -19,6 +19,7 @@ const coreServer = new CoreServer()
 const terminalBridge = new TerminalBridge()
 const faviconResourceCache = new FaviconResourceCache()
 let isQuittingAfterServiceShutdown = false
+let disposeAdaptiveAppIcon: (() => void) | null = null
 const trustedRendererEntries = new Map<number, string>()
 
 const macWindowChromeOptions =
@@ -108,7 +109,7 @@ function createWindow(): void {
     show: false,
     autoHideMenuBar: true,
     ...macWindowChromeOptions,
-    ...(process.platform === 'linux' ? { icon } : {}),
+    ...(process.platform !== 'darwin' ? { icon: getAdaptiveAppIcon() } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -171,6 +172,7 @@ function createWindow(): void {
 app.whenReady().then(() => {
   app.setName('MyCopilot')
   electronApp.setAppUserModelId('com.mycopilot.next')
+  disposeAdaptiveAppIcon = installAdaptiveAppIcon()
   coreServer.start()
   faviconResourceCache.registerProtocol()
   initializeManagedWebviewSessions()
@@ -207,6 +209,8 @@ app.on('before-quit', (event) => {
 })
 
 app.on('will-quit', () => {
+  disposeAdaptiveAppIcon?.()
+  disposeAdaptiveAppIcon = null
   terminalBridge.killNow()
   coreServer.stop()
 })

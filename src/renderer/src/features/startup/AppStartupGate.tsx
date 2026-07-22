@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import appIcon from '../../../../../resources/icon.png'
+import darkBrandMark from '../../../../../resources/brand-mark-dark.png'
+import lightBrandMark from '../../../../../resources/brand-mark-light.png'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { useAppStartupStatus } from './AppStartupContext'
 import { StartupAmbientText } from './StartupAmbientText'
@@ -14,7 +15,7 @@ const STARTUP_EXIT_MS = 180
 
 export function AppStartupGate({ children }: { children: ReactNode }) {
   const startup = useAppStartupStatus()
-  const { t } = useFrontendConfig()
+  const { resolvedColorScheme, t } = useFrontendConfig()
   const [interactive, setInteractive] = useState(false)
   const [overlayMounted, setOverlayMounted] = useState(true)
   const [timedOut, setTimedOut] = useState(false)
@@ -67,7 +68,12 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
         >
           <div className="app-startup-screen__drag-region" aria-hidden="true" />
           <div className="app-startup-screen__content">
-            <img className="app-startup-screen__icon" src={appIcon} alt="" aria-hidden="true" />
+            <img
+              className="app-startup-screen__icon"
+              src={resolvedColorScheme === 'dark' ? darkBrandMark : lightBrandMark}
+              alt=""
+              aria-hidden="true"
+            />
             {showFailure ? (
               <div className="app-startup-screen__failure">
                 <strong>{t('startup.failedTitle')}</strong>
