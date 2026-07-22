@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
+import { useAppStartupStage } from '../features/startup/AppStartupContext'
 import {
   deleteStoredProject,
   loadProjects,
@@ -22,24 +23,35 @@ const ProjectSettingsContext = createContext<ProjectSettingsContextValue | null>
 
 export function ProjectSettingsProvider({ children }: { children: ReactNode }) {
   const [projects, setProjects] = useState<AppProject[]>([])
+  const {
+    attempt: startupAttempt,
+    markFailed: markStartupFailed,
+    markPending: markStartupPending,
+    markReady: markStartupReady
+  } = useAppStartupStage('projects')
 
   useEffect(() => {
     let isCancelled = false
+    markStartupPending()
 
     void loadProjects()
       .then((storedProjects) => {
         if (!isCancelled) {
           setProjects(storedProjects)
+          markStartupReady()
         }
       })
       .catch((error) => {
-        console.error('Failed to load projects from SQLite', error)
+        if (!isCancelled) {
+          markStartupFailed(error)
+          console.error('Failed to load projects from SQLite', error)
+        }
       })
 
     return () => {
       isCancelled = true
     }
-  }, [])
+  }, [markStartupFailed, markStartupPending, markStartupReady, startupAttempt])
 
   const value = useMemo<ProjectSettingsContextValue>(
     () => ({

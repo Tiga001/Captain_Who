@@ -10,6 +10,11 @@ export const enUSTranslations = {
   'app.resizeLeftSidebar': 'Resize left sidebar',
   'app.resizeRightSidebar': 'Resize right sidebar',
 
+  'startup.loading': 'Starting MyCopilot',
+  'startup.failedTitle': 'Unable to start MyCopilot',
+  'startup.failedDescription': 'Required services did not finish loading. Please try again.',
+  'startup.retry': 'Retry',
+
   'sidebar.newConversation': 'New chat',
   'sidebar.search': 'Search',
   'sidebar.searchPlaceholder': 'Search chats',

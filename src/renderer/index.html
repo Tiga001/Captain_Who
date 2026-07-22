@@ -8,10 +8,86 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: mycopilot-resource:; frame-src 'self' http: https:"
     />
+    <style>
+      html,
+      body,
+      #root {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+      }
+
+      .app-bootstrap-screen {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: #f4f4f2;
+        -webkit-app-region: no-drag;
+      }
+
+      .app-bootstrap-screen__drag-region {
+        position: absolute;
+        z-index: 1;
+        top: 0;
+        right: 0;
+        left: 0;
+        height: 52px;
+        -webkit-app-region: drag;
+      }
+
+      .app-bootstrap-screen__icon {
+        width: 72px;
+        height: 72px;
+        border-radius: 16px;
+        object-fit: contain;
+        animation: app-bootstrap-icon-pulse 1800ms ease-in-out infinite;
+        -webkit-user-drag: none;
+        user-select: none;
+      }
+
+      @keyframes app-bootstrap-icon-pulse {
+        0%,
+        100% {
+          opacity: 0.82;
+          transform: scale(0.98);
+        }
+
+        50% {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .app-bootstrap-screen {
+          background: #171717;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .app-bootstrap-screen__icon {
+          animation: none;
+        }
+      }
+    </style>
   </head>
 
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- This zero-JavaScript shell is the first paint. React replaces it with AppStartupGate. -->
+      <div class="app-bootstrap-screen" role="status" aria-label="Starting MyCopilot">
+        <div class="app-bootstrap-screen__drag-region" aria-hidden="true"></div>
+        <img
+          class="app-bootstrap-screen__icon"
+          src="../../resources/icon.png"
+          alt=""
+          aria-hidden="true"
+          draggable="false"
+        />
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

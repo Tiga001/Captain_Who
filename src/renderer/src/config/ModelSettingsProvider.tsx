@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import type { ReactNode } from 'react'
 import { useToast } from '../components/toast/ToastContext'
 import { loadModelSettings, saveModelSettings } from '../features/storage/storageClient'
+import { useAppStartupStage } from '../features/startup/AppStartupContext'
 import { useFrontendConfig } from './FrontendConfigProvider'
 import { INITIAL_MODELS, isModelConnectionAvailable, modelConfig } from './modelConfig'
 import type { ModelConfig, SearchMode } from './modelConfig'
@@ -37,6 +38,12 @@ function waitForModelSettingsRetry(delayMs: number): Promise<void> {
 export function ModelSettingsProvider({ children }: { children: ReactNode }) {
   const { t } = useFrontendConfig()
   const { showToast } = useToast()
+  const {
+    attempt: startupAttempt,
+    markFailed: markStartupFailed,
+    markPending: markStartupPending,
+    markReady: markStartupReady
+  } = useAppStartupStage('modelSettings')
   const [apiUrl, setApiUrl] = useState<string>(modelConfig.api.defaultUrl)
   const [apiToken, setApiToken] = useState<string>(modelConfig.api.defaultToken)
   const [searchMode, setSearchMode] = useState<SearchMode>(modelConfig.webSearch.defaultMode)
@@ -56,6 +63,8 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let isCancelled = false
+    setHydrationStatus('loading')
+    markStartupPending()
 
     const hydrate = async () => {
       let lastError: unknown
@@ -83,6 +92,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
           }
 
           setHydrationStatus('ready')
+          markStartupReady()
           return
         } catch (error) {
           lastError = error
@@ -92,6 +102,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
       if (isCancelled) return
 
       setHydrationStatus('failed')
+      markStartupFailed(lastError)
       console.error('Failed to load model settings from SQLite', lastError)
       const detail = lastError instanceof Error ? lastError.message : String(lastError)
       const { showToast: presentToast, t: translate } = loadFailurePresentationRef.current
@@ -103,7 +114,7 @@ export function ModelSettingsProvider({ children }: { children: ReactNode }) {
     return () => {
       isCancelled = true
     }
-  }, [])
+  }, [markStartupFailed, markStartupPending, markStartupReady, startupAttempt])
 
   useEffect(() => {
     // A failed read must never authorize default in-memory values to overwrite SQLite.

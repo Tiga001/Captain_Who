@@ -1,0 +1,86 @@
+// Renderer startup layer: keeps the workspace mounted behind an accessible startup surface.
+
+import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
+import appIcon from '../../../../../resources/icon.png'
+import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { useAppStartupStatus } from './AppStartupContext'
+import './AppStartupScreen.css'
+
+const MINIMUM_STARTUP_SCREEN_MS = 280
+const STARTUP_TIMEOUT_MS = 60_000
+const STARTUP_EXIT_MS = 180
+
+export function AppStartupGate({ children }: { children: ReactNode }) {
+  const startup = useAppStartupStatus()
+  const { t } = useFrontendConfig()
+  const [interactive, setInteractive] = useState(false)
+  const [overlayMounted, setOverlayMounted] = useState(true)
+  const [timedOut, setTimedOut] = useState(false)
+  const startupAttempt = startup?.attempt
+
+  useEffect(() => {
+    if (startupAttempt === undefined) return
+    setInteractive(false)
+    setOverlayMounted(true)
+    setTimedOut(false)
+  }, [startupAttempt])
+
+  useEffect(() => {
+    if (!startup || startup.ready || startup.hasFailed) return
+    const remaining = Math.max(0, STARTUP_TIMEOUT_MS - (Date.now() - startup.startedAt))
+    const timeoutId = window.setTimeout(() => setTimedOut(true), remaining)
+    return () => window.clearTimeout(timeoutId)
+  }, [startup])
+
+  useEffect(() => {
+    if (!startup?.ready) return
+    const remaining = Math.max(0, MINIMUM_STARTUP_SCREEN_MS - (Date.now() - startup.startedAt))
+    let exitTimeoutId: number | undefined
+    const readyTimeoutId = window.setTimeout(() => {
+      setInteractive(true)
+      exitTimeoutId = window.setTimeout(() => setOverlayMounted(false), STARTUP_EXIT_MS)
+    }, remaining)
+    return () => {
+      window.clearTimeout(readyTimeoutId)
+      if (exitTimeoutId !== undefined) window.clearTimeout(exitTimeoutId)
+    }
+  }, [startup?.ready, startup?.startedAt])
+
+  if (!startup) return children
+
+  const showFailure = startup.hasFailed || timedOut
+
+  return (
+    <div className="app-startup-root" data-interactive={interactive ? 'true' : 'false'}>
+      <div className="app-startup-workspace" aria-hidden={!interactive} inert={!interactive}>
+        {children}
+      </div>
+
+      {overlayMounted ? (
+        <div
+          className="app-startup-screen"
+          data-exiting={interactive ? 'true' : 'false'}
+          role={showFailure ? 'alert' : 'status'}
+          aria-live={showFailure ? 'assertive' : 'polite'}
+        >
+          <div className="app-startup-screen__drag-region" aria-hidden="true" />
+          <div className="app-startup-screen__content">
+            <img className="app-startup-screen__icon" src={appIcon} alt="" aria-hidden="true" />
+            {showFailure ? (
+              <div className="app-startup-screen__failure">
+                <strong>{t('startup.failedTitle')}</strong>
+                <span>{t('startup.failedDescription')}</span>
+                <button type="button" onClick={startup.retry}>
+                  {t('startup.retry')}
+                </button>
+              </div>
+            ) : (
+              <span className="app-startup-screen__sr-only">{t('startup.loading')}</span>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}

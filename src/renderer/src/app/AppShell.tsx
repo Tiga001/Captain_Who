@@ -17,6 +17,7 @@ import { useFrontendConfig } from '../config/FrontendConfigProvider'
 import { featureFlags } from '../config/featureFlags'
 import { hostClient } from '../host/hostClient'
 import { useGitRepositoryCapability } from '../features/gitReview/useGitRepositoryCapability'
+import { useAppStartupStage } from '../features/startup/AppStartupContext'
 import type { RightSidebarCapabilities } from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
 import { NewConversationPage } from '../features/chat/NewConversationPage'
@@ -109,6 +110,24 @@ import { applyAuthoritativePendingActionDecision } from './pendingActionDecision
 export function AppShell() {
   const { t } = useFrontendConfig()
   const { showToast } = useToast()
+  const {
+    attempt: uiPreferencesStartupAttempt,
+    markFailed: markUiPreferencesStartupFailed,
+    markPending: markUiPreferencesStartupPending,
+    markReady: markUiPreferencesStartupReady
+  } = useAppStartupStage('uiPreferences')
+  const {
+    attempt: composerDraftsStartupAttempt,
+    markFailed: markComposerDraftsStartupFailed,
+    markPending: markComposerDraftsStartupPending,
+    markReady: markComposerDraftsStartupReady
+  } = useAppStartupStage('composerDrafts')
+  const {
+    attempt: conversationMetasStartupAttempt,
+    markFailed: markConversationMetasStartupFailed,
+    markPending: markConversationMetasStartupPending,
+    markReady: markConversationMetasStartupReady
+  } = useAppStartupStage('conversationMetas')
   const { enabledModels, models } = useModelSettings()
   const { projects, deleteProject, renameProject, showProjectInFolder, togglePinProject } =
     useProjectSettings()
@@ -456,20 +475,33 @@ export function AppShell() {
 
   useEffect(() => {
     let cancelled = false
+    markUiPreferencesStartupPending()
     void loadUiPreferences()
       .then((preferences) => {
-        if (!cancelled) setUiPreferences(preferences)
+        if (!cancelled) {
+          setUiPreferences(preferences)
+          markUiPreferencesStartupReady()
+        }
       })
       .catch((error) => {
-        if (!cancelled) console.error('Failed to load UI preferences', error)
+        if (!cancelled) {
+          markUiPreferencesStartupFailed(error)
+          console.error('Failed to load UI preferences', error)
+        }
       })
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [
+    markUiPreferencesStartupFailed,
+    markUiPreferencesStartupPending,
+    markUiPreferencesStartupReady,
+    uiPreferencesStartupAttempt
+  ])
 
   useEffect(() => {
     let cancelled = false
+    markComposerDraftsStartupPending()
     void loadComposerDrafts()
       .then((storedDrafts) => {
         if (cancelled) return
@@ -477,17 +509,28 @@ export function AppShell() {
           [NEW_CONVERSATION_DRAFT_ID]: createComposerDraft(),
           ...storedDrafts
         })
+        markComposerDraftsStartupReady()
       })
       .catch((error) => {
-        if (!cancelled) console.error('Failed to load composer drafts', error)
+        if (!cancelled) {
+          markComposerDraftsStartupFailed(error)
+          console.error('Failed to load composer drafts', error)
+        }
       })
     return () => {
       cancelled = true
     }
-  }, [setDraftsWithRef])
+  }, [
+    composerDraftsStartupAttempt,
+    markComposerDraftsStartupFailed,
+    markComposerDraftsStartupPending,
+    markComposerDraftsStartupReady,
+    setDraftsWithRef
+  ])
 
   useEffect(() => {
     let cancelled = false
+    markConversationMetasStartupPending()
     void loadConversationMetas()
       .then((storedConversations) => {
         if (cancelled) return
@@ -505,14 +548,24 @@ export function AppShell() {
             ...currentConversations.filter((conversation) => !storedIds.has(conversation.id))
           ]
         })
+        markConversationMetasStartupReady()
       })
       .catch((error) => {
-        if (!cancelled) console.error('Failed to load conversation metadata', error)
+        if (!cancelled) {
+          markConversationMetasStartupFailed(error)
+          console.error('Failed to load conversation metadata', error)
+        }
       })
     return () => {
       cancelled = true
     }
-  }, [setConversationsWithRef])
+  }, [
+    conversationMetasStartupAttempt,
+    markConversationMetasStartupFailed,
+    markConversationMetasStartupPending,
+    markConversationMetasStartupReady,
+    setConversationsWithRef
+  ])
 
   const updateUiPreferences = useCallback((patch: Partial<UiPreferencesSnapshot>) => {
     setUiPreferences((currentPreferences) => {

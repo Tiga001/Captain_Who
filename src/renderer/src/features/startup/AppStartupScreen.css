@@ -1,0 +1,140 @@
+/* Renderer startup layer: theme-aware launch surface displayed while required services hydrate. */
+
+.app-startup-root,
+.app-startup-workspace {
+  width: 100%;
+  height: 100%;
+}
+
+.app-startup-root {
+  position: relative;
+  overflow: hidden;
+  background: var(--mc-color-surface-main-panel, #f4f4f2);
+}
+
+.app-startup-workspace {
+  visibility: hidden;
+}
+
+.app-startup-root[data-interactive='true'] .app-startup-workspace {
+  visibility: visible;
+}
+
+.app-startup-screen {
+  position: fixed;
+  z-index: 10000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--mc-color-surface-main-panel, #f4f4f2);
+  opacity: 1;
+  transition: opacity 180ms ease;
+  -webkit-app-region: no-drag;
+}
+
+.app-startup-screen[data-exiting='true'] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.app-startup-screen__drag-region {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: var(--mc-layout-titlebar-height, 52px);
+  -webkit-app-region: drag;
+}
+
+.app-startup-screen__content {
+  display: grid;
+  max-width: min(360px, calc(100vw - 48px));
+  justify-items: center;
+  gap: 18px;
+  text-align: center;
+}
+
+.app-startup-screen__icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 16px;
+  object-fit: contain;
+  animation: app-startup-icon-pulse 1800ms ease-in-out infinite;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+.app-startup-screen__failure {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  color: var(--mc-color-text-primary);
+  letter-spacing: 0;
+  -webkit-app-region: no-drag;
+}
+
+.app-startup-screen__failure strong {
+  font-size: var(--mc-font-size-lg);
+  font-weight: 600;
+}
+
+.app-startup-screen__failure span {
+  color: var(--mc-color-text-secondary);
+  font-size: var(--mc-font-size-sm);
+}
+
+.app-startup-screen__failure button {
+  min-width: 76px;
+  height: 34px;
+  margin-top: 8px;
+  padding: 0 16px;
+  color: var(--mc-color-button-primary-text);
+  background: var(--mc-color-button-primary-bg);
+  border: 1px solid var(--mc-color-button-primary-bg);
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.app-startup-screen__failure button:hover {
+  background: var(--mc-color-button-primary-bg-hover);
+}
+
+.app-startup-screen__failure button:focus-visible {
+  outline: 2px solid var(--mc-color-focus-ring);
+  outline-offset: 2px;
+}
+
+.app-startup-screen__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes app-startup-icon-pulse {
+  0%,
+  100% {
+    opacity: 0.82;
+    transform: scale(0.98);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-startup-screen {
+    transition: none;
+  }
+
+  .app-startup-screen__icon {
+    animation: none;
+  }
+}

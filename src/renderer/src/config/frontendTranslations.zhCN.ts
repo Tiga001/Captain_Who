@@ -10,6 +10,11 @@ export const zhCNTranslations = {
   'app.resizeLeftSidebar': '调整左侧栏宽度',
   'app.resizeRightSidebar': '调整右侧栏宽度',
 
+  'startup.loading': '正在启动 MyCopilot',
+  'startup.failedTitle': '无法启动 MyCopilot',
+  'startup.failedDescription': '必要服务未能完成加载，请重试。',
+  'startup.retry': '重试',
+
   'sidebar.newConversation': '新对话',
   'sidebar.search': '搜索',
   'sidebar.searchPlaceholder': '搜索聊天',
