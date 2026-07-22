@@ -148,8 +148,12 @@ or was cancelled:
   whether to continue from it, overwrite it deliberately, or report the partial outcome.
 
 Observation is followed by presentation verification. Read the relevant structure, validate the
-package, and render every changed slide. Do not equate a structurally valid deck with a visually
-correct presentation.
+package, and render every changed slide. Put all changed slide ranges into one screenshot request
+with a contact-sheet grid; never issue one browser-backed call per slide. Render a single slide
+again only after the combined preview exposes a concrete defect. If the managed renderer returns
+an `office.render_backend_*` error, preserve it and report the visual check as unavailable instead
+of falling back to a user browser. Do not equate a structurally valid deck with a visually correct
+presentation.
 
 ## Core recipes
 
@@ -238,7 +242,7 @@ preserved:
 }
 ```
 
-Render the changed slide to a workspace PNG:
+Render all changed slides to one workspace contact sheet:
 
 ```json
 {
@@ -246,10 +250,11 @@ Render the changed slide to a workspace PNG:
     "operation": "view",
     "filePath": "quarterly-plan.pptx",
     "mode": "screenshot",
-    "pages": [{ "start": 1 }],
-    "outputPath": "quarterly-plan-slide-1.png"
+    "pages": [{ "start": 1, "end": 6 }],
+    "grid": { "mode": "auto" },
+    "outputPath": "quarterly-plan-slides.png"
   },
-  "reason": "Render the changed slide for visual inspection"
+  "reason": "Render all changed slides for visual inspection"
 }
 ```
 

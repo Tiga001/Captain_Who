@@ -9,8 +9,8 @@ fn skill_catalog_v4_serializes_explicit_source_and_trust_unions() {
         catalog_revision: "catalog-revision".to_string(),
         skills: vec![SkillDescriptorDto {
             id: "installed:user:0190b0f2-7c50-7cc0-8b25-3bb80f08b334".to_string(),
-            name: "repository-evidence-auditor".to_string(),
-            description: "Audit repository claims using evidence.".to_string(),
+            name: "sample-skill".to_string(),
+            description: "Exercise the installed Skill protocol fixture.".to_string(),
             source: SkillSourceDto {
                 kind: SkillSourceKindDto::Installed,
                 id: "installed:user".to_string(),

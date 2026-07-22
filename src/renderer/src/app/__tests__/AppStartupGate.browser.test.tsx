@@ -18,7 +18,7 @@ vi.mock('../../host/hostClient', () => ({
 }))
 
 vi.mock('../../config/FrontendConfigProvider', () => ({
-  useFrontendConfig: () => ({ t: (key: string) => key })
+  useFrontendConfig: () => ({ language: 'zh-CN', t: (key: string) => key })
 }))
 
 const { AppStartupGate } = await import('../../features/startup/AppStartupGate')
@@ -95,6 +95,24 @@ describe('AppStartupGate', () => {
       screen.container.querySelector<HTMLElement>('.app-startup-workspace')
 
     await expect.element(screen.getByText('startup.loading')).toBeInTheDocument()
+    expect(screen.container.querySelector('.app-startup-screen__ambient')).not.toBeNull()
+    await expect
+      .poll(
+        () =>
+          screen.container.querySelector('.app-startup-screen__ambient')?.textContent?.length ?? 0
+      )
+      .toBeGreaterThan(0)
+    await expect
+      .poll(
+        () => {
+          const ambientText = screen.container.querySelector(
+            '.app-startup-screen__ambient'
+          )?.textContent
+          return Boolean(ambientText && ambientText !== 'startup.ambient.deepThinking')
+        },
+        { timeout: 2500 }
+      )
+      .toBe(true)
     expect(workspaceHost()?.getAttribute('aria-hidden')).toBe('true')
 
     await expect.poll(() => service.ping.mock.calls.length).toBe(1)

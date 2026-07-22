@@ -104,7 +104,7 @@ fn requires_model_connection_overrides_to_be_saved_as_a_complete_pair() {
 #[test]
 fn skill_enablement_defaults_to_true_and_persists_explicit_overrides() {
     let fixture = StorageFixture::new();
-    let first = "bundled:application:repository-evidence-auditor".to_string();
+    let first = "bundled:application:documents".to_string();
     let second = "installed:user:01234567-89ab-4def-8123-456789abcdef".to_string();
 
     {

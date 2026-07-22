@@ -4,6 +4,7 @@ import { useRef, useState } from 'react'
 import type { AppLanguage } from '../../config/frontendTranslations'
 import type { ChatConversation } from '../../features/chat/chatTypes'
 import { useDismissOnOutsidePointer } from '../../hooks/useDismissOnOutsidePointer'
+import { Tooltip } from '../overlay/Tooltip'
 import { formatConversationAge } from './leftSidebarUtils'
 
 function ConversationPinIcon({ filled }: { filled: boolean }) {
@@ -130,27 +131,29 @@ export function ConversationRow({
       </span>
 
       <div className="left-sidebar__conversation-item-actions" aria-label={archiveLabel}>
-        <button
-          className="left-sidebar__conversation-item-action"
-          type="button"
-          data-pinned={isPinned || undefined}
-          data-tooltip={isPinned ? unpinLabel : pinLabel}
-          aria-label={isPinned ? unpinLabel : pinLabel}
-          disabled={isConversationMenuOpen}
-          onClick={() => onTogglePinConversation(conversation.id)}
-        >
-          <ConversationPinIcon filled={isPinned} />
-        </button>
-        <button
-          className="left-sidebar__conversation-item-action"
-          type="button"
-          data-tooltip={archiveLabel}
-          aria-label={archiveLabel}
-          disabled={isConversationMenuOpen}
-          onClick={() => onArchiveConversation(conversation.id)}
-        >
-          <Archive aria-hidden="true" />
-        </button>
+        <Tooltip content={isPinned ? unpinLabel : pinLabel}>
+          <button
+            className="left-sidebar__conversation-item-action"
+            type="button"
+            data-pinned={isPinned || undefined}
+            aria-label={isPinned ? unpinLabel : pinLabel}
+            disabled={isConversationMenuOpen}
+            onClick={() => onTogglePinConversation(conversation.id)}
+          >
+            <ConversationPinIcon filled={isPinned} />
+          </button>
+        </Tooltip>
+        <Tooltip content={archiveLabel}>
+          <button
+            className="left-sidebar__conversation-item-action"
+            type="button"
+            aria-label={archiveLabel}
+            disabled={isConversationMenuOpen}
+            onClick={() => onArchiveConversation(conversation.id)}
+          >
+            <Archive aria-hidden="true" />
+          </button>
+        </Tooltip>
       </div>
 
       {menuPosition && (

@@ -134,8 +134,12 @@ or was cancelled:
   whether to continue from it, overwrite it deliberately, or report the partial outcome.
 
 Observation is followed by document verification. Read the relevant structure, validate the OOXML
-package, and render every page whose layout matters. Do not equate a valid ZIP/package with a
-visually correct document.
+package, and render every page whose layout matters. Put all required page ranges into one
+browser-backed screenshot request and use a contact-sheet grid; never loop over pages. A focused
+single-page render is appropriate only after that combined preview exposes a defect. Do not equate
+a valid ZIP/package with a visually correct document. If the managed renderer returns an
+`office.render_backend_*` error, preserve it and report the visual check as unavailable instead of
+falling back to a user browser.
 
 ## Core recipes
 
@@ -217,7 +221,7 @@ new file. Apply later mutations to `revised.docx` itself so earlier changes are 
 }
 ```
 
-Render the first page to a workspace PNG. Rendering writes `outputPath`, so it follows the same file-write approval policy as other write tools:
+Render all pages that need review into one workspace contact sheet. Rendering writes `outputPath`, so it follows the same file-write approval policy as other write tools:
 
 ```json
 {
@@ -225,10 +229,11 @@ Render the first page to a workspace PNG. Rendering writes `outputPath`, so it f
     "operation": "view",
     "filePath": "report.docx",
     "mode": "screenshot",
-    "pages": [{ "start": 1 }],
+    "pages": [{ "start": 1, "end": 3 }],
+    "grid": { "mode": "auto" },
     "outputPath": "report-preview.png"
   },
-  "reason": "Render the finished document for visual inspection"
+  "reason": "Render the finished document pages for visual inspection"
 }
 ```
 

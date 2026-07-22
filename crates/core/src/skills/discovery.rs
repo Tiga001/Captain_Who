@@ -373,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn discovers_the_repository_auditor_fixture() {
+    fn discovers_the_workspace_fixture_skill() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace");
 
         let catalog = SkillsService::new()
@@ -384,17 +384,14 @@ mod tests {
         assert!(catalog.diagnostics().is_empty());
         assert_eq!(catalog.skills().len(), 1);
         let skill = &catalog.skills()[0];
-        assert_eq!(
-            skill.id(),
-            "workspace:fixture-workspace:repository-evidence-auditor"
-        );
-        assert_eq!(skill.name(), "repository-evidence-auditor");
+        assert_eq!(skill.id(), "workspace:fixture-workspace:fixture-skill");
+        assert_eq!(skill.name(), "fixture-skill");
         assert_eq!(skill.source_kind(), SkillSourceKind::Workspace);
         assert_eq!(skill.activation_scope(), SkillActivationScope::Run);
         assert!(matches!(
             skill.provenance(),
             SkillProvenance::Workspace { relative_path, .. }
-                if relative_path == ".agents/skills/repository-evidence-auditor/SKILL.md"
+                if relative_path == ".agents/skills/fixture-skill/SKILL.md"
         ));
         assert!(!skill.revision().as_str().is_empty());
     }

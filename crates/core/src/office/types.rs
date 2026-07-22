@@ -139,15 +139,22 @@ pub enum OfficeOperationAccess {
     FileWrite,
 }
 
-/// Element-oriented Office help verbs exposed to the model.
+/// Provider-neutral Office help topics exposed to the model.
 ///
-/// The document format is derived from the selected Office tool, so callers never need to repeat
-/// `docx`, `xlsx`, or `pptx` as a provider token.
+/// `status`, `help`, `create`, `view`, and `validate` describe Host-managed operations and never
+/// become provider argv. The remaining topics may be used for OfficeCLI's element-oriented schema
+/// help. The document format is always derived from the selected Office tool, so callers never
+/// repeat `docx`, `xlsx`, or `pptx` as a provider token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OfficeHelpVerb {
+    Status,
+    Help,
+    Create,
+    View,
     Get,
     Query,
+    Validate,
     Set,
     Add,
     Remove,
@@ -156,16 +163,40 @@ pub enum OfficeHelpVerb {
 }
 
 impl OfficeHelpVerb {
-    pub fn cli_name(self) -> &'static str {
+    pub fn stable_name(self) -> &'static str {
         match self {
+            Self::Status => "status",
+            Self::Help => "help",
+            Self::Create => "create",
+            Self::View => "view",
             Self::Get => "get",
             Self::Query => "query",
+            Self::Validate => "validate",
             Self::Set => "set",
             Self::Add => "add",
             Self::Remove => "remove",
             Self::Move => "move",
             Self::Swap => "swap",
         }
+    }
+
+    /// Returns the provider verb only for OfficeCLI's element-oriented help contract.
+    /// Host-managed topics deliberately return `None` so they cannot cross the provider boundary.
+    pub fn provider_element_cli_name(self) -> Option<&'static str> {
+        match self {
+            Self::Get
+            | Self::Query
+            | Self::Set
+            | Self::Add
+            | Self::Remove
+            | Self::Move
+            | Self::Swap => Some(self.stable_name()),
+            Self::Status | Self::Help | Self::Create | Self::View | Self::Validate => None,
+        }
+    }
+
+    pub fn is_host_managed(self) -> bool {
+        self.provider_element_cli_name().is_none()
     }
 }
 
@@ -759,6 +790,10 @@ pub struct OfficePreparedExecution {
 pub enum OfficeEngineErrorCode {
     Unavailable,
     InvalidConfiguration,
+    RenderBackendUnavailable,
+    RenderBackendInvalid,
+    RenderBackendTimeout,
+    RenderBackendFailed,
     InvalidRequest,
     UnsafeOperation,
     UnsupportedOperation,
@@ -775,6 +810,10 @@ impl OfficeEngineErrorCode {
         match self {
             Self::Unavailable => "office.engine_unavailable",
             Self::InvalidConfiguration => "office.invalid_configuration",
+            Self::RenderBackendUnavailable => "office.render_backend_unavailable",
+            Self::RenderBackendInvalid => "office.render_backend_invalid",
+            Self::RenderBackendTimeout => "office.render_backend_timeout",
+            Self::RenderBackendFailed => "office.render_backend_failed",
             Self::InvalidRequest => "office.invalid_request",
             Self::UnsafeOperation => "office.unsafe_operation",
             Self::UnsupportedOperation => "office.unsupported_operation",

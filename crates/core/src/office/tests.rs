@@ -18,6 +18,8 @@ use std::time::Instant;
 struct Fixture {
     workspace: tempfile::TempDir,
     engine_dir: tempfile::TempDir,
+    _proxy_dir: tempfile::TempDir,
+    _render_runtime_dir: tempfile::TempDir,
     engine: OfficeCliEngine,
 }
 
@@ -26,14 +28,26 @@ impl Fixture {
         let workspace = tempfile::tempdir().unwrap();
         let engine_dir = tempfile::tempdir().unwrap();
         let executable = engine_dir.path().join("officecli");
-        write_executable(&executable, script);
+        write_executable(&executable, &fixture_officecli_script(script));
+        let proxy_dir = tempfile::tempdir().unwrap();
+        let proxy = proxy_dir.path().join("core-server");
+        write_executable(
+            &proxy,
+            "#!/bin/sh\nprintf 'mycopilot-office-browser-proxy-v1\\n'\n",
+        );
+        let render_runtime_dir = tempfile::tempdir().unwrap();
+        super::render_runtime::write_test_render_runtime(render_runtime_dir.path());
         let options = OfficeCliDiscoveryOptions::new()
             .with_configured_executable(&executable)
+            .with_configured_render_runtime_dir(render_runtime_dir.path())
+            .with_browser_proxy_executable(&proxy)
             .with_workspace_root(workspace.path());
         let engine = OfficeCliEngine::discover(&options).unwrap();
         Self {
             workspace,
             engine_dir,
+            _proxy_dir: proxy_dir,
+            _render_runtime_dir: render_runtime_dir,
             engine,
         }
     }
@@ -49,6 +63,12 @@ impl Fixture {
             timeout_ms: Some(10_000),
         }
     }
+}
+
+fn fixture_officecli_script(script: &str) -> String {
+    format!(
+        "#!/bin/sh\nif [ -n \"$MYCOPILOT_OFFICE_BROWSER_FAILURE_MARKER\" ] && [ -n \"$MYCOPILOT_OFFICE_BROWSER_MARKER_NONCE\" ]; then\n  printf '{{\"schemaVersion\":1,\"nonce\":\"%s\",\"status\":\"success\",\"invocationCount\":1,\"maxInvocations\":%s,\"timedOut\":false}}' \"$MYCOPILOT_OFFICE_BROWSER_MARKER_NONCE\" \"$MYCOPILOT_OFFICE_BROWSER_MAX_INVOCATIONS\" > \"$MYCOPILOT_OFFICE_BROWSER_FAILURE_MARKER\"\nfi\n{script}"
+    )
 }
 
 fn default_parameters(operation: OfficeOperation) -> OfficeOperationParameters {
@@ -195,7 +215,7 @@ fn configured_discovery_and_probe_are_structured() {
     assert!(fixture
         .engine
         .engine_revision()
-        .starts_with("office-engine-sha256-v1:"));
+        .starts_with("office-engine-sha256-v2:"));
     assert_eq!(status.capabilities.document_kinds.len(), 3);
 }
 
@@ -839,7 +859,10 @@ fn typed_operations_compile_to_deterministic_host_owned_argv() {
         issue_type: None,
         limit: None,
         columns: Vec::new(),
-        pages: Vec::new(),
+        pages: vec![OfficePageRange {
+            start: 1,
+            end: Some(6),
+        }],
         range: None,
         viewport: None,
         grid: Some(OfficeGridLayout::Auto),
@@ -848,7 +871,7 @@ fn typed_operations_compile_to_deterministic_host_owned_argv() {
     });
     assert_eq!(
         compile_office_arguments(&contact_sheet).unwrap(),
-        vec!["screenshot", "--grid", "auto", "--json"]
+        vec!["screenshot", "--page", "1-6", "--grid", "auto", "--json",]
     );
 }
 
@@ -1509,6 +1532,137 @@ fn rendering_requires_a_validated_output_path() {
 }
 
 #[test]
+fn missing_managed_browser_fails_before_officecli_starts() {
+    let workspace = tempfile::tempdir().unwrap();
+    let engine_directory = tempfile::tempdir().unwrap();
+    let executable = engine_directory.path().join("officecli");
+    let started_marker = workspace.path().join("officecli-started");
+    write_executable(
+        &executable,
+        &format!("#!/bin/sh\ntouch '{}'\n", started_marker.display()),
+    );
+    let engine = OfficeCliEngine::discover(
+        &OfficeCliDiscoveryOptions::new()
+            .with_configured_executable(&executable)
+            .with_browser_proxy_executable(&executable)
+            .with_workspace_root(workspace.path()),
+    )
+    .unwrap();
+    fs::write(workspace.path().join("sample.docx"), b"doc").unwrap();
+    let request = OfficeExecutionRequest {
+        document_kind: OfficeDocumentKind::Document,
+        operation: OfficeOperation::View,
+        document_path: Some("sample.docx".to_string()),
+        parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::View {
+            mode: OfficeViewMode::Screenshot,
+            start: None,
+            end: None,
+            max_lines: None,
+            issue_type: None,
+            limit: None,
+            columns: Vec::new(),
+            pages: vec![OfficePageRange {
+                start: 1,
+                end: Some(3),
+            }],
+            range: None,
+            viewport: None,
+            grid: Some(OfficeGridLayout::Auto),
+            render_mode: None,
+            page_count: false,
+        }),
+        output_path: Some("preview.png".to_string()),
+        destination_path: None,
+        timeout_ms: Some(MAX_OFFICE_TIMEOUT_MS),
+    };
+
+    let started = Instant::now();
+    let error = engine
+        .prepare(&workspace_context(workspace.path()), &request)
+        .unwrap_err();
+
+    assert_eq!(
+        error.code(),
+        OfficeEngineErrorCode::RenderBackendUnavailable
+    );
+    assert_eq!(
+        error.code().stable_name(),
+        "office.render_backend_unavailable"
+    );
+    assert!(started.elapsed().as_millis() < 500);
+    assert!(!started_marker.exists());
+}
+
+#[test]
+fn browser_proxy_self_test_rejects_an_unidentified_executable_before_officecli_starts() {
+    let workspace = tempfile::tempdir().unwrap();
+    let engine_directory = tempfile::tempdir().unwrap();
+    let executable = engine_directory.path().join("officecli");
+    let started_marker = workspace.path().join("officecli-started");
+    write_executable(
+        &executable,
+        &format!("#!/bin/sh\ntouch '{}'\n", started_marker.display()),
+    );
+    let proxy_directory = tempfile::tempdir().unwrap();
+    let proxy = proxy_directory.path().join("core-server");
+    write_executable(&proxy, "#!/bin/sh\nexit 0\n");
+    let render_runtime_directory = tempfile::tempdir().unwrap();
+    super::render_runtime::write_test_render_runtime(render_runtime_directory.path());
+    let engine = OfficeCliEngine::discover(
+        &OfficeCliDiscoveryOptions::new()
+            .with_configured_executable(&executable)
+            .with_configured_render_runtime_dir(render_runtime_directory.path())
+            .with_browser_proxy_executable(&proxy)
+            .with_workspace_root(workspace.path()),
+    )
+    .unwrap();
+    fs::write(workspace.path().join("sample.docx"), b"doc").unwrap();
+    let request = OfficeExecutionRequest {
+        document_kind: OfficeDocumentKind::Document,
+        operation: OfficeOperation::View,
+        document_path: Some("sample.docx".to_string()),
+        parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::View {
+            mode: OfficeViewMode::Screenshot,
+            start: None,
+            end: None,
+            max_lines: None,
+            issue_type: None,
+            limit: None,
+            columns: Vec::new(),
+            pages: vec![OfficePageRange {
+                start: 1,
+                end: Some(3),
+            }],
+            range: None,
+            viewport: None,
+            grid: Some(OfficeGridLayout::Auto),
+            render_mode: None,
+            page_count: false,
+        }),
+        output_path: Some("preview.png".to_string()),
+        destination_path: None,
+        timeout_ms: Some(MAX_OFFICE_TIMEOUT_MS),
+    };
+
+    let started = Instant::now();
+    let error = engine
+        .execute(
+            &workspace_context(workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error.code(),
+        OfficeEngineErrorCode::RenderBackendUnavailable
+    );
+    assert!(started.elapsed().as_millis() < 2_000);
+    assert!(!started_marker.exists());
+}
+
+#[test]
 fn office_paths_follow_the_read_write_permission_matrix() {
     let fixture = Fixture::new(basic_script());
     let workspace_document = fixture.workspace.path().join("sample.docx");
@@ -1901,6 +2055,89 @@ fn real_officecli_creates_and_validates_all_supported_formats() {
         assert!(validate.error_code.is_none(), "{:?}", validate.error);
         assert!(validate.stdout.contains("\"count\": 0"));
     }
+}
+
+#[test]
+#[ignore = "requires managed OfficeCLI, Office renderer, and core-server component paths"]
+fn real_officecli_renders_through_the_application_managed_browser() {
+    let officecli = std::env::var_os("MYCOPILOT_OFFICECLI_PATH")
+        .expect("MYCOPILOT_OFFICECLI_PATH is required for the render smoke test");
+    let renderer = std::env::var_os("MYCOPILOT_OFFICE_RENDERER_DIR")
+        .expect("MYCOPILOT_OFFICE_RENDERER_DIR is required for the render smoke test");
+    let browser_proxy = std::env::var_os("MYCOPILOT_CORE_SERVER_PATH")
+        .expect("MYCOPILOT_CORE_SERVER_PATH is required for the render smoke test");
+    let workspace = tempfile::tempdir().unwrap();
+    let engine = OfficeCliEngine::discover(
+        &OfficeCliDiscoveryOptions::new()
+            .with_configured_executable(officecli)
+            .with_configured_render_runtime_dir(renderer)
+            .with_browser_proxy_executable(browser_proxy)
+            .with_workspace_root(workspace.path()),
+    )
+    .unwrap();
+
+    let create = engine
+        .execute(
+            &workspace_context(workspace.path()),
+            &OfficeExecutionRequest {
+                document_kind: OfficeDocumentKind::Document,
+                operation: OfficeOperation::Create,
+                document_path: Some("managed-render.docx".to_string()),
+                parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::Create {
+                    locale: None,
+                    minimal: false,
+                    overwrite: false,
+                }),
+                output_path: None,
+                destination_path: None,
+                timeout_ms: Some(30_000),
+            },
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(create.error_code.is_none(), "{:?}", create.error);
+
+    let render = engine
+        .execute(
+            &workspace_context(workspace.path()),
+            &OfficeExecutionRequest {
+                document_kind: OfficeDocumentKind::Document,
+                operation: OfficeOperation::View,
+                document_path: Some("managed-render.docx".to_string()),
+                parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::View {
+                    mode: OfficeViewMode::Screenshot,
+                    start: None,
+                    end: None,
+                    max_lines: None,
+                    issue_type: None,
+                    limit: None,
+                    columns: Vec::new(),
+                    pages: vec![OfficePageRange {
+                        start: 1,
+                        end: Some(1),
+                    }],
+                    range: None,
+                    viewport: None,
+                    grid: Some(OfficeGridLayout::Auto),
+                    render_mode: Some(OfficeViewRenderMode::Html),
+                    page_count: false,
+                }),
+                output_path: Some("managed-render.png".to_string()),
+                destination_path: None,
+                timeout_ms: Some(45_000),
+            },
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(render.error_code.is_none(), "{:?}", render.error);
+    assert!(!render.timed_out);
+    assert!(workspace
+        .path()
+        .join("managed-render.png")
+        .metadata()
+        .is_ok_and(|metadata| metadata.len() > 1_024));
 }
 
 #[test]

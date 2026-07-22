@@ -142,8 +142,11 @@ or was cancelled:
   decide whether to continue from it, overwrite it deliberately, or report the partial outcome.
 
 Observation is followed by workbook verification. Read representative ranges and exact formulas,
-validate the package, and render every sheet or range whose layout matters. Do not infer formula
-results that the selected library or engine did not calculate.
+validate the package, and render each complete sheet or range whose layout matters once. Do not
+fragment one visual range into repeated browser-backed calls unless the first combined preview
+exposes a concrete defect. If the managed renderer returns an `office.render_backend_*` error,
+preserve it and report the visual check as unavailable instead of falling back to a user browser.
+Do not infer formula results that the selected library or engine did not calculate.
 
 ## Core recipes
 

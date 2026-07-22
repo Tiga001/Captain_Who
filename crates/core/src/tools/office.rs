@@ -118,6 +118,14 @@ impl OfficeTool {
                 |error| AgentError::new(format!("cannot serialize Office status: {error}")),
             );
         }
+        if let Some((topic, requested_element)) = args.host_managed_help() {
+            return Ok(host_managed_operation_help(
+                self.document_kind,
+                self.tool_name(),
+                topic,
+                requested_element,
+            ));
+        }
 
         let request = args.into_request(self.document_kind)?;
         if request.access() == OfficeOperationAccess::FileWrite {
@@ -157,6 +165,11 @@ impl OfficeTool {
             args.validate_status_call(self.tool_name())?;
             return Err(AgentError::new(
                 "The Office status operation is read-only and does not create an approval action.",
+            ));
+        }
+        if args.host_managed_help().is_some() {
+            return Err(AgentError::new(
+                "Host-managed Office operation help is read-only and does not create an approval action.",
             ));
         }
         let reason = args.reason.clone();
@@ -213,6 +226,9 @@ impl OfficeTool {
         };
         if args.is_status() {
             return args.validate_status_call(self.tool_name()).is_err();
+        }
+        if args.host_managed_help().is_some() {
+            return false;
         }
         let Ok(request) = args.into_request(self.document_kind) else {
             return true;
@@ -409,6 +425,18 @@ impl OfficeToolArgs {
         // status call carrying paths, timeouts, or mutation parameters cannot
         // deserialize and therefore never reaches this point.
         Ok(())
+    }
+
+    fn host_managed_help(&self) -> Option<(OfficeHelpVerb, Option<&str>)> {
+        let OfficeToolOperationWire::Help { verb, element, .. } = &self.operation else {
+            return None;
+        };
+        let topic = verb.filter(|verb| verb.is_host_managed())?;
+        let requested_element = element
+            .as_deref()
+            .map(str::trim)
+            .filter(|element| !element.is_empty());
+        Some((topic, requested_element))
     }
 
     fn into_request(
@@ -816,6 +844,93 @@ fn map_engine_error(error: OfficeEngineError) -> AgentError {
     )
 }
 
+const MANAGED_OFFICE_HELP_SCHEMA_VERSION: u32 = 1;
+
+fn host_managed_operation_help(
+    document_kind: OfficeDocumentKind,
+    tool_name: &str,
+    topic: OfficeHelpVerb,
+    requested_element: Option<&str>,
+) -> Value {
+    debug_assert!(topic.is_host_managed());
+    let example_file = match document_kind {
+        OfficeDocumentKind::Document => "document.docx",
+        OfficeDocumentKind::Spreadsheet => "workbook.xlsx",
+        OfficeDocumentKind::Presentation => "presentation.pptx",
+    };
+    let (summary, access, approval, request_schema, example) = match topic {
+        OfficeHelpVerb::Status => (
+            "Inspect Office engine availability, version, revision, and managed capabilities. This operation does not accept a file path.",
+            "readOnly",
+            "notRequired",
+            status_schema(),
+            json!({ "operation": "status" }),
+        ),
+        OfficeHelpVerb::Help => (
+            "Read Host-owned managed-operation help, or request element-schema help with get, query, set, add, remove, move, or swap.",
+            "readOnly",
+            "notRequired",
+            help_schema(),
+            json!({ "operation": "help", "verb": "create" }),
+        ),
+        OfficeHelpVerb::Create => (
+            "Create a new Office file through a frozen Host-managed write. The target is staged, validated, and atomically published after approval.",
+            "fileWrite",
+            "required",
+            create_schema(document_kind),
+            json!({ "operation": "create", "filePath": example_file }),
+        ),
+        OfficeHelpVerb::View => (
+            "Inspect text or structure read-only, or render html, svg, or screenshot output as a managed file write. The selected mode determines access and approval.",
+            "dependsOnMode",
+            "dependsOnMode",
+            view_schema(document_kind),
+            json!({ "operation": "view", "filePath": example_file, "mode": "text" }),
+        ),
+        OfficeHelpVerb::Validate => (
+            "Validate an existing Office file and return structured provider output without modifying the source.",
+            "readOnly",
+            "notRequired",
+            validate_schema(document_kind),
+            json!({ "operation": "validate", "filePath": example_file }),
+        ),
+        OfficeHelpVerb::Get
+        | OfficeHelpVerb::Query
+        | OfficeHelpVerb::Set
+        | OfficeHelpVerb::Add
+        | OfficeHelpVerb::Remove
+        | OfficeHelpVerb::Move
+        | OfficeHelpVerb::Swap => unreachable!("provider element help is not Host-managed"),
+    };
+    let mut notes = vec![
+        "Place operation fields inside `request` and provide the concise audit `reason` beside it."
+            .to_string(),
+        "Provider argv, document-format tokens, staging paths, and output flags are generated by the Host."
+            .to_string(),
+    ];
+    if let Some(element) = requested_element {
+        notes.push(format!(
+            "The requested element `{element}` is not applicable to `{}` managed-operation help and was not forwarded to OfficeCLI.",
+            topic.stable_name()
+        ));
+    }
+    json!({
+        "schemaVersion": MANAGED_OFFICE_HELP_SCHEMA_VERSION,
+        "kind": "managedOfficeOperationHelp",
+        "source": "host",
+        "providerNeutral": true,
+        "tool": tool_name,
+        "documentKind": document_kind,
+        "operation": topic.stable_name(),
+        "summary": summary,
+        "access": access,
+        "approval": approval,
+        "requestSchema": request_schema,
+        "exampleRequest": example,
+        "notes": notes,
+    })
+}
+
 fn office_input_schema(document_kind: OfficeDocumentKind) -> Value {
     // Some model providers reject composed schemas at the tool-input root. Keep the root as one
     // portable object and place the exact discriminated union one level below it. This preserves
@@ -885,8 +1000,8 @@ fn help_schema() -> Value {
                 "verb",
                 json!({
                     "type": "string",
-                    "enum": ["get", "query", "set", "add", "remove", "move", "swap"],
-                    "description": "Optional element-oriented operation whose provider schema should be inspected. The document format is inferred from the selected tool.",
+                    "enum": ["status", "help", "create", "view", "get", "query", "validate", "set", "add", "remove", "move", "swap"],
+                    "description": "Optional provider-neutral help topic. status, help, create, view, and validate return Host-owned managed-operation help without invoking OfficeCLI. get, query, set, add, remove, move, and swap select OfficeCLI element-schema help. The document format is inferred from the selected tool.",
                 }),
             ),
             (
@@ -894,7 +1009,7 @@ fn help_schema() -> Value {
                 json!({
                     "type": "string",
                     "minLength": 1,
-                    "description": "help: optional element name that requires verb and narrows the returned schema. add: required type of the element to create, such as paragraph, cell, slide, shape, table, chart, or picture.",
+                    "description": "Optional element name for get, query, set, add, remove, move, or swap provider-schema help. For Host-managed status, help, create, view, or validate topics it is accepted for recovery from an over-specified model call, reported as not applicable, and never forwarded to OfficeCLI.",
                 }),
             ),
             ("timeoutMs", timeout_schema()),

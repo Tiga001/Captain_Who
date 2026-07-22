@@ -18,7 +18,6 @@ const OFFICE_SKILL_KIND_BY_PRESENTATION_KEY: Readonly<
 > = {
   documents: 'document',
   presentations: 'presentation',
-  repositoryEvidenceAuditor: undefined,
   spreadsheets: 'spreadsheet'
 }
 

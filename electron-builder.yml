@@ -1,5 +1,7 @@
 appId: com.mycopilot.next
 productName: MyCopilot
+afterPack: ./scripts/verify-packaged-office-renderer.mjs
+afterSign: ./scripts/verify-packaged-office-renderer.mjs
 directories:
   buildResources: build
 files:
@@ -20,6 +22,8 @@ asarUnpack:
 extraResources:
   - from: .cache/officecli/current
     to: components/officecli
+  - from: .cache/office-renderer/current
+    to: components/office-renderer
   - from: .cache/artifact-runtime/current
     to: components/artifact-runtime
   - from: THIRD_PARTY_NOTICES.txt
@@ -32,6 +36,11 @@ extraResources:
     to: LICENSES.chromium.html
 win:
   executableName: mycopilot
+  # Preserve the frozen renderer receipt. The application and its other executables are still
+  # signed; only the application-managed Chromium binary is excluded from a second Authenticode
+  # mutation after its bytes have been verified and frozen.
+  signExts:
+    - '!chrome-headless-shell.exe'
   extraResources:
     - from: target/release/core-server.exe
       to: core-server.exe
@@ -42,6 +51,10 @@ nsis:
   createDesktopShortcut: always
 mac:
   entitlementsInherit: build/entitlements.mac.plist
+  # The top-level application signature still seals Resources. Avoid recursively re-signing the
+  # frozen Chromium component because codesign would change bytes covered by its receipt.
+  signIgnore:
+    - /Contents/Resources/components/office-renderer/
   extraResources:
     - from: target/release/core-server
       to: core-server

@@ -29,7 +29,7 @@ use mycopilot_core::file_write::{
 };
 use mycopilot_core::office::{
     resolve_office_engine, OfficeCliDiscoveryOptions, OfficeEngine, OfficeEngineError,
-    OfficeExecutionResult,
+    OfficeEngineErrorCode, OfficeEngineRecovery, OfficeExecutionResult,
 };
 use mycopilot_core::skills::{
     execute_skill_python_script, SkillMaterializationDestination, SkillMaterializationError,
@@ -112,6 +112,118 @@ type ContextCompactionSummaryGenerator = Arc<
         + Send
         + Sync,
 >;
+
+type OfficeEngineResolver = Arc<dyn Fn() -> Arc<dyn OfficeEngine> + Send + Sync + 'static>;
+
+/// A Host-owned, single-flight Office engine binding.
+///
+/// Office prepared executions are revision-bound security snapshots. A stale
+/// engine can therefore be rediscovered before a new operation is prepared,
+/// but an already prepared (and possibly approved) operation must never be
+/// replayed against the replacement engine.
+struct RefreshableOfficeEngine {
+    current: Mutex<Arc<dyn OfficeEngine>>,
+    resolver: OfficeEngineResolver,
+}
+
+impl RefreshableOfficeEngine {
+    fn new(resolver: OfficeEngineResolver) -> Self {
+        let current = resolver();
+        Self {
+            current: Mutex::new(current),
+            resolver,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_current(current: Arc<dyn OfficeEngine>, resolver: OfficeEngineResolver) -> Self {
+        Self {
+            current: Mutex::new(current),
+            resolver,
+        }
+    }
+
+    fn current(&self) -> Arc<dyn OfficeEngine> {
+        self.current
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// Re-resolves at most once for every observed stale engine instance.
+    /// Concurrent callers that observed the same instance all receive the
+    /// first replacement instead of racing independent discoveries.
+    fn refresh_if_current(&self, observed: &Arc<dyn OfficeEngine>) -> Arc<dyn OfficeEngine> {
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !Arc::ptr_eq(&current, observed) {
+            return current.clone();
+        }
+        let replacement = (self.resolver)();
+        *current = replacement.clone();
+        replacement
+    }
+}
+
+impl OfficeEngine for RefreshableOfficeEngine {
+    fn capabilities(&self) -> mycopilot_core::office::OfficeEngineCapabilities {
+        self.current().capabilities()
+    }
+
+    fn status(
+        &self,
+        cancellation: AgentCancellationToken,
+    ) -> mycopilot_core::office::OfficeEngineStatus {
+        let current = self.current();
+        let status = current.status(cancellation.clone());
+        if status.error_code.as_deref()
+            != Some(OfficeEngineErrorCode::InvalidConfiguration.stable_name())
+        {
+            return status;
+        }
+        self.refresh_if_current(&current).status(cancellation)
+    }
+
+    fn prepare(
+        &self,
+        context: &mycopilot_core::office::OfficeExecutionContext,
+        request: &mycopilot_core::office::OfficeExecutionRequest,
+    ) -> Result<mycopilot_core::office::OfficePreparedExecution, OfficeEngineError> {
+        let current = self.current();
+        match current.prepare(context, request) {
+            Err(error) if error.code() == OfficeEngineErrorCode::InvalidConfiguration => {
+                self.refresh_if_current(&current).prepare(context, request)
+            }
+            result => result,
+        }
+    }
+
+    fn execute_prepared(
+        &self,
+        context: &mycopilot_core::office::OfficeExecutionContext,
+        prepared: &mycopilot_core::office::OfficePreparedExecution,
+        cancellation: AgentCancellationToken,
+        action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<OfficeExecutionResult, OfficeEngineError> {
+        let current = self.current();
+        match current.execute_prepared(context, prepared, cancellation, action_cancel_flag) {
+            Err(error) if error.code() == OfficeEngineErrorCode::InvalidConfiguration => {
+                // Discovery is safe here, but execution is deliberately not retried. The
+                // replacement has a different revision, so the old frozen plan (including an
+                // approved write) no longer carries authority to execute.
+                self.refresh_if_current(&current);
+                Err(OfficeEngineError::new(
+                    OfficeEngineErrorCode::PreconditionFailed,
+                    OfficeEngineRecovery::Retry,
+                    "The Office engine changed after this operation was prepared. The Host refreshed the engine, but did not replay the stale prepared or approved operation; prepare it again.",
+                ))
+            }
+            result => result,
+        }
+    }
+}
 
 pub type CoreServerNotificationSender = UnboundedSender<Value>;
 
@@ -299,14 +411,21 @@ impl AgentService {
 }
 
 fn resolve_default_office_engine() -> Arc<dyn OfficeEngine> {
-    let options = if let Some(path) = std::env::var_os("MYCOPILOT_OFFICECLI_PATH") {
+    let mut options = if let Some(path) = std::env::var_os("MYCOPILOT_OFFICECLI_PATH") {
         OfficeCliDiscoveryOptions::new().with_configured_executable(path)
     } else if let Some(directory) = std::env::var_os("MYCOPILOT_OFFICE_COMPONENTS_DIR") {
         OfficeCliDiscoveryOptions::new().with_application_resources_dir(directory)
     } else {
         OfficeCliDiscoveryOptions::new().allow_path_fallback(cfg!(debug_assertions))
     };
-    resolve_office_engine(&options)
+    if let Some(directory) = std::env::var_os("MYCOPILOT_OFFICE_RENDERER_DIR") {
+        options = options.with_configured_render_runtime_dir(directory);
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        options = options.with_browser_proxy_executable(executable);
+    }
+    let resolver: OfficeEngineResolver = Arc::new(move || resolve_office_engine(&options));
+    Arc::new(RefreshableOfficeEngine::new(resolver))
 }
 
 fn resolve_default_artifact_runtime() -> Option<Arc<ArtifactRuntimeProvider>> {

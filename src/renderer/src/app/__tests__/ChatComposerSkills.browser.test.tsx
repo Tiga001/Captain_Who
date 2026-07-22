@@ -101,14 +101,14 @@ const projectBSkill: SkillDescriptor = {
   source: { id: 'project-b', kind: 'workspace' }
 }
 
-const bundledAuditorSkill: SkillDescriptor = {
+const bundledDocumentsSkill: SkillDescriptor = {
   activationScope: 'run',
-  description: 'Audits repository claims against source evidence.',
-  id: 'bundled:application:repository-evidence-auditor',
-  location: 'skills/repository-evidence-auditor/SKILL.md',
-  name: 'Repository evidence auditor',
-  revision: 'skill-sha256-v1:bundled-auditor',
-  source: { id: 'bundled:application', kind: 'bundled' },
+  description: 'Create and edit document files.',
+  id: 'bundled:application:documents',
+  location: 'skills/documents/SKILL.md',
+  name: 'Documents',
+  revision: 'skill-package-sha256-v3:bundled-documents',
+  source: { id: 'application:documents', kind: 'bundled' },
   trust: 'application'
 }
 
@@ -125,16 +125,9 @@ const installedAuditorSkill: SkillDescriptor = {
 }
 
 const bundledOfficeSkills: SkillDescriptor[] = [
+  bundledDocumentsSkill,
   {
-    ...bundledAuditorSkill,
-    description: 'Create and edit document files.',
-    id: 'bundled:application:documents',
-    location: 'skills/documents/SKILL.md',
-    name: 'Documents',
-    source: { id: 'application:documents', kind: 'bundled' }
-  },
-  {
-    ...bundledAuditorSkill,
+    ...bundledDocumentsSkill,
     description: 'Create and edit spreadsheet files.',
     id: 'bundled:application:spreadsheets',
     location: 'skills/spreadsheets/SKILL.md',
@@ -142,7 +135,7 @@ const bundledOfficeSkills: SkillDescriptor[] = [
     source: { id: 'application:spreadsheets', kind: 'bundled' }
   },
   {
-    ...bundledAuditorSkill,
+    ...bundledDocumentsSkill,
     description: 'Create and edit presentation files.',
     id: 'bundled:application:presentations',
     location: 'skills/presentations/SKILL.md',
@@ -197,8 +190,8 @@ beforeEach(() => {
   draftChangeSpy.mockReset()
   listSkillsSpy.mockReset()
   listSkillsSpy.mockImplementation(async (projectId: string | null) => {
-    if (projectId === null) return catalog([bundledAuditorSkill, installedAuditorSkill])
-    return projectId === 'project-b' ? catalog([projectBSkill, bundledAuditorSkill]) : catalog()
+    if (projectId === null) return catalog([bundledDocumentsSkill, installedAuditorSkill])
+    return projectId === 'project-b' ? catalog([projectBSkill, bundledDocumentsSkill]) : catalog()
   })
   submitSpy.mockReset()
 })
@@ -207,16 +200,16 @@ describe('Skill selection invariants', () => {
   it('fails closed for unsupported source and trust contracts', () => {
     expect(() =>
       skillCatalog.assertSupportedSkillCatalog(
-        catalog([auditorSkill, bundledAuditorSkill, installedAuditorSkill])
+        catalog([auditorSkill, bundledDocumentsSkill, installedAuditorSkill])
       )
     ).not.toThrow()
 
     const mismatchedTrust = {
-      ...bundledAuditorSkill,
+      ...bundledDocumentsSkill,
       trust: 'untrusted'
     } as unknown as SkillDescriptor
     const unknownSource = {
-      ...bundledAuditorSkill,
+      ...bundledDocumentsSkill,
       source: { id: 'remote:catalog', kind: 'remote' }
     } as unknown as SkillDescriptor
     const trustedInstalled = {
@@ -368,18 +361,14 @@ describe('ChatComposer Skill picker', () => {
     await expect.poll(() => listSkillsSpy.mock.calls.length).toBe(1)
     expect(listSkillsSpy).toHaveBeenCalledWith(null)
     await expect
-      .element(
-        screen.getByRole('button', { name: /^skills\.bundled\.repositoryEvidenceAuditor\.name/ })
-      )
+      .element(screen.getByRole('button', { name: /^skills\.bundled\.documents\.name/ }))
       .toBeVisible()
     await expect
       .element(screen.getByRole('button', { name: /^Installed dependency auditor/ }))
       .toBeVisible()
     expect(screen.container.textContent).not.toContain('chat.skillProjectRequired')
 
-    await screen
-      .getByRole('button', { name: /^skills\.bundled\.repositoryEvidenceAuditor\.name/ })
-      .click()
+    await screen.getByRole('button', { name: /^skills\.bundled\.documents\.name/ }).click()
     await screen.getByRole('button', { name: /^Installed dependency auditor/ }).click()
     await screen.getByRole('textbox', { name: 'chat.inputAria' }).fill('Audit without a project')
     await screen.getByRole('button', { name: 'chat.send' }).click()
@@ -388,7 +377,7 @@ describe('ChatComposer Skill picker', () => {
     expect(submitSpy.mock.calls[0]?.[1]).toMatchObject({
       projectId: null,
       skills: [
-        { id: bundledAuditorSkill.id, revision: bundledAuditorSkill.revision },
+        { id: bundledDocumentsSkill.id, revision: bundledDocumentsSkill.revision },
         { id: installedAuditorSkill.id, revision: installedAuditorSkill.revision }
       ]
     })
@@ -523,7 +512,7 @@ describe('ChatComposer Skill picker', () => {
 
   it('keeps source and trust metadata accessible without adding it to compact list rows', async () => {
     listSkillsSpy.mockResolvedValue(
-      catalog([auditorSkill, testSkill, bundledAuditorSkill, installedAuditorSkill])
+      catalog([auditorSkill, testSkill, bundledDocumentsSkill, installedAuditorSkill])
     )
     const screen = await render(<TestComposer />)
 
@@ -531,7 +520,7 @@ describe('ChatComposer Skill picker', () => {
     await screen.getByRole('menuitem', { name: 'chat.skills' }).click()
 
     const bundledOption = screen.getByRole('button', {
-      name: /^skills\.bundled\.repositoryEvidenceAuditor\.name.*chat\.bundledSkill.*chat\.skillTrustApplication/
+      name: /^skills\.bundled\.documents\.name.*chat\.bundledSkill.*chat\.skillTrustApplication/
     })
     await expect.element(bundledOption).toBeVisible()
     expect(screen.container.textContent).not.toContain('chat.bundledSkill')
@@ -540,7 +529,7 @@ describe('ChatComposer Skill picker', () => {
     ;(bundledOption.element() as HTMLButtonElement).focus()
     await expect
       .element(screen.getByRole('tooltip'))
-      .toHaveTextContent('skills.bundled.repositoryEvidenceAuditor.description')
+      .toHaveTextContent('skills.bundled.documents.description')
 
     await bundledOption.click()
     await screen.getByRole('textbox', { name: 'chat.inputAria' }).fill('Audit this claim')
@@ -548,7 +537,7 @@ describe('ChatComposer Skill picker', () => {
     await expect.poll(() => submitSpy.mock.calls.length).toBe(1)
 
     expect(submitSpy.mock.calls[0]?.[1].skills).toEqual([
-      { id: bundledAuditorSkill.id, revision: bundledAuditorSkill.revision }
+      { id: bundledDocumentsSkill.id, revision: bundledDocumentsSkill.revision }
     ])
   })
 
@@ -574,7 +563,7 @@ describe('ChatComposer Skill picker', () => {
 
   it('keeps same-named selected skills visibly and accessibly distinct by provenance', async () => {
     const sameNamedBundledSkill = {
-      ...bundledAuditorSkill,
+      ...bundledDocumentsSkill,
       name: auditorSkill.name
     }
     const sameNamedInstalledSkill = {
@@ -613,7 +602,7 @@ describe('ChatComposer Skill picker', () => {
 
     expect(workspaceChip?.textContent).toContain(auditorSkill.name)
     expect(workspaceChip?.textContent).toContain('chat.workspaceSkill · chat.skillTrustUntrusted')
-    expect(bundledChip?.textContent).toContain('skills.bundled.repositoryEvidenceAuditor.name')
+    expect(bundledChip?.textContent).toContain('skills.bundled.documents.name')
     expect(bundledChip?.textContent).toContain('chat.bundledSkill · chat.skillTrustApplication')
     expect(installedChip?.textContent).toContain(auditorSkill.name)
     expect(installedChip?.textContent).toContain('chat.installedSkill · chat.skillTrustUntrusted')
@@ -634,7 +623,7 @@ describe('ChatComposer Skill picker', () => {
     await expect
       .element(
         screen.getByRole('button', {
-          name: 'chat.removeSkill skills.bundled.repositoryEvidenceAuditor.name · chat.bundledSkill · chat.skillTrustApplication'
+          name: 'chat.removeSkill skills.bundled.documents.name · chat.bundledSkill · chat.skillTrustApplication'
         })
       )
       .toBeVisible()
@@ -755,7 +744,7 @@ describe('ChatComposer Skill picker', () => {
           projectId: 'project-a',
           skills: [
             { id: auditorSkill.id, revision: auditorSkill.revision },
-            { id: bundledAuditorSkill.id, revision: bundledAuditorSkill.revision }
+            { id: bundledDocumentsSkill.id, revision: bundledDocumentsSkill.revision }
           ]
         })}
         showProjectSelector
@@ -768,13 +757,13 @@ describe('ChatComposer Skill picker', () => {
       .poll(() => screen.container.querySelectorAll('.composer-skill-chip').length)
       .toBe(1)
     expect(screen.container.textContent).not.toContain(auditorSkill.name)
-    expect(screen.container.textContent).toContain('skills.bundled.repositoryEvidenceAuditor.name')
+    expect(screen.container.textContent).toContain('skills.bundled.documents.name')
 
     await screen.getByRole('button', { name: 'chat.send' }).click()
     await expect.poll(() => submitSpy.mock.calls.length).toBe(1)
     expect(submitSpy.mock.calls[0]?.[1].projectId).toBe('project-b')
     expect(submitSpy.mock.calls[0]?.[1].skills).toEqual([
-      { id: bundledAuditorSkill.id, revision: bundledAuditorSkill.revision }
+      { id: bundledDocumentsSkill.id, revision: bundledDocumentsSkill.revision }
     ])
   })
 })

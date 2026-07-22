@@ -5,6 +5,7 @@ import type { ReactNode } from 'react'
 import appIcon from '../../../../../resources/icon.png'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import { useAppStartupStatus } from './AppStartupContext'
+import { StartupAmbientText } from './StartupAmbientText'
 import './AppStartupScreen.css'
 
 const MINIMUM_STARTUP_SCREEN_MS = 280
@@ -76,7 +77,10 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
                 </button>
               </div>
             ) : (
-              <span className="app-startup-screen__sr-only">{t('startup.loading')}</span>
+              <>
+                <StartupAmbientText />
+                <span className="app-startup-screen__sr-only">{t('startup.loading')}</span>
+              </>
             )}
           </div>
         </div>

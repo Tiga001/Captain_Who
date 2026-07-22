@@ -210,8 +210,22 @@ export class CoreJsonRpcClient {
   private resolveEnvironment(): NodeJS.ProcessEnv {
     const configuredOfficeCliPath = process.env.MYCOPILOT_OFFICECLI_PATH
     const configuredComponentsDirectory = process.env.MYCOPILOT_OFFICE_COMPONENTS_DIR
+    const configuredOfficeRendererDirectory = process.env.MYCOPILOT_OFFICE_RENDERER_DIR
     const configuredArtifactRuntimeDirectory = process.env.MYCOPILOT_ARTIFACT_RUNTIME_DIR
     const environment = { ...process.env }
+
+    // These variables are an internal, per-call capability between Rust and its browser proxy.
+    // They must never be inherited by the normal long-lived core-server process.
+    for (const name of [
+      'MYCOPILOT_OFFICE_BROWSER_PROXY_MODE',
+      'MYCOPILOT_OFFICE_BROWSER_EXECUTABLE',
+      'MYCOPILOT_OFFICE_BROWSER_PROFILE',
+      'MYCOPILOT_OFFICE_BROWSER_FAILURE_MARKER',
+      'MYCOPILOT_OFFICE_BROWSER_MARKER_NONCE',
+      'MYCOPILOT_OFFICE_BROWSER_MAX_INVOCATIONS'
+    ]) {
+      delete environment[name]
+    }
 
     if (app.isPackaged) {
       // Let the Rust discovery layer resolve the canonical component layout so status reports the
@@ -219,6 +233,14 @@ export class CoreJsonRpcClient {
       if (configuredOfficeCliPath === undefined && configuredComponentsDirectory === undefined) {
         environment.MYCOPILOT_OFFICE_COMPONENTS_DIR = join(process.resourcesPath, 'components')
       }
+      // The packaged renderer is part of the signed application component boundary. Always
+      // replace an inherited development override with the application-owned component path;
+      // this remains available even when OfficeCLI itself has an explicit configured path.
+      environment.MYCOPILOT_OFFICE_RENDERER_DIR = join(
+        process.resourcesPath,
+        'components',
+        'office-renderer'
+      )
       // Production never accepts an inherited configured-component override.
       // The Rust layer treats this application resource root as a packaged,
       // code-signed trust boundary and appends `artifact-runtime` itself.
@@ -237,6 +259,15 @@ export class CoreJsonRpcClient {
           'officecli',
           'current',
           executableName
+        )
+      }
+      if (configuredOfficeRendererDirectory === undefined) {
+        environment.MYCOPILOT_OFFICE_RENDERER_DIR = join(
+          __dirname,
+          '../..',
+          '.cache',
+          'office-renderer',
+          'current'
         )
       }
       if (configuredArtifactRuntimeDirectory === undefined) {

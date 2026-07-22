@@ -22,12 +22,6 @@ const bundledCases = [
     sourceId: 'application:presentations',
     zhName: '演示文稿',
     enName: 'Presentations'
-  },
-  {
-    id: 'bundled:application:repository-evidence-auditor',
-    sourceId: 'application:repository-evidence-auditor',
-    zhName: '代码库证据审计',
-    enName: 'Repository evidence auditor'
   }
 ] as const
 

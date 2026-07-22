@@ -3,8 +3,7 @@ import type { SkillSourceDescriptor } from '@mycopilot/protocol'
 import type { Translate } from '../../config/translationFormat'
 import type { TranslationKey } from '../../config/frontendTranslations'
 
-export type BundledSkillPresentationKey =
-  'documents' | 'presentations' | 'repositoryEvidenceAuditor' | 'spreadsheets'
+export type BundledSkillPresentationKey = 'documents' | 'presentations' | 'spreadsheets'
 
 interface SkillPresentationInput {
   description?: string
@@ -21,14 +20,12 @@ interface SkillPresentation {
 const BUNDLED_SKILL_KEY_BY_ID: Readonly<Record<string, BundledSkillPresentationKey>> = {
   'bundled:application:documents': 'documents',
   'bundled:application:presentations': 'presentations',
-  'bundled:application:repository-evidence-auditor': 'repositoryEvidenceAuditor',
   'bundled:application:spreadsheets': 'spreadsheets'
 }
 
 const BUNDLED_SKILL_KEY_BY_SOURCE_ID: Readonly<Record<string, BundledSkillPresentationKey>> = {
   'application:documents': 'documents',
   'application:presentations': 'presentations',
-  'application:repository-evidence-auditor': 'repositoryEvidenceAuditor',
   'application:spreadsheets': 'spreadsheets'
 }
 
@@ -42,10 +39,6 @@ const BUNDLED_SKILL_TRANSLATIONS: Readonly<
   presentations: {
     description: 'skills.bundled.presentations.description',
     name: 'skills.bundled.presentations.name'
-  },
-  repositoryEvidenceAuditor: {
-    description: 'skills.bundled.repositoryEvidenceAuditor.description',
-    name: 'skills.bundled.repositoryEvidenceAuditor.name'
   },
   spreadsheets: {
     description: 'skills.bundled.spreadsheets.description',

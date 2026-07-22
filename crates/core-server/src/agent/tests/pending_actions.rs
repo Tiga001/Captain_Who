@@ -479,8 +479,8 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
     agent_input.skill_activation = Some(AgentSkillActivation {
         activation_revision: "activation-revision".to_string(),
         skills: vec![AgentActivatedSkill {
-            id: "bundled:application:repository-evidence-auditor".to_string(),
-            name: "repository-evidence-auditor".to_string(),
+            id: "bundled:application:test-bundled-skill".to_string(),
+            name: "test-bundled-skill".to_string(),
             revision: "package-revision".to_string(),
             source: "bundled:application".to_string(),
             instructions: MARKER.to_string(),
@@ -495,12 +495,12 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         skills: vec![mycopilot_core::skills::AgentDiscoverableSkill {
             activation_ref: mycopilot_core::skills::derive_skill_activation_ref(
                 "skill-enabled-catalog-sha256-v1:redaction",
-                "bundled:application:repository-evidence-auditor",
+                "bundled:application:test-bundled-skill",
                 "package-revision",
             ),
-            id: "bundled:application:repository-evidence-auditor".to_string(),
+            id: "bundled:application:test-bundled-skill".to_string(),
             revision: "package-revision".to_string(),
-            name: "repository-evidence-auditor".to_string(),
+            name: "test-bundled-skill".to_string(),
             description: CATALOG_MARKER.to_string(),
             source_kind: "bundled".to_string(),
         }],
@@ -525,7 +525,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
                 group: None,
                 origin: Some(mycopilot_core::AgentContextCheckpointOrigin {
                     kind: "skill".to_string(),
-                    id: "bundled:application:repository-evidence-auditor".to_string(),
+                    id: "bundled:application:test-bundled-skill".to_string(),
                 }),
             },
             mycopilot_core::AgentContextCheckpointItem {
@@ -566,8 +566,8 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
             state: json!({
                 "discovery": checkpoint_discovery,
                 "skills": [{
-                    "id": "bundled:application:repository-evidence-auditor",
-                    "name": "repository-evidence-auditor",
+                    "id": "bundled:application:test-bundled-skill",
+                    "name": "test-bundled-skill",
                     "revision": "package-revision",
                     "source": "bundled:application",
                     "sourceBytes": MARKER.len(),
@@ -636,7 +636,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         assert_eq!(activation.skills.len(), 1);
         assert_eq!(
             activation.skills[0].id,
-            "bundled:application:repository-evidence-auditor"
+            "bundled:application:test-bundled-skill"
         );
         assert_eq!(activation.skills[0].revision, "package-revision");
         assert_eq!(activation.skills[0].source, "bundled:application");
@@ -649,7 +649,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         );
         assert_eq!(
             checkpoint.context_items[0].origin.as_ref().unwrap().id,
-            "bundled:application:repository-evidence-auditor"
+            "bundled:application:test-bundled-skill"
         );
         assert_eq!(checkpoint.context_items[1].content, "");
         assert_eq!(checkpoint.context_items[1].sources, vec!["skill_catalog"]);
@@ -688,8 +688,8 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
     agent_input.skill_activation = Some(AgentSkillActivation {
         activation_revision: "activation-missing-row".to_string(),
         skills: vec![AgentActivatedSkill {
-            id: "bundled:application/repository-evidence-auditor".to_string(),
-            name: "repository-evidence-auditor".to_string(),
+            id: "bundled:application/test-bundled-skill".to_string(),
+            name: "test-bundled-skill".to_string(),
             revision: "package-missing-row".to_string(),
             source: "bundled:application".to_string(),
             instructions: MARKER.to_string(),
@@ -766,8 +766,8 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
     agent_input.skill_activation = Some(AgentSkillActivation {
         activation_revision: "activation-cancel-rollback".to_string(),
         skills: vec![AgentActivatedSkill {
-            id: "bundled:application/repository-evidence-auditor".to_string(),
-            name: "repository-evidence-auditor".to_string(),
+            id: "bundled:application/test-bundled-skill".to_string(),
+            name: "test-bundled-skill".to_string(),
             revision: "package-cancel-rollback".to_string(),
             source: "bundled:application".to_string(),
             instructions: MARKER.to_string(),

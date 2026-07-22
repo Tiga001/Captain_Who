@@ -1,4 +1,5 @@
 use super::execution::{prepare_office_cli, probe_engine, run_prepared_office_cli};
+use super::render_runtime::{OfficeRenderRuntime, OfficeRenderRuntimeDiscoveryOptions};
 use super::types::{
     OfficeEngine, OfficeEngineCapabilities, OfficeEngineError, OfficeEngineErrorCode,
     OfficeEngineRecovery, OfficeEngineSource, OfficeEngineStatus, OfficeExecutionContext,
@@ -15,13 +16,16 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 const COMPONENT_DIRECTORY: &str = "officecli";
-const ENGINE_REVISION_PREFIX: &str = "office-engine-sha256-v1:";
+const ENGINE_REVISION_PREFIX: &str = "office-engine-sha256-v2:";
+const RENDER_LAUNCH_POLICY_REVISION: &str = "office-render-launch-policy-v1";
 const MAX_OFFICECLI_BINARY_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default)]
 pub struct OfficeCliDiscoveryOptions {
     configured_executable: Option<PathBuf>,
     application_resources_dir: Option<PathBuf>,
+    configured_render_runtime_dir: Option<PathBuf>,
+    browser_proxy_executable: Option<PathBuf>,
     workspace_root: Option<PathBuf>,
     allow_path_fallback: bool,
 }
@@ -38,6 +42,19 @@ impl OfficeCliDiscoveryOptions {
 
     pub fn with_application_resources_dir(mut self, directory: impl Into<PathBuf>) -> Self {
         self.application_resources_dir = Some(directory.into());
+        self
+    }
+
+    pub fn with_configured_render_runtime_dir(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.configured_render_runtime_dir = Some(directory.into());
+        self
+    }
+
+    /// Configures the trusted launcher executable that OfficeCLI sees under a
+    /// private Chrome-family name. The core-server passes its own executable;
+    /// launcher mode is selected only by a private environment marker.
+    pub fn with_browser_proxy_executable(mut self, executable: impl Into<PathBuf>) -> Self {
+        self.browser_proxy_executable = Some(executable.into());
         self
     }
 
@@ -58,7 +75,10 @@ impl OfficeCliDiscoveryOptions {
 pub struct OfficeCliEngine {
     executable: PathBuf,
     source: OfficeEngineSource,
+    officecli_revision: String,
     engine_revision: String,
+    render_runtime: Result<OfficeRenderRuntime, OfficeEngineError>,
+    browser_proxy_executable: Option<PathBuf>,
 }
 
 impl OfficeCliEngine {
@@ -98,13 +118,53 @@ impl OfficeCliEngine {
         &self.engine_revision
     }
 
+    pub(crate) fn render_runtime(&self) -> Result<&OfficeRenderRuntime, OfficeEngineError> {
+        let runtime = self.render_runtime.as_ref().map_err(Clone::clone)?;
+        if self.browser_proxy_executable.is_none() {
+            return Err(OfficeEngineError::new(
+                OfficeEngineErrorCode::RenderBackendUnavailable,
+                OfficeEngineRecovery::InstallComponent,
+                "The trusted Office render browser launcher is unavailable.",
+            ));
+        }
+        Ok(runtime)
+    }
+
+    pub(crate) fn optional_render_runtime(&self) -> Option<&OfficeRenderRuntime> {
+        self.render_runtime.as_ref().ok()
+    }
+
+    pub(crate) fn browser_proxy_executable(&self) -> Option<&Path> {
+        self.browser_proxy_executable.as_deref()
+    }
+
     pub(crate) fn verify_engine_revision(&self) -> Result<(), OfficeEngineError> {
-        let current = executable_revision(&self.executable)?;
-        if current != self.engine_revision {
+        let officecli_revision = executable_revision(&self.executable)?;
+        if officecli_revision != self.officecli_revision {
             return Err(OfficeEngineError::new(
                 OfficeEngineErrorCode::InvalidConfiguration,
                 OfficeEngineRecovery::Retry,
                 "OfficeCLI changed after discovery; rediscover the engine and prepare the operation again.",
+            ));
+        }
+        if let Ok(runtime) = &self.render_runtime {
+            runtime.verify_integrity()?;
+        }
+        let proxy_revision = self
+            .browser_proxy_executable
+            .as_deref()
+            .map(executable_revision)
+            .transpose()?;
+        let current = combined_engine_revision(
+            &officecli_revision,
+            self.render_runtime.as_ref().ok(),
+            proxy_revision.as_deref(),
+        );
+        if current != self.engine_revision {
+            return Err(OfficeEngineError::new(
+                OfficeEngineErrorCode::InvalidConfiguration,
+                OfficeEngineRecovery::Retry,
+                "The Office execution or render runtime changed after discovery; rediscover the engine and prepare the operation again.",
             ));
         }
         Ok(())
@@ -234,12 +294,12 @@ fn discover_with_path(
                     error.message()
                 ))
             })?;
-        let engine_revision = executable_revision(&executable)?;
-        return Ok(OfficeCliEngine {
+        return build_engine(
             executable,
-            source: OfficeEngineSource::Configured,
-            engine_revision,
-        });
+            OfficeEngineSource::Configured,
+            options,
+            workspace_root.as_deref(),
+        );
     }
 
     if let Some(resources) = options.application_resources_dir.as_deref() {
@@ -263,12 +323,12 @@ fn discover_with_path(
                     "The packaged OfficeCLI component resolves outside application resources.",
                 ));
             }
-            let engine_revision = executable_revision(&executable)?;
-            return Ok(OfficeCliEngine {
+            return build_engine(
                 executable,
-                source: OfficeEngineSource::PackagedComponent,
-                engine_revision,
-            });
+                OfficeEngineSource::PackagedComponent,
+                options,
+                workspace_root.as_deref(),
+            );
         }
     }
 
@@ -285,12 +345,12 @@ fn discover_with_path(
                 else {
                     continue;
                 };
-                let engine_revision = executable_revision(&executable)?;
-                return Ok(OfficeCliEngine {
+                return build_engine(
                     executable,
-                    source: OfficeEngineSource::DevelopmentPath,
-                    engine_revision,
-                });
+                    OfficeEngineSource::DevelopmentPath,
+                    options,
+                    workspace_root.as_deref(),
+                );
             }
         }
     }
@@ -300,6 +360,79 @@ fn discover_with_path(
         OfficeEngineRecovery::InstallComponent,
         "OfficeCLI is unavailable. Package the managed component, configure an absolute executable path, or enable the development PATH fallback.",
     ))
+}
+
+fn build_engine(
+    executable: PathBuf,
+    source: OfficeEngineSource,
+    options: &OfficeCliDiscoveryOptions,
+    workspace_root: Option<&Path>,
+) -> Result<OfficeCliEngine, OfficeEngineError> {
+    let officecli_revision = executable_revision(&executable)?;
+    let render_runtime = discover_render_runtime(options);
+    let browser_proxy_executable = options
+        .browser_proxy_executable
+        .as_deref()
+        .map(|path| validate_executable(path, workspace_root))
+        .transpose()?;
+    let proxy_revision = browser_proxy_executable
+        .as_deref()
+        .map(executable_revision)
+        .transpose()?;
+    let engine_revision = combined_engine_revision(
+        &officecli_revision,
+        render_runtime.as_ref().ok(),
+        proxy_revision.as_deref(),
+    );
+    Ok(OfficeCliEngine {
+        executable,
+        source,
+        officecli_revision,
+        engine_revision,
+        render_runtime,
+        browser_proxy_executable,
+    })
+}
+
+fn discover_render_runtime(
+    options: &OfficeCliDiscoveryOptions,
+) -> Result<OfficeRenderRuntime, OfficeEngineError> {
+    let mut render_options = OfficeRenderRuntimeDiscoveryOptions::new();
+    if let Some(workspace) = options.workspace_root.as_deref() {
+        render_options = render_options.with_workspace_root(workspace);
+    }
+    if let Some(directory) = options.configured_render_runtime_dir.as_deref() {
+        render_options = render_options.with_configured_component_dir(directory);
+    } else if let Some(resources) = options.application_resources_dir.as_deref() {
+        render_options = render_options.with_application_resources_dir(resources);
+    }
+    OfficeRenderRuntime::discover(&render_options)
+}
+
+fn combined_engine_revision(
+    officecli_revision: &str,
+    render_runtime: Option<&OfficeRenderRuntime>,
+    proxy_revision: Option<&str>,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mycopilot.office.engine\0v2\0");
+    digest.update(officecli_revision.as_bytes());
+    digest.update(b"\0");
+    digest.update(
+        render_runtime
+            .map(OfficeRenderRuntime::runtime_revision)
+            .unwrap_or("render-runtime-unavailable")
+            .as_bytes(),
+    );
+    digest.update(b"\0");
+    digest.update(
+        proxy_revision
+            .unwrap_or("browser-proxy-unavailable")
+            .as_bytes(),
+    );
+    digest.update(b"\0");
+    digest.update(RENDER_LAUNCH_POLICY_REVISION.as_bytes());
+    format!("{ENGINE_REVISION_PREFIX}{}", hex_lower(&digest.finalize()))
 }
 
 fn canonical_directory(path: &Path) -> Result<PathBuf, OfficeEngineError> {

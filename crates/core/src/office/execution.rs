@@ -1,4 +1,11 @@
 use super::discovery::OfficeCliEngine;
+use super::render_runtime::{
+    initialize_render_marker, read_render_failure, OfficeRenderFailureMarker, OfficeRenderRuntime,
+    BROWSER_EXECUTABLE_ENV, BROWSER_FAILURE_MARKER_ENV, BROWSER_MARKER_NONCE_ENV,
+    BROWSER_MAX_INVOCATIONS_ENV, BROWSER_PROFILE_ENV, BROWSER_PROXY_MODE_ENV,
+    BROWSER_PROXY_SELF_TEST_ARGUMENT, BROWSER_PROXY_SELF_TEST_RESPONSE,
+    BROWSER_PROXY_SELF_TEST_TIMEOUT,
+};
 use super::types::{
     OfficeDocumentKind, OfficeElementPosition, OfficeEngine, OfficeEngineAvailability,
     OfficeEngineError, OfficeEngineErrorCode, OfficeEngineRecovery, OfficeEngineStatus,
@@ -38,6 +45,8 @@ pub const MAX_OFFICE_PROPERTIES: usize = 96;
 pub const MAX_OFFICE_LIST_VALUES: usize = 64;
 pub const MAX_OFFICE_SCREENSHOT_DIMENSION: u32 = 16_384;
 pub const MAX_OFFICE_GRID_COLUMNS: u16 = 32;
+const MAX_OFFICE_PAGE_NUMBER: u32 = 10_000;
+const MAX_OFFICE_TOTAL_PAGES: u32 = 128;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const FILE_REVISION_PREFIX: &str = "office-file-sha256-v1:";
 static OFFICE_COMMIT_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
@@ -81,6 +90,7 @@ pub(super) fn probe_engine(
         &["--version".to_string()],
         PROBE_TIMEOUT,
         &cancellation,
+        None,
         None,
     );
     match output {
@@ -163,6 +173,9 @@ pub(super) fn prepare_office_cli(
     let _ = compile_office_arguments(request)?;
     let context = ResolvedExecutionContext::resolve(context)?;
     let prepared = prepare_request(&context, request)?;
+    if request_requires_browser_runtime(request) {
+        engine.render_runtime()?.verify_integrity()?;
+    }
     Ok(OfficePreparedExecution {
         schema_version: OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
         provider_id: OFFICECLI_PROVIDER_ID.to_string(),
@@ -189,6 +202,9 @@ pub(super) fn run_prepared_office_cli(
     validate_platform()?;
     validate_prepared_identity(engine, prepared)?;
     let _ = compile_office_arguments(&prepared.request)?;
+    if request_requires_browser_runtime(&prepared.request) {
+        engine.render_runtime()?.verify_integrity()?;
+    }
     let context = ResolvedExecutionContext::resolve(context)?;
     if prepared.workspace_revision.is_some()
         && context.workspace_revision != prepared.workspace_revision
@@ -281,7 +297,13 @@ pub(crate) fn compile_office_arguments(
         OfficeOperationParameters::Help { verb, element } => {
             arguments.push(document_format_name(request.document_kind).to_string());
             if let Some(verb) = verb {
-                arguments.push(verb.cli_name().to_string());
+                let provider_verb = verb.provider_element_cli_name().ok_or_else(|| {
+                    invalid_request(format!(
+                        "Office `{}` operation help is Host-managed and cannot be forwarded to OfficeCLI.",
+                        verb.stable_name()
+                    ))
+                })?;
+                arguments.push(provider_verb.to_string());
             }
             if let Some(element) = optional_non_empty("help element", element.as_deref())? {
                 if verb.is_none() {
@@ -714,21 +736,39 @@ fn canonical_page_ranges(
             "Office page ranges exceed the {MAX_OFFICE_LIST_VALUES}-item limit."
         )));
     }
-    ranges
-        .iter()
-        .map(|range| {
-            if range.start == 0 || range.end.is_some_and(|end| end < range.start) {
-                return Err(invalid_request(
-                    "Office page ranges are one-based and each end must be greater than or equal to its start.",
-                ));
-            }
-            Ok(match range.end {
-                Some(end) if end != range.start => format!("{}-{end}", range.start),
-                _ => range.start.to_string(),
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(|ranges| ranges.join(","))
+    let mut total_pages = 0_u32;
+    let mut canonical = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        let end = range.end.unwrap_or(range.start);
+        if range.start == 0 || end < range.start {
+            return Err(invalid_request(
+                "Office page ranges are one-based and each end must be greater than or equal to its start.",
+            ));
+        }
+        if range.start > MAX_OFFICE_PAGE_NUMBER || end > MAX_OFFICE_PAGE_NUMBER {
+            return Err(invalid_request(format!(
+                "Office page ranges cannot reference a page greater than {MAX_OFFICE_PAGE_NUMBER}."
+            )));
+        }
+        let page_count = end
+            .checked_sub(range.start)
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| invalid_request("Office page range size overflowed."))?;
+        total_pages = total_pages
+            .checked_add(page_count)
+            .ok_or_else(|| invalid_request("Office page range total overflowed."))?;
+        if total_pages > MAX_OFFICE_TOTAL_PAGES {
+            return Err(invalid_request(format!(
+                "Office page ranges cannot contain more than {MAX_OFFICE_TOTAL_PAGES} pages in total."
+            )));
+        }
+        canonical.push(if end == range.start {
+            range.start.to_string()
+        } else {
+            format!("{}-{end}", range.start)
+        });
+    }
+    Ok(canonical.join(","))
 }
 
 fn push_position(
@@ -1017,6 +1057,7 @@ fn execute_read_only(
         timeout,
         cancellation,
         action_cancel_flag,
+        browser_process_policy(engine, &prepared.request)?,
     )?;
     Ok(process_result(engine, prepared, output, started))
 }
@@ -1063,6 +1104,7 @@ fn execute_document_transaction(
         timeout,
         cancellation,
         action_cancel_flag,
+        browser_process_policy(engine, &prepared.request)?,
     )?;
     let mut result = process_result(engine, prepared, output, started);
     if result.error_code.is_some() {
@@ -1144,6 +1186,7 @@ fn execute_render_transaction(
         timeout,
         cancellation,
         action_cancel_flag,
+        browser_process_policy(engine, &prepared.request)?,
     )?;
     let mut result = process_result(engine, prepared, output, started);
     if result.error_code.is_some() {
@@ -1194,7 +1237,11 @@ fn process_result(
         exit_code: output.status.code(),
         stdout: output.stdout,
         stderr: output.stderr,
-        timed_out: output.timed_out,
+        timed_out: output.timed_out
+            || output
+                .render_failure
+                .as_ref()
+                .is_some_and(|failure| failure.timed_out),
         cancelled: output.cancelled,
         duration_ms: started.elapsed().as_millis() as u64,
         stdout_truncated: output.stdout_truncated,
@@ -2876,6 +2923,83 @@ struct ProcessOutput {
     cancelled: bool,
     stdout_truncated: bool,
     stderr_truncated: bool,
+    render_failure: Option<OfficeRenderFailureMarker>,
+}
+
+#[derive(Clone, Copy)]
+struct BrowserProcessPolicy<'a> {
+    proxy_executable: &'a Path,
+    runtime: Option<&'a OfficeRenderRuntime>,
+    required: bool,
+    max_invocations: u32,
+}
+
+struct BrowserMarkerExpectation {
+    path: PathBuf,
+    nonce: String,
+    required: bool,
+    max_invocations: u32,
+}
+
+fn browser_process_policy<'a>(
+    engine: &'a OfficeCliEngine,
+    request: &OfficeExecutionRequest,
+) -> Result<Option<BrowserProcessPolicy<'a>>, OfficeEngineError> {
+    let required = request_requires_browser_runtime(request);
+    let Some(proxy_executable) = engine.browser_proxy_executable() else {
+        if required {
+            return Err(OfficeEngineError::new(
+                OfficeEngineErrorCode::RenderBackendUnavailable,
+                OfficeEngineRecovery::InstallComponent,
+                "The trusted Office render browser launcher is unavailable.",
+            ));
+        }
+        return Ok(None);
+    };
+    let runtime = if required {
+        Some(engine.render_runtime()?)
+    } else {
+        engine.optional_render_runtime()
+    };
+    Ok(Some(BrowserProcessPolicy {
+        proxy_executable,
+        runtime,
+        required,
+        max_invocations: browser_invocation_limit(request),
+    }))
+}
+
+fn browser_invocation_limit(request: &OfficeExecutionRequest) -> u32 {
+    let document_contact_sheet = request.document_kind == OfficeDocumentKind::Document
+        && matches!(
+            request.typed_parameters(),
+            Some(OfficeOperationParameters::View {
+                mode: OfficeViewMode::Screenshot,
+                grid: Some(_),
+                ..
+            })
+        );
+    if document_contact_sheet {
+        // OfficeCLI v1.0.139 uses one bounded page-count pass and one capture pass for a Word
+        // contact sheet. This fixed limit is independent of page count and prevents per-page
+        // browser spawning. Presentations and all other browser-backed requests get one pass.
+        2
+    } else {
+        1
+    }
+}
+
+fn request_requires_browser_runtime(request: &OfficeExecutionRequest) -> bool {
+    let Some(OfficeOperationParameters::View {
+        mode, page_count, ..
+    }) = request.typed_parameters()
+    else {
+        return false;
+    };
+    matches!(mode, OfficeViewMode::Screenshot | OfficeViewMode::Svg)
+        || (*mode == OfficeViewMode::Stats
+            && *page_count
+            && request.document_kind == OfficeDocumentKind::Document)
 }
 
 fn run_process(
@@ -2885,6 +3009,7 @@ fn run_process(
     timeout: Duration,
     cancellation: &AgentCancellationToken,
     action_cancel_flag: Option<&Arc<AtomicBool>>,
+    browser_policy: Option<BrowserProcessPolicy<'_>>,
 ) -> Result<ProcessOutput, OfficeEngineError> {
     let private_home = tempfile::Builder::new()
         .prefix("mycopilot-office-runtime-")
@@ -2896,6 +3021,9 @@ fn run_process(
         command.current_dir(cwd);
     }
     configure_private_environment(&mut command, private_home.path());
+    let browser_failure_marker = browser_policy
+        .map(|policy| configure_browser_environment(&mut command, private_home.path(), policy))
+        .transpose()?;
 
     if cancellation_requested(cancellation, action_cancel_flag) {
         return synthetic_cancelled_status();
@@ -2950,6 +3078,18 @@ fn run_process(
         join_output_reader(stdout_reader, "OfficeCLI stdout").map_err(process_error)?;
     let (stderr, stderr_truncated) =
         join_output_reader(stderr_reader, "OfficeCLI stderr").map_err(process_error)?;
+    let render_failure = browser_failure_marker
+        .as_ref()
+        .map(|expectation| {
+            read_render_failure(
+                &expectation.path,
+                &expectation.nonce,
+                expectation.max_invocations,
+                expectation.required,
+            )
+        })
+        .transpose()?
+        .flatten();
     Ok(ProcessOutput {
         status,
         stdout,
@@ -2958,7 +3098,166 @@ fn run_process(
         cancelled,
         stdout_truncated,
         stderr_truncated,
+        render_failure,
     })
+}
+
+fn configure_browser_environment(
+    command: &mut Command,
+    private_home: &Path,
+    policy: BrowserProcessPolicy<'_>,
+) -> Result<BrowserMarkerExpectation, OfficeEngineError> {
+    if policy.required && policy.runtime.is_none() {
+        return Err(OfficeEngineError::new(
+            OfficeEngineErrorCode::RenderBackendUnavailable,
+            OfficeEngineRecovery::InstallComponent,
+            "The application-managed Chromium render runtime is unavailable.",
+        ));
+    }
+    if let Some(runtime) = policy.runtime {
+        runtime.verify_integrity()?;
+    }
+    let bin = private_home.join("browser-bin");
+    let profile = private_home.join("browser-profile");
+    fs::create_dir_all(&bin).map_err(|error| {
+        io_error(
+            "create the private Office browser launcher directory",
+            error,
+        )
+    })?;
+    fs::create_dir_all(&profile)
+        .map_err(|error| io_error("create the private Office browser profile", error))?;
+    secure_private_directory(&bin)?;
+    secure_private_directory(&profile)?;
+    let alias = bin.join(if cfg!(windows) {
+        "google-chrome.exe"
+    } else {
+        "google-chrome"
+    });
+    create_browser_proxy_alias(policy.proxy_executable, &alias)?;
+    if policy.required {
+        verify_browser_proxy_alias(&alias, private_home)?;
+    }
+    let marker = private_home.join("browser-failure.json");
+    let marker_nonce = uuid::Uuid::new_v4().simple().to_string();
+    initialize_render_marker(&marker, &marker_nonce, policy.max_invocations)?;
+    let unavailable = private_home.join("browser-runtime-unavailable");
+    command.env("PATH", &bin);
+    command.env(BROWSER_PROXY_MODE_ENV, "1");
+    command.env(
+        BROWSER_EXECUTABLE_ENV,
+        policy
+            .runtime
+            .map(OfficeRenderRuntime::executable_path)
+            .unwrap_or(unavailable.as_path()),
+    );
+    command.env(BROWSER_PROFILE_ENV, &profile);
+    command.env(BROWSER_FAILURE_MARKER_ENV, &marker);
+    command.env(BROWSER_MARKER_NONCE_ENV, &marker_nonce);
+    command.env(
+        BROWSER_MAX_INVOCATIONS_ENV,
+        policy.max_invocations.to_string(),
+    );
+    Ok(BrowserMarkerExpectation {
+        path: marker,
+        nonce: marker_nonce,
+        required: policy.required,
+        max_invocations: policy.max_invocations,
+    })
+}
+
+fn verify_browser_proxy_alias(alias: &Path, private_home: &Path) -> Result<(), OfficeEngineError> {
+    let mut command = Command::new(alias);
+    command.arg(BROWSER_PROXY_SELF_TEST_ARGUMENT);
+    configure_private_environment(&mut command, private_home);
+    command.env(BROWSER_PROXY_MODE_ENV, "1");
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    configure_command_process_group(&mut command);
+    let mut child = command.spawn().map_err(|error| {
+        OfficeEngineError::new(
+            OfficeEngineErrorCode::RenderBackendUnavailable,
+            OfficeEngineRecovery::InstallComponent,
+            format!("Cannot start the trusted Office browser proxy: {error}"),
+        )
+    })?;
+    let started = Instant::now();
+    loop {
+        match try_wait_command_process_group(&mut child).map_err(|error| {
+            OfficeEngineError::new(
+                OfficeEngineErrorCode::RenderBackendUnavailable,
+                OfficeEngineRecovery::InstallComponent,
+                format!("Cannot verify the trusted Office browser proxy: {error}"),
+            )
+        })? {
+            Some(status) if status.success() => {
+                let mut output = Vec::new();
+                if let Some(stdout) = child.stdout.take() {
+                    stdout.take(128).read_to_end(&mut output).map_err(|error| {
+                        OfficeEngineError::new(
+                            OfficeEngineErrorCode::RenderBackendUnavailable,
+                            OfficeEngineRecovery::InstallComponent,
+                            format!(
+                                "Cannot read the trusted Office browser proxy self-test: {error}"
+                            ),
+                        )
+                    })?;
+                }
+                if output == BROWSER_PROXY_SELF_TEST_RESPONSE.as_bytes() {
+                    return Ok(());
+                }
+                return Err(OfficeEngineError::new(
+                    OfficeEngineErrorCode::RenderBackendUnavailable,
+                    OfficeEngineRecovery::InstallComponent,
+                    "The configured Office browser launcher did not identify itself as the trusted core-server proxy.",
+                ));
+            }
+            Some(status) => {
+                return Err(OfficeEngineError::new(
+                    OfficeEngineErrorCode::RenderBackendUnavailable,
+                    OfficeEngineRecovery::InstallComponent,
+                    format!("The trusted Office browser proxy self-test exited with {status}."),
+                ))
+            }
+            None if started.elapsed() >= BROWSER_PROXY_SELF_TEST_TIMEOUT => {
+                terminate_command_process_group(&mut child);
+                let _ = child.wait();
+                return Err(OfficeEngineError::new(
+                    OfficeEngineErrorCode::RenderBackendUnavailable,
+                    OfficeEngineRecovery::InstallComponent,
+                    "The trusted Office browser proxy self-test timed out.",
+                ));
+            }
+            None => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn create_browser_proxy_alias(source: &Path, destination: &Path) -> Result<(), OfficeEngineError> {
+    std::os::unix::fs::symlink(source, destination)
+        .map_err(|error| io_error("create the private Office browser launcher alias", error))
+}
+
+#[cfg(windows)]
+fn create_browser_proxy_alias(source: &Path, destination: &Path) -> Result<(), OfficeEngineError> {
+    fs::copy(source, destination)
+        .map(|_| ())
+        .map_err(|error| io_error("create the private Office browser launcher alias", error))
+}
+
+#[cfg(unix)]
+fn secure_private_directory(path: &Path) -> Result<(), OfficeEngineError> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|error| io_error("secure the private Office browser directory", error))
+}
+
+#[cfg(windows)]
+fn secure_private_directory(_path: &Path) -> Result<(), OfficeEngineError> {
+    Ok(())
 }
 
 fn configure_private_environment(command: &mut Command, private_home: &Path) {
@@ -3010,6 +3309,7 @@ fn synthetic_cancelled_status() -> Result<ProcessOutput, OfficeEngineError> {
         cancelled: true,
         stdout_truncated: false,
         stderr_truncated: false,
+        render_failure: None,
     })
 }
 
@@ -3024,6 +3324,7 @@ fn synthetic_cancelled_status() -> Result<ProcessOutput, OfficeEngineError> {
         cancelled: true,
         stdout_truncated: false,
         stderr_truncated: false,
+        render_failure: None,
     })
 }
 
@@ -3038,6 +3339,12 @@ fn execution_error(output: &ProcessOutput) -> (Option<String>, Option<String>) {
         return (
             Some("office.timeout".to_string()),
             Some("OfficeCLI execution exceeded its timeout.".to_string()),
+        );
+    }
+    if let Some(failure) = &output.render_failure {
+        return (
+            Some(failure.error_code.clone()),
+            Some(failure.message.clone()),
         );
     }
     match output.status.code() {
@@ -3138,4 +3445,50 @@ fn process_error(message: impl Into<String>) -> OfficeEngineError {
         OfficeEngineRecovery::Retry,
         message,
     )
+}
+
+#[cfg(test)]
+mod page_range_limit_tests {
+    use super::*;
+    use crate::office::OfficePageRange;
+
+    #[test]
+    fn rejects_a_single_range_over_the_total_page_limit() {
+        let error = canonical_page_ranges(&[OfficePageRange {
+            start: 1,
+            end: Some(129),
+        }])
+        .unwrap_err();
+
+        assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+        assert!(error.message().contains("128 pages"));
+    }
+
+    #[test]
+    fn rejects_a_page_number_over_the_hard_limit() {
+        let error = canonical_page_ranges(&[OfficePageRange {
+            start: 10_001,
+            end: None,
+        }])
+        .unwrap_err();
+
+        assert_eq!(error.code(), OfficeEngineErrorCode::InvalidRequest);
+        assert!(error.message().contains("10000"));
+    }
+
+    #[test]
+    fn accepts_the_total_page_and_page_number_boundaries() {
+        let ranges = [
+            OfficePageRange {
+                start: 1,
+                end: Some(127),
+            },
+            OfficePageRange {
+                start: 10_000,
+                end: None,
+            },
+        ];
+
+        assert_eq!(canonical_page_ranges(&ranges).unwrap(), "1-127,10000");
+    }
 }

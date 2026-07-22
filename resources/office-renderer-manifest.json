@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 2,
+  "providerId": "mycopilot.office-render-runtime",
+  "bundleVersion": "2026.07.2",
+  "browser": {
+    "family": "chromium",
+    "version": "149.0.7827.55",
+    "playwrightVersion": "1.61.1",
+    "revision": "1228"
+  },
+  "targets": {
+    "darwin-arm64": {
+      "executable": "browser/chrome-headless-shell-mac-arm64/chrome-headless-shell",
+      "archive": {
+        "url": "https://cdn.playwright.dev/builds/cft/149.0.7827.55/mac-arm64/chrome-headless-shell-mac-arm64.zip",
+        "size": 98043456,
+        "sha256": "302f82603be06683947594ecd60f849e362a8fe3dd82a89bd4408477c97e75a6"
+      }
+    },
+    "darwin-x64": {
+      "executable": "browser/chrome-headless-shell-mac-x64/chrome-headless-shell",
+      "archive": {
+        "url": "https://cdn.playwright.dev/builds/cft/149.0.7827.55/mac-x64/chrome-headless-shell-mac-x64.zip",
+        "size": 103452247,
+        "sha256": "a32029e1861329a431b712d5b864e213d9cf8ef51a82ce4c24b27e25f6605434"
+      }
+    },
+    "linux-arm64": {
+      "executable": "browser/chrome-linux/headless_shell",
+      "archive": {
+        "url": "https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1228/chromium-headless-shell-linux-arm64.zip",
+        "size": 115342043,
+        "sha256": "1652929a70f4afb17aca36fce073fb7ed22262d16825be761b0801972f43ac4f"
+      }
+    },
+    "linux-x64": {
+      "executable": "browser/chrome-headless-shell-linux64/chrome-headless-shell",
+      "archive": {
+        "url": "https://cdn.playwright.dev/builds/cft/149.0.7827.55/linux64/chrome-headless-shell-linux64.zip",
+        "size": 119778157,
+        "sha256": "410c9407d5de3fea80d9398666be06f2aa09154a3fa7b327dc254e336bb4c4b7"
+      }
+    },
+    "win32-arm64": {
+      "executable": "browser/chrome-headless-shell-win64/chrome-headless-shell.exe",
+      "archive": {
+        "url": "https://cdn.playwright.dev/builds/cft/149.0.7827.55/win64/chrome-headless-shell-win64.zip",
+        "size": 119099822,
+        "sha256": "5cfda0c763aa6a867ce2efad0c467e3220e9c5c01c4cba02fd57afe49ede5457"
+      }
+    },
+    "win32-x64": {
+      "executable": "browser/chrome-headless-shell-win64/chrome-headless-shell.exe",
+      "archive": {
+        "url": "https://cdn.playwright.dev/builds/cft/149.0.7827.55/win64/chrome-headless-shell-win64.zip",
+        "size": 119099822,
+        "sha256": "5cfda0c763aa6a867ce2efad0c467e3220e9c5c01c4cba02fd57afe49ede5457"
+      }
+    }
+  }
+}

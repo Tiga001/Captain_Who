@@ -206,11 +206,11 @@
       "managementRevision": "skill-management-catalog-sha256-v2:3333333333333333333333333333333333333333333333333333333333333333",
       "skills": [
         {
-          "id": "bundled:application:repository-evidence-auditor",
-          "name": "repository-evidence-auditor",
-          "description": "Audit repository claims using evidence.",
+          "id": "bundled:application:documents",
+          "name": "documents",
+          "description": "Create, edit, inspect, render, and validate Microsoft Word-compatible documents.",
           "source": { "kind": "bundled", "id": "bundled:application" },
-          "packageRevision": "skill-package-sha256-v1:4444444444444444444444444444444444444444444444444444444444444444",
+          "packageRevision": "skill-package-sha256-v3:4444444444444444444444444444444444444444444444444444444444444444",
           "stateRevision": "skill-management-state-sha256-v2:5555555555555555555555555555555555555555555555555555555555555555",
           "enabled": true,
           "actions": {

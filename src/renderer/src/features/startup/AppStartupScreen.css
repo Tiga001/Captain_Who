@@ -65,6 +65,29 @@
   user-select: none;
 }
 
+.app-startup-screen__ambient {
+  display: flex;
+  width: min(320px, calc(100vw - 64px));
+  min-height: 22px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: var(--mc-color-text-secondary, #737b86);
+  font-size: var(--mc-font-size-sm, 14px);
+  font-weight: 400;
+  line-height: 22px;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 1;
+  transition: opacity 180ms ease;
+  user-select: none;
+}
+
+.app-startup-screen__ambient[data-phase='fading'] {
+  opacity: 0;
+}
+
 .app-startup-screen__failure {
   display: grid;
   justify-items: center;
@@ -136,5 +159,9 @@
 
   .app-startup-screen__icon {
     animation: none;
+  }
+
+  .app-startup-screen__ambient {
+    transition: none;
   }
 }

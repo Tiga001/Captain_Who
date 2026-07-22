@@ -5,6 +5,8 @@ use rusqlite::Connection;
 const REMOVE_INITIAL_DEMO_PROFILE_TASK: &str = "remove_initial_demo_profile";
 const CLEAR_PLACEHOLDER_TAVILY_KEY_TASK: &str = "clear_placeholder_tavily_key";
 const CLEAR_INITIAL_API_URL_TASK: &str = "clear_initial_api_url";
+const REMOVE_RETIRED_BUNDLED_SKILL_TASK: &str = "remove_retired_bundled_skill_v1";
+const RETIRED_BUNDLED_SKILL_ID: &str = "bundled:application:repository-evidence-auditor";
 const INITIAL_API_URL: &str = "https://zju.smartml.cn/userapi/v1/model/v1/chat/completions";
 
 fn add_column_if_missing(
@@ -534,7 +536,60 @@ fn run_one_time_maintenance(connection: &Connection) -> rusqlite::Result<()> {
         )?;
     }
 
+    let retired_skill_removed = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM maintenance_tasks WHERE id = ?1)",
+        [REMOVE_RETIRED_BUNDLED_SKILL_TASK],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !retired_skill_removed {
+        remove_retired_bundled_skill_from_drafts(&transaction)?;
+        transaction.execute(
+            "DELETE FROM skill_enablement_overrides WHERE skill_id = ?1",
+            [RETIRED_BUNDLED_SKILL_ID],
+        )?;
+        transaction.execute(
+            "INSERT INTO maintenance_tasks (id, completed_at) VALUES (?1, CAST(strftime('%s', 'now') AS INTEGER) * 1000)",
+            [REMOVE_RETIRED_BUNDLED_SKILL_TASK],
+        )?;
+    }
+
     transaction.commit()
+}
+
+fn remove_retired_bundled_skill_from_drafts(
+    transaction: &rusqlite::Transaction<'_>,
+) -> rusqlite::Result<()> {
+    let drafts = {
+        let mut statement =
+            transaction.prepare("SELECT scope_id, skills_json FROM composer_drafts")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+
+    for (scope_id, skills_json) in drafts {
+        let Ok(mut skills) = serde_json::from_str::<Vec<serde_json::Value>>(&skills_json) else {
+            continue;
+        };
+        let previous_len = skills.len();
+        skills.retain(|skill| {
+            skill.get("id").and_then(serde_json::Value::as_str) != Some(RETIRED_BUNDLED_SKILL_ID)
+        });
+        if skills.len() == previous_len {
+            continue;
+        }
+        let updated = serde_json::to_string(&skills)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        transaction.execute(
+            "UPDATE composer_drafts SET skills_json = ?1 WHERE scope_id = ?2",
+            rusqlite::params![updated, scope_id],
+        )?;
+    }
+
+    Ok(())
 }
 
 pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
@@ -550,6 +605,40 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             search_mode TEXT NOT NULL,
             tavily_api_key TEXT NOT NULL,
             updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS image_generation_profiles (
+            id TEXT PRIMARY KEY CHECK (
+                typeof(id) = 'text'
+                AND length(CAST(id AS BLOB)) BETWEEN 1 AND 128
+            ),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            adapter_id TEXT NOT NULL CHECK (adapter_id = 'smartmlSeedream'),
+            endpoint_url TEXT NOT NULL CHECK (
+                length(CAST(endpoint_url AS BLOB)) <= 4096
+            ),
+            model_id TEXT NOT NULL CHECK (
+                length(CAST(model_id AS BLOB)) <= 512
+            ),
+            credential_ref TEXT CHECK (
+                credential_ref IS NULL
+                OR (
+                    typeof(credential_ref) = 'text'
+                    AND length(CAST(credential_ref AS BLOB)) BETWEEN 1 AND 1024
+                )
+            ),
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            text_to_image INTEGER NOT NULL DEFAULT 1 CHECK (text_to_image = 1),
+            image_to_image INTEGER NOT NULL DEFAULT 0 CHECK (image_to_image IN (0, 1)),
+            default_size_preset TEXT NOT NULL DEFAULT '2K' CHECK (
+                default_size_preset = '2K'
+            ),
+            default_watermark INTEGER NOT NULL DEFAULT 1 CHECK (
+                default_watermark IN (0, 1)
+            ),
+            generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at)
         );
 
         CREATE TABLE IF NOT EXISTS models (
@@ -1709,6 +1798,84 @@ mod tests {
             )
             .unwrap();
         assert_eq!(preserved, ("hx z".to_string(), "hxz9393".to_string()));
+    }
+
+    #[test]
+    fn removes_only_the_retired_bundled_skill_from_live_preferences_and_drafts() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute(
+                "DELETE FROM maintenance_tasks WHERE id = ?1",
+                [REMOVE_RETIRED_BUNDLED_SKILL_TASK],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO skill_enablement_overrides (skill_id, enabled, generation, updated_at)
+                 VALUES (?1, 0, 0, 1), ('bundled:application:documents', 0, 0, 1)",
+                [RETIRED_BUNDLED_SKILL_ID],
+            )
+            .unwrap();
+        let mixed_skills = serde_json::json!([
+            { "id": RETIRED_BUNDLED_SKILL_ID, "revision": "retired" },
+            { "id": "bundled:application:documents", "revision": "documents" },
+            { "id": "installed:user:01234567-89ab-4def-8123-456789abcdef", "revision": "installed" }
+        ])
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO composer_drafts (
+                    scope_id, message, permission_mode, permission_mode_version,
+                    model_id, project_id, attachments_json, skills_json, updated_at
+                 ) VALUES ('mixed', '', 'default', 1, NULL, NULL, '[]', ?1, 1),
+                          ('malformed', '', 'default', 1, NULL, NULL, '[]', 'not-json', 1)",
+                [mixed_skills],
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        let migrated = connection
+            .query_row(
+                "SELECT skills_json FROM composer_drafts WHERE scope_id = 'mixed'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&migrated).unwrap(),
+            serde_json::json!([
+                { "id": "bundled:application:documents", "revision": "documents" },
+                { "id": "installed:user:01234567-89ab-4def-8123-456789abcdef", "revision": "installed" }
+            ])
+        );
+        let malformed = connection
+            .query_row(
+                "SELECT skills_json FROM composer_drafts WHERE scope_id = 'malformed'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(malformed, "not-json");
+        let remaining_overrides = connection
+            .query_row(
+                "SELECT group_concat(skill_id, ',') FROM skill_enablement_overrides",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_overrides, "bundled:application:documents");
+
+        run_migrations(&connection).unwrap();
+        let rerun = connection
+            .query_row(
+                "SELECT skills_json FROM composer_drafts WHERE scope_id = 'mixed'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(rerun, migrated);
     }
 
     #[test]

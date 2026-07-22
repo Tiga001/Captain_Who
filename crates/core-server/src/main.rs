@@ -94,6 +94,9 @@ mod server;
 use server::*;
 
 fn main() -> io::Result<()> {
+    if mycopilot_core::office::office_browser_proxy_mode_requested() {
+        std::process::exit(mycopilot_core::office::run_office_browser_proxy());
+    }
     // The production GitHub adapter owns reqwest's blocking client. Build and retain every
     // blocking dependency outside Tokio: reqwest deliberately panics when its blocking client is
     // constructed inside an async runtime, and its final drop joins an internal runtime thread.

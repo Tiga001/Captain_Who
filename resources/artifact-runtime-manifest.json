@@ -21,11 +21,11 @@
     },
     "nodePackageEvidence": {
       "path": "resources/artifact-runtime-node-package-evidence.json",
-      "sha256": "3582172e829aa8404647e9efa75119c4fa43f497f9ddc1e63335573b9f1b4356"
+      "sha256": "fc1f2d9f5950230ca48315a35e4faf67363890bf34512803b670c0f7ea69409e"
     },
     "pnpmLockfile": {
       "path": "pnpm-lock.yaml",
-      "sha256": "ff00b75f8f08f98494da70fcff19c833cefca642a5c99b0b87ded35bf0e34f24"
+      "sha256": "84e5520cc70d01126fddbd4ba9a9b8d6f2fdf6719b28001b2dad379bfb3a27e7"
     },
     "pythonRequirements": {
       "path": "resources/artifact-runtime-python-requirements.txt",

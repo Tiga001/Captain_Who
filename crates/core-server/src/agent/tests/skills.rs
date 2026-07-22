@@ -56,7 +56,7 @@ fn conversation_turn_resolves_skill_snapshot_before_persisting_the_run() {
 
 #[test]
 fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction_leakage() {
-    const BUNDLED_INSTRUCTION_MARKER: &str = "Treat Application trust as package provenance";
+    const BUNDLED_INSTRUCTION_MARKER: &str = "Choose the execution path that matches the task";
     let fixture = tempdir().unwrap();
     let workspace = fixture.path().join("workspace");
     fs::create_dir_all(&workspace).unwrap();
@@ -79,8 +79,8 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
     let descriptor = catalog
         .skills()
         .iter()
-        .find(|skill| skill.id().as_str() == "bundled:application:repository-evidence-auditor")
-        .expect("production catalog must expose the bundled auditor");
+        .find(|skill| skill.id().as_str() == "bundled:application:documents")
+        .expect("production catalog must expose the bundled Documents Skill");
     let selection = mycopilot_protocol_rs::SkillSelectionDto {
         id: descriptor.id().as_str().to_string(),
         revision: descriptor.revision().as_str().to_string(),
@@ -100,10 +100,7 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
 
     let activation = prepared.agent_input.skill_activation.as_ref().unwrap();
     assert_eq!(activation.skills.len(), 1);
-    assert_eq!(
-        activation.skills[0].id,
-        "bundled:application:repository-evidence-auditor"
-    );
+    assert_eq!(activation.skills[0].id, "bundled:application:documents");
     assert!(activation.skills[0]
         .instructions
         .contains(BUNDLED_INSTRUCTION_MARKER));

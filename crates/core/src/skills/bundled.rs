@@ -19,7 +19,6 @@ use std::sync::Arc;
 pub const APPLICATION_BUNDLED_SKILL_SOURCE_ID: &str = "bundled:application";
 pub const DOCUMENTS_LOCAL_ID: &str = "documents";
 pub const PRESENTATIONS_LOCAL_ID: &str = "presentations";
-pub const REPOSITORY_EVIDENCE_AUDITOR_LOCAL_ID: &str = "repository-evidence-auditor";
 pub const SPREADSHEETS_LOCAL_ID: &str = "spreadsheets";
 
 const DOCUMENTS_PATH: &str = "documents/SKILL.md";
@@ -47,10 +46,6 @@ const PRESENTATIONS_RESOURCES: &[EmbeddedSkillResource] = &[
         bytes: include_bytes!("bundled/presentations/references/workflows.md"),
     },
 ];
-
-const REPOSITORY_EVIDENCE_AUDITOR_PATH: &str = "repository-evidence-auditor/SKILL.md";
-const REPOSITORY_EVIDENCE_AUDITOR_SOURCE: &str =
-    include_str!("bundled/repository-evidence-auditor/SKILL.md");
 
 const SPREADSHEETS_PATH: &str = "spreadsheets/SKILL.md";
 const SPREADSHEETS_SOURCE: &str = include_str!("bundled/spreadsheets/SKILL.md");
@@ -89,12 +84,6 @@ const EMBEDDED_SKILLS: &[EmbeddedSkill] = &[
         relative_path: PRESENTATIONS_PATH,
         source_text: PRESENTATIONS_SOURCE,
         resources: PRESENTATIONS_RESOURCES,
-    },
-    EmbeddedSkill {
-        local_id: REPOSITORY_EVIDENCE_AUDITOR_LOCAL_ID,
-        relative_path: REPOSITORY_EVIDENCE_AUDITOR_PATH,
-        source_text: REPOSITORY_EVIDENCE_AUDITOR_SOURCE,
-        resources: &[],
     },
     EmbeddedSkill {
         local_id: SPREADSHEETS_LOCAL_ID,
@@ -408,8 +397,7 @@ fn invalid_bundled_source(error: SkillReferenceError) -> SkillRegistrationError 
 mod tests {
     use super::*;
     use crate::skills::model::{
-        SkillErrorCode, SkillResourceKind, SkillRevision, SKILL_PACKAGE_FORMAT_VERSION,
-        SKILL_PACKAGE_FORMAT_VERSION_V3,
+        SkillErrorCode, SkillResourceKind, SkillRevision, SKILL_PACKAGE_FORMAT_VERSION_V3,
     };
     use crate::skills::{SkillResourcePath, SkillResourceTextReadOptions, SkillsService};
     use serde_json::Value;
@@ -479,7 +467,7 @@ mod tests {
         assert_eq!(source.activation_scope(), SkillActivationScope::Run);
         assert!(catalog.diagnostics().is_empty());
         assert!(!catalog.truncated());
-        assert_eq!(catalog.skills().len(), 4);
+        assert_eq!(catalog.skills().len(), 3);
         assert_eq!(
             catalog
                 .skills()
@@ -489,7 +477,6 @@ mod tests {
             vec![
                 "bundled:application:documents",
                 "bundled:application:presentations",
-                "bundled:application:repository-evidence-auditor",
                 "bundled:application:spreadsheets",
             ]
         );
@@ -497,13 +484,10 @@ mod tests {
         let descriptor = catalog
             .skills()
             .iter()
-            .find(|skill| skill.id().local_id() == REPOSITORY_EVIDENCE_AUDITOR_LOCAL_ID)
+            .find(|skill| skill.id().local_id() == DOCUMENTS_LOCAL_ID)
             .unwrap();
-        assert_eq!(
-            descriptor.id().as_str(),
-            "bundled:application:repository-evidence-auditor"
-        );
-        assert_eq!(descriptor.name(), REPOSITORY_EVIDENCE_AUDITOR_LOCAL_ID);
+        assert_eq!(descriptor.id().as_str(), "bundled:application:documents");
+        assert_eq!(descriptor.name(), DOCUMENTS_LOCAL_ID);
         assert_eq!(descriptor.source_kind(), SkillSourceKind::Bundled);
         assert_eq!(descriptor.trust(), SkillTrust::Application);
         assert_eq!(descriptor.activation_scope(), SkillActivationScope::Run);
@@ -511,21 +495,18 @@ mod tests {
             descriptor.provenance(),
             SkillProvenance::Bundled { source_id, relative_path }
                 if source_id == source.id()
-                    && relative_path == REPOSITORY_EVIDENCE_AUDITOR_PATH
+                    && relative_path == DOCUMENTS_PATH
         ));
 
         let package = source.resolve(&descriptor.selection()).unwrap();
-        assert_eq!(package.format_version(), SKILL_PACKAGE_FORMAT_VERSION);
-        assert!(package.resources().is_empty());
-        assert_eq!(package.source_text(), REPOSITORY_EVIDENCE_AUDITOR_SOURCE);
+        assert_eq!(package.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V3);
+        assert!(!package.resources().is_empty());
+        assert_eq!(package.source_text(), DOCUMENTS_SOURCE);
         assert!(package
             .instructions()
-            .contains("grounding every material conclusion in evidence"));
+            .contains("Choose the execution path that matches the task"));
         assert!(!package.instructions().contains("description:"));
-        assert_eq!(
-            package.revision(),
-            &package_revision(REPOSITORY_EVIDENCE_AUDITOR_SOURCE.as_bytes())
-        );
+        assert_eq!(package.revision(), descriptor.revision());
     }
 
     #[test]
@@ -778,7 +759,7 @@ mod tests {
             .unwrap()
             .skills()
             .iter()
-            .find(|skill| skill.id().local_id() == REPOSITORY_EVIDENCE_AUDITOR_LOCAL_ID)
+            .find(|skill| skill.id().local_id() == DOCUMENTS_LOCAL_ID)
             .unwrap()
             .clone();
         let stale = SkillSelection::new(

@@ -258,46 +258,6 @@
   transition: color 120ms ease;
 }
 
-.left-sidebar__conversation-item-action::after {
-  position: absolute;
-  z-index: var(--left-sidebar-popover-z-index);
-  bottom: calc(100% + 8px);
-  left: 50%;
-  padding: 7px 11px;
-  color: var(--mc-color-sidebar-text-secondary);
-  font-size: var(--mc-font-size-sm);
-  font-weight: var(--mc-font-weight-bold);
-  line-height: var(--mc-line-height-tight);
-  white-space: nowrap;
-  pointer-events: none;
-  background: var(--mc-color-surface-glass-strong);
-  border: 1px solid var(--mc-color-border-hairline);
-  border-radius: var(--mc-radius-card);
-  box-shadow: var(--mc-shadow-sidebar-menu);
-  opacity: 0;
-  content: attr(data-tooltip);
-  transform: translate(-50%, 4px);
-  transition:
-    opacity 120ms ease,
-    transform 120ms ease,
-    visibility 120ms ease;
-  visibility: hidden;
-  backdrop-filter: var(--mc-effect-blur-popover);
-}
-
-.left-sidebar__conversation-item-action:hover::after,
-.left-sidebar__conversation-item-action:focus-visible::after {
-  opacity: 1;
-  transform: translate(-50%, 0);
-  visibility: visible;
-}
-
-.left-sidebar__conversation-row[data-menu-open='true']
-  .left-sidebar__conversation-item-action::after {
-  opacity: 0;
-  visibility: hidden;
-}
-
 .left-sidebar__conversation-row:hover
   .left-sidebar__conversation-item-action:not(:hover):not(:focus-visible),
 .left-sidebar__conversation-row:focus-within

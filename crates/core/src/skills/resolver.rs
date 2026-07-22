@@ -369,12 +369,7 @@ mod tests {
     fn resolves_the_fixture_into_an_exact_source_snapshot() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace");
         let service = SkillsService::new();
-        let request = catalog_request(
-            &service,
-            "fixture-workspace",
-            &workspace,
-            "repository-evidence-auditor",
-        );
+        let request = catalog_request(&service, "fixture-workspace", &workspace, "fixture-skill");
         let descriptor = service
             .list_workspace("fixture-workspace", &workspace)
             .unwrap()
@@ -390,7 +385,7 @@ mod tests {
             workspace
                 .join(super::super::workspace::AGENTS_DIRECTORY)
                 .join(super::super::workspace::SKILLS_DIRECTORY)
-                .join("repository-evidence-auditor")
+                .join("fixture-skill")
                 .join(super::super::workspace::SKILL_FILE_NAME),
         )
         .unwrap();

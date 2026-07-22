@@ -12,6 +12,140 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Barrier;
 
+#[cfg(unix)]
+fn write_probe_officecli(path: &Path, version: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(
+        path,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '{version}\\n'; exit 0; fi\nexit 0\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[derive(Clone)]
+struct LifecycleTestOfficeEngine {
+    revision: &'static str,
+    invalid_status: bool,
+    invalid_prepare: bool,
+    invalid_execute: bool,
+    status_calls: Arc<AtomicUsize>,
+    prepare_calls: Arc<AtomicUsize>,
+    executions: Arc<AtomicUsize>,
+}
+
+impl LifecycleTestOfficeEngine {
+    fn valid(revision: &'static str) -> Self {
+        Self {
+            revision,
+            invalid_status: false,
+            invalid_prepare: false,
+            invalid_execute: false,
+            status_calls: Arc::new(AtomicUsize::new(0)),
+            prepare_calls: Arc::new(AtomicUsize::new(0)),
+            executions: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn invalid_configuration(message: &'static str) -> OfficeEngineError {
+        OfficeEngineError::new(
+            OfficeEngineErrorCode::InvalidConfiguration,
+            OfficeEngineRecovery::Retry,
+            message,
+        )
+    }
+}
+
+impl OfficeEngine for LifecycleTestOfficeEngine {
+    fn capabilities(&self) -> OfficeEngineCapabilities {
+        FailedOfficeEngine.capabilities()
+    }
+
+    fn status(&self, _cancellation: AgentCancellationToken) -> OfficeEngineStatus {
+        self.status_calls.fetch_add(1, Ordering::SeqCst);
+        OfficeEngineStatus {
+            schema_version: OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
+            provider_id: OFFICECLI_PROVIDER_ID.to_string(),
+            availability: if self.invalid_status {
+                OfficeEngineAvailability::Unavailable
+            } else {
+                OfficeEngineAvailability::Available
+            },
+            source: Some(OfficeEngineSource::Configured),
+            version: Some("test".to_string()),
+            engine_revision: Some(self.revision.to_string()),
+            capabilities: self.capabilities(),
+            error_code: self.invalid_status.then(|| {
+                OfficeEngineErrorCode::InvalidConfiguration
+                    .stable_name()
+                    .to_string()
+            }),
+            message: self
+                .invalid_status
+                .then(|| "The Office component changed after discovery.".to_string()),
+        }
+    }
+
+    fn prepare(
+        &self,
+        _context: &OfficeExecutionContext,
+        _request: &OfficeExecutionRequest,
+    ) -> Result<OfficePreparedExecution, OfficeEngineError> {
+        self.prepare_calls.fetch_add(1, Ordering::SeqCst);
+        if self.invalid_prepare {
+            return Err(Self::invalid_configuration(
+                "The Office component changed before preparation.",
+            ));
+        }
+        let mut prepared = prepared_spreadsheet_operation();
+        prepared.engine_revision = self.revision.to_string();
+        Ok(prepared)
+    }
+
+    fn execute_prepared(
+        &self,
+        _context: &OfficeExecutionContext,
+        prepared: &OfficePreparedExecution,
+        _cancellation: AgentCancellationToken,
+        _action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<OfficeExecutionResult, OfficeEngineError> {
+        if self.invalid_execute {
+            return Err(Self::invalid_configuration(
+                "The Office component changed before execution.",
+            ));
+        }
+        if prepared.engine_revision != self.revision {
+            return Err(OfficeEngineError::new(
+                OfficeEngineErrorCode::PreconditionFailed,
+                OfficeEngineRecovery::Retry,
+                "The prepared Office operation belongs to an older engine revision.",
+            ));
+        }
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        Ok(OfficeExecutionResult {
+            provider_id: OFFICECLI_PROVIDER_ID.to_string(),
+            engine_revision: self.revision.to_string(),
+            document_kind: prepared.request.document_kind,
+            operation: prepared.request.operation,
+            argv: prepared.argv.clone(),
+            cwd: ".".to_string(),
+            exit_code: Some(0),
+            stdout: "provider-success\n".to_string(),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled: false,
+            duration_ms: 1,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            error_code: None,
+            error: None,
+        })
+    }
+}
+
 #[derive(Clone)]
 struct FailedOfficeEngine;
 
@@ -244,6 +378,158 @@ fn prepared_office_action(id: &str) -> AgentProposedAction {
             reason: "Update the approved workbook cell".to_string(),
         }),
     }
+}
+
+#[test]
+fn office_status_rediscovery_replaces_a_stale_engine_once() {
+    let stale = LifecycleTestOfficeEngine {
+        invalid_status: true,
+        ..LifecycleTestOfficeEngine::valid("office-engine-v1")
+    };
+    let replacement = LifecycleTestOfficeEngine::valid("office-engine-v2");
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let resolver: OfficeEngineResolver = {
+        let replacement = replacement.clone();
+        let resolver_calls = Arc::clone(&resolver_calls);
+        Arc::new(move || {
+            resolver_calls.fetch_add(1, Ordering::SeqCst);
+            Arc::new(replacement.clone())
+        })
+    };
+    let engine = RefreshableOfficeEngine::with_current(Arc::new(stale.clone()), resolver);
+
+    let first = engine.status(AgentCancellationToken::new());
+    let second = engine.status(AgentCancellationToken::new());
+
+    assert_eq!(first.availability, OfficeEngineAvailability::Available);
+    assert_eq!(first.engine_revision.as_deref(), Some("office-engine-v2"));
+    assert_eq!(second.engine_revision.as_deref(), Some("office-engine-v2"));
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(stale.status_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(replacement.status_calls.load(Ordering::SeqCst), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn office_status_rediscovery_recovers_after_executable_inode_replacement() {
+    let directory = tempdir().unwrap();
+    let executable = directory.path().join("officecli");
+    write_probe_officecli(&executable, "OfficeCLI test-v1");
+    let options = OfficeCliDiscoveryOptions::new().with_configured_executable(&executable);
+    let stale = resolve_office_engine(&options);
+    let before = stale.status(AgentCancellationToken::new());
+    assert_eq!(before.availability, OfficeEngineAvailability::Available);
+    assert_eq!(before.version.as_deref(), Some("OfficeCLI test-v1"));
+
+    let replacement_path = directory.path().join("officecli.next");
+    write_probe_officecli(&replacement_path, "OfficeCLI test-v2");
+    fs::rename(&replacement_path, &executable).unwrap();
+    let stale_status = stale.status(AgentCancellationToken::new());
+    assert_eq!(
+        stale_status.availability,
+        OfficeEngineAvailability::Unavailable
+    );
+    assert_eq!(
+        stale_status.error_code.as_deref(),
+        Some(OfficeEngineErrorCode::InvalidConfiguration.stable_name())
+    );
+
+    let resolver: OfficeEngineResolver = Arc::new(move || resolve_office_engine(&options));
+    let engine = RefreshableOfficeEngine::with_current(stale, resolver);
+    let recovered = engine.status(AgentCancellationToken::new());
+
+    assert_eq!(recovered.availability, OfficeEngineAvailability::Available);
+    assert_eq!(recovered.version.as_deref(), Some("OfficeCLI test-v2"));
+    assert_ne!(recovered.engine_revision, before.engine_revision);
+}
+
+#[test]
+fn concurrent_office_preparation_uses_one_rediscovery_for_a_stale_instance() {
+    let stale = LifecycleTestOfficeEngine {
+        invalid_prepare: true,
+        ..LifecycleTestOfficeEngine::valid("office-engine-v1")
+    };
+    let replacement = LifecycleTestOfficeEngine::valid("office-engine-v2");
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let resolver: OfficeEngineResolver = {
+        let replacement = replacement.clone();
+        let resolver_calls = Arc::clone(&resolver_calls);
+        Arc::new(move || {
+            resolver_calls.fetch_add(1, Ordering::SeqCst);
+            Arc::new(replacement.clone())
+        })
+    };
+    let engine = Arc::new(RefreshableOfficeEngine::with_current(
+        Arc::new(stale),
+        resolver,
+    ));
+    let barrier = Arc::new(Barrier::new(9));
+    let context = OfficeExecutionContext::from_run_context(None);
+    let request = prepared_spreadsheet_operation().request;
+    let mut workers = Vec::new();
+    for _ in 0..8 {
+        let engine = Arc::clone(&engine);
+        let barrier = Arc::clone(&barrier);
+        let context = context.clone();
+        let request = request.clone();
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            engine.prepare(&context, &request).unwrap().engine_revision
+        }));
+    }
+    barrier.wait();
+
+    for worker in workers {
+        assert_eq!(worker.join().unwrap(), "office-engine-v2");
+    }
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn approved_office_action_is_not_replayed_across_engine_rediscovery() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let stale = LifecycleTestOfficeEngine {
+        invalid_execute: true,
+        ..LifecycleTestOfficeEngine::valid("office-engine-test")
+    };
+    let replacement = LifecycleTestOfficeEngine::valid("office-engine-v2");
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let resolver: OfficeEngineResolver = {
+        let replacement = replacement.clone();
+        let resolver_calls = Arc::clone(&resolver_calls);
+        Arc::new(move || {
+            resolver_calls.fetch_add(1, Ordering::SeqCst);
+            Arc::new(replacement.clone())
+        })
+    };
+    let service = AgentService::new(storage).with_office_engine(Arc::new(
+        RefreshableOfficeEngine::with_current(Arc::new(stale), resolver),
+    ));
+    let operation = match prepared_office_action("office-stale-approved-action") {
+        AgentProposedAction::OfficeOperation { office_operation } => office_operation,
+        _ => unreachable!(),
+    };
+
+    let result = service.execute_office_operation(
+        &automatic_office_input(fixture.path()),
+        &operation,
+        AgentCancellationToken::new(),
+        None,
+    );
+
+    assert!(!result.ok);
+    assert_eq!(
+        result.result.as_ref().unwrap()["code"],
+        "office.precondition_failed"
+    );
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(replacement.executions.load(Ordering::SeqCst), 0);
+    assert!(result
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("did not replay the stale prepared or approved operation"));
 }
 
 #[test]

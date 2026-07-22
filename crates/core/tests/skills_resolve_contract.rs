@@ -23,10 +23,7 @@ fn public_core_api_resolves_a_catalog_selection_without_exposing_source_paths() 
     assert!(resolved.resources().is_empty());
     match resolved.provenance() {
         SkillProvenance::Workspace { relative_path, .. } => {
-            assert_eq!(
-                relative_path,
-                ".agents/skills/repository-evidence-auditor/SKILL.md"
-            );
+            assert_eq!(relative_path, ".agents/skills/fixture-skill/SKILL.md");
         }
         _ => panic!("fixture must resolve from the workspace source"),
     }

@@ -41,8 +41,8 @@
             "package": {
               "formatVersion": 1,
               "packageRevision": "skill-package-sha256-v1:1111111111111111111111111111111111111111111111111111111111111111",
-              "name": "repository-evidence-auditor",
-              "description": "Audit repository claims against concrete evidence.",
+              "name": "example-analysis-skill",
+              "description": "Exercise exact Skill source resolution.",
               "fileCount": 1,
               "totalBytes": 512
             }
@@ -88,8 +88,8 @@
             "package": {
               "formatVersion": 1,
               "packageRevision": "skill-package-sha256-v1:2222222222222222222222222222222222222222222222222222222222222222",
-              "name": "repository-evidence-auditor",
-              "description": "Audit repository claims against concrete evidence.",
+              "name": "example-analysis-skill",
+              "description": "Exercise multi-candidate Skill source resolution.",
               "fileCount": 1,
               "totalBytes": 544
             }

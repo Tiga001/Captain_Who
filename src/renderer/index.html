@@ -47,6 +47,33 @@
         user-select: none;
       }
 
+      .app-bootstrap-screen__content {
+        display: grid;
+        max-width: min(360px, calc(100vw - 48px));
+        justify-items: center;
+        gap: 18px;
+        text-align: center;
+      }
+
+      .app-bootstrap-screen__ambient {
+        display: flex;
+        width: min(320px, calc(100vw - 64px));
+        min-height: 22px;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        color: #737b86;
+        font:
+          400 14px/22px -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          sans-serif;
+        letter-spacing: 0;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        user-select: none;
+      }
+
       @keyframes app-bootstrap-icon-pulse {
         0%,
         100% {
@@ -64,6 +91,10 @@
         .app-bootstrap-screen {
           background: #171717;
         }
+
+        .app-bootstrap-screen__ambient {
+          color: #969ca5;
+        }
       }
 
       @media (prefers-reduced-motion: reduce) {
@@ -79,13 +110,16 @@
       <!-- This zero-JavaScript shell is the first paint. React replaces it with AppStartupGate. -->
       <div class="app-bootstrap-screen" role="status" aria-label="Starting MyCopilot">
         <div class="app-bootstrap-screen__drag-region" aria-hidden="true"></div>
-        <img
-          class="app-bootstrap-screen__icon"
-          src="../../resources/icon.png"
-          alt=""
-          aria-hidden="true"
-          draggable="false"
-        />
+        <div class="app-bootstrap-screen__content">
+          <img
+            class="app-bootstrap-screen__icon"
+            src="../../resources/icon.png"
+            alt=""
+            aria-hidden="true"
+            draggable="false"
+          />
+          <div class="app-bootstrap-screen__ambient" aria-hidden="true">正在深度思考</div>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>

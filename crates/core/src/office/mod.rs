@@ -7,6 +7,7 @@
 
 mod discovery;
 mod execution;
+mod render_runtime;
 mod types;
 
 pub use discovery::{office_cli_component_relative_path, OfficeCliDiscoveryOptions};
@@ -15,6 +16,11 @@ pub use execution::{
     DEFAULT_OFFICE_TIMEOUT_MS, MAX_OFFICE_ARGUMENTS, MAX_OFFICE_ARGUMENT_BYTES,
     MAX_OFFICE_DOCUMENT_BYTES, MAX_OFFICE_GRID_COLUMNS, MAX_OFFICE_LIST_VALUES,
     MAX_OFFICE_PROPERTIES, MAX_OFFICE_SCREENSHOT_DIMENSION, MAX_OFFICE_TIMEOUT_MS,
+};
+pub use render_runtime::{
+    office_browser_proxy_mode_requested, office_render_component_relative_path,
+    run_office_browser_proxy, OfficeRenderRuntime, OfficeRenderRuntimeDiscoveryOptions,
+    OFFICE_RENDER_RUNTIME_BUNDLE_VERSION, OFFICE_RENDER_RUNTIME_PROVIDER_ID,
 };
 pub use types::{
     OfficeCellShift, OfficeDocumentKind, OfficeElementPosition, OfficeEngine,
