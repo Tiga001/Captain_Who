@@ -1,7 +1,7 @@
 appId: com.mycopilot.next
 productName: MyCopilot
-afterPack: ./scripts/verify-packaged-office-renderer.mjs
-afterSign: ./scripts/verify-packaged-office-renderer.mjs
+afterPack: ./scripts/verify-packaged-app.mjs
+afterSign: ./scripts/verify-packaged-app.mjs
 directories:
   buildResources: build
 files:
@@ -50,6 +50,13 @@ nsis:
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
 mac:
+  # build:mac additionally enables forceCodeSigning. This custom signer gives the Rust helper a
+  # stable designated requirement while preserving electron-builder's normal recursive signing
+  # policy for the application and Electron helpers.
+  sign: ./scripts/sign-macos.mjs
+  type: distribution
+  hardenedRuntime: true
+  strictVerify: true
   entitlementsInherit: build/entitlements.mac.plist
   # The top-level application signature still seals Resources. Avoid recursively re-signing the
   # frozen Chromium component because codesign would change bytes covered by its receipt.
@@ -61,6 +68,8 @@ mac:
   extendInfo:
     - NSDocumentsFolderUsageDescription: MyCopilot accesses files you select in Documents.
     - NSDownloadsFolderUsageDescription: MyCopilot accesses files you select in Downloads.
+  # Signing is mandatory for build:mac. Notarization remains an independent release operation
+  # until CI has an Apple notary credential contract; it must never be confused with signing.
   notarize: false
 dmg:
   artifactName: ${name}-${version}.${ext}

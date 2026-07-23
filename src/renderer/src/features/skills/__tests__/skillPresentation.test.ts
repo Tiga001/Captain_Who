@@ -22,6 +22,12 @@ const bundledCases = [
     sourceId: 'application:presentations',
     zhName: '演示文稿',
     enName: 'Presentations'
+  },
+  {
+    id: 'bundled:application:image-generation',
+    sourceId: 'application:image-generation',
+    zhName: '图片生成',
+    enName: 'Image Generation'
   }
 ] as const
 

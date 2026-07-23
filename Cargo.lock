@@ -1235,6 +1235,8 @@ dependencies = [
  "reqwest",
  "roxmltree",
  "rusqlite",
+ "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -1255,6 +1257,7 @@ version = "0.1.0"
 dependencies = [
  "mycopilot-core",
  "mycopilot-protocol-rs",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2",

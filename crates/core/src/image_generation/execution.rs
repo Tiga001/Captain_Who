@@ -734,6 +734,7 @@ impl ImageGenerationExecutionService {
         let [output] = provider_result.outputs.as_slice() else {
             unreachable!("validated provider result has exactly one output")
         };
+        let artifact_transfer_policy = provider.artifact_transfer_policy();
         let prepared_artifact = tokio::select! {
             _ = cancellation.cancelled() => {
                 return self.finalize_failure(
@@ -756,7 +757,10 @@ impl ImageGenerationExecutionService {
                     started,
                 ).await;
             }
-            result = tokio::time::timeout_at(deadline, self.artifacts.stage(output, &cancellation)) => {
+            result = tokio::time::timeout_at(
+                deadline,
+                self.artifacts.stage(output, artifact_transfer_policy, &cancellation),
+            ) => {
                 match result {
                     Ok(Ok(artifact)) => artifact,
                     Ok(Err(error)) => {
@@ -2161,7 +2165,8 @@ fn journal_unavailable() -> ImageGenerationExecutionServiceError {
 mod tests {
     use super::*;
     use crate::image_generation::artifact::{
-        ImageArtifactPublicationStatus, PreparedImageArtifact,
+        ImageArtifactHostRule, ImageArtifactPublicationStatus, ImageArtifactTransferPolicy,
+        PreparedImageArtifact,
     };
     use crate::image_generation::credential_store::{CredentialSecret, InMemoryCredentialStore};
     use crate::image_generation::provider::{
@@ -2246,6 +2251,12 @@ mod tests {
         invalid_prepared_profile: bool,
     }
 
+    const TEST_ARTIFACT_HOST_RULES: &[ImageArtifactHostRule] =
+        &[ImageArtifactHostRule::ExactHttpsOrigin {
+            host: "artifact.invalid",
+            port: 443,
+        }];
+
     struct TestProviderFactory {
         calls: Arc<AtomicUsize>,
         fail: bool,
@@ -2275,6 +2286,10 @@ mod tests {
     impl ImageGenerationProvider for TestProvider {
         fn profile(&self) -> &ImageGenerationProviderProfile {
             &self.profile
+        }
+
+        fn artifact_transfer_policy(&self) -> ImageArtifactTransferPolicy {
+            ImageArtifactTransferPolicy::with_trusted_fake_ip_https_hosts(TEST_ARTIFACT_HOST_RULES)
         }
 
         fn prepare(
@@ -2339,9 +2354,13 @@ mod tests {
         fn stage<'a>(
             &'a self,
             _source: &'a ImageGenerationUrlOutput,
+            transfer_policy: ImageArtifactTransferPolicy,
             _cancellation: &'a AgentCancellationToken,
         ) -> BoxFuture<'a, Result<PreparedImageArtifact, ImageArtifactError>> {
             Box::pin(async move {
+                assert!(transfer_policy.permits_fake_ip_for_origin("artifact.invalid", 443));
+                assert!(!transfer_policy.permits_fake_ip_for_origin("artifact.invalid", 8443));
+                assert!(!transfer_policy.permits_fake_ip_for_origin("untrusted.invalid", 443));
                 let digest = "b".repeat(64);
                 let staging = self.root.join("staging");
                 let target = self.root.join("target.png");

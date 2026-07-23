@@ -233,6 +233,92 @@
   border-radius: var(--mc-radius-2xl);
 }
 
+.image-generation-artifact-list {
+  display: grid;
+  width: 100%;
+  max-width: 900px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--mc-color-surface-card) 88%, var(--mc-color-text-primary) 2%);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-2xl);
+}
+
+.image-generation-artifact-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  min-width: 0;
+  min-height: 76px;
+  padding: 10px 14px;
+  gap: 12px;
+  color: var(--mc-color-text-primary);
+}
+
+.image-generation-artifact-card + .image-generation-artifact-card {
+  border-top: 1px solid var(--mc-color-border-subtle);
+}
+
+.image-generation-artifact-card__preview {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  overflow: hidden;
+  place-items: center;
+  color: var(--mc-color-text-muted);
+  background: var(--mc-color-surface-muted);
+  border-radius: var(--mc-radius-lg);
+}
+
+.image-generation-artifact-card__preview > svg {
+  width: 24px;
+  height: 24px;
+}
+
+.image-generation-artifact-card__preview > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.image-generation-artifact-card__content {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+}
+
+.image-generation-artifact-card__content p {
+  width: 100%;
+  margin: 0;
+  color: var(--mc-color-text-primary);
+  font-size: var(--mc-font-size-chat-activity);
+  font-weight: var(--mc-font-weight-heavy);
+  line-height: var(--mc-line-height-tight);
+}
+
+.image-generation-artifact-card__content span,
+.image-generation-artifact-card__content small {
+  color: var(--mc-color-text-muted);
+  font-size: var(--mc-font-size-chat-activity-detail);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-tight);
+}
+
+.image-generation-artifact-card__content small {
+  width: 100%;
+}
+
+.image-generation-activity__details {
+  display: grid;
+  gap: 4px;
+}
+
+.image-generation-activity__details p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .office-artifact-card {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

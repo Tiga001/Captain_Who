@@ -15,9 +15,10 @@
     "format:check": "prettier --check . && cargo fmt --all -- --check",
     "lint": "eslint --cache .",
     "lint:rust": "cargo clippy --workspace --all-targets -- -D warnings",
-    "test": "pnpm test:officecli && pnpm test:office-renderer && pnpm test:artifact-runtime && pnpm test:web && pnpm test:rust",
+    "test": "pnpm test:officecli && pnpm test:office-renderer && pnpm test:mac-signing && pnpm test:artifact-runtime && pnpm test:web && pnpm test:rust",
     "test:officecli": "node --test scripts/prepare-officecli.test.mjs",
     "test:office-renderer": "node --test scripts/prepare-office-renderer.test.mjs scripts/verify-packaged-office-renderer.test.mjs",
+    "test:mac-signing": "node --test scripts/sign-macos.test.mjs scripts/verify-packaged-macos-signatures.test.mjs",
     "test:artifact-runtime": "node --test scripts/prepare-artifact-runtime.test.mjs",
     "test:rust": "cargo test --workspace",
     "test:web": "vitest run",
@@ -38,9 +39,9 @@
     "verify:core": "node scripts/verify-core-binary.mjs",
     "build:core": "cargo build --locked --release -p mycopilot-core-server --bin core-server && pnpm verify:core",
     "postinstall": "electron-builder install-app-deps",
-    "build:unpack": "pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --dir",
+    "build:unpack": "pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --dir --config.mac.identity=null",
     "build:win": "node scripts/assert-package-platform.mjs win32 && pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --win",
-    "build:mac": "node scripts/assert-package-platform.mjs darwin && pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --mac",
+    "build:mac": "node scripts/assert-package-platform.mjs darwin && pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --mac --config.forceCodeSigning=true",
     "build:linux": "node scripts/assert-package-platform.mjs linux && pnpm prepare:officecli && pnpm prepare:office-renderer && pnpm prepare:artifact-runtime && pnpm build && pnpm build:core && electron-builder --linux"
   },
   "dependencies": {
@@ -48,6 +49,7 @@
     "node-pty": "^1.1.0"
   },
   "devDependencies": {
+    "@electron/osx-sign": "1.3.3",
     "@electron-toolkit/eslint-config-prettier": "^3.0.0",
     "@electron-toolkit/eslint-config-ts": "^3.1.0",
     "@electron-toolkit/tsconfig": "^2.0.0",

@@ -5,6 +5,7 @@ import { useFrontendConfig } from '../../../../config/FrontendConfigProvider'
 
 interface SecretInputProps {
   ariaLabel: string
+  disabled?: boolean
   onChange: (value: string) => void
   placeholder?: string
   tabIndex?: number
@@ -13,6 +14,7 @@ interface SecretInputProps {
 
 export function SecretInput({
   ariaLabel,
+  disabled = false,
   onChange,
   placeholder,
   tabIndex,
@@ -29,6 +31,7 @@ export function SecretInput({
       <input
         aria-label={ariaLabel}
         className="settings-list-control"
+        disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
         onCopy={preventClipboard}
         onCut={preventClipboard}
@@ -43,6 +46,7 @@ export function SecretInput({
         }
         aria-pressed={isVisible}
         className="configuration-secret-input__toggle"
+        disabled={disabled}
         onClick={() => setVisible((visible) => !visible)}
         tabIndex={tabIndex}
         type="button"

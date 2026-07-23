@@ -112,6 +112,15 @@ const bundledDocumentsSkill: SkillDescriptor = {
   trust: 'application'
 }
 
+const bundledImageGenerationSkill: SkillDescriptor = {
+  ...bundledDocumentsSkill,
+  description: 'Generate or edit image artifacts.',
+  id: 'bundled:application:image-generation',
+  location: 'skills/image-generation/SKILL.md',
+  name: 'Image Generation',
+  source: { id: 'application:image-generation', kind: 'bundled' }
+}
+
 const installedAuditorSkill: SkillDescriptor = {
   activationScope: 'run',
   description: 'Audits installed dependencies against repository evidence.',
@@ -190,7 +199,9 @@ beforeEach(() => {
   draftChangeSpy.mockReset()
   listSkillsSpy.mockReset()
   listSkillsSpy.mockImplementation(async (projectId: string | null) => {
-    if (projectId === null) return catalog([bundledDocumentsSkill, installedAuditorSkill])
+    if (projectId === null) {
+      return catalog([bundledDocumentsSkill, bundledImageGenerationSkill, installedAuditorSkill])
+    }
     return projectId === 'project-b' ? catalog([projectBSkill, bundledDocumentsSkill]) : catalog()
   })
   submitSpy.mockReset()
@@ -365,6 +376,9 @@ describe('ChatComposer Skill picker', () => {
       .toBeVisible()
     await expect
       .element(screen.getByRole('button', { name: /^Installed dependency auditor/ }))
+      .toBeVisible()
+    await expect
+      .element(screen.getByRole('button', { name: /^skills\.bundled\.imageGeneration\.name/ }))
       .toBeVisible()
     expect(screen.container.textContent).not.toContain('chat.skillProjectRequired')
 

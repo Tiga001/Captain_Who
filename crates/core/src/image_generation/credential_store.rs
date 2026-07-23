@@ -5,6 +5,10 @@
 //! application storage; the referenced secret remains in the operating system's
 //! native credential store.
 
+mod development_file;
+#[cfg(target_os = "macos")]
+mod macos_keychain;
+
 use std::{
     collections::HashMap,
     error::Error,
@@ -16,29 +20,84 @@ use keyring::v1::{Entry, Error as KeyringError};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
+pub use development_file::DevelopmentFileCredentialStore;
+#[cfg(target_os = "macos")]
+pub use macos_keychain::NonInteractiveMacCredentialStore;
+
 /// Stable service name used for image-provider credentials in the native store.
 ///
 /// The per-credential username is an opaque [`CredentialReference`]. Keeping the
 /// service stable lets configuration records rotate references without changing
 /// the native-store namespace.
-pub const IMAGE_GENERATION_CREDENTIAL_SERVICE: &str = "com.mycopilot.next.image-generation";
+pub const IMAGE_GENERATION_CREDENTIAL_SERVICE: &str = "com.mycopilot.next.image-generation.v2";
 
 const OPAQUE_REFERENCE_PREFIX: &str = "image-generation/api-key/";
 const OPAQUE_REFERENCE_UUID_BYTES: usize = 32;
 const MAX_CREDENTIAL_SERVICE_BYTES: usize = 512;
 
+/// Identifies the credential backend that owns a persisted reference.
+///
+/// The tag is part of every new reference. This makes backend migration fail
+/// closed: a store never probes another backend (especially a legacy macOS
+/// Keychain item) merely because SQLite still contains an older reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CredentialStoreBackend {
+    /// Unversioned references created before backend ownership was explicit.
+    LegacySystemV1,
+    /// Native OS credential storage used outside the dedicated macOS adapter.
+    SystemV2,
+    /// Non-interactive macOS Keychain adapter with a v2 service namespace.
+    MacKeychainV2,
+    /// Private, durable development-only file storage.
+    DevelopmentFileV1,
+    /// Deterministic in-process storage used by tests.
+    InMemoryV1,
+}
+
+impl CredentialStoreBackend {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacySystemV1 => "legacy-system-v1",
+            Self::SystemV2 => "system-v2",
+            Self::MacKeychainV2 => "mac-keychain-v2",
+            Self::DevelopmentFileV1 => "development-file-v1",
+            Self::InMemoryV1 => "memory-v1",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "system-v2" => Some(Self::SystemV2),
+            "mac-keychain-v2" => Some(Self::MacKeychainV2),
+            "development-file-v1" => Some(Self::DevelopmentFileV1),
+            "memory-v1" => Some(Self::InMemoryV1),
+            _ => None,
+        }
+    }
+}
+
 /// An opaque, non-secret identifier for one credential-store entry.
 ///
 /// This value is safe to persist. It never contains the credential itself.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct CredentialReference(String);
+pub struct CredentialReference {
+    value: String,
+    backend: CredentialStoreBackend,
+    opaque_id: String,
+}
 
 impl CredentialReference {
     /// Validates a reference loaded from persistent configuration.
     pub fn parse(value: impl Into<String>) -> Result<Self, CredentialStoreError> {
         let value = value.into();
-        validate_reference(&value)?;
-        Ok(Self(value))
+        let (backend, opaque_id) = parse_reference(&value)?;
+        let opaque_id = opaque_id.to_owned();
+        Ok(Self {
+            value,
+            backend,
+            opaque_id,
+        })
     }
 
     /// Creates a fresh opaque reference suitable for credential rotation.
@@ -48,16 +107,35 @@ impl CredentialReference {
     /// reference. Failed configuration commits can safely delete the new reference.
     #[must_use]
     pub fn new_opaque() -> Self {
-        Self(format!(
-            "{OPAQUE_REFERENCE_PREFIX}{}",
-            Uuid::new_v4().simple()
-        ))
+        Self::new_for_backend(CredentialStoreBackend::InMemoryV1)
+    }
+
+    /// Creates a new reference owned by `backend`.
+    #[must_use]
+    pub fn new_for_backend(backend: CredentialStoreBackend) -> Self {
+        debug_assert_ne!(backend, CredentialStoreBackend::LegacySystemV1);
+        let opaque_id = Uuid::new_v4().simple().to_string();
+        Self {
+            value: format!("{OPAQUE_REFERENCE_PREFIX}{}/{opaque_id}", backend.as_str()),
+            backend,
+            opaque_id,
+        }
     }
 
     /// Returns the non-secret reference value for persistence or keyring lookup.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.value
+    }
+
+    /// Returns the backend that owns this reference.
+    #[must_use]
+    pub const fn backend(&self) -> CredentialStoreBackend {
+        self.backend
+    }
+
+    pub(crate) fn opaque_id(&self) -> &str {
+        &self.opaque_id
     }
 }
 
@@ -65,7 +143,7 @@ impl fmt::Debug for CredentialReference {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_tuple("CredentialReference")
-            .field(&self.0)
+            .field(&self.value)
             .finish()
     }
 }
@@ -210,6 +288,19 @@ impl Error for CredentialStoreError {}
 /// `replace` has create-or-overwrite semantics. `get` returns `Ok(None)` for a
 /// missing entry. `delete` is idempotent and reports whether an entry existed.
 pub trait CredentialStore: Send + Sync {
+    /// Returns the backend identity embedded in references created by this store.
+    fn backend(&self) -> CredentialStoreBackend;
+
+    /// Creates a fresh reference owned by this store.
+    fn new_reference(&self) -> CredentialReference {
+        CredentialReference::new_for_backend(self.backend())
+    }
+
+    /// Reports whether this store owns `reference`.
+    fn supports_reference(&self, reference: &CredentialReference) -> bool {
+        reference.backend() == self.backend()
+    }
+
     fn replace(
         &self,
         reference: &CredentialReference,
@@ -269,11 +360,16 @@ impl fmt::Debug for SystemCredentialStore {
 }
 
 impl CredentialStore for SystemCredentialStore {
+    fn backend(&self) -> CredentialStoreBackend {
+        CredentialStoreBackend::SystemV2
+    }
+
     fn replace(
         &self,
         reference: &CredentialReference,
         secret: CredentialSecret,
     ) -> Result<(), CredentialStoreError> {
+        ensure_supported_reference(self, reference)?;
         let _guard = lock_system_credentials();
         let entry = self.entry(reference)?;
         entry
@@ -285,6 +381,7 @@ impl CredentialStore for SystemCredentialStore {
         &self,
         reference: &CredentialReference,
     ) -> Result<Option<CredentialSecret>, CredentialStoreError> {
+        ensure_supported_reference(self, reference)?;
         let _guard = lock_system_credentials();
         let entry = self.entry(reference)?;
         match entry.get_password() {
@@ -298,6 +395,7 @@ impl CredentialStore for SystemCredentialStore {
         &self,
         reference: &CredentialReference,
     ) -> Result<CredentialDeleteOutcome, CredentialStoreError> {
+        ensure_supported_reference(self, reference)?;
         let _guard = lock_system_credentials();
         let entry = self.entry(reference)?;
         match entry.delete_credential() {
@@ -324,11 +422,16 @@ impl fmt::Debug for InMemoryCredentialStore {
 }
 
 impl CredentialStore for InMemoryCredentialStore {
+    fn backend(&self) -> CredentialStoreBackend {
+        CredentialStoreBackend::InMemoryV1
+    }
+
     fn replace(
         &self,
         reference: &CredentialReference,
         secret: CredentialSecret,
     ) -> Result<(), CredentialStoreError> {
+        ensure_supported_reference(self, reference)?;
         self.lock_credentials(CredentialStoreOperation::Replace)?
             .insert(reference.clone(), secret);
         Ok(())
@@ -338,6 +441,7 @@ impl CredentialStore for InMemoryCredentialStore {
         &self,
         reference: &CredentialReference,
     ) -> Result<Option<CredentialSecret>, CredentialStoreError> {
+        ensure_supported_reference(self, reference)?;
         self.lock_credentials(CredentialStoreOperation::Get)?
             .get(reference)
             .map(|secret| CredentialSecret::new(secret.0.clone()))
@@ -348,6 +452,7 @@ impl CredentialStore for InMemoryCredentialStore {
         &self,
         reference: &CredentialReference,
     ) -> Result<CredentialDeleteOutcome, CredentialStoreError> {
+        ensure_supported_reference(self, reference)?;
         let removed = self
             .lock_credentials(CredentialStoreOperation::Delete)?
             .remove(reference);
@@ -371,16 +476,34 @@ impl InMemoryCredentialStore {
     }
 }
 
-fn validate_reference(value: &str) -> Result<(), CredentialStoreError> {
-    let Some(uuid) = value.strip_prefix(OPAQUE_REFERENCE_PREFIX) else {
+fn parse_reference(value: &str) -> Result<(CredentialStoreBackend, &str), CredentialStoreError> {
+    let Some(suffix) = value.strip_prefix(OPAQUE_REFERENCE_PREFIX) else {
         return Err(CredentialStoreError::InvalidReference);
     };
-    if uuid.len() != OPAQUE_REFERENCE_UUID_BYTES
-        || !uuid.bytes().all(|byte| byte.is_ascii_hexdigit())
+    let (backend, opaque_id) = match suffix.split_once('/') {
+        Some((backend, opaque_id)) => (
+            CredentialStoreBackend::parse(backend).ok_or(CredentialStoreError::InvalidReference)?,
+            opaque_id,
+        ),
+        None => (CredentialStoreBackend::LegacySystemV1, suffix),
+    };
+    if opaque_id.len() != OPAQUE_REFERENCE_UUID_BYTES
+        || !opaque_id.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(CredentialStoreError::InvalidReference);
     }
-    Ok(())
+    Ok((backend, opaque_id))
+}
+
+fn ensure_supported_reference(
+    store: &dyn CredentialStore,
+    reference: &CredentialReference,
+) -> Result<(), CredentialStoreError> {
+    if store.supports_reference(reference) {
+        Ok(())
+    } else {
+        Err(CredentialStoreError::InvalidReference)
+    }
 }
 
 fn validate_service_name(value: &str) -> Result<(), CredentialStoreError> {
@@ -440,6 +563,27 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.as_str().starts_with(OPAQUE_REFERENCE_PREFIX));
         assert!(CredentialReference::parse(first.as_str()).is_ok());
+    }
+
+    #[test]
+    fn references_preserve_backend_ownership_and_parse_legacy_values() {
+        for backend in [
+            CredentialStoreBackend::SystemV2,
+            CredentialStoreBackend::MacKeychainV2,
+            CredentialStoreBackend::DevelopmentFileV1,
+            CredentialStoreBackend::InMemoryV1,
+        ] {
+            let reference = CredentialReference::new_for_backend(backend);
+            let parsed = CredentialReference::parse(reference.as_str()).unwrap();
+            assert_eq!(parsed.backend(), backend);
+            assert_eq!(parsed, reference);
+        }
+
+        let legacy =
+            CredentialReference::parse("image-generation/api-key/0123456789abcdef0123456789abcdef")
+                .unwrap();
+        assert_eq!(legacy.backend(), CredentialStoreBackend::LegacySystemV1);
+        assert!(!InMemoryCredentialStore::default().supports_reference(&legacy));
     }
 
     #[test]

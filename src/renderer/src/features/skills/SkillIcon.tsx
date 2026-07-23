@@ -1,6 +1,6 @@
-// Renderer Skill icon presentation: maps exact bundled Office identities to bundled MIT icons.
+// Renderer Skill icon presentation: maps exact bundled application identities to stable icons.
 import type { SkillSourceDescriptor } from '@mycopilot/protocol'
-import { WandSparkles } from 'lucide-react'
+import { Images, WandSparkles } from 'lucide-react'
 import { OfficeFileIcon, type OfficeFileKind } from '../../components/files/OfficeFileIcon'
 import {
   getBundledSkillPresentationKey,
@@ -14,7 +14,7 @@ interface SkillIconProps {
 }
 
 const OFFICE_SKILL_KIND_BY_PRESENTATION_KEY: Readonly<
-  Record<BundledSkillPresentationKey, OfficeFileKind | undefined>
+  Partial<Record<BundledSkillPresentationKey, OfficeFileKind>>
 > = {
   documents: 'document',
   presentations: 'presentation',
@@ -28,11 +28,18 @@ function getOfficeSkillKind(skillId: string, source?: SkillSourceDescriptor) {
 
 export function SkillIcon({ className, skillId, source }: SkillIconProps) {
   // Exact protocol identities keep icon selection stable across localization and renamed displays.
+  const presentationKey = getBundledSkillPresentationKey(skillId, source)
   const officeKind = getOfficeSkillKind(skillId, source)
 
   return (
     <span className={className} data-office-kind={officeKind} aria-hidden="true">
-      {officeKind ? <OfficeFileIcon kind={officeKind} /> : <WandSparkles />}
+      {officeKind ? (
+        <OfficeFileIcon kind={officeKind} />
+      ) : presentationKey === 'imageGeneration' ? (
+        <Images />
+      ) : (
+        <WandSparkles />
+      )}
     </span>
   )
 }

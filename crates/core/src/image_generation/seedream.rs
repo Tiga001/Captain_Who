@@ -9,12 +9,18 @@ use super::types::{
     ImageGenerationResult, ImageGenerationResultStatus, ImageGenerationUrlOutput,
     PreparedImageGenerationRequest,
 };
+use super::{ImageArtifactHostRule, ImageArtifactTransferPolicy};
 use futures_util::future::BoxFuture;
 use reqwest::Url;
 use serde_json::{json, Map, Value};
 
 const SEEDREAM_SEQUENTIAL_IMAGE_GENERATION: &str = "disabled";
 const SEEDREAM_RESPONSE_FORMAT: &str = "url";
+const SEEDREAM_TRUSTED_FAKE_IP_ARTIFACT_HOSTS: &[ImageArtifactHostRule] =
+    &[ImageArtifactHostRule::ExactHttpsOrigin {
+        host: "ark-content-generation-v2-cn-beijing.tos-cn-beijing.volces.com",
+        port: 443,
+    }];
 
 /// SmartML adapter for the Seedream-compatible `/images/generations` contract.
 ///
@@ -101,6 +107,23 @@ impl SmartMlSeedreamProvider {
 impl ImageGenerationProvider for SmartMlSeedreamProvider {
     fn profile(&self) -> &ImageGenerationProviderProfile {
         &self.profile
+    }
+
+    fn artifact_transfer_policy(&self) -> ImageArtifactTransferPolicy {
+        // The configured endpoint is an explicit user trust decision. Known Adapter CDN origins
+        // are separately reviewed. Any other signed CDN URL must pass independent public-DNS
+        // verification in the Artifact layer instead of receiving a direct Fake-IP exception.
+        ImageArtifactTransferPolicy::with_trusted_fake_ip_https_hosts(
+            SEEDREAM_TRUSTED_FAKE_IP_ARTIFACT_HOSTS,
+        )
+        .with_configured_endpoint_https_origin(
+            self.endpoint
+                .host_str()
+                .expect("validated image-generation endpoint has a host"),
+            self.endpoint
+                .port_or_known_default()
+                .expect("validated HTTPS endpoint has a port"),
+        )
     }
 
     fn prepare(
@@ -472,6 +495,23 @@ mod tests {
             .is_some_and(|value| value.starts_with("sha256:")));
         assert!(format!("{:?}", result.outputs[0]).contains("[REDACTED]"));
         assert!(!format!("{:?}", result.outputs[0]).contains("signature"));
+    }
+
+    #[test]
+    fn adapter_grants_fake_ip_compatibility_only_to_configured_and_reviewed_origins() {
+        let policy = provider(false).artifact_transfer_policy();
+
+        assert!(policy.permits_fake_ip_for_origin(
+            "ark-content-generation-v2-cn-beijing.tos-cn-beijing.volces.com",
+            443,
+        ));
+        assert!(policy.permits_fake_ip_for_origin("zju.smartml.cn", 443));
+        assert!(!policy.permits_fake_ip_for_origin("zju.smartml.cn", 8443));
+        assert!(!policy.permits_fake_ip_for_origin("images.another-provider.com", 443));
+        assert!(!policy.permits_fake_ip_for_origin("localhost", 443));
+        assert!(!policy.permits_fake_ip_for_origin("images.local", 443));
+        assert!(!policy.permits_fake_ip_for_origin("intranet", 443));
+        assert!(!policy.permits_fake_ip_for_origin("198.18.0.8", 443));
     }
 
     #[test]

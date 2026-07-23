@@ -315,7 +315,7 @@ impl ToolRegistry {
                 call_id: call.id.clone(),
                 tool: call.tool.clone(),
                 ok: false,
-                result: structured_error_result(&error),
+                result: tool.error_result(&error),
                 error: Some(error.to_string()),
             },
         }
@@ -427,6 +427,14 @@ pub(crate) trait AgentTool: Send + Sync {
     fn definition(&self) -> AgentToolDefinition;
     fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value>;
     fn permission_policy(&self) -> AgentToolPermissionPolicy;
+
+    /// Projects a structured execution error into the canonical ToolResult payload.
+    ///
+    /// Most tools use the shared diagnostic envelope. A tool with its own closed terminal result
+    /// schema may override this hook so generic metadata cannot invalidate that schema.
+    fn error_result(&self, error: &AgentError) -> Option<Value> {
+        structured_error_result(error)
+    }
 
     fn cancellation_settlement(&self) -> AgentToolCancellationSettlement {
         AgentToolCancellationSettlement::Interruptible

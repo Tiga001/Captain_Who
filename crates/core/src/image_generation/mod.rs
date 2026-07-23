@@ -14,13 +14,13 @@ mod seedream;
 mod types;
 
 pub use artifact::{
-    ImageArtifactError, ImageArtifactErrorCode, ImageArtifactFormat, ImageArtifactNetworkPolicy,
-    ImageArtifactPublicationStatus, ImageArtifactStoreConfig, ImageGenerationArtifactCandidate,
-    ImageGenerationArtifactStore, ManagedImageGenerationArtifactStore, PreparedImageArtifact,
-    PublishedImageArtifact, DEFAULT_IMAGE_ARTIFACT_CONNECT_TIMEOUT,
-    DEFAULT_IMAGE_ARTIFACT_DNS_TIMEOUT, DEFAULT_IMAGE_ARTIFACT_DOWNLOAD_TIMEOUT,
-    DEFAULT_IMAGE_ARTIFACT_MAX_BYTES, DEFAULT_IMAGE_ARTIFACT_MAX_REDIRECTS,
-    MAX_IMAGE_ARTIFACT_DIMENSION, MAX_IMAGE_ARTIFACT_PIXELS,
+    ImageArtifactError, ImageArtifactErrorCode, ImageArtifactFormat, ImageArtifactHostRule,
+    ImageArtifactNetworkPolicy, ImageArtifactPublicationStatus, ImageArtifactStoreConfig,
+    ImageArtifactTransferPolicy, ImageGenerationArtifactCandidate, ImageGenerationArtifactStore,
+    ManagedImageGenerationArtifactStore, PreparedImageArtifact, PublishedImageArtifact,
+    DEFAULT_IMAGE_ARTIFACT_CONNECT_TIMEOUT, DEFAULT_IMAGE_ARTIFACT_DNS_TIMEOUT,
+    DEFAULT_IMAGE_ARTIFACT_DOWNLOAD_TIMEOUT, DEFAULT_IMAGE_ARTIFACT_MAX_BYTES,
+    DEFAULT_IMAGE_ARTIFACT_MAX_REDIRECTS, MAX_IMAGE_ARTIFACT_DIMENSION, MAX_IMAGE_ARTIFACT_PIXELS,
 };
 pub use configuration::{
     CredentialReconciliationReport, ImageGenerationConfiguration,
@@ -29,9 +29,12 @@ pub use configuration::{
     ImageGenerationConfigurationUpdate, ImageGenerationCredentialMutation,
     ImageGenerationCredentialStatus, ImageGenerationReadiness,
 };
+#[cfg(target_os = "macos")]
+pub use credential_store::NonInteractiveMacCredentialStore;
 pub use credential_store::{
     CredentialDeleteOutcome, CredentialReference, CredentialSecret, CredentialStore,
-    CredentialStoreError, CredentialStoreOperation, InMemoryCredentialStore, SystemCredentialStore,
+    CredentialStoreBackend, CredentialStoreError, CredentialStoreOperation,
+    DevelopmentFileCredentialStore, InMemoryCredentialStore, SystemCredentialStore,
     IMAGE_GENERATION_CREDENTIAL_SERVICE,
 };
 pub use execution::{

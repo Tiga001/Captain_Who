@@ -23,10 +23,17 @@ use image_generation_dispatcher::{
 use mycopilot_core::git_review::{GitReviewFileMutationAction, GitReviewScope, GitReviewService};
 #[cfg(test)]
 use mycopilot_core::image_generation::InMemoryCredentialStore;
+#[cfg(not(target_os = "macos"))]
+use mycopilot_core::image_generation::SystemCredentialStore;
 use mycopilot_core::image_generation::{
-    ImageArtifactStoreConfig, ImageGenerationAdapterRegistry, ImageGenerationConfigurationService,
-    ImageGenerationExecutionLimits, ImageGenerationExecutionService,
-    ManagedImageGenerationArtifactStore, SmartMlSeedreamProviderFactory, SystemCredentialStore,
+    CredentialStore, ImageArtifactStoreConfig, ImageGenerationAdapterRegistry,
+    ImageGenerationConfigurationService, ImageGenerationExecutionLimits,
+    ImageGenerationExecutionService, ManagedImageGenerationArtifactStore,
+    SmartMlSeedreamProviderFactory,
+};
+#[cfg(target_os = "macos")]
+use mycopilot_core::image_generation::{
+    DevelopmentFileCredentialStore, NonInteractiveMacCredentialStore,
 };
 use mycopilot_core::skills::{
     GitHubAcquisitionTransport, GitHubInstallationSourceResolver, GitHubSkillAcquirer,

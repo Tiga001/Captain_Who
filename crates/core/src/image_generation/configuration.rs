@@ -276,6 +276,9 @@ impl ImageGenerationConfigurationService {
                     CredentialReference::parse(value)
                         .map_err(|_| ImageGenerationConfigurationError::InvalidConfiguration)
                 })?;
+            if !self.credentials.supports_reference(&reference) {
+                return Err(ImageGenerationConfigurationError::MissingCredential);
+            }
             let credential = self
                 .credentials
                 .get(&reference)
@@ -445,9 +448,11 @@ impl ImageGenerationConfigurationService {
             }
             let reference = CredentialReference::parse(staged.credential_ref.clone())
                 .map_err(|_| ImageGenerationConfigurationError::InvalidConfiguration)?;
-            self.credentials
-                .delete(&reference)
-                .map_err(map_credential_error)?;
+            if self.credentials.supports_reference(&reference) {
+                self.credentials
+                    .delete(&reference)
+                    .map_err(map_credential_error)?;
+            }
             self.storage
                 .complete_image_generation_credential_staging(&staged.credential_ref)
                 .map_err(|_| ImageGenerationConfigurationError::StorageUnavailable)?;
@@ -464,7 +469,7 @@ impl ImageGenerationConfigurationService {
         update: ImageGenerationConfigurationUpdate,
         secret: CredentialSecret,
     ) -> Result<ImageGenerationConfigurationMutationResult, ImageGenerationConfigurationError> {
-        let reference = CredentialReference::new_opaque();
+        let reference = self.credentials.new_reference();
         match self
             .storage
             .stage_image_generation_credential(
@@ -651,6 +656,9 @@ impl ImageGenerationConfigurationService {
         };
         let reference = CredentialReference::parse(reference)
             .map_err(|_| ImageGenerationConfigurationError::InvalidConfiguration)?;
+        if !self.credentials.supports_reference(&reference) {
+            return Ok(ImageGenerationCredentialStatus::Missing);
+        }
         self.credentials
             .get(&reference)
             .map(|secret| {
@@ -676,6 +684,9 @@ impl ImageGenerationConfigurationService {
         };
         let reference = CredentialReference::parse(reference)
             .map_err(|_| ImageGenerationConfigurationError::InvalidConfiguration)?;
+        if !self.credentials.supports_reference(&reference) {
+            return Ok(ImageGenerationCredentialStatus::Missing);
+        }
         Ok(match self.credentials.get(&reference) {
             Ok(Some(_)) => ImageGenerationCredentialStatus::Configured,
             Ok(None) => ImageGenerationCredentialStatus::Missing,
@@ -694,9 +705,11 @@ impl ImageGenerationConfigurationService {
         for value in cleanup {
             let reference = CredentialReference::parse(value.clone())
                 .map_err(|_| ImageGenerationConfigurationError::InvalidConfiguration)?;
-            self.credentials
-                .delete(&reference)
-                .map_err(map_credential_error)?;
+            if self.credentials.supports_reference(&reference) {
+                self.credentials
+                    .delete(&reference)
+                    .map_err(map_credential_error)?;
+            }
             self.storage
                 .complete_image_generation_credential_cleanup(&value)
                 .map_err(|_| ImageGenerationConfigurationError::StorageUnavailable)?;
@@ -916,9 +929,10 @@ fn map_credential_error(_: CredentialStoreError) -> ImageGenerationConfiguration
 mod tests {
     use super::*;
     use crate::image_generation::credential_store::{
-        CredentialDeleteOutcome, CredentialStoreOperation, InMemoryCredentialStore,
+        CredentialDeleteOutcome, CredentialStoreBackend, CredentialStoreOperation,
+        InMemoryCredentialStore,
     };
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::tempdir;
 
     struct UnavailableCredentialStore;
@@ -934,7 +948,18 @@ mod tests {
         delegate: InMemoryCredentialStore,
     }
 
+    #[derive(Default)]
+    struct TrackingCredentialStore {
+        delegate: InMemoryCredentialStore,
+        foreign_gets: AtomicUsize,
+        foreign_deletes: AtomicUsize,
+    }
+
     impl CredentialStore for UnavailableCredentialStore {
+        fn backend(&self) -> CredentialStoreBackend {
+            CredentialStoreBackend::InMemoryV1
+        }
+
         fn replace(
             &self,
             _reference: &CredentialReference,
@@ -965,6 +990,10 @@ mod tests {
     }
 
     impl CredentialStore for UnreadableCredentialStore {
+        fn backend(&self) -> CredentialStoreBackend {
+            CredentialStoreBackend::InMemoryV1
+        }
+
         fn replace(
             &self,
             reference: &CredentialReference,
@@ -991,6 +1020,10 @@ mod tests {
     }
 
     impl CredentialStore for RotatingCredentialStore {
+        fn backend(&self) -> CredentialStoreBackend {
+            CredentialStoreBackend::InMemoryV1
+        }
+
         fn replace(
             &self,
             reference: &CredentialReference,
@@ -1032,6 +1065,42 @@ mod tests {
             &self,
             reference: &CredentialReference,
         ) -> Result<CredentialDeleteOutcome, CredentialStoreError> {
+            self.delegate.delete(reference)
+        }
+    }
+
+    impl CredentialStore for TrackingCredentialStore {
+        fn backend(&self) -> CredentialStoreBackend {
+            CredentialStoreBackend::InMemoryV1
+        }
+
+        fn replace(
+            &self,
+            reference: &CredentialReference,
+            secret: CredentialSecret,
+        ) -> Result<(), CredentialStoreError> {
+            self.delegate.replace(reference, secret)
+        }
+
+        fn get(
+            &self,
+            reference: &CredentialReference,
+        ) -> Result<Option<CredentialSecret>, CredentialStoreError> {
+            if !self.supports_reference(reference) {
+                self.foreign_gets.fetch_add(1, Ordering::SeqCst);
+                return Err(CredentialStoreError::InvalidReference);
+            }
+            self.delegate.get(reference)
+        }
+
+        fn delete(
+            &self,
+            reference: &CredentialReference,
+        ) -> Result<CredentialDeleteOutcome, CredentialStoreError> {
+            if !self.supports_reference(reference) {
+                self.foreign_deletes.fetch_add(1, Ordering::SeqCst);
+                return Err(CredentialStoreError::InvalidReference);
+            }
             self.delegate.delete(reference)
         }
     }
@@ -1345,6 +1414,85 @@ mod tests {
             .list_image_generation_credential_staging()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn legacy_references_never_reach_the_active_backend_during_migration() {
+        let directory = tempdir().unwrap();
+        let storage = Arc::new(StorageService::open(&directory.path().join("app.db")).unwrap());
+        let legacy_active = "image-generation/api-key/0123456789abcdef0123456789abcdef".to_string();
+        let legacy_orphan = "image-generation/api-key/fedcba9876543210fedcba9876543210".to_string();
+        let mut record = default_record();
+        record.endpoint_url = "https://example.com/images/generations".to_string();
+        record.model_id = "seedream-model".to_string();
+        record.credential_ref = Some(legacy_active);
+        let published = storage
+            .compare_and_set_image_generation_profile(
+                DEFAULT_IMAGE_GENERATION_PROFILE_ID,
+                0,
+                &record,
+            )
+            .unwrap();
+        let ImageGenerationProfileCompareAndSetOutcome::Updated(record) = published else {
+            panic!("profile must be published");
+        };
+        storage
+            .stage_image_generation_credential(
+                DEFAULT_IMAGE_GENERATION_PROFILE_ID,
+                record.generation,
+                &legacy_orphan,
+            )
+            .unwrap();
+        let credentials = Arc::new(TrackingCredentialStore::default());
+        let service = ImageGenerationConfigurationService::new(
+            Arc::clone(&storage),
+            Arc::clone(&credentials) as Arc<dyn CredentialStore>,
+        );
+
+        let snapshot = service.get_configuration().unwrap();
+        assert_eq!(
+            snapshot.credential_status,
+            ImageGenerationCredentialStatus::Missing
+        );
+        let report = service.reconcile_credentials().unwrap();
+        assert_eq!(report.removed_orphaned_credentials, 1);
+        assert!(storage
+            .list_image_generation_credential_staging()
+            .unwrap()
+            .is_empty());
+
+        let mut clear = update(&snapshot.revision, "unused");
+        clear.credential_mutation = ImageGenerationCredentialMutation::Clear;
+        let cleared = service.update_configuration(clear).unwrap().configuration;
+        assert_eq!(
+            cleared.credential_status,
+            ImageGenerationCredentialStatus::Missing
+        );
+        assert!(storage
+            .list_image_generation_credential_cleanup()
+            .unwrap()
+            .is_empty());
+
+        let result = service
+            .update_configuration(update(&cleared.revision, "replacement-secret"))
+            .unwrap();
+        assert_eq!(
+            result.configuration.credential_status,
+            ImageGenerationCredentialStatus::Configured
+        );
+        let reference = CredentialReference::parse(
+            service
+                .load_record()
+                .unwrap()
+                .unwrap()
+                .credential_ref
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reference.backend(), CredentialStoreBackend::InMemoryV1);
+        assert!(credentials.delegate.get(&reference).unwrap().is_some());
+        assert_eq!(credentials.foreign_gets.load(Ordering::SeqCst), 0);
+        assert_eq!(credentials.foreign_deletes.load(Ordering::SeqCst), 0);
     }
 
     #[test]

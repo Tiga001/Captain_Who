@@ -3,7 +3,8 @@ import type { SkillSourceDescriptor } from '@mycopilot/protocol'
 import type { Translate } from '../../config/translationFormat'
 import type { TranslationKey } from '../../config/frontendTranslations'
 
-export type BundledSkillPresentationKey = 'documents' | 'presentations' | 'spreadsheets'
+export type BundledSkillPresentationKey =
+  'documents' | 'imageGeneration' | 'presentations' | 'spreadsheets'
 
 interface SkillPresentationInput {
   description?: string
@@ -19,12 +20,14 @@ interface SkillPresentation {
 
 const BUNDLED_SKILL_KEY_BY_ID: Readonly<Record<string, BundledSkillPresentationKey>> = {
   'bundled:application:documents': 'documents',
+  'bundled:application:image-generation': 'imageGeneration',
   'bundled:application:presentations': 'presentations',
   'bundled:application:spreadsheets': 'spreadsheets'
 }
 
 const BUNDLED_SKILL_KEY_BY_SOURCE_ID: Readonly<Record<string, BundledSkillPresentationKey>> = {
   'application:documents': 'documents',
+  'application:image-generation': 'imageGeneration',
   'application:presentations': 'presentations',
   'application:spreadsheets': 'spreadsheets'
 }
@@ -35,6 +38,10 @@ const BUNDLED_SKILL_TRANSLATIONS: Readonly<
   documents: {
     description: 'skills.bundled.documents.description',
     name: 'skills.bundled.documents.name'
+  },
+  imageGeneration: {
+    description: 'skills.bundled.imageGeneration.description',
+    name: 'skills.bundled.imageGeneration.name'
   },
   presentations: {
     description: 'skills.bundled.presentations.description',

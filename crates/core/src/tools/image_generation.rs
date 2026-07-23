@@ -5,6 +5,7 @@ use super::{
 use crate::conversation_trace::canonical_tool_result_for_context;
 use crate::image_generation::{
     ImageGenerationDataUrlInput, ImageGenerationEditRequest, ImageGenerationExecutionId,
+    ImageGenerationExecutionPhase, ImageGenerationExecutionReceipt,
     ImageGenerationExecutionRequest, ImageGenerationExecutionResult,
     ImageGenerationExecutionService, ImageGenerationExecutionServiceError,
     ImageGenerationExecutionServiceErrorCode, ImageGenerationExecutionStatus,
@@ -24,6 +25,7 @@ use image::{ImageFormat, ImageReader, Limits};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
@@ -107,16 +109,47 @@ impl ImageGenerationToolExecutor for ImageGenerationExecutionService {
 
 pub(super) struct ImageGenerationTool {
     executor: Arc<dyn ImageGenerationToolExecutor>,
+    retry_guard: ImageGenerationRetryGuard,
+}
+
+#[derive(Default)]
+struct ImageGenerationRetryGuard {
+    // Tool registries are constructed per Agent run. Retain only request digests, never prompts or
+    // input paths, and require a fresh user turn before an identical non-retryable request can
+    // create another provider execution.
+    non_retryable_request_fingerprints: Mutex<HashSet<String>>,
+}
+
+impl ImageGenerationRetryGuard {
+    fn blocks(&self, request_fingerprint: &str) -> bool {
+        self.non_retryable_request_fingerprints
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(request_fingerprint)
+    }
+
+    fn block(&self, request_fingerprint: String) {
+        self.non_retryable_request_fingerprints
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(request_fingerprint);
+    }
 }
 
 impl ImageGenerationTool {
     pub(super) fn new(executor: Arc<ImageGenerationExecutionService>) -> Self {
-        Self { executor }
+        Self {
+            executor,
+            retry_guard: ImageGenerationRetryGuard::default(),
+        }
     }
 
     #[cfg(test)]
     fn with_executor(executor: Arc<dyn ImageGenerationToolExecutor>) -> Self {
-        Self { executor }
+        Self {
+            executor,
+            retry_guard: ImageGenerationRetryGuard::default(),
+        }
     }
 }
 
@@ -154,16 +187,34 @@ impl AgentTool for ImageGenerationTool {
             execution_id: execution_id.clone(),
             request,
         };
+        let request_fingerprint = tool_request_fingerprint(&request.request);
+        if self.retry_guard.blocks(&request_fingerprint) {
+            return Err(duplicate_retry_suppressed(
+                operation,
+                &args.reason,
+                execution_id.as_str(),
+            ));
+        }
         let cancellation = context.cancellation_token();
+        let failure_fingerprint = request_fingerprint.clone();
         let result = block_on_tool_future(async {
             self.executor
                 .execute(request, cancellation)
                 .await
                 .map_err(|error| {
+                    if service_error_requires_new_user_intent(&error) {
+                        self.retry_guard.block(failure_fingerprint);
+                    }
                     service_error(operation, &args.reason, execution_id.as_str(), error)
                 })
         })?;
-        execution_result(operation, &args.reason, execution_id.as_str(), result)
+        let generation_reached_terminal_boundary =
+            receipt_requires_new_user_intent(&result.receipt);
+        let outcome = execution_result(operation, &args.reason, execution_id.as_str(), result);
+        if outcome.is_err() && generation_reached_terminal_boundary {
+            self.retry_guard.block(request_fingerprint);
+        }
+        outcome
     }
 
     fn permission_policy(&self) -> AgentToolPermissionPolicy {
@@ -171,6 +222,10 @@ impl AgentTool for ImageGenerationTool {
         // the application-managed immutable Artifact store, not to the user's filesystem, so this
         // tool deliberately does not inherit file-write or command permissions.
         AgentToolPermissionPolicy::Default
+    }
+
+    fn error_result(&self, error: &AgentError) -> Option<Value> {
+        image_generation_error_result(error)
     }
 
     fn cancellation_settlement(&self) -> AgentToolCancellationSettlement {
@@ -222,6 +277,124 @@ impl AgentTool for ImageGenerationTool {
     fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         canonical_tool_result_for_context(result)
     }
+}
+
+fn tool_request_fingerprint(request: &ImageGenerationRequest) -> String {
+    let mut fingerprint = Sha256::new();
+    fingerprint.update(b"mycopilot.image-generation.tool-request.v1\0");
+    match request {
+        ImageGenerationRequest::Generate(request) => {
+            update_fingerprint_part(&mut fingerprint, b"generate");
+            update_fingerprint_part(&mut fingerprint, request.prompt.trim().as_bytes());
+            update_optional_size_preset(&mut fingerprint, request.size_preset);
+        }
+        ImageGenerationRequest::Edit(request) => {
+            update_fingerprint_part(&mut fingerprint, b"edit");
+            update_fingerprint_part(&mut fingerprint, request.prompt.trim().as_bytes());
+            update_optional_size_preset(&mut fingerprint, request.size_preset);
+            for input in &request.inputs {
+                update_fingerprint_part(&mut fingerprint, input.sha256().as_bytes());
+            }
+        }
+        ImageGenerationRequest::Status => {
+            update_fingerprint_part(&mut fingerprint, b"status");
+        }
+    }
+    format!("sha256:{:x}", fingerprint.finalize())
+}
+
+fn update_optional_size_preset(
+    fingerprint: &mut Sha256,
+    size_preset: Option<ImageGenerationSizePreset>,
+) {
+    update_fingerprint_part(
+        fingerprint,
+        size_preset
+            .map(ImageGenerationSizePreset::as_provider_value)
+            .unwrap_or("provider-default")
+            .as_bytes(),
+    );
+}
+
+fn update_fingerprint_part(fingerprint: &mut Sha256, value: &[u8]) {
+    fingerprint.update((value.len() as u64).to_be_bytes());
+    fingerprint.update(value);
+}
+
+fn service_error_requires_new_user_intent(error: &ImageGenerationExecutionServiceError) -> bool {
+    !error.retryable
+}
+
+fn receipt_requires_new_user_intent(receipt: &ImageGenerationExecutionReceipt) -> bool {
+    if receipt.status == ImageGenerationExecutionStatus::Succeeded {
+        return true;
+    }
+    receipt
+        .error
+        .as_ref()
+        .is_some_and(|failure| !failure.retryable)
+        || matches!(
+            receipt.status,
+            ImageGenerationExecutionStatus::OutcomeIndeterminate
+                | ImageGenerationExecutionStatus::CommitIndeterminate
+        )
+}
+
+fn duplicate_retry_suppressed(
+    operation: ImageGenerationOperation,
+    reason: &str,
+    execution_id: &str,
+) -> AgentError {
+    AgentError::structured(
+        "image_generation.duplicate_retry_suppressed",
+        "The same image request already ended with a non-retryable result in this Agent run. A duplicate generation was suppressed.",
+        json!({
+            "type": "image_generation_preflight",
+            "status": ImageGenerationExecutionStatus::Failed,
+            "operation": operation_name(operation),
+            "reason": reason,
+            "executionId": execution_id,
+            "code": "duplicateRetrySuppressed",
+            "phase": ImageGenerationExecutionPhase::Admission,
+            "message": "A duplicate image generation was suppressed because the previous result was not retryable.",
+            "recovery": "waitForNewUserRequest",
+            "retryable": false,
+            "generationMayHaveSucceeded": false,
+            "providerSucceeded": false,
+            "artifactCommitMayHaveSucceeded": false,
+        }),
+    )
+}
+
+fn image_generation_error_result(error: &AgentError) -> Option<Value> {
+    let details = error.details()?.clone();
+    if is_terminal_image_generation_result(&details) {
+        Some(details)
+    } else {
+        super::structured_error_result(error)
+    }
+}
+
+fn is_terminal_image_generation_result(value: &Value) -> bool {
+    let Ok(contract) = serde_json::from_value::<AgentImageGenerationResult>(value.clone()) else {
+        return false;
+    };
+    if contract.schema_version != AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION {
+        return false;
+    }
+    let terminal_shape_is_valid = match contract.status {
+        AgentImageGenerationResultStatus::Succeeded => {
+            contract.artifact.is_some() && contract.failure.is_none()
+        }
+        AgentImageGenerationResultStatus::Failed
+        | AgentImageGenerationResultStatus::Cancelled
+        | AgentImageGenerationResultStatus::OutcomeIndeterminate
+        | AgentImageGenerationResultStatus::CommitIndeterminate => {
+            contract.artifact.is_none() && contract.failure.is_some()
+        }
+    };
+    terminal_shape_is_valid
+        && serde_json::to_value(&contract).is_ok_and(|canonical| canonical == *value)
 }
 
 fn image_generation_tool_definition() -> AgentToolDefinition {
@@ -484,7 +657,16 @@ pub fn agent_image_generation_tool_result_from_execution(
             result: Some(result),
             error: None,
         },
-        Err(error) => image_generation_error_tool_result(call_id, error),
+        // A terminal execution failure already carries the complete, closed v1 result contract.
+        // Do not decorate it with the generic top-level `errorCode`: strict protocol consumers
+        // would correctly reject that extra field and lose the authoritative failure semantics.
+        Err(error) => AgentToolResult {
+            call_id: call_id.to_string(),
+            tool: TOOL_NAME.to_string(),
+            ok: false,
+            result: error.details().cloned(),
+            error: Some(error.to_string()),
+        },
     }
 }
 
@@ -1410,6 +1592,7 @@ mod tests {
     };
     use image::ImageEncoder;
     use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     fn png() -> Vec<u8> {
@@ -1814,6 +1997,185 @@ mod tests {
                 .as_ref()
                 .map(|failure| failure.generation_may_have_succeeded),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn terminal_failure_tool_result_preserves_the_closed_v1_contract() {
+        let failure = ImageGenerationExecutionFailure {
+            code: ImageGenerationExecutionFailureCode::ArtifactFailed,
+            phase: ImageGenerationExecutionPhase::ArtifactDownload,
+            message: "image Artifact URL was rejected by the network safety policy".to_string(),
+            recovery: "Start a new execution only if another generated image is desired."
+                .to_string(),
+            retryable: false,
+            generation_may_have_succeeded: false,
+            provider_succeeded: true,
+            artifact_commit_may_have_succeeded: false,
+            provider_error_code: None,
+            artifact_error_code: Some(crate::image_generation::ImageArtifactErrorCode::DnsRejected),
+        };
+        let result = agent_image_generation_tool_result_from_execution(
+            "call-1",
+            "Create the requested image.",
+            ImageGenerationOperation::Generate,
+            "agent-v1:execution",
+            ImageGenerationExecutionResult {
+                receipt: receipt(ImageGenerationExecutionStatus::Failed, None, Some(failure)),
+                managed_artifact: None,
+            },
+        );
+
+        assert!(!result.ok);
+        let value = result
+            .result
+            .expect("terminal failure must retain its contract");
+        assert!(
+            value.get("errorCode").is_none(),
+            "generic error metadata must not alter the closed terminal schema"
+        );
+        let contract: AgentImageGenerationResult = serde_json::from_value(value).unwrap();
+        assert_eq!(contract.status, AgentImageGenerationResultStatus::Failed);
+        assert_eq!(
+            contract.failure.as_ref().map(|failure| (
+                failure.phase,
+                failure.provider_succeeded,
+                failure.retryable
+            )),
+            Some((ImageGenerationExecutionPhase::ArtifactDownload, true, false))
+        );
+    }
+
+    #[test]
+    fn live_registry_dispatch_preserves_terminal_contract_but_decorates_preflight_errors() {
+        struct TerminalFailureExecutor {
+            calls: Arc<AtomicUsize>,
+        }
+        impl ImageGenerationToolExecutor for TerminalFailureExecutor {
+            fn execute<'a>(
+                &'a self,
+                request: ImageGenerationExecutionRequest,
+                _cancellation: crate::AgentCancellationToken,
+            ) -> BoxFuture<
+                'a,
+                Result<ImageGenerationExecutionResult, ImageGenerationExecutionServiceError>,
+            > {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    let failure = ImageGenerationExecutionFailure {
+                        code: ImageGenerationExecutionFailureCode::ArtifactFailed,
+                        phase: ImageGenerationExecutionPhase::ArtifactDownload,
+                        message: "image Artifact URL was rejected by the network safety policy"
+                            .to_string(),
+                        recovery:
+                            "Start a new execution only if another generated image is desired."
+                                .to_string(),
+                        retryable: false,
+                        generation_may_have_succeeded: false,
+                        provider_succeeded: true,
+                        artifact_commit_may_have_succeeded: false,
+                        provider_error_code: None,
+                        artifact_error_code: Some(
+                            crate::image_generation::ImageArtifactErrorCode::DnsRejected,
+                        ),
+                    };
+                    let mut execution_receipt =
+                        receipt(ImageGenerationExecutionStatus::Failed, None, Some(failure));
+                    execution_receipt.execution_id = request.execution_id.as_str().to_string();
+                    Ok(ImageGenerationExecutionResult {
+                        receipt: execution_receipt,
+                        managed_artifact: None,
+                    })
+                })
+            }
+        }
+
+        let executor_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = crate::tools::ToolRegistry::defaults_with_search(None);
+        registry.register(ImageGenerationTool::with_executor(Arc::new(
+            TerminalFailureExecutor {
+                calls: Arc::clone(&executor_calls),
+            },
+        )));
+        let context = ToolExecutionContext::from_run_context(None)
+            .with_runtime_services("run-1".to_string(), None);
+        let call = AgentToolCall {
+            id: "call-1".to_string(),
+            tool: TOOL_NAME.to_string(),
+            args: json!({
+                "request": {
+                    "operation": "generate",
+                    "prompt": "Beijing skyline"
+                },
+                "reason": "Generate the requested Beijing image."
+            }),
+            approval_status: crate::protocol::AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+
+        let terminal = registry.execute(&context, &call);
+        assert!(!terminal.ok);
+        let terminal_value = terminal
+            .result
+            .expect("live terminal failure must retain its contract");
+        assert!(terminal_value.get("errorCode").is_none());
+        let mut tampered = terminal_value.clone();
+        tampered
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_string(), json!(true));
+        let tampered_error = AgentError::structured(
+            "image_generation.artifact_failed",
+            "tampered terminal contract",
+            tampered,
+        );
+        assert_eq!(
+            image_generation_error_result(&tampered_error)
+                .as_ref()
+                .and_then(|result| result.get("errorCode")),
+            Some(&json!("image_generation.artifact_failed"))
+        );
+        let contract: AgentImageGenerationResult = serde_json::from_value(terminal_value).unwrap();
+        assert_eq!(contract.status, AgentImageGenerationResultStatus::Failed);
+        assert_eq!(
+            contract.failure.map(|failure| failure.retryable),
+            Some(false)
+        );
+        assert_eq!(executor_calls.load(Ordering::SeqCst), 1);
+
+        let mut duplicate_call = call.clone();
+        duplicate_call.id = "call-duplicate".to_string();
+        duplicate_call.args["reason"] =
+            json!("Retry the same Beijing image after the previous failure.");
+        let duplicate = registry.execute(&context, &duplicate_call);
+        assert!(!duplicate.ok);
+        assert_eq!(
+            duplicate
+                .result
+                .as_ref()
+                .and_then(|result| result.get("errorCode")),
+            Some(&json!("image_generation.duplicate_retry_suppressed"))
+        );
+        assert_eq!(executor_calls.load(Ordering::SeqCst), 1);
+
+        let mut distinct_call = call.clone();
+        distinct_call.id = "call-distinct".to_string();
+        distinct_call.args["request"]["prompt"] = json!("Shanghai skyline");
+        let distinct = registry.execute(&context, &distinct_call);
+        assert!(!distinct.ok);
+        assert_eq!(executor_calls.load(Ordering::SeqCst), 2);
+
+        let mut invalid_call = call;
+        invalid_call.id = "call-2".to_string();
+        invalid_call.args["reason"] = json!("");
+        let preflight = registry.execute(&context, &invalid_call);
+        assert!(!preflight.ok);
+        assert_eq!(
+            preflight
+                .result
+                .as_ref()
+                .and_then(|result| result.get("errorCode")),
+            Some(&json!("image_generation.reason_required"))
         );
     }
 

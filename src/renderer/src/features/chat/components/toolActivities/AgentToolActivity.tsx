@@ -15,6 +15,7 @@ import { TodoUpdateToolActivity } from './TodoUpdateToolActivity'
 import { WebSearchToolActivity } from './WebSearchToolActivity'
 import { WorkspaceMapToolActivity } from './WorkspaceMapToolActivity'
 import { OfficeToolActivity } from './OfficeToolActivity'
+import { ImageGenerationToolActivity } from './ImageGenerationToolActivity'
 import { SkillScriptToolActivity } from './SkillToolActivity'
 import type { SettledToolStatus } from './toolActivityUtils'
 
@@ -162,6 +163,10 @@ export function AgentToolActivity({
 
   if (call.tool === 'skills_run_script') {
     return <SkillScriptToolActivity callId={call.id} run={run} settledStatus={settledStatus} />
+  }
+
+  if (call.tool === 'image_generation') {
+    return <ImageGenerationToolActivity call={call} result={result} settledStatus={settledStatus} />
   }
 
   return (

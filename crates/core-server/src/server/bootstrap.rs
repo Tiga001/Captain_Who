@@ -26,7 +26,7 @@ impl CoreServerBootstrap {
             })?);
         let image_generation_configuration = Arc::new(ImageGenerationConfigurationService::new(
             Arc::clone(&storage),
-            Arc::new(SystemCredentialStore::image_generation()),
+            image_generation_credential_store(&database_path)?,
         ));
         if let Err(error) = image_generation_configuration.reconcile_credentials() {
             // The service remains available so settings can expose a structured, retryable error.
@@ -373,6 +373,64 @@ pub(crate) fn image_generation_artifact_store_root(database_path: &std::path::Pa
         .parent()
         .map(|parent| parent.join("image-generation-artifacts"))
         .unwrap_or_else(|| PathBuf::from("image-generation-artifacts"))
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_CORE_SERVER_SIGNING_REQUIREMENT: &str =
+    r#"anchor apple generic and identifier "com.mycopilot.next.core-server""#;
+
+/// Selects a credential backend without ever probing a legacy Keychain item.
+///
+/// A frequently rebuilt, ad-hoc-signed helper has no stable macOS code identity. Giving that
+/// helper direct Keychain access makes the operating system ask the user to approve every new
+/// CDHash. Development and unsigned local packages therefore use a private application file
+/// store. Only an Apple-issued, fixed-identifier build is allowed to use the non-interactive
+/// production Keychain adapter.
+fn image_generation_credential_store(database_path: &Path) -> io::Result<Arc<dyn CredentialStore>> {
+    #[cfg(target_os = "macos")]
+    {
+        if macos_core_server_has_stable_signing_identity() {
+            return Ok(Arc::new(
+                NonInteractiveMacCredentialStore::image_generation(),
+            ));
+        }
+
+        DevelopmentFileCredentialStore::new(image_generation_development_credential_store_root(
+            database_path,
+        ))
+        .map(|store| Arc::new(store) as Arc<dyn CredentialStore>)
+        .map_err(|error| {
+            io::Error::other(format!(
+                "failed to initialize development image-generation credential store: {error}"
+            ))
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = database_path;
+        Ok(Arc::new(SystemCredentialStore::image_generation()))
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn image_generation_development_credential_store_root(database_path: &Path) -> PathBuf {
+    database_path
+        .parent()
+        .map(|parent| parent.join("image-generation-development-credentials-v1"))
+        .unwrap_or_else(|| PathBuf::from("image-generation-development-credentials-v1"))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_core_server_has_stable_signing_identity() -> bool {
+    use security_framework::os::macos::code_signing::{Flags, SecCode, SecRequirement};
+
+    let Ok(requirement) = MACOS_CORE_SERVER_SIGNING_REQUIREMENT.parse::<SecRequirement>() else {
+        return false;
+    };
+    SecCode::for_self(Flags::NONE)
+        .and_then(|code| code.check_validity(Flags::NONE, &requirement))
+        .is_ok()
 }
 
 pub(crate) fn absolute_path(path: PathBuf) -> io::Result<PathBuf> {

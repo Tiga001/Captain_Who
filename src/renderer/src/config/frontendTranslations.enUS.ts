@@ -621,6 +621,9 @@ export const enUSTranslations = {
   'skills.bundled.presentations.name': 'Presentations',
   'skills.bundled.presentations.description':
     'Create, edit, inspect, render, and validate PowerPoint presentations.',
+  'skills.bundled.imageGeneration.name': 'Image Generation',
+  'skills.bundled.imageGeneration.description':
+    'Generate images from text or edit an existing image with instructions.',
   'chat.unsupportedImageWarning': 'The current model does not support images',
   'chat.yesterday': 'Yesterday',
   'chat.messageActions': 'Message actions',
@@ -769,6 +772,36 @@ export const enUSTranslations = {
   'agent.office.files': 'Office files',
   'agent.office.reveal': 'Show in folder',
   'agent.office.revealUnavailable': 'This path cannot be located in a folder',
+  'agent.imageGeneration.generate.running': 'Generating image',
+  'agent.imageGeneration.generate.completed': 'Generated image',
+  'agent.imageGeneration.generate.failed': 'Image generation failed',
+  'agent.imageGeneration.generate.cancelled': 'Cancelled image generation',
+  'agent.imageGeneration.generate.outcomeIndeterminate':
+    'Image generation outcome needs confirmation',
+  'agent.imageGeneration.generate.commitIndeterminate': 'Image save status needs confirmation',
+  'agent.imageGeneration.edit.running': 'Editing image',
+  'agent.imageGeneration.edit.completed': 'Edited image',
+  'agent.imageGeneration.edit.failed': 'Image editing failed',
+  'agent.imageGeneration.edit.cancelled': 'Cancelled image editing',
+  'agent.imageGeneration.edit.outcomeIndeterminate': 'Image editing outcome needs confirmation',
+  'agent.imageGeneration.edit.commitIndeterminate': 'Image save status needs confirmation',
+  'agent.imageGeneration.unknown.running': 'Processing image',
+  'agent.imageGeneration.unknown.completed': 'Processed image',
+  'agent.imageGeneration.unknown.failed': 'Image processing failed',
+  'agent.imageGeneration.unknown.cancelled': 'Cancelled image processing',
+  'agent.imageGeneration.unknown.outcomeIndeterminate':
+    'Image processing outcome needs confirmation',
+  'agent.imageGeneration.unknown.commitIndeterminate': 'Image save status needs confirmation',
+  'agent.imageGeneration.safeFailure':
+    'Image processing did not finish. Check the configuration and try again.',
+  'agent.imageGeneration.artifacts': 'Generated images',
+  'agent.imageGeneration.artifact': 'Image',
+  'agent.imageGeneration.artifactFormat': '{format} image',
+  'agent.imageGeneration.artifactMetadata': '{width} × {height} · {size}',
+  'agent.imageGeneration.previewLoading': 'Loading a secure preview…',
+  'agent.imageGeneration.previewFailed': 'The image preview is temporarily unavailable.',
+  'agent.imageGeneration.previewUnavailable':
+    'The image is safely stored, but preview and export are not available in this version.',
   'agent.command.rejected': 'Command rejected',
   'agent.command.completed': 'Ran command',
   'agent.command.failed': 'Command failed',
@@ -1032,5 +1065,52 @@ export const enUSTranslations = {
   'configuration.invalidApiUrl': 'Enter a valid http or https URL',
   'configuration.modelConnectionPairRequired':
     'URL and API Token must both be filled in or both be blank',
+  'configuration.imageGeneration.title': 'Image generation',
+  'configuration.imageGeneration.description':
+    'Configure the external image generation service available to the Agent.',
+  'configuration.imageGeneration.loading': 'Loading image generation configuration…',
+  'configuration.imageGeneration.enabled': 'Allow image generation',
+  'configuration.imageGeneration.endpointUrl': 'Image generation URL',
+  'configuration.imageGeneration.endpointUrlPlaceholder': 'https://example.com/v1',
+  'configuration.imageGeneration.apiKey': 'API Key',
+  'configuration.imageGeneration.modelId': 'Model ID',
+  'configuration.imageGeneration.modelIdPlaceholder': 'Enter the image generation model ID',
+  'configuration.imageGeneration.textToImage': 'Text to image',
+  'configuration.imageGeneration.imageToImage': 'Image to image',
+  'configuration.imageGeneration.watermark': 'Add watermark',
+  'configuration.imageGeneration.save': 'Save',
+  'configuration.imageGeneration.saved': 'Image generation configuration saved.',
+  'configuration.imageGeneration.retry': 'Retry',
+  'configuration.imageGeneration.error.revisionConflict':
+    'The configuration changed elsewhere. The latest state has been reloaded.',
+  'configuration.imageGeneration.error.unsupportedAdapter':
+    'This image generation service is not supported by this version.',
+  'configuration.imageGeneration.error.missingEndpoint': 'Enter the image generation URL.',
+  'configuration.imageGeneration.error.invalidEndpoint': 'The image generation URL is invalid.',
+  'configuration.imageGeneration.error.insecureEndpoint':
+    'The image generation URL must use a secure HTTPS address.',
+  'configuration.imageGeneration.error.missingModel': 'Enter a model ID.',
+  'configuration.imageGeneration.error.invalidModelId': 'The model ID is invalid.',
+  'configuration.imageGeneration.error.missingCredential': 'Enter an API Key.',
+  'configuration.imageGeneration.error.invalidCredential':
+    'The API Key is invalid. Enter it again.',
+  'configuration.imageGeneration.error.credentialReplacementRequired':
+    'Enter the API Key again before saving.',
+  'configuration.imageGeneration.error.credentialStoreUnavailable':
+    'Secure key storage is currently unavailable.',
+  'configuration.imageGeneration.error.storageUnavailable':
+    'Configuration storage is currently unavailable.',
+  'configuration.imageGeneration.error.commitIndeterminate':
+    'The save result could not be confirmed. The latest state has been reloaded.',
+  'configuration.imageGeneration.error.unavailable':
+    'Image generation configuration is currently unavailable.',
+  'configuration.imageGeneration.error.commitIndeterminateRefreshed':
+    'The operation result could not be confirmed. The authoritative configuration has been reloaded; review the current state.',
+  'configuration.imageGeneration.error.authoritativeRefresh':
+    'The configuration changed. The latest state has been reloaded.',
+  'configuration.imageGeneration.error.generic':
+    'Unable to complete the image generation configuration operation.',
+  'configuration.imageGeneration.error.loadFailed':
+    'Unable to load image generation configuration.',
   'configuration.save': 'Save'
 } as const

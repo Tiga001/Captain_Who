@@ -158,6 +158,14 @@ const bundledOfficeSkills: SkillManagementEntry[] = [
   }
 ]
 
+const bundledImageGenerationSkill: SkillManagementEntry = {
+  ...bundledSkill,
+  actions: { canSetEnabled: true, canUninstall: false, canUpdate: false },
+  id: 'bundled:application:image-generation',
+  name: 'image-generation',
+  source: { id: 'application:image-generation', kind: 'bundled' }
+}
+
 function managementOutput(
   skills: SkillManagementEntry[] = [bundledSkill, installedSkill, workspaceSkill],
   overrides: Partial<SkillsListManagementOutput> = {}
@@ -437,6 +445,19 @@ describe('Skills settings navigation and management inventory', () => {
       expect(icon?.querySelector('img')).not.toBeNull()
       expect(icon?.querySelector('svg')).toBeNull()
     }
+  })
+
+  it('uses the localized Image Generation presentation and its non-Office icon', async () => {
+    service.listManagement.mockResolvedValueOnce(managementOutput([bundledImageGenerationSkill]))
+    const screen = await render(<SkillsSettingsPage />)
+
+    const name = 'skills.bundled.imageGeneration.name'
+    await expect.element(screen.getByText(name)).toBeVisible()
+    const row = findSkillRow(screen.container, name)
+    const icon = row.querySelector('.skill-management-row__icon')
+    expect(icon?.querySelector('svg')).not.toBeNull()
+    expect(icon?.querySelector('img')).toBeNull()
+    expect(row.querySelector<HTMLButtonElement>('[role="switch"]')?.disabled).toBe(false)
   })
 
   it('does not offer update when backend actions deny it for a local installation', async () => {

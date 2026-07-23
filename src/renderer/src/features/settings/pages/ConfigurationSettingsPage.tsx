@@ -4,6 +4,7 @@ import { ModelForm } from './configuration/ModelForm'
 import { ModelManager } from './configuration/ModelManager'
 import { ModelProviderSettings } from './configuration/ModelProviderSettings'
 import { WebSearchSettings } from './configuration/WebSearchSettings'
+import { ImageGenerationSettings } from './configuration/ImageGenerationSettings'
 import type { ModelConfig, ModelFormValues } from './configuration/configurationTypes'
 import './ConfigurationSettingsPage.css'
 
@@ -98,6 +99,8 @@ export function ConfigurationSettingsPage() {
         onSearchModeChange={setSearchMode}
         onTavilyApiKeyChange={setTavilyApiKey}
       />
+
+      <ImageGenerationSettings />
     </div>
   )
 }

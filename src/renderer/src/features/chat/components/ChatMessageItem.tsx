@@ -54,6 +54,7 @@ import {
 } from './chatMessageItemUtils'
 import { EditSummaryCard } from './EditSummaryCard'
 import { OfficeArtifactsCard } from './OfficeArtifactsCard'
+import { ImageGenerationArtifactsCard } from './ImageGenerationArtifactsCard'
 import { useImagePreview, useImagePreviewNotice } from './ImagePreview'
 import { AgentToolActivity } from './toolActivities/AgentToolActivity'
 import { ContextCompactionActivity } from './toolActivities/ContextCompactionActivity'
@@ -497,6 +498,7 @@ function AgentRunView({
         <ChatMarkdown className="chat-agent-text" content={finalAnswerContent} />
       )}
       {isRunSettled(run) && <OfficeArtifactsCard projectId={projectId} run={run} />}
+      {isRunSettled(run) && <ImageGenerationArtifactsCard run={run} />}
       {isRunSettled(run) && <EditSummaryCard projectId={projectId} run={run} />}
       {isRunSettled(run) && <AssistantSources sources={webSearchSources} />}
       {showTokenLimitNotice && (

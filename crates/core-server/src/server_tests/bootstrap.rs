@@ -8,6 +8,17 @@ fn installed_skill_store_is_a_sibling_of_the_effective_database() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn development_credentials_are_private_siblings_of_the_effective_database() {
+    assert_eq!(
+        image_generation_development_credential_store_root(std::path::Path::new(
+            "profile/storage.sqlite"
+        )),
+        std::path::Path::new("profile/image-generation-development-credentials-v1")
+    );
+}
+
 #[test]
 fn relative_database_override_is_absolutized_before_source_registration() {
     let current_directory = std::env::current_dir().unwrap();

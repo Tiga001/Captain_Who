@@ -9,17 +9,141 @@ use serde_json::{json, Value};
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[cfg(target_os = "macos")]
+#[test]
+fn unsigned_development_bootstrap_persists_credentials_without_keychain_access() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let profile = tempfile::tempdir().expect("temporary profile");
+    let database = profile.path().join("storage.sqlite");
+    let credential_root = profile
+        .path()
+        .join("image-generation-development-credentials-v1");
+    let mut child = spawn_core_server(&database);
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (line_tx, line_rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "imageGeneration.updateConfiguration",
+            "params": {
+                "schemaVersion": 1,
+                "expectedRevision": "image-generation:v1:0",
+                "adapterId": "smartmlSeedream",
+                "endpointUrl": "https://example.com/v1/images/generations",
+                "modelId": "development-smoke-model",
+                "capabilities": {
+                    "textToImage": true,
+                    "imageToImage": false
+                },
+                "defaults": {
+                    "sizePreset": "2K",
+                    "watermark": true
+                },
+                "credentialMutation": {
+                    "type": "replace",
+                    "value": "development-smoke-credential"
+                }
+            }
+        }),
+    );
+    let update = receive_response(&line_rx);
+    assert_eq!(update["id"], 1);
+    assert_eq!(
+        update["result"]["configuration"]["credentialStatus"],
+        "configured"
+    );
+
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "core.shutdown"
+        }),
+    );
+    assert_eq!(receive_response(&line_rx)["id"], 2);
+    drop(stdin);
+    let status = wait_for_exit(&mut child, EXIT_TIMEOUT);
+    reader.join().expect("stdout reader thread");
+    let stderr = read_stderr(&mut child);
+    assert!(
+        status.success(),
+        "core-server exited with {status}; stderr:\n{stderr}"
+    );
+
+    let root_metadata = std::fs::symlink_metadata(&credential_root).expect("credential root");
+    assert!(root_metadata.is_dir());
+    assert_eq!(root_metadata.permissions().mode() & 0o777, 0o700);
+    let entries = std::fs::read_dir(&credential_root)
+        .expect("read credential root")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("credential entries");
+    assert_eq!(entries.len(), 1);
+    let credential_metadata = entries[0].metadata().expect("credential metadata");
+    assert!(credential_metadata.is_file());
+    assert_eq!(credential_metadata.permissions().mode() & 0o777, 0o600);
+
+    let mut restarted = spawn_core_server(&database);
+    let mut restarted_stdin = restarted.stdin.take().expect("piped stdin");
+    let restarted_stdout = restarted.stdout.take().expect("piped stdout");
+    let (restarted_tx, restarted_rx) = mpsc::channel();
+    let restarted_reader = thread::spawn(move || {
+        for line in BufReader::new(restarted_stdout).lines() {
+            if restarted_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    send_request(
+        &mut restarted_stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "imageGeneration.getConfiguration"
+        }),
+    );
+    let restored = receive_response(&restarted_rx);
+    assert_eq!(restored["id"], 3);
+    assert_eq!(
+        restored["result"]["configuration"]["credentialStatus"],
+        "configured"
+    );
+    send_request(
+        &mut restarted_stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "core.shutdown"
+        }),
+    );
+    assert_eq!(receive_response(&restarted_rx)["id"], 4);
+    drop(restarted_stdin);
+    let restarted_status = wait_for_exit(&mut restarted, EXIT_TIMEOUT);
+    restarted_reader.join().expect("stdout reader thread");
+    let restarted_stderr = read_stderr(&mut restarted);
+    assert!(
+        restarted_status.success(),
+        "restarted core-server exited with {restarted_status}; stderr:\n{restarted_stderr}"
+    );
+}
+
 #[test]
 fn production_bootstrap_serves_management_configuration_and_shuts_down_cleanly() {
     let profile = tempfile::tempdir().expect("temporary profile");
     let database = profile.path().join("storage.sqlite");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_core-server"))
-        .env("MYCOPILOT_STORAGE_DB", &database)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn production core-server binary");
+    let mut child = spawn_core_server(&database);
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
     let (line_tx, line_rx) = mpsc::channel();
@@ -124,6 +248,16 @@ fn production_bootstrap_serves_management_configuration_and_shuts_down_cleanly()
         !stderr.contains("Cannot drop a runtime in a context where blocking is not allowed"),
         "blocking runtime lifecycle regressed:\n{stderr}"
     );
+}
+
+fn spawn_core_server(database: &std::path::Path) -> Child {
+    Command::new(env!("CARGO_BIN_EXE_core-server"))
+        .env("MYCOPILOT_STORAGE_DB", database)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn production core-server binary")
 }
 
 fn send_request(stdin: &mut impl Write, request: Value) {

@@ -7,7 +7,7 @@
 use super::types::ImageGenerationUrlOutput;
 use crate::durable_fs::{atomic_rename_noreplace, sync_directory};
 use crate::AgentCancellationToken;
-use futures_util::future::BoxFuture;
+use futures_util::future::{join, join_all, BoxFuture};
 use futures_util::StreamExt;
 use image::{ImageFormat, ImageReader, Limits};
 use reqwest::header::{
@@ -38,12 +38,116 @@ pub const MAX_IMAGE_ARTIFACT_PIXELS: u64 = 64 * 1024 * 1024;
 const MAX_IMAGE_ARTIFACT_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_IMAGE_ARTIFACT_URL_BYTES: usize = 16 * 1024;
 const MANAGED_ARTIFACT_OBJECTS_DIRECTORY: &str = "objects";
+const MAX_PUBLIC_DNS_RESPONSE_BYTES: usize = 64 * 1024;
+
+const ALIDNS_ADDRESSES: &[&str] = &["223.5.5.5", "223.6.6.6"];
+const GOOGLE_DNS_ADDRESSES: &[&str] = &["8.8.8.8", "8.8.4.4"];
+const PUBLIC_DNS_RESOLVERS: &[PublicDnsResolver] = &[
+    PublicDnsResolver {
+        host: "dns.alidns.com",
+        path: "/resolve",
+        addresses: ALIDNS_ADDRESSES,
+    },
+    PublicDnsResolver {
+        host: "dns.google",
+        path: "/resolve",
+        addresses: GOOGLE_DNS_ADDRESSES,
+    },
+];
+
+#[derive(Debug, Clone, Copy)]
+struct PublicDnsResolver {
+    host: &'static str,
+    path: &'static str,
+    addresses: &'static [&'static str],
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageArtifactNetworkPolicy {
     PublicHttpsOnly,
     /// Test-only escape hatch. HTTP and non-public addresses remain limited to loopback.
     AllowLoopbackHttpForTests,
+}
+
+/// Compile-time hostname rule minted by a trusted Provider Adapter.
+///
+/// These rules are not model input, user configuration, or provider response data. They grant
+/// only the narrow ability to traverse a local Fake-IP TUN/proxy that represents an HTTPS origin
+/// with an RFC 2544 benchmarking address. URL, TLS/SNI, redirect, DNS pinning, and remote-address
+/// checks remain mandatory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageArtifactHostRule {
+    ExactHttpsOrigin { host: &'static str, port: u16 },
+}
+
+impl ImageArtifactHostRule {
+    fn matches(self, host: &str, port: u16) -> bool {
+        match self {
+            Self::ExactHttpsOrigin {
+                host: expected_host,
+                port: expected_port,
+            } => expected_host.eq_ignore_ascii_case(host) && expected_port == port,
+        }
+    }
+}
+
+/// Provider-owned network capability for downloading one generated Artifact.
+///
+/// The default has no direct Fake-IP exceptions. An adapter may add reviewed exact hosts, and a
+/// validated provider profile may freeze its user-configured endpoint host. Other Fake-IP hosts
+/// are resolved independently through pinned public DNS and connected by their verified public
+/// addresses; provider response data and model input cannot mint a direct-tunnel exception.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImageArtifactTransferPolicy {
+    trusted_fake_ip_https_hosts: &'static [ImageArtifactHostRule],
+    configured_endpoint_https_origin: Option<(Arc<str>, u16)>,
+}
+
+impl ImageArtifactTransferPolicy {
+    #[must_use]
+    pub const fn public_https_only() -> Self {
+        Self {
+            trusted_fake_ip_https_hosts: &[],
+            configured_endpoint_https_origin: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_trusted_fake_ip_https_hosts(hosts: &'static [ImageArtifactHostRule]) -> Self {
+        Self {
+            trusted_fake_ip_https_hosts: hosts,
+            configured_endpoint_https_origin: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_configured_endpoint_https_origin(mut self, host: &str, port: u16) -> Self {
+        if fake_ip_eligible_dns_hostname(host) && port != 0 {
+            self.configured_endpoint_https_origin =
+                Some((Arc::<str>::from(host.to_ascii_lowercase()), port));
+        }
+        self
+    }
+
+    pub(crate) fn permits_fake_ip_for_origin(&self, host: &str, port: u16) -> bool {
+        literal_ip(host).is_none()
+            && (self.configured_endpoint_https_origin.as_ref().is_some_and(
+                |(expected_host, expected_port)| {
+                    expected_host.eq_ignore_ascii_case(host) && *expected_port == port
+                },
+            ) || self
+                .trusted_fake_ip_https_hosts
+                .iter()
+                .any(|rule| rule.matches(host, port)))
+    }
+
+    fn permits_configured_https_origin(&self, host: &str, port: u16) -> bool {
+        self.configured_endpoint_https_origin.as_ref().is_some_and(
+            |(expected_host, expected_port)| {
+                expected_host.eq_ignore_ascii_case(host) && *expected_port == port
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,6 +404,7 @@ pub trait ImageGenerationArtifactStore: Send + Sync {
     fn stage<'a>(
         &'a self,
         source: &'a ImageGenerationUrlOutput,
+        transfer_policy: ImageArtifactTransferPolicy,
         cancellation: &'a AgentCancellationToken,
     ) -> BoxFuture<'a, Result<PreparedImageArtifact, ImageArtifactError>>;
 
@@ -363,6 +468,7 @@ impl ManagedImageGenerationArtifactStore {
     async fn stage_inner(
         &self,
         source: &ImageGenerationUrlOutput,
+        transfer_policy: ImageArtifactTransferPolicy,
         cancellation: &AgentCancellationToken,
     ) -> Result<PreparedImageArtifact, ImageArtifactError> {
         let mut staging = StagingArtifactFile::new(&self.objects_root)?;
@@ -371,6 +477,7 @@ impl ManagedImageGenerationArtifactStore {
         let content_type = self
             .download(
                 source.expose_url_for_download(),
+                transfer_policy,
                 &mut staging_writer,
                 cancellation,
             )
@@ -433,14 +540,18 @@ impl ManagedImageGenerationArtifactStore {
     async fn download(
         &self,
         initial_url: &str,
+        transfer_policy: ImageArtifactTransferPolicy,
         staging: &mut tokio::fs::File,
         cancellation: &AgentCancellationToken,
     ) -> Result<Option<String>, ImageArtifactError> {
         let download = async {
-            let mut url = validate_artifact_url(initial_url, self.config.network_policy)?;
+            let mut url =
+                validate_artifact_url(initial_url, self.config.network_policy, &transfer_policy)?;
             for redirect_count in 0..=self.config.max_redirects {
                 cancellation_check(cancellation)?;
-                let resolved = resolve_artifact_target(&url, self.config, cancellation).await?;
+                let resolved =
+                    resolve_artifact_target(&url, self.config, &transfer_policy, cancellation)
+                        .await?;
                 let client = client_for_resolved_target(&resolved, self.config)?;
                 let response = tokio::select! {
                     _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
@@ -464,6 +575,7 @@ impl ManagedImageGenerationArtifactStore {
                         response.status(),
                         response.headers(),
                         self.config.network_policy,
+                        &transfer_policy,
                     )?;
                     continue;
                 }
@@ -579,9 +691,10 @@ impl ImageGenerationArtifactStore for ManagedImageGenerationArtifactStore {
     fn stage<'a>(
         &'a self,
         source: &'a ImageGenerationUrlOutput,
+        transfer_policy: ImageArtifactTransferPolicy,
         cancellation: &'a AgentCancellationToken,
     ) -> BoxFuture<'a, Result<PreparedImageArtifact, ImageArtifactError>> {
-        Box::pin(self.stage_inner(source, cancellation))
+        Box::pin(self.stage_inner(source, transfer_policy, cancellation))
     }
 
     fn publish(
@@ -748,9 +861,25 @@ struct ResolvedArtifactTarget {
     addresses: Vec<SocketAddr>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PublicDnsJsonResponse {
+    #[serde(rename = "Status")]
+    status: u16,
+    #[serde(rename = "Answer", default)]
+    answers: Vec<PublicDnsJsonAnswer>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublicDnsJsonAnswer {
+    #[serde(rename = "type")]
+    record_type: u16,
+    data: String,
+}
+
 async fn resolve_artifact_target(
     url: &Url,
     config: ImageArtifactStoreConfig,
+    transfer_policy: &ImageArtifactTransferPolicy,
     cancellation: &AgentCancellationToken,
 ) -> Result<ResolvedArtifactTarget, ImageArtifactError> {
     let host = url
@@ -759,6 +888,7 @@ async fn resolve_artifact_target(
     let port = url
         .port_or_known_default()
         .ok_or_else(|| unsafe_url("image Artifact URL uses an unsupported network scheme"))?;
+    let mut system_lookup_failed = false;
     let addresses = if let Ok(address) = host.parse::<IpAddr>() {
         vec![SocketAddr::new(address, port)]
     } else {
@@ -766,41 +896,254 @@ async fn resolve_artifact_target(
         tokio::select! {
             _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
             result = tokio::time::timeout(config.dns_timeout, lookup) => {
-                result
-                    .map_err(|_| ImageArtifactError::new(
-                        ImageArtifactErrorCode::DnsRejected,
-                        "image Artifact DNS lookup timed out",
-                        true,
-                    ))?
-                    .map_err(|_| ImageArtifactError::new(
-                        ImageArtifactErrorCode::DnsRejected,
-                        "image Artifact host could not be resolved",
-                        true,
-                    ))?
-                    .collect::<Vec<_>>()
+                match result {
+                    Ok(Ok(addresses)) => addresses.collect::<Vec<_>>(),
+                    Ok(Err(_)) | Err(_) => {
+                        system_lookup_failed = true;
+                        Vec::new()
+                    }
+                }
             }
         }
     };
-    let addresses = addresses
-        .into_iter()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let system_reported_fake_ip = addresses
+        .iter()
+        .any(|address| matches!(address.ip(), IpAddr::V4(value) if benchmark_fake_ipv4(value)));
+    let mut addresses =
+        approved_resolved_addresses(host, addresses, config.network_policy, transfer_policy);
     if addresses.is_empty()
-        || addresses
-            .iter()
-            .any(|address| !address_allowed(address.ip(), config.network_policy))
+        && (system_reported_fake_ip || system_lookup_failed)
+        && config.network_policy == ImageArtifactNetworkPolicy::PublicHttpsOnly
+        && fake_ip_eligible_dns_hostname(host)
     {
+        addresses = resolve_through_public_dns(host, port, config, cancellation).await?;
+    }
+    if addresses.is_empty() {
         return Err(ImageArtifactError::new(
             ImageArtifactErrorCode::DnsRejected,
             "image Artifact host resolved to a disallowed network address",
-            false,
+            system_lookup_failed,
         ));
     }
     Ok(ResolvedArtifactTarget {
         host: host.to_string(),
         addresses,
     })
+}
+
+async fn resolve_through_public_dns(
+    host: &str,
+    port: u16,
+    config: ImageArtifactStoreConfig,
+    cancellation: &AgentCancellationToken,
+) -> Result<Vec<SocketAddr>, ImageArtifactError> {
+    let mut received_authoritative_response = false;
+    let queries = join_all(
+        PUBLIC_DNS_RESOLVERS
+            .iter()
+            .map(|resolver| query_public_dns_resolver(*resolver, host, config, cancellation)),
+    );
+    let results = tokio::select! {
+        _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
+        results = tokio::time::timeout(config.dns_timeout, queries) => {
+            results.map_err(|_| public_dns_unavailable())?
+        }
+    };
+    for result in results {
+        match result {
+            Ok(addresses) => {
+                received_authoritative_response = true;
+                let approved = addresses
+                    .into_iter()
+                    .filter(|address| {
+                        address_allowed(*address, ImageArtifactNetworkPolicy::PublicHttpsOnly)
+                    })
+                    .map(|address| SocketAddr::new(address, port))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                if !approved.is_empty() {
+                    return Ok(approved);
+                }
+            }
+            Err(error) if error.code == ImageArtifactErrorCode::Cancelled => return Err(error),
+            Err(_) => {}
+        }
+    }
+    Err(ImageArtifactError::new(
+        ImageArtifactErrorCode::DnsRejected,
+        if received_authoritative_response {
+            "image Artifact host was not verified to use a public network address"
+        } else {
+            "image Artifact public DNS verification was unavailable"
+        },
+        !received_authoritative_response,
+    ))
+}
+
+async fn query_public_dns_resolver(
+    resolver: PublicDnsResolver,
+    host: &str,
+    config: ImageArtifactStoreConfig,
+    cancellation: &AgentCancellationToken,
+) -> Result<Vec<IpAddr>, ImageArtifactError> {
+    let resolver_addresses = resolver
+        .addresses
+        .iter()
+        .filter_map(|address| address.parse::<IpAddr>().ok())
+        .map(|address| SocketAddr::new(address, 443))
+        .collect::<Vec<_>>();
+    if resolver_addresses.is_empty() {
+        return Err(public_dns_unavailable());
+    }
+    let client = Client::builder()
+        .connect_timeout(config.connect_timeout.min(config.dns_timeout))
+        .timeout(config.dns_timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .resolve_to_addrs(resolver.host, &resolver_addresses)
+        .build()
+        .map_err(|_| public_dns_unavailable())?;
+    let mut addresses = BTreeSet::new();
+    let mut received_response = false;
+    let (ipv4, ipv6) = join(
+        query_public_dns_record(
+            &client,
+            resolver,
+            &resolver_addresses,
+            host,
+            "A",
+            1,
+            cancellation,
+        ),
+        query_public_dns_record(
+            &client,
+            resolver,
+            &resolver_addresses,
+            host,
+            "AAAA",
+            28,
+            cancellation,
+        ),
+    )
+    .await;
+    for result in [ipv4, ipv6] {
+        match result {
+            Ok(result) => {
+                received_response = true;
+                addresses.extend(result);
+            }
+            Err(error) if error.code == ImageArtifactErrorCode::Cancelled => return Err(error),
+            Err(_) => {}
+        }
+    }
+    if received_response {
+        Ok(addresses.into_iter().collect())
+    } else {
+        Err(public_dns_unavailable())
+    }
+}
+
+async fn query_public_dns_record(
+    client: &Client,
+    resolver: PublicDnsResolver,
+    resolver_addresses: &[SocketAddr],
+    host: &str,
+    record_type: &str,
+    expected_type: u16,
+    cancellation: &AgentCancellationToken,
+) -> Result<Vec<IpAddr>, ImageArtifactError> {
+    let mut url =
+        Url::parse(&format!("https://{}{}", resolver.host, resolver.path)).map_err(|_| {
+            ImageArtifactError::new(
+                ImageArtifactErrorCode::InvalidConfiguration,
+                "image Artifact public DNS resolver is invalid",
+                false,
+            )
+        })?;
+    url.query_pairs_mut()
+        .append_pair("name", host)
+        .append_pair("type", record_type);
+    let response = tokio::select! {
+        _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
+        response = client
+            .get(url)
+            .header(
+                ACCEPT,
+                HeaderValue::from_static("application/dns-json, application/json"),
+            )
+            .header(ACCEPT_ENCODING, HeaderValue::from_static("identity"))
+            .send() => response.map_err(|_| public_dns_unavailable())?,
+    };
+    if !response.status().is_success()
+        || response
+            .content_length()
+            .is_some_and(|length| length > MAX_PUBLIC_DNS_RESPONSE_BYTES as u64)
+        || response
+            .remote_addr()
+            .is_none_or(|remote| !resolver_addresses.contains(&remote))
+    {
+        return Err(public_dns_unavailable());
+    }
+    let body = read_bounded_public_dns_body(response, cancellation).await?;
+    let response = parse_public_dns_response(&body)?;
+    if response.status != 0 {
+        return Ok(Vec::new());
+    }
+    Ok(response
+        .answers
+        .into_iter()
+        .filter(|answer| answer.record_type == expected_type)
+        .filter_map(|answer| answer.data.parse::<IpAddr>().ok())
+        .collect())
+}
+
+fn parse_public_dns_response(body: &[u8]) -> Result<PublicDnsJsonResponse, ImageArtifactError> {
+    serde_json::from_slice(body).map_err(|_| public_dns_unavailable())
+}
+
+async fn read_bounded_public_dns_body(
+    response: reqwest::Response,
+    cancellation: &AgentCancellationToken,
+) -> Result<Vec<u8>, ImageArtifactError> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = tokio::select! {
+        _ = cancellation.cancelled() => return Err(ImageArtifactError::cancelled()),
+        chunk = stream.next() => chunk,
+    } {
+        let chunk = chunk.map_err(|_| public_dns_unavailable())?;
+        if body.len().saturating_add(chunk.len()) > MAX_PUBLIC_DNS_RESPONSE_BYTES {
+            return Err(public_dns_unavailable());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn public_dns_unavailable() -> ImageArtifactError {
+    ImageArtifactError::new(
+        ImageArtifactErrorCode::DnsRejected,
+        "image Artifact public DNS verification was unavailable",
+        true,
+    )
+}
+
+fn approved_resolved_addresses(
+    host: &str,
+    addresses: impl IntoIterator<Item = SocketAddr>,
+    network_policy: ImageArtifactNetworkPolicy,
+    transfer_policy: &ImageArtifactTransferPolicy,
+) -> Vec<SocketAddr> {
+    addresses
+        .into_iter()
+        .filter(|address| {
+            address_allowed(address.ip(), network_policy)
+                || fake_ip_address_allowed(*address, host, transfer_policy)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn client_for_resolved_target(
@@ -834,11 +1177,7 @@ fn verify_remote_address(
             false,
         )
     })?;
-    if target
-        .addresses
-        .iter()
-        .any(|approved| approved.ip() == remote.ip())
-    {
+    if target.addresses.contains(&remote) {
         Ok(())
     } else {
         Err(ImageArtifactError::new(
@@ -852,6 +1191,7 @@ fn verify_remote_address(
 fn validate_artifact_url(
     value: &str,
     policy: ImageArtifactNetworkPolicy,
+    transfer_policy: &ImageArtifactTransferPolicy,
 ) -> Result<Url, ImageArtifactError> {
     let value = value.trim();
     if value.is_empty()
@@ -876,11 +1216,15 @@ fn validate_artifact_url(
         "http" if policy == ImageArtifactNetworkPolicy::AllowLoopbackHttpForTests && loopback => {}
         _ => return Err(unsafe_url("image Artifact URL must use HTTPS")),
     }
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| unsafe_url("image Artifact URL uses an unsupported network scheme"))?;
     if policy == ImageArtifactNetworkPolicy::PublicHttpsOnly
-        && url.port().is_some_and(|port| port != 443)
+        && port != 443
+        && !transfer_policy.permits_configured_https_origin(host, port)
     {
         return Err(unsafe_url(
-            "image Artifact URL must use the default HTTPS port",
+            "image Artifact URL must use HTTPS port 443 or the configured Provider origin port",
         ));
     }
     Ok(url)
@@ -891,6 +1235,7 @@ fn redirect_target(
     status: StatusCode,
     headers: &HeaderMap,
     policy: ImageArtifactNetworkPolicy,
+    transfer_policy: &ImageArtifactTransferPolicy,
 ) -> Result<Url, ImageArtifactError> {
     if !matches!(
         status,
@@ -924,7 +1269,7 @@ fn redirect_target(
         )
     })?;
     // Never return the destination in an error or Debug value: it may contain a signed query.
-    validate_artifact_url(next.as_str(), policy)
+    validate_artifact_url(next.as_str(), policy, transfer_policy)
 }
 
 fn validate_content_encoding(headers: &HeaderMap) -> Result<(), ImageArtifactError> {
@@ -1143,6 +1488,21 @@ fn address_allowed(address: IpAddr, policy: ImageArtifactNetworkPolicy) -> bool 
     }
 }
 
+fn fake_ip_address_allowed(
+    address: SocketAddr,
+    host: &str,
+    transfer_policy: &ImageArtifactTransferPolicy,
+) -> bool {
+    transfer_policy.permits_fake_ip_for_origin(host, address.port())
+        && matches!(address.ip(), IpAddr::V4(address) if benchmark_fake_ipv4(address))
+}
+
+fn benchmark_fake_ipv4(address: Ipv4Addr) -> bool {
+    let value = u32::from(address);
+    let network = u32::from(Ipv4Addr::new(198, 18, 0, 0));
+    value & (u32::MAX << 17) == network
+}
+
 fn public_ipv4(address: Ipv4Addr) -> bool {
     let value = u32::from(address);
     ![
@@ -1200,6 +1560,61 @@ fn literal_ip(host: &str) -> Option<IpAddr> {
         .trim_end_matches(']')
         .parse()
         .ok()
+}
+
+fn fake_ip_eligible_dns_hostname(host: &str) -> bool {
+    if host.is_empty()
+        || host.len() > 253
+        || host.ends_with('.')
+        || literal_ip(host).is_some()
+        || !host.contains('.')
+    {
+        return false;
+    }
+    let normalized = host.to_ascii_lowercase();
+    if [
+        "localhost",
+        "local",
+        "localdomain",
+        "home",
+        "home.arpa",
+        "internal",
+        "intranet",
+        "lan",
+        "corp",
+        "invalid",
+        "test",
+        "example",
+        "example.com",
+        "example.net",
+        "example.org",
+        "onion",
+        "arpa",
+    ]
+    .into_iter()
+    .any(|suffix| {
+        normalized == suffix
+            || normalized
+                .strip_suffix(suffix)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    }) {
+        return false;
+    }
+    normalized.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && label
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
 }
 
 fn classify_transport_error(error: reqwest::Error) -> ImageArtifactError {
@@ -1332,7 +1747,11 @@ mod tests {
         let store = test_store(directory.path());
 
         let prepared = store
-            .stage(&source, &AgentCancellationToken::new())
+            .stage(
+                &source,
+                ImageArtifactTransferPolicy::public_https_only(),
+                &AgentCancellationToken::new(),
+            )
             .await
             .unwrap();
         assert_eq!(prepared.candidate().width, 2);
@@ -1355,7 +1774,11 @@ mod tests {
         let store = test_store(directory.path());
 
         let error = store
-            .stage(&source, &AgentCancellationToken::new())
+            .stage(
+                &source,
+                ImageArtifactTransferPolicy::public_https_only(),
+                &AgentCancellationToken::new(),
+            )
             .await
             .unwrap_err();
 
@@ -1397,6 +1820,204 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn fake_ip_compatibility_requires_an_exact_adapter_owned_hostname() {
+        const TRUSTED_HOST: &str = "ark-content-generation-v2-cn-beijing.tos-cn-beijing.volces.com";
+        const TRUSTED_RULES: &[ImageArtifactHostRule] =
+            &[ImageArtifactHostRule::ExactHttpsOrigin {
+                host: TRUSTED_HOST,
+                port: 443,
+            }];
+        let trusted = ImageArtifactTransferPolicy::with_trusted_fake_ip_https_hosts(TRUSTED_RULES);
+        let fake_ip = "198.18.0.8:443".parse().unwrap();
+
+        assert!(approved_resolved_addresses(
+            TRUSTED_HOST,
+            [fake_ip],
+            ImageArtifactNetworkPolicy::PublicHttpsOnly,
+            &trusted,
+        )
+        .contains(&fake_ip));
+        assert!(approved_resolved_addresses(
+            "untrusted.example",
+            [fake_ip],
+            ImageArtifactNetworkPolicy::PublicHttpsOnly,
+            &trusted,
+        )
+        .is_empty());
+        assert!(approved_resolved_addresses(
+            &format!("{TRUSTED_HOST}.attacker.example"),
+            [fake_ip],
+            ImageArtifactNetworkPolicy::PublicHttpsOnly,
+            &trusted,
+        )
+        .is_empty());
+        assert!(approved_resolved_addresses(
+            "198.18.0.8",
+            [fake_ip],
+            ImageArtifactNetworkPolicy::PublicHttpsOnly,
+            &ImageArtifactTransferPolicy::with_trusted_fake_ip_https_hosts(&[
+                ImageArtifactHostRule::ExactHttpsOrigin {
+                    host: "198.18.0.8",
+                    port: 443,
+                },
+            ]),
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn configured_endpoint_host_grants_only_its_exact_fake_ip_origin() {
+        let policy = ImageArtifactTransferPolicy::public_https_only()
+            .with_configured_endpoint_https_origin("images.provider-one.com", 8443);
+        let fake_ip_443 = "198.18.0.8:443".parse().unwrap();
+        let fake_ip_8443 = "198.18.0.8:8443".parse().unwrap();
+
+        assert_eq!(
+            approved_resolved_addresses(
+                "images.provider-one.com",
+                [fake_ip_8443],
+                ImageArtifactNetworkPolicy::PublicHttpsOnly,
+                &policy,
+            ),
+            vec![fake_ip_8443],
+        );
+        assert!(approved_resolved_addresses(
+            "images.provider-one.com",
+            [fake_ip_443],
+            ImageArtifactNetworkPolicy::PublicHttpsOnly,
+            &policy,
+        )
+        .is_empty());
+        assert!(validate_artifact_url(
+            "https://images.provider-one.com:8443/result.png",
+            ImageArtifactNetworkPolicy::PublicHttpsOnly,
+            &policy,
+        )
+        .is_ok());
+        assert!(validate_artifact_url(
+            "https://images.provider-one.com:9443/result.png",
+            ImageArtifactNetworkPolicy::PublicHttpsOnly,
+            &policy,
+        )
+        .is_err());
+        assert!(validate_artifact_url(
+            "https://cdn.provider-one.com:8443/result.png",
+            ImageArtifactNetworkPolicy::PublicHttpsOnly,
+            &policy,
+        )
+        .is_err());
+        for host in [
+            "localhost",
+            "renderer",
+            "images.local",
+            "assets.home.arpa",
+            "service.internal",
+            "cdn.provider-one.com",
+            "198.18.0.8",
+        ] {
+            assert!(
+                approved_resolved_addresses(
+                    host,
+                    [fake_ip_8443],
+                    ImageArtifactNetworkPolicy::PublicHttpsOnly,
+                    &policy,
+                )
+                .is_empty(),
+                "{host} must not receive Fake-IP compatibility"
+            );
+        }
+    }
+
+    #[test]
+    fn public_dns_fallback_accepts_only_qualified_hosts_and_public_answers() {
+        for host in [
+            "images.provider-one.com",
+            "signed-assets.provider-two.cn",
+            "xn--fiqs8s.example-provider.net",
+        ] {
+            assert!(fake_ip_eligible_dns_hostname(host), "{host}");
+        }
+        for host in [
+            "localhost",
+            "renderer",
+            "images.local",
+            "assets.home.arpa",
+            "service.internal",
+            "cdn.example.com",
+            "198.18.0.8",
+            "bad_host.provider.com",
+            "-bad.provider.com",
+            "trailing.provider.com.",
+        ] {
+            assert!(!fake_ip_eligible_dns_hostname(host), "{host}");
+        }
+
+        let response = parse_public_dns_response(
+            br#"{
+                "Status": 0,
+                "Answer": [
+                    {"type": 5, "data": "cdn.provider.com."},
+                    {"type": 1, "data": "203.0.113.10"},
+                    {"type": 1, "data": "8.8.8.8"},
+                    {"type": 28, "data": "2606:4700:4700::1111"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let addresses = response
+            .answers
+            .into_iter()
+            .filter_map(|answer| answer.data.parse::<IpAddr>().ok())
+            .filter(|address| {
+                address_allowed(*address, ImageArtifactNetworkPolicy::PublicHttpsOnly)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            addresses,
+            vec![
+                "8.8.8.8".parse::<IpAddr>().unwrap(),
+                "2606:4700:4700::1111".parse::<IpAddr>().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn fake_ip_compatibility_never_grants_other_private_networks() {
+        const TRUSTED_HOST: &str = "ark-content-generation-v2-cn-beijing.tos-cn-beijing.volces.com";
+        const TRUSTED_RULES: &[ImageArtifactHostRule] =
+            &[ImageArtifactHostRule::ExactHttpsOrigin {
+                host: TRUSTED_HOST,
+                port: 443,
+            }];
+        let trusted = ImageArtifactTransferPolicy::with_trusted_fake_ip_https_hosts(TRUSTED_RULES);
+
+        for address in ["10.0.0.1:443", "127.0.0.1:443", "169.254.169.254:443"] {
+            assert!(approved_resolved_addresses(
+                TRUSTED_HOST,
+                [address.parse().unwrap()],
+                ImageArtifactNetworkPolicy::PublicHttpsOnly,
+                &trusted,
+            )
+            .is_empty());
+        }
+    }
+
+    #[test]
+    fn mixed_dns_pins_only_addresses_approved_for_the_current_host() {
+        let public = "8.8.8.8:443".parse().unwrap();
+        let private = "10.0.0.1:443".parse().unwrap();
+        let fake_ip = "198.18.0.8:443".parse().unwrap();
+        let approved = approved_resolved_addresses(
+            "cdn.example",
+            [private, public, fake_ip, public],
+            ImageArtifactNetworkPolicy::PublicHttpsOnly,
+            &ImageArtifactTransferPolicy::public_https_only(),
+        );
+
+        assert_eq!(approved, vec![public]);
+    }
+
     #[tokio::test]
     async fn cancellation_removes_private_staging_file() {
         let directory = tempdir().unwrap();
@@ -1406,7 +2027,15 @@ mod tests {
         let source = ImageGenerationUrlOutput::new("http://127.0.0.1:9/a".to_string());
 
         assert_eq!(
-            store.stage(&source, &cancellation).await.unwrap_err().code,
+            store
+                .stage(
+                    &source,
+                    ImageArtifactTransferPolicy::public_https_only(),
+                    &cancellation,
+                )
+                .await
+                .unwrap_err()
+                .code,
             ImageArtifactErrorCode::Cancelled
         );
         assert!(fs::read_dir(directory.path().join("objects"))

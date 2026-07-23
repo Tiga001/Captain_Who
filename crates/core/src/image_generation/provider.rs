@@ -3,6 +3,7 @@ use super::types::{
     ImageGenerationError, ImageGenerationProviderProfile, ImageGenerationRequest,
     ImageGenerationResult, PreparedImageGenerationRequest,
 };
+use super::ImageArtifactTransferPolicy;
 use futures_util::future::BoxFuture;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -16,6 +17,17 @@ use std::sync::Arc;
 /// not spawn detached network work.
 pub trait ImageGenerationProvider: Send + Sync {
     fn profile(&self) -> &ImageGenerationProviderProfile;
+
+    /// Returns an Adapter-owned capability for transferring generated Artifacts.
+    ///
+    /// The default permits only verified public HTTPS addresses. Implementations may opt a
+    /// compile-time reviewed exact host, plus the already-validated configured endpoint host,
+    /// into direct Fake-IP/TUN compatibility. Other CDN hosts remain subject to the Artifact
+    /// layer's independent public-DNS verification. Provider response data and model input must
+    /// never construct or widen this policy.
+    fn artifact_transfer_policy(&self) -> ImageArtifactTransferPolicy {
+        ImageArtifactTransferPolicy::public_https_only()
+    }
 
     fn prepare(
         &self,
