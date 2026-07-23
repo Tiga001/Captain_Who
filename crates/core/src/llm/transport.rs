@@ -335,6 +335,7 @@ pub(super) fn validate_request(request: &LlmChatRequest) -> AgentResult<()> {
     if request.messages.is_empty() {
         return Err(AgentError::new("没有可发送的对话内容。"));
     }
+    validate_model_tool_protocol(&request.messages)?;
     for tool in &request.tools {
         validate_portable_tool_input_schema(&tool.name, &tool.input_schema)?;
     }

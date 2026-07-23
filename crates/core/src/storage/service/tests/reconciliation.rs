@@ -477,6 +477,76 @@ fn manual_non_command_file_effect_settlement(
     (pending, approved_audit, terminal_audit, trace)
 }
 
+fn legacy_schema_v3_office_settlement(
+    storage_id: &str,
+    call_id: &str,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+    operation: crate::office::OfficeOperation,
+    operation_name: &str,
+    arguments: Vec<String>,
+    created_at: i64,
+) -> (
+    AgentPendingActionRecord,
+    AgentActionAuditRecord,
+    Vec<ConversationTurnTraceItem>,
+) {
+    let (mut pending, _approved, mut terminal, mut trace) =
+        manual_non_command_file_effect_settlement(
+            ManualNonCommandFileEffect::OfficeOperation,
+            storage_id,
+            call_id,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+        );
+    let path = "legacy-office-workbook.xlsx";
+    let reason = format!("legacy Office operation {operation_name}");
+    let mut action = serde_json::from_str::<AgentProposedAction>(&pending.action_json).unwrap();
+    let AgentProposedAction::OfficeOperation { office_operation } = &mut action else {
+        unreachable!("the Office settlement fixture must contain an Office action");
+    };
+    office_operation.schema_version = 3;
+    office_operation.prepared.schema_version = 3;
+    office_operation.prepared.request.operation = operation;
+    office_operation.prepared.request.document_path = Some(path.to_string());
+    office_operation.prepared.request.parameters =
+        crate::office::OfficeRequestParameters::Legacy(arguments.clone());
+    office_operation.prepared.argv = std::iter::once(operation_name.to_string())
+        .chain(std::iter::once(path.to_string()))
+        .chain(arguments.iter().cloned())
+        .collect();
+    office_operation.reason = reason.clone();
+    let action_json = serde_json::to_string(&action).unwrap();
+
+    pending.status = "completed".to_string();
+    pending.target_status = Some("completed".to_string());
+    pending.action_json = action_json.clone();
+    pending.created_at = created_at;
+    pending.updated_at = created_at + 2;
+
+    terminal.action_json = action_json;
+    terminal.created_at = created_at;
+    terminal.decided_at = Some(created_at + 1);
+    terminal.completed_at = Some(created_at + 2);
+
+    let ConversationTurnTraceItem::ToolCall {
+        operation: trace_operation,
+        ..
+    } = &mut trace.items[0]
+    else {
+        unreachable!("the Office settlement fixture must start with a ToolCall");
+    };
+    *trace_operation = serde_json::json!({
+        "operation": operation_name,
+        "path": path,
+        "arguments": arguments,
+        "reason": reason,
+    });
+    (pending, terminal, trace.items)
+}
+
 fn assert_manual_file_effect_is_uncommitted(
     service: &StorageService,
     storage_id: &str,
@@ -997,6 +1067,117 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
     drop(connection);
     let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
     assert!(reopened.list_unsettled_file_effects().unwrap().is_empty());
+}
+
+#[test]
+fn schema_v3_office_receipts_remain_authoritative_after_typed_protocol_upgrade() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let run_id = "run-legacy-office-v3";
+    let conversation_id = "conversation-legacy-office-v3";
+    let assistant_message_id = "assistant-legacy-office-v3";
+    save_assistant_conversation(&service, conversation_id, assistant_message_id);
+
+    let cases = [
+        (crate::office::OfficeOperation::Create, "create", Vec::new()),
+        (
+            crate::office::OfficeOperation::Add,
+            "add",
+            vec![
+                "/workbook".to_string(),
+                "--type".to_string(),
+                "worksheet".to_string(),
+            ],
+        ),
+        (
+            crate::office::OfficeOperation::Set,
+            "set",
+            vec![
+                "/workbook".to_string(),
+                "--prop".to_string(),
+                "title=Quarterly report".to_string(),
+            ],
+        ),
+    ];
+    let mut trace_items = Vec::new();
+    let mut action_ids = Vec::new();
+    for (index, (operation, operation_name, arguments)) in cases.into_iter().enumerate() {
+        let call_id = format!("legacy-office-v3-call-{index}");
+        let action_id = format!("{run_id}:{call_id}");
+        let (pending, terminal, mut items) = legacy_schema_v3_office_settlement(
+            &action_id,
+            &call_id,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            operation,
+            operation_name,
+            arguments,
+            10 + (index as i64 * 10),
+        );
+        for item in &mut items {
+            match item {
+                ConversationTurnTraceItem::ToolCall { sequence, .. }
+                | ConversationTurnTraceItem::ToolResult { sequence, .. }
+                | ConversationTurnTraceItem::AssistantNarration { sequence, .. } => {
+                    *sequence += (index as u64) * 2;
+                }
+            }
+        }
+        service.store_pending_agent_action(pending).unwrap();
+        service.upsert_agent_action_audit(terminal).unwrap();
+        trace_items.extend(items);
+        action_ids.push(action_id);
+    }
+
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::Cancelled,
+        terminal_error: None,
+        truncated: false,
+        items: trace_items,
+    };
+    service
+        .replace_conversation_turn_trace(&trace, 10, 42)
+        .unwrap();
+
+    assert!(service.list_unsettled_file_effects().unwrap().is_empty());
+    let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
+    assert!(reopened.list_unsettled_file_effects().unwrap().is_empty());
+    drop(reopened);
+
+    let mut tampered_call = trace.items[0].clone();
+    let ConversationTurnTraceItem::ToolCall { operation, .. } = &mut tampered_call else {
+        unreachable!("the first legacy Office trace item must be a ToolCall");
+    };
+    operation["path"] = serde_json::json!("different-workbook.xlsx");
+    service
+        .state
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE conversation_turn_trace_items
+             SET item_json = ?3
+             WHERE assistant_message_id = ?1 AND sequence = ?2",
+            rusqlite::params![
+                assistant_message_id,
+                tampered_call.sequence(),
+                serde_json::to_string(&tampered_call).unwrap(),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        service.list_unsettled_file_effects().unwrap(),
+        vec![AgentUnsettledFileEffect {
+            project_id: Some("project-1".to_string()),
+            conversation_id: conversation_id.to_string(),
+            run_id: run_id.to_string(),
+            action_id: action_ids[0].clone(),
+        }]
+    );
 }
 
 fn attach_manual_file_effect_recovery_checkpoint(

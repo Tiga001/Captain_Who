@@ -1,11 +1,11 @@
 // Tool-call parsing, execution wrappers, result redaction, and runtime event helpers.
 use super::{
     AgentEventStream, AgentHostActionExecutor, DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE,
-    MAX_MAX_TOKENS, RUN_COUNTER,
+    MAX_MAX_TOKENS,
 };
 use crate::cancellation::AgentCancellationToken;
 use crate::conversation_trace::render_tool_observation;
-use crate::llm::{LlmImage, LlmMessage, LlmMessageRole, LlmToolCall};
+use crate::llm::{model_response_tool_call_id, LlmImage, LlmMessage, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
     AgentApprovalStatus, AgentChatOutput, AgentError, AgentEvent, AgentProposedAction, AgentResult,
     AgentRunStatus, AgentStateSnapshot, AgentTodoState, AgentToolCall, AgentToolDefinition,
@@ -14,9 +14,9 @@ use crate::protocol::{
 use crate::tools::{AgentToolCancellationSettlement, ToolExecutionContext, ToolRegistry};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 pub(super) struct ToolCallRequest {
     pub(super) tool: String,
@@ -65,19 +65,31 @@ pub(super) fn tool_calls_from_response(
     run_id: &str,
     iteration: usize,
 ) -> Vec<LlmToolCall> {
-    if !native_tool_calls.is_empty() {
-        return native_tool_calls;
-    }
+    let calls = if native_tool_calls.is_empty() {
+        parse_tool_call_request(content)
+            .map(|request| {
+                vec![LlmToolCall {
+                    // The value is only a source correlation hint. Every accepted call is assigned
+                    // a runtime-owned provider-safe identity below.
+                    id: "text-fallback".to_string(),
+                    name: request.tool,
+                    args: request.args,
+                }]
+            })
+            .unwrap_or_default()
+    } else {
+        native_tool_calls
+    };
 
-    parse_tool_call_request(content)
-        .map(|request| {
-            vec![LlmToolCall {
-                id: format!("tool-{run_id}-{}", iteration + 1),
-                name: request.tool,
-                args: request.args,
-            }]
+    calls
+        .into_iter()
+        .enumerate()
+        .map(|(tool_index, call)| LlmToolCall {
+            id: model_response_tool_call_id(run_id, iteration, tool_index, &call.id),
+            name: call.name,
+            args: call.args,
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// Makes progressive Skill disclosure a model-request boundary.
@@ -406,8 +418,7 @@ pub(super) fn cancelled_output(
 }
 
 pub(super) fn generate_run_id() -> String {
-    let counter = RUN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("run-{}-{counter}", now_ms())
+    format!("run-{}", Uuid::new_v4().simple())
 }
 
 fn now_ms() -> u64 {
@@ -422,7 +433,75 @@ mod tests {
     use super::*;
     use crate::tools::{AgentTool, AgentToolPermissionPolicy};
     use serde_json::json;
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn assert_runtime_owned_tool_call_id(id: &str) {
+        assert!(id.starts_with("tc1_"), "unexpected tool-call ID: {id}");
+        assert_eq!(id.len(), 47, "unexpected canonical ID length: {id}");
+        assert!(
+            id.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+            "tool-call ID contains provider-unsafe characters: {id}"
+        );
+    }
+
+    #[test]
+    fn native_tool_calls_replace_untrusted_unicode_ids_and_disambiguate_duplicates() {
+        let provider_id = format!("重复/unsafe:{}", "工具调用🔧".repeat(80));
+        let calls = tool_calls_from_response(
+            vec![
+                LlmToolCall {
+                    id: provider_id.clone(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "first.txt" }),
+                },
+                LlmToolCall {
+                    id: provider_id,
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "second.txt" }),
+                },
+            ],
+            "",
+            "run-native-tool-id",
+            7,
+        );
+
+        assert_eq!(calls.len(), 2);
+        assert_runtime_owned_tool_call_id(&calls[0].id);
+        assert_runtime_owned_tool_call_id(&calls[1].id);
+        assert_ne!(calls[0].id, calls[1].id);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.id.as_str())
+                .collect::<HashSet<_>>()
+                .len(),
+            2
+        );
+        assert_eq!(calls[0].args["path"], "first.txt");
+        assert_eq!(calls[1].args["path"], "second.txt");
+    }
+
+    #[test]
+    fn plaintext_fallback_receives_the_same_runtime_owned_id_contract() {
+        let content = r#"{
+            "type": "tool_call",
+            "tool": "read_file",
+            "args": { "path": "notes.md" }
+        }"#;
+        let first = tool_calls_from_response(Vec::new(), content, "run-fallback", 3);
+        let repeated = tool_calls_from_response(Vec::new(), content, "run-fallback", 3);
+        let next_request = tool_calls_from_response(Vec::new(), content, "run-fallback", 4);
+
+        assert_eq!(first.len(), 1);
+        assert_runtime_owned_tool_call_id(&first[0].id);
+        assert_eq!(first[0].id, repeated[0].id);
+        assert_ne!(first[0].id, next_request[0].id);
+        assert_eq!(first[0].name, "read_file");
+        assert_eq!(first[0].args["path"], "notes.md");
+        assert!(!first[0].id.contains("text-fallback"));
+    }
 
     #[test]
     fn skill_activation_barrier_defers_calls_planned_without_full_instructions() {

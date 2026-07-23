@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { app } from 'electron'
-import { join } from 'node:path'
+import { isAbsolute, join, normalize } from 'node:path'
 
 import type {
   JsonRpcErrorResponse,
@@ -20,6 +20,26 @@ interface PendingRequest {
 
 type NotificationHandler = (params: unknown) => void
 
+function deleteEnvironmentVariableCaseInsensitively(
+  environment: NodeJS.ProcessEnv,
+  variableName: string
+): void {
+  const normalizedName = variableName.toUpperCase()
+  for (const existingName of Object.keys(environment)) {
+    if (existingName.toUpperCase() === normalizedName) {
+      delete environment[existingName]
+    }
+  }
+}
+
+export interface CoreJsonRpcClientOptions {
+  /**
+   * The application data root selected by Electron Host. It is normalized and frozen when the
+   * client is constructed; spawning the Core remains lazy.
+   */
+  appDataRoot?: string
+}
+
 /** Preserves JSON-RPC error metadata for callers that can apply typed recovery policies. */
 export class CoreJsonRpcError extends Error {
   readonly code: number
@@ -34,10 +54,19 @@ export class CoreJsonRpcError extends Error {
 }
 
 export class CoreJsonRpcClient {
+  private readonly appDataRoot: string
   private child: ChildProcessWithoutNullStreams | null = null
   private nextId = 1
   private readonly notificationHandlers = new Map<string, Set<NotificationHandler>>()
   private readonly pendingRequests = new Map<JsonRpcId, PendingRequest>()
+
+  constructor(options: CoreJsonRpcClientOptions = {}) {
+    const appDataRoot = normalize(options.appDataRoot ?? app.getPath('userData'))
+    if (!isAbsolute(appDataRoot)) {
+      throw new Error('Core application data root must be an absolute path')
+    }
+    this.appDataRoot = appDataRoot
+  }
 
   start(): void {
     if (this.child) {
@@ -213,6 +242,14 @@ export class CoreJsonRpcClient {
     const configuredOfficeRendererDirectory = process.env.MYCOPILOT_OFFICE_RENDERER_DIR
     const configuredArtifactRuntimeDirectory = process.env.MYCOPILOT_ARTIFACT_RUNTIME_DIR
     const environment = { ...process.env }
+
+    // Electron Host owns this location for both development and packaged applications.
+    // Never allow a parent shell to redirect the Core to a separate legacy database.
+    // Windows environment keys are case-insensitive even though a copied JavaScript object is
+    // not. Remove every casing before installing the single canonical Host capability.
+    deleteEnvironmentVariableCaseInsensitively(environment, 'MYCOPILOT_APP_DATA_ROOT')
+    deleteEnvironmentVariableCaseInsensitively(environment, 'MYCOPILOT_STORAGE_DB')
+    environment.MYCOPILOT_APP_DATA_ROOT = this.appDataRoot
 
     // These variables are an internal, per-call capability between Rust and its browser proxy.
     // They must never be inherited by the normal long-lived core-server process.

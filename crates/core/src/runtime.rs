@@ -584,17 +584,19 @@ impl AgentRuntime {
                                     }
                                     LlmStreamEvent::ToolInputProgress {
                                         tool_call_index,
-                                        tool_call_id,
                                         tool,
                                         input_delta,
                                         received_bytes,
                                     } => {
+                                        // Stream fragments are provisional. Correlate them by
+                                        // stream/attempt/index and leave Tool Call ID unset until
+                                        // the complete response receives its canonical identity.
                                         let observation = tool_input_stream.on_delta(
                                             tool_registry.as_ref(),
                                             &tool_context,
                                             &stream_id,
                                             tool_call_index,
-                                            tool_call_id.as_deref(),
+                                            None,
                                             &tool,
                                             &input_delta,
                                             received_bytes,
@@ -606,7 +608,7 @@ impl AgentRuntime {
                                                     stream_id: stream_id.clone(),
                                                     attempt: tool_input_stream.attempt(),
                                                     tool_call_index,
-                                                    tool_call_id: tool_call_id.clone(),
+                                                    tool_call_id: None,
                                                     tool: tool.clone(),
                                                     received_bytes,
                                                 },

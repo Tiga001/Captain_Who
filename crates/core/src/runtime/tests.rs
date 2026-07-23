@@ -30,6 +30,16 @@ fn empty_attachment_context() -> AttachmentContext {
     }
 }
 
+fn assert_runtime_owned_tool_call_id(id: &str) {
+    assert!(id.starts_with("tc1_"), "unexpected tool-call ID: {id}");
+    assert_eq!(id.len(), 47, "unexpected canonical ID length: {id}");
+    assert!(
+        id.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')),
+        "tool-call ID contains provider-unsafe characters: {id}"
+    );
+}
+
 #[test]
 fn skill_activation_barrier_clears_committed_stream_write_previews() {
     let captured = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
@@ -842,12 +852,17 @@ async fn effective_tool_definitions_are_also_the_execution_allowlist() {
         .events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::ToolCall { call, .. } if call.id == "hidden-tool-call" => Some(call),
+            AgentEvent::ToolCall { call, .. } if call.tool == "skills_preflight_script" => {
+                Some(call)
+            }
             _ => None,
         })
         .expect("the unavailable tool call remains observable");
+    assert_runtime_owned_tool_call_id(&call.id);
     assert_eq!(call.reason, None);
     let request = String::from_utf8(second_request.lock().unwrap().clone()).unwrap();
+    assert!(request.contains(&call.id));
+    assert!(!request.contains("hidden-tool-call"));
     assert!(request.contains("agent.tool_not_available"));
     assert!(request.contains("toolNotAvailable"));
 }
@@ -955,17 +970,24 @@ async fn text_only_model_receives_paired_read_image_capability_failure_without_i
     server.await.unwrap();
 
     assert_eq!(output.content, "This model cannot inspect images.");
-    let call_index = output
+    let (call_index, call_id) = output
         .events
         .iter()
-        .position(|event| matches!(event, AgentEvent::ToolCall { call, .. } if call.id == "read-image-unsupported"))
+        .enumerate()
+        .find_map(|(index, event)| match event {
+            AgentEvent::ToolCall { call, .. } if call.tool == "read_image" => {
+                Some((index, call.id.clone()))
+            }
+            _ => None,
+        })
         .expect("read_image tool call event");
+    assert_runtime_owned_tool_call_id(&call_id);
     let (result_index, result) = output
         .events
         .iter()
         .enumerate()
         .find_map(|(index, event)| match event {
-            AgentEvent::ToolResult { result, .. } if result.call_id == "read-image-unsupported" => {
+            AgentEvent::ToolResult { result, .. } if result.call_id == call_id => {
                 Some((index, result))
             }
             _ => None,
@@ -993,17 +1015,17 @@ async fn text_only_model_receives_paired_read_image_capability_failure_without_i
     let tool_call_index = messages
         .iter()
         .position(|message| {
-            message["role"] == "assistant"
-                && message["tool_calls"][0]["id"] == "read-image-unsupported"
+            message["role"] == "assistant" && message["tool_calls"][0]["id"] == call_id
         })
         .expect("assistant tool call in provider payload");
     let tool_result_index = messages
         .iter()
-        .position(|message| {
-            message["role"] == "tool" && message["tool_call_id"] == "read-image-unsupported"
-        })
+        .position(|message| message["role"] == "tool" && message["tool_call_id"] == call_id)
         .expect("paired tool result in provider payload");
     assert!(tool_call_index < tool_result_index);
+    assert!(!serde_json::to_string(messages)
+        .unwrap()
+        .contains("read-image-unsupported"));
 
     let request = serde_json::to_string(&second_request).unwrap();
     assert!(request.contains("modelCapabilityUnsupported"));
@@ -1161,13 +1183,22 @@ async fn image_capable_read_image_round_trip_is_legal_for_openai_and_anthropic()
         server.await.unwrap();
         assert_eq!(output.content, "image inspected");
 
+        let call_id = output
+            .events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::ToolCall { call, .. } if call.tool == "read_image" => {
+                    Some(call.id.clone())
+                }
+                _ => None,
+            })
+            .expect("read_image call event");
+        assert_runtime_owned_tool_call_id(&call_id);
         let event_result = output
             .events
             .iter()
             .find_map(|event| match event {
-                AgentEvent::ToolResult { result, .. } if result.call_id == "read-image-success" => {
-                    Some(result)
-                }
+                AgentEvent::ToolResult { result, .. } if result.call_id == call_id => Some(result),
                 _ => None,
             })
             .expect("read_image result event");
@@ -1186,10 +1217,17 @@ async fn image_capable_read_image_round_trip_is_legal_for_openai_and_anthropic()
         assert!(trace.items.iter().any(|item| matches!(
             item,
             ConversationTurnTraceItem::ToolResult {
-                call_id,
+                call_id: trace_call_id,
                 truncated: true,
                 ..
-            } if call_id == "read-image-success"
+            } if trace_call_id == &call_id
+        )));
+        assert!(trace.items.iter().any(|item| matches!(
+            item,
+            ConversationTurnTraceItem::ToolCall {
+                call_id: trace_call_id,
+                ..
+            } if trace_call_id == &call_id
         )));
         let durable = serde_json::to_string(trace).unwrap();
         assert!(!durable.contains(&full_image_base64));
@@ -1208,14 +1246,13 @@ async fn image_capable_read_image_round_trip_is_legal_for_openai_and_anthropic()
                 let tool_call_index = messages
                     .iter()
                     .position(|message| {
-                        message["role"] == "assistant"
-                            && message["tool_calls"][0]["id"] == "read-image-success"
+                        message["role"] == "assistant" && message["tool_calls"][0]["id"] == call_id
                     })
                     .expect("OpenAI assistant tool call");
                 let tool_result_index = messages
                     .iter()
                     .position(|message| {
-                        message["role"] == "tool" && message["tool_call_id"] == "read-image-success"
+                        message["role"] == "tool" && message["tool_call_id"] == call_id
                     })
                     .expect("OpenAI paired tool result");
                 let image_index = messages
@@ -1243,9 +1280,9 @@ async fn image_capable_read_image_round_trip_is_legal_for_openai_and_anthropic()
                     .position(|message| {
                         message["role"] == "assistant"
                             && message["content"].as_array().is_some_and(|parts| {
-                                parts.iter().any(|part| {
-                                    part["type"] == "tool_use" && part["id"] == "read-image-success"
-                                })
+                                parts
+                                    .iter()
+                                    .any(|part| part["type"] == "tool_use" && part["id"] == call_id)
                             })
                     })
                     .expect("Anthropic assistant tool_use");
@@ -1255,8 +1292,7 @@ async fn image_capable_read_image_round_trip_is_legal_for_openai_and_anthropic()
                         message["role"] == "user"
                             && message["content"].as_array().is_some_and(|parts| {
                                 parts.iter().any(|part| {
-                                    part["type"] == "tool_result"
-                                        && part["tool_use_id"] == "read-image-success"
+                                    part["type"] == "tool_result" && part["tool_use_id"] == call_id
                                 }) && parts.iter().any(|part| {
                                     part["type"] == "image"
                                         && part["source"]["data"] == full_image_base64
@@ -1267,6 +1303,9 @@ async fn image_capable_read_image_round_trip_is_legal_for_openai_and_anthropic()
                 assert!(tool_call_index < result_and_image_index);
             }
         }
+        assert!(!serde_json::to_string(messages)
+            .unwrap()
+            .contains("read-image-success"));
     }
 
     run_case(crate::protocol::AgentApiStyle::OpenAiCompatible).await;
@@ -1444,9 +1483,12 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
         ])
     );
 
+    let context_call_id =
+        crate::llm::model_response_tool_call_id("run-context", 0, 0, "call-context");
+    assert_runtime_owned_tool_call_id(&context_call_id);
     let call = ConversationTurnTraceItem::ToolCall {
         sequence: 1,
-        call_id: "call-context".to_string(),
+        call_id: context_call_id.clone(),
         tool: "read_file".to_string(),
         operation: json!({ "path": "src/lib.rs" }),
         approval_status: AgentApprovalStatus::NotRequired,
@@ -1454,7 +1496,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
     };
     let result = ConversationTurnTraceItem::ToolResult {
         sequence: 2,
-        call_id: "call-context".to_string(),
+        call_id: context_call_id,
         tool: "read_file".to_string(),
         status: ConversationTraceToolResultStatus::Succeeded,
         success: true,
@@ -1888,6 +1930,17 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
 
     assert_eq!(output.content, "Skill loaded and applied.");
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+    let activation_call_id = output
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCall { call, .. } if call.tool == "skills_activate" => {
+                Some(call.id.clone())
+            }
+            _ => None,
+        })
+        .expect("canonical skills_activate call");
+    assert_runtime_owned_tool_call_id(&activation_call_id);
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     let first_serialized = serde_json::to_string(&requests[0]).unwrap();
@@ -1899,7 +1952,7 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
     let tool_result_index = second_messages
         .iter()
         .position(|message| {
-            message["role"] == "tool" && message["tool_call_id"] == "activate-documents"
+            message["role"] == "tool" && message["tool_call_id"] == activation_call_id
         })
         .unwrap();
     let skill_context_index = second_messages
@@ -1936,7 +1989,7 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
     let events = events.lock().unwrap();
     let result_index = events
         .iter()
-        .position(|event| matches!(event, AgentEvent::ToolResult { result, .. } if result.call_id == "activate-documents"))
+        .position(|event| matches!(event, AgentEvent::ToolResult { result, .. } if result.call_id == activation_call_id))
         .unwrap();
     let activated_index = events
         .iter()
@@ -1944,8 +1997,11 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
         .unwrap();
     assert!(result_index < activated_index);
     assert!(!events.iter().any(|event| {
-        matches!(event, AgentEvent::ToolCall { call, .. } if call.id == "read-before-skill")
+        matches!(event, AgentEvent::ToolCall { call, .. } if call.tool == "read_file")
     }));
+    assert!(!serde_json::to_string(&*events)
+        .unwrap()
+        .contains("activate-documents"));
     assert!(!serde_json::to_string(&*events)
         .unwrap()
         .contains(INSTRUCTIONS));
@@ -2983,12 +3039,18 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         .events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::ToolCall { call, .. } if call.id == "call-append" => Some(call),
+            AgentEvent::ToolCall { call, .. }
+                if call.tool == "write_file" && call.args["phase"] == "append" =>
+            {
+                Some(call)
+            }
             _ => None,
         })
         .expect("write_file append event");
+    assert_runtime_owned_tool_call_id(&append_event.id);
     assert_eq!(append_event.args["content"], "[stored in private draft]");
     assert_eq!(append_event.args["contentBytes"], 28);
+    let append_call_id = append_event.id.clone();
 
     let append_trace = output
         .conversation_turn_trace
@@ -2999,7 +3061,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         .find_map(|item| match item {
             ConversationTurnTraceItem::ToolCall {
                 call_id, operation, ..
-            } if call_id == "call-append" => Some(operation),
+            } if call_id == &append_call_id => Some(operation),
             _ => None,
         })
         .expect("write_file append trace item");
@@ -3219,8 +3281,58 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(checkpoint.pending_tool_call_id, "patch-approval");
     assert_eq!(checkpoint.queued_tool_calls.len(), 1);
+    let todo_call_id = waiting
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCall { call, .. } if call.tool == "todo_update" => {
+                Some(call.id.clone())
+            }
+            _ => None,
+        })
+        .expect("todo call event");
+    let read_before_call_id = waiting
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCall { call, .. }
+                if call.tool == "read_file" && call.args["path"] == "source.txt" =>
+            {
+                Some(call.id.clone())
+            }
+            _ => None,
+        })
+        .expect("first read call event");
+    let pending_call_id = checkpoint.pending_tool_call_id.clone();
+    let queued_call_id = checkpoint.queued_tool_calls[0].call.id.clone();
+    for call_id in [
+        &todo_call_id,
+        &read_before_call_id,
+        &pending_call_id,
+        &queued_call_id,
+    ] {
+        assert_runtime_owned_tool_call_id(call_id);
+    }
+    assert_eq!(
+        [
+            &todo_call_id,
+            &read_before_call_id,
+            &pending_call_id,
+            &queued_call_id,
+        ]
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len(),
+        4
+    );
+    for completed_call_id in [&todo_call_id, &read_before_call_id] {
+        assert!(waiting.events.iter().any(|event| matches!(
+            event,
+            AgentEvent::ToolResult { result, .. }
+                if result.call_id == completed_call_id.as_str()
+        )));
+    }
     assert!(checkpoint
         .extension_snapshots
         .iter()
@@ -3250,20 +3362,20 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     resume_input.skill_activation = Some(activated_skill("SKILL_CHANGED_DURING_RESUME"));
     resume_input.resume_checkpoint = Some(checkpoint);
     resume_input.approval_decision = Some(AgentApprovalDecision {
-        action_id: "patch-approval".to_string(),
+        action_id: pending_call_id.clone(),
         status: AgentApprovalDecisionStatus::Rejected,
         message: Some("Keep the evidence but revise the report first.".to_string()),
     });
     resume_input.tool_continuation = Some(AgentToolContinuation {
         call: AgentToolCall {
-            id: "patch-approval".to_string(),
+            id: pending_call_id.clone(),
             tool: "apply_patch".to_string(),
             args: json!({ "operation": "create", "filePath": "report.txt" }),
             approval_status: AgentApprovalStatus::Rejected,
             reason: None,
         },
         result: AgentToolResult {
-            call_id: "patch-approval".to_string(),
+            call_id: pending_call_id.clone(),
             tool: "apply_patch".to_string(),
             ok: false,
             result: None,
@@ -3293,18 +3405,31 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     assert!(messages.contains("evidence-before-approval"));
     assert!(messages.contains("evidence-from-queued-tool"));
     assert!(messages.contains("user rejected"));
-    assert!(messages.contains("read-before"));
-    assert!(messages.contains("patch-approval"));
-    assert!(messages.contains("read-queued"));
+    for call_id in [
+        &todo_call_id,
+        &read_before_call_id,
+        &pending_call_id,
+        &queued_call_id,
+    ] {
+        assert!(messages.contains(call_id.as_str()));
+    }
+    for provider_call_id in [
+        "todo-before",
+        "read-before",
+        "patch-approval",
+        "read-queued",
+    ] {
+        assert!(!messages.contains(provider_call_id));
+    }
     assert!(messages.contains("SKILL_SNAPSHOT_BEFORE_APPROVAL"));
     assert!(!messages.contains("SKILL_CHANGED_DURING_RESUME"));
     let trace = completed.conversation_turn_trace.as_ref().unwrap();
     trace.validate().unwrap();
     for call_id in [
-        "todo-before",
-        "read-before",
-        "patch-approval",
-        "read-queued",
+        &todo_call_id,
+        &read_before_call_id,
+        &pending_call_id,
+        &queued_call_id,
     ] {
         assert_eq!(
             trace
@@ -3574,6 +3699,23 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
             _ => None,
         })
         .unwrap();
+    let resource_read_call_id = output
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCall { call, .. } if call.tool == "skills_read_resource" => {
+                Some(call.id.clone())
+            }
+            _ => None,
+        })
+        .expect("Skill resource read call");
+    let pending_call_id = checkpoint.pending_tool_call_id.clone();
+    assert_runtime_owned_tool_call_id(&resource_read_call_id);
+    assert_runtime_owned_tool_call_id(&pending_call_id);
+    assert_ne!(resource_read_call_id, pending_call_id);
+    let model_request_messages = serde_json::to_string(&model_request["messages"]).unwrap();
+    assert!(model_request_messages.contains(&resource_read_call_id));
+    assert!(!model_request_messages.contains("read-skill-resource"));
     let checkpoint_json = serde_json::to_string(checkpoint).unwrap();
     assert!(!checkpoint_json.contains(RESOURCE_MARKER));
     assert!(checkpoint_json.contains("contentOmittedFromHistory"));
@@ -3586,13 +3728,13 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
     resume_input.skill_activation = None;
     resume_input.resume_checkpoint = Some(checkpoint.clone());
     resume_input.approval_decision = Some(AgentApprovalDecision {
-        action_id: "materialize-after-read".to_string(),
+        action_id: pending_call_id.clone(),
         status: AgentApprovalDecisionStatus::Approved,
         message: None,
     });
     resume_input.tool_continuation = Some(AgentToolContinuation {
         call: AgentToolCall {
-            id: "materialize-after-read".to_string(),
+            id: pending_call_id.clone(),
             tool: "apply_patch".to_string(),
             args: json!({
                 "operation": "create",
@@ -3603,7 +3745,7 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
             reason: None,
         },
         result: AgentToolResult {
-            call_id: "materialize-after-read".to_string(),
+            call_id: pending_call_id.clone(),
             tool: "apply_patch".to_string(),
             ok: true,
             result: Some(json!({ "status": "applied" })),
@@ -3627,7 +3769,30 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
     assert_eq!(completed.content, "continued after approval");
     let resumed_request = resumed_request.lock().unwrap().clone().unwrap();
     let resumed_messages = serde_json::to_string(&resumed_request["messages"]).unwrap();
-    assert!(resumed_messages.contains("materialize-after-read"));
+    assert!(resumed_messages.contains(&resource_read_call_id));
+    assert!(resumed_messages.contains(&pending_call_id));
+    assert!(!resumed_messages.contains("read-skill-resource"));
+    assert!(!resumed_messages.contains("materialize-after-read"));
     assert!(resumed_messages.contains("applied"));
     assert!(!resumed_messages.contains(RESOURCE_MARKER));
+    let trace = completed
+        .conversation_turn_trace
+        .as_ref()
+        .expect("terminal conversation trace");
+    for call_id in [&resource_read_call_id, &pending_call_id] {
+        assert!(trace.items.iter().any(|item| matches!(
+            item,
+            ConversationTurnTraceItem::ToolCall {
+                call_id: trace_call_id,
+                ..
+            } if trace_call_id == call_id
+        )));
+        assert!(trace.items.iter().any(|item| matches!(
+            item,
+            ConversationTurnTraceItem::ToolResult {
+                call_id: trace_call_id,
+                ..
+            } if trace_call_id == call_id
+        )));
+    }
 }

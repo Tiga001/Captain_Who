@@ -9,6 +9,74 @@ use serde_json::{json, Value};
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[test]
+fn electron_app_data_root_is_the_authoritative_process_boundary() {
+    let profile = tempfile::tempdir().expect("temporary profile");
+    let app_data_root = profile.path().join("Electron User Data");
+    std::fs::create_dir(&app_data_root).expect("application data root");
+    let isolated_home = profile.path().join("isolated-home");
+    let isolated_app_data = profile.path().join("isolated-app-data");
+    let isolated_xdg_data = profile.path().join("isolated-xdg-data");
+    std::fs::create_dir_all(&isolated_home).expect("isolated home");
+    std::fs::create_dir_all(&isolated_app_data).expect("isolated app data");
+    std::fs::create_dir_all(&isolated_xdg_data).expect("isolated XDG data");
+    let ignored_database = profile.path().join("ignored/storage.sqlite");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_core-server"))
+        .env("MYCOPILOT_APP_DATA_ROOT", &app_data_root)
+        .env("MYCOPILOT_STORAGE_DB", &ignored_database)
+        .env("HOME", &isolated_home)
+        .env("APPDATA", &isolated_app_data)
+        .env("XDG_DATA_HOME", &isolated_xdg_data)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn production core-server binary");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (line_tx, line_rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "core.ping"
+        }),
+    );
+    assert_eq!(receive_response(&line_rx)["result"]["message"], "pong");
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "core.shutdown"
+        }),
+    );
+    assert_eq!(receive_response(&line_rx)["id"], 2);
+    drop(stdin);
+
+    let status = wait_for_exit(&mut child, EXIT_TIMEOUT);
+    reader.join().expect("stdout reader thread");
+    let stderr = read_stderr(&mut child);
+    assert!(
+        status.success(),
+        "core-server exited with {status}; stderr:\n{stderr}"
+    );
+    assert!(app_data_root.join("storage.sqlite").is_file());
+    assert!(
+        !ignored_database.exists(),
+        "standalone database override must not split Electron application storage"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn unsigned_development_bootstrap_persists_credentials_without_keychain_access() {

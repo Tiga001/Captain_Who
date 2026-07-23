@@ -389,7 +389,6 @@ impl OpenAiStreamAccumulator {
                         if !input_delta.is_empty() {
                             on_delta(LlmStreamEvent::ToolInputProgress {
                                 tool_call_index: slot,
-                                tool_call_id: entry.id.clone(),
                                 tool: entry.name.clone(),
                                 input_delta,
                                 received_bytes: entry.arguments.received_bytes(),
@@ -542,7 +541,6 @@ impl AnthropicStreamAccumulator {
                         block.input_json = serde_json::to_string(input).unwrap_or_default();
                         on_delta(LlmStreamEvent::ToolInputProgress {
                             tool_call_index: index,
-                            tool_call_id: block.id.clone(),
                             tool: block.name.clone().unwrap_or_default(),
                             input_delta: block.input_json.clone(),
                             received_bytes: block.input_json.len() as u64,
@@ -594,7 +592,6 @@ impl AnthropicStreamAccumulator {
                 if !partial_json.is_empty() {
                     on_delta(LlmStreamEvent::ToolInputProgress {
                         tool_call_index: index,
-                        tool_call_id: block.id.clone(),
                         tool: block.name.clone().unwrap_or_default(),
                         input_delta: partial_json.to_string(),
                         received_bytes: block.input_json.len() as u64,
@@ -700,12 +697,10 @@ mod tests {
             .filter_map(|event| match event {
                 LlmStreamEvent::ToolInputProgress {
                     tool_call_index,
-                    tool_call_id,
                     input_delta,
                     ..
                 } => {
                     assert_eq!(*tool_call_index, 0);
-                    assert_eq!(tool_call_id.as_deref(), Some("call-1"));
                     Some(input_delta.as_str())
                 }
                 _ => None,
@@ -838,17 +833,12 @@ mod tests {
             .iter()
             .filter_map(|event| match event {
                 LlmStreamEvent::ToolInputProgress {
-                    tool_call_index,
-                    tool_call_id,
-                    ..
-                } => Some((*tool_call_index, tool_call_id.as_deref())),
+                    tool_call_index, ..
+                } => Some(*tool_call_index),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(
-            streamed_calls,
-            vec![(0, Some("call-a")), (1, Some("call-b"))]
-        );
+        assert_eq!(streamed_calls, vec![0, 1]);
         let response = accumulator.finish().unwrap();
         assert_eq!(response.tool_calls.len(), 2);
         assert_eq!(response.tool_calls[0].id, "call-a");

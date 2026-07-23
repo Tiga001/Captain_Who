@@ -103,15 +103,21 @@ export function useRightSidebarPlatform({
       module: RightSidebarModuleDefinition,
       request: RightSidebarPageOpenRequest
     ) => {
+      const targetModule = modules.find(
+        (candidate) => candidate.id === (request.targetModuleId ?? module.id)
+      )
+      if (!targetModule) return
       dispatch({
-        module,
         pageId: createPageId('page'),
         request,
+        sourceModule: module,
         sourcePageId,
+        t,
+        targetModule,
         type: 'open-related-page'
       })
     },
-    []
+    [modules, t]
   )
 
   const updatePage = useCallback((pageId: string, update: RightSidebarPageUpdate) => {

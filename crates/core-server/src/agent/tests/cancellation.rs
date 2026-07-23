@@ -57,7 +57,7 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
     }))
     .unwrap();
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel".to_string(),
         context_items: Vec::new(),
         next_model_request_index: 1,
@@ -160,7 +160,7 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
         },
     );
     let checkpoint = AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-forced".to_string(),
         context_items: Vec::new(),
         next_model_request_index: 1,
@@ -326,7 +326,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
     };
     let call = command_tool_call(&command);
     let checkpoint = AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel-before-spawn".to_string(),
         context_items: Vec::new(),
         next_model_request_index: 1,
@@ -455,7 +455,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         reason: Some("exercise the pre-spawn continuation lease".to_string()),
     };
     let checkpoint = AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         context_items: Vec::new(),
         next_model_request_index: 1,
@@ -638,7 +638,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
     };
     let call = command_tool_call(&command);
     let checkpoint = AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-command-cancel".to_string(),
         context_items: Vec::new(),
         next_model_request_index: 1,

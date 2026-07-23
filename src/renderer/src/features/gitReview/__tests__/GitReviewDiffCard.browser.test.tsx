@@ -1,6 +1,6 @@
 import type { GitReviewFile } from '@mycopilot/protocol'
 import { useRef, type CSSProperties, type ReactNode } from 'react'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 import { Tooltip } from '../../../components/overlay/Tooltip'
 import { getFrontendTheme } from '../../../config/frontendTheme'
@@ -108,6 +108,7 @@ function StickyCardsFixture(): ReactNode {
               mutationLocked={false}
               mutationPending={false}
               onMutate={noop}
+              onOpenFile={noop}
               onRequestDiff={noop}
               onRestore={noop}
               onToggle={noop}
@@ -152,6 +153,7 @@ function WindowedCardFixture({
           mutationLocked={false}
           mutationPending={false}
           onMutate={noop}
+          onOpenFile={noop}
           onRequestDiff={noop}
           onRestore={noop}
           onToggle={noop}
@@ -167,7 +169,11 @@ function WindowedCardFixture({
   )
 }
 
-function LastTurnCardFixture(): ReactNode {
+function LastTurnCardFixture({
+  onOpenFile = noop
+}: {
+  onOpenFile?: (path: string) => void
+}): ReactNode {
   const scrollRootRef = useRef<HTMLDivElement>(null)
   return (
     <div className="git-review" style={{ display: 'block', height: 300, width: 440 }}>
@@ -184,6 +190,7 @@ function LastTurnCardFixture(): ReactNode {
           mutationLocked={false}
           mutationPending={false}
           onMutate={noop}
+          onOpenFile={onOpenFile}
           onRequestDiff={noop}
           onRestore={noop}
           onToggle={noop}
@@ -254,6 +261,7 @@ function ExpansionAnchorFixture(): ReactNode {
           mutationLocked={false}
           mutationPending={false}
           onMutate={noop}
+          onOpenFile={noop}
           onRequestDiff={noop}
           onRestore={noop}
           onToggle={noop}
@@ -282,7 +290,17 @@ describe('GitReviewDiffCard browser layout', () => {
     expect(actions?.querySelector('[aria-label="gitReview.file.stage"]')).toBeNull()
     expect(actions?.querySelector('[aria-label="gitReview.file.unstage"]')).toBeNull()
     expect(actions?.querySelector('[aria-label="gitReview.file.expand"]')).not.toBeNull()
-    expect(actions?.querySelector('[aria-label="gitReview.file.openSoon"]')).not.toBeNull()
+    expect(actions?.querySelector('[aria-label="gitReview.file.open"]')).not.toBeNull()
+  })
+
+  it('opens the selected review file through the tab action', async () => {
+    const onOpenFile = vi.fn()
+    const screen = await render(<LastTurnCardFixture onOpenFile={onOpenFile} />)
+
+    await screen.getByRole('button', { name: 'gitReview.file.open' }).click()
+
+    expect(onOpenFile).toHaveBeenCalledOnce()
+    expect(onOpenFile).toHaveBeenCalledWith('src/last-turn.ts')
   })
 
   it('keeps the following hunk anchored while expanding omitted lines upward', async () => {

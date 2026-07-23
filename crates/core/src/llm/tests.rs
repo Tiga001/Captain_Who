@@ -45,6 +45,20 @@ fn tool_definition() -> AgentToolDefinition {
     }
 }
 
+fn request_with_messages(messages: Vec<LlmMessage>) -> LlmChatRequest {
+    LlmChatRequest {
+        api_url: "https://example.test/v1/chat/completions".to_string(),
+        api_token: "token".to_string(),
+        model: "gpt".to_string(),
+        api_style: AgentApiStyle::OpenAiCompatible,
+        max_tokens: 1024,
+        temperature: 0.2,
+        stream: true,
+        messages,
+        tools: vec![tool_definition()],
+    }
+}
+
 async fn read_test_http_request(stream: &mut TcpStream) {
     let mut request = Vec::new();
     let mut content_length = None;
@@ -100,6 +114,7 @@ fn chat_message(role: &str, content: &str) -> AgentChatMessage {
 }
 
 fn traced_chat_message(content: &str) -> AgentChatMessage {
+    let call_id = historical_trace_call_id();
     AgentChatMessage {
         message_id: Some("assistant-history".to_string()),
         role: "assistant".to_string(),
@@ -121,7 +136,7 @@ fn traced_chat_message(content: &str) -> AgentChatMessage {
                 },
                 ConversationTurnTraceItem::ToolCall {
                     sequence: 11,
-                    call_id: "call-1".to_string(),
+                    call_id: call_id.clone(),
                     tool: "read_file".to_string(),
                     operation: json!({ "path": "src/lib.rs", "startLine": 1 }),
                     approval_status: AgentApprovalStatus::NotRequired,
@@ -129,7 +144,7 @@ fn traced_chat_message(content: &str) -> AgentChatMessage {
                 },
                 ConversationTurnTraceItem::ToolResult {
                     sequence: 12,
-                    call_id: "call-1".to_string(),
+                    call_id,
                     tool: "read_file".to_string(),
                     status: ConversationTraceToolResultStatus::Succeeded,
                     success: true,
@@ -146,6 +161,10 @@ fn traced_chat_message(content: &str) -> AgentChatMessage {
             ],
         }),
     }
+}
+
+fn historical_trace_call_id() -> String {
+    model_response_tool_call_id("historical-run-1", 0, 0, "provider-call-1")
 }
 
 #[test]
@@ -292,6 +311,167 @@ fn rejects_incompatible_tool_schema_before_building_an_http_request() {
 
     assert!(error.to_string().contains("read_file"));
     assert!(error.to_string().contains("anyOf"));
+}
+
+#[test]
+fn accepts_a_complete_tool_exchange_with_an_application_canonical_id() {
+    let call_id = model_response_tool_call_id("active-run", 0, 0, "provider-call");
+    let request = request_with_messages(vec![
+        message(LlmMessageRole::User, "Read a file"),
+        LlmMessage::assistant(
+            "",
+            vec![LlmToolCall {
+                id: call_id.clone(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "src/lib.rs" }),
+            }],
+        ),
+        LlmMessage::tool_result(call_id, "{\"ok\":true}", false),
+    ]);
+
+    validate_request(&request).unwrap();
+}
+
+#[test]
+fn rejects_noncanonical_tool_ids_at_or_below_the_provider_limit_before_network_io() {
+    for call_id in ["call-1".to_string(), "a".repeat(64)] {
+        let request = request_with_messages(vec![
+            LlmMessage::assistant(
+                "",
+                vec![LlmToolCall {
+                    id: call_id.clone(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "src/lib.rs" }),
+                }],
+            ),
+            LlmMessage::tool_result(call_id, "{\"ok\":true}", false),
+        ]);
+
+        let error = validate_request(&request).unwrap_err();
+
+        assert_eq!(error.code(), Some("agent.invalid_model_tool_call_id"));
+        assert_eq!(
+            error.details().and_then(|details| details["code"].as_str()),
+            Some("nonCanonicalToolCallId")
+        );
+        assert_eq!(
+            error
+                .details()
+                .and_then(|details| details["canonicalLength"].as_u64()),
+            Some(47)
+        );
+        assert_eq!(
+            error
+                .details()
+                .and_then(|details| details["canonicalPrefix"].as_str()),
+            Some("tc1_")
+        );
+    }
+}
+
+#[test]
+fn rejects_tool_ids_over_sixty_four_bytes_before_network_io() {
+    let call_id = "a".repeat(65);
+    let request = request_with_messages(vec![
+        LlmMessage::assistant(
+            "",
+            vec![LlmToolCall {
+                id: call_id.clone(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "src/lib.rs" }),
+            }],
+        ),
+        LlmMessage::tool_result(call_id, "{\"ok\":true}", false),
+    ]);
+
+    let error = validate_request(&request).unwrap_err();
+
+    assert_eq!(error.code(), Some("agent.invalid_model_tool_call_id"));
+    assert_eq!(
+        error.details().and_then(|details| details["code"].as_str()),
+        Some("toolCallIdTooLong")
+    );
+    assert_eq!(
+        error
+            .details()
+            .and_then(|details| details["maxLength"].as_u64()),
+        Some(64)
+    );
+}
+
+#[test]
+fn rejects_unsafe_tool_id_characters_before_network_io() {
+    let request = request_with_messages(vec![
+        LlmMessage::assistant(
+            "",
+            vec![LlmToolCall {
+                id: "unsafe:id".to_string(),
+                name: "read_file".to_string(),
+                args: json!({ "path": "src/lib.rs" }),
+            }],
+        ),
+        LlmMessage::tool_result("unsafe:id", "{\"ok\":true}", false),
+    ]);
+
+    let error = validate_request(&request).unwrap_err();
+
+    assert_eq!(error.code(), Some("agent.invalid_model_tool_call_id"));
+    assert_eq!(
+        error.details().and_then(|details| details["code"].as_str()),
+        Some("unsafeToolCallIdCharacters")
+    );
+}
+
+#[test]
+fn rejects_duplicate_and_unpaired_tool_protocol_before_network_io() {
+    let duplicate_call_id = model_response_tool_call_id("duplicate-run", 0, 0, "provider-call");
+    let duplicate = request_with_messages(vec![
+        LlmMessage::assistant(
+            "",
+            vec![
+                LlmToolCall {
+                    id: duplicate_call_id.clone(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "src/one.rs" }),
+                },
+                LlmToolCall {
+                    id: duplicate_call_id.clone(),
+                    name: "read_file".to_string(),
+                    args: json!({ "path": "src/two.rs" }),
+                },
+            ],
+        ),
+        LlmMessage::tool_result(duplicate_call_id, "{\"ok\":true}", false),
+    ]);
+    let duplicate_error = validate_request(&duplicate).unwrap_err();
+    assert_eq!(
+        duplicate_error.code(),
+        Some("agent.invalid_model_tool_protocol")
+    );
+    assert_eq!(
+        duplicate_error
+            .details()
+            .and_then(|details| details["code"].as_str()),
+        Some("duplicateToolCallId")
+    );
+
+    let orphan_call_id = model_response_tool_call_id("orphan-run", 0, 0, "provider-call");
+    let unpaired = request_with_messages(vec![LlmMessage::tool_result(
+        orphan_call_id,
+        "result",
+        true,
+    )]);
+    let unpaired_error = validate_request(&unpaired).unwrap_err();
+    assert_eq!(
+        unpaired_error.code(),
+        Some("agent.invalid_model_tool_protocol")
+    );
+    assert_eq!(
+        unpaired_error
+            .details()
+            .and_then(|details| details["code"].as_str()),
+        Some("unpairedToolResult")
+    );
 }
 
 #[test]
@@ -590,7 +770,9 @@ fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
     let openai_call_id = openai["messages"][3]["tool_calls"][0]["id"]
         .as_str()
         .unwrap();
-    assert!(openai_call_id.starts_with("conversation_trace_historical-run-1_"));
+    assert_eq!(openai_call_id, historical_trace_call_id());
+    assert_eq!(openai_call_id.len(), 47);
+    assert!(openai_call_id.starts_with("tc1_"));
     assert_eq!(openai["messages"][3]["content"], Value::Null);
     assert_eq!(openai["messages"][4]["role"], "tool");
     assert_eq!(openai["messages"][4]["tool_call_id"], openai_call_id);
@@ -616,6 +798,7 @@ fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
     let anthropic_call_id = anthropic["messages"][1]["content"][1]["id"]
         .as_str()
         .unwrap();
+    assert_eq!(anthropic_call_id, historical_trace_call_id());
     assert_eq!(anthropic_call_id, openai_call_id);
     assert_eq!(anthropic["messages"][2]["role"], "user");
     assert_eq!(

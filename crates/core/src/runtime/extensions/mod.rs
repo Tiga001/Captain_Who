@@ -649,7 +649,7 @@ mod tests {
                 },
             },
             checkpoint: crate::protocol::AgentRunCheckpoint {
-                version: 2,
+                version: crate::protocol::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
                 run_id: "run-1".to_string(),
                 context_items: Vec::new(),
                 next_model_request_index: 1,

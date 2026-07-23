@@ -509,7 +509,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
     });
     let checkpoint_discovery = agent_input.skill_discovery.clone().unwrap();
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-skill-redaction".to_string(),
         context_items: vec![
             mycopilot_core::AgentContextCheckpointItem {
@@ -776,7 +776,7 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
         }],
     });
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel-rollback".to_string(),
         context_items: Vec::new(),
         next_model_request_index: 1,
@@ -892,7 +892,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
     }))
     .unwrap();
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-cancel-usage-failure".to_string(),
         context_items: Vec::new(),
         next_model_request_index: 1,
@@ -1038,7 +1038,7 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
     }))
     .unwrap();
     agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-file-write-cancel-failure".to_string(),
         context_items: Vec::new(),
         next_model_request_index: 1,

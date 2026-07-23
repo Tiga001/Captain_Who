@@ -7,9 +7,9 @@ import { getTranslucentSidebarOpacityPercent } from '../../features/storage/stor
 
 describe('translucent sidebar tint', () => {
   it('keeps a theme-owned tint floor across the supported transparency range', () => {
-    expect(getTranslucentSidebarOpacityPercent(50)).toBe('66%')
-    expect(getTranslucentSidebarOpacityPercent(54)).toBe('63%')
-    expect(getTranslucentSidebarOpacityPercent(82)).toBe('44%')
-    expect(getTranslucentSidebarOpacityPercent(100)).toBe('32%')
+    expect(getTranslucentSidebarOpacityPercent(50)).toBe('55%')
+    expect(getTranslucentSidebarOpacityPercent(54)).toBe('51%')
+    expect(getTranslucentSidebarOpacityPercent(82)).toBe('26%')
+    expect(getTranslucentSidebarOpacityPercent(100)).toBe('10%')
   })
 })

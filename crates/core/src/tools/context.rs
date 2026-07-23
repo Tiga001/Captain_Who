@@ -491,6 +491,25 @@ impl ToolExecutionContext {
     }
 }
 
+fn is_attachment_path(input_path: &str) -> bool {
+    input_path.trim().starts_with("@attachments/")
+}
+
+fn attachment_id_from_path(input_path: &str) -> AgentResult<String> {
+    let trimmed = input_path.trim();
+    let remainder = trimmed
+        .strip_prefix("@attachments/")
+        .ok_or_else(|| AgentError::new("附件路径必须以 @attachments/ 开头。"))?;
+    let attachment_id = remainder
+        .split('/')
+        .next()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| AgentError::new("附件路径缺少附件 id。"))?;
+
+    Ok(attachment_id.to_string())
+}
+
 #[cfg(test)]
 mod model_image_delivery_budget_tests {
     use super::*;
@@ -530,23 +549,4 @@ mod model_image_delivery_budget_tests {
             .with_model_capabilities(ModelCapabilities { image_input: false });
         assert!(text_only.try_reserve_model_image_delivery(1).is_none());
     }
-}
-
-fn is_attachment_path(input_path: &str) -> bool {
-    input_path.trim().starts_with("@attachments/")
-}
-
-fn attachment_id_from_path(input_path: &str) -> AgentResult<String> {
-    let trimmed = input_path.trim();
-    let remainder = trimmed
-        .strip_prefix("@attachments/")
-        .ok_or_else(|| AgentError::new("附件路径必须以 @attachments/ 开头。"))?;
-    let attachment_id = remainder
-        .split('/')
-        .next()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| AgentError::new("附件路径缺少附件 id。"))?;
-
-    Ok(attachment_id.to_string())
 }

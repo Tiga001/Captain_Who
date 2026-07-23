@@ -51,6 +51,7 @@ interface GitReviewDiffCardProps {
   mutationLocked: boolean
   mutationPending: boolean
   onMutate: (fileId: string, action: GitReviewFileMutationAction) => void
+  onOpenFile: (path: string) => void
   onRequestDiff: (fileId: string) => void
   onRestore: (file: GitReviewFile) => void
   onToggle: (fileId: string) => void
@@ -77,6 +78,7 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
   mutationLocked,
   mutationPending,
   onMutate,
+  onOpenFile,
   onRequestDiff,
   onRestore,
   onToggle,
@@ -226,11 +228,7 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
           <FileActionButton label={actionLabel} onClick={() => onToggle(file.id)}>
             {isExpanded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}
           </FileActionButton>
-          <FileActionButton
-            ariaDisabled
-            label={t('gitReview.file.openSoon')}
-            onClick={() => undefined}
-          >
+          <FileActionButton label={t('gitReview.file.open')} onClick={() => onOpenFile(file.path)}>
             <ExternalLink aria-hidden="true" />
           </FileActionButton>
           {scope === 'unstaged' && (

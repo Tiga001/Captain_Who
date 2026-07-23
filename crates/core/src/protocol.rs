@@ -157,6 +157,12 @@ pub struct AgentExtensionSnapshot {
     pub state: Value,
 }
 
+/// Current durable Agent run checkpoint schema.
+///
+/// Version 3 is the first version whose entire Tool Call graph uses one application-owned
+/// canonical identity. Earlier development checkpoints are intentionally not migrated.
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 3;
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunCheckpoint {
@@ -233,6 +239,9 @@ pub struct AgentContextCheckpointImage {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentContextCheckpointToolCall {
+    /// Application-owned opaque identity shared by execution, audit, persistence, and model I/O.
+    ///
+    /// This value is never a provider's raw ID and consumers must not parse its representation.
     pub id: String,
     pub name: String,
     pub args: Value,
@@ -945,6 +954,11 @@ pub enum AgentCommandRiskLevel {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolCall {
+    /// Application-owned opaque identity shared by the call's entire lifecycle.
+    ///
+    /// The runtime assigns it once when accepting a model response. Execution, approval, events,
+    /// audit, checkpoints, traces, results, and subsequent model requests must reuse it verbatim.
+    /// UI and host consumers must not parse or synthesize this value.
     pub id: String,
     pub tool: String,
     pub args: Value,
@@ -1124,6 +1138,10 @@ pub struct AgentFileWritePreview {
     pub stream_id: String,
     pub attempt: usize,
     pub tool_call_index: usize,
+    /// Present only after an application-owned canonical Tool Call ID exists.
+    ///
+    /// Streaming previews are provisional, so the runtime intentionally leaves this unset instead
+    /// of exposing a provider's raw correlation ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     pub draft_id: String,
@@ -1733,6 +1751,7 @@ pub enum AgentEvent {
         stream_id: String,
         attempt: usize,
         tool_call_index: usize,
+        /// Provisional stream events do not expose provider-owned raw Tool Call IDs.
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_call_id: Option<String>,
         tool: String,

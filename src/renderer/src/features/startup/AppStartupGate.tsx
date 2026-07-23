@@ -5,6 +5,7 @@ import type { ReactNode } from 'react'
 import darkBrandMark from '../../../../../resources/brand-mark-dark.png'
 import lightBrandMark from '../../../../../resources/brand-mark-light.png'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
+import { isMacOS } from '../../lib/platform'
 import { useAppStartupStatus } from './AppStartupContext'
 import { StartupAmbientText } from './StartupAmbientText'
 import './AppStartupScreen.css'
@@ -16,6 +17,7 @@ const STARTUP_EXIT_MS = 180
 export function AppStartupGate({ children }: { children: ReactNode }) {
   const startup = useAppStartupStatus()
   const { resolvedColorScheme, t } = useFrontendConfig()
+  const supportsNativeTranslucency = isMacOS()
   const [interactive, setInteractive] = useState(false)
   const [overlayMounted, setOverlayMounted] = useState(true)
   const [timedOut, setTimedOut] = useState(false)
@@ -63,6 +65,7 @@ export function AppStartupGate({ children }: { children: ReactNode }) {
         <div
           className="app-startup-screen"
           data-exiting={interactive ? 'true' : 'false'}
+          data-native-translucency={supportsNativeTranslucency ? 'true' : undefined}
           role={showFailure ? 'alert' : 'status'}
           aria-live={showFailure ? 'assertive' : 'polite'}
         >

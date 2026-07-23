@@ -32,6 +32,7 @@ import './GitReviewPanel.css'
 interface GitReviewPanelProps {
   conversationId?: string | null
   isActive: boolean
+  onOpenFile: (path: string) => void
   projectId: string
 }
 
@@ -54,6 +55,7 @@ function emptyFileVisibility(): GitReviewFileVisibility {
 export function GitReviewPanel({
   conversationId,
   isActive,
+  onOpenFile,
   projectId
 }: GitReviewPanelProps): ReactNode {
   const { t } = useFrontendConfig()
@@ -696,6 +698,7 @@ export function GitReviewPanel({
             loadFullFiles={reviewPreferences.loadFullFiles}
             mutateFile={handleMutateFile}
             pendingFileId={pendingFileId}
+            onOpenFile={onOpenFile}
             onRestore={setRestoreCandidate}
             nearFileIds={fileVisibility.near}
             scope={scope}
@@ -851,6 +854,7 @@ interface GitReviewContentProps {
   loadFullFiles: boolean
   mutateFile: (fileId: string, action: Parameters<ReviewHook['mutateFile']>[1]) => void
   nearFileIds: Set<string>
+  onOpenFile: (path: string) => void
   onRestore: (file: GitReviewFile) => void
   onRefresh: ReviewHook['refresh']
   pendingFileId: string | null
@@ -879,6 +883,7 @@ function GitReviewContent({
   loadFullFiles,
   mutateFile,
   nearFileIds,
+  onOpenFile,
   onRestore,
   onRefresh,
   pendingFileId,
@@ -975,6 +980,7 @@ function GitReviewContent({
             mutationLocked={pendingFileId !== null}
             mutationPending={pendingFileId === file.id}
             onMutate={mutateFile}
+            onOpenFile={onOpenFile}
             onRequestDiff={retryFileDiff}
             onRestore={onRestore}
             onToggle={toggleFile}

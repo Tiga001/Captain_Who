@@ -7,7 +7,8 @@ import type {
   RightSidebarModuleCreateContext,
   RightSidebarModuleDefinition,
   RightSidebarModuleRenderProps,
-  RightSidebarPage
+  RightSidebarPage,
+  RightSidebarPageOpenRequest
 } from './rightSidebarTypes'
 
 const TerminalPanel = lazy(async () => {
@@ -165,7 +166,13 @@ const BrowserModuleSurface = memo(function BrowserModuleSurface({
   )
 })
 
-function renderGitReviewModule({ activity, availability, page, t }: RightSidebarModuleRenderProps) {
+function renderGitReviewModule({
+  activity,
+  availability,
+  onOpenPage,
+  page,
+  t
+}: RightSidebarModuleRenderProps) {
   if (availability === 'checking') {
     return <div className="right-sidebar__panel-loading">{t('gitReview.loading')}</div>
   }
@@ -177,18 +184,30 @@ function renderGitReviewModule({ activity, availability, page, t }: RightSidebar
     >
       <GitReviewModuleSurface
         isActive={activity === 'foreground'}
+        onOpenFile={(path) => {
+          onOpenPage(createWorkspaceFileOpenRequest(path, 'reuse-source-if-empty'))
+        }}
         projectId={page.workspaceKey ?? ''}
       />
     </Suspense>
   )
 }
 
-function GitReviewModuleSurface({ isActive, projectId }: { isActive: boolean; projectId: string }) {
+function GitReviewModuleSurface({
+  isActive,
+  onOpenFile,
+  projectId
+}: {
+  isActive: boolean
+  onOpenFile: (path: string) => void
+  projectId: string
+}) {
   const { activeConversationId, activeWorkspaceKey } = useRightSidebarRuntimeContext()
   return (
     <GitReviewPanel
       conversationId={projectId === activeWorkspaceKey ? activeConversationId : null}
       isActive={isActive}
+      onOpenFile={onOpenFile}
       projectId={projectId}
     />
   )
@@ -227,13 +246,9 @@ function renderFilesModule({
           })
         }}
         onOpenFile={(path) => {
-          onOpenPage({
-            disposition: filePath ? 'new-page' : 'reuse-source-if-empty',
-            iconUrl: getFileTypeIconSource(path),
-            moduleState: { kind: 'workspace-file', path },
-            resourceKey: `workspace-file:${path}`,
-            title: path.split('/').at(-1) ?? path
-          })
+          onOpenPage(
+            createWorkspaceFileOpenRequest(path, filePath ? 'new-page' : 'reuse-source-if-empty')
+          )
         }}
         onPdfPageChange={(nextPdfPage) => {
           if (!filePath) return
@@ -263,6 +278,20 @@ function renderFilesModule({
       />
     </Suspense>
   )
+}
+
+function createWorkspaceFileOpenRequest(
+  path: string,
+  disposition: NonNullable<RightSidebarPageOpenRequest['disposition']>
+): RightSidebarPageOpenRequest {
+  return {
+    disposition,
+    iconUrl: getFileTypeIconSource(path),
+    moduleState: { kind: 'workspace-file', path },
+    resourceKey: `workspace-file:${path}`,
+    targetModuleId: 'files',
+    title: path.split('/').at(-1) ?? path
+  }
 }
 
 export const RIGHT_SIDEBAR_MODULES: RightSidebarModuleDefinition[] = [

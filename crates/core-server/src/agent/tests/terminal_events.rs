@@ -1216,7 +1216,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
         .unwrap();
     let call = command_tool_call(&command);
     let checkpoint = AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
         context_items: Vec::new(),
         next_model_request_index: 1,

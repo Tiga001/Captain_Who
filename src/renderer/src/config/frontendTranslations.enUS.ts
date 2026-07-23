@@ -217,7 +217,7 @@ export const enUSTranslations = {
   'gitReview.file.expand': 'Expand file diff',
   'gitReview.file.collapse': 'Collapse file diff',
   'gitReview.file.actions': 'File actions',
-  'gitReview.file.openSoon': 'Open file in a tab (coming soon)',
+  'gitReview.file.open': 'Open file in a tab',
   'gitReview.file.restore': 'Restore file',
   'gitReview.file.stage': 'Stage file',
   'gitReview.file.unstage': 'Unstage file',
@@ -1011,7 +1011,7 @@ export const enUSTranslations = {
   'tool.webFetch': 'read webpage',
   'tool.webSearch': 'search the web',
 
-  'configuration.model': 'Models',
+  'configuration.model': 'Chat model',
   'configuration.modelSettings': 'Model configuration',
   'configuration.availableModels': 'Available models',
   'configuration.manageModels': 'Manage models',
@@ -1082,7 +1082,6 @@ export const enUSTranslations = {
   'configuration.imageGeneration.imageToImage': 'Image to image',
   'configuration.imageGeneration.watermark': 'Add watermark',
   'configuration.imageGeneration.save': 'Save',
-  'configuration.imageGeneration.saved': 'Image generation configuration saved.',
   'configuration.imageGeneration.retry': 'Retry',
   'configuration.imageGeneration.error.revisionConflict':
     'The configuration changed elsewhere. The latest state has been reloaded.',

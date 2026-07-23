@@ -35,7 +35,6 @@ function feedbackText(
   >,
   t: ReturnType<typeof useFrontendConfig>['t']
 ) {
-  if (feedback.kind === 'saved') return t('configuration.imageGeneration.saved')
   if (feedback.kind === 'authoritativeRefresh') {
     return feedback.code === 'commitIndeterminate'
       ? t('configuration.imageGeneration.error.commitIndeterminateRefreshed')

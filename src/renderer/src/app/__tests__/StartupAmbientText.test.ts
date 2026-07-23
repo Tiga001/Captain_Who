@@ -18,6 +18,8 @@ describe('pickNextStartupPhraseIndex', () => {
     const rendererShell = readFileSync(resolve('src/renderer/index.html'), 'utf8')
     expect(rendererShell).toContain('class="app-bootstrap-screen__ambient"')
     expect(rendererShell).toContain('正在深度思考')
+    expect(rendererShell).toContain('background: rgba(244, 244, 242, 0.58)')
+    expect(rendererShell).toContain('@media (prefers-reduced-transparency: reduce)')
   })
 
   it('returns the only phrase when the catalog has fewer than two entries', () => {

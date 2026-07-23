@@ -50,6 +50,7 @@ nsis:
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
 mac:
+  icon: build/icon.icns
   # build:mac additionally enables forceCodeSigning. This custom signer gives the Rust helper a
   # stable designated requirement while preserving electron-builder's normal recursive signing
   # policy for the application and Electron helpers.

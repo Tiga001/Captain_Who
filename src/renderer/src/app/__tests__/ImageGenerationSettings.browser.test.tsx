@@ -168,6 +168,9 @@ describe('ImageGenerationSettings', () => {
     })
     await expect.element(secretInput).toHaveValue('')
     await expect.element(secretInput).toHaveAttribute('placeholder', '\u2022'.repeat(18))
+    expect(
+      screen.container.querySelector('.image-generation-settings__feedback')?.textContent
+    ).toBe('')
     expect(screen.container.textContent).not.toContain('top-secret')
   })
 

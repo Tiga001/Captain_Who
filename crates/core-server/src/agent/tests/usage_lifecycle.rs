@@ -298,7 +298,7 @@ fn pending_approval_persists_full_run_checkpoint() {
     }))
     .unwrap();
     let run_checkpoint = AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-checkpoint".to_string(),
         context_items: vec![
             mycopilot_core::AgentContextCheckpointItem {

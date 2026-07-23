@@ -9,6 +9,7 @@ mod request_handler;
 mod request_loop;
 mod rpc;
 mod skills_rpc;
+mod storage_root;
 
 pub(crate) use agent_rpc::*;
 pub(crate) use bootstrap::*;
@@ -19,3 +20,4 @@ pub(crate) use request_handler::*;
 pub(crate) use request_loop::*;
 pub(crate) use rpc::*;
 pub(crate) use skills_rpc::*;
+pub(crate) use storage_root::*;

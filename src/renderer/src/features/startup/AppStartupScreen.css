@@ -9,7 +9,7 @@
 .app-startup-root {
   position: relative;
   overflow: hidden;
-  background: var(--mc-color-surface-main-panel, #f4f4f2);
+  background: transparent;
 }
 
 .app-startup-workspace {
@@ -30,6 +30,16 @@
   opacity: 1;
   transition: opacity 180ms ease;
   -webkit-app-region: no-drag;
+}
+
+.app-startup-screen[data-native-translucency='true'] {
+  /*
+   * Electron's native macOS vibrancy supplies the blur. This layer only contributes enough
+   * theme tint for startup text and branding to remain legible without double-blurring.
+   */
+  background: color-mix(in srgb, var(--mc-color-surface-main-panel, #f4f4f2) 58%, transparent);
+  backdrop-filter: saturate(1.12);
+  -webkit-backdrop-filter: saturate(1.12);
 }
 
 .app-startup-screen[data-exiting='true'] {
@@ -163,5 +173,13 @@
 
   .app-startup-screen__ambient {
     transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .app-startup-screen[data-native-translucency='true'] {
+    background: var(--mc-color-surface-main-panel, #f4f4f2);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 }

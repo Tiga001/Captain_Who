@@ -348,6 +348,7 @@ mod tests {
         ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
         ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
+    use crate::llm::model_response_tool_call_id;
     use crate::protocol::AgentApprovalStatus;
     use crate::ContextJournalCursor;
     use serde_json::json;
@@ -398,6 +399,7 @@ mod tests {
     }
 
     fn traced_assistant(content: &str) -> AgentChatMessage {
+        let call_id = model_response_tool_call_id("run-previous", 0, 0, "provider-history-call");
         AgentChatMessage {
             message_id: Some("assistant-previous".to_string()),
             role: "assistant".to_string(),
@@ -419,7 +421,7 @@ mod tests {
                     },
                     ConversationTurnTraceItem::ToolCall {
                         sequence: 1,
-                        call_id: "call-1".to_string(),
+                        call_id: call_id.clone(),
                         tool: "write_file".to_string(),
                         operation: json!({
                             "filePath": "src/new.rs",
@@ -430,7 +432,7 @@ mod tests {
                     },
                     ConversationTurnTraceItem::ToolResult {
                         sequence: 2,
-                        call_id: "call-1".to_string(),
+                        call_id,
                         tool: "write_file".to_string(),
                         status: ConversationTraceToolResultStatus::Succeeded,
                         success: true,

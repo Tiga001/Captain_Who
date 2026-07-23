@@ -9,7 +9,7 @@ use std::io;
 use std::path::Path;
 
 /// Atomically publishes `source` at an absent `target` without replacing an existing name.
-pub(crate) fn atomic_rename_noreplace(source: &Path, target: &Path) -> io::Result<()> {
+pub fn atomic_rename_noreplace(source: &Path, target: &Path) -> io::Result<()> {
     atomic_rename_noreplace_impl(source, target)
 }
 
@@ -22,7 +22,7 @@ pub(crate) fn atomic_replace(source: &Path, target: &Path) -> io::Result<()> {
 ///
 /// Windows publication uses `MOVEFILE_WRITE_THROUGH`; Windows has no direct equivalent of a
 /// Unix directory `fsync`, so this is intentionally a documented no-op there.
-pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
+pub fn sync_directory(path: &Path) -> io::Result<()> {
     sync_directory_impl(path)
 }
 

@@ -5,7 +5,7 @@ mod context;
 mod context_compaction_audit;
 mod context_compaction_receipt;
 mod conversation_trace;
-mod durable_fs;
+pub mod durable_fs;
 pub mod file_write;
 pub mod git_review;
 pub mod image_generation;
@@ -98,7 +98,7 @@ pub use protocol::{
     AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION, AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
     AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION, AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
-    AGENT_OFFICE_REASON_MAX_CHARS,
+    AGENT_OFFICE_REASON_MAX_CHARS, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
 };
 pub use revision::content_revision;
 pub use runtime::{

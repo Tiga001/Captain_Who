@@ -1,8 +1,12 @@
 mod payload;
 mod response;
 mod stream;
+mod tool_call_id;
 mod transport;
 
+pub(crate) use tool_call_id::{
+    model_response_tool_call_id, validate_model_tool_call_id, validate_model_tool_protocol,
+};
 pub(crate) use transport::{
     complete_chat, complete_chat_allow_empty, complete_chat_streaming,
     complete_chat_streaming_allow_empty,
@@ -134,7 +138,6 @@ pub(crate) enum LlmStreamEvent {
     Delta(String),
     ToolInputProgress {
         tool_call_index: usize,
-        tool_call_id: Option<String>,
         tool: String,
         input_delta: String,
         received_bytes: u64,

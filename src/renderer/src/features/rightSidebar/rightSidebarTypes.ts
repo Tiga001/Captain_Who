@@ -76,6 +76,7 @@ export interface RightSidebarPageOpenRequest {
   iconUrl?: string | null
   moduleState?: RightSidebarModulePageState
   resourceKey?: string
+  targetModuleId?: RightSidebarModuleId
   title: string
 }
 

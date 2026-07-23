@@ -436,9 +436,10 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
         assert!(!entry.terminal);
     }
 
+    let canonical_call_id = format!("tc1_{}", "A".repeat(43));
     let call = ConversationTurnTraceItem::ToolCall {
         sequence: 1,
-        call_id: "call-live".to_string(),
+        call_id: canonical_call_id.clone(),
         tool: "image_generation".to_string(),
         operation: json!({
             "request": { "operation": "generate", "prompt": "private prompt" },
@@ -471,12 +472,13 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
     assert_eq!(durable_open_call.items.len(), 2);
     assert!(matches!(
         durable_open_call.items.last(),
-        Some(ConversationTurnTraceItem::ToolCall { call_id, .. }) if call_id == "call-live"
+        Some(ConversationTurnTraceItem::ToolCall { call_id, .. })
+            if call_id == &canonical_call_id
     ));
 
     let result = ConversationTurnTraceItem::ToolResult {
         sequence: 2,
-        call_id: "call-live".to_string(),
+        call_id: canonical_call_id,
         tool: "image_generation".to_string(),
         status: ConversationTraceToolResultStatus::Succeeded,
         success: true,

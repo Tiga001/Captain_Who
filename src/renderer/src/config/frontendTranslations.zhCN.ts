@@ -217,7 +217,7 @@ export const zhCNTranslations = {
   'gitReview.file.expand': '展开文件差异',
   'gitReview.file.collapse': '折叠文件差异',
   'gitReview.file.actions': '文件操作',
-  'gitReview.file.openSoon': '在标签页中打开文件（即将支持）',
+  'gitReview.file.open': '在标签页中打开文件',
   'gitReview.file.restore': '还原文件',
   'gitReview.file.stage': '暂存文件',
   'gitReview.file.unstage': '取消暂存文件',
@@ -975,7 +975,7 @@ export const zhCNTranslations = {
   'tool.webFetch': '读取网页',
   'tool.webSearch': '联网搜索',
 
-  'configuration.model': '模型',
+  'configuration.model': '对话模型',
   'configuration.modelSettings': '模型配置',
   'configuration.availableModels': '可用模型',
   'configuration.manageModels': '管理模型',
@@ -1043,7 +1043,6 @@ export const zhCNTranslations = {
   'configuration.imageGeneration.imageToImage': '图生图',
   'configuration.imageGeneration.watermark': '添加水印',
   'configuration.imageGeneration.save': '保存',
-  'configuration.imageGeneration.saved': '图片生成配置已保存。',
   'configuration.imageGeneration.retry': '重试',
   'configuration.imageGeneration.error.revisionConflict':
     '配置已在其他位置发生变化，已重新加载最新状态。',

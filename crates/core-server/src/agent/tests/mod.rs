@@ -14,8 +14,8 @@ use mycopilot_core::{
     AgentWritePermission, ContextCompactionGeneration, ContextCompactionPrefix,
     ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
     ContextJournalCursor, ConversationTraceToolResultStatus, ConversationTurnTraceItem,
-    ConversationTurnTraceTerminalStatus, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
-    CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    ConversationTurnTraceTerminalStatus, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+    CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
 use std::fs;

@@ -56,7 +56,7 @@ type SidebarSectionOrder = 'projects_first' | 'conversations_first'
 export const MIN_TRANSLUCENT_SIDEBAR_TRANSPARENCY = 50
 export const MAX_TRANSLUCENT_SIDEBAR_TRANSPARENCY = 100
 const DEFAULT_TRANSLUCENT_SIDEBAR_TRANSPARENCY = 54
-const TRANSLUCENT_SIDEBAR_THEME_TINT_FLOOR = 32
+const TRANSLUCENT_SIDEBAR_THEME_TINT_FLOOR = 10
 
 export interface UiPreferencesSnapshot {
   profileAvatarDataUrl: string | null

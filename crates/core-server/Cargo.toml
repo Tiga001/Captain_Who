@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 base64 = "0.22"
+libc = "0.2"
 mycopilot-core.workspace = true
 mycopilot-protocol-rs.workspace = true
 serde.workspace = true

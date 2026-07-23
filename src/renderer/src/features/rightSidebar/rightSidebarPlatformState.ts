@@ -12,6 +12,7 @@ import type {
   RightSidebarPageUpdate,
   RightSidebarWorkspaceContext
 } from './rightSidebarTypes'
+import { createRightSidebarWorkspaceContext } from './rightSidebarWorkspace'
 
 export interface RightSidebarPlatformState {
   activePageId: string | null
@@ -29,10 +30,12 @@ export type RightSidebarPlatformAction =
   | { pageId: string; type: 'activate' }
   | { pageId: string; type: 'close' }
   | {
-      module: RightSidebarModuleDefinition
       pageId: string
       request: RightSidebarPageOpenRequest
+      sourceModule: RightSidebarModuleDefinition
       sourcePageId: string
+      t: Translate
+      targetModule: RightSidebarModuleDefinition
       type: 'open-related-page'
     }
   | {
@@ -84,10 +87,12 @@ export function reduceRightSidebarPlatform(
     case 'open-related-page':
       return openRelatedPage(
         state,
-        action.module,
+        action.sourceModule,
+        action.targetModule,
         action.sourcePageId,
         action.pageId,
-        action.request
+        action.request,
+        action.t
       )
     case 'synchronize-context':
       return synchronizeContext(
@@ -120,21 +125,29 @@ export function reduceRightSidebarPlatform(
 
 function openRelatedPage(
   state: RightSidebarPlatformState,
-  module: RightSidebarModuleDefinition,
+  sourceModule: RightSidebarModuleDefinition,
+  targetModule: RightSidebarModuleDefinition,
   sourcePageId: string,
   pageId: string,
-  request: RightSidebarPageOpenRequest
+  request: RightSidebarPageOpenRequest,
+  t: Translate
 ): RightSidebarPlatformState {
   const sourcePage = state.pages.find((page) => page.id === sourcePageId)
-  if (!sourcePage || sourcePage.moduleId !== module.id) return state
+  if (!sourcePage || sourcePage.moduleId !== sourceModule.id) return state
+
+  const targetBasePage =
+    targetModule.id === sourceModule.id
+      ? sourcePage
+      : createCrossModulePageBase(state, sourcePage, targetModule, pageId, t)
+  if (!targetBasePage) return state
 
   const resourceKey = request.resourceKey?.trim() || undefined
   if (resourceKey) {
     const existingPage = state.pages.find(
       (page) =>
-        page.moduleId === sourcePage.moduleId &&
+        page.moduleId === targetModule.id &&
         page.resourceKey === resourceKey &&
-        page.workspaceSessionKey === sourcePage.workspaceSessionKey
+        page.workspaceSessionKey === targetBasePage.workspaceSessionKey
     )
     if (existingPage) {
       return state.activePageId === existingPage.id
@@ -143,25 +156,26 @@ function openRelatedPage(
     }
   }
 
-  const title = request.title.trim() || sourcePage.title
+  const reusablePage =
+    request.disposition === 'reuse-source-if-empty'
+      ? findReusableEmptyPage(state.pages, targetModule.id, targetBasePage, sourcePage)
+      : undefined
+  const pageBase = reusablePage ?? targetBasePage
+  const title = request.title.trim() || pageBase.title
   const page: RightSidebarPage = {
-    ...sourcePage,
-    iconUrl: request.iconUrl === undefined ? sourcePage.iconUrl : request.iconUrl,
+    ...pageBase,
+    iconUrl: request.iconUrl === undefined ? pageBase.iconUrl : request.iconUrl,
     id: pageId,
     moduleState: request.moduleState,
     resourceKey,
     title
   }
-  const pages = evictRelatedPageAtLimit(state, module, sourcePage)
-  if (
-    request.disposition === 'reuse-source-if-empty' &&
-    sourcePage.moduleState === undefined &&
-    sourcePage.resourceKey === undefined
-  ) {
+  const pages = evictRelatedPageAtLimit(state, targetModule, targetBasePage, reusablePage?.id)
+  if (reusablePage) {
     return {
-      activePageId: sourcePage.id,
+      activePageId: reusablePage.id,
       pages: pages.map((currentPage) =>
-        currentPage.id === sourcePage.id ? { ...page, id: sourcePage.id } : currentPage
+        currentPage.id === reusablePage.id ? { ...page, id: reusablePage.id } : currentPage
       )
     }
   }
@@ -172,10 +186,58 @@ function openRelatedPage(
   }
 }
 
+function createCrossModulePageBase(
+  state: RightSidebarPlatformState,
+  sourcePage: RightSidebarPage,
+  targetModule: RightSidebarModuleDefinition,
+  pageId: string,
+  t: Translate
+): RightSidebarPage | null {
+  const workspace = createRightSidebarWorkspaceContext(
+    sourcePage.workspaceKey,
+    sourcePage.workspaceName,
+    sourcePage.workspacePath
+  )
+  if (targetModule.requiresWorkspace && !workspace.hasWorkspace) return null
+  return bindNewPageToWorkspace(
+    targetModule.createPage({
+      existingPages: state.pages,
+      pageId,
+      t,
+      workspace
+    }),
+    targetModule,
+    workspace
+  )
+}
+
+function findReusableEmptyPage(
+  pages: RightSidebarPage[],
+  targetModuleId: RightSidebarModuleId,
+  targetBasePage: RightSidebarPage,
+  sourcePage: RightSidebarPage
+): RightSidebarPage | undefined {
+  const sourceIsReusable =
+    sourcePage.moduleId === targetModuleId &&
+    sourcePage.workspaceSessionKey === targetBasePage.workspaceSessionKey &&
+    sourcePage.moduleState === undefined &&
+    sourcePage.resourceKey === undefined
+  if (sourceIsReusable) return sourcePage
+
+  return pages.find(
+    (page) =>
+      page.moduleId === targetModuleId &&
+      page.workspaceSessionKey === targetBasePage.workspaceSessionKey &&
+      page.moduleState === undefined &&
+      page.resourceKey === undefined
+  )
+}
+
 function evictRelatedPageAtLimit(
   state: RightSidebarPlatformState,
   module: RightSidebarModuleDefinition,
-  sourcePage: RightSidebarPage
+  sourcePage: RightSidebarPage,
+  protectedPageId: string | undefined = sourcePage.id
 ): RightSidebarPage[] {
   const limit = module.maxRelatedPagesPerWorkspace
   if (!limit || limit < 1) return state.pages
@@ -189,8 +251,8 @@ function evictRelatedPageAtLimit(
   if (relatedPages.length < limit) return state.pages
 
   const pageToEvict =
-    relatedPages.find((page) => page.id !== sourcePage.id && page.id !== state.activePageId) ??
-    relatedPages.find((page) => page.id !== sourcePage.id) ??
+    relatedPages.find((page) => page.id !== protectedPageId && page.id !== state.activePageId) ??
+    relatedPages.find((page) => page.id !== protectedPageId) ??
     relatedPages[0]
   if (!pageToEvict) return state.pages
   return state.pages.filter((page) => page.id !== pageToEvict.id)

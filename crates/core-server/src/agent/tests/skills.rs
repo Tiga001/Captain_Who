@@ -536,7 +536,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         .clone()
         .expect("managed Skills must have a discovery snapshot");
     dynamically_activated_input.resume_checkpoint = Some(AgentRunCheckpoint {
-        version: 2,
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: "run-dynamic-installed-skill".to_string(),
         context_items: Vec::new(),
         next_model_request_index: 1,

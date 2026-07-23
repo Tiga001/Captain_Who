@@ -87,19 +87,26 @@ pnpm build:linux
 
 ## 本地数据与隐私
 
-默认数据库位置：
+Electron 应用以 `app.getPath('userData')` 返回的位置作为唯一权威数据根目录，并在启动
+Rust Core 时显式传入该目录。数据库位于数据根的 `storage.sqlite`，附件、已安装 Skill、
+生成图片和开发环境凭据分别保存在同级的受管子目录中；启动时会清理无数据库引用的孤立
+附件文件。具体路径由 Electron 按当前操作系统和应用身份解析，业务代码不再分别猜测
+macOS、Windows 或 Linux 的目录。
 
-- macOS：`~/Library/Application Support/mycopilot-next/storage.sqlite`
-- Windows：`%APPDATA%/mycopilot-next/storage.sqlite`
-- Linux：`$XDG_DATA_HOME/mycopilot-next/storage.sqlite`，未设置时使用 `~/.local/share/mycopilot-next/storage.sqlite`
+若权威根与旧版 Core 的默认目录不同，启动阶段只复制 Core 管理的上述数据：受管目录经
+私有 staging、落盘和原子发布，SQLite 通过一致性快照校验后最后提交。目标已有独立数据
+或目录内容冲突时会停止迁移而不是覆盖；旧目录会保留作为回滚副本。
 
-设置 `MYCOPILOT_STORAGE_DB` 可以覆盖数据库路径。附件保存在数据库同级的 `attachments/` 目录；启动时会清理无数据库引用的孤立附件文件。
+直接运行独立 `core-server` 时仍可通过 `MYCOPILOT_STORAGE_DB` 指定数据库路径；该变量是
+测试和独立诊断接口，Electron 启动的正式应用会使用 Host 传入的数据根覆盖它。
 
 内置浏览器使用独立的持久会话；“清除浏览数据”会同时清理该会话和站点图标缓存。图标缓存最多保留 256 项和 30 天。
 
 请注意：
 
 - 模型 Token 与 Tavily Key 当前以明文保存在本机 SQLite 数据库中，不是系统钥匙串。
+- 签名发行版的图片生成 API Key 使用操作系统凭据存储，不属于文件数据根；开发版使用的
+  私有文件凭据才位于数据根内。备份或卸载时应分别处理系统凭据。
 - 模型请求会发送到你配置的 API URL；启用联网搜索后，查询或目标 URL 会发送给 Tavily。
 - 内置浏览器默认拒绝网页申请摄像头、麦克风、定位、通知等系统权限。
 - “移除项目”会永久删除 MyCopilot 中该项目的本地对话、消息与附件，但不会修改项目目录中的文件。

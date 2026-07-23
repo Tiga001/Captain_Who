@@ -93,9 +93,11 @@ describe('AppStartupGate', () => {
     const screen = await render(<StartupHarness />)
     const workspaceHost = () =>
       screen.container.querySelector<HTMLElement>('.app-startup-workspace')
+    const startupRoot = () => screen.container.querySelector<HTMLElement>('.app-startup-root')
 
     await expect.element(screen.getByText('startup.loading')).toBeInTheDocument()
     expect(screen.container.querySelector('.app-startup-screen__ambient')).not.toBeNull()
+    expect(getComputedStyle(startupRoot()!).backgroundColor).toBe('rgba(0, 0, 0, 0)')
     await expect
       .poll(
         () =>
@@ -120,6 +122,7 @@ describe('AppStartupGate', () => {
 
     await expect.poll(() => workspaceHost()?.getAttribute('aria-hidden')).toBe('false')
     await expect.element(screen.getByText('startup.loading')).not.toBeInTheDocument()
+    expect(getComputedStyle(startupRoot()!).backgroundColor).toBe('rgba(0, 0, 0, 0)')
   })
 
   it('retries all startup stages with a new attempt after a blocking failure', async () => {

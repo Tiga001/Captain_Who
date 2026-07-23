@@ -242,29 +242,25 @@
 
 .image-generation-artifact-gallery {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1px;
-  overflow: hidden;
-  background: var(--mc-color-border-subtle);
-  border: 1px solid var(--mc-color-border-subtle);
-  border-radius: var(--mc-radius-2xl);
-}
-
-.image-generation-artifact-section[data-count='1'] .image-generation-artifact-gallery {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: 10px;
 }
 
 .image-generation-artifact-gallery > div {
   display: block;
   min-width: 0;
+  overflow: hidden;
   background: color-mix(in srgb, var(--mc-color-surface-card) 94%, var(--mc-color-text-primary) 1%);
+  border: 1px solid var(--mc-color-border-subtle);
+  border-radius: var(--mc-radius-2xl);
 }
 
 .image-generation-artifact-preview {
   display: grid;
   width: 100%;
-  min-height: 180px;
-  max-height: 520px;
+  min-height: 140px;
+  max-height: 280px;
   aspect-ratio: var(--image-artifact-aspect-ratio, 4 / 3);
   overflow: hidden;
   place-items: center;
@@ -304,10 +300,6 @@
 
 .image-generation-artifact-preview > button:hover img {
   transform: scale(1.015);
-}
-
-.image-generation-artifact-section[data-count='1'] .image-generation-artifact-preview img {
-  object-fit: contain;
 }
 
 .image-generation-artifact-list {
@@ -409,6 +401,12 @@
   width: 100%;
 }
 
+@media (max-width: 880px) {
+  .image-generation-artifact-gallery {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 620px) {
   .image-generation-artifact-gallery {
     grid-template-columns: minmax(0, 1fr);
@@ -416,6 +414,7 @@
 
   .image-generation-artifact-preview {
     min-height: 160px;
+    max-height: 420px;
   }
 }
 

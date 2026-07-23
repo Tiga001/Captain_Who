@@ -26,7 +26,6 @@ export interface ImageGenerationConfigurationForm {
 export type ImageGenerationConfigurationPendingOperation = 'saving' | 'enabling' | 'disabling'
 
 export type ImageGenerationConfigurationFeedback =
-  | { kind: 'saved' }
   | { kind: 'authoritativeRefresh'; code?: ImageGenerationConfigurationErrorCode }
   | { kind: 'error'; code?: ImageGenerationConfigurationErrorCode }
 
@@ -197,7 +196,6 @@ export function useImageGenerationConfiguration() {
       setForm(formFromConfiguration(output.configuration))
       // The only plaintext credential copy held by Renderer is discarded immediately on success.
       setApiKeyDraftState('')
-      setFeedback({ kind: 'saved' })
     })
   }, [apiKeyDraft, configuration, form, runMutation])
 

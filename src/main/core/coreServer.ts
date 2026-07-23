@@ -311,8 +311,24 @@ function sameImageGenerationArtifact(
   )
 }
 
+export interface CoreServerOptions {
+  /**
+   * The Electron Host-owned application data root. Production construction must inject the
+   * value frozen from app.getPath('userData'); the optional fallback keeps isolated unit-test
+   * construction and non-entrypoint consumers source-compatible.
+   */
+  appDataRoot?: string
+}
+
 export class CoreServer {
-  private readonly rpc = new CoreJsonRpcClient()
+  private readonly rpc: CoreJsonRpcClient
+
+  constructor(options: CoreServerOptions = {}) {
+    this.rpc =
+      options.appDataRoot === undefined
+        ? new CoreJsonRpcClient()
+        : new CoreJsonRpcClient({ appDataRoot: options.appDataRoot })
+  }
 
   start(): void {
     this.rpc.start()

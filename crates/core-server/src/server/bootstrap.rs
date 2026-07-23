@@ -1,5 +1,5 @@
 use super::*;
-use std::fs::{self, File, OpenOptions};
+use std::fs::File;
 use std::path::Path;
 
 pub(crate) struct CoreServerBootstrap {
@@ -18,8 +18,18 @@ pub(crate) struct CoreServerBootstrap {
 
 impl CoreServerBootstrap {
     pub(crate) fn initialize() -> io::Result<Self> {
-        let database_path = absolute_path(database_path())?;
+        let database_location = database_location()?;
+        let database_path = absolute_path(database_location.database_path)?;
         let database_instance_lock = acquire_database_instance_lock(&database_path)?;
+        let uses_development_credentials = uses_development_image_generation_credentials();
+        if let Some(legacy_database_path) = database_location.legacy_database_path {
+            let legacy_database_path = absolute_path(legacy_database_path)?;
+            migrate_legacy_storage_if_needed(
+                &legacy_database_path,
+                &database_path,
+                uses_development_credentials,
+            )?;
+        }
         let skill_store_root = skill_store_root(&database_path);
         let storage =
             Arc::new(StorageService::open(&database_path).map_err(|error| {
@@ -27,7 +37,7 @@ impl CoreServerBootstrap {
             })?);
         let image_generation_configuration = Arc::new(ImageGenerationConfigurationService::new(
             Arc::clone(&storage),
-            image_generation_credential_store(&database_path)?,
+            image_generation_credential_store(&database_path, uses_development_credentials)?,
         ));
         if let Err(error) = image_generation_configuration.reconcile_credentials() {
             // The service remains available so settings can expose a structured, retryable error.
@@ -148,62 +158,6 @@ impl CoreServerBootstrap {
             _database_instance_lock: database_instance_lock,
         })
     }
-}
-
-pub(crate) fn acquire_database_instance_lock(database_path: &Path) -> io::Result<File> {
-    let parent = database_path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent)?;
-    let canonical_parent = fs::canonicalize(parent)?;
-    let file_name = database_path.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "storage database path has no file name: {}",
-                database_path.display()
-            ),
-        )
-    })?;
-    let database_identity = if database_path.exists() {
-        fs::canonicalize(database_path)?
-    } else {
-        canonical_parent.join(file_name)
-    };
-    let lock_file_name = format!(
-        ".{}.core-server.lock",
-        database_identity
-            .file_name()
-            .expect("database identity retains a file name")
-            .to_string_lossy()
-    );
-    let lock_path = database_identity.with_file_name(lock_file_name);
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)?;
-    if let Err(error) = lock.try_lock() {
-        let (kind, message) = match error {
-            fs::TryLockError::WouldBlock => (
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "another core-server already owns storage `{}` (instance lock `{}`)",
-                    database_identity.display(),
-                    lock_path.display()
-                ),
-            ),
-            fs::TryLockError::Error(error) => (
-                error.kind(),
-                format!(
-                    "failed to acquire the core-server instance lock `{}` for storage `{}`: {error}",
-                    lock_path.display(),
-                    database_identity.display()
-                ),
-            ),
-        };
-        return Err(io::Error::new(kind, message));
-    }
-    Ok(lock)
 }
 
 pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Result<()> {
@@ -346,34 +300,6 @@ pub(crate) struct SkillServices {
     pub(crate) source_resolution: Arc<SkillSourceResolutionService>,
 }
 
-pub(crate) fn database_path() -> PathBuf {
-    if let Ok(path) = std::env::var("MYCOPILOT_STORAGE_DB") {
-        return PathBuf::from(path);
-    }
-
-    if cfg!(target_os = "macos") {
-        return home_dir()
-            .join("Library")
-            .join("Application Support")
-            .join("mycopilot-next")
-            .join("storage.sqlite");
-    }
-
-    if cfg!(target_os = "windows") {
-        if let Ok(app_data) = std::env::var("APPDATA") {
-            return PathBuf::from(app_data)
-                .join("mycopilot-next")
-                .join("storage.sqlite");
-        }
-    }
-
-    std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir().join(".local").join("share"))
-        .join("mycopilot-next")
-        .join("storage.sqlite")
-}
-
 pub(crate) fn skill_store_root(database_path: &std::path::Path) -> PathBuf {
     database_path
         .parent()
@@ -399,10 +325,13 @@ const MACOS_CORE_SERVER_SIGNING_REQUIREMENT: &str =
 /// CDHash. Development and unsigned local packages therefore use a private application file
 /// store. Only an Apple-issued, fixed-identifier build is allowed to use the non-interactive
 /// production Keychain adapter.
-fn image_generation_credential_store(database_path: &Path) -> io::Result<Arc<dyn CredentialStore>> {
+fn image_generation_credential_store(
+    database_path: &Path,
+    uses_development_credentials: bool,
+) -> io::Result<Arc<dyn CredentialStore>> {
     #[cfg(target_os = "macos")]
     {
-        if macos_core_server_has_stable_signing_identity() {
+        if !uses_development_credentials {
             return Ok(Arc::new(
                 NonInteractiveMacCredentialStore::image_generation(),
             ));
@@ -421,8 +350,20 @@ fn image_generation_credential_store(database_path: &Path) -> io::Result<Arc<dyn
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = database_path;
+        let _ = (database_path, uses_development_credentials);
         Ok(Arc::new(SystemCredentialStore::image_generation()))
+    }
+}
+
+fn uses_development_image_generation_credentials() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        !macos_core_server_has_stable_signing_identity()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
     }
 }
 
@@ -452,10 +393,4 @@ pub(crate) fn absolute_path(path: PathBuf) -> io::Result<PathBuf> {
     } else {
         std::env::current_dir().map(|current_directory| current_directory.join(path))
     }
-}
-
-pub(crate) fn home_dir() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
 }

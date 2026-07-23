@@ -11,6 +11,7 @@ pub mod context_compaction_repository;
 pub mod conversation_fork_repository;
 pub mod conversation_history_repository;
 pub mod conversation_trace_repository;
+mod database_snapshot;
 pub mod file_draft_repository;
 pub mod image_generation_execution_repository;
 pub mod image_generation_repository;
@@ -24,6 +25,8 @@ pub mod service;
 pub mod skill_enablement_repository;
 pub mod turn_diff_repository;
 pub mod usage_repository;
+
+pub use database_snapshot::create_verified_sqlite_snapshot;
 
 use rusqlite::Connection;
 use std::path::Path;

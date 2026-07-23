@@ -1,5 +1,6 @@
-import { app, BrowserWindow, Menu, type IpcMainInvokeEvent } from 'electron'
-import { join } from 'path'
+import { app, BrowserWindow, Menu, nativeTheme, type IpcMainInvokeEvent } from 'electron'
+import { mkdirSync, realpathSync } from 'node:fs'
+import { join, resolve } from 'path'
 import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import type { AppWindowState } from '@mycopilot/host-api'
@@ -13,9 +14,17 @@ import { openExternalUrl, registerHostIpc } from './ipc'
 import { FaviconResourceCache, registerResourceSchemes } from './resources/FaviconResourceCache'
 import { TerminalBridge } from './terminal/TerminalBridge'
 
+// Electron is the sole authority for the application data location. Freeze it before
+// app.setName() can affect Electron's path resolution so existing development data stays
+// attached to the same root across this upgrade.
+const requestedAppDataRoot = resolve(app.getPath('userData'))
+mkdirSync(requestedAppDataRoot, { recursive: true, mode: 0o700 })
+const appDataRoot = realpathSync(requestedAppDataRoot)
+app.setPath('userData', appDataRoot)
+
 registerResourceSchemes()
 
-const coreServer = new CoreServer()
+const coreServer = new CoreServer({ appDataRoot })
 const terminalBridge = new TerminalBridge()
 const faviconResourceCache = new FaviconResourceCache()
 let isQuittingAfterServiceShutdown = false
@@ -108,6 +117,9 @@ function createWindow(): void {
     minHeight: 640,
     show: false,
     autoHideMenuBar: true,
+    // Non-macOS windows do not have native vibrancy. Their opaque native surface is the
+    // compatibility fallback beneath the shared translucent startup CSS.
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#171717' : '#f4f4f2',
     ...macWindowChromeOptions,
     ...(process.platform !== 'darwin' ? { icon: getAdaptiveAppIcon() } : {}),
     webPreferences: {

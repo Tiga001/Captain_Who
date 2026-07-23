@@ -43,7 +43,6 @@ describe('right sidebar platform context lifecycle', () => {
   it('reuses an empty file source page once, then opens independent previews', () => {
     const initial = openPages(WORKSPACE_A, ['files'])
     const firstPreview = reduceRightSidebarPlatform(initial, {
-      module: getModule('files'),
       pageId: 'unused-file-page',
       request: {
         disposition: 'reuse-source-if-empty',
@@ -52,7 +51,10 @@ describe('right sidebar platform context lifecycle', () => {
         resourceKey: 'workspace-file:README.md',
         title: 'README.md'
       },
+      sourceModule: getModule('files'),
       sourcePageId: 'files-page',
+      t: translate,
+      targetModule: getModule('files'),
       type: 'open-related-page'
     })
 
@@ -69,7 +71,6 @@ describe('right sidebar platform context lifecycle', () => {
     })
 
     const secondPreview = reduceRightSidebarPlatform(firstPreview, {
-      module: getModule('files'),
       pageId: 'second-file-page',
       request: {
         disposition: 'new-page',
@@ -77,7 +78,10 @@ describe('right sidebar platform context lifecycle', () => {
         resourceKey: 'workspace-file:src/index.ts',
         title: 'index.ts'
       },
+      sourceModule: getModule('files'),
       sourcePageId: 'files-page',
+      t: translate,
+      targetModule: getModule('files'),
       type: 'open-related-page'
     })
 
@@ -88,7 +92,6 @@ describe('right sidebar platform context lifecycle', () => {
   it('opens related resources as independent pages and reuses an existing resource page', () => {
     const initial = openPages(WORKSPACE_A, ['files'])
     const opened = reduceRightSidebarPlatform(initial, {
-      module: getModule('files'),
       pageId: 'workspace-file-page',
       request: {
         iconUrl: 'file:///python.svg',
@@ -96,7 +99,10 @@ describe('right sidebar platform context lifecycle', () => {
         resourceKey: 'workspace-file:src/index.py',
         title: 'index.py'
       },
+      sourceModule: getModule('files'),
       sourcePageId: 'files-page',
+      t: translate,
+      targetModule: getModule('files'),
       type: 'open-related-page'
     })
 
@@ -113,18 +119,64 @@ describe('right sidebar platform context lifecycle', () => {
     })
 
     const reopened = reduceRightSidebarPlatform(opened, {
-      module: getModule('files'),
       pageId: 'duplicate-file-page',
       request: {
         moduleState: { kind: 'workspace-file', path: 'src/index.py' },
         resourceKey: 'workspace-file:src/index.py',
         title: 'index.py'
       },
+      sourceModule: getModule('files'),
       sourcePageId: 'files-page',
+      t: translate,
+      targetModule: getModule('files'),
       type: 'open-related-page'
     })
 
     expect(reopened).toBe(opened)
+  })
+
+  it('opens a review file in the pinned files module and reuses that resource', () => {
+    const initial = openPages(WORKSPACE_A, ['git-review'])
+    const opened = openFileFromReview(initial, 'src/index.ts', 'review-file-page')
+
+    expect(opened.activePageId).toBe('review-file-page')
+    expect(opened.pages).toHaveLength(2)
+    expect(opened.pages[1]).toMatchObject({
+      id: 'review-file-page',
+      moduleId: 'files',
+      moduleState: { kind: 'workspace-file', path: 'src/index.ts' },
+      resourceKey: 'workspace-file:src/index.ts',
+      title: 'index.ts',
+      workspaceKey: WORKSPACE_A.key,
+      workspacePath: WORKSPACE_A.path,
+      workspaceSessionKey: WORKSPACE_A.sessionKey
+    })
+
+    const reviewActive = reduceRightSidebarPlatform(opened, {
+      pageId: 'git-review-page',
+      type: 'activate'
+    })
+    const reopened = openFileFromReview(reviewActive, 'src/index.ts', 'duplicate-file-page')
+
+    expect(reopened.activePageId).toBe('review-file-page')
+    expect(reopened.pages).toHaveLength(2)
+  })
+
+  it('reuses an empty file page when a review file is opened', () => {
+    const initial = openPages(WORKSPACE_A, ['files', 'git-review'])
+    const opened = openFileFromReview(initial, 'README.md', 'unused-file-page')
+
+    expect(opened.activePageId).toBe('files-page')
+    expect(opened.pages).toHaveLength(2)
+    expect(opened.pages[0]).toMatchObject({
+      id: 'files-page',
+      moduleId: 'files',
+      moduleState: { kind: 'workspace-file', path: 'README.md' },
+      resourceKey: 'workspace-file:README.md',
+      title: 'README.md',
+      workspaceKey: WORKSPACE_A.key,
+      workspaceSessionKey: WORKSPACE_A.sessionKey
+    })
   })
 
   it('keeps files pinned to their creation workspace while review follows the conversation', () => {
@@ -404,14 +456,38 @@ function synchronize(
 
 function openFilePage(state: RightSidebarPlatformState, path: string): RightSidebarPlatformState {
   return reduceRightSidebarPlatform(state, {
-    module: getModule('files'),
     pageId: `file-${path}`,
     request: {
       moduleState: { kind: 'workspace-file', path },
       resourceKey: `workspace-file:${path}`,
       title: path
     },
+    sourceModule: getModule('files'),
     sourcePageId: 'files-page',
+    t: translate,
+    targetModule: getModule('files'),
+    type: 'open-related-page'
+  })
+}
+
+function openFileFromReview(
+  state: RightSidebarPlatformState,
+  path: string,
+  pageId: string
+): RightSidebarPlatformState {
+  return reduceRightSidebarPlatform(state, {
+    pageId,
+    request: {
+      disposition: 'reuse-source-if-empty',
+      moduleState: { kind: 'workspace-file', path },
+      resourceKey: `workspace-file:${path}`,
+      targetModuleId: 'files',
+      title: path.split('/').at(-1) ?? path
+    },
+    sourceModule: getModule('git-review'),
+    sourcePageId: 'git-review-page',
+    t: translate,
+    targetModule: getModule('files'),
     type: 'open-related-page'
   })
 }

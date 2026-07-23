@@ -103,6 +103,7 @@ vi.mock('../useGitReview', async () => {
 })
 
 const { GitReviewPanel } = await import('../GitReviewPanel')
+const openFile = (): void => undefined
 
 beforeEach(() => {
   loadFileContentSpy.mockClear()
@@ -113,7 +114,7 @@ describe('GitReviewPanel interactions', () => {
   it('persists the load-full-files action inside the review module', async () => {
     const screen = await render(
       <div style={{ height: 300, width: 440 }}>
-        <GitReviewPanel isActive projectId="project-1" />
+        <GitReviewPanel isActive onOpenFile={openFile} projectId="project-1" />
       </div>
     )
 
@@ -132,7 +133,7 @@ describe('GitReviewPanel interactions', () => {
   it('loads full content only after an expanded file enters the review scrollport', async () => {
     const screen = await render(
       <div style={{ height: 120, width: 440 }}>
-        <GitReviewPanel isActive projectId="project-1" />
+        <GitReviewPanel isActive onOpenFile={openFile} projectId="project-1" />
       </div>
     )
     const thirdToggle = screen.container.querySelector<HTMLButtonElement>(
@@ -168,7 +169,7 @@ describe('GitReviewPanel interactions', () => {
   it('does not load full content while the review module is inactive', async () => {
     const screen = await render(
       <div style={{ height: 300, width: 440 }}>
-        <GitReviewPanel isActive={false} projectId="project-1" />
+        <GitReviewPanel isActive={false} onOpenFile={openFile} projectId="project-1" />
       </div>
     )
     const firstToggle = screen.container.querySelector<HTMLButtonElement>(
@@ -187,7 +188,7 @@ describe('GitReviewPanel interactions', () => {
     )
     const screen = await render(
       <div style={{ height: 300, width: 440 }}>
-        <GitReviewPanel isActive projectId="project-1" />
+        <GitReviewPanel isActive onOpenFile={openFile} projectId="project-1" />
       </div>
     )
     const firstToggle = screen.container.querySelector<HTMLButtonElement>(
@@ -202,7 +203,7 @@ describe('GitReviewPanel interactions', () => {
   it('keeps the action label and layout icon aligned with the target mode', async () => {
     const screen = await render(
       <div style={{ height: 500, width: 440 }}>
-        <GitReviewPanel isActive projectId="project-1" />
+        <GitReviewPanel isActive onOpenFile={openFile} projectId="project-1" />
       </div>
     )
     const switchToSplit = screen.getByRole('button', {
@@ -229,7 +230,7 @@ describe('GitReviewPanel interactions', () => {
   it('realigns a selected file after its lazy diff increases the scroll range', async () => {
     const screen = await render(
       <div style={{ height: 500, width: 440 }}>
-        <GitReviewPanel isActive projectId="project-1" />
+        <GitReviewPanel isActive onOpenFile={openFile} projectId="project-1" />
       </div>
     )
 
@@ -259,7 +260,7 @@ describe('GitReviewPanel interactions', () => {
   it('stops native smooth scrolling when the user starts interacting with the diff', async () => {
     const screen = await render(
       <div style={{ height: 500, width: 440 }}>
-        <GitReviewPanel isActive projectId="project-1" />
+        <GitReviewPanel isActive onOpenFile={openFile} projectId="project-1" />
       </div>
     )
 
