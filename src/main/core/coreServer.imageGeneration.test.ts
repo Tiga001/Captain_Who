@@ -1,12 +1,15 @@
 import type {
+  ImageGenerationArtifactReadInput,
   ImageGenerationConfiguration,
   ImageGenerationSetEnabledInput,
   ImageGenerationUpdateConfigurationInput
 } from '@mycopilot/protocol'
 import {
+  IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
   IMAGE_GENERATION_CONFIGURATION_ERROR_CODE,
   IMAGE_GENERATION_GET_CONFIGURATION_METHOD,
   IMAGE_GENERATION_GET_STATUS_METHOD,
+  IMAGE_GENERATION_READ_ARTIFACT_METHOD,
   IMAGE_GENERATION_SET_ENABLED_METHOD,
   IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD
 } from '@mycopilot/protocol'
@@ -50,6 +53,22 @@ const setEnabledInput = {
   expectedRevision: configuration.revision,
   enabled: false
 } satisfies ImageGenerationSetEnabledInput
+
+const artifactSha256 = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
+const artifactReadInput = {
+  schemaVersion: 1,
+  artifact: {
+    artifactId: `sha256:${artifactSha256}`,
+    uri: `image-artifact://sha256/${artifactSha256}`,
+    kind: 'image',
+    format: 'png',
+    mimeType: 'image/png',
+    width: 1,
+    height: 1,
+    sizeBytes: 5,
+    sha256: artifactSha256
+  }
+} satisfies ImageGenerationArtifactReadInput
 
 describe('CoreServer image generation configuration client', () => {
   beforeEach(() => rpcRequest.mockReset())
@@ -166,5 +185,72 @@ describe('CoreServer image generation configuration client', () => {
     await expect(new CoreServer().updateImageGenerationConfiguration(updateInput)).rejects.toThrow(
       'Image generation configuration error data'
     )
+  })
+
+  it('decodes an Artifact only after frozen identity, length and sha256 validation', async () => {
+    rpcRequest.mockResolvedValueOnce({
+      schemaVersion: 1,
+      artifact: artifactReadInput.artifact,
+      fileName: `generated-image-${artifactSha256.slice(0, 12)}.png`,
+      dataBase64: 'aGVsbG8='
+    })
+
+    const result = await new CoreServer().readImageGenerationArtifact(artifactReadInput)
+    expect(result).toEqual({
+      schemaVersion: 1,
+      artifact: artifactReadInput.artifact,
+      fileName: `generated-image-${artifactSha256.slice(0, 12)}.png`,
+      bytes: Uint8Array.from(Buffer.from('hello'))
+    })
+    expect(rpcRequest).toHaveBeenCalledWith(
+      IMAGE_GENERATION_READ_ARTIFACT_METHOD,
+      artifactReadInput
+    )
+  })
+
+  it('rejects changed Artifact content and response identity', async () => {
+    const response = {
+      schemaVersion: 1,
+      artifact: artifactReadInput.artifact,
+      fileName: `generated-image-${artifactSha256.slice(0, 12)}.png`,
+      dataBase64: 'd29ybGQ='
+    }
+    rpcRequest.mockResolvedValueOnce(response)
+    await expect(new CoreServer().readImageGenerationArtifact(artifactReadInput)).rejects.toThrow(
+      /content digest changed/
+    )
+
+    rpcRequest.mockResolvedValueOnce({
+      ...response,
+      artifact: { ...artifactReadInput.artifact, width: 2 }
+    })
+    await expect(new CoreServer().readImageGenerationArtifact(artifactReadInput)).rejects.toThrow(
+      /frozen identity changed/
+    )
+  })
+
+  it('preserves only validated structured Artifact read failures', async () => {
+    const data = {
+      type: 'imageGenerationArtifact',
+      operation: 'read',
+      code: 'notFound',
+      recovery: 'regenerate',
+      message: 'The generated image is no longer available.',
+      retryable: false
+    } as const
+    rpcRequest.mockRejectedValueOnce(
+      Object.assign(new Error('unsafe internal path'), {
+        code: IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
+        data
+      })
+    )
+
+    await expect(
+      new CoreServer().readImageGenerationArtifact(artifactReadInput)
+    ).rejects.toMatchObject({
+      message: data.message,
+      code: IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
+      data
+    })
   })
 })

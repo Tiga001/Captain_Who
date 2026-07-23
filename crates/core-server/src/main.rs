@@ -69,9 +69,9 @@ use mycopilot_protocol_rs::{
     CORE_PING_METHOD, CORE_SHUTDOWN_METHOD, GIT_GET_REVIEW_FILE_CONTENT_METHOD,
     GIT_GET_REVIEW_FILE_DIFF_METHOD, GIT_GET_REVIEW_SUMMARY_METHOD, GIT_INSPECT_REPOSITORY_METHOD,
     GIT_MUTATE_REVIEW_FILE_METHOD, IMAGE_GENERATION_GET_CONFIGURATION_METHOD,
-    IMAGE_GENERATION_GET_STATUS_METHOD, IMAGE_GENERATION_SET_ENABLED_METHOD,
-    IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD, OFFICE_GET_STATUS_METHOD,
-    SEARCH_SEARCH_CHATS_METHOD, SKILLS_CANCEL_PREPARATION_METHOD,
+    IMAGE_GENERATION_GET_STATUS_METHOD, IMAGE_GENERATION_READ_ARTIFACT_METHOD,
+    IMAGE_GENERATION_SET_ENABLED_METHOD, IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD,
+    OFFICE_GET_STATUS_METHOD, SEARCH_SEARCH_CHATS_METHOD, SKILLS_CANCEL_PREPARATION_METHOD,
     SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD, SKILLS_CHANGED_NOTIFICATION_METHOD,
     SKILLS_COMMIT_INSTALLATION_METHOD, SKILLS_INSPECT_INSTALLATION_METHOD,
     SKILLS_INSTALL_LOCAL_METHOD, SKILLS_LIST_MANAGEMENT_METHOD, SKILLS_LIST_METHOD,
@@ -109,7 +109,7 @@ use skills_adapter::{
 };
 use skills_dispatcher::{mutation_admission_error_response, SkillMutationTarget, SkillsDispatcher};
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 
 mod server;
 use server::*;
@@ -140,10 +140,23 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 fn test_core_request_services(storage: Arc<StorageService>) -> CoreRequestServices {
+    let artifact_store_root = tempfile::tempdir()
+        .expect("test image Artifact temporary directory should initialize")
+        .keep();
     CoreRequestServices {
         image_generation_configuration: Arc::new(ImageGenerationConfigurationService::new(
             Arc::clone(&storage),
             Arc::new(InMemoryCredentialStore::default()),
+        )),
+        image_generation_artifacts: Arc::new(
+            ManagedImageGenerationArtifactStore::new(
+                artifact_store_root,
+                ImageArtifactStoreConfig::default(),
+            )
+            .expect("test image Artifact store should initialize"),
+        ),
+        image_generation_artifact_read_admission: Arc::new(Semaphore::new(
+            DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS,
         )),
         storage,
     }

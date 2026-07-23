@@ -74,6 +74,8 @@ async fn office_status_probe_runs_off_the_request_loop_and_returns_a_strict_resu
     let installations =
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let image_generation_dispatcher =
@@ -103,7 +105,10 @@ async fn office_status_probe_runs_off_the_request_loop_and_returns_a_strict_resu
         },
         Arc::new(GitReviewService::new()),
         &dispatchers,
-        &outbound_tx,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_artifact_outbound_tx,
+        },
     )
     .await
     .unwrap();
@@ -177,6 +182,8 @@ async fn request_loop_routes_skills_list_through_the_bounded_dispatcher() {
     let skill_installation_service =
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let image_generation_dispatcher =
@@ -206,7 +213,10 @@ async fn request_loop_routes_skills_list_through_the_bounded_dispatcher() {
         },
         Arc::new(GitReviewService::new()),
         &dispatchers,
-        &outbound_tx,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_artifact_outbound_tx,
+        },
     )
     .await
     .unwrap();
@@ -260,6 +270,8 @@ async fn changed_enablement_emits_one_invalidation_notification() {
     let installations =
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let image_generation_dispatcher =
@@ -285,7 +297,10 @@ async fn changed_enablement_emits_one_invalidation_notification() {
         },
         Arc::new(GitReviewService::new()),
         &dispatchers,
-        &outbound_tx,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_artifact_outbound_tx,
+        },
     )
     .await
     .unwrap();
@@ -477,9 +492,16 @@ fn ordinary_direct_mutation_failure_does_not_emit_an_invalidation() {
 async fn outbound_writer_finishes_after_draining_with_a_lingering_sender() {
     let (writer_stream, mut reader_stream) = io::duplex(1024);
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+    let (_image_artifact_tx, image_artifact_rx) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let lingering_sender = outbound_tx.clone();
     let (finish_tx, finish_rx) = oneshot::channel();
-    let writer = tokio::spawn(run_outbound_writer(writer_stream, outbound_rx, finish_rx));
+    let writer = tokio::spawn(run_outbound_writer(
+        writer_stream,
+        outbound_rx,
+        image_artifact_rx,
+        finish_rx,
+    ));
     let first = json!({ "id": 1, "result": "before shutdown" });
     let final_response = json!({ "id": 2, "result": "shutdown" });
 
@@ -504,6 +526,52 @@ async fn outbound_writer_finishes_after_draining_with_a_lingering_sender() {
     assert_eq!(messages, vec![first, final_response]);
 }
 
+#[tokio::test]
+async fn image_artifact_permit_is_held_until_the_large_response_is_flushed() {
+    let (writer_stream, mut reader_stream) = io::duplex(32);
+    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+    let (image_artifact_tx, image_artifact_rx) = mpsc::channel(1);
+    let admission = Arc::new(Semaphore::new(1));
+    let permit = Arc::clone(&admission).acquire_owned().await.unwrap();
+    image_artifact_tx
+        .send(ImageArtifactOutbound {
+            message: json!({ "id": 1, "result": "x".repeat(8 * 1024) }),
+            _permit: permit,
+        })
+        .await
+        .unwrap();
+    let (finish_tx, finish_rx) = oneshot::channel();
+    let writer = tokio::spawn(run_outbound_writer(
+        writer_stream,
+        outbound_rx,
+        image_artifact_rx,
+        finish_rx,
+    ));
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        admission.try_acquire().is_err(),
+        "stdout backpressure must retain Artifact read admission"
+    );
+
+    let reader = tokio::spawn(async move {
+        let mut output = String::new();
+        reader_stream.read_to_string(&mut output).await.unwrap();
+        output
+    });
+    finish_tx.send(()).unwrap();
+    drop(outbound_tx);
+    drop(image_artifact_tx);
+    tokio::time::timeout(Duration::from_secs(2), writer)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let output = reader.await.unwrap();
+    assert!(output.contains(&"x".repeat(8 * 1024)));
+    assert!(admission.try_acquire().is_ok());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() {
     let temp = tempfile::tempdir().unwrap();
@@ -514,6 +582,8 @@ async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() 
         Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
     let git_review_service = Arc::new(GitReviewService::new());
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skill_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let image_generation_dispatcher =
@@ -578,7 +648,10 @@ async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() 
         },
         git_review_service,
         &request_dispatchers,
-        &outbound_tx,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_artifact_outbound_tx,
+        },
     )
     .await
     .unwrap();
@@ -594,5 +667,84 @@ async fn request_loop_remains_responsive_while_filesystem_workers_are_blocked() 
     skill_release_tx.send(()).unwrap();
     dispatcher.shutdown().await.unwrap();
     skill_dispatcher.shutdown().await.unwrap();
+    image_generation_dispatcher.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn artifact_read_admission_is_bounded_and_does_not_block_core_requests() {
+    let temp = tempfile::tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
+    let agent_service = AgentService::new(Arc::clone(&storage));
+    let installations =
+        Arc::new(SkillInstallationService::new(temp.path().join("skills")).unwrap());
+    let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
+    let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
+    let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
+    let image_generation_dispatcher =
+        ImageGenerationConfigurationDispatcher::new(outbound_tx.clone());
+    let dispatchers = RequestDispatchers {
+        git: &git_dispatcher,
+        skills: &skills_dispatcher,
+        skill_acquisition: &skills_dispatcher,
+        image_generation_configuration: &image_generation_dispatcher,
+    };
+    let services = test_core_request_services(storage);
+    let _saturated = Arc::clone(&services.image_generation_artifact_read_admission)
+        .acquire_many_owned(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS as u32)
+        .await
+        .unwrap();
+    let digest = "a".repeat(64);
+    let input = format!(
+        concat!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"imageGeneration.readArtifact\",",
+            "\"params\":{{\"schemaVersion\":1,\"artifact\":{{",
+            "\"artifactId\":\"sha256:{digest}\",",
+            "\"uri\":\"image-artifact://sha256/{digest}\",",
+            "\"kind\":\"image\",\"format\":\"png\",\"mimeType\":\"image/png\",",
+            "\"width\":1,\"height\":1,\"sizeBytes\":1,\"sha256\":\"{digest}\"}}}}}}\n",
+            "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"core.ping\",",
+            "\"params\":{{\"message\":\"responsive\"}}}}\n"
+        ),
+        digest = digest
+    );
+
+    run_request_loop(
+        BufReader::new(input.as_bytes()),
+        services,
+        &agent_service,
+        SkillServices {
+            catalog: Arc::new(SkillsService::new()),
+            installations,
+            workflow: Arc::new(SkillInstallationWorkflow::new(
+                SkillInstallationService::new(temp.path().join("skills")).unwrap(),
+            )),
+            source_resolution: Arc::new(SkillSourceResolutionService::new()),
+        },
+        Arc::new(GitReviewService::new()),
+        &dispatchers,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_artifact_outbound_tx,
+        },
+    )
+    .await
+    .unwrap();
+
+    let busy = outbound_rx.recv().await.unwrap();
+    let ping = outbound_rx.recv().await.unwrap();
+    assert_eq!(busy["id"], 1);
+    assert_eq!(
+        busy["error"]["code"],
+        mycopilot_protocol_rs::IMAGE_GENERATION_ARTIFACT_ERROR_CODE
+    );
+    assert_eq!(busy["error"]["data"]["code"], "unavailable");
+    assert_eq!(busy["error"]["data"]["recovery"], "retry");
+    assert_eq!(ping["id"], 2);
+    assert_eq!(ping["result"]["echo"], "responsive");
+
+    git_dispatcher.shutdown().await.unwrap();
+    skills_dispatcher.shutdown().await.unwrap();
     image_generation_dispatcher.shutdown().await.unwrap();
 }

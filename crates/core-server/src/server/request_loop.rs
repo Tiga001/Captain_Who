@@ -1,10 +1,24 @@
 use super::*;
 
+pub(crate) const DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS: usize = 2;
+
+pub(crate) struct ImageArtifactOutbound {
+    pub(crate) message: Value,
+    // Held until `run_outbound_writer` has flushed the complete base64 response. This bounds both
+    // active decoding and large Values waiting behind stdout backpressure.
+    pub(crate) _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
 pub(crate) struct RequestDispatchers<'a> {
     pub(crate) git: &'a GitDispatcher,
     pub(crate) skills: &'a SkillsDispatcher,
     pub(crate) skill_acquisition: &'a SkillsDispatcher,
     pub(crate) image_generation_configuration: &'a ImageGenerationConfigurationDispatcher,
+}
+
+pub(crate) struct RequestOutbounds<'a> {
+    pub(crate) normal: &'a mpsc::UnboundedSender<Value>,
+    pub(crate) image_artifact: &'a mpsc::Sender<ImageArtifactOutbound>,
 }
 
 /// Process-wide services used directly by JSON-RPC request handlers.
@@ -16,6 +30,8 @@ pub(crate) struct RequestDispatchers<'a> {
 pub(crate) struct CoreRequestServices {
     pub(crate) storage: Arc<StorageService>,
     pub(crate) image_generation_configuration: Arc<ImageGenerationConfigurationService>,
+    pub(crate) image_generation_artifacts: Arc<ManagedImageGenerationArtifactStore>,
+    pub(crate) image_generation_artifact_read_admission: Arc<Semaphore>,
 }
 
 fn is_blocking_read_method(method: &str) -> bool {
@@ -48,13 +64,18 @@ pub(crate) async fn run_request_loop<R>(
     skill_services: SkillServices,
     git_review_service: Arc<GitReviewService>,
     dispatchers: &RequestDispatchers<'_>,
-    outbound: &mpsc::UnboundedSender<Value>,
+    outbounds: RequestOutbounds<'_>,
 ) -> io::Result<Option<JsonRpcId>>
 where
     R: AsyncBufRead + Unpin,
 {
     let storage = services.storage;
     let image_generation_configuration = services.image_generation_configuration;
+    let image_generation_artifacts = services.image_generation_artifacts;
+    let image_generation_artifact_read_admission =
+        services.image_generation_artifact_read_admission;
+    let outbound = outbounds.normal;
+    let image_artifact_outbound = outbounds.image_artifact;
     let mut lines = input.lines();
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
@@ -82,6 +103,37 @@ where
         }
 
         if request.jsonrpc == "2.0" {
+            if request.method == IMAGE_GENERATION_READ_ARTIFACT_METHOD {
+                let request_id = request.id.clone();
+                let permit = match Arc::clone(&image_generation_artifact_read_admission)
+                    .try_acquire_owned()
+                {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        enqueue_outbound(
+                            outbound,
+                            image_generation_artifact_error_response(
+                                request_id,
+                                mycopilot_protocol_rs::ImageGenerationArtifactErrorCodeDto::Unavailable,
+                            ),
+                        )?;
+                        continue;
+                    }
+                };
+                let request_store = Arc::clone(&image_generation_artifacts);
+                let request_outbound = image_artifact_outbound.clone();
+                tokio::spawn(async move {
+                    let response =
+                        handle_image_generation_artifact_request(request_store, request).await;
+                    let _ = request_outbound
+                        .send(ImageArtifactOutbound {
+                            message: response,
+                            _permit: permit,
+                        })
+                        .await;
+                });
+                continue;
+            }
             if let Some(operation) = image_generation_configuration_operation(&request.method) {
                 let request_id = request.id.clone();
                 let request_service = Arc::clone(&image_generation_configuration);
@@ -288,28 +340,56 @@ where
 pub(crate) async fn run_outbound_writer<W>(
     mut writer: W,
     mut outbound: mpsc::UnboundedReceiver<Value>,
+    mut image_artifact_outbound: mpsc::Receiver<ImageArtifactOutbound>,
     mut finish: oneshot::Receiver<()>,
 ) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
+    let mut outbound_open = true;
+    let mut image_artifact_outbound_open = true;
     loop {
         tokio::select! {
-            biased;
             _ = &mut finish => {
                 // Closing preserves already queued messages but prevents lingering agent tasks
                 // from keeping shutdown open or appending notifications after the final response.
                 outbound.close();
+                image_artifact_outbound.close();
+                // Release the largest retained Values first. The dedicated lane is capped at two,
+                // so this cannot starve the normal queue during shutdown.
+                while let Some(message) = image_artifact_outbound.recv().await {
+                    write_outbound_message(&mut writer, message.message).await?;
+                }
                 while let Some(message) = outbound.recv().await {
                     write_outbound_message(&mut writer, message).await?;
                 }
                 return Ok(());
             }
-            message = outbound.recv() => {
-                let Some(message) = message else {
-                    return Ok(());
-                };
-                write_outbound_message(&mut writer, message).await?;
+            message = image_artifact_outbound.recv(), if image_artifact_outbound_open => {
+                match message {
+                    Some(message) => {
+                        write_outbound_message(&mut writer, message.message).await?;
+                    }
+                    None => {
+                        image_artifact_outbound_open = false;
+                        if !outbound_open {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            message = outbound.recv(), if outbound_open => {
+                match message {
+                    Some(message) => {
+                        write_outbound_message(&mut writer, message).await?;
+                    }
+                    None => {
+                        outbound_open = false;
+                        if !image_artifact_outbound_open {
+                            return Ok(());
+                        }
+                    }
+                }
             }
         }
     }

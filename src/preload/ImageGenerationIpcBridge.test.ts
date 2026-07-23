@@ -10,6 +10,7 @@ import {
   createImageGenerationIpcBridge,
   IMAGE_GENERATION_GET_CONFIGURATION_CHANNEL,
   IMAGE_GENERATION_GET_STATUS_CHANNEL,
+  IMAGE_GENERATION_READ_ARTIFACT_CHANNEL,
   IMAGE_GENERATION_SET_ENABLED_CHANNEL,
   IMAGE_GENERATION_UPDATE_CONFIGURATION_CHANNEL
 } from './ImageGenerationIpcBridge'
@@ -53,17 +54,33 @@ describe('Image generation IPC bridge', () => {
       expectedRevision: 'image-generation:v1:2',
       enabled: true
     } satisfies ImageGenerationSetEnabledInput
+    const artifactInput = {
+      schemaVersion: 1,
+      artifact: {
+        artifactId: `sha256:${'a'.repeat(64)}`,
+        uri: `image-artifact://sha256/${'a'.repeat(64)}`,
+        kind: 'image',
+        format: 'png',
+        mimeType: 'image/png',
+        width: 1,
+        height: 1,
+        sizeBytes: 1,
+        sha256: 'a'.repeat(64)
+      }
+    } as const
 
     await expect(bridge.getConfiguration()).resolves.toBe(response)
     await expect(bridge.updateConfiguration(updateInput)).resolves.toBe(response)
     await expect(bridge.setEnabled(setEnabledInput)).resolves.toBe(response)
     await expect(bridge.getStatus()).resolves.toBe(response)
+    await expect(bridge.readArtifact(artifactInput)).resolves.toBe(response)
 
     expect(invoke.mock.calls).toEqual([
       [IMAGE_GENERATION_GET_CONFIGURATION_CHANNEL],
       [IMAGE_GENERATION_UPDATE_CONFIGURATION_CHANNEL, updateInput],
       [IMAGE_GENERATION_SET_ENABLED_CHANNEL, setEnabledInput],
-      [IMAGE_GENERATION_GET_STATUS_CHANNEL]
+      [IMAGE_GENERATION_GET_STATUS_CHANNEL],
+      [IMAGE_GENERATION_READ_ARTIFACT_CHANNEL, artifactInput]
     ])
   })
 })

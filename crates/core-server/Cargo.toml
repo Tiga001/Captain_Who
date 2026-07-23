@@ -8,6 +8,7 @@ name = "core-server"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
 mycopilot-core.workspace = true
 mycopilot-protocol-rs.workspace = true
 serde.workspace = true

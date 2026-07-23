@@ -137,6 +137,41 @@ fn checkpoint_uses_durable_tool_projection_without_mutating_live_context() {
 }
 
 #[test]
+fn checkpoint_message_can_remove_transient_model_images_without_changing_live_context() {
+    let mut live = LlmMessage::text(
+        LlmMessageRole::User,
+        "Inspect the generated image at /managed/generated.png.",
+    );
+    live.images.push(LlmImage {
+        mime_type: "image/png".to_string(),
+        data_base64: "YWJj".to_string(),
+    });
+    let durable = LlmMessage::text(
+        LlmMessageRole::User,
+        "Inspect the generated image at /managed/generated.png.",
+    );
+    let frame = ContextFrame::new(vec![ContextItem::new(
+        live,
+        ContextMetadata::new(
+            ContextSource::ToolResult,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ),
+    )
+    .with_checkpoint_message(durable)]);
+
+    assert_eq!(frame.to_messages()[0].images[0].data_base64, "YWJj");
+    let checkpoint = frame.checkpoint_items().unwrap();
+    assert!(checkpoint[0].images.is_empty());
+    assert!(!serde_json::to_string(&checkpoint).unwrap().contains("YWJj"));
+    let restored = ContextFrame::from_checkpoint_items(checkpoint).unwrap();
+    assert!(restored.to_messages()[0].images.is_empty());
+    assert!(restored.to_messages()[0]
+        .content
+        .contains("/managed/generated.png"));
+}
+
+#[test]
 fn persistent_replacement_keeps_run_overlay_and_discards_old_history() {
     let detector =
         ContextCapacityDetector::for_model("test-model", AgentApiStyle::OpenAiCompatible, &[]);

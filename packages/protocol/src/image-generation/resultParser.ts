@@ -72,7 +72,7 @@ export function parseAgentImageGenerationResult(value: unknown): AgentImageGener
       schemaVersion: AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION,
       status,
       operation,
-      artifact: parseArtifact(record.artifact, `${context}.artifact`),
+      artifact: parseAgentImageGenerationArtifact(record.artifact, `${context}.artifact`),
       audit
     }
   }
@@ -92,7 +92,10 @@ export function parseAgentImageGenerationResult(value: unknown): AgentImageGener
   }
 }
 
-function parseArtifact(value: unknown, context: string): AgentImageGenerationArtifact {
+export function parseAgentImageGenerationArtifact(
+  value: unknown,
+  context = 'Agent image generation artifact'
+): AgentImageGenerationArtifact {
   const record = expectRecord(value, context)
   expectOnlyKeys(
     record,

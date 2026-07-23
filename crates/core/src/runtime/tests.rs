@@ -1,5 +1,6 @@
 // Tests for runtime message construction and tool-flow helpers.
 use super::*;
+use crate::conversation_trace::canonical_tool_result_for_context;
 use crate::llm::LlmToolCall;
 use crate::protocol::{
     AgentActivatedSkill, AgentInputAttachment, AgentInputAttachmentEncoding,
@@ -384,7 +385,9 @@ fn read_image_tool_result_is_redacted_but_creates_visual_message() {
     );
     assert!(event_value.get("image").is_none());
 
-    let image_message = llm_image_message_from_tool_result(&result).unwrap();
+    let image_message =
+        llm_image_message_from_tool_result(&result, crate::ModelCapabilities { image_input: true })
+            .unwrap();
     assert_eq!(image_message.role, LlmMessageRole::User);
     assert_eq!(image_message.images.len(), 1);
     assert_eq!(image_message.images[0].mime_type, "image/png");
@@ -406,7 +409,47 @@ fn failed_read_image_capability_result_never_creates_visual_input() {
         error: Some("当前模型不支持图片输入；文件尚未读取。".to_string()),
     };
 
-    assert!(llm_image_message_from_tool_result(&result).is_none());
+    assert!(llm_image_message_from_tool_result(
+        &result,
+        crate::ModelCapabilities { image_input: false }
+    )
+    .is_none());
+}
+
+#[test]
+fn generated_image_visual_input_is_capability_gated() {
+    let result = AgentToolResult {
+        call_id: "call-generated-image".to_string(),
+        tool: "image_generation".to_string(),
+        ok: true,
+        result: Some(json!({
+            "schemaVersion": 1,
+            "status": "succeeded",
+            "savedPath": "/managed/generated-image.png",
+            "image": {
+                "mimeType": "image/png",
+                "dataBase64": "YWJj"
+            }
+        })),
+        error: None,
+    };
+
+    assert!(llm_image_message_from_tool_result(
+        &result,
+        crate::ModelCapabilities { image_input: false }
+    )
+    .is_none());
+
+    let image_message =
+        llm_image_message_from_tool_result(&result, crate::ModelCapabilities { image_input: true })
+            .expect("image-capable models receive generated pixels");
+    assert_eq!(image_message.role, LlmMessageRole::User);
+    assert!(image_message
+        .content
+        .contains("/managed/generated-image.png"));
+    assert_eq!(image_message.images.len(), 1);
+    assert_eq!(image_message.images[0].mime_type, "image/png");
+    assert_eq!(image_message.images[0].data_base64, "YWJj");
 }
 
 #[test]

@@ -3,6 +3,8 @@ use std::fmt;
 
 pub const IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION: u32 = 1;
 pub const IMAGE_GENERATION_CONFIGURATION_ERROR_CODE: i64 = -32020;
+pub const IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION: u32 = 1;
+pub const IMAGE_GENERATION_ARTIFACT_ERROR_CODE: i64 = -32021;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ImageGenerationAdapterIdDto {
@@ -218,4 +220,102 @@ pub struct ImageGenerationConfigurationErrorData {
     pub retry_after_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration_may_have_changed: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ImageGenerationArtifactKindDto {
+    Image,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ImageGenerationArtifactFormatDto {
+    Png,
+    Jpeg,
+    Webp,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageGenerationArtifactDto {
+    pub artifact_id: String,
+    pub uri: String,
+    pub kind: ImageGenerationArtifactKindDto,
+    pub format: ImageGenerationArtifactFormatDto,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageGenerationArtifactReadRequest {
+    pub schema_version: u32,
+    pub artifact: ImageGenerationArtifactDto,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageGenerationArtifactReadResponse {
+    pub schema_version: u32,
+    pub artifact: ImageGenerationArtifactDto,
+    pub file_name: String,
+    pub data_base64: String,
+}
+
+impl fmt::Debug for ImageGenerationArtifactReadResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImageGenerationArtifactReadResponse")
+            .field("schema_version", &self.schema_version)
+            .field("artifact", &self.artifact)
+            .field("file_name", &self.file_name)
+            .field("data_base64", &"[IMAGE DATA REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ImageGenerationArtifactOperationDto {
+    Read,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ImageGenerationArtifactErrorCodeDto {
+    InvalidRequest,
+    NotFound,
+    IntegrityCheckFailed,
+    TooLarge,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ImageGenerationArtifactRecoveryDto {
+    DoNotRetry,
+    Retry,
+    Regenerate,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ImageGenerationArtifactErrorTypeDto {
+    ImageGenerationArtifact,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageGenerationArtifactErrorData {
+    #[serde(rename = "type")]
+    pub error_type: ImageGenerationArtifactErrorTypeDto,
+    pub operation: ImageGenerationArtifactOperationDto,
+    pub code: ImageGenerationArtifactErrorCodeDto,
+    pub recovery: ImageGenerationArtifactRecoveryDto,
+    pub message: String,
+    pub retryable: bool,
 }

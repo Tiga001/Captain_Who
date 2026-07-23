@@ -6,6 +6,7 @@ export const IMAGE_GENERATION_UPDATE_CONFIGURATION_CHANNEL =
   'host:imageGeneration.updateConfiguration'
 export const IMAGE_GENERATION_SET_ENABLED_CHANNEL = 'host:imageGeneration.setEnabled'
 export const IMAGE_GENERATION_GET_STATUS_CHANNEL = 'host:imageGeneration.getStatus'
+export const IMAGE_GENERATION_READ_ARTIFACT_CHANNEL = 'host:imageGeneration.readArtifact'
 
 type ImageGenerationIpcRenderer = Pick<IpcRenderer, 'invoke'>
 
@@ -22,6 +23,7 @@ export function createImageGenerationIpcBridge(
     updateConfiguration: (input) =>
       ipcRenderer.invoke(IMAGE_GENERATION_UPDATE_CONFIGURATION_CHANNEL, input),
     setEnabled: (input) => ipcRenderer.invoke(IMAGE_GENERATION_SET_ENABLED_CHANNEL, input),
-    getStatus: () => ipcRenderer.invoke(IMAGE_GENERATION_GET_STATUS_CHANNEL)
+    getStatus: () => ipcRenderer.invoke(IMAGE_GENERATION_GET_STATUS_CHANNEL),
+    readArtifact: (input) => ipcRenderer.invoke(IMAGE_GENERATION_READ_ARTIFACT_CHANNEL, input)
   }
 }

@@ -6,6 +6,9 @@ export const IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD =
   'imageGeneration.updateConfiguration' as const
 export const IMAGE_GENERATION_SET_ENABLED_METHOD = 'imageGeneration.setEnabled' as const
 export const IMAGE_GENERATION_GET_STATUS_METHOD = 'imageGeneration.getStatus' as const
+export const IMAGE_GENERATION_READ_ARTIFACT_METHOD = 'imageGeneration.readArtifact' as const
+export const IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION = 1 as const
+export const IMAGE_GENERATION_ARTIFACT_ERROR_CODE = -32021 as const
 
 /**
  * Stable identifier for the backend adapter that owns provider-specific request mapping.
@@ -190,6 +193,45 @@ export interface AgentImageGenerationArtifact {
   height: number
   sizeBytes: number
   sha256: string
+}
+
+/**
+ * Reads one immutable generated image previously persisted in an Agent result.
+ *
+ * Supplying the complete frozen identity lets the backend reject stale or tampered history before
+ * returning content. Provider URLs and managed filesystem paths are never accepted as locators.
+ */
+export interface ImageGenerationArtifactReadInput {
+  schemaVersion: typeof IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION
+  artifact: AgentImageGenerationArtifact
+}
+
+/**
+ * Core JSON-RPC transport representation. Main validates and decodes `dataBase64` before exposing
+ * a typed byte array through the Renderer Host API.
+ */
+export interface ImageGenerationArtifactReadOutput {
+  schemaVersion: typeof IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION
+  artifact: AgentImageGenerationArtifact
+  fileName: string
+  dataBase64: string
+}
+
+export type ImageGenerationArtifactOperation = 'read'
+
+export type ImageGenerationArtifactErrorCode =
+  'invalidRequest' | 'notFound' | 'integrityCheckFailed' | 'tooLarge' | 'unavailable'
+
+export type ImageGenerationArtifactRecovery = 'doNotRetry' | 'retry' | 'regenerate'
+
+/** Bounded, path-free structured failure for generated-image content reads. */
+export interface ImageGenerationArtifactErrorData {
+  type: 'imageGenerationArtifact'
+  operation: ImageGenerationArtifactOperation
+  code: ImageGenerationArtifactErrorCode
+  recovery: ImageGenerationArtifactRecovery
+  message: string
+  retryable: boolean
 }
 
 /** Correlation metadata safe to persist in Agent traces and expose to clients. */

@@ -17,10 +17,11 @@ pub use artifact::{
     ImageArtifactError, ImageArtifactErrorCode, ImageArtifactFormat, ImageArtifactHostRule,
     ImageArtifactNetworkPolicy, ImageArtifactPublicationStatus, ImageArtifactStoreConfig,
     ImageArtifactTransferPolicy, ImageGenerationArtifactCandidate, ImageGenerationArtifactStore,
-    ManagedImageGenerationArtifactStore, PreparedImageArtifact, PublishedImageArtifact,
-    DEFAULT_IMAGE_ARTIFACT_CONNECT_TIMEOUT, DEFAULT_IMAGE_ARTIFACT_DNS_TIMEOUT,
-    DEFAULT_IMAGE_ARTIFACT_DOWNLOAD_TIMEOUT, DEFAULT_IMAGE_ARTIFACT_MAX_BYTES,
-    DEFAULT_IMAGE_ARTIFACT_MAX_REDIRECTS, MAX_IMAGE_ARTIFACT_DIMENSION, MAX_IMAGE_ARTIFACT_PIXELS,
+    ManagedImageArtifactContent, ManagedImageGenerationArtifactStore, PreparedImageArtifact,
+    PublishedImageArtifact, DEFAULT_IMAGE_ARTIFACT_CONNECT_TIMEOUT,
+    DEFAULT_IMAGE_ARTIFACT_DNS_TIMEOUT, DEFAULT_IMAGE_ARTIFACT_DOWNLOAD_TIMEOUT,
+    DEFAULT_IMAGE_ARTIFACT_MAX_BYTES, DEFAULT_IMAGE_ARTIFACT_MAX_REDIRECTS,
+    MAX_IMAGE_ARTIFACT_DIMENSION, MAX_IMAGE_ARTIFACT_PIXELS,
 };
 pub use configuration::{
     CredentialReconciliationReport, ImageGenerationConfiguration,

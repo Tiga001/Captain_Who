@@ -1255,6 +1255,7 @@ dependencies = [
 name = "mycopilot-core-server"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "mycopilot-core",
  "mycopilot-protocol-rs",
  "security-framework",

@@ -800,8 +800,7 @@ export const enUSTranslations = {
   'agent.imageGeneration.artifactMetadata': '{width} × {height} · {size}',
   'agent.imageGeneration.previewLoading': 'Loading a secure preview…',
   'agent.imageGeneration.previewFailed': 'The image preview is temporarily unavailable.',
-  'agent.imageGeneration.previewUnavailable':
-    'The image is safely stored, but preview and export are not available in this version.',
+  'agent.imageGeneration.previewUnavailable': 'Image preview is unavailable.',
   'agent.command.rejected': 'Command rejected',
   'agent.command.completed': 'Ran command',
   'agent.command.failed': 'Command failed',

@@ -768,7 +768,7 @@ export const zhCNTranslations = {
   'agent.imageGeneration.artifactMetadata': '{width} × {height} · {size}',
   'agent.imageGeneration.previewLoading': '正在加载安全预览…',
   'agent.imageGeneration.previewFailed': '暂时无法加载图片预览。',
-  'agent.imageGeneration.previewUnavailable': '图片已安全保存，当前版本暂不支持预览或导出。',
+  'agent.imageGeneration.previewUnavailable': '图片预览暂不可用。',
   'agent.command.rejected': '已拒绝运行命令',
   'agent.command.completed': '已运行命令',
   'agent.command.failed': '运行失败',

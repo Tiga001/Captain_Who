@@ -406,6 +406,8 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
     let installations = Arc::new(SkillInstallationService::new(&store_root).unwrap());
     let agent_service = AgentService::new(Arc::clone(&storage));
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let image_generation_dispatcher =
@@ -449,7 +451,10 @@ async fn request_loop_serializes_install_before_the_following_catalog_read() {
         },
         Arc::new(GitReviewService::new()),
         &dispatchers,
-        &outbound_tx,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_artifact_outbound_tx,
+        },
     )
     .await
     .unwrap();
@@ -511,6 +516,8 @@ async fn two_phase_rpc_runs_install_update_activation_and_uninstall_end_to_end()
     ));
     let agent_service = AgentService::new(Arc::clone(&storage));
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
@@ -535,7 +542,10 @@ async fn two_phase_rpc_runs_install_update_activation_and_uninstall_end_to_end()
         },
         Arc::new(GitReviewService::new()),
         &dispatchers,
-        &outbound_tx,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_artifact_outbound_tx,
+        },
     );
     let local_directory = local_skill.to_string_lossy().into_owned();
     let client = async {

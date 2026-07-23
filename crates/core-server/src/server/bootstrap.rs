@@ -5,6 +5,7 @@ use std::path::Path;
 pub(crate) struct CoreServerBootstrap {
     pub(crate) storage: Arc<StorageService>,
     pub(crate) image_generation_configuration: Arc<ImageGenerationConfigurationService>,
+    pub(crate) image_generation_artifacts: Arc<ManagedImageGenerationArtifactStore>,
     pub(crate) image_generation_execution: Arc<ImageGenerationExecutionService>,
     pub(crate) agent_service: AgentService,
     pub(crate) skill_services: SkillServices,
@@ -56,7 +57,7 @@ impl CoreServerBootstrap {
             ImageGenerationExecutionService::new(
                 Arc::clone(&image_generation_configuration),
                 Arc::new(image_generation_adapters),
-                image_generation_artifacts,
+                image_generation_artifacts.clone(),
                 Arc::clone(&storage),
                 ImageGenerationExecutionLimits::default(),
             )
@@ -139,6 +140,7 @@ impl CoreServerBootstrap {
         Ok(Self {
             storage,
             image_generation_configuration,
+            image_generation_artifacts,
             image_generation_execution,
             agent_service,
             skill_services,
@@ -228,10 +230,13 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         .reconcile_startup_orphaned_conversation_traces()
         .map_err(io::Error::other)?;
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
+    let (image_artifact_outbound_tx, image_artifact_outbound_rx) =
+        mpsc::channel::<ImageArtifactOutbound>(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
     let writer = tokio::spawn(run_outbound_writer(
         io::stdout(),
         outbound_rx,
+        image_artifact_outbound_rx,
         finish_outbound_rx,
     ));
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
@@ -251,12 +256,19 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         CoreRequestServices {
             storage: Arc::clone(&bootstrap.storage),
             image_generation_configuration: Arc::clone(&bootstrap.image_generation_configuration),
+            image_generation_artifacts: Arc::clone(&bootstrap.image_generation_artifacts),
+            image_generation_artifact_read_admission: Arc::new(Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS,
+            )),
         },
         &bootstrap.agent_service,
         bootstrap.skill_services.clone(),
         Arc::clone(&bootstrap.git_review_service),
         &request_dispatchers,
-        &outbound_tx,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_artifact_outbound_tx,
+        },
     )
     .await;
 
@@ -299,6 +311,7 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
         }
     }
     drop(outbound_tx);
+    drop(image_artifact_outbound_tx);
     // A timed-out agent may still own an outbound sender. Tell the writer to close its receiver
     // and drain everything accepted so far instead of waiting for every producer clone to drop.
     // The shutdown response above is therefore flushed, while late notifications are rejected.

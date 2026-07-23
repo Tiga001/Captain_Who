@@ -275,6 +275,43 @@ pub struct PublishedImageArtifact {
     pub status: ImageArtifactPublicationStatus,
 }
 
+impl PublishedImageArtifact {
+    /// Reopens and fully revalidates the immutable published file before its bytes cross another
+    /// trust boundary, such as the transient model-vision delivery path.
+    ///
+    /// The caller must still decide whether the receiving model is allowed to accept image input.
+    /// This method deliberately performs no encoding and exposes no provider URL.
+    pub(crate) fn read_verified(&self, max_bytes: usize) -> Result<Vec<u8>, ImageArtifactError> {
+        if !self.absolute_path.is_absolute() {
+            return Err(ImageArtifactError::new(
+                ImageArtifactErrorCode::Conflict,
+                "published image Artifact path is not absolute",
+                false,
+            ));
+        }
+        read_file_matching_candidate(&self.absolute_path, &self.candidate, max_bytes)
+    }
+}
+
+/// Fully revalidated content read from the private immutable Artifact store.
+///
+/// The managed path remains intentionally absent: callers receive only the same presentation-safe
+/// identity that was persisted in the Agent result plus the verified image bytes.
+pub struct ManagedImageArtifactContent {
+    pub candidate: ImageGenerationArtifactCandidate,
+    pub bytes: Vec<u8>,
+}
+
+impl fmt::Debug for ManagedImageArtifactContent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ManagedImageArtifactContent")
+            .field("candidate", &self.candidate)
+            .field("byte_length", &self.bytes.len())
+            .finish()
+    }
+}
+
 /// A validated but unpublished Artifact. Dropping it removes its private staging file.
 pub struct PreparedImageArtifact {
     candidate: ImageGenerationArtifactCandidate,
@@ -463,6 +500,56 @@ impl ManagedImageGenerationArtifactStore {
     #[must_use]
     pub fn config(&self) -> ImageArtifactStoreConfig {
         self.config
+    }
+
+    /// Reads an immutable Artifact after revalidating its frozen identity and image structure.
+    ///
+    /// Reads share the bounded image-validation pool with publication so a Renderer cannot create
+    /// unbounded parallel decoder work by restoring a conversation containing many images.
+    pub async fn read_published(
+        &self,
+        candidate: &ImageGenerationArtifactCandidate,
+    ) -> Result<Option<ManagedImageArtifactContent>, ImageArtifactError> {
+        let target = self.validate_candidate_path(candidate)?;
+        match fs::symlink_metadata(&target) {
+            Ok(metadata)
+                if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(ImageArtifactError::new(
+                    ImageArtifactErrorCode::Conflict,
+                    "image Artifact store entry is not an immutable regular file",
+                    false,
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error(error)),
+        }
+
+        let validation_worker = Arc::clone(&self.validation_workers)
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                ImageArtifactError::new(
+                    ImageArtifactErrorCode::InvalidConfiguration,
+                    "image Artifact validation pool is unavailable",
+                    true,
+                )
+            })?;
+        let candidate = candidate.clone();
+        let max_download_bytes = self.config.max_download_bytes;
+        tokio::task::spawn_blocking(move || {
+            let _validation_worker = validation_worker;
+            let bytes = read_file_matching_candidate(&target, &candidate, max_download_bytes)?;
+            Ok(Some(ManagedImageArtifactContent { candidate, bytes }))
+        })
+        .await
+        .map_err(|_| {
+            ImageArtifactError::new(
+                ImageArtifactErrorCode::Io,
+                "image Artifact validation worker stopped unexpectedly",
+                true,
+            )
+        })?
     }
 
     async fn stage_inner(
@@ -1310,6 +1397,16 @@ fn validate_staged_image(
     max_bytes: usize,
     expected_size_bytes: Option<u64>,
 ) -> Result<ValidatedImage, ImageArtifactError> {
+    read_and_validate_image(path, claimed_content_type, max_bytes, expected_size_bytes)
+        .map(|(validated, _bytes)| validated)
+}
+
+fn read_and_validate_image(
+    path: &Path,
+    claimed_content_type: Option<&str>,
+    max_bytes: usize,
+    expected_size_bytes: Option<u64>,
+) -> Result<(ValidatedImage, Vec<u8>), ImageArtifactError> {
     let mut file = open_regular_file_no_follow(path).map_err(io_error)?;
     let metadata = file.metadata().map_err(io_error)?;
     if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > max_bytes as u64 {
@@ -1335,7 +1432,15 @@ fn validate_staged_image(
             false,
         ));
     }
-    let format = detect_image_format(&bytes)?;
+    let validated = validate_image_bytes(&bytes, claimed_content_type)?;
+    Ok((validated, bytes))
+}
+
+fn validate_image_bytes(
+    bytes: &[u8],
+    claimed_content_type: Option<&str>,
+) -> Result<ValidatedImage, ImageArtifactError> {
+    let format = detect_image_format(bytes)?;
     if let Some(content_type) = claimed_content_type {
         if content_type != "application/octet-stream" && content_type != format.media_type() {
             return Err(ImageArtifactError::new(
@@ -1371,21 +1476,21 @@ fn validate_staged_image(
     let width = decoded.width();
     let height = decoded.height();
     validate_image_dimensions(width, height)?;
-    let sha256 = hex_sha256(&bytes);
+    let sha256 = hex_sha256(bytes);
     Ok(ValidatedImage {
         format,
         width,
         height,
-        size_bytes: metadata.len(),
+        size_bytes: bytes.len() as u64,
         sha256,
     })
 }
 
-fn verify_file_matches_candidate(
+fn read_file_matching_candidate(
     path: &Path,
     candidate: &ImageGenerationArtifactCandidate,
     max_bytes: usize,
-) -> Result<(), ImageArtifactError> {
+) -> Result<Vec<u8>, ImageArtifactError> {
     if candidate.size_bytes == 0 || candidate.size_bytes > max_bytes as u64 {
         return Err(ImageArtifactError::new(
             ImageArtifactErrorCode::Conflict,
@@ -1393,7 +1498,7 @@ fn verify_file_matches_candidate(
             false,
         ));
     }
-    let validated = validate_staged_image(
+    let (validated, bytes) = read_and_validate_image(
         path,
         Some(&candidate.media_type),
         max_bytes,
@@ -1411,7 +1516,15 @@ fn verify_file_matches_candidate(
             false,
         ));
     }
-    Ok(())
+    Ok(bytes)
+}
+
+fn verify_file_matches_candidate(
+    path: &Path,
+    candidate: &ImageGenerationArtifactCandidate,
+    max_bytes: usize,
+) -> Result<(), ImageArtifactError> {
+    read_file_matching_candidate(path, candidate, max_bytes).map(|_| ())
 }
 
 fn detect_image_format(bytes: &[u8]) -> Result<ImageArtifactFormat, ImageArtifactError> {
@@ -1738,6 +1851,26 @@ mod tests {
         .unwrap()
     }
 
+    fn seed_published_png(
+        store: &ManagedImageGenerationArtifactStore,
+    ) -> (ImageGenerationArtifactCandidate, PathBuf, Vec<u8>) {
+        let bytes = png_bytes();
+        let sha256 = hex_sha256(&bytes);
+        let target = store.objects_root.join(format!("{sha256}.png"));
+        fs::write(&target, &bytes).unwrap();
+        let candidate = ImageGenerationArtifactCandidate {
+            artifact_id: format!("sha256:{sha256}"),
+            storage_relative_path: format!("objects/{sha256}.png"),
+            format: ImageArtifactFormat::Png,
+            media_type: "image/png".to_string(),
+            width: 2,
+            height: 3,
+            size_bytes: bytes.len() as u64,
+            sha256,
+        };
+        (candidate, target, bytes)
+    }
+
     #[tokio::test]
     async fn downloads_validates_and_atomically_publishes_png() {
         let directory = tempdir().unwrap();
@@ -1764,6 +1897,54 @@ mod tests {
         assert_eq!(published.status, ImageArtifactPublicationStatus::Created);
         assert_eq!(fs::read(&published.absolute_path).unwrap(), bytes);
         assert!(store.inspect(&published.candidate).unwrap().is_some());
+        let content = store
+            .read_published(&published.candidate)
+            .await
+            .unwrap()
+            .expect("published Artifact should be readable");
+        assert_eq!(content.candidate, published.candidate);
+        assert_eq!(content.bytes, bytes);
+    }
+
+    #[tokio::test]
+    async fn published_reads_fail_closed_for_missing_mismatched_and_corrupt_content() {
+        let directory = tempdir().unwrap();
+        let store = test_store(directory.path());
+        let (candidate, target, _bytes) = seed_published_png(&store);
+
+        let mut mismatched = candidate.clone();
+        mismatched.width += 1;
+        let error = store.read_published(&mismatched).await.unwrap_err();
+        assert_eq!(error.code, ImageArtifactErrorCode::Conflict);
+
+        fs::write(&target, b"not an image").unwrap();
+        let error = store.read_published(&candidate).await.unwrap_err();
+        assert!(matches!(
+            error.code,
+            ImageArtifactErrorCode::Conflict
+                | ImageArtifactErrorCode::InvalidImage
+                | ImageArtifactErrorCode::UnsupportedMediaType
+        ));
+
+        fs::remove_file(&target).unwrap();
+        assert!(store.read_published(&candidate).await.unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn published_reads_reject_symlink_entries() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let store = test_store(directory.path());
+        let (candidate, target, bytes) = seed_published_png(&store);
+        let replacement = directory.path().join("replacement.png");
+        fs::write(&replacement, bytes).unwrap();
+        fs::remove_file(&target).unwrap();
+        symlink(&replacement, &target).unwrap();
+
+        let error = store.read_published(&candidate).await.unwrap_err();
+        assert_eq!(error.code, ImageArtifactErrorCode::Conflict);
     }
 
     #[tokio::test]

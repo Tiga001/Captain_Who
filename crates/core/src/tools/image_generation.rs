@@ -20,6 +20,7 @@ use crate::protocol::{
     AgentResult, AgentToolCall, AgentToolDefinition, AgentToolResult, AgentToolSafety,
     AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION,
 };
+use base64::Engine;
 use futures_util::future::BoxFuture;
 use image::{ImageFormat, ImageReader, Limits};
 use serde::Deserialize;
@@ -29,60 +30,14 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 const TOOL_NAME: &str = "image_generation";
 const MAX_REASON_CHARS: usize = 240;
 const MAX_INPUT_DECODE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_CONCURRENT_IMAGE_INPUT_PREPARATIONS: usize = 2;
-
-struct ImageInputPreparationAdmission {
-    available: Mutex<usize>,
-    changed: Condvar,
-}
-
-struct ImageInputPreparationPermit(&'static ImageInputPreparationAdmission);
-
-impl Drop for ImageInputPreparationPermit {
-    fn drop(&mut self) {
-        let mut available = self
-            .0
-            .available
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        *available = available
-            .saturating_add(1)
-            .min(MAX_CONCURRENT_IMAGE_INPUT_PREPARATIONS);
-        self.0.changed.notify_one();
-    }
-}
-
-fn acquire_image_input_preparation(
-    context: &ToolExecutionContext,
-) -> AgentResult<ImageInputPreparationPermit> {
-    static ADMISSION: OnceLock<ImageInputPreparationAdmission> = OnceLock::new();
-    let admission = ADMISSION.get_or_init(|| ImageInputPreparationAdmission {
-        available: Mutex::new(MAX_CONCURRENT_IMAGE_INPUT_PREPARATIONS),
-        changed: Condvar::new(),
-    });
-    let mut available = admission
-        .available
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    loop {
-        context.check_cancelled()?;
-        if *available > 0 {
-            *available -= 1;
-            return Ok(ImageInputPreparationPermit(admission));
-        }
-        available = admission
-            .changed
-            .wait_timeout(available, Duration::from_millis(25))
-            .unwrap_or_else(|error| error.into_inner())
-            .0;
-    }
-}
+const MAX_MODEL_IMAGE_DELIVERY_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_MODEL_IMAGE_DELIVERY_DIMENSION: u32 = 8_192;
+const MAX_MODEL_IMAGE_DELIVERY_PIXELS: u64 = 36 * 1024 * 1024;
 
 pub(super) trait ImageGenerationToolExecutor: Send + Sync {
     fn execute<'a>(
@@ -210,7 +165,11 @@ impl AgentTool for ImageGenerationTool {
         })?;
         let generation_reached_terminal_boundary =
             receipt_requires_new_user_intent(&result.receipt);
+        let published_for_model = result.managed_artifact.clone();
         let outcome = execution_result(operation, &args.reason, execution_id.as_str(), result);
+        let outcome = outcome.map(|public_result| {
+            attach_model_artifact_delivery(public_result, published_for_model.as_ref(), context)
+        });
         if outcome.is_err() && generation_reached_terminal_boundary {
             self.retry_guard.block(request_fingerprint);
         }
@@ -267,15 +226,188 @@ impl AgentTool for ImageGenerationTool {
     }
 
     fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
-        canonical_tool_result_for_context(result)
+        image_generation_history_projection(result)
     }
 
     fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
-        canonical_tool_result_for_context(result)
+        image_generation_event_projection(result)
     }
 
     fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
-        canonical_tool_result_for_context(result)
+        image_generation_history_projection(result)
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        image_generation_model_projection(result)
+    }
+}
+
+fn attach_model_artifact_delivery(
+    mut public_result: Value,
+    published: Option<&crate::image_generation::PublishedImageArtifact>,
+    context: &ToolExecutionContext,
+) -> Value {
+    // `execution_result` above is the closed public v1 contract. These fields are a runtime-only
+    // extension for the model loop: event_projection removes them before Renderer transport,
+    // while model/history projections retain only the stable path and textual delivery status.
+    let Some(object) = public_result.as_object_mut() else {
+        return public_result;
+    };
+    let Some(published) = published else {
+        return public_result;
+    };
+
+    if let Some(saved_path) = published.absolute_path.to_str() {
+        object.insert(
+            "savedPath".to_string(),
+            Value::String(saved_path.to_string()),
+        );
+    } else {
+        object.insert(
+            "visualInputStatus".to_string(),
+            Value::String("pathUnavailable".to_string()),
+        );
+        return public_result;
+    }
+
+    if !context.model_capabilities().image_input {
+        object.insert(
+            "visualInputStatus".to_string(),
+            Value::String("unsupportedByCurrentModel".to_string()),
+        );
+        return public_result;
+    }
+
+    let candidate = &published.candidate;
+    let pixels = u64::from(candidate.width).saturating_mul(u64::from(candidate.height));
+    if candidate.size_bytes > MAX_MODEL_IMAGE_DELIVERY_BYTES
+        || candidate.width > MAX_MODEL_IMAGE_DELIVERY_DIMENSION
+        || candidate.height > MAX_MODEL_IMAGE_DELIVERY_DIMENSION
+        || pixels > MAX_MODEL_IMAGE_DELIVERY_PIXELS
+    {
+        object.insert(
+            "visualInputStatus".to_string(),
+            Value::String("omittedTooLarge".to_string()),
+        );
+        return public_result;
+    }
+
+    let Some(reservation) = context.try_reserve_model_image_delivery(candidate.size_bytes) else {
+        object.insert(
+            "visualInputStatus".to_string(),
+            Value::String("omittedRunBudgetExceeded".to_string()),
+        );
+        return public_result;
+    };
+    let _preparation_permit = match context.acquire_model_image_preparation() {
+        Ok(permit) => permit,
+        Err(_) => {
+            object.insert(
+                "visualInputStatus".to_string(),
+                Value::String("omittedCancelled".to_string()),
+            );
+            return public_result;
+        }
+    };
+    if context.check_cancelled().is_err() {
+        object.insert(
+            "visualInputStatus".to_string(),
+            Value::String("omittedCancelled".to_string()),
+        );
+        return public_result;
+    }
+
+    match published.read_verified(MAX_MODEL_IMAGE_DELIVERY_BYTES as usize) {
+        Ok(bytes) => {
+            if context.check_cancelled().is_err() {
+                object.insert(
+                    "visualInputStatus".to_string(),
+                    Value::String("omittedCancelled".to_string()),
+                );
+                return public_result;
+            }
+            let data_base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            if context.check_cancelled().is_err() {
+                object.insert(
+                    "visualInputStatus".to_string(),
+                    Value::String("omittedCancelled".to_string()),
+                );
+                return public_result;
+            }
+            object.insert(
+                "image".to_string(),
+                json!({
+                    "mimeType": published.candidate.media_type,
+                    "dataBase64": data_base64,
+                }),
+            );
+            object.insert(
+                "visualInputStatus".to_string(),
+                Value::String("attachedThisRun".to_string()),
+            );
+            reservation.commit();
+        }
+        Err(_) => {
+            // Publication remains a real success. A late local integrity/read failure only means
+            // the current model cannot inspect the pixels; do not misreport remote generation as
+            // failed and never include unverified bytes.
+            object.insert(
+                "visualInputStatus".to_string(),
+                Value::String("unavailable".to_string()),
+            );
+        }
+    }
+    public_result
+}
+
+fn remove_runtime_image(result: &AgentToolResult, mark_history_omission: bool) -> AgentToolResult {
+    let mut projected = clone_result_without_fields(result, &["image"]);
+    if let Some(object) = projected.result.as_mut().and_then(Value::as_object_mut) {
+        if result
+            .result
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some_and(|raw| raw.contains_key("image"))
+            && mark_history_omission
+        {
+            object.insert("binaryOmittedFromHistory".to_string(), json!(true));
+        }
+    }
+    canonical_tool_result_for_context(&projected)
+}
+
+fn image_generation_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    remove_runtime_image(result, false)
+}
+
+fn image_generation_history_projection(result: &AgentToolResult) -> AgentToolResult {
+    remove_runtime_image(result, true)
+}
+
+fn image_generation_event_projection(result: &AgentToolResult) -> AgentToolResult {
+    canonical_tool_result_for_context(&clone_result_without_fields(
+        result,
+        &["image", "savedPath", "visualInputStatus"],
+    ))
+}
+
+fn clone_result_without_fields(result: &AgentToolResult, omitted: &[&str]) -> AgentToolResult {
+    let projected_result = result.result.as_ref().map(|value| match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .filter(|(key, _)| !omitted.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
+        value => value.clone(),
+    });
+    AgentToolResult {
+        call_id: result.call_id.clone(),
+        tool: result.tool.clone(),
+        ok: result.ok,
+        result: projected_result,
+        error: result.error.clone(),
     }
 }
 
@@ -639,9 +771,12 @@ pub fn agent_image_generation_execution_id(
     )
 }
 
-/// Projects a reconciled image execution into the exact Agent ToolResult contract used during a
-/// live run. This is intentionally public only through the core facade so startup reconciliation
-/// cannot grow a second, subtly different Artifact/audit projection.
+/// Projects a reconciled image execution into the durable Agent ToolResult used by a live run.
+///
+/// Startup recovery restores the trusted local path but never reconstructs transient image bytes:
+/// there is no active model-capability snapshot or run-scoped delivery budget at this boundary.
+/// This is intentionally public only through the core facade so startup reconciliation cannot grow
+/// a second, subtly different Artifact/audit projection.
 pub fn agent_image_generation_tool_result_from_execution(
     call_id: &str,
     reason: &str,
@@ -649,12 +784,13 @@ pub fn agent_image_generation_tool_result_from_execution(
     execution_id: &str,
     result: ImageGenerationExecutionResult,
 ) -> AgentToolResult {
+    let published = result.managed_artifact.clone();
     match execution_result(operation, reason, execution_id, result) {
         Ok(result) => AgentToolResult {
             call_id: call_id.to_string(),
             tool: TOOL_NAME.to_string(),
             ok: true,
-            result: Some(result),
+            result: Some(attach_recovered_artifact_path(result, published.as_ref())),
             error: None,
         },
         // A terminal execution failure already carries the complete, closed v1 result contract.
@@ -668,6 +804,36 @@ pub fn agent_image_generation_tool_result_from_execution(
             error: Some(error.to_string()),
         },
     }
+}
+
+fn attach_recovered_artifact_path(
+    mut result: Value,
+    published: Option<&crate::image_generation::PublishedImageArtifact>,
+) -> Value {
+    let Some(object) = result.as_object_mut() else {
+        return result;
+    };
+    let Some(published) = published else {
+        return result;
+    };
+    if let Some(saved_path) = published.absolute_path.to_str() {
+        object.insert(
+            "savedPath".to_string(),
+            Value::String(saved_path.to_string()),
+        );
+        // Startup reconciliation has no active model capability or context budget. Restore only
+        // the durable reference; image bytes must be reacquired explicitly in a later live run.
+        object.insert(
+            "visualInputStatus".to_string(),
+            Value::String("notRestoredAfterRestart".to_string()),
+        );
+    } else {
+        object.insert(
+            "visualInputStatus".to_string(),
+            Value::String("pathUnavailable".to_string()),
+        );
+    }
+    result
 }
 
 /// Projects a terminal journal-inspection failure without exposing its internal diagnostic text.
@@ -708,7 +874,7 @@ fn load_authorized_image_input(
 ) -> AgentResult<ImageGenerationDataUrlInput> {
     context.check_cancelled()?;
     let authorized = authorize_image_input_path(context, input_path.trim())?;
-    let _preparation_permit = acquire_image_input_preparation(context)?;
+    let _preparation_permit = context.acquire_model_image_preparation()?;
     let mut file = open_authorized_regular_file(&authorized).map_err(input_open_error)?;
     let before = file.metadata().map_err(|error| {
         input_error(
@@ -758,12 +924,14 @@ fn load_authorized_image_input(
     }
 
     validate_decoded_input(&bytes)?;
+    context.check_cancelled()?;
     let input = ImageGenerationDataUrlInput::from_bytes(&bytes).map_err(|error| {
         input_error(
             "inputInvalid",
             &format!("The input image is not a supported, valid PNG, JPEG, or WebP file: {error}"),
         )
     })?;
+    context.check_cancelled()?;
     if let Some(reference) = authorized.attachment {
         if let Some(claimed) = reference
             .mime_type
@@ -1589,6 +1757,7 @@ mod tests {
     use crate::protocol::{
         AgentAttachmentLibraryContext, AgentAttachmentReference, AgentInputAttachmentKind,
         AgentPermissions, AgentReadPermission, AgentRunContext, AgentWorkspaceContext,
+        ModelCapabilities,
     };
     use image::ImageEncoder;
     use std::fs;
@@ -1630,6 +1799,36 @@ mod tests {
             created_at: 10,
             completed_at: 20,
             duration_ms: 10,
+        }
+    }
+
+    #[derive(Clone)]
+    struct SuccessfulExecutor {
+        published: PublishedImageArtifact,
+    }
+
+    impl ImageGenerationToolExecutor for SuccessfulExecutor {
+        fn execute<'a>(
+            &'a self,
+            request: ImageGenerationExecutionRequest,
+            _cancellation: crate::AgentCancellationToken,
+        ) -> BoxFuture<
+            'a,
+            Result<ImageGenerationExecutionResult, ImageGenerationExecutionServiceError>,
+        > {
+            let published = self.published.clone();
+            Box::pin(async move {
+                let mut execution_receipt = receipt(
+                    ImageGenerationExecutionStatus::Succeeded,
+                    Some(published.candidate.clone()),
+                    None,
+                );
+                execution_receipt.execution_id = request.execution_id.as_str().to_string();
+                Ok(ImageGenerationExecutionResult {
+                    receipt: execution_receipt,
+                    managed_artifact: Some(published),
+                })
+            })
         }
     }
 
@@ -1954,6 +2153,255 @@ mod tests {
         assert!(!encoded.contains("/private/managed"));
         assert!(!encoded.contains("https://"));
         assert!(!encoded.contains("apiKey"));
+    }
+
+    #[test]
+    fn live_delivery_exposes_a_stable_path_but_only_encodes_for_image_capable_models() {
+        let directory = TempDir::new().unwrap();
+        let bytes = png();
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let path = directory.path().join("generated.png");
+        fs::write(&path, &bytes).unwrap();
+        let candidate = ImageGenerationArtifactCandidate {
+            artifact_id: format!("sha256:{sha256}"),
+            storage_relative_path: format!("objects/{sha256}.png"),
+            format: ImageArtifactFormat::Png,
+            media_type: "image/png".to_string(),
+            width: 1,
+            height: 1,
+            size_bytes: bytes.len() as u64,
+            sha256,
+        };
+        let published = PublishedImageArtifact {
+            candidate,
+            absolute_path: path.clone(),
+            status: ImageArtifactPublicationStatus::Created,
+        };
+        let args = json!({
+            "request": {
+                "operation": "generate",
+                "prompt": "A capability-aware generated image"
+            },
+            "reason": "Generate the requested test image."
+        });
+
+        let text_tool = ImageGenerationTool::with_executor(Arc::new(SuccessfulExecutor {
+            published: published.clone(),
+        }));
+        let text_context = context(directory.path())
+            .with_model_capabilities(ModelCapabilities { image_input: false });
+        let text_result = text_tool.execute(&text_context, args.clone()).unwrap();
+        assert_eq!(
+            text_result["savedPath"],
+            path.to_str().expect("temporary path is UTF-8")
+        );
+        assert_eq!(
+            text_result["visualInputStatus"],
+            "unsupportedByCurrentModel"
+        );
+        assert!(text_result.get("image").is_none());
+        let text_encoded = serde_json::to_string(&text_result).unwrap();
+        assert!(!text_encoded.contains("dataBase64"));
+        assert!(!text_encoded.contains("data:image"));
+
+        let vision_tool =
+            ImageGenerationTool::with_executor(Arc::new(SuccessfulExecutor { published }));
+        let vision_context = context(directory.path())
+            .with_model_capabilities(ModelCapabilities { image_input: true });
+        let vision_result = vision_tool.execute(&vision_context, args).unwrap();
+        assert_eq!(vision_result["visualInputStatus"], "attachedThisRun");
+        let encoded = vision_result["image"]["dataBase64"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&encoded)
+                .unwrap(),
+            bytes
+        );
+
+        let raw = AgentToolResult {
+            call_id: "call-1".to_string(),
+            tool: TOOL_NAME.to_string(),
+            ok: true,
+            result: Some(vision_result),
+            error: None,
+        };
+        let model = vision_tool.model_projection(&raw);
+        let model_value = model.result.as_ref().unwrap();
+        assert_eq!(model_value["savedPath"], path.to_str().unwrap());
+        assert!(model_value.get("image").is_none());
+        assert!(!serde_json::to_string(&model).unwrap().contains(&encoded));
+
+        for durable in [
+            vision_tool.trace_projection(&raw),
+            vision_tool.checkpoint_projection(&raw),
+        ] {
+            let durable_value = durable.result.as_ref().unwrap();
+            assert_eq!(durable_value["savedPath"], path.to_str().unwrap());
+            assert_eq!(durable_value["binaryOmittedFromHistory"], true);
+            let serialized = serde_json::to_string(&durable).unwrap();
+            assert!(!serialized.contains(&encoded));
+            assert!(!serialized.contains("dataBase64"));
+        }
+
+        let event = vision_tool.event_projection(&raw);
+        let event_value = event.result.as_ref().unwrap();
+        assert!(event_value.get("savedPath").is_none());
+        assert!(event_value.get("visualInputStatus").is_none());
+        assert!(event_value.get("image").is_none());
+        serde_json::from_value::<AgentImageGenerationResult>(event_value.clone())
+            .expect("Renderer event remains the closed public v1 contract");
+    }
+
+    #[test]
+    fn image_capable_delivery_never_injects_unverified_bytes() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("missing.png");
+        let candidate = ImageGenerationArtifactCandidate {
+            artifact_id: format!("sha256:{}", "a".repeat(64)),
+            storage_relative_path: format!("objects/{}.png", "a".repeat(64)),
+            format: ImageArtifactFormat::Png,
+            media_type: "image/png".to_string(),
+            width: 1,
+            height: 1,
+            size_bytes: 4,
+            sha256: "a".repeat(64),
+        };
+        let published = PublishedImageArtifact {
+            candidate,
+            absolute_path: path.clone(),
+            status: ImageArtifactPublicationStatus::Created,
+        };
+        let request = json!({
+            "request": {
+                "operation": "generate",
+                "prompt": "A missing test image"
+            },
+            "reason": "Exercise fail-closed visual delivery."
+        });
+
+        let text_tool = ImageGenerationTool::with_executor(Arc::new(SuccessfulExecutor {
+            published: published.clone(),
+        }));
+        let text_value = text_tool
+            .execute(
+                &context(directory.path())
+                    .with_model_capabilities(ModelCapabilities { image_input: false }),
+                request.clone(),
+            )
+            .expect("text-only delivery must not attempt to read image bytes");
+        assert_eq!(text_value["savedPath"], path.to_str().unwrap());
+        assert_eq!(text_value["visualInputStatus"], "unsupportedByCurrentModel");
+        assert!(text_value.get("image").is_none());
+
+        let vision_tool =
+            ImageGenerationTool::with_executor(Arc::new(SuccessfulExecutor { published }));
+        let value = vision_tool
+            .execute(
+                &context(directory.path())
+                    .with_model_capabilities(ModelCapabilities { image_input: true }),
+                request,
+            )
+            .unwrap();
+
+        assert_eq!(value["savedPath"], path.to_str().unwrap());
+        assert_eq!(value["visualInputStatus"], "unavailable");
+        assert!(value.get("image").is_none());
+        assert!(!serde_json::to_string(&value)
+            .unwrap()
+            .contains("dataBase64"));
+    }
+
+    #[test]
+    fn model_delivery_omits_artifacts_outside_its_independent_budget() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("large.png");
+        let candidate = ImageGenerationArtifactCandidate {
+            artifact_id: format!("sha256:{}", "b".repeat(64)),
+            storage_relative_path: format!("objects/{}.png", "b".repeat(64)),
+            format: ImageArtifactFormat::Png,
+            media_type: "image/png".to_string(),
+            width: 1,
+            height: 1,
+            size_bytes: MAX_MODEL_IMAGE_DELIVERY_BYTES + 1,
+            sha256: "b".repeat(64),
+        };
+        let published = PublishedImageArtifact {
+            candidate,
+            absolute_path: path.clone(),
+            status: ImageArtifactPublicationStatus::Created,
+        };
+        let tool = ImageGenerationTool::with_executor(Arc::new(SuccessfulExecutor { published }));
+        let value = tool
+            .execute(
+                &context(directory.path())
+                    .with_model_capabilities(ModelCapabilities { image_input: true }),
+                json!({
+                    "request": {
+                        "operation": "generate",
+                        "prompt": "An intentionally oversized model-delivery fixture"
+                    },
+                    "reason": "Exercise the model image delivery size budget."
+                }),
+            )
+            .expect("Artifact publication remains successful");
+
+        assert_eq!(value["savedPath"], path.to_str().unwrap());
+        assert_eq!(value["visualInputStatus"], "omittedTooLarge");
+        assert!(value.get("image").is_none());
+    }
+
+    #[test]
+    fn startup_recovery_restores_only_the_stable_artifact_path() {
+        let directory = TempDir::new().unwrap();
+        let bytes = png();
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        let path = directory.path().join("recovered.png");
+        fs::write(&path, &bytes).unwrap();
+        let candidate = ImageGenerationArtifactCandidate {
+            artifact_id: format!("sha256:{sha256}"),
+            storage_relative_path: format!("objects/{sha256}.png"),
+            format: ImageArtifactFormat::Png,
+            media_type: "image/png".to_string(),
+            width: 1,
+            height: 1,
+            size_bytes: bytes.len() as u64,
+            sha256,
+        };
+        let published = PublishedImageArtifact {
+            candidate: candidate.clone(),
+            absolute_path: path.clone(),
+            status: ImageArtifactPublicationStatus::Created,
+        };
+        let result = agent_image_generation_tool_result_from_execution(
+            "call-recovered",
+            "Recover the generated image.",
+            ImageGenerationOperation::Generate,
+            "agent-v1:execution",
+            ImageGenerationExecutionResult {
+                receipt: receipt(
+                    ImageGenerationExecutionStatus::Succeeded,
+                    Some(candidate),
+                    None,
+                ),
+                managed_artifact: Some(published),
+            },
+        );
+
+        assert!(result.ok);
+        let value = result.result.as_ref().unwrap();
+        assert_eq!(value["savedPath"], path.to_str().unwrap());
+        assert_eq!(value["visualInputStatus"], "notRestoredAfterRestart");
+        assert!(value.get("image").is_none());
+        assert!(!serde_json::to_string(&result)
+            .unwrap()
+            .contains("dataBase64"));
+
+        let event = image_generation_event_projection(&result);
+        serde_json::from_value::<AgentImageGenerationResult>(event.result.unwrap())
+            .expect("public event projection remains strict v1");
     }
 
     #[test]

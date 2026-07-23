@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+import type { ImageGenerationArtifactContent } from '@mycopilot/host-api'
 import type {
   AgentActionExecutionOutput,
   AgentActionIdRequest,
@@ -34,6 +36,9 @@ import type {
   GitReviewFileMutationInput,
   GitReviewSummary,
   GitReviewSummaryInput,
+  AgentImageGenerationArtifact,
+  ImageGenerationArtifactReadInput,
+  ImageGenerationArtifactReadOutput,
   ImageGenerationGetConfigurationOutput,
   ImageGenerationSetEnabledInput,
   ImageGenerationSetEnabledOutput,
@@ -100,6 +105,11 @@ import {
   IMAGE_GENERATION_SET_ENABLED_METHOD,
   IMAGE_GENERATION_UPDATE_CONFIGURATION_METHOD,
   parseImageGenerationConfigurationErrorData,
+  IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
+  IMAGE_GENERATION_READ_ARTIFACT_METHOD,
+  parseImageGenerationArtifactErrorData,
+  parseImageGenerationArtifactReadInput,
+  parseImageGenerationArtifactReadOutput,
   parseImageGenerationGetConfigurationOutput,
   parseImageGenerationSetEnabledInput,
   parseImageGenerationSetEnabledOutput,
@@ -239,6 +249,68 @@ function rethrowValidatedImageGenerationConfigurationError(error: unknown): neve
   })
 }
 
+function rethrowValidatedImageGenerationArtifactError(error: unknown): never {
+  if (
+    typeof error !== 'object' ||
+    error === null ||
+    Array.isArray(error) ||
+    !('code' in error) ||
+    error.code !== IMAGE_GENERATION_ARTIFACT_ERROR_CODE
+  ) {
+    throw error
+  }
+
+  const data = parseImageGenerationArtifactErrorData('data' in error ? error.data : undefined)
+  throw Object.assign(new Error(data.message), {
+    name: 'ImageGenerationArtifactError',
+    code: IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
+    data
+  })
+}
+
+function validatedImageGenerationArtifactContent(
+  output: ImageGenerationArtifactReadOutput,
+  expected: AgentImageGenerationArtifact
+): ImageGenerationArtifactContent {
+  if (!sameImageGenerationArtifact(output.artifact, expected)) {
+    throw new Error('Invalid Image generation Artifact read response: frozen identity changed')
+  }
+  const bytes = Buffer.from(output.dataBase64, 'base64')
+  if (
+    bytes.byteLength !== output.artifact.sizeBytes ||
+    bytes.toString('base64') !== output.dataBase64
+  ) {
+    throw new Error('Invalid Image generation Artifact read response: byte length changed')
+  }
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  if (sha256 !== output.artifact.sha256) {
+    throw new Error('Invalid Image generation Artifact read response: content digest changed')
+  }
+  return {
+    schemaVersion: output.schemaVersion,
+    artifact: output.artifact,
+    fileName: output.fileName,
+    bytes: Uint8Array.from(bytes)
+  }
+}
+
+function sameImageGenerationArtifact(
+  left: AgentImageGenerationArtifact,
+  right: AgentImageGenerationArtifact
+): boolean {
+  return (
+    left.artifactId === right.artifactId &&
+    left.uri === right.uri &&
+    left.kind === right.kind &&
+    left.format === right.format &&
+    left.mimeType === right.mimeType &&
+    left.width === right.width &&
+    left.height === right.height &&
+    left.sizeBytes === right.sizeBytes &&
+    left.sha256 === right.sha256
+  )
+}
+
 export class CoreServer {
   private readonly rpc = new CoreJsonRpcClient()
 
@@ -320,6 +392,20 @@ export class CoreServer {
       .request<unknown>(IMAGE_GENERATION_GET_STATUS_METHOD)
       .then(parseImageGenerationStatus)
       .catch(rethrowValidatedImageGenerationConfigurationError)
+  }
+
+  readImageGenerationArtifact(
+    input: ImageGenerationArtifactReadInput
+  ): Promise<ImageGenerationArtifactContent> {
+    const request = parseImageGenerationArtifactReadInput(input)
+    return this.rpc
+      .request<unknown, ImageGenerationArtifactReadInput>(
+        IMAGE_GENERATION_READ_ARTIFACT_METHOD,
+        request
+      )
+      .then(parseImageGenerationArtifactReadOutput)
+      .then((output) => validatedImageGenerationArtifactContent(output, request.artifact))
+      .catch(rethrowValidatedImageGenerationArtifactError)
   }
 
   startConversationTurn(input: AgentConversationTurnInput): Promise<AgentConversationTurnOutput> {

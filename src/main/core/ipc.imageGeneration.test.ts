@@ -38,13 +38,15 @@ describe('Image generation configuration IPC registration', () => {
   it('wraps each operation in a serializable Host invocation envelope', async () => {
     const output = { schemaVersion: 1, marker: 'opaque' }
     const input = { expectedRevision: 'image-generation:v1:1', enabled: true }
+    const artifactInput = { schemaVersion: 1, artifact: { artifactId: 'opaque' } }
     const coreServer = {
       onAgentEvent: vi.fn(),
       onSkillsChanged: vi.fn(),
       getImageGenerationConfiguration: vi.fn().mockResolvedValue(output),
       updateImageGenerationConfiguration: vi.fn().mockResolvedValue(output),
       setImageGenerationEnabled: vi.fn().mockResolvedValue(output),
-      getImageGenerationStatus: vi.fn().mockResolvedValue(output)
+      getImageGenerationStatus: vi.fn().mockResolvedValue(output),
+      readImageGenerationArtifact: vi.fn().mockResolvedValue(output)
     }
     registerHostIpc(coreServer as never, {} as never, {} as never, () => true)
 
@@ -63,9 +65,16 @@ describe('Image generation configuration IPC registration', () => {
       ok: true,
       value: output
     })
+    await expect(
+      findHandler('host:imageGeneration.readArtifact')(event, artifactInput)
+    ).resolves.toEqual({
+      ok: true,
+      value: output
+    })
 
     expect(coreServer.updateImageGenerationConfiguration).toHaveBeenCalledWith(input)
     expect(coreServer.setImageGenerationEnabled).toHaveBeenCalledWith(input)
+    expect(coreServer.readImageGenerationArtifact).toHaveBeenCalledWith(artifactInput)
   })
 
   it('preserves structured failures while treating secret-bearing input as opaque', async () => {
@@ -99,5 +108,23 @@ describe('Image generation configuration IPC registration', () => {
       error: { message: data.message, code: -32020, data }
     })
     expect(updateImageGenerationConfiguration).toHaveBeenCalledWith(input)
+  })
+
+  it('does not let an untrusted Renderer read private Artifact bytes', () => {
+    const readImageGenerationArtifact = vi.fn()
+    const coreServer = {
+      onAgentEvent: vi.fn(),
+      onSkillsChanged: vi.fn(),
+      readImageGenerationArtifact
+    }
+    registerHostIpc(coreServer as never, {} as never, {} as never, () => false)
+
+    expect(() =>
+      findHandler('host:imageGeneration.readArtifact')(event, {
+        schemaVersion: 1,
+        artifact: { artifactId: 'opaque' }
+      })
+    ).toThrow(/Blocked untrusted IPC sender/)
+    expect(readImageGenerationArtifact).not.toHaveBeenCalled()
   })
 })

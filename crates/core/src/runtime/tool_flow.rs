@@ -9,7 +9,7 @@ use crate::llm::{LlmImage, LlmMessage, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
     AgentApprovalStatus, AgentChatOutput, AgentError, AgentEvent, AgentProposedAction, AgentResult,
     AgentRunStatus, AgentStateSnapshot, AgentTodoState, AgentToolCall, AgentToolDefinition,
-    AgentToolResult, AgentUsage,
+    AgentToolResult, AgentUsage, ModelCapabilities,
 };
 use crate::tools::{AgentToolCancellationSettlement, ToolExecutionContext, ToolRegistry};
 use serde::Deserialize;
@@ -249,8 +249,17 @@ pub(super) fn file_draft_from_tool_result(
     serde_json::from_value(draft).ok()
 }
 
-pub(super) fn llm_image_message_from_tool_result(result: &AgentToolResult) -> Option<LlmMessage> {
-    if !result.ok || result.tool != "read_image" {
+pub(super) fn llm_image_message_from_tool_result(
+    result: &AgentToolResult,
+    model_capabilities: ModelCapabilities,
+) -> Option<LlmMessage> {
+    // Defense in depth: the producing tool already checks this frozen backend capability before
+    // reading or encoding bytes. The runtime independently refuses any accidental image-bearing
+    // result when the selected base model is text-only.
+    if !model_capabilities.image_input
+        || !result.ok
+        || !matches!(result.tool.as_str(), "read_image" | "image_generation")
+    {
         return None;
     }
 
@@ -260,23 +269,40 @@ pub(super) fn llm_image_message_from_tool_result(result: &AgentToolResult) -> Op
         .get("mimeType")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| {
+            matches!(
+                *value,
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            )
+        })?;
     let data_base64 = image
         .get("dataBase64")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
+    let path_key = if result.tool == "image_generation" {
+        "savedPath"
+    } else {
+        "path"
+    };
     let path = result_value
-        .get("path")
+        .get(path_key)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("image");
+    let action = if result.tool == "image_generation" {
+        "generated"
+    } else {
+        "returned"
+    };
+    let quoted_path = serde_json::to_string(path).ok()?;
 
     let mut message = LlmMessage::text(
         LlmMessageRole::User,
         format!(
-            "The read_image tool returned visual input for `{path}`. Inspect the attached image before continuing."
+            "The {} tool {action} visual input for path {quoted_path}. Inspect the attached image before continuing.",
+            result.tool
         ),
     );
     message.images.push(LlmImage {

@@ -404,6 +404,90 @@ describe('Skill and Office chat timeline', () => {
     expect(screen.getByRole('button', { name: '在文件夹中打开' }).elements()).toHaveLength(3)
   })
 
+  it('places generated image artifacts above Office file cards', async () => {
+    const hash = 'b'.repeat(64)
+    const message = assistantMessage({
+      toolCalls: [
+        {
+          id: 'office-1',
+          tool: 'office_spreadsheet',
+          approvalStatus: 'approved',
+          args: { operation: 'create', path: '浙江大学_工科专业排名.xlsx' },
+          reason: '创建高校专业排名电子表格。'
+        },
+        {
+          id: 'image-1',
+          tool: 'image_generation',
+          approvalStatus: 'not_required',
+          args: {
+            request: { operation: 'generate', hasInputImage: false },
+            reason: '生成校园风景图片。'
+          },
+          reason: '生成校园风景图片。'
+        }
+      ],
+      toolResults: [
+        {
+          callId: 'office-1',
+          tool: 'office_spreadsheet',
+          ok: true,
+          result: { exitCode: 0 }
+        },
+        {
+          callId: 'image-1',
+          tool: 'image_generation',
+          ok: true,
+          result: {
+            schemaVersion: 1,
+            status: 'succeeded',
+            operation: 'generate',
+            artifact: {
+              artifactId: `sha256:${hash}`,
+              uri: `image-artifact://sha256/${hash}`,
+              kind: 'image',
+              format: 'jpeg',
+              mimeType: 'image/jpeg',
+              width: 1536,
+              height: 1024,
+              sizeBytes: 4096,
+              sha256: hash
+            },
+            audit: {
+              executionId: 'execution-1',
+              requestFingerprint: `sha256:${hash}`,
+              providerProfileId: 'profile-1',
+              adapterId: 'smartmlSeedream',
+              profileRevision: 1,
+              modelId: 'image-model',
+              createdAt: 100,
+              completedAt: 120,
+              durationMs: 20
+            }
+          }
+        }
+      ],
+      timeline: [
+        { id: 'office-1', type: 'tool_call', callId: 'office-1' },
+        { id: 'image-1', type: 'tool_call', callId: 'image-1' }
+      ]
+    })
+    const screen = await render(
+      <ChatMessageItem message={message} projectId="project-1" showTokenUsageDetails={false} />
+    )
+
+    const imageArtifacts = screen.container.querySelector('.image-generation-artifact-section')
+    const officeArtifacts = screen.container.querySelector('.office-artifact-list')
+
+    expect(imageArtifacts).not.toBeNull()
+    expect(officeArtifacts).not.toBeNull()
+    if (!imageArtifacts || !officeArtifacts) {
+      throw new Error('Expected both image and Office artifact sections.')
+    }
+    expect(
+      imageArtifacts.compareDocumentPosition(officeArtifacts) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+  })
+
   it('does not render a success file card for a failed observed command', async () => {
     const message = assistantMessage({
       toolCalls: [

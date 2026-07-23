@@ -823,3 +823,42 @@ fn action_decision_requests_require_run_scoped_identity() {
         .is_err()
     );
 }
+
+#[test]
+fn image_artifact_read_contract_is_path_free_and_redacts_content_debug() {
+    let digest = "a".repeat(64);
+    let artifact = serde_json::json!({
+        "artifactId": format!("sha256:{digest}"),
+        "uri": format!("image-artifact://sha256/{digest}"),
+        "kind": "image",
+        "format": "png",
+        "mimeType": "image/png",
+        "width": 1,
+        "height": 1,
+        "sizeBytes": 1,
+        "sha256": digest,
+    });
+    let request: ImageGenerationArtifactReadRequest = serde_json::from_value(serde_json::json!({
+        "schemaVersion": IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+        "artifact": artifact,
+    }))
+    .unwrap();
+    assert_eq!(request.artifact.kind, ImageGenerationArtifactKindDto::Image);
+
+    let mut unsafe_request = serde_json::to_value(&request).unwrap();
+    unsafe_request["artifact"]["managedPath"] = serde_json::json!("/private/object.png");
+    assert!(serde_json::from_value::<ImageGenerationArtifactReadRequest>(unsafe_request).is_err());
+
+    let response = ImageGenerationArtifactReadResponse {
+        schema_version: IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+        artifact: request.artifact,
+        file_name: "generated-image-aaaaaaaaaaaa.png".to_string(),
+        data_base64: "c2VjcmV0LWJ5dGVz".to_string(),
+    };
+    let debug = format!("{response:?}");
+    assert!(!debug.contains("c2VjcmV0LWJ5dGVz"));
+    assert!(debug.contains("[IMAGE DATA REDACTED]"));
+    let value = serde_json::to_value(response).unwrap();
+    assert!(value.get("managedPath").is_none());
+    assert!(value.get("providerUrl").is_none());
+}

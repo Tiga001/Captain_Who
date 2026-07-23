@@ -438,6 +438,19 @@ impl ContextItem {
         self
     }
 
+    /// Keeps a richer message in the live model loop while supplying a durable-safe replacement
+    /// for approval checkpoints.
+    ///
+    /// `to_checkpoint` remains the enforcement boundary: the replacement may remove transient
+    /// images or text, but it cannot change the role, tool identity, tool calls, or error
+    /// semantics of the live message.
+    pub(crate) fn with_checkpoint_message(mut self, projected: LlmMessage) -> Self {
+        if projected != self.message {
+            self.checkpoint_message = Some(projected);
+        }
+        self
+    }
+
     fn measure(&mut self, estimator: &dyn ContextTokenEstimator) -> ContextMessageEstimate {
         let identity = estimator.identity();
         if let Some(measurement) = &self.measurement {

@@ -35,6 +35,8 @@ import type {
   GitReviewFileMutationInput,
   GitReviewSummary,
   GitReviewSummaryInput,
+  AgentImageGenerationArtifact,
+  ImageGenerationArtifactReadInput,
   ImageGenerationGetConfigurationOutput,
   ImageGenerationSetEnabledInput,
   ImageGenerationSetEnabledOutput,
@@ -159,6 +161,17 @@ export interface ImageGenerationHostApi {
     input: ImageGenerationSetEnabledInput
   ): Promise<HostInvocationResult<ImageGenerationSetEnabledOutput>>
   getStatus(): Promise<HostInvocationResult<ImageGenerationStatus>>
+  /** Resolves a private immutable Artifact without exposing its managed path or provider URL. */
+  readArtifact(
+    input: ImageGenerationArtifactReadInput
+  ): Promise<HostInvocationResult<ImageGenerationArtifactContent>>
+}
+
+export interface ImageGenerationArtifactContent {
+  schemaVersion: 1
+  artifact: AgentImageGenerationArtifact
+  fileName: string
+  bytes: Uint8Array
 }
 
 export interface SkillsHostApi {

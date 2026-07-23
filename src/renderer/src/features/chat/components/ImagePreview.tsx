@@ -18,6 +18,8 @@ import './ImagePreview.css'
 interface ImagePreviewInput {
   alt?: string
   fileName?: string
+  /** Releases an optional temporary source lease after the viewer closes. */
+  release?: () => void
   src: string
 }
 
@@ -96,16 +98,24 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
   const { t } = useFrontendConfig()
   const { showToast } = useToast()
   const dialogRef = useRef<HTMLDivElement>(null)
+  const previewRef = useRef<ImagePreviewInput | null>(null)
   const [preview, setPreview] = useState<ImagePreviewInput | null>(null)
   const [zoom, setZoom] = useState(1)
 
   const openImagePreview = useCallback((input: ImagePreviewInput) => {
-    if (!input.src) return
+    if (!input.src) {
+      input.release?.()
+      return
+    }
+    previewRef.current?.release?.()
+    previewRef.current = input
     setPreview(input)
     setZoom(1)
   }, [])
 
   const closeImagePreview = useCallback(() => {
+    previewRef.current?.release?.()
+    previewRef.current = null
     setPreview(null)
   }, [])
 
@@ -163,6 +173,14 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
     dialogRef.current?.focus()
   }, [preview])
 
+  useEffect(
+    () => () => {
+      previewRef.current?.release?.()
+      previewRef.current = null
+    },
+    []
+  )
+
   useEffect(() => {
     if (!preview) return
 
@@ -199,7 +217,7 @@ export function ImagePreviewProvider({ children }: { children: ReactNode }) {
   }
 
   const handlePreviewImageError = () => {
-    setPreview(null)
+    closeImagePreview()
     showImagePreviewNotice(t('imagePreview.originalMissing'))
   }
 

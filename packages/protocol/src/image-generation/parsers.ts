@@ -1,5 +1,9 @@
 import {
+  IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
   IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
+  type ImageGenerationArtifactErrorData,
+  type ImageGenerationArtifactReadInput,
+  type ImageGenerationArtifactReadOutput,
   type ImageGenerationCapabilities,
   type ImageGenerationConfiguration,
   type ImageGenerationConfigurationErrorData,
@@ -12,6 +16,7 @@ import {
   type ImageGenerationUpdateConfigurationInput,
   type ImageGenerationUpdateConfigurationOutput
 } from './contracts'
+import { parseAgentImageGenerationArtifact } from './resultParser'
 import {
   expectBoolean,
   expectEnum,
@@ -30,6 +35,98 @@ export const IMAGE_GENERATION_MODEL_ID_MAX_LENGTH = 512 as const
 export const IMAGE_GENERATION_CREDENTIAL_MAX_LENGTH = 8_192 as const
 export const IMAGE_GENERATION_REVISION_MAX_LENGTH = 512 as const
 export const IMAGE_GENERATION_ERROR_MESSAGE_MAX_LENGTH = 2_048 as const
+export const IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES = 32 * 1024 * 1024
+const BASE64_PAYLOAD_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u
+
+export function parseImageGenerationArtifactReadInput(
+  value: unknown
+): ImageGenerationArtifactReadInput {
+  const context = 'Image generation Artifact read request'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'artifact'] as const, context)
+  expectSchemaVersion(record, IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION, context)
+  const artifact = parseAgentImageGenerationArtifact(record.artifact, `${context}.artifact`)
+  if (artifact.sizeBytes > IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES) {
+    throw invalidProtocolValue(
+      `${context}.artifact.sizeBytes`,
+      `must not exceed ${IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES}`
+    )
+  }
+  return {
+    schemaVersion: IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+    artifact
+  }
+}
+
+export function parseImageGenerationArtifactReadOutput(
+  value: unknown
+): ImageGenerationArtifactReadOutput {
+  const context = 'Image generation Artifact read response'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(record, ['schemaVersion', 'artifact', 'fileName', 'dataBase64'] as const, context)
+  expectSchemaVersion(record, IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION, context)
+  const artifact = parseAgentImageGenerationArtifact(record.artifact, `${context}.artifact`)
+  if (artifact.sizeBytes > IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES) {
+    throw invalidProtocolValue(
+      `${context}.artifact.sizeBytes`,
+      `must not exceed ${IMAGE_GENERATION_ARTIFACT_READ_MAX_BYTES}`
+    )
+  }
+  const expectedFileName = `generated-image-${artifact.sha256.slice(0, 12)}.${extensionForArtifactFormat(artifact.format)}`
+  const fileName = expectString(record.fileName, `${context}.fileName`)
+  if (fileName !== expectedFileName) {
+    throw invalidProtocolValue(`${context}.fileName`, 'does not match the immutable Artifact')
+  }
+  const dataBase64 = expectString(record.dataBase64, `${context}.dataBase64`)
+  const expectedEncodedLength = Math.ceil(artifact.sizeBytes / 3) * 4
+  if (dataBase64.length !== expectedEncodedLength || !BASE64_PAYLOAD_PATTERN.test(dataBase64)) {
+    throw invalidProtocolValue(
+      `${context}.dataBase64`,
+      'must be canonical base64 with the declared byte length'
+    )
+  }
+  return {
+    schemaVersion: IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+    artifact,
+    fileName,
+    dataBase64
+  }
+}
+
+export function parseImageGenerationArtifactErrorData(
+  value: unknown
+): ImageGenerationArtifactErrorData {
+  const context = 'Image generation Artifact error data'
+  const record = expectRecord(value, context)
+  expectOnlyKeys(
+    record,
+    ['type', 'operation', 'code', 'recovery', 'message', 'retryable'] as const,
+    context
+  )
+  if (record.type !== 'imageGenerationArtifact') {
+    throw invalidProtocolValue(context, 'type must be imageGenerationArtifact')
+  }
+  return {
+    type: 'imageGenerationArtifact',
+    operation: expectEnum(record.operation, ['read'] as const, `${context}.operation`),
+    code: expectEnum(
+      record.code,
+      ['invalidRequest', 'notFound', 'integrityCheckFailed', 'tooLarge', 'unavailable'] as const,
+      `${context}.code`
+    ),
+    recovery: expectEnum(
+      record.recovery,
+      ['doNotRetry', 'retry', 'regenerate'] as const,
+      `${context}.recovery`
+    ),
+    message: expectBoundedNonEmptyString(
+      record.message,
+      IMAGE_GENERATION_ERROR_MESSAGE_MAX_LENGTH,
+      `${context}.message`
+    ),
+    retryable: expectBoolean(record.retryable, `${context}.retryable`)
+  }
+}
 
 export function parseImageGenerationGetConfigurationOutput(
   value: unknown
@@ -399,6 +496,11 @@ function parseImageGenerationCredentialMutation(
 
 function expectAdapterId(value: unknown, context: string): 'smartmlSeedream' {
   return expectEnum(value, ['smartmlSeedream'] as const, context)
+}
+
+function extensionForArtifactFormat(format: 'png' | 'jpeg' | 'webp'): 'png' | 'jpg' | 'webp' {
+  if (format === 'jpeg') return 'jpg'
+  return format
 }
 
 function expectReadiness(

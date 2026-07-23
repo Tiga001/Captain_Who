@@ -1,14 +1,22 @@
 use super::*;
+use base64::Engine;
 use mycopilot_core::image_generation::{
-    CredentialSecret, ImageGenerationAdapterId, ImageGenerationConfiguration,
+    CredentialSecret, ImageArtifactErrorCode, ImageArtifactFormat, ImageGenerationAdapterId,
+    ImageGenerationArtifactCandidate, ImageGenerationConfiguration,
     ImageGenerationConfigurationError, ImageGenerationConfigurationMutationOutcome,
     ImageGenerationConfigurationMutationResult, ImageGenerationConfigurationService,
     ImageGenerationConfigurationUpdate, ImageGenerationCredentialMutation,
     ImageGenerationCredentialStatus, ImageGenerationDefaults, ImageGenerationReadiness,
-    ImageGenerationSizePreset,
+    ImageGenerationSizePreset, ManagedImageGenerationArtifactStore,
+    DEFAULT_IMAGE_ARTIFACT_MAX_BYTES, MAX_IMAGE_ARTIFACT_DIMENSION, MAX_IMAGE_ARTIFACT_PIXELS,
 };
 use mycopilot_protocol_rs::{
-    ImageGenerationAdapterIdDto, ImageGenerationCapabilitiesDto, ImageGenerationConfigurationDto,
+    ImageGenerationAdapterIdDto, ImageGenerationArtifactDto, ImageGenerationArtifactErrorCodeDto,
+    ImageGenerationArtifactErrorData, ImageGenerationArtifactErrorTypeDto,
+    ImageGenerationArtifactFormatDto, ImageGenerationArtifactKindDto,
+    ImageGenerationArtifactOperationDto, ImageGenerationArtifactReadRequest,
+    ImageGenerationArtifactReadResponse, ImageGenerationArtifactRecoveryDto,
+    ImageGenerationCapabilitiesDto, ImageGenerationConfigurationDto,
     ImageGenerationConfigurationErrorCodeDto, ImageGenerationConfigurationErrorData,
     ImageGenerationConfigurationErrorTypeDto, ImageGenerationConfigurationMutationOutcomeDto,
     ImageGenerationConfigurationOperationDto, ImageGenerationConfigurationRecoveryDto,
@@ -16,7 +24,8 @@ use mycopilot_protocol_rs::{
     ImageGenerationDefaultsDto, ImageGenerationGetConfigurationResponse,
     ImageGenerationReadinessDto, ImageGenerationSetEnabledRequest, ImageGenerationSizePresetDto,
     ImageGenerationStatusDto, ImageGenerationUpdateConfigurationRequest,
-    ImageGenerationUpdateConfigurationResponse, IMAGE_GENERATION_CONFIGURATION_ERROR_CODE,
+    ImageGenerationUpdateConfigurationResponse, IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+    IMAGE_GENERATION_ARTIFACT_ERROR_CODE, IMAGE_GENERATION_CONFIGURATION_ERROR_CODE,
     IMAGE_GENERATION_CONFIGURATION_SCHEMA_VERSION,
 };
 
@@ -157,6 +166,219 @@ pub(crate) fn handle_image_generation_configuration_request(
         Ok(result) => response_success(id, mutation_response(result)),
         Err(error) => image_generation_configuration_error_response(id, operation, error),
     }
+}
+
+pub(crate) async fn handle_image_generation_artifact_request(
+    store: Arc<ManagedImageGenerationArtifactStore>,
+    request: JsonRpcRequest,
+) -> Value {
+    let id = request.id;
+    if request.jsonrpc != "2.0" || request.method != IMAGE_GENERATION_READ_ARTIFACT_METHOD {
+        return image_generation_artifact_error_response(
+            id,
+            ImageGenerationArtifactErrorCodeDto::InvalidRequest,
+        );
+    }
+    let input = match parse_params::<ImageGenerationArtifactReadRequest>(request.params) {
+        Ok(input) if input.schema_version == IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION => {
+            input
+        }
+        Ok(_) | Err(_) => {
+            return image_generation_artifact_error_response(
+                id,
+                ImageGenerationArtifactErrorCodeDto::InvalidRequest,
+            )
+        }
+    };
+    let candidate = match artifact_candidate(&input.artifact) {
+        Some(candidate) => candidate,
+        None => {
+            return image_generation_artifact_error_response(
+                id,
+                ImageGenerationArtifactErrorCodeDto::InvalidRequest,
+            )
+        }
+    };
+
+    let content = match store.read_published(&candidate).await {
+        Ok(Some(content)) => content,
+        Ok(None) => {
+            return image_generation_artifact_error_response(
+                id,
+                ImageGenerationArtifactErrorCodeDto::NotFound,
+            )
+        }
+        Err(error) => return image_generation_artifact_store_error_response(id, error.code),
+    };
+    let artifact = artifact_dto(&content.candidate);
+    let file_name = format!(
+        "generated-image-{}.{}",
+        &content.candidate.sha256[..12],
+        content.candidate.format.extension()
+    );
+    let data_base64 = match tokio::task::spawn_blocking(move || {
+        base64::engine::general_purpose::STANDARD.encode(content.bytes)
+    })
+    .await
+    {
+        Ok(data_base64) => data_base64,
+        Err(_) => {
+            return image_generation_artifact_error_response(
+                id,
+                ImageGenerationArtifactErrorCodeDto::Unavailable,
+            )
+        }
+    };
+    response_success(
+        id,
+        ImageGenerationArtifactReadResponse {
+            schema_version: IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+            artifact,
+            file_name,
+            data_base64,
+        },
+    )
+}
+
+fn artifact_candidate(
+    artifact: &ImageGenerationArtifactDto,
+) -> Option<ImageGenerationArtifactCandidate> {
+    let sha256 = artifact.sha256.as_str();
+    if !is_lower_hex_sha256(sha256)
+        || artifact.artifact_id != format!("sha256:{sha256}")
+        || artifact.uri != format!("image-artifact://sha256/{sha256}")
+        || artifact.kind != ImageGenerationArtifactKindDto::Image
+        || artifact.width == 0
+        || artifact.height == 0
+        || artifact.width > MAX_IMAGE_ARTIFACT_DIMENSION
+        || artifact.height > MAX_IMAGE_ARTIFACT_DIMENSION
+        || u64::from(artifact.width)
+            .checked_mul(u64::from(artifact.height))
+            .is_none_or(|pixels| pixels > MAX_IMAGE_ARTIFACT_PIXELS)
+        || artifact.size_bytes == 0
+        || artifact.size_bytes > DEFAULT_IMAGE_ARTIFACT_MAX_BYTES as u64
+    {
+        return None;
+    }
+    let format = match artifact.format {
+        ImageGenerationArtifactFormatDto::Png => ImageArtifactFormat::Png,
+        ImageGenerationArtifactFormatDto::Jpeg => ImageArtifactFormat::Jpeg,
+        ImageGenerationArtifactFormatDto::Webp => ImageArtifactFormat::Webp,
+    };
+    if artifact.mime_type != format.media_type() {
+        return None;
+    }
+    let target_name = format!("{sha256}.{}", format.extension());
+    Some(ImageGenerationArtifactCandidate {
+        artifact_id: artifact.artifact_id.clone(),
+        storage_relative_path: format!("objects/{target_name}"),
+        format,
+        media_type: artifact.mime_type.clone(),
+        width: artifact.width,
+        height: artifact.height,
+        size_bytes: artifact.size_bytes,
+        sha256: artifact.sha256.clone(),
+    })
+}
+
+fn artifact_dto(candidate: &ImageGenerationArtifactCandidate) -> ImageGenerationArtifactDto {
+    ImageGenerationArtifactDto {
+        artifact_id: candidate.artifact_id.clone(),
+        uri: candidate.artifact_uri(),
+        kind: ImageGenerationArtifactKindDto::Image,
+        format: match candidate.format {
+            ImageArtifactFormat::Png => ImageGenerationArtifactFormatDto::Png,
+            ImageArtifactFormat::Jpeg => ImageGenerationArtifactFormatDto::Jpeg,
+            ImageArtifactFormat::Webp => ImageGenerationArtifactFormatDto::Webp,
+        },
+        mime_type: candidate.media_type.clone(),
+        width: candidate.width,
+        height: candidate.height,
+        size_bytes: candidate.size_bytes,
+        sha256: candidate.sha256.clone(),
+    }
+}
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn image_generation_artifact_store_error_response(
+    id: JsonRpcId,
+    code: ImageArtifactErrorCode,
+) -> Value {
+    let code = match code {
+        ImageArtifactErrorCode::ResponseTooLarge => ImageGenerationArtifactErrorCodeDto::TooLarge,
+        ImageArtifactErrorCode::UnsupportedMediaType
+        | ImageArtifactErrorCode::InvalidImage
+        | ImageArtifactErrorCode::Conflict => {
+            ImageGenerationArtifactErrorCodeDto::IntegrityCheckFailed
+        }
+        ImageArtifactErrorCode::InvalidConfiguration
+        | ImageArtifactErrorCode::UnsafeUrl
+        | ImageArtifactErrorCode::DnsRejected
+        | ImageArtifactErrorCode::RedirectRejected
+        | ImageArtifactErrorCode::TransportFailed
+        | ImageArtifactErrorCode::DownloadTimedOut
+        | ImageArtifactErrorCode::HttpRejected
+        | ImageArtifactErrorCode::Io
+        | ImageArtifactErrorCode::Cancelled
+        | ImageArtifactErrorCode::CommitIndeterminate => {
+            ImageGenerationArtifactErrorCodeDto::Unavailable
+        }
+    };
+    image_generation_artifact_error_response(id, code)
+}
+
+pub(crate) fn image_generation_artifact_error_response(
+    id: JsonRpcId,
+    code: ImageGenerationArtifactErrorCodeDto,
+) -> Value {
+    let (recovery, message, retryable) = match code {
+        ImageGenerationArtifactErrorCodeDto::InvalidRequest => (
+            ImageGenerationArtifactRecoveryDto::DoNotRetry,
+            "The generated image reference is invalid.",
+            false,
+        ),
+        ImageGenerationArtifactErrorCodeDto::NotFound => (
+            ImageGenerationArtifactRecoveryDto::Regenerate,
+            "The generated image is no longer available.",
+            false,
+        ),
+        ImageGenerationArtifactErrorCodeDto::IntegrityCheckFailed => (
+            ImageGenerationArtifactRecoveryDto::Regenerate,
+            "The stored image failed its integrity check.",
+            false,
+        ),
+        ImageGenerationArtifactErrorCodeDto::TooLarge => (
+            ImageGenerationArtifactRecoveryDto::Regenerate,
+            "The stored image exceeds the supported preview size.",
+            false,
+        ),
+        ImageGenerationArtifactErrorCodeDto::Unavailable => (
+            ImageGenerationArtifactRecoveryDto::Retry,
+            "The generated image could not be read right now.",
+            true,
+        ),
+    };
+    let data = ImageGenerationArtifactErrorData {
+        error_type: ImageGenerationArtifactErrorTypeDto::ImageGenerationArtifact,
+        operation: ImageGenerationArtifactOperationDto::Read,
+        code,
+        recovery,
+        message: message.to_string(),
+        retryable,
+    };
+    serde_json::to_value(error_with_data(
+        Some(id),
+        IMAGE_GENERATION_ARTIFACT_ERROR_CODE,
+        data.message.clone(),
+        serde_json::to_value(data).expect("image Artifact error data must serialize"),
+    ))
+    .expect("JSON-RPC error response must serialize")
 }
 
 fn configuration_update(
@@ -399,6 +621,8 @@ pub(crate) fn image_generation_configuration_error_response(
 mod tests {
     use super::*;
     use mycopilot_core::image_generation::InMemoryCredentialStore;
+    use sha2::{Digest, Sha256};
+    use std::fs;
 
     struct Fixture {
         _temp: tempfile::TempDir,
@@ -453,6 +677,45 @@ mod tests {
                 "value": credential
             }
         })
+    }
+
+    fn artifact_fixture() -> (
+        tempfile::TempDir,
+        Arc<ManagedImageGenerationArtifactStore>,
+        Vec<u8>,
+        Value,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            ManagedImageGenerationArtifactStore::new(
+                temp.path(),
+                ImageArtifactStoreConfig::default(),
+            )
+            .unwrap(),
+        );
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            )
+            .unwrap();
+        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+        fs::write(
+            temp.path().join("objects").join(format!("{sha256}.png")),
+            &bytes,
+        )
+        .unwrap();
+        let artifact = json!({
+            "artifactId": format!("sha256:{sha256}"),
+            "uri": format!("image-artifact://sha256/{sha256}"),
+            "kind": "image",
+            "format": "png",
+            "mimeType": "image/png",
+            "width": 1,
+            "height": 1,
+            "sizeBytes": bytes.len(),
+            "sha256": sha256,
+        });
+        (temp, store, bytes, artifact)
     }
 
     #[test]
@@ -559,5 +822,84 @@ mod tests {
         );
         assert_eq!(malformed["error"]["data"]["code"], "invalidRequest");
         assert!(!malformed.to_string().contains(secret));
+    }
+
+    #[tokio::test]
+    async fn historical_artifact_read_is_independent_of_current_provider_configuration() {
+        let (_temp, store, bytes, artifact) = artifact_fixture();
+        let response = handle_image_generation_artifact_request(
+            store,
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: JsonRpcId::Number(1),
+                method: IMAGE_GENERATION_READ_ARTIFACT_METHOD.to_string(),
+                params: Some(json!({
+                    "schemaVersion": IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+                    "artifact": artifact.clone(),
+                })),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            response["result"]["dataBase64"],
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        );
+        assert_eq!(response["result"]["artifact"], artifact);
+        assert!(response.to_string().contains("generated-image-"));
+        assert!(!response.to_string().contains("provider"));
+        assert!(!response.to_string().contains("image-generation-artifacts"));
+    }
+
+    #[tokio::test]
+    async fn artifact_read_returns_stable_not_found_and_identity_errors() {
+        let (_temp, store, _bytes, artifact) = artifact_fixture();
+        let mut mismatched = artifact.clone();
+        mismatched["width"] = json!(2);
+        let invalid = handle_image_generation_artifact_request(
+            Arc::clone(&store),
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: JsonRpcId::Number(1),
+                method: IMAGE_GENERATION_READ_ARTIFACT_METHOD.to_string(),
+                params: Some(json!({
+                    "schemaVersion": IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+                    "artifact": mismatched,
+                })),
+            },
+        )
+        .await;
+        assert_eq!(
+            invalid["error"]["code"],
+            IMAGE_GENERATION_ARTIFACT_ERROR_CODE
+        );
+        assert_eq!(invalid["error"]["data"]["code"], "integrityCheckFailed");
+
+        let missing_sha = "f".repeat(64);
+        let missing = handle_image_generation_artifact_request(
+            store,
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: JsonRpcId::Number(2),
+                method: IMAGE_GENERATION_READ_ARTIFACT_METHOD.to_string(),
+                params: Some(json!({
+                    "schemaVersion": IMAGE_GENERATION_ARTIFACT_CONTENT_SCHEMA_VERSION,
+                    "artifact": {
+                        "artifactId": format!("sha256:{missing_sha}"),
+                        "uri": format!("image-artifact://sha256/{missing_sha}"),
+                        "kind": "image",
+                        "format": "png",
+                        "mimeType": "image/png",
+                        "width": 1,
+                        "height": 1,
+                        "sizeBytes": 1,
+                        "sha256": missing_sha,
+                    },
+                })),
+            },
+        )
+        .await;
+        assert_eq!(missing["error"]["data"]["code"], "notFound");
+        assert_eq!(missing["error"]["data"]["recovery"], "regenerate");
     }
 }

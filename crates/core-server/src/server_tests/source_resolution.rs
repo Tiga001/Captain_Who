@@ -84,6 +84,8 @@ async fn queued_source_cancellation_cannot_overtake_the_resolution_it_fences() {
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new(Arc::clone(&storage));
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
@@ -137,7 +139,10 @@ async fn queued_source_cancellation_cannot_overtake_the_resolution_it_fences() {
         },
         Arc::new(GitReviewService::new()),
         &dispatchers,
-        &outbound_tx,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_artifact_outbound_tx,
+        },
     )
     .await
     .unwrap();
@@ -179,6 +184,8 @@ async fn request_loop_resolves_and_hands_off_a_candidate_on_one_acquisition_lane
     let storage = Arc::new(StorageService::open(&temp.path().join("storage.sqlite")).unwrap());
     let agent_service = AgentService::new(Arc::clone(&storage));
     let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+    let (image_artifact_outbound_tx, _image_artifact_outbound_rx) =
+        mpsc::channel(DEFAULT_MAX_CONCURRENT_IMAGE_ARTIFACT_READS);
     let git_dispatcher = GitDispatcher::new(outbound_tx.clone());
     let skills_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
     let acquisition_dispatcher = SkillsDispatcher::new(outbound_tx.clone());
@@ -229,7 +236,10 @@ async fn request_loop_resolves_and_hands_off_a_candidate_on_one_acquisition_lane
         },
         Arc::new(GitReviewService::new()),
         &dispatchers,
-        &outbound_tx,
+        RequestOutbounds {
+            normal: &outbound_tx,
+            image_artifact: &image_artifact_outbound_tx,
+        },
     )
     .await
     .unwrap();

@@ -334,6 +334,18 @@ impl ToolRegistry {
             .unwrap_or_else(|| canonical_tool_result_for_context(result))
     }
 
+    /// Returns the textual projection supplied to the current model tool-result message.
+    ///
+    /// This is intentionally distinct from the raw result: a tool may carry transient binary
+    /// delivery data that is converted into a provider-native multimodal message instead of being
+    /// serialized into tool-result text.
+    pub(crate) fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.tools
+            .get(&result.tool)
+            .map(|tool| tool.model_projection(result))
+            .unwrap_or_else(|| canonical_tool_result_for_context(result))
+    }
+
     /// Returns the projection safe to publish through runtime events.
     pub(crate) fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         self.tools
@@ -474,6 +486,10 @@ pub(crate) trait AgentTool: Send + Sync {
     }
 
     fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        canonical_tool_result_for_context(result)
+    }
+
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         canonical_tool_result_for_context(result)
     }
 

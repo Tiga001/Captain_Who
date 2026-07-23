@@ -28,7 +28,7 @@ use crate::context::{
     ContextCompactionPlanner, ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata,
     ContextRetention, ContextScope, ContextSource,
 };
-use crate::conversation_trace::{canonical_tool_result_for_context, ConversationTraceRecorder};
+use crate::conversation_trace::ConversationTraceRecorder;
 use crate::file_write::{file_write_approval_route, FileWriteApprovalRoute};
 use crate::llm::{
     complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessage,
@@ -1072,11 +1072,12 @@ impl AgentRuntime {
                             }
                             Err(error) => {
                                 let result = failed_tool_call_result(&call, error);
-                                let llm_result = canonical_tool_result_for_context(&result);
+                                let llm_result = tool_registry.model_projection(&result);
+                                let trace_result = tool_registry.trace_projection(&result);
                                 conversation_trace
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
-                                    .record_tool_result(&call, &llm_result);
+                                    .record_tool_result(&call, &trace_result);
                                 pending_trace_baseline = publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
@@ -1239,7 +1240,7 @@ impl AgentRuntime {
                         }
                         Err(error) => return Err(error),
                     };
-                    let llm_result = canonical_tool_result_for_context(&result);
+                    let llm_result = tool_registry.model_projection(&result);
                     let trace_result = tool_registry.trace_projection(&result);
                     let checkpoint_result = tool_registry.checkpoint_projection(&result);
                     conversation_trace
@@ -1298,19 +1299,30 @@ impl AgentRuntime {
                             !result.ok,
                         ),
                     );
-                    if let Some(image_message) = llm_image_message_from_tool_result(&result) {
-                        active_context.push(ContextItem::new(
-                            image_message,
-                            ContextMetadata::new(
-                                ContextSource::ToolResult,
-                                ContextScope::Run,
-                                ContextRetention::Retained,
+                    if let Some(image_message) =
+                        llm_image_message_from_tool_result(&result, model_capabilities)
+                    {
+                        let checkpoint_message = LlmMessage::text(
+                            image_message.role,
+                            image_message.content.clone(),
+                        );
+                        active_context.push(
+                            ContextItem::new(
+                                image_message,
+                                ContextMetadata::new(
+                                    ContextSource::ToolResult,
+                                    ContextScope::Run,
+                                    ContextRetention::Retained,
+                                )
+                                .with_group(tool_exchange_group.clone()),
                             )
-                            .with_group(tool_exchange_group.clone()),
-                        ));
+                            .with_checkpoint_message(checkpoint_message),
+                        );
                     }
                     let extension_effects = runtime_extensions
-                        .on_event(RuntimeExtensionEvent::ToolCompleted { result: &result })?;
+                        .on_event(RuntimeExtensionEvent::ToolCompleted {
+                            result: &trace_result,
+                        })?;
                     // A tool result must remain adjacent to its assistant tool call. Runtime
                     // extensions may append retained context only after the paired result has
                     // entered the frame, otherwise provider tool-call protocol would be invalid.

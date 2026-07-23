@@ -9,7 +9,59 @@ use crate::protocol::{
 use crate::storage::service::StorageService;
 use crate::system_paths::expand_system_path;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::Duration;
+
+const MODEL_IMAGE_DELIVERY_BUDGET_BYTES_PER_RUN: u64 = 16 * 1024 * 1024;
+const MAX_CONCURRENT_MODEL_IMAGE_PREPARATIONS: usize = 2;
+
+struct ModelImagePreparationAdmission {
+    available: Mutex<usize>,
+    changed: Condvar,
+}
+
+pub(super) struct ModelImagePreparationPermit(&'static ModelImagePreparationAdmission);
+
+impl Drop for ModelImagePreparationPermit {
+    fn drop(&mut self) {
+        let mut available = self
+            .0
+            .available
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *available = available
+            .saturating_add(1)
+            .min(MAX_CONCURRENT_MODEL_IMAGE_PREPARATIONS);
+        self.0.changed.notify_one();
+    }
+}
+
+/// One reservation from the run-scoped raw-image budget.
+///
+/// Reservations are refunded unless committed after verified bytes have been encoded. Cloned tool
+/// contexts share the same atomic budget, so a batch of image-producing calls cannot each claim the
+/// full allowance independently.
+pub(super) struct ModelImageDeliveryReservation {
+    remaining_bytes: Arc<AtomicU64>,
+    reserved_bytes: u64,
+    committed: bool,
+}
+
+impl ModelImageDeliveryReservation {
+    pub(super) fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ModelImageDeliveryReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.remaining_bytes
+                .fetch_add(self.reserved_bytes, Ordering::Release);
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct ToolExecutionContext {
@@ -17,6 +69,7 @@ pub struct ToolExecutionContext {
     attachment_library: Option<AgentAttachmentLibraryContext>,
     cancellation_token: AgentCancellationToken,
     model_capabilities: ModelCapabilities,
+    model_image_delivery_budget: Arc<AtomicU64>,
     permissions: AgentPermissions,
     conversation_id: Option<String>,
     project_id: Option<String>,
@@ -47,6 +100,7 @@ impl ToolExecutionContext {
             attachment_library,
             cancellation_token: AgentCancellationToken::new(),
             model_capabilities: ModelCapabilities::default(),
+            model_image_delivery_budget: Arc::new(AtomicU64::new(0)),
             permissions,
             conversation_id,
             project_id,
@@ -66,6 +120,11 @@ impl ToolExecutionContext {
 
     pub(crate) fn with_model_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
         self.model_capabilities = capabilities;
+        self.model_image_delivery_budget = Arc::new(AtomicU64::new(if capabilities.image_input {
+            MODEL_IMAGE_DELIVERY_BUDGET_BYTES_PER_RUN
+        } else {
+            0
+        }));
         self
     }
 
@@ -115,6 +174,71 @@ impl ToolExecutionContext {
 
     pub(super) fn model_capabilities(&self) -> ModelCapabilities {
         self.model_capabilities
+    }
+
+    /// Reserves raw image bytes that may be transiently attached to this run's model context.
+    ///
+    /// This is an internal resource budget, not an authority decision. The caller must separately
+    /// verify the frozen model capability and the image itself.
+    pub(super) fn try_reserve_model_image_delivery(
+        &self,
+        bytes: u64,
+    ) -> Option<ModelImageDeliveryReservation> {
+        if bytes == 0 || !self.model_capabilities.image_input {
+            return None;
+        }
+
+        let mut remaining = self.model_image_delivery_budget.load(Ordering::Acquire);
+        loop {
+            if remaining < bytes {
+                return None;
+            }
+            match self.model_image_delivery_budget.compare_exchange_weak(
+                remaining,
+                remaining - bytes,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(ModelImageDeliveryReservation {
+                        remaining_bytes: Arc::clone(&self.model_image_delivery_budget),
+                        reserved_bytes: bytes,
+                        committed: false,
+                    });
+                }
+                Err(actual) => remaining = actual,
+            }
+        }
+    }
+
+    /// Admits bounded image decode/encode work across all concurrent Agent runs.
+    ///
+    /// Waiting remains cancellation-aware so a queued image call never becomes an uninterruptible
+    /// memory task after the user has stopped the run.
+    pub(super) fn acquire_model_image_preparation(
+        &self,
+    ) -> AgentResult<ModelImagePreparationPermit> {
+        static ADMISSION: OnceLock<ModelImagePreparationAdmission> = OnceLock::new();
+        let admission = ADMISSION.get_or_init(|| ModelImagePreparationAdmission {
+            available: Mutex::new(MAX_CONCURRENT_MODEL_IMAGE_PREPARATIONS),
+            changed: Condvar::new(),
+        });
+        let mut available = admission
+            .available
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        loop {
+            self.check_cancelled()?;
+            if *available > 0 {
+                *available -= 1;
+                return Ok(ModelImagePreparationPermit(admission));
+            }
+            available = admission
+                .changed
+                .wait_timeout(available, Duration::from_millis(25))
+                .unwrap_or_else(|error| error.into_inner())
+                .0;
+        }
     }
 
     pub(super) fn text_output_budget(&self) -> &ContextTextBudget {
@@ -364,6 +488,47 @@ impl ToolExecutionContext {
         }
 
         Ok(reference)
+    }
+}
+
+#[cfg(test)]
+mod model_image_delivery_budget_tests {
+    use super::*;
+
+    #[test]
+    fn multimodal_delivery_budget_is_shared_by_cloned_tool_contexts() {
+        let context = ToolExecutionContext::from_run_context(None)
+            .with_model_capabilities(ModelCapabilities { image_input: true });
+        let clone = context.clone();
+        let half = MODEL_IMAGE_DELIVERY_BUDGET_BYTES_PER_RUN / 2;
+
+        context
+            .try_reserve_model_image_delivery(half)
+            .expect("first half should fit")
+            .commit();
+        clone
+            .try_reserve_model_image_delivery(half)
+            .expect("second half should fit")
+            .commit();
+
+        assert!(context.try_reserve_model_image_delivery(1).is_none());
+    }
+
+    #[test]
+    fn failed_delivery_refunds_budget_and_text_models_have_no_budget() {
+        let multimodal = ToolExecutionContext::from_run_context(None)
+            .with_model_capabilities(ModelCapabilities { image_input: true });
+        let reservation = multimodal
+            .try_reserve_model_image_delivery(MODEL_IMAGE_DELIVERY_BUDGET_BYTES_PER_RUN)
+            .expect("full budget should be reservable");
+        drop(reservation);
+        assert!(multimodal
+            .try_reserve_model_image_delivery(MODEL_IMAGE_DELIVERY_BUDGET_BYTES_PER_RUN)
+            .is_some());
+
+        let text_only = ToolExecutionContext::from_run_context(None)
+            .with_model_capabilities(ModelCapabilities { image_input: false });
+        assert!(text_only.try_reserve_model_image_delivery(1).is_none());
     }
 }
 

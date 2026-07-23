@@ -333,6 +333,9 @@ export function registerHostIpc(
   ipcMain.handle('host:imageGeneration.getStatus', () =>
     captureHostInvocation(() => coreServer.getImageGenerationStatus())
   )
+  ipcMain.handle('host:imageGeneration.readArtifact', (_event, input) =>
+    captureHostInvocation(() => coreServer.readImageGenerationArtifact(input))
+  )
   ipcMain.handle('host:app.getWindowState', (event) => getAppWindowState(getInvokeWindow(event)))
   ipcMain.handle('host:app.openExternal', (_event, url) => openExternalUrl(url))
   ipcMain.handle('host:app.setNativeThemeSource', (_event, themeSource) => {

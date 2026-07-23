@@ -84,18 +84,41 @@ impl AgentTool for ReadImageTool {
                 MAX_READ_IMAGE_BYTES
             )));
         }
-
+        if metadata.len() == 0 {
+            return Err(AgentError::new("图片文件为空。"));
+        }
         let extension = image_extension(&file_path)?;
         let mime_type = image_mime_type(&extension)?;
+
+        let reservation = context
+            .try_reserve_model_image_delivery(metadata.len())
+            .ok_or_else(|| {
+                AgentError::structured(
+                    "agent.model_image_delivery_budget_exceeded",
+                    "本轮可交给模型查看的图片数据已达到上限；请在下一轮继续读取。",
+                    json!({
+                        "type": "model_capability",
+                        "code": "modelImageDeliveryBudgetExceeded",
+                        "capability": "imageInput",
+                        "tool": "read_image",
+                        "recovery": "retryInNextTurn"
+                    }),
+                )
+            })?;
+        let _preparation_permit = context.acquire_model_image_preparation()?;
+
         let bytes = fs::read(&file_path)
             .map_err(|error| AgentError::new(format!("读取图片失败：{error}")))?;
         context.check_cancelled()?;
         let thumbnail_data_url = image_thumbnail_data_url(&bytes);
         context.check_cancelled()?;
         let data_base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        context.check_cancelled()?;
+        let display_path = context.display_path(path, &file_path)?;
+        reservation.commit();
 
         Ok(json!({
-            "path": context.display_path(path, &file_path)?,
+            "path": display_path,
             "format": extension,
             "mimeType": mime_type,
             "sizeBytes": metadata.len(),
@@ -111,6 +134,10 @@ impl AgentTool for ReadImageTool {
         read_image_history_projection(result)
     }
 
+    fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        read_image_model_projection(result)
+    }
+
     fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         read_image_event_projection(result)
     }
@@ -118,6 +145,15 @@ impl AgentTool for ReadImageTool {
     fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         read_image_history_projection(result)
     }
+}
+
+fn read_image_model_projection(result: &AgentToolResult) -> AgentToolResult {
+    let mut projected = result.clone();
+    if let Some(object) = projected.result.as_mut().and_then(Value::as_object_mut) {
+        object.remove("image");
+        object.remove("thumbnailDataUrl");
+    }
+    canonical_tool_result_for_context(&projected)
 }
 
 fn read_image_history_projection(result: &AgentToolResult) -> AgentToolResult {
@@ -290,6 +326,12 @@ mod tests {
         assert!(!serde_json::to_string(&event)
             .unwrap()
             .contains("ZnVsbC1pbWFnZQ=="));
+
+        let model = ReadImageTool.model_projection(&result);
+        let model_value = model.result.as_ref().unwrap();
+        assert!(model_value.get("image").is_none());
+        assert!(model_value.get("thumbnailDataUrl").is_none());
+        assert!(!serde_json::to_string(&model).unwrap().contains("base64"));
 
         // Projection must never mutate or replace the runtime observation used to build the
         // current model's visual message.

@@ -69,6 +69,8 @@ impl ModelRequestContext {
 }
 
 pub(super) enum RuntimeExtensionEvent<'a> {
+    /// The tool-owned durable projection, never the raw runtime result. Extensions must not gain
+    /// access to transient binary model-delivery payloads.
     ToolCompleted { result: &'a AgentToolResult },
 }
 
