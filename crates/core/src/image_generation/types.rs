@@ -378,6 +378,36 @@ pub struct ImageGenerationDataUrlInput {
 }
 
 impl ImageGenerationDataUrlInput {
+    /// Builds a provider input from host-authorized image bytes.
+    ///
+    /// The raw bytes and resulting data URL remain private implementation details. This
+    /// constructor accepts only the media types supported by the image-generation contract,
+    /// applies the same 20 MiB decoded-size limit as [`Self::parse`], and rejects MIME spoofing
+    /// before producing a canonical base64 data URL.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ImageGenerationError> {
+        if bytes.is_empty() || bytes.len() > MAX_IMAGE_GENERATION_INPUT_BYTES {
+            return Err(ImageGenerationError::invalid_request(
+                "image input is empty or exceeds the size limit",
+            ));
+        }
+        let media_type = ImageGenerationInputMediaType::detect(bytes).ok_or_else(|| {
+            ImageGenerationError::invalid_request("image input must be a PNG, JPEG, or WebP file")
+        })?;
+
+        Ok(Self::from_validated_bytes(media_type, bytes))
+    }
+
+    fn from_validated_bytes(media_type: ImageGenerationInputMediaType, bytes: &[u8]) -> Self {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let data_url = format!("data:{};base64,{encoded}", media_type.as_str());
+        Self {
+            media_type,
+            data_url,
+            decoded_size_bytes: bytes.len(),
+            sha256: hex_sha256(bytes),
+        }
+    }
+
     pub fn parse(value: impl Into<String>) -> Result<Self, ImageGenerationError> {
         let value = value.into();
         let (media_type, encoded) = ImageGenerationInputMediaType::split_data_url(&value)?;
@@ -404,12 +434,7 @@ impl ImageGenerationDataUrlInput {
                 "image input MIME type does not match its encoded bytes",
             ));
         }
-        Ok(Self {
-            media_type,
-            data_url: value,
-            decoded_size_bytes: bytes.len(),
-            sha256: hex_sha256(&bytes),
-        })
+        Ok(Self::from_validated_bytes(media_type, &bytes))
     }
 
     #[must_use]
@@ -487,6 +512,12 @@ impl ImageGenerationInputMediaType {
                     "image input must be a PNG, JPEG, or WebP base64 data URL",
                 )
             })
+    }
+
+    fn detect(bytes: &[u8]) -> Option<Self> {
+        [Self::Png, Self::Jpeg, Self::Webp]
+            .into_iter()
+            .find(|media_type| media_type.matches_magic_bytes(bytes))
     }
 
     fn matches_magic_bytes(self, bytes: &[u8]) -> bool {
@@ -934,6 +965,56 @@ mod tests {
         );
         assert_eq!(
             ImageGenerationDataUrlInput::parse(value).unwrap_err().code,
+            ImageGenerationErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn from_bytes_builds_canonical_private_inputs_for_supported_formats() {
+        let cases: [(ImageGenerationInputMediaType, &[u8]); 3] = [
+            (
+                ImageGenerationInputMediaType::Png,
+                b"\x89PNG\r\n\x1a\ncontent",
+            ),
+            (ImageGenerationInputMediaType::Jpeg, b"\xff\xd8\xffcontent"),
+            (
+                ImageGenerationInputMediaType::Webp,
+                b"RIFF\x04\x00\x00\x00WEBPcontent",
+            ),
+        ];
+
+        for (media_type, bytes) in cases {
+            let input = ImageGenerationDataUrlInput::from_bytes(bytes).unwrap();
+            assert_eq!(input.media_type(), media_type);
+            assert_eq!(input.decoded_size_bytes(), bytes.len());
+            assert_eq!(input.sha256(), hex_sha256(bytes));
+            assert!(input
+                .data_url()
+                .starts_with(&format!("data:{};base64,", media_type.as_str())));
+            assert!(!format!("{input:?}").contains(input.data_url()));
+        }
+    }
+
+    #[test]
+    fn from_bytes_rejects_empty_oversized_and_spoofed_inputs() {
+        assert_eq!(
+            ImageGenerationDataUrlInput::from_bytes(&[])
+                .unwrap_err()
+                .code,
+            ImageGenerationErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            ImageGenerationDataUrlInput::from_bytes(b"not an image")
+                .unwrap_err()
+                .code,
+            ImageGenerationErrorCode::InvalidRequest
+        );
+
+        let oversized = vec![0_u8; MAX_IMAGE_GENERATION_INPUT_BYTES + 1];
+        assert_eq!(
+            ImageGenerationDataUrlInput::from_bytes(&oversized)
+                .unwrap_err()
+                .code,
             ImageGenerationErrorCode::InvalidRequest
         );
     }

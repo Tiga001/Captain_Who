@@ -25,6 +25,7 @@ mod cancellation;
 mod context_history;
 mod context_runtime;
 mod file_write_permissions;
+mod image_generation;
 mod office;
 mod pending_actions;
 mod skills;

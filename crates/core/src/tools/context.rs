@@ -340,7 +340,7 @@ impl ToolExecutionContext {
         Ok(canonical)
     }
 
-    fn attachment_reference_for_path(
+    pub(super) fn attachment_reference_for_path(
         &self,
         input_path: &str,
     ) -> AgentResult<&AgentAttachmentReference> {

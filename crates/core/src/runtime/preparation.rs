@@ -1,5 +1,14 @@
 use super::*;
 
+pub(super) struct RuntimeCapabilityServices {
+    pub(super) host_actions_available: bool,
+    pub(super) office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
+    pub(super) image_generation_execution:
+        Option<Arc<crate::image_generation::ImageGenerationExecutionService>>,
+    pub(super) skill_activation_resolver: Option<AgentSkillActivationResolver>,
+    pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
+}
+
 pub(super) fn prepare_runtime_capabilities(
     input: &AgentChatInput,
     run_id: &str,
@@ -11,10 +20,13 @@ pub(super) fn prepare_runtime_capabilities(
         input,
         run_id,
         extension_snapshots,
-        host_actions_available,
-        office_engine,
-        None,
-        None,
+        RuntimeCapabilityServices {
+            host_actions_available,
+            office_engine,
+            image_generation_execution: None,
+            skill_activation_resolver: None,
+            skill_resources: None,
+        },
     )
 }
 
@@ -22,11 +34,15 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
     input: &AgentChatInput,
     run_id: &str,
     extension_snapshots: &[AgentExtensionSnapshot],
-    host_actions_available: bool,
-    office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
-    skill_activation_resolver: Option<AgentSkillActivationResolver>,
-    skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
+    services: RuntimeCapabilityServices,
 ) -> AgentResult<PreparedRuntimeCapabilities> {
+    let RuntimeCapabilityServices {
+        host_actions_available,
+        office_engine,
+        image_generation_execution,
+        skill_activation_resolver,
+        skill_resources,
+    } = services;
     let runtime_extensions = RuntimeExtensions::for_run_with_skills(
         run_id,
         input.skill_discovery.clone(),
@@ -35,8 +51,11 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         skill_resources,
         extension_snapshots,
     )?;
-    let mut tool_registry =
-        ToolRegistry::defaults_with_search_and_office(input.search_config.as_ref(), office_engine);
+    let mut tool_registry = ToolRegistry::defaults_with_search_office_and_image(
+        input.search_config.as_ref(),
+        office_engine,
+        image_generation_execution,
+    );
     let context = input.context.as_ref();
     if context
         .and_then(|context| context.conversation_id.as_deref())

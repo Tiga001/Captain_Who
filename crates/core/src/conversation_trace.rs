@@ -236,16 +236,37 @@ impl ConversationTurnTrace {
                 }
             }
         }
-        if pending_call.is_some() {
+        if pending_call.is_some()
+            && self.terminal_status != ConversationTurnTraceTerminalStatus::InProgress
+        {
             return Err("conversation trace ends with an unresolved tool call".to_string());
         }
         Ok(())
     }
+
+    /// Number of items that form complete exchanges and may be rendered into model context.
+    #[must_use]
+    pub fn model_context_item_count(&self) -> usize {
+        if self.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
+            && matches!(
+                self.items.last(),
+                Some(ConversationTurnTraceItem::ToolCall { .. })
+            )
+        {
+            self.items.len().saturating_sub(1)
+        } else {
+            self.items.len()
+        }
+    }
 }
 
 impl ConversationTraceSnapshot {
-    /// Only closed exchanges are durable. A call waiting for approval remains in the checkpoint
-    /// until a result closes it.
+    /// Returns the closed prefix that is safe to append to model context.
+    ///
+    /// The durable audit trace may retain one final unresolved call while the process owns the
+    /// run. Keeping that call out of this prefix prevents a half tool exchange from entering
+    /// model context, while still allowing startup recovery to correlate a process-owned external
+    /// side effect with its eventual terminal receipt.
     pub fn committed_prefix(&self) -> Self {
         let unresolved_call_index = self.items.iter().enumerate().rev().find_map(|(index, item)| {
             let ConversationTurnTraceItem::ToolCall { call_id, .. } = item else {
@@ -283,6 +304,99 @@ impl ConversationTraceSnapshot {
             items: committed.items,
         }
     }
+
+    /// Builds the append-only in-progress audit view, including a final unresolved ToolCall.
+    ///
+    /// This trace is for durable recovery only. Callers that assemble model context must continue
+    /// to use [`Self::in_progress_trace`], which retains closed exchanges only.
+    pub fn in_progress_audit_trace(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        assistant_message_id: &str,
+    ) -> ConversationTurnTrace {
+        ConversationTurnTrace {
+            schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: run_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            assistant_message_id: assistant_message_id.to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+            terminal_error: None,
+            truncated: self.truncated,
+            items: self.items.clone(),
+        }
+    }
+}
+
+/// Closes any process-interrupted ToolCall before an in-progress trace becomes terminal.
+pub(crate) fn terminalize_interrupted_conversation_trace(
+    trace: ConversationTurnTrace,
+    terminal_status: ConversationTurnTraceTerminalStatus,
+    reason: &str,
+) -> ConversationTurnTrace {
+    debug_assert_eq!(
+        trace.terminal_status,
+        ConversationTurnTraceTerminalStatus::InProgress
+    );
+    ConversationTraceRecorder::from_checkpoint(trace.items, 0, trace.truncated).finish(
+        &trace.run_id,
+        &trace.conversation_id,
+        &trace.assistant_message_id,
+        terminal_status,
+        Some(reason),
+    )
+}
+
+/// Appends one authoritative recovery result to the final unresolved ToolCall of an in-progress
+/// trace. The identity and ordering checks make the operation safe to retry during startup.
+pub fn conversation_trace_with_recovered_tool_result(
+    trace: &ConversationTurnTrace,
+    result: &AgentToolResult,
+) -> Result<ConversationTurnTrace, String> {
+    if trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress {
+        return Err("only an in-progress conversation trace can accept a recovered result".into());
+    }
+    let Some(ConversationTurnTraceItem::ToolCall {
+        call_id,
+        tool,
+        operation,
+        approval_status,
+        ..
+    }) = trace.items.last()
+    else {
+        return Err("conversation trace has no final unresolved ToolCall".into());
+    };
+    if result.call_id != *call_id || result.tool != *tool {
+        return Err("recovered ToolResult identity does not match the unresolved ToolCall".into());
+    }
+    let call = AgentToolCall {
+        id: call_id.clone(),
+        tool: tool.clone(),
+        args: operation.clone(),
+        approval_status: *approval_status,
+        reason: operation
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    let mut recorder = ConversationTraceRecorder::from_checkpoint(
+        trace.items.clone(),
+        trace
+            .items
+            .last()
+            .map(ConversationTurnTraceItem::sequence)
+            .unwrap_or(0)
+            .saturating_add(1),
+        trace.truncated,
+    );
+    recorder.record_tool_result(&call, result);
+    let recovered = recorder.snapshot().in_progress_audit_trace(
+        &trace.run_id,
+        &trace.conversation_id,
+        &trace.assistant_message_id,
+    );
+    recovered.validate()?;
+    Ok(recovered)
 }
 
 pub fn cancelled_conversation_trace_from_checkpoint(
@@ -981,5 +1095,66 @@ mod tests {
         let committed = recorder.snapshot().committed_prefix();
         assert_eq!(committed.items.len(), 1);
         assert!(committed.items[0].is_safe_compaction_boundary());
+    }
+
+    #[test]
+    fn in_progress_audit_keeps_open_call_while_context_prefix_does_not() {
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_narration("I will generate the image.");
+        let mut pending = call("image-call");
+        pending.tool = "image_generation".to_string();
+        pending.args = json!({
+            "request": { "operation": "generate", "prompt": "private prompt" },
+            "reason": "Create the requested image."
+        });
+        recorder.record_tool_call(&pending);
+        let snapshot = recorder.snapshot();
+
+        let audit = snapshot.in_progress_audit_trace("run", "conversation", "assistant");
+        let context = snapshot.in_progress_trace("run", "conversation", "assistant");
+        audit.validate().unwrap();
+        context.validate().unwrap();
+        assert!(matches!(
+            audit.items.last(),
+            Some(ConversationTurnTraceItem::ToolCall { call_id, .. }) if call_id == "image-call"
+        ));
+        assert!(matches!(
+            context.items.last(),
+            Some(ConversationTurnTraceItem::AssistantNarration { .. })
+        ));
+        let mut terminal = audit.clone();
+        terminal.terminal_status = ConversationTurnTraceTerminalStatus::Failed;
+        terminal.terminal_error = Some("interrupted".to_string());
+        assert!(terminal.validate().is_err());
+    }
+
+    #[test]
+    fn recovered_result_closes_the_same_durable_call_once() {
+        let mut recorder = ConversationTraceRecorder::default();
+        let mut pending = call("image-call");
+        pending.tool = "image_generation".to_string();
+        pending.args = json!({
+            "request": { "operation": "generate", "prompt": "private prompt" },
+            "reason": "Create the requested image."
+        });
+        recorder.record_tool_call(&pending);
+        let audit = recorder
+            .snapshot()
+            .in_progress_audit_trace("run", "conversation", "assistant");
+        let result = AgentToolResult {
+            call_id: pending.id.clone(),
+            tool: pending.tool.clone(),
+            ok: false,
+            result: Some(json!({ "status": "outcomeIndeterminate" })),
+            error: Some("execution interrupted".to_string()),
+        };
+
+        let recovered = conversation_trace_with_recovered_tool_result(&audit, &result).unwrap();
+        recovered.validate().unwrap();
+        assert!(matches!(
+            recovered.items.last(),
+            Some(ConversationTurnTraceItem::ToolResult { call_id, .. }) if call_id == "image-call"
+        ));
+        assert!(conversation_trace_with_recovered_tool_result(&recovered, &result).is_err());
     }
 }

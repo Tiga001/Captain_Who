@@ -117,12 +117,13 @@ impl AgentConversationContextState {
         trace: &ConversationTurnTrace,
         committed_item_count: usize,
     ) -> AgentResult<usize> {
-        if committed_item_count > trace.items.len() {
+        let model_context_item_count = trace.model_context_item_count();
+        if committed_item_count > model_context_item_count {
             return Err(AgentError::new(
                 "会话上下文状态的 trace 游标超过已持久化项目数量。",
             ));
         }
-        if committed_item_count == trace.items.len() {
+        if committed_item_count == model_context_item_count {
             return Ok(committed_item_count);
         }
         let suffix = ConversationTurnTrace {
@@ -133,13 +134,13 @@ impl AgentConversationContextState {
             terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
             terminal_error: None,
             truncated: trace.truncated,
-            items: trace.items[committed_item_count..].to_vec(),
+            items: trace.items[committed_item_count..model_context_item_count].to_vec(),
         };
         let rendered = ConversationTraceRenderer::render(&suffix)?;
         for item in rendered.activity_items {
             self.frame.push(item);
         }
-        Ok(trace.items.len())
+        Ok(model_context_item_count)
     }
 
     pub fn finalize_conversation_turn(

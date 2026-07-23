@@ -127,6 +127,10 @@ impl AgentService {
                 .with_trace_observer(trace_observer)
                 .with_model_request_observer(model_request_observer)
                 .with_context_compaction(context_compaction_services);
+            if let Some(image_generation_execution) = service.image_generation_execution.clone() {
+                host_services =
+                    host_services.with_image_generation_execution(image_generation_execution);
+            }
             host_services = host_services.with_skill_activation_resolver(
                 model_skill_activation_resolver(service.storage.clone(), service.skills.clone()),
             );

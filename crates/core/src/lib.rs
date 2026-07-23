@@ -45,9 +45,10 @@ pub use conversation_trace::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
     conversation_trace_snapshot_from_checkpoint_and_continuation,
-    failed_conversation_trace_without_items, ConversationTraceSnapshot,
-    ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
-    ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    conversation_trace_with_recovered_tool_result, failed_conversation_trace_without_items,
+    ConversationTraceSnapshot, ConversationTraceToolResultStatus, ConversationTurnTrace,
+    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 pub use model_request_observation::{
     ModelRequestActualUsage, ModelRequestCapacityStatus, ModelRequestEstimate,
@@ -76,13 +77,15 @@ pub use protocol::{
     AgentContextWindowSnapshot, AgentContextWindowStatus, AgentDiffProposal, AgentError,
     AgentEvent, AgentExtensionSnapshot, AgentFileDraftSnapshot, AgentFileDraftStatus,
     AgentFileWriteMode, AgentFileWriteProposal, AgentFileWriteResult, AgentFileWriteResultStatus,
-    AgentGitDiffSnapshot, AgentInputAttachment, AgentInputAttachmentEncoding,
-    AgentInputAttachmentKind, AgentOfficeOperationRequest, AgentPatchOperation,
-    AgentPatchPermission, AgentPatchResult, AgentPatchResultStatus, AgentPermissions,
-    AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
-    AgentProposedAction, AgentQueuedToolCallCheckpoint, AgentReadPermission, AgentResult,
-    AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
-    AgentSkillActivation, AgentSkillDependencyCheck, AgentSkillDependencyKind,
+    AgentGitDiffSnapshot, AgentImageGenerationArtifact, AgentImageGenerationArtifactKind,
+    AgentImageGenerationAudit, AgentImageGenerationFailure, AgentImageGenerationOperation,
+    AgentImageGenerationResult, AgentImageGenerationResultStatus, AgentInputAttachment,
+    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentOfficeOperationRequest,
+    AgentPatchOperation, AgentPatchPermission, AgentPatchResult, AgentPatchResultStatus,
+    AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone,
+    AgentPromptWorkMode, AgentProposedAction, AgentQueuedToolCallCheckpoint, AgentReadPermission,
+    AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentSearchConfig,
+    AgentSearchMode, AgentSkillActivation, AgentSkillDependencyCheck, AgentSkillDependencyKind,
     AgentSkillDependencyStatus, AgentSkillMaterializationRequest, AgentSkillMaterializationResult,
     AgentSkillMaterializationResultStatus, AgentSkillScriptInterpreter,
     AgentSkillScriptPreflightReport, AgentSkillScriptPreflightStatus, AgentSkillScriptRequest,
@@ -93,7 +96,8 @@ pub use protocol::{
     AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission, ModelCapabilities,
     AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION, AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
-    AGENT_OFFICE_OPERATION_SCHEMA_VERSION, AGENT_OFFICE_REASON_MAX_CHARS,
+    AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION, AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
+    AGENT_OFFICE_REASON_MAX_CHARS,
 };
 pub use revision::content_revision;
 pub use runtime::{
@@ -110,3 +114,7 @@ pub use runtime::{
     AgentRuntimeHostServices, AgentSkillActivationResolver, AgentSkillCheckpointAuthority,
 };
 pub use system_paths::expand_system_path;
+pub use tools::{
+    agent_image_generation_execution_id, agent_image_generation_tool_result_from_execution,
+    agent_image_generation_tool_result_from_service_error, normalize_agent_image_generation_reason,
+};

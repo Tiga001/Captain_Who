@@ -167,6 +167,8 @@ impl ImageGenerationExecutionStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ImageGenerationExecutionPhase {
+    Admission,
+    Configuration,
     Provider,
     ArtifactDownload,
     ArtifactPublish,
@@ -258,6 +260,11 @@ pub struct ImageGenerationExecutionServiceError {
     pub code: ImageGenerationExecutionServiceErrorCode,
     pub message: String,
     pub retryable: bool,
+    pub status: ImageGenerationExecutionStatus,
+    pub phase: ImageGenerationExecutionPhase,
+    pub generation_may_have_succeeded: bool,
+    pub provider_succeeded: bool,
+    pub artifact_commit_may_have_succeeded: bool,
 }
 
 impl ImageGenerationExecutionServiceError {
@@ -267,10 +274,83 @@ impl ImageGenerationExecutionServiceError {
         message: impl Into<String>,
         retryable: bool,
     ) -> Self {
+        let semantics = ImageGenerationExecutionServiceErrorSemantics::for_code(code);
         Self {
             code,
             message: message.into(),
-            retryable,
+            // A new Agent ToolCall receives a new execution identity. Once the existing identity
+            // may have reached the provider or Artifact commit boundary, advertising a generic
+            // retry would invite a duplicate paid generation rather than an idempotent inspect.
+            retryable: retryable && !semantics.generation_may_have_succeeded,
+            status: semantics.status,
+            phase: semantics.phase,
+            generation_may_have_succeeded: semantics.generation_may_have_succeeded,
+            provider_succeeded: semantics.provider_succeeded,
+            artifact_commit_may_have_succeeded: semantics.artifact_commit_may_have_succeeded,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageGenerationExecutionServiceErrorSemantics {
+    status: ImageGenerationExecutionStatus,
+    phase: ImageGenerationExecutionPhase,
+    generation_may_have_succeeded: bool,
+    provider_succeeded: bool,
+    artifact_commit_may_have_succeeded: bool,
+}
+
+impl ImageGenerationExecutionServiceErrorSemantics {
+    const fn for_code(code: ImageGenerationExecutionServiceErrorCode) -> Self {
+        match code {
+            ImageGenerationExecutionServiceErrorCode::InvalidConfiguration
+            | ImageGenerationExecutionServiceErrorCode::ConfigurationDisabled
+            | ImageGenerationExecutionServiceErrorCode::ConfigurationIncomplete
+            | ImageGenerationExecutionServiceErrorCode::ConfigurationUnavailable => {
+                Self::definite_failure(ImageGenerationExecutionPhase::Configuration)
+            }
+            ImageGenerationExecutionServiceErrorCode::InvalidRequest
+            | ImageGenerationExecutionServiceErrorCode::Busy
+            | ImageGenerationExecutionServiceErrorCode::DeadlineExceeded
+            | ImageGenerationExecutionServiceErrorCode::ShuttingDown => {
+                Self::definite_failure(ImageGenerationExecutionPhase::Admission)
+            }
+            ImageGenerationExecutionServiceErrorCode::Cancelled => Self {
+                status: ImageGenerationExecutionStatus::Cancelled,
+                phase: ImageGenerationExecutionPhase::Admission,
+                generation_may_have_succeeded: false,
+                provider_succeeded: false,
+                artifact_commit_may_have_succeeded: false,
+            },
+            ImageGenerationExecutionServiceErrorCode::IdempotencyConflict
+            | ImageGenerationExecutionServiceErrorCode::AlreadyClaimed
+            | ImageGenerationExecutionServiceErrorCode::JournalUnavailable
+            | ImageGenerationExecutionServiceErrorCode::JournalCorrupt => Self {
+                status: ImageGenerationExecutionStatus::OutcomeIndeterminate,
+                phase: ImageGenerationExecutionPhase::Journal,
+                generation_may_have_succeeded: true,
+                provider_succeeded: false,
+                artifact_commit_may_have_succeeded: true,
+            },
+            ImageGenerationExecutionServiceErrorCode::CommitIndeterminate => Self {
+                status: ImageGenerationExecutionStatus::CommitIndeterminate,
+                phase: ImageGenerationExecutionPhase::ArtifactPublish,
+                generation_may_have_succeeded: true,
+                // A generic service error cannot prove that the provider returned success. The
+                // separate "may have" fields conservatively preserve the unknown side effects.
+                provider_succeeded: false,
+                artifact_commit_may_have_succeeded: true,
+            },
+        }
+    }
+
+    const fn definite_failure(phase: ImageGenerationExecutionPhase) -> Self {
+        Self {
+            status: ImageGenerationExecutionStatus::Failed,
+            phase,
+            generation_may_have_succeeded: false,
+            provider_succeeded: false,
+            artifact_commit_may_have_succeeded: false,
         }
     }
 }
@@ -1103,6 +1183,26 @@ impl ImageGenerationExecutionService {
         })
     }
 
+    /// Reopens one terminal execution without replaying its provider request.
+    ///
+    /// Startup Agent-audit recovery uses this after [`Self::reconcile_interrupted`] has made every
+    /// claimed execution terminal. A successful result is returned only when its managed Artifact
+    /// can still be verified by the configured Artifact store.
+    pub async fn inspect_terminal(
+        &self,
+        execution_id: &ImageGenerationExecutionId,
+    ) -> Result<Option<ImageGenerationExecutionResult>, ImageGenerationExecutionServiceError> {
+        let Some(record) =
+            storage_inspect(Arc::clone(&self.storage), execution_id.as_str().to_string()).await?
+        else {
+            return Ok(None);
+        };
+        if !record.status.is_terminal() {
+            return Ok(None);
+        }
+        self.result_from_existing(record).await.map(Some)
+    }
+
     async fn reconcile_indeterminate_commit(
         &self,
         record: ImageGenerationExecutionJournalRecord,
@@ -1666,14 +1766,76 @@ fn parse_terminal_receipt(
             false,
         )
     })?;
+    let operation = parse_operation(&record.identity.operation).ok_or_else(|| {
+        service_error(
+            ImageGenerationExecutionServiceErrorCode::JournalCorrupt,
+            "image-generation execution journal contains an invalid operation",
+            false,
+        )
+    })?;
+    let artifact = record
+        .artifact
+        .as_ref()
+        .map(candidate_from_journal)
+        .transpose()?;
+    let failure = receipt.error.as_ref();
+    let succeeded = receipt.status == ImageGenerationExecutionStatus::Succeeded;
+    let terminal_shape_is_valid = if succeeded {
+        receipt.artifact.is_some() && failure.is_none()
+    } else {
+        failure.is_some()
+    };
+    let uncertainty_matches = record.remote_outcome_unknown
+        == failure.is_some_and(|failure| failure.generation_may_have_succeeded)
+        && record.provider_succeeded
+            == (succeeded || failure.is_some_and(|failure| failure.provider_succeeded))
+        && record.commit_may_have_succeeded
+            == failure.is_some_and(|failure| failure.artifact_commit_may_have_succeeded);
+    let artifact_state_matches = match record.status {
+        StoredImageGenerationExecutionStatus::Succeeded => {
+            record.artifact.as_ref().is_some_and(|artifact| {
+                artifact.state == StoredImageGenerationArtifactState::Published
+            })
+        }
+        StoredImageGenerationExecutionStatus::CommitIndeterminate => {
+            record.artifact.as_ref().is_some_and(|artifact| {
+                artifact.state == StoredImageGenerationArtifactState::Indeterminate
+            })
+        }
+        StoredImageGenerationExecutionStatus::Failed
+        | StoredImageGenerationExecutionStatus::Cancelled
+        | StoredImageGenerationExecutionStatus::OutcomeIndeterminate => record
+            .artifact
+            .as_ref()
+            .is_none_or(|artifact| artifact.state == StoredImageGenerationArtifactState::Discarded),
+        StoredImageGenerationExecutionStatus::Executing
+        | StoredImageGenerationExecutionStatus::Publishing => false,
+    };
+    let timestamps_are_valid = receipt.created_at == record.created_at
+        && receipt.completed_at >= receipt.created_at
+        && record
+            .completed_at
+            .is_some_and(|completed_at| receipt.completed_at <= completed_at);
     if receipt.schema_version != IMAGE_GENERATION_EXECUTION_RECEIPT_SCHEMA_VERSION
         || receipt.execution_id != record.identity.execution_id
         || receipt.request_fingerprint != record.identity.request_fingerprint
         || receipt.status.stored() != record.status
+        || receipt.provider_profile_id != record.identity.profile_id
+        || receipt.adapter_id != record.identity.adapter_id
+        || receipt.profile_revision != record.identity.profile_revision
+        || receipt.model_id != record.identity.model_id
+        || receipt.operation != operation
+        || receipt.provider_request_id != record.provider_request_id
+        || receipt.http_status != record.http_status
+        || receipt.artifact != artifact
+        || !terminal_shape_is_valid
+        || !uncertainty_matches
+        || !artifact_state_matches
+        || !timestamps_are_valid
     {
         return Err(service_error(
             ImageGenerationExecutionServiceErrorCode::JournalCorrupt,
-            "image-generation terminal receipt identity does not match its journal record",
+            "image-generation terminal receipt does not match its frozen journal record",
             false,
         ));
     }
@@ -2019,6 +2181,63 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tempfile::tempdir;
 
+    #[test]
+    fn service_errors_own_conservative_terminal_semantics() {
+        let configuration = ImageGenerationExecutionServiceError::new(
+            ImageGenerationExecutionServiceErrorCode::ConfigurationUnavailable,
+            "configuration unavailable",
+            true,
+        );
+        assert_eq!(configuration.status, ImageGenerationExecutionStatus::Failed);
+        assert_eq!(
+            configuration.phase,
+            ImageGenerationExecutionPhase::Configuration
+        );
+        assert!(!configuration.generation_may_have_succeeded);
+        assert!(!configuration.provider_succeeded);
+        assert!(!configuration.artifact_commit_may_have_succeeded);
+
+        let journal = ImageGenerationExecutionServiceError::new(
+            ImageGenerationExecutionServiceErrorCode::JournalUnavailable,
+            "journal unavailable",
+            true,
+        );
+        assert_eq!(
+            journal.status,
+            ImageGenerationExecutionStatus::OutcomeIndeterminate
+        );
+        assert_eq!(journal.phase, ImageGenerationExecutionPhase::Journal);
+        assert!(journal.generation_may_have_succeeded);
+        assert!(!journal.provider_succeeded);
+        assert!(journal.artifact_commit_may_have_succeeded);
+        assert!(!journal.retryable);
+
+        let commit = ImageGenerationExecutionServiceError::new(
+            ImageGenerationExecutionServiceErrorCode::CommitIndeterminate,
+            "commit indeterminate",
+            false,
+        );
+        assert_eq!(
+            commit.status,
+            ImageGenerationExecutionStatus::CommitIndeterminate
+        );
+        assert_eq!(commit.phase, ImageGenerationExecutionPhase::ArtifactPublish);
+        assert!(commit.generation_may_have_succeeded);
+        assert!(!commit.provider_succeeded);
+        assert!(commit.artifact_commit_may_have_succeeded);
+
+        let cancelled = ImageGenerationExecutionServiceError::new(
+            ImageGenerationExecutionServiceErrorCode::Cancelled,
+            "cancelled",
+            false,
+        );
+        assert_eq!(cancelled.status, ImageGenerationExecutionStatus::Cancelled);
+        assert_eq!(cancelled.phase, ImageGenerationExecutionPhase::Admission);
+        assert!(!cancelled.generation_may_have_succeeded);
+        assert!(!cancelled.provider_succeeded);
+        assert!(!cancelled.artifact_commit_may_have_succeeded);
+    }
+
     struct TestProvider {
         profile: ImageGenerationProviderProfile,
         calls: Arc<AtomicUsize>,
@@ -2301,6 +2520,56 @@ mod tests {
         assert!(!database.contains("artifact.invalid"));
         assert!(!database.contains("signature=private"));
         assert!(!database.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn terminal_receipt_cannot_reassociate_an_execution_with_another_artifact() {
+        let fixture = fixture(false);
+        let execution_id = ImageGenerationExecutionId::parse("execution-tampered-receipt").unwrap();
+        let result = fixture
+            .service
+            .execute(
+                request(execution_id.as_str()),
+                AgentCancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let mut tampered = serde_json::to_value(result.receipt).unwrap();
+        let other_digest = "d".repeat(64);
+        tampered["artifact"] = serde_json::json!({
+            "artifactId": format!("sha256:{other_digest}"),
+            "storageRelativePath": format!("objects/{other_digest}.png"),
+            "format": "png",
+            "mediaType": "image/png",
+            "width": 2,
+            "height": 3,
+            "sizeBytes": 4,
+            "sha256": other_digest,
+        });
+        let connection =
+            rusqlite::Connection::open(fixture.directory.path().join("app.db")).unwrap();
+        connection
+            .execute(
+                "UPDATE image_generation_executions SET terminal_result_json = ?2 WHERE execution_id = ?1",
+                rusqlite::params![execution_id.as_str(), tampered.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = fixture
+            .service
+            .inspect_terminal(&execution_id)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            ImageGenerationExecutionServiceErrorCode::JournalCorrupt
+        );
+        assert_eq!(
+            error.status,
+            ImageGenerationExecutionStatus::OutcomeIndeterminate
+        );
+        assert!(!error.retryable);
     }
 
     #[tokio::test]

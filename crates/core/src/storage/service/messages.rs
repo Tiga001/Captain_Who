@@ -155,6 +155,14 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    /// Lists durable in-progress traces for process-startup side-effect reconciliation.
+    pub fn list_in_progress_conversation_turn_traces(
+        &self,
+    ) -> Result<Vec<ConversationTurnTrace>, String> {
+        let connection = self.state.connection()?;
+        conversation_trace_repository::list_in_progress_traces(&connection).map_err(storage_error)
+    }
+
     pub fn save_chat_message_state(
         &self,
         conversation_id: &str,

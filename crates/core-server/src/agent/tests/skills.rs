@@ -206,6 +206,10 @@ fn projectless_turn_discovers_enabled_managed_skills_without_explicit_activation
         discovery.skills.len(),
         skills.list().unwrap().skills().len()
     );
+    assert!(discovery
+        .skills
+        .iter()
+        .any(|skill| skill.id == "bundled:application:image-generation"));
     assert!(prepared
         .skill_resources
         .as_ref()

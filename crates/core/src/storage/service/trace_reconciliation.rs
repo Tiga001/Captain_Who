@@ -75,7 +75,7 @@ impl StorageService {
                 continue;
             }
 
-            let mut trace = conversation_trace_repository::get_trace_for_message(
+            let trace = conversation_trace_repository::get_trace_for_message(
                 &transaction,
                 &candidate.assistant_message_id,
             )
@@ -118,8 +118,11 @@ impl StorageService {
                     .max(candidate.created_at)
                     .max(candidate.updated_at)
             });
-            trace.terminal_status = terminal_status;
-            trace.terminal_error = Some(reason.to_string());
+            let trace = crate::conversation_trace::terminalize_interrupted_conversation_trace(
+                trace,
+                terminal_status,
+                reason,
+            );
             conversation_trace_repository::commit_trace_in_connection(
                 &transaction,
                 &trace,

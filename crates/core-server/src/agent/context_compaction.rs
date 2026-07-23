@@ -399,9 +399,31 @@ impl AgentService {
         snapshot: &ConversationTraceSnapshot,
         configuration_revision: &str,
     ) -> Result<Option<AgentContextBaseline>, String> {
-        let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
+        // Persist the complete audit view so a crash after an external side effect starts can be
+        // correlated with its durable execution journal. Model context still receives only the
+        // closed prefix and therefore never sees a half ToolCall/ToolResult exchange.
+        let context_trace =
+            snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
+        let previous_trace = self
+            .storage
+            .get_conversation_turn_trace(assistant_message_id)?;
+        let model_context_changed = previous_trace.as_ref().is_none_or(|trace| {
+            trace.model_context_item_count() != context_trace.model_context_item_count()
+        });
+        // Only tools with an independently durable, non-replayable execution journal retain an
+        // open call here. Approval-backed tools may enrich their call snapshot before settlement,
+        // so persisting those calls early would violate the trace's append-only contract.
+        let retain_open_call_for_recovery = matches!(
+            snapshot.items.last(),
+            Some(ConversationTurnTraceItem::ToolCall { tool, .. }) if tool == "image_generation"
+        );
+        let audit_trace = if retain_open_call_for_recovery {
+            snapshot.in_progress_audit_trace(run_id, conversation_id, assistant_message_id)
+        } else {
+            context_trace.clone()
+        };
         let changed = self.storage.append_in_progress_conversation_turn_trace(
-            &trace,
+            &audit_trace,
             created_at,
             now_ms(),
         )?;
@@ -410,10 +432,10 @@ impl AgentService {
             run_id,
             conversation_id,
             assistant_message_id,
-            &trace,
+            &context_trace,
             configuration_revision,
         )?;
-        if changed {
+        if changed && model_context_changed {
             self.emit_context_window_snapshot(
                 notifications,
                 run_id,

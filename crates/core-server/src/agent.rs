@@ -27,6 +27,7 @@ use mycopilot_core::file_write::{
     file_write_authorized, file_write_diff, proposed_action_uses_file_write_policy,
     FileWriteApprovalRoute, FileWriteAuthorizationSource,
 };
+use mycopilot_core::image_generation::{ImageGenerationExecutionService, ImageGenerationOperation};
 use mycopilot_core::office::{
     resolve_office_engine, OfficeCliDiscoveryOptions, OfficeEngine, OfficeEngineError,
     OfficeEngineErrorCode, OfficeEngineRecovery, OfficeExecutionResult,
@@ -66,8 +67,8 @@ use mycopilot_core::{
     AgentSkillScriptRequest, AgentSkillScriptResult, AgentToolCall, AgentToolContinuation,
     AgentToolResult, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
     AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
-    ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
-    ModelCapabilities,
+    ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceItem,
+    ConversationTurnTraceTerminalStatus, ModelCapabilities,
 };
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
@@ -254,6 +255,7 @@ pub struct AgentService {
     conversation_context_state_clock: Arc<AtomicU64>,
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
     office_engine: Arc<dyn OfficeEngine>,
+    image_generation_execution: Option<Arc<ImageGenerationExecutionService>>,
     artifact_runtime: Option<Arc<ArtifactRuntimeProvider>>,
     process_runs: CommandRunState,
     deletion_lifecycle: Arc<Mutex<DeletionLifecycleState>>,
@@ -261,15 +263,33 @@ pub struct AgentService {
 }
 
 impl AgentService {
+    #[cfg(test)]
     pub fn try_new(storage: Arc<StorageService>) -> Result<Self, String> {
+        Self::try_new_with_startup_reconciliation(storage, true)
+    }
+
+    /// Builds the production service while deferring orphan trace retirement until asynchronous
+    /// external execution journals have been reconciled.
+    pub(crate) fn try_new_deferred_startup_reconciliation(
+        storage: Arc<StorageService>,
+    ) -> Result<Self, String> {
+        Self::try_new_with_startup_reconciliation(storage, false)
+    }
+
+    fn try_new_with_startup_reconciliation(
+        storage: Arc<StorageService>,
+        reconcile_orphaned_traces: bool,
+    ) -> Result<Self, String> {
         storage
             .reconcile_interrupted_pending_agent_actions(now_ms())
             .map_err(|error| format!("failed to reconcile interrupted pending actions: {error}"))?;
-        storage
-            .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), now_ms())
-            .map_err(|error| {
-                format!("failed to reconcile orphaned conversation traces: {error}")
-            })?;
+        if reconcile_orphaned_traces {
+            storage
+                .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), now_ms())
+                .map_err(|error| {
+                    format!("failed to reconcile orphaned conversation traces: {error}")
+                })?;
+        }
         let pending_actions = load_persisted_pending_actions(&storage)?;
         let office_engine = resolve_default_office_engine();
         let artifact_runtime = resolve_default_artifact_runtime();
@@ -295,6 +315,7 @@ impl AgentService {
             conversation_context_state_clock: Arc::new(AtomicU64::new(1)),
             context_compaction_summary_generator: None,
             office_engine,
+            image_generation_execution: None,
             artifact_runtime,
             process_runs: CommandRunState::default(),
             deletion_lifecycle: Arc::new(Mutex::new(DeletionLifecycleState::default())),
@@ -310,6 +331,105 @@ impl AgentService {
     pub fn with_skills_service(mut self, skills: Arc<SkillsService>) -> Self {
         self.skills = skills;
         self
+    }
+
+    /// Installs the process-owned image-generation executor into future Agent runs. The service
+    /// remains a Host capability so provider credentials and transport details never enter model
+    /// input or resumable checkpoints.
+    pub fn with_image_generation_execution(
+        mut self,
+        service: Arc<ImageGenerationExecutionService>,
+    ) -> Self {
+        self.image_generation_execution = Some(service);
+        self
+    }
+
+    /// Reconciles durable image ToolCalls with the authoritative image execution journal.
+    ///
+    /// Production invokes this only after the execution service has terminalized every
+    /// interrupted journal entry and before generic orphan trace retirement. It is idempotent:
+    /// closed traces are skipped and trace storage enforces an exact append-only prefix.
+    pub(crate) async fn reconcile_interrupted_image_generation_tool_audits(
+        &self,
+    ) -> Result<usize, String> {
+        let Some(execution_service) = self.image_generation_execution.as_ref() else {
+            return Ok(0);
+        };
+        let traces = self.storage.list_in_progress_conversation_turn_traces()?;
+        let mut reconciled = 0;
+        for trace in traces {
+            let Some(ConversationTurnTraceItem::ToolCall {
+                call_id,
+                tool,
+                operation: args,
+                ..
+            }) = trace.items.last()
+            else {
+                continue;
+            };
+            if tool != "image_generation" {
+                continue;
+            }
+            let operation_name = args
+                .get("request")
+                .and_then(|request| request.get("operation"))
+                .and_then(Value::as_str);
+            let operation = match operation_name {
+                Some("generate") => ImageGenerationOperation::Generate,
+                Some("edit") => ImageGenerationOperation::Edit,
+                _ => continue,
+            };
+            let reason = args
+                .get("reason")
+                .and_then(Value::as_str)
+                .and_then(mycopilot_core::normalize_agent_image_generation_reason)
+                .unwrap_or_else(|| "Recover the interrupted image generation audit.".to_string());
+            let execution_id =
+                mycopilot_core::agent_image_generation_execution_id(&trace.run_id, call_id)
+                    .map_err(|error| {
+                        format!("failed to derive interrupted image execution identity: {error}")
+                    })?;
+            let result = match execution_service.inspect_terminal(&execution_id).await {
+                Ok(Some(execution)) => {
+                    mycopilot_core::agent_image_generation_tool_result_from_execution(
+                        call_id,
+                        &reason,
+                        operation,
+                        execution_id.as_str(),
+                        execution,
+                    )
+                }
+                Ok(None) => continue,
+                Err(error) => {
+                    mycopilot_core::agent_image_generation_tool_result_from_service_error(
+                        call_id,
+                        &reason,
+                        operation,
+                        execution_id.as_str(),
+                        error,
+                    )
+                }
+            };
+            let recovered =
+                mycopilot_core::conversation_trace_with_recovered_tool_result(&trace, &result)
+                    .map_err(|error| {
+                        format!("failed to append interrupted image ToolResult audit: {error}")
+                    })?;
+            let committed_at = now_ms();
+            self.storage
+                .append_in_progress_conversation_turn_trace(&recovered, committed_at, committed_at)
+                .map_err(|error| {
+                    format!("failed to persist interrupted image ToolResult audit: {error}")
+                })?;
+            reconciled += 1;
+        }
+        Ok(reconciled)
+    }
+
+    pub(crate) fn reconcile_startup_orphaned_conversation_traces(&self) -> Result<usize, String> {
+        self.storage
+            .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), now_ms())
+            .map_err(|error| format!("failed to reconcile orphaned conversation traces: {error}"))
     }
 
     /// Probes the same Office engine instance used by Agent tools and actions.

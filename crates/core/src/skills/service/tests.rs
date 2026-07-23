@@ -445,7 +445,7 @@ fn explicit_bundled_registration_exposes_the_real_embedded_skill() {
     let service = SkillsService::new().with_bundled_source().unwrap();
     let catalog = service.list().unwrap();
 
-    assert_eq!(catalog.skills().len(), 3);
+    assert_eq!(catalog.skills().len(), 4);
     let descriptor = catalog
         .skills()
         .iter()
@@ -478,7 +478,7 @@ fn list_with_workspace_aggregates_real_sources_in_stable_order() {
         .unwrap();
 
     assert_eq!(first, second);
-    assert_eq!(first.skills().len(), 4);
+    assert_eq!(first.skills().len(), 5);
     assert_eq!(
         first
             .skills()
@@ -487,6 +487,7 @@ fn list_with_workspace_aggregates_real_sources_in_stable_order() {
             .collect::<Vec<_>>(),
         vec![
             "bundled:application:documents",
+            "bundled:application:image-generation",
             "bundled:application:presentations",
             "bundled:application:spreadsheets",
             "workspace:workspace:workspace-skill",
@@ -502,6 +503,7 @@ fn list_with_workspace_aggregates_real_sources_in_stable_order() {
             SkillSourceKind::Bundled,
             SkillSourceKind::Bundled,
             SkillSourceKind::Bundled,
+            SkillSourceKind::Bundled,
             SkillSourceKind::Workspace,
         ]
     );
@@ -509,7 +511,7 @@ fn list_with_workspace_aggregates_real_sources_in_stable_order() {
 
     // The request-scoped workspace must not mutate the registered source set.
     let registered = service.list().unwrap();
-    assert_eq!(registered.skills().len(), 3);
+    assert_eq!(registered.skills().len(), 4);
     assert!(registered
         .skills()
         .iter()

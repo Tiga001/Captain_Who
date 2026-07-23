@@ -51,6 +51,8 @@ pub struct AgentRuntimeHostServices {
     pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
     pub(super) skill_activation_resolver: Option<AgentSkillActivationResolver>,
     pub(super) office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
+    pub(super) image_generation_execution:
+        Option<Arc<crate::image_generation::ImageGenerationExecutionService>>,
     pub(super) command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
 }
@@ -117,6 +119,17 @@ impl AgentRuntimeHostServices {
     /// outside model input and persisted checkpoints.
     pub fn with_office_engine(mut self, engine: Arc<dyn crate::office::OfficeEngine>) -> Self {
         self.office_engine = Some(engine);
+        self
+    }
+
+    /// Supplies the application-owned image-generation execution service used by the typed Agent
+    /// tool. Provider configuration, credentials, transport, and Artifact publication remain
+    /// outside model input and persisted checkpoints.
+    pub fn with_image_generation_execution(
+        mut self,
+        service: Arc<crate::image_generation::ImageGenerationExecutionService>,
+    ) -> Self {
+        self.image_generation_execution = Some(service);
         self
     }
 

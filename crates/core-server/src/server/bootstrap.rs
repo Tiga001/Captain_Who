@@ -124,11 +124,12 @@ impl CoreServerBootstrap {
                     "failed to register GitHub Skill source resolver: {error}"
                 ))
             })?;
-        let agent_service = AgentService::try_new(storage.clone())
+        let agent_service = AgentService::try_new_deferred_startup_reconciliation(storage.clone())
             .map_err(|error| {
                 io::Error::other(format!("failed to initialize Agent service: {error}"))
             })?
-            .with_skills_service(Arc::clone(&skills_service));
+            .with_skills_service(Arc::clone(&skills_service))
+            .with_image_generation_execution(Arc::clone(&image_generation_execution));
         let skill_services = SkillServices {
             catalog: skills_service,
             installations: skill_installation_service,
@@ -213,6 +214,19 @@ pub(crate) async fn run_core_server(bootstrap: &CoreServerBootstrap) -> io::Resu
                 "failed to reconcile interrupted image-generation executions: {error}"
             ))
         })?;
+    bootstrap
+        .agent_service
+        .reconcile_interrupted_image_generation_tool_audits()
+        .await
+        .map_err(|error| {
+            io::Error::other(format!(
+                "failed to reconcile interrupted image-generation Agent audits: {error}"
+            ))
+        })?;
+    bootstrap
+        .agent_service
+        .reconcile_startup_orphaned_conversation_traces()
+        .map_err(io::Error::other)?;
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Value>();
     let (finish_outbound_tx, finish_outbound_rx) = oneshot::channel();
     let writer = tokio::spawn(run_outbound_writer(

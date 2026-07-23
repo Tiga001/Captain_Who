@@ -7,6 +7,7 @@ mod conversation_history;
 mod document_text;
 mod filesystem;
 mod git_diff;
+mod image_generation;
 mod input_stream;
 mod limits;
 mod office;
@@ -39,6 +40,11 @@ use apply_patch::ApplyPatchTool;
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
 use conversation_history::ConversationHistoryTool;
 use git_diff::GitDiffTool;
+use image_generation::ImageGenerationTool;
+pub use image_generation::{
+    agent_image_generation_execution_id, agent_image_generation_tool_result_from_execution,
+    agent_image_generation_tool_result_from_service_error, normalize_agent_image_generation_reason,
+};
 pub(crate) use office::validate_frozen_office_trace_args;
 use office::{OfficeDocumentTool, OfficePresentationTool, OfficeSpreadsheetTool};
 use read_file::ReadFileTool;
@@ -101,6 +107,17 @@ pub(crate) enum FileWriteToolAccess {
     ReadWrite,
 }
 
+/// Declares how runtime cancellation settles a blocking tool execution.
+///
+/// Most read-only tools can be interrupted immediately. Tools that may have crossed an external
+/// side-effect or durable-commit boundary must instead finish their own cancellation protocol and
+/// return the authoritative terminal receipt before the run is allowed to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentToolCancellationSettlement {
+    Interruptible,
+    Authoritative,
+}
+
 impl AgentToolPermissionPolicy {
     pub(crate) fn uses_file_write_approval(self) -> bool {
         matches!(self, Self::FileWrite(_))
@@ -120,6 +137,16 @@ impl ToolRegistry {
         search_config: Option<&AgentSearchConfig>,
         office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
     ) -> Self {
+        Self::defaults_with_search_office_and_image(search_config, office_engine, None)
+    }
+
+    pub(crate) fn defaults_with_search_office_and_image(
+        search_config: Option<&AgentSearchConfig>,
+        office_engine: Option<Arc<dyn crate::office::OfficeEngine>>,
+        image_generation_execution: Option<
+            Arc<crate::image_generation::ImageGenerationExecutionService>,
+        >,
+    ) -> Self {
         let mut registry = Self {
             tools: BTreeMap::new(),
             owners: BTreeMap::new(),
@@ -136,6 +163,9 @@ impl ToolRegistry {
             registry.register(OfficeDocumentTool::new(engine.clone()));
             registry.register(OfficeSpreadsheetTool::new(engine.clone()));
             registry.register(OfficePresentationTool::new(engine));
+        }
+        if let Some(execution) = image_generation_execution {
+            registry.register(ImageGenerationTool::new(execution));
         }
         registry.register(WorkspaceMapTool);
         registry.register(SearchFilesTool);
@@ -177,6 +207,16 @@ impl ToolRegistry {
             .get(tool_name)
             .map(|tool| tool.permission_policy())
             .unwrap_or(AgentToolPermissionPolicy::Default)
+    }
+
+    pub(crate) fn cancellation_settlement(
+        &self,
+        tool_name: &str,
+    ) -> AgentToolCancellationSettlement {
+        self.tools
+            .get(tool_name)
+            .map(|tool| tool.cancellation_settlement())
+            .unwrap_or(AgentToolCancellationSettlement::Interruptible)
     }
 
     pub(crate) fn input_stream_observer(
@@ -251,16 +291,19 @@ impl ToolRegistry {
         };
 
         let call_context = context.clone().with_tool_call_id(call.id.clone());
+        let cancellation_settlement = tool.cancellation_settlement();
         match tool.execute(&call_context, call.args.clone()) {
-            Ok(result) => match context.check_cancelled() {
-                Ok(()) => AgentToolResult {
-                    call_id: call.id.clone(),
-                    tool: call.tool.clone(),
-                    ok: true,
-                    result: Some(result),
-                    error: None,
-                },
-                Err(error) => AgentToolResult {
+            Ok(result) => match (cancellation_settlement, context.check_cancelled()) {
+                (AgentToolCancellationSettlement::Authoritative, _) | (_, Ok(())) => {
+                    AgentToolResult {
+                        call_id: call.id.clone(),
+                        tool: call.tool.clone(),
+                        ok: true,
+                        result: Some(result),
+                        error: None,
+                    }
+                }
+                (_, Err(error)) => AgentToolResult {
                     call_id: call.id.clone(),
                     tool: call.tool.clone(),
                     ok: false,
@@ -384,6 +427,10 @@ pub(crate) trait AgentTool: Send + Sync {
     fn definition(&self) -> AgentToolDefinition;
     fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value>;
     fn permission_policy(&self) -> AgentToolPermissionPolicy;
+
+    fn cancellation_settlement(&self) -> AgentToolCancellationSettlement {
+        AgentToolCancellationSettlement::Interruptible
+    }
 
     fn proposed_action(
         &self,

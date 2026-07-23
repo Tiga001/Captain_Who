@@ -279,6 +279,33 @@ pub fn list_traces_for_conversation(
         .collect()
 }
 
+pub fn list_in_progress_traces(
+    connection: &Connection,
+) -> rusqlite::Result<Vec<ConversationTurnTrace>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT
+            assistant_message_id,
+            conversation_id,
+            run_id,
+            schema_version,
+            terminal_status,
+            terminal_error,
+            truncated
+        FROM conversation_turn_traces
+        WHERE terminal_status = 'in_progress'
+        ORDER BY created_at ASC, assistant_message_id ASC
+        ",
+    )?;
+    let headers = statement
+        .query_map([], trace_header_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    headers
+        .into_iter()
+        .map(|header| load_trace(connection, header))
+        .collect()
+}
+
 fn trace_header_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TraceHeader> {
     let schema_version = row.get::<_, i64>(3)?;
     let schema_version = u32::try_from(schema_version).map_err(|error| {

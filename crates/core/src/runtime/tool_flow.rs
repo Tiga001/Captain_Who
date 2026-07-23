@@ -11,7 +11,7 @@ use crate::protocol::{
     AgentRunStatus, AgentStateSnapshot, AgentTodoState, AgentToolCall, AgentToolDefinition,
     AgentToolResult, AgentUsage,
 };
-use crate::tools::{ToolExecutionContext, ToolRegistry};
+use crate::tools::{AgentToolCancellationSettlement, ToolExecutionContext, ToolRegistry};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
@@ -136,11 +136,22 @@ pub(super) async fn execute_tool_on_blocking_thread(
     call: AgentToolCall,
     cancellation_token: AgentCancellationToken,
 ) -> AgentResult<AgentToolResult> {
+    let settlement = registry.cancellation_settlement(&call.tool);
     let handle = tokio::task::spawn_blocking(move || registry.execute(&context, &call));
-    tokio::select! {
-        _ = cancellation_token.cancelled() => Err(AgentError::cancelled()),
-        result = handle => {
-            result.map_err(|error| AgentError::new(format!("工具执行线程失败：{error}")))
+    match settlement {
+        AgentToolCancellationSettlement::Interruptible => tokio::select! {
+            _ = cancellation_token.cancelled() => Err(AgentError::cancelled()),
+            result = handle => {
+                result.map_err(|error| AgentError::new(format!("工具执行线程失败：{error}")))
+            }
+        },
+        AgentToolCancellationSettlement::Authoritative => {
+            // Cancellation is delivered through ToolExecutionContext. Once this class of tool has
+            // started it may already have caused a remote effect or crossed a durable publication
+            // boundary, so detaching the blocking task would fabricate an unknown local outcome.
+            handle
+                .await
+                .map_err(|error| AgentError::new(format!("工具执行线程失败：{error}")))
         }
     }
 }
@@ -158,6 +169,17 @@ pub(super) async fn execute_host_action_on_blocking_thread(
     handle
         .await
         .map_err(|error| AgentError::new(format!("host 执行线程失败：{error}")))?
+}
+
+pub(super) fn cancellation_preempts_tool_result(
+    auto_execute_host_action: bool,
+    settlement: AgentToolCancellationSettlement,
+    cancellation_requested: bool,
+    result: &AgentToolResult,
+) -> bool {
+    settlement == AgentToolCancellationSettlement::Interruptible
+        && ((!auto_execute_host_action && cancellation_requested)
+            || result.error.as_deref() == Some("agent run 已取消。"))
 }
 
 pub(super) fn approve_proposed_action(mut action: AgentProposedAction) -> AgentProposedAction {
@@ -372,6 +394,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::{AgentTool, AgentToolPermissionPolicy};
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -467,5 +490,123 @@ mod tests {
                 .and_then(|value| value["cancelled"].as_bool()),
             Some(true)
         );
+    }
+
+    struct AuthoritativeCancellationTool {
+        started: Arc<AtomicBool>,
+        finished: Arc<AtomicBool>,
+        cancellation: AgentCancellationToken,
+    }
+
+    impl AgentTool for AuthoritativeCancellationTool {
+        fn definition(&self) -> AgentToolDefinition {
+            AgentToolDefinition {
+                name: "authoritative_cancellation_test".to_string(),
+                description: "test".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                safety: crate::protocol::AgentToolSafety::ReadOnly,
+                requires_workspace: false,
+                requires_approval: false,
+                approval_mode: crate::protocol::AgentToolApprovalMode::Never,
+            }
+        }
+
+        fn execute(&self, _context: &ToolExecutionContext, _args: Value) -> AgentResult<Value> {
+            self.started.store(true, Ordering::SeqCst);
+            while !self.cancellation.is_cancelled() {
+                std::thread::yield_now();
+            }
+            self.finished.store(true, Ordering::SeqCst);
+            Ok(json!({ "status": "cancelled", "authoritative": true }))
+        }
+
+        fn permission_policy(&self) -> AgentToolPermissionPolicy {
+            AgentToolPermissionPolicy::Default
+        }
+
+        fn cancellation_settlement(&self) -> AgentToolCancellationSettlement {
+            AgentToolCancellationSettlement::Authoritative
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_authoritative_tool_waits_for_its_terminal_result() {
+        let started = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let cancellation = AgentCancellationToken::new();
+        let mut registry = ToolRegistry::defaults_with_search(None);
+        registry
+            .register_extension_tool(
+                "test",
+                Box::new(AuthoritativeCancellationTool {
+                    started: Arc::clone(&started),
+                    finished: Arc::clone(&finished),
+                    cancellation: cancellation.clone(),
+                }),
+            )
+            .unwrap();
+        let registry = Arc::new(registry);
+        let context =
+            ToolExecutionContext::from_run_context(None).with_cancellation(cancellation.clone());
+        let call = AgentToolCall {
+            id: "authoritative-1".to_string(),
+            tool: "authoritative_cancellation_test".to_string(),
+            args: json!({}),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let task_cancellation = cancellation.clone();
+        let task = tokio::spawn(async move {
+            execute_tool_on_blocking_thread(registry, context, call, task_cancellation).await
+        });
+        while !started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        cancellation.cancel();
+
+        let result = task.await.unwrap().unwrap();
+        assert!(finished.load(Ordering::SeqCst));
+        assert!(result.ok);
+        assert_eq!(
+            result
+                .result
+                .as_ref()
+                .and_then(|value| value["authoritative"].as_bool()),
+            Some(true)
+        );
+        assert!(!cancellation_preempts_tool_result(
+            false,
+            AgentToolCancellationSettlement::Authoritative,
+            true,
+            &result,
+        ));
+    }
+
+    #[test]
+    fn authoritative_cancelled_result_is_published_before_the_run_stops() {
+        let result = AgentToolResult {
+            call_id: "authoritative-1".to_string(),
+            tool: "authoritative_cancellation_test".to_string(),
+            ok: false,
+            result: None,
+            error: Some("agent run 已取消。".to_string()),
+        };
+
+        assert!(!cancellation_preempts_tool_result(
+            false,
+            AgentToolCancellationSettlement::Authoritative,
+            true,
+            &result,
+        ));
+        assert!(cancellation_preempts_tool_result(
+            false,
+            AgentToolCancellationSettlement::Interruptible,
+            true,
+            &result,
+        ));
     }
 }

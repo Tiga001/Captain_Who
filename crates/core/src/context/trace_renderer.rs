@@ -47,18 +47,22 @@ impl ConversationTraceRenderer {
                     operation,
                     ..
                 } => {
-                    let result_sequence = trace
-                        .items
-                        .get(index + 1)
-                        .and_then(|item| match item {
-                            ConversationTurnTraceItem::ToolResult { sequence, .. } => {
-                                Some(*sequence)
-                            }
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            AgentError::new("ConversationTurnTrace 工具调用后缺少紧邻的工具结果。")
-                        })?;
+                    let result_sequence = trace.items.get(index + 1).and_then(|item| match item {
+                        ConversationTurnTraceItem::ToolResult { sequence, .. } => Some(*sequence),
+                        _ => None,
+                    });
+                    let Some(result_sequence) = result_sequence else {
+                        // The durable audit may end with one process-owned unresolved call. It is
+                        // intentionally invisible to model context until its result is appended.
+                        if trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
+                            && index + 1 == trace.items.len()
+                        {
+                            continue;
+                        }
+                        return Err(AgentError::new(
+                            "ConversationTurnTrace 工具调用后缺少紧邻的工具结果。",
+                        ));
+                    };
                     let wire_call_id = wire_call_id(&trace.run_id, *sequence);
                     let group =
                         ContextGroup::tool_exchange(wire_group_id(&trace.run_id, *sequence));

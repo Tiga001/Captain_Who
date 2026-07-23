@@ -977,6 +977,107 @@ pub struct AgentToolResult {
     pub error: Option<String>,
 }
 
+/// Version of the presentation-safe image-generation result returned by the Agent Tool.
+///
+/// This contract deliberately excludes provider endpoints, credentials, ephemeral or signed
+/// output URLs, managed-store paths, and input image bytes. Those values remain inside the
+/// configuration, execution, and Artifact boundaries respectively.
+pub const AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentImageGenerationResultStatus {
+    Succeeded,
+    Failed,
+    Cancelled,
+    OutcomeIndeterminate,
+    CommitIndeterminate,
+}
+
+/// Model-visible image operation. Provider status probes are intentionally not Agent results.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentImageGenerationOperation {
+    Generate,
+    Edit,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentImageGenerationArtifactKind {
+    Image,
+}
+
+/// Immutable, presentation-safe identity for one successfully published generated image.
+///
+/// The URI is an application-owned `image-artifact://` capability, never a provider URL or a
+/// filesystem path. A terminal result may expose this structure only when publication completed
+/// successfully.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentImageGenerationArtifact {
+    pub artifact_id: String,
+    pub uri: String,
+    pub kind: AgentImageGenerationArtifactKind,
+    pub format: crate::image_generation::ImageArtifactFormat,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+/// Correlation and execution metadata safe to persist in Agent traces and emit to clients.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentImageGenerationAudit {
+    pub execution_id: String,
+    pub request_fingerprint: String,
+    pub provider_profile_id: String,
+    pub adapter_id: String,
+    pub profile_revision: u64,
+    pub model_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    pub created_at: i64,
+    pub completed_at: i64,
+    pub duration_ms: u64,
+}
+
+/// Stable failure details and explicit uncertainty markers for terminal execution outcomes.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentImageGenerationFailure {
+    pub code: crate::image_generation::ImageGenerationExecutionFailureCode,
+    pub phase: crate::image_generation::ImageGenerationExecutionPhase,
+    pub message: String,
+    pub recovery: String,
+    pub retryable: bool,
+    pub generation_may_have_succeeded: bool,
+    pub provider_succeeded: bool,
+    pub artifact_commit_may_have_succeeded: bool,
+}
+
+/// Terminal Tool result for image generation and image editing.
+///
+/// `succeeded` requires exactly one `artifact` and no `failure`. Every other status requires a
+/// `failure` and must not contain an `artifact`. Producers enforce this invariant before the
+/// result is emitted or persisted.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentImageGenerationResult {
+    pub schema_version: u32,
+    pub status: AgentImageGenerationResultStatus,
+    pub operation: AgentImageGenerationOperation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<AgentImageGenerationArtifact>,
+    pub audit: AgentImageGenerationAudit,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<AgentImageGenerationFailure>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDiffProposal {
@@ -1854,7 +1955,130 @@ impl From<&str> for AgentError {
 mod tests {
     use super::*;
     use crate::completed_conversation_trace_without_items;
+    use crate::image_generation::{
+        ImageArtifactFormat, ImageGenerationExecutionFailureCode, ImageGenerationExecutionPhase,
+    };
     use serde_json::json;
+
+    fn image_generation_audit() -> AgentImageGenerationAudit {
+        AgentImageGenerationAudit {
+            execution_id: format!("agent-v1:{}", "a".repeat(64)),
+            request_fingerprint: format!("sha256:{}", "b".repeat(64)),
+            provider_profile_id: "default".to_string(),
+            adapter_id: "smartmlSeedream".to_string(),
+            profile_revision: 7,
+            model_id: "seedream-model".to_string(),
+            provider_request_id: Some(format!("sha256:{}", "c".repeat(32))),
+            http_status: Some(200),
+            created_at: 10,
+            completed_at: 20,
+            duration_ms: 10,
+        }
+    }
+
+    #[test]
+    fn image_generation_success_contract_exposes_only_managed_artifact_metadata() {
+        let digest = "d".repeat(64);
+        let result = AgentImageGenerationResult {
+            schema_version: AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION,
+            status: AgentImageGenerationResultStatus::Succeeded,
+            operation: AgentImageGenerationOperation::Generate,
+            artifact: Some(AgentImageGenerationArtifact {
+                artifact_id: format!("sha256:{digest}"),
+                uri: format!("image-artifact://sha256/{digest}"),
+                kind: AgentImageGenerationArtifactKind::Image,
+                format: ImageArtifactFormat::Png,
+                mime_type: "image/png".to_string(),
+                width: 1024,
+                height: 1024,
+                size_bytes: 42,
+                sha256: digest.clone(),
+            }),
+            audit: image_generation_audit(),
+            failure: None,
+        };
+
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["status"], "succeeded");
+        assert_eq!(value["operation"], "generate");
+        assert_eq!(value["artifact"]["kind"], "image");
+        assert_eq!(value["artifact"]["format"], "png");
+        assert_eq!(
+            value["artifact"]["uri"],
+            format!("image-artifact://sha256/{digest}")
+        );
+        assert_eq!(value["artifact"].as_object().unwrap().len(), 9);
+        assert!(value.get("failure").is_none());
+
+        let serialized = serde_json::to_string(&result).unwrap();
+        for forbidden in [
+            "endpoint",
+            "signedUrl",
+            "storageRelativePath",
+            "absolutePath",
+            "apiKey",
+            "inputBytes",
+            "https://provider.example/signed-output",
+            "PRIVATE_API_KEY",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+
+        let round_trip: AgentImageGenerationResult = serde_json::from_value(value).unwrap();
+        assert_eq!(round_trip, result);
+    }
+
+    #[test]
+    fn image_generation_failure_contract_preserves_uncertainty_without_artifact() {
+        let result = AgentImageGenerationResult {
+            schema_version: AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION,
+            status: AgentImageGenerationResultStatus::OutcomeIndeterminate,
+            operation: AgentImageGenerationOperation::Edit,
+            artifact: None,
+            audit: image_generation_audit(),
+            failure: Some(AgentImageGenerationFailure {
+                code: ImageGenerationExecutionFailureCode::DeadlineExceeded,
+                phase: ImageGenerationExecutionPhase::Provider,
+                message: "the provider outcome is unknown".to_string(),
+                recovery: "Check execution history before retrying.".to_string(),
+                retryable: false,
+                generation_may_have_succeeded: true,
+                provider_succeeded: false,
+                artifact_commit_may_have_succeeded: false,
+            }),
+        };
+
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["status"], "outcomeIndeterminate");
+        assert_eq!(value["operation"], "edit");
+        assert!(value.get("artifact").is_none());
+        assert_eq!(value["failure"]["code"], "deadlineExceeded");
+        assert_eq!(value["failure"]["phase"], "provider");
+        assert_eq!(value["failure"]["generationMayHaveSucceeded"], true);
+        assert_eq!(value["failure"]["providerSucceeded"], false);
+        assert_eq!(value["failure"]["artifactCommitMayHaveSucceeded"], false);
+    }
+
+    #[test]
+    fn image_generation_terminal_statuses_have_stable_wire_values() {
+        let cases = [
+            (AgentImageGenerationResultStatus::Succeeded, "succeeded"),
+            (AgentImageGenerationResultStatus::Failed, "failed"),
+            (AgentImageGenerationResultStatus::Cancelled, "cancelled"),
+            (
+                AgentImageGenerationResultStatus::OutcomeIndeterminate,
+                "outcomeIndeterminate",
+            ),
+            (
+                AgentImageGenerationResultStatus::CommitIndeterminate,
+                "commitIndeterminate",
+            ),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(serde_json::to_value(status).unwrap(), expected);
+        }
+    }
 
     #[test]
     fn skill_activated_event_uses_the_stable_frontend_contract() {

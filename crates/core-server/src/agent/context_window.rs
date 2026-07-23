@@ -274,7 +274,8 @@ impl AgentService {
                 .map(ToString::to_string),
             active_assistant_message_id: latest_trace
                 .map(|trace| trace.assistant_message_id.clone()),
-            committed_trace_items: latest_trace.map_or(0, |trace| trace.items.len()),
+            committed_trace_items: latest_trace
+                .map_or(0, ConversationTurnTrace::model_context_item_count),
             terminal: latest_trace.is_none_or(|trace| trace.terminal_status.is_terminal()),
             last_access: self.next_conversation_context_state_access(),
         };

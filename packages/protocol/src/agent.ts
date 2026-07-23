@@ -92,6 +92,7 @@ export type AgentToolName =
   | 'office_document'
   | 'office_spreadsheet'
   | 'office_presentation'
+  | 'image_generation'
   | (string & {})
 
 export type AgentToolSafety = 'read_only' | 'requires_approval' | 'destructive'

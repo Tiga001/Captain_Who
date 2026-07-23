@@ -255,6 +255,71 @@ fn startup_trace_reconciliation_retires_cancelled_orphan_and_unblocks_fork() {
 }
 
 #[test]
+fn startup_trace_reconciliation_closes_a_durable_unresolved_tool_call() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let conversation_id = "conversation-open-call";
+    let assistant_message_id = "assistant-open-call";
+    let run_id = "run-open-call";
+    save_run_conversation(
+        &service,
+        conversation_id,
+        assistant_message_id,
+        run_id,
+        "running",
+        "pending",
+    );
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![ConversationTurnTraceItem::ToolCall {
+            sequence: 0,
+            call_id: "image-call".to_string(),
+            tool: "image_generation".to_string(),
+            operation: serde_json::json!({
+                "request": { "operation": "generate", "prompt": "private prompt" },
+                "reason": "Create the requested image."
+            }),
+            approval_status: crate::AgentApprovalStatus::NotRequired,
+            truncated: false,
+        }],
+    };
+    service
+        .append_in_progress_conversation_turn_trace(&trace, 10, 20)
+        .unwrap();
+
+    assert_eq!(
+        service
+            .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), 100)
+            .unwrap(),
+        1
+    );
+    let repaired = service
+        .get_conversation_turn_trace(assistant_message_id)
+        .unwrap()
+        .unwrap();
+    repaired.validate().unwrap();
+    assert_eq!(
+        repaired.terminal_status,
+        crate::ConversationTurnTraceTerminalStatus::Failed
+    );
+    assert!(matches!(
+        repaired.items.last(),
+        Some(ConversationTurnTraceItem::ToolResult {
+            call_id,
+            tool,
+            success: false,
+            ..
+        }) if call_id == "image-call" && tool == "image_generation"
+    ));
+}
+
+#[test]
 fn completed_looking_renderer_state_is_conservatively_reconciled_as_interrupted_failure() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

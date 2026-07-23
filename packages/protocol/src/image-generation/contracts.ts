@@ -160,3 +160,104 @@ export interface ImageGenerationConfigurationErrorData {
   /** A refresh is mandatory before retrying an indeterminate persistence result. */
   configurationMayHaveChanged?: true
 }
+
+/**
+ * Version of the presentation-safe image-generation result emitted by the Agent Tool.
+ *
+ * This boundary deliberately contains no provider endpoint, credential, provider output URL,
+ * filesystem path, or input image bytes. Generated content is referenced exclusively through an
+ * application-owned immutable Artifact URI.
+ */
+export const AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION = 1 as const
+
+export type AgentImageGenerationResultStatus =
+  'succeeded' | 'failed' | 'cancelled' | 'outcomeIndeterminate' | 'commitIndeterminate'
+
+export type AgentImageGenerationOperation = 'generate' | 'edit'
+
+export type AgentImageGenerationArtifactKind = 'image'
+
+export type AgentImageGenerationArtifactFormat = 'png' | 'jpeg' | 'webp'
+
+/** Immutable identity and display metadata for a verified managed image Artifact. */
+export interface AgentImageGenerationArtifact {
+  artifactId: string
+  uri: string
+  kind: AgentImageGenerationArtifactKind
+  format: AgentImageGenerationArtifactFormat
+  mimeType: string
+  width: number
+  height: number
+  sizeBytes: number
+  sha256: string
+}
+
+/** Correlation metadata safe to persist in Agent traces and expose to clients. */
+export interface AgentImageGenerationAudit {
+  executionId: string
+  requestFingerprint: string
+  providerProfileId: string
+  adapterId: string
+  profileRevision: number
+  modelId: string
+  providerRequestId?: string
+  httpStatus?: number
+  createdAt: number
+  completedAt: number
+  durationMs: number
+}
+
+export type AgentImageGenerationFailureCode =
+  | 'providerFailed'
+  | 'cancelled'
+  | 'deadlineExceeded'
+  | 'artifactFailed'
+  | 'commitIndeterminate'
+  | 'executionInterrupted'
+  | 'journalUnavailable'
+
+export type AgentImageGenerationFailurePhase =
+  | 'admission'
+  | 'configuration'
+  | 'provider'
+  | 'artifactDownload'
+  | 'artifactPublish'
+  | 'journal'
+  | 'recovery'
+
+/** Stable failure details with explicit remote-generation and Artifact-commit uncertainty. */
+export interface AgentImageGenerationFailure {
+  code: AgentImageGenerationFailureCode
+  phase: AgentImageGenerationFailurePhase
+  message: string
+  recovery: string
+  retryable: boolean
+  generationMayHaveSucceeded: boolean
+  providerSucceeded: boolean
+  artifactCommitMayHaveSucceeded: boolean
+}
+
+interface AgentImageGenerationResultBase {
+  schemaVersion: typeof AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION
+  operation: AgentImageGenerationOperation
+  audit: AgentImageGenerationAudit
+}
+
+export interface AgentImageGenerationSucceededResult extends AgentImageGenerationResultBase {
+  status: 'succeeded'
+  artifact: AgentImageGenerationArtifact
+  failure?: never
+}
+
+export interface AgentImageGenerationUnsuccessfulResult extends AgentImageGenerationResultBase {
+  status: Exclude<AgentImageGenerationResultStatus, 'succeeded'>
+  artifact?: never
+  failure: AgentImageGenerationFailure
+}
+
+/**
+ * Terminal image-generation Tool result. The discriminated union makes Artifact publication
+ * impossible to confuse with a failed, cancelled, or indeterminate execution.
+ */
+export type AgentImageGenerationResult =
+  AgentImageGenerationSucceededResult | AgentImageGenerationUnsuccessfulResult

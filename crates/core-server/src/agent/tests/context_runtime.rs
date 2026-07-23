@@ -439,8 +439,11 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
     let call = ConversationTurnTraceItem::ToolCall {
         sequence: 1,
         call_id: "call-live".to_string(),
-        tool: "read_file".to_string(),
-        operation: json!({ "path": "src/lib.rs" }),
+        tool: "image_generation".to_string(),
+        operation: json!({
+            "request": { "operation": "generate", "prompt": "private prompt" },
+            "reason": "Create the requested image."
+        }),
         approval_status: AgentApprovalStatus::NotRequired,
         truncated: false,
     };
@@ -461,14 +464,23 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
             .committed_trace_items,
         1
     );
+    let durable_open_call = storage
+        .get_conversation_turn_trace("assistant-live")
+        .unwrap()
+        .unwrap();
+    assert_eq!(durable_open_call.items.len(), 2);
+    assert!(matches!(
+        durable_open_call.items.last(),
+        Some(ConversationTurnTraceItem::ToolCall { call_id, .. }) if call_id == "call-live"
+    ));
 
     let result = ConversationTurnTraceItem::ToolResult {
         sequence: 2,
         call_id: "call-live".to_string(),
-        tool: "read_file".to_string(),
+        tool: "image_generation".to_string(),
         status: ConversationTraceToolResultStatus::Succeeded,
         success: true,
-        observation: json!({ "path": "src/lib.rs", "endLine": 20 }),
+        observation: json!({ "status": "succeeded" }),
         approval_status: AgentApprovalStatus::NotRequired,
         error: None,
         truncated: false,

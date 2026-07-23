@@ -73,12 +73,12 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tool_flow::{
-    approve_proposed_action, build_tool_observation_message, cancelled_output, done_event,
-    enforce_skill_activation_barrier, execute_host_action_on_blocking_thread,
-    execute_tool_on_blocking_thread, extract_reason_from_args, failed_tool_call_result,
-    file_draft_from_tool_result, generate_run_id, llm_image_message_from_tool_result,
-    redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
-    tool_calls_from_response,
+    approve_proposed_action, build_tool_observation_message, cancellation_preempts_tool_result,
+    cancelled_output, done_event, enforce_skill_activation_barrier,
+    execute_host_action_on_blocking_thread, execute_tool_on_blocking_thread,
+    extract_reason_from_args, failed_tool_call_result, file_draft_from_tool_result,
+    generate_run_id, llm_image_message_from_tool_result, redact_tool_result_for_event,
+    sanitize_max_tokens, sanitize_temperature, state_event, tool_calls_from_response,
 };
 use tool_input_stream::ToolInputStreamObservers;
 
@@ -187,6 +187,7 @@ impl AgentRuntime {
             skill_resources,
             skill_activation_resolver,
             office_engine,
+            image_generation_execution,
             command_runtime_profile_resolver,
         } = host_services.unwrap_or_default();
         let run_id = run_id.unwrap_or_else(generate_run_id);
@@ -234,10 +235,13 @@ impl AgentRuntime {
             &input,
             &run_id,
             extension_snapshots,
-            host_executor.is_some(),
-            office_engine,
-            skill_activation_resolver,
-            skill_resources.clone(),
+            RuntimeCapabilityServices {
+                host_actions_available: host_executor.is_some(),
+                office_engine,
+                image_generation_execution,
+                skill_activation_resolver,
+                skill_resources: skill_resources.clone(),
+            },
         )
         .map_err(|error| {
             attach_failed_runtime_trace(
@@ -1217,6 +1221,10 @@ impl AgentRuntime {
                         )
                         .await
                     };
+                    let authoritative_tool_settlement = matches!(
+                        tool_registry.cancellation_settlement(&call.tool),
+                        crate::tools::AgentToolCancellationSettlement::Authoritative
+                    );
                     let result = match result_result {
                         Ok(result) => result,
                         Err(error) if error.is_cancelled() => {
@@ -1240,9 +1248,16 @@ impl AgentRuntime {
                         .record_tool_result(&call, &trace_result);
                     pending_trace_baseline =
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
-                    if (!auto_execute_host_action && cancellation_token.is_cancelled())
-                        || result.error.as_deref() == Some("agent run 已取消。")
-                    {
+                    if cancellation_preempts_tool_result(
+                        auto_execute_host_action,
+                        if authoritative_tool_settlement {
+                            crate::tools::AgentToolCancellationSettlement::Authoritative
+                        } else {
+                            crate::tools::AgentToolCancellationSettlement::Interruptible
+                        },
+                        cancellation_token.is_cancelled(),
+                        &result,
+                    ) {
                         return Ok(cancelled_output(
                             run_id,
                             event_stream,
