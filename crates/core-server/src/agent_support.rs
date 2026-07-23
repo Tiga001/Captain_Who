@@ -26,7 +26,8 @@ use mycopilot_core::{
     AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
     AgentProposedAction, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
     AgentSkillMaterializationRequest, AgentSkillScriptRequest, AgentToolCall, AgentToolResult,
-    AgentUsage, AgentWorkspaceContext, ContextCompactionAuditBundle, ContextJournalCursor,
+    AgentTurnDiffIdentity, AgentTurnFileChange, AgentTurnFileContent, AgentUsage,
+    AgentWorkspaceContext, ContextCompactionAuditBundle, ContextJournalCursor,
     ConversationTurnTrace, ConversationTurnTraceTerminalStatus, ModelCapabilities,
 };
 use mycopilot_protocol_rs::{

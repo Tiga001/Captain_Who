@@ -193,6 +193,7 @@ export const enUSTranslations = {
   'gitReview.loading': 'Reading Git changes',
   'gitReview.scope.unstaged': 'Unstaged',
   'gitReview.scope.staged': 'Staged',
+  'gitReview.scope.lastTurn': 'Last turn',
   'gitReview.stats.summary': '{files} files, {additions} additions, {deletions} deletions',
   'gitReview.stats.incomplete': '{files} files; line statistics are incomplete',
   'gitReview.options': 'More review options',
@@ -231,6 +232,9 @@ export const enUSTranslations = {
   'gitReview.empty.unstaged.description': 'There are no unstaged workspace changes to review.',
   'gitReview.empty.staged.title': 'No staged changes',
   'gitReview.empty.staged.description': 'There are no changes in the Git index to review.',
+  'gitReview.empty.lastTurn.title': 'No file changes in the last turn',
+  'gitReview.empty.lastTurn.description':
+    'The last turn in the current task has no file changes to review.',
   'gitReview.error.title': 'Unable to read Git changes',
   'gitReview.error.dismiss': 'Dismiss error',
   'gitReview.retry': 'Retry',

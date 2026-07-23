@@ -61,7 +61,7 @@ function readyContent(snapshotId = 'snapshot-1'): GitReviewFileContent {
 }
 
 function ReviewHarness({ active }: { active: boolean }) {
-  const review = useGitReview('project-1', active)
+  const review = useGitReview('project-1', active, 'conversation-1')
   return (
     <div>
       <output data-testid="summary-status">
@@ -83,6 +83,12 @@ function ReviewHarness({ active }: { active: boolean }) {
       </button>
       <button type="button" onClick={() => void review.refresh()}>
         refresh
+      </button>
+      <button type="button" onClick={() => review.setScope('lastTurn')}>
+        last turn
+      </button>
+      <button type="button" onClick={() => void review.mutateFile('file-1', 'stage')}>
+        mutate
       </button>
     </div>
   )
@@ -180,6 +186,24 @@ describe('useGitReview request lifecycle', () => {
     await screen.getByRole('button', { name: 'retry diff' }).click()
     await expect.element(screen.getByTestId('diff-status')).toHaveTextContent('ready')
     expect(diffSpy).toHaveBeenCalledTimes(2)
+  })
+
+  it('scopes last-turn reads to the active conversation and blocks mutations', async () => {
+    const screen = await render(<ReviewHarness active />)
+    await expect
+      .element(screen.getByTestId('summary-status'))
+      .toHaveTextContent('ready:snapshot-1:ok')
+
+    await screen.getByRole('button', { name: 'last turn' }).click()
+    await expect.poll(() => summarySpy.mock.calls.length).toBeGreaterThan(1)
+    expect(summarySpy).toHaveBeenLastCalledWith({
+      conversationId: 'conversation-1',
+      projectId: 'project-1',
+      scope: 'lastTurn'
+    })
+
+    await screen.getByRole('button', { name: 'mutate' }).click()
+    expect(mutateSpy).not.toHaveBeenCalled()
   })
 })
 

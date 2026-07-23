@@ -1,4 +1,7 @@
-use crate::{content_revision, AgentPatchOperation, AgentPermissions, AgentWritePermission};
+use crate::{
+    capture_agent_turn_file_content, content_revision, AgentPatchOperation, AgentPermissions,
+    AgentTurnFileChange, AgentWritePermission,
+};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -12,6 +15,8 @@ const UNSUPPORTED_PATCH_EXTENSIONS: &[&str] = &["pdf", "doc", "docx", "ppt", "pp
 #[serde(rename_all = "camelCase")]
 pub struct PatchApplyResult {
     pub file_paths: Vec<String>,
+    #[serde(skip)]
+    pub file_change: AgentTurnFileChange,
 }
 
 pub fn apply_unified_diff_in_workspace(
@@ -41,12 +46,19 @@ pub fn apply_unified_diff_in_workspace(
     validate_base_revision(&target, operation, expected_base_revision)?;
     let paths = validate_patch_paths(&target, patch)?;
     let apply_patch = rewrite_patch_for_apply_root(patch, &target);
+    let before = capture_agent_turn_file_content(&target.absolute_path);
 
     run_git_apply(&target.apply_root, &apply_patch, true)?;
     run_git_apply(&target.apply_root, &apply_patch, false)?;
+    let after = capture_agent_turn_file_content(&target.absolute_path);
 
     Ok(PatchApplyResult {
         file_paths: paths.into_iter().collect(),
+        file_change: AgentTurnFileChange {
+            path: target.display_path,
+            before,
+            after,
+        },
     })
 }
 
@@ -590,6 +602,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.file_paths, vec!["src/notes.txt"]);
+        assert_eq!(
+            result.file_change,
+            AgentTurnFileChange {
+                path: "src/notes.txt".to_string(),
+                before: crate::AgentTurnFileContent::Text("old\n".to_string()),
+                after: crate::AgentTurnFileContent::Text("new\n".to_string()),
+            }
+        );
         assert_eq!(std::fs::read_to_string(target).unwrap(), "new\n");
     }
 

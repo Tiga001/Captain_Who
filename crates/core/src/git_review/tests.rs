@@ -3,6 +3,110 @@ use std::process::Command;
 use tempfile::TempDir;
 
 #[test]
+fn last_turn_review_reuses_read_only_diff_and_content_surfaces() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    let workspace_root = repo.path().canonicalize().unwrap();
+    let record = crate::AgentTurnDiffRecord {
+        identity: crate::AgentTurnDiffIdentity {
+            run_id: "run-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-1".to_string(),
+            project_id: "project-1".to_string(),
+            workspace_root: workspace_root.to_string_lossy().into_owned(),
+        },
+        files: vec![
+            crate::AgentTurnFileChange {
+                path: "created.txt".to_string(),
+                before: crate::AgentTurnFileContent::Missing,
+                after: crate::AgentTurnFileContent::Text("created\n".to_string()),
+            },
+            crate::AgentTurnFileChange {
+                path: "modified.txt".to_string(),
+                before: crate::AgentTurnFileContent::Text("before\n".to_string()),
+                after: crate::AgentTurnFileContent::Text("after\n".to_string()),
+            },
+            crate::AgentTurnFileChange {
+                path: "binary.bin".to_string(),
+                before: crate::AgentTurnFileContent::Binary,
+                after: crate::AgentTurnFileContent::Binary,
+            },
+        ],
+        truncated: false,
+    };
+    let service = GitReviewService::new();
+    let summary = service
+        .review_last_turn_summary(repo.path(), Some(&record))
+        .unwrap();
+
+    assert_eq!(summary.scope, GitReviewScope::LastTurn);
+    assert_eq!(summary.files.len(), 3);
+    assert!(!summary.stats.line_counts_complete);
+    let created = summary
+        .files
+        .iter()
+        .find(|file| file.path == "created.txt")
+        .unwrap();
+    assert_eq!(created.status, GitReviewFileStatus::Added);
+    assert_eq!(
+        created.stats,
+        Some(GitReviewFileStats {
+            additions: 1,
+            deletions: 0,
+        })
+    );
+
+    let diff = service
+        .review_file_diff(&summary.snapshot_id, &created.id)
+        .unwrap();
+    assert_eq!(diff.status, GitReviewFileDiffStatus::Ready);
+    assert!(diff.patch.unwrap().contains("+created"));
+    let content = service
+        .review_file_content(&summary.snapshot_id, &created.id)
+        .unwrap();
+    assert_eq!(content.status, GitReviewFileContentStatus::Ready);
+    assert_eq!(content.before_text, None);
+    assert_eq!(content.after_text.as_deref(), Some("created\n"));
+    assert_eq!(
+        service
+            .mutate_review_file(
+                &summary.snapshot_id,
+                &created.id,
+                GitReviewFileMutationAction::Stage,
+            )
+            .unwrap_err(),
+        "Last-turn review is read-only."
+    );
+}
+
+#[test]
+fn last_turn_review_ignores_records_from_a_different_workspace() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    let record = crate::AgentTurnDiffRecord {
+        identity: crate::AgentTurnDiffIdentity {
+            run_id: "run-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-1".to_string(),
+            project_id: "project-1".to_string(),
+            workspace_root: repo.path().join("other").to_string_lossy().into_owned(),
+        },
+        files: vec![crate::AgentTurnFileChange {
+            path: "created.txt".to_string(),
+            before: crate::AgentTurnFileContent::Missing,
+            after: crate::AgentTurnFileContent::Text("created\n".to_string()),
+        }],
+        truncated: false,
+    };
+    let summary = GitReviewService::new()
+        .review_last_turn_summary(repo.path(), Some(&record))
+        .unwrap();
+    assert!(summary.files.is_empty());
+}
+
+#[test]
 fn diff_patch_budget_rejects_each_dimension_independently() {
     assert!(!exceeds_diff_patch_budget(b"@@ -1 +1 @@\n-old\n+new\n"));
 

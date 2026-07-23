@@ -45,6 +45,7 @@ pub(crate) struct ActionExecutionDecision {
     pub(crate) final_pending_status: PendingActionStatus,
     pub(crate) patch_result: Option<AgentPatchResult>,
     pub(crate) file_write_result: Option<AgentFileWriteResult>,
+    pub(crate) file_change: Option<AgentTurnFileChange>,
     pub(crate) tool_result: AgentToolResult,
 }
 

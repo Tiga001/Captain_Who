@@ -33,7 +33,25 @@ pub(crate) fn handle_git_request(
                 Ok(path) => path,
                 Err(message) => return response_error(Some(request.id), -32000, message),
             };
-            match git_review_service.review_summary(&project_path, scope) {
+            let summary = if scope == GitReviewScope::LastTurn {
+                let turn = input
+                    .conversation_id
+                    .as_deref()
+                    .map(|conversation_id| {
+                        storage.load_latest_agent_turn_diff(conversation_id, &input.project_id)
+                    })
+                    .transpose();
+                match turn {
+                    Ok(turn) => git_review_service.review_last_turn_summary(
+                        &project_path,
+                        turn.as_ref().and_then(Option::as_ref),
+                    ),
+                    Err(message) => Err(message),
+                }
+            } else {
+                git_review_service.review_summary(&project_path, scope)
+            };
+            match summary {
                 Ok(summary) => response_success(request.id, summary),
                 Err(message) => response_error(Some(request.id), -32000, message),
             }

@@ -30,6 +30,7 @@ import { useGitReview } from './useGitReview'
 import './GitReviewPanel.css'
 
 interface GitReviewPanelProps {
+  conversationId?: string | null
   isActive: boolean
   projectId: string
 }
@@ -50,7 +51,11 @@ function emptyFileVisibility(): GitReviewFileVisibility {
   return { near: new Set(), visible: new Set() }
 }
 
-export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): ReactNode {
+export function GitReviewPanel({
+  conversationId,
+  isActive,
+  projectId
+}: GitReviewPanelProps): ReactNode {
   const { t } = useFrontendConfig()
   const {
     cancelQueuedFileContentsExcept,
@@ -70,7 +75,7 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
     setHotFullContentFileIds,
     setScope,
     summaryState
-  } = useGitReview(projectId, isActive)
+  } = useGitReview(projectId, isActive, conversationId)
   const [expandedFileIds, setExpandedFileIds] = useState<Set<string>>(() => new Set())
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<GitReviewViewMode>('unified')
@@ -448,7 +453,11 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
   }, [])
 
   const scopeLabel =
-    scope === 'unstaged' ? t('gitReview.scope.unstaged') : t('gitReview.scope.staged')
+    scope === 'lastTurn'
+      ? t('gitReview.scope.lastTurn')
+      : scope === 'unstaged'
+        ? t('gitReview.scope.unstaged')
+        : t('gitReview.scope.staged')
   const stats = summaryState.value?.scope === scope ? summaryState.value.stats : null
   const statsLabel = stats
     ? formatTranslation(
@@ -483,6 +492,11 @@ export function GitReviewPanel({ isActive, projectId }: GitReviewPanelProps): Re
             </button>
             {openMenu === 'scope' && (
               <div className="git-review__menu git-review__scope-menu" role="menu">
+                <ScopeMenuItem
+                  checked={scope === 'lastTurn'}
+                  label={t('gitReview.scope.lastTurn')}
+                  onSelect={() => handleScopeChange('lastTurn')}
+                />
                 <ScopeMenuItem
                   checked={scope === 'unstaged'}
                   label={t('gitReview.scope.unstaged')}
@@ -908,11 +922,17 @@ function GitReviewContent({
 
   if (summaryState.value && summaryState.value.files.length === 0) {
     const title =
-      scope === 'unstaged' ? t('gitReview.empty.unstaged.title') : t('gitReview.empty.staged.title')
+      scope === 'lastTurn'
+        ? t('gitReview.empty.lastTurn.title')
+        : scope === 'unstaged'
+          ? t('gitReview.empty.unstaged.title')
+          : t('gitReview.empty.staged.title')
     const description =
-      scope === 'unstaged'
-        ? t('gitReview.empty.unstaged.description')
-        : t('gitReview.empty.staged.description')
+      scope === 'lastTurn'
+        ? t('gitReview.empty.lastTurn.description')
+        : scope === 'unstaged'
+          ? t('gitReview.empty.unstaged.description')
+          : t('gitReview.empty.staged.description')
     return (
       <div className="git-review__center-state git-review__center-state--empty">
         <h2>{title}</h2>

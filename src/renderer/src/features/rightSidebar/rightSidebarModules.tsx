@@ -2,6 +2,7 @@ import { lazy, memo, Suspense, useCallback } from 'react'
 import { FileDiff, FolderOpen, Globe2, TerminalSquare } from 'lucide-react'
 import { getFileTypeIconSource } from '../../components/files/FileTypeIcon'
 import type { BrowserPageMetadata } from '../browser/browserTypes'
+import { useRightSidebarRuntimeContext } from './RightSidebarRuntimeContext'
 import type {
   RightSidebarModuleCreateContext,
   RightSidebarModuleDefinition,
@@ -174,8 +175,22 @@ function renderGitReviewModule({ activity, availability, page, t }: RightSidebar
     <Suspense
       fallback={<div className="right-sidebar__panel-loading">{t('gitReview.loading')}</div>}
     >
-      <GitReviewPanel isActive={activity === 'foreground'} projectId={page.workspaceKey ?? ''} />
+      <GitReviewModuleSurface
+        isActive={activity === 'foreground'}
+        projectId={page.workspaceKey ?? ''}
+      />
     </Suspense>
+  )
+}
+
+function GitReviewModuleSurface({ isActive, projectId }: { isActive: boolean; projectId: string }) {
+  const { activeConversationId, activeWorkspaceKey } = useRightSidebarRuntimeContext()
+  return (
+    <GitReviewPanel
+      conversationId={projectId === activeWorkspaceKey ? activeConversationId : null}
+      isActive={isActive}
+      projectId={projectId}
+    />
   )
 }
 

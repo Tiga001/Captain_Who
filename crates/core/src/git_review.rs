@@ -16,6 +16,7 @@ mod git_command;
 mod mutation;
 mod repository;
 mod snapshot;
+mod turn;
 
 use content::*;
 use diff::*;
@@ -23,6 +24,7 @@ use git_command::*;
 use mutation::*;
 use repository::*;
 use snapshot::*;
+use turn::*;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(12);
 const SNAPSHOT_TTL: Duration = Duration::from_secs(5 * 60);
@@ -65,6 +67,7 @@ pub struct GitRepositoryInspection {
 pub enum GitReviewScope {
     Unstaged,
     Staged,
+    LastTurn,
 }
 
 impl GitReviewScope {
@@ -72,6 +75,7 @@ impl GitReviewScope {
         match value {
             "unstaged" => Ok(Self::Unstaged),
             "staged" => Ok(Self::Staged),
+            "lastTurn" => Ok(Self::LastTurn),
             _ => Err("Unsupported Git review scope.".to_string()),
         }
     }
@@ -80,6 +84,7 @@ impl GitReviewScope {
         match self {
             Self::Unstaged => "unstaged",
             Self::Staged => "staged",
+            Self::LastTurn => "lastTurn",
         }
     }
 }
@@ -211,6 +216,7 @@ pub struct GitReviewFileMutation {
 
 pub struct GitReviewService {
     snapshots: Mutex<SnapshotCache>,
+    turn_snapshots: Mutex<TurnSnapshotCache>,
 }
 
 impl Default for GitReviewService {
@@ -223,6 +229,7 @@ impl GitReviewService {
     pub fn new() -> Self {
         Self {
             snapshots: Mutex::new(SnapshotCache::default()),
+            turn_snapshots: Mutex::new(TurnSnapshotCache::default()),
         }
     }
 
@@ -264,6 +271,9 @@ impl GitReviewService {
         project_path: &Path,
         scope: GitReviewScope,
     ) -> Result<GitReviewSummary, String> {
+        if scope == GitReviewScope::LastTurn {
+            return Err("Last-turn review requires an agent turn record.".to_string());
+        }
         let repository = resolve_repository(project_path).map_err(|error| error.message())?;
         let args = vec![
             "status".to_string(),
@@ -350,11 +360,39 @@ impl GitReviewService {
         })
     }
 
+    pub fn review_last_turn_summary(
+        &self,
+        project_path: &Path,
+        record: Option<&crate::AgentTurnDiffRecord>,
+    ) -> Result<GitReviewSummary, String> {
+        let repository = resolve_repository(project_path).map_err(|error| error.message())?;
+        let (summary, snapshot) = build_last_turn_review(&repository, project_path, record);
+        self.turn_snapshots
+            .lock()
+            .map_err(|_| "Last-turn review snapshot cache is unavailable.".to_string())?
+            .insert(snapshot);
+        Ok(summary)
+    }
+
     pub fn review_file_diff(
         &self,
         snapshot_id: &str,
         file_id: &str,
     ) -> Result<GitReviewFileDiff, String> {
+        let turn_snapshot = self
+            .turn_snapshots
+            .lock()
+            .map_err(|_| "Last-turn review snapshot cache is unavailable.".to_string())?
+            .get(snapshot_id);
+        if let Some(snapshot) = turn_snapshot {
+            let Some(file) = snapshot.files.get(file_id) else {
+                return Ok(expired_diff(snapshot_id, file_id));
+            };
+            return Ok(last_turn_file_diff(snapshot_id, file_id, file));
+        }
+        if snapshot_id.starts_with(LAST_TURN_SNAPSHOT_PREFIX) {
+            return Ok(expired_diff(snapshot_id, file_id));
+        }
         let snapshot = self
             .snapshots
             .lock()
@@ -436,6 +474,20 @@ impl GitReviewService {
         snapshot_id: &str,
         file_id: &str,
     ) -> Result<GitReviewFileContent, String> {
+        let turn_snapshot = self
+            .turn_snapshots
+            .lock()
+            .map_err(|_| "Last-turn review snapshot cache is unavailable.".to_string())?
+            .get(snapshot_id);
+        if let Some(snapshot) = turn_snapshot {
+            let Some(file) = snapshot.files.get(file_id) else {
+                return Ok(expired_content(snapshot_id, file_id));
+            };
+            return Ok(last_turn_file_content(snapshot_id, file_id, file));
+        }
+        if snapshot_id.starts_with(LAST_TURN_SNAPSHOT_PREFIX) {
+            return Ok(expired_content(snapshot_id, file_id));
+        }
         let snapshot = self
             .snapshots
             .lock()
@@ -466,6 +518,9 @@ impl GitReviewService {
         file_id: &str,
         action: GitReviewFileMutationAction,
     ) -> Result<GitReviewFileMutation, String> {
+        if snapshot_id.starts_with(LAST_TURN_SNAPSHOT_PREFIX) {
+            return Err("Last-turn review is read-only.".to_string());
+        }
         let snapshot = self
             .snapshots
             .lock()

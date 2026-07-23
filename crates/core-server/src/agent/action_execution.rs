@@ -1245,6 +1245,15 @@ impl AgentService {
                 cancellation_token.check()?;
                 let action_id = diff.id.clone();
                 let execution = approved_patch_execution_for_input(&agent_input, &action_id, &diff);
+                record_turn_file_change_best_effort(
+                    &self.storage,
+                    &agent_input,
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &action_id,
+                    execution.file_change.as_ref(),
+                );
                 self.record_auto_action_audit(
                     &run_id,
                     conversation_id,
@@ -1457,6 +1466,15 @@ impl AgentService {
                 };
                 let execution =
                     approved_file_write_execution(&self.storage, &agent_input, &file_write);
+                record_turn_file_change_best_effort(
+                    &self.storage,
+                    &agent_input,
+                    &run_id,
+                    conversation_id.as_deref(),
+                    assistant_message_id.as_deref(),
+                    &file_write.id,
+                    execution.file_change.as_ref(),
+                );
                 self.record_auto_action_audit(
                     &run_id,
                     conversation_id,

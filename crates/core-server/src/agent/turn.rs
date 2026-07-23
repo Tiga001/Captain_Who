@@ -25,7 +25,6 @@ impl AgentService {
                 return Err(error);
             }
         };
-
         self.register_usage_context(&run_id, prepared.usage_context.clone());
         if self.is_agent_input_scope_deleting(&prepared.agent_input) {
             self.discard_usage_context(&run_id);
@@ -34,6 +33,13 @@ impl AgentService {
                 .to_string()
                 .into());
         }
+        initialize_turn_diff_best_effort(
+            &self.storage,
+            &prepared.agent_input,
+            &run_id,
+            &prepared.output.conversation_id,
+            &prepared.output.assistant_message_id,
+        );
 
         let output = prepared.output.clone();
         let service = self.clone();

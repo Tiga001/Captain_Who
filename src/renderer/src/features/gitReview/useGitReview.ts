@@ -60,6 +60,7 @@ interface DiffRequestRecord extends GitReviewDiffQueueItem {
 }
 
 interface RequestableSnapshot {
+  conversationId: string | null
   projectId: string
   scope: GitReviewScope
   summary: GitReviewSummary
@@ -69,8 +70,9 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-export function useGitReview(projectId: string, isActive: boolean) {
+export function useGitReview(projectId: string, isActive: boolean, conversationId?: string | null) {
   const [scope, setScope] = useState<GitReviewScope>('unstaged')
+  const lastTurnConversationId = scope === 'lastTurn' ? (conversationId ?? null) : null
   const [summaryState, setSummaryState] = useState<GitReviewSummaryState>({ status: 'idle' })
   const [diffStates, setDiffStates] = useState<Record<string, GitReviewDiffState>>({})
   const [fileContentStates, setFileContentStates] = useState<
@@ -116,12 +118,13 @@ export function useGitReview(projectId: string, isActive: boolean) {
     if (
       requestableSnapshotRef.current &&
       (requestableSnapshotRef.current.projectId !== projectId ||
-        requestableSnapshotRef.current.scope !== scope)
+        requestableSnapshotRef.current.scope !== scope ||
+        requestableSnapshotRef.current.conversationId !== lastTurnConversationId)
     ) {
       requestableSnapshotRef.current = null
       refreshFallbackRef.current = null
     }
-  }, [isActive, projectId, scope])
+  }, [isActive, lastTurnConversationId, projectId, scope])
 
   useEffect(
     () => () => {
@@ -154,7 +157,7 @@ export function useGitReview(projectId: string, isActive: boolean) {
     mutationRequestRef.current = null
     setMutationError(null)
     setPendingFileId(null)
-  }, [projectId, scope])
+  }, [lastTurnConversationId, projectId, scope])
 
   const resetReviewData = useCallback(() => {
     setDiffStates({})
@@ -190,7 +193,7 @@ export function useGitReview(projectId: string, isActive: boolean) {
   const refresh = useCallback(async () => {
     if (!projectId) return
     const requestId = summaryRequestRef.current + 1
-    const queryKey = `${projectId}:${scope}`
+    const queryKey = `${projectId}:${scope}:${lastTurnConversationId ?? ''}`
     const sameQuery = summaryQueryRef.current === queryKey
     const fallbackSnapshot = sameQuery
       ? (requestableSnapshotRef.current ?? refreshFallbackRef.current)
@@ -207,11 +210,20 @@ export function useGitReview(projectId: string, isActive: boolean) {
     if (!preserveCurrentReview) resetReviewData()
 
     try {
-      const summary = await getGitReviewSummary({ projectId, scope })
+      const summary = await getGitReviewSummary({
+        ...(lastTurnConversationId ? { conversationId: lastTurnConversationId } : {}),
+        projectId,
+        scope
+      })
       if (summaryRequestRef.current !== requestId) return
       if (preserveCurrentReview) resetReviewData()
       refreshFallbackRef.current = null
-      requestableSnapshotRef.current = { projectId, scope, summary }
+      requestableSnapshotRef.current = {
+        conversationId: lastTurnConversationId,
+        projectId,
+        scope,
+        summary
+      }
       setSummaryState({ status: 'ready', value: summary })
     } catch (error) {
       if (summaryRequestRef.current !== requestId) return
@@ -227,7 +239,7 @@ export function useGitReview(projectId: string, isActive: boolean) {
         drainFullContentQueueRef.current()
       }
     }
-  }, [projectId, resetReviewData, scope])
+  }, [lastTurnConversationId, projectId, resetReviewData, scope])
 
   const drainFullContentQueue = useCallback(() => {
     while (
@@ -316,7 +328,14 @@ export function useGitReview(projectId: string, isActive: boolean) {
     (fileId: string) => {
       if (!isActiveRef.current) return
       const requestable = requestableSnapshotRef.current
-      if (!requestable || requestable.projectId !== projectId || requestable.scope !== scope) return
+      if (
+        !requestable ||
+        requestable.projectId !== projectId ||
+        requestable.scope !== scope ||
+        requestable.conversationId !== lastTurnConversationId
+      ) {
+        return
+      }
       const summary = requestable.summary
       const existing = fileContentStatesRef.current[fileId]
       if (existing?.status === 'loading') return
@@ -343,7 +362,7 @@ export function useGitReview(projectId: string, isActive: boolean) {
       fullContentQueueRef.current.push(item)
       drainFullContentQueueRef.current()
     },
-    [projectId, scope]
+    [lastTurnConversationId, projectId, scope]
   )
 
   const cancelQueuedFileContentsExcept = useCallback((keepFileIds: ReadonlySet<string>) => {
@@ -479,7 +498,14 @@ export function useGitReview(projectId: string, isActive: boolean) {
     (fileId: string, priority: GitReviewDiffPriority, retryError: boolean) => {
       if (!isActiveRef.current) return
       const requestable = requestableSnapshotRef.current
-      if (!requestable || requestable.projectId !== projectId || requestable.scope !== scope) return
+      if (
+        !requestable ||
+        requestable.projectId !== projectId ||
+        requestable.scope !== scope ||
+        requestable.conversationId !== lastTurnConversationId
+      ) {
+        return
+      }
       const summary = requestable.summary
       const existingState = diffStatesRef.current[fileId]
       if (existingState?.status === 'ready') {
@@ -522,7 +548,7 @@ export function useGitReview(projectId: string, isActive: boolean) {
       setDiffStates(nextStates)
       drainDiffQueueRef.current()
     },
-    [projectId, scope]
+    [lastTurnConversationId, projectId, scope]
   )
 
   const loadFileDiff = useCallback(
@@ -582,6 +608,8 @@ export function useGitReview(projectId: string, isActive: boolean) {
         !requestable ||
         requestable.projectId !== projectId ||
         requestable.scope !== scope ||
+        requestable.conversationId !== lastTurnConversationId ||
+        scope === 'lastTurn' ||
         mutationRequestRef.current
       ) {
         return
@@ -611,7 +639,7 @@ export function useGitReview(projectId: string, isActive: boolean) {
         }
       }
     },
-    [projectId, refresh, scope]
+    [lastTurnConversationId, projectId, refresh, scope]
   )
 
   useEffect(() => {

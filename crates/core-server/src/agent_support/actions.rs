@@ -1,6 +1,126 @@
 use super::*;
 use mycopilot_core::office::{OfficeOperationParameters, OfficeRequestParameters};
 use serde_json::Map;
+use std::path::{Component, Path};
+
+pub(crate) fn initialize_turn_diff_best_effort(
+    storage: &StorageService,
+    agent_input: &AgentChatInput,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+) {
+    let Some(identity) =
+        turn_diff_identity(agent_input, run_id, conversation_id, assistant_message_id)
+    else {
+        return;
+    };
+    if let Err(error) = storage.initialize_agent_turn_diff(&identity) {
+        eprintln!("failed to initialize agent turn diff ledger: {error}");
+    }
+}
+
+pub(crate) fn record_turn_file_change_best_effort(
+    storage: &StorageService,
+    agent_input: &AgentChatInput,
+    run_id: &str,
+    conversation_id: Option<&str>,
+    assistant_message_id: Option<&str>,
+    action_id: &str,
+    change: Option<&AgentTurnFileChange>,
+) {
+    let (Some(conversation_id), Some(assistant_message_id), Some(change)) =
+        (conversation_id, assistant_message_id, change)
+    else {
+        return;
+    };
+    let Some(identity) =
+        turn_diff_identity(agent_input, run_id, conversation_id, assistant_message_id)
+    else {
+        return;
+    };
+    let Some(change) = workspace_relative_turn_change(&identity, change) else {
+        return;
+    };
+    if let Err(error) = storage.record_agent_turn_file_change(&identity, action_id, &change) {
+        eprintln!("failed to record agent turn file change: {error}");
+    }
+}
+
+fn turn_diff_identity(
+    agent_input: &AgentChatInput,
+    run_id: &str,
+    conversation_id: &str,
+    assistant_message_id: &str,
+) -> Option<AgentTurnDiffIdentity> {
+    let context = agent_input.context.as_ref()?;
+    if context
+        .conversation_id
+        .as_deref()
+        .is_some_and(|context_id| context_id != conversation_id)
+    {
+        return None;
+    }
+    let project_id = context.project_id.as_deref()?.trim();
+    let workspace = context.workspace.as_ref()?;
+    if workspace
+        .project_id
+        .as_deref()
+        .is_some_and(|workspace_project_id| workspace_project_id != project_id)
+    {
+        return None;
+    }
+    let workspace_root = Path::new(workspace.root_path.as_deref()?.trim())
+        .canonicalize()
+        .ok()?;
+    if !workspace_root.is_dir() {
+        return None;
+    }
+
+    Some(AgentTurnDiffIdentity {
+        run_id: run_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        project_id: project_id.to_string(),
+        workspace_root: workspace_root.to_string_lossy().into_owned(),
+    })
+}
+
+fn workspace_relative_turn_change(
+    identity: &AgentTurnDiffIdentity,
+    change: &AgentTurnFileChange,
+) -> Option<AgentTurnFileChange> {
+    let path = Path::new(&change.path);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(Path::new(&identity.workspace_root))
+            .ok()?
+    } else {
+        path
+    };
+    let components = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            Component::CurDir => None,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if components.is_empty()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(AgentTurnFileChange {
+        path: components.join("/"),
+        before: change.before.clone(),
+        after: change.after.clone(),
+    })
+}
 
 pub(crate) fn action_id_for_action(action: &AgentProposedAction) -> String {
     match action {
@@ -426,7 +546,7 @@ pub(crate) fn action_execution_for_decision(
         return rejected_action_execution(storage, record, call, message);
     }
 
-    match &record.snapshot.action {
+    let execution = match &record.snapshot.action {
         AgentProposedAction::Diff { diff } => approved_patch_execution(record, diff),
         AgentProposedAction::FileWrite { file_write } => {
             approved_file_write_execution(storage, &record.agent_input, file_write)
@@ -437,6 +557,7 @@ pub(crate) fn action_execution_for_decision(
                 final_pending_status: PendingActionStatus::Failed,
                 patch_result: None,
                 file_write_result: None,
+                file_change: None,
                 tool_result: AgentToolResult {
                     call_id: call.id.clone(),
                     tool: call.tool.clone(),
@@ -454,9 +575,20 @@ pub(crate) fn action_execution_for_decision(
             final_pending_status: PendingActionStatus::Failed,
             patch_result: None,
             file_write_result: None,
+            file_change: None,
             tool_result: tool_result_for_decision(call, decision_status, message),
         },
-    }
+    };
+    record_turn_file_change_best_effort(
+        storage,
+        &record.agent_input,
+        &record.snapshot.run_id,
+        record.snapshot.conversation_id.as_deref(),
+        record.snapshot.assistant_message_id.as_deref(),
+        &record.snapshot.action_id,
+        execution.file_change.as_ref(),
+    );
+    execution
 }
 
 pub(crate) fn rejected_action_execution(
@@ -482,6 +614,7 @@ pub(crate) fn rejected_action_execution(
             final_pending_status: PendingActionStatus::Rejected,
             patch_result: Some(patch_result),
             file_write_result: None,
+            file_change: None,
             tool_result,
         };
     }
@@ -502,6 +635,7 @@ pub(crate) fn rejected_action_execution(
             final_pending_status: PendingActionStatus::Rejected,
             patch_result: None,
             file_write_result: Some(result.clone()),
+            file_change: None,
             tool_result: file_write_tool_result(&record.snapshot.action_id, true, &result),
         };
     }
@@ -511,6 +645,7 @@ pub(crate) fn rejected_action_execution(
         final_pending_status: PendingActionStatus::Rejected,
         patch_result: None,
         file_write_result: None,
+        file_change: None,
         tool_result: tool_result_for_decision(call, AgentApprovalDecisionStatus::Rejected, message),
     }
 }
@@ -529,7 +664,7 @@ pub(crate) fn approved_patch_execution_for_input(
 ) -> ActionExecutionDecision {
     let workspace_root = workspace_root_optional(agent_input);
     let permissions = permissions_from_input(agent_input);
-    let patch_result = match apply_unified_diff_in_workspace(
+    let (patch_result, file_change) = match apply_unified_diff_in_workspace(
         workspace_root.as_deref(),
         diff.operation,
         &diff.file_path,
@@ -537,26 +672,32 @@ pub(crate) fn approved_patch_execution_for_input(
         diff.base_revision.as_deref(),
         permissions,
     ) {
-        Ok(apply_result) => AgentPatchResult {
-            status: AgentPatchResultStatus::Applied,
-            operation: diff.operation,
-            file_path: diff.file_path.clone(),
-            applied_file_paths: apply_result.file_paths,
-            git_diff: None,
-            git_diff_error: None,
-            error: None,
-            message: diff.summary.clone(),
-        },
-        Err(error) => AgentPatchResult {
-            status: patch_status_for_error(&error),
-            operation: diff.operation,
-            file_path: diff.file_path.clone(),
-            applied_file_paths: Vec::new(),
-            git_diff: None,
-            git_diff_error: None,
-            error: Some(error),
-            message: None,
-        },
+        Ok(apply_result) => (
+            AgentPatchResult {
+                status: AgentPatchResultStatus::Applied,
+                operation: diff.operation,
+                file_path: diff.file_path.clone(),
+                applied_file_paths: apply_result.file_paths,
+                git_diff: None,
+                git_diff_error: None,
+                error: None,
+                message: diff.summary.clone(),
+            },
+            Some(apply_result.file_change),
+        ),
+        Err(error) => (
+            AgentPatchResult {
+                status: patch_status_for_error(&error),
+                operation: diff.operation,
+                file_path: diff.file_path.clone(),
+                applied_file_paths: Vec::new(),
+                git_diff: None,
+                git_diff_error: None,
+                error: Some(error),
+                message: None,
+            },
+            None,
+        ),
     };
 
     let applied = patch_result.status == AgentPatchResultStatus::Applied;
@@ -577,6 +718,7 @@ pub(crate) fn approved_patch_execution_for_input(
         },
         patch_result: Some(patch_result),
         file_write_result: None,
+        file_change,
         tool_result,
     }
 }
@@ -596,7 +738,7 @@ pub(crate) fn approved_file_write_execution(
             AgentFileWriteResultStatus::Failed,
             "未找到待应用的文件草稿。",
         );
-        return file_write_decision(proposal, result);
+        return file_write_decision(proposal, result, None);
     };
     if draft.status != "waiting_approval" {
         let result = failed_file_write_result(
@@ -607,7 +749,7 @@ pub(crate) fn approved_file_write_execution(
                 draft.status
             ),
         );
-        return file_write_decision(proposal, result);
+        return file_write_decision(proposal, result, None);
     }
     draft.status = "applying".to_string();
     draft.updated_at = now_ms();
@@ -637,12 +779,26 @@ pub(crate) fn approved_file_write_execution(
     .to_string();
     draft.updated_at = now_ms();
     let _ = storage.update_agent_file_draft(&draft);
-    file_write_decision(proposal, result)
+    let file_change = matches!(
+        result.status,
+        AgentFileWriteResultStatus::Applied | AgentFileWriteResultStatus::AlreadyApplied
+    )
+    .then(|| AgentTurnFileChange {
+        path: draft.file_path.clone(),
+        before: if draft.base_revision.is_some() {
+            AgentTurnFileContent::Text(draft.base_content.clone())
+        } else {
+            AgentTurnFileContent::Missing
+        },
+        after: AgentTurnFileContent::Text(draft.content.clone()),
+    });
+    file_write_decision(proposal, result, file_change)
 }
 
 fn file_write_decision(
     proposal: &AgentFileWriteProposal,
     result: AgentFileWriteResult,
+    file_change: Option<AgentTurnFileChange>,
 ) -> ActionExecutionDecision {
     let applied = matches!(
         result.status,
@@ -665,6 +821,7 @@ fn file_write_decision(
         },
         patch_result: None,
         file_write_result: Some(result.clone()),
+        file_change,
         tool_result: file_write_tool_result(&proposal.id, applied, &result),
     }
 }

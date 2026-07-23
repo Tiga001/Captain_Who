@@ -154,6 +154,7 @@ pub(super) fn parse_porcelain_status(
             match scope {
                 GitReviewScope::Staged => x != b' ',
                 GitReviewScope::Unstaged => y != b' ',
+                GitReviewScope::LastTurn => false,
             }
         };
         if !selected {
@@ -168,6 +169,9 @@ pub(super) fn parse_porcelain_status(
             status_from_code(match scope {
                 GitReviewScope::Staged => x,
                 GitReviewScope::Unstaged => y,
+                GitReviewScope::LastTurn => {
+                    return Err("Last-turn review does not use Git status.".to_string())
+                }
             })
         };
         files.push(ParsedStatusFile {

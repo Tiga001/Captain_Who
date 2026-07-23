@@ -242,19 +242,21 @@ export const GitReviewDiffCard = memo(function GitReviewDiffCard({
               <Undo2 aria-hidden="true" />
             </FileActionButton>
           )}
-          <FileActionButton
-            disabled={mutationLocked}
-            label={scope === 'unstaged' ? t('gitReview.file.stage') : t('gitReview.file.unstage')}
-            onClick={() => onMutate(file.id, scope === 'unstaged' ? 'stage' : 'unstage')}
-          >
-            {mutationPending ? (
-              <LoaderCircle className="git-review__spinner" aria-hidden="true" />
-            ) : scope === 'unstaged' ? (
-              <Plus aria-hidden="true" />
-            ) : (
-              <Minus aria-hidden="true" />
-            )}
-          </FileActionButton>
+          {scope !== 'lastTurn' && (
+            <FileActionButton
+              disabled={mutationLocked}
+              label={scope === 'unstaged' ? t('gitReview.file.stage') : t('gitReview.file.unstage')}
+              onClick={() => onMutate(file.id, scope === 'unstaged' ? 'stage' : 'unstage')}
+            >
+              {mutationPending ? (
+                <LoaderCircle className="git-review__spinner" aria-hidden="true" />
+              ) : scope === 'unstaged' ? (
+                <Plus aria-hidden="true" />
+              ) : (
+                <Minus aria-hidden="true" />
+              )}
+            </FileActionButton>
+          )}
         </div>
       </div>
 

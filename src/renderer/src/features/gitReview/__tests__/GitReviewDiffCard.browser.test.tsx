@@ -167,6 +167,37 @@ function WindowedCardFixture({
   )
 }
 
+function LastTurnCardFixture(): ReactNode {
+  const scrollRootRef = useRef<HTMLDivElement>(null)
+  return (
+    <div className="git-review" style={{ display: 'block', height: 300, width: 440 }}>
+      <div className="git-review__content" ref={scrollRootRef}>
+        <GitReviewDiffCard
+          diffState={createDiffState('last-turn')}
+          file={createFile('last-turn')}
+          isExpanded={false}
+          isNearViewport
+          isReviewActive
+          isSelected
+          isVisible
+          loadFullFiles={false}
+          mutationLocked={false}
+          mutationPending={false}
+          onMutate={noop}
+          onRequestDiff={noop}
+          onRestore={noop}
+          onToggle={noop}
+          scope="lastTurn"
+          scrollRootRef={scrollRootRef}
+          t={translate}
+          viewMode="unified"
+          wrapLines={false}
+        />
+      </div>
+    </div>
+  )
+}
+
 const ANCHOR_OLD_LINES = Array.from({ length: 80 }, (_, index) => `line ${index + 1}`)
 const ANCHOR_NEW_LINES = ANCHOR_OLD_LINES.map((line, index) =>
   index === 49 ? `${line} changed` : line
@@ -243,6 +274,17 @@ async function nextPaint(): Promise<void> {
 }
 
 describe('GitReviewDiffCard browser layout', () => {
+  it('keeps last-turn file cards read-only while preserving review controls', async () => {
+    const screen = await render(<LastTurnCardFixture />)
+    const actions = screen.container.querySelector('.git-review__file-actions')
+    expect(actions).not.toBeNull()
+    expect(actions?.querySelector('[aria-label="gitReview.file.restore"]')).toBeNull()
+    expect(actions?.querySelector('[aria-label="gitReview.file.stage"]')).toBeNull()
+    expect(actions?.querySelector('[aria-label="gitReview.file.unstage"]')).toBeNull()
+    expect(actions?.querySelector('[aria-label="gitReview.file.expand"]')).not.toBeNull()
+    expect(actions?.querySelector('[aria-label="gitReview.file.openSoon"]')).not.toBeNull()
+  })
+
   it('keeps the following hunk anchored while expanding omitted lines upward', async () => {
     const screen = await render(<ExpansionAnchorFixture />)
     const scrollport = screen.getByTestId('anchor-scrollport').element() as HTMLElement

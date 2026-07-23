@@ -1157,6 +1157,48 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS agent_turn_diffs (
+            assistant_message_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            run_id TEXT NOT NULL UNIQUE,
+            project_id TEXT NOT NULL,
+            workspace_root TEXT NOT NULL CHECK (length(trim(workspace_root)) > 0),
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_turn_diff_files (
+            assistant_message_id TEXT NOT NULL,
+            path TEXT NOT NULL CHECK (length(trim(path)) > 0),
+            before_kind TEXT NOT NULL CHECK (before_kind IN ('missing', 'text', 'binary', 'too_large')),
+            before_text TEXT,
+            after_kind TEXT NOT NULL CHECK (after_kind IN ('missing', 'text', 'binary', 'too_large')),
+            after_text TEXT,
+            PRIMARY KEY (assistant_message_id, path),
+            CHECK (
+                (before_kind = 'text' AND before_text IS NOT NULL)
+                OR (before_kind != 'text' AND before_text IS NULL)
+            ),
+            CHECK (
+                (after_kind = 'text' AND after_text IS NOT NULL)
+                OR (after_kind != 'text' AND after_text IS NULL)
+            ),
+            FOREIGN KEY (assistant_message_id) REFERENCES agent_turn_diffs(assistant_message_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_turn_diff_actions (
+            assistant_message_id TEXT NOT NULL,
+            action_id TEXT NOT NULL CHECK (length(trim(action_id)) > 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (assistant_message_id, action_id),
+            FOREIGN KEY (assistant_message_id) REFERENCES agent_turn_diffs(assistant_message_id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS context_compaction_summaries (
             id TEXT PRIMARY KEY,
             conversation_id TEXT NOT NULL,
@@ -1328,6 +1370,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at);
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, position);
         CREATE INDEX IF NOT EXISTS idx_conversation_turn_traces_conversation_id ON conversation_turn_traces(conversation_id, completed_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_turn_diffs_conversation_project ON agent_turn_diffs(conversation_id, project_id, updated_at);
         CREATE INDEX IF NOT EXISTS idx_context_compaction_summaries_conversation_id ON context_compaction_summaries(conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_context_compaction_summary_lineage_owner ON context_compaction_summary_lineage(conversation_id, introduced_by_assistant_message_id);
         CREATE INDEX IF NOT EXISTS idx_context_compaction_summary_lineage_source ON context_compaction_summary_lineage(source_conversation_id, source_summary_id);

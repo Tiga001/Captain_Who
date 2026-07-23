@@ -21,6 +21,7 @@ pub mod skills;
 pub mod storage;
 mod system_paths;
 mod tools;
+mod turn_diff;
 mod usage;
 
 pub use cancellation::AgentCancellationToken;
@@ -117,4 +118,9 @@ pub use system_paths::expand_system_path;
 pub use tools::{
     agent_image_generation_execution_id, agent_image_generation_tool_result_from_execution,
     agent_image_generation_tool_result_from_service_error, normalize_agent_image_generation_reason,
+};
+pub use turn_diff::{
+    capture_agent_turn_file_content, AgentTurnDiffIdentity, AgentTurnDiffRecord,
+    AgentTurnFileChange, AgentTurnFileContent, AGENT_TURN_DIFF_SCHEMA_VERSION,
+    MAX_AGENT_TURN_FILE_CONTENT_BYTES,
 };

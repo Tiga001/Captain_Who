@@ -7,6 +7,7 @@ import { WorkspaceFileTreeSessionsProvider } from '../../features/files/Workspac
 import { RightSidebarHome } from '../../features/rightSidebar/RightSidebarHome'
 import { RightSidebarModulePicker } from '../../features/rightSidebar/RightSidebarModulePicker'
 import { RightSidebarPageStack } from '../../features/rightSidebar/RightSidebarPageStack'
+import { RightSidebarRuntimeContext } from '../../features/rightSidebar/RightSidebarRuntimeContext'
 import { useRightSidebarDocumentVisibility } from '../../features/rightSidebar/rightSidebarActivity'
 import { RIGHT_SIDEBAR_MODULES } from '../../features/rightSidebar/rightSidebarModules'
 import type {
@@ -18,6 +19,7 @@ import { useRightSidebarPlatform } from '../../features/rightSidebar/useRightSid
 import './RightSidebar.css'
 
 interface RightSidebarProps {
+  activeConversationId?: string | null
   capabilities?: RightSidebarCapabilities
   isMaximized: boolean
   isOpen: boolean
@@ -50,6 +52,7 @@ function RestoreFromMaximizedIcon(): ReactNode {
 }
 
 export const RightSidebar = memo(function RightSidebar({
+  activeConversationId,
   capabilities,
   isMaximized,
   isOpen,
@@ -102,6 +105,13 @@ export const RightSidebar = memo(function RightSidebar({
   // maximize preference remains set for a later reopen.
   const sidebarVisible = isOpen && isWorkspaceVisible
   const maximizeLabel = isMaximized ? t('rightSidebar.restore') : t('rightSidebar.maximize')
+  const runtimeContext = useMemo(
+    () => ({
+      activeConversationId: activeConversationId ?? null,
+      activeWorkspaceKey: workspaceKey ?? null
+    }),
+    [activeConversationId, workspaceKey]
+  )
 
   const closeTransientUi = useCallback(() => {
     setIsModuleMenuOpen(false)
@@ -276,22 +286,24 @@ export const RightSidebar = memo(function RightSidebar({
 
       <WorkspaceFileTreeSessionsProvider projectIds={fileTreeProjectIds}>
         <div className="right-sidebar__content">
-          {hasOpenPages ? (
-            <RightSidebarPageStack
-              activePageId={activePageId}
-              availability={moduleAvailability}
-              documentVisible={documentVisible}
-              modules={modules}
-              onOpenPage={openRelatedPage}
-              onPageUpdate={updatePage}
-              onSurfaceFocus={closeTransientUi}
-              pages={pages}
-              sidebarVisible={sidebarVisible}
-              t={t}
-            />
-          ) : (
-            <RightSidebarHome modules={availableModules} onOpenModule={openModule} />
-          )}
+          <RightSidebarRuntimeContext.Provider value={runtimeContext}>
+            {hasOpenPages ? (
+              <RightSidebarPageStack
+                activePageId={activePageId}
+                availability={moduleAvailability}
+                documentVisible={documentVisible}
+                modules={modules}
+                onOpenPage={openRelatedPage}
+                onPageUpdate={updatePage}
+                onSurfaceFocus={closeTransientUi}
+                pages={pages}
+                sidebarVisible={sidebarVisible}
+                t={t}
+              />
+            ) : (
+              <RightSidebarHome modules={availableModules} onOpenModule={openModule} />
+            )}
+          </RightSidebarRuntimeContext.Provider>
         </div>
       </WorkspaceFileTreeSessionsProvider>
     </aside>

@@ -11,12 +11,13 @@ export interface GitRepositoryInspection {
   message?: string
 }
 
-export type GitReviewScope = 'unstaged' | 'staged'
+export type GitReviewScope = 'unstaged' | 'staged' | 'lastTurn'
 
 export type GitReviewFileStatus =
   'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted'
 
 export interface GitReviewSummaryInput {
+  conversationId?: string
   projectId: string
   scope: GitReviewScope
 }

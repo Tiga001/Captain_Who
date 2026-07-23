@@ -20,10 +20,61 @@ pub(super) struct Snapshot {
     pub(super) files: HashMap<String, SnapshotFile>,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct TurnSnapshotFile {
+    pub(super) path: String,
+    pub(super) before: crate::AgentTurnFileContent,
+    pub(super) after: crate::AgentTurnFileContent,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct TurnSnapshot {
+    pub(super) id: String,
+    pub(super) created_at: Instant,
+    pub(super) files: HashMap<String, TurnSnapshotFile>,
+}
+
 #[derive(Default)]
 pub(super) struct SnapshotCache {
     entries: HashMap<String, Snapshot>,
     order: VecDeque<String>,
+}
+
+#[derive(Default)]
+pub(super) struct TurnSnapshotCache {
+    entries: HashMap<String, TurnSnapshot>,
+    order: VecDeque<String>,
+}
+
+impl TurnSnapshotCache {
+    pub(super) fn insert(&mut self, snapshot: TurnSnapshot) {
+        self.prune();
+        while self.order.len() >= MAX_SNAPSHOTS {
+            if let Some(id) = self.order.pop_front() {
+                self.entries.remove(&id);
+            }
+        }
+        self.order.push_back(snapshot.id.clone());
+        self.entries.insert(snapshot.id.clone(), snapshot);
+    }
+
+    pub(super) fn get(&mut self, snapshot_id: &str) -> Option<TurnSnapshot> {
+        self.prune();
+        self.entries.get(snapshot_id).cloned()
+    }
+
+    fn prune(&mut self) {
+        let expired = self
+            .entries
+            .iter()
+            .filter(|(_, snapshot)| snapshot.created_at.elapsed() > SNAPSHOT_TTL)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in expired {
+            self.entries.remove(&id);
+            self.order.retain(|candidate| candidate != &id);
+        }
+    }
 }
 
 impl SnapshotCache {

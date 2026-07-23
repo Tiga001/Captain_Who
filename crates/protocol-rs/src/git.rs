@@ -3,6 +3,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitReviewSummaryRequest {
+    pub conversation_id: Option<String>,
     pub project_id: String,
     pub scope: String,
 }

@@ -20,16 +20,16 @@ use crate::storage::{
     conversation_trace_repository, file_draft_repository, image_generation_repository,
     model_request_observation_repository, now_ms, pending_action_repository,
     preferences_repository, project_repository, skill_enablement_repository, storage_error,
-    usage_repository, StorageState,
+    turn_diff_repository, usage_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentChatInput, AgentInputAttachment,
     AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentProposedAction, AgentToolCall,
-    AgentToolResult, AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput,
-    AgentUsageSummaryOutput, ContextCompactionAuditBundle, ContextCompactionPrefix,
-    ContextCompactionReceipt, ContextCompactionSummary, ContextCompactionSummaryDraft,
-    ContextJournalCursor, ConversationTurnTrace, ConversationTurnTraceItem,
-    ModelRequestObservation,
+    AgentToolResult, AgentTurnDiffIdentity, AgentTurnDiffRecord, AgentTurnFileChange,
+    AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    ContextCompactionAuditBundle, ContextCompactionPrefix, ContextCompactionReceipt,
+    ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
+    ConversationTurnTrace, ConversationTurnTraceItem, ModelRequestObservation,
 };
 use base64::Engine;
 use rusqlite::OptionalExtension;
@@ -45,6 +45,7 @@ mod messages;
 mod pending_actions;
 mod settings;
 mod trace_reconciliation;
+mod turn_diffs;
 
 use attachments::*;
 pub use lifecycle::*;

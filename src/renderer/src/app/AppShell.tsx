@@ -2011,6 +2011,7 @@ export function AppShell() {
 
       <aside className="side-panel side-panel--right">
         <RightSidebar
+          activeConversationId={activeConversation?.id}
           capabilities={rightSidebarCapabilities}
           isMaximized={rightMaximized}
           isOpen={rightOpen}

@@ -53,6 +53,7 @@ pub(super) fn load_review_file_content(
         (_, GitReviewFileStatus::Untracked)
         | (GitReviewScope::Staged, GitReviewFileStatus::Added) => SideRequirement::Absent,
         (GitReviewScope::Unstaged, GitReviewFileStatus::Added) => SideRequirement::Optional,
+        (GitReviewScope::LastTurn, _) => SideRequirement::Absent,
         _ => SideRequirement::Required,
     };
     let after_requirement = if file.status == GitReviewFileStatus::Deleted {
@@ -78,6 +79,7 @@ pub(super) fn load_review_file_content(
             let entry = index_entry(&snapshot.repository, before_path)?;
             load_repository_entry(&snapshot.repository, entry, requirement)?
         }
+        (GitReviewScope::LastTurn, _) => SideContent::Unsupported,
     };
     let after = match (snapshot.scope, after_requirement) {
         (_, SideRequirement::Absent) => SideContent::Missing,
@@ -86,6 +88,7 @@ pub(super) fn load_review_file_content(
             load_repository_entry(&snapshot.repository, entry, requirement)?
         }
         (GitReviewScope::Unstaged, _) => read_worktree_content(&snapshot.repository, &file.path),
+        (GitReviewScope::LastTurn, _) => SideContent::Unsupported,
     };
 
     Ok(normalize_review_content(before, after))

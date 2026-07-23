@@ -518,6 +518,7 @@ impl AgentService {
                     },
                     patch_result: None,
                     file_write_result: None,
+                    file_change: None,
                     tool_result,
                 }
             } else {
