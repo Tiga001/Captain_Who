@@ -370,6 +370,9 @@ pub enum AgentSteerRunRejectionCode {
     IdentityConflict,
     AttachmentsNotSupported,
     ModelDoesNotSupportAttachments,
+    AttachmentValidationFailed,
+    AttachmentLimitExceeded,
+    AttachmentPersistenceFailed,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -395,6 +398,12 @@ pub struct AgentSteerInput {
     pub content: String,
     #[serde(default)]
     pub attachments: Vec<AgentInputAttachment>,
+    /// Host-authoritative attachment library including this guidance's persisted attachments.
+    ///
+    /// The runtime installs this snapshot only when the guidance is applied at a safe model
+    /// boundary. Merely admitting an RPC must never expand the active tool context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_library: Option<AgentAttachmentLibraryContext>,
     pub created_at: i64,
 }
 
@@ -607,7 +616,7 @@ pub struct AgentWorkspaceContext {
     pub root_path: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentAttachmentLibraryContext {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -622,7 +631,7 @@ pub struct AgentAttachmentLibraryContext {
     pub project_attachments: Vec<AgentAttachmentReference>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentAttachmentReference {
     pub id: String,

@@ -168,6 +168,14 @@ impl ToolExecutionContext {
         self
     }
 
+    /// Replaces the run-scoped attachment catalog after newly admitted guidance is applied.
+    ///
+    /// Callers must provide a host-built snapshot. This method deliberately is not exposed to
+    /// model-authored tool arguments.
+    pub(crate) fn replace_attachment_library(&mut self, library: AgentAttachmentLibraryContext) {
+        self.attachment_library = Some(library);
+    }
+
     pub(super) fn cancellation_token(&self) -> AgentCancellationToken {
         self.cancellation_token.clone()
     }

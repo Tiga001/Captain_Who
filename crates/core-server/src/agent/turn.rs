@@ -37,6 +37,11 @@ impl AgentService {
             &run_id,
             &prepared.output.conversation_id,
             &prepared.output.assistant_message_id,
+            prepared
+                .agent_input
+                .context
+                .as_ref()
+                .and_then(|context| context.project_id.as_deref()),
             prepared.agent_input.model_capabilities,
         );
         initialize_turn_diff_best_effort(
@@ -85,8 +90,17 @@ impl AgentService {
                             .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
                         return;
                     }
-                    let agent_input =
+                    let mut agent_input =
                         agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
+                    if let Err(error) =
+                        emitter_service.refresh_agent_input_attachment_library(&mut agent_input)
+                    {
+                        emitter_terminal_event_gate.discard();
+                        *emitter_pending_store_failure
+                            .lock()
+                            .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
+                        return;
+                    }
                     match emitter_service.store_pending_action(
                         run_id,
                         &emitter_conversation_id,

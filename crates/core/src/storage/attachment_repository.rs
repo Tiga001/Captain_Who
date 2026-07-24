@@ -48,6 +48,42 @@ pub fn save_attachment(
     Ok(())
 }
 
+pub fn insert_attachment(
+    connection: &Connection,
+    attachment: &AttachmentRecord,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "
+        INSERT INTO attachments (
+            id,
+            conversation_id,
+            message_id,
+            project_id,
+            kind,
+            original_name,
+            mime_type,
+            size_bytes,
+            storage_rel_path,
+            created_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        ",
+        params![
+            &attachment.id,
+            &attachment.conversation_id,
+            &attachment.message_id,
+            &attachment.project_id,
+            &attachment.kind,
+            &attachment.original_name,
+            &attachment.mime_type,
+            attachment.size_bytes,
+            &attachment.storage_rel_path,
+            attachment.created_at
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn list_conversation_attachments(
     connection: &Connection,
     conversation_id: &str,
@@ -110,6 +146,141 @@ pub fn list_project_attachments_excluding_conversation(
         )?
         .collect();
 
+    attachments
+}
+
+pub fn list_conversation_attachments_for_library(
+    connection: &Connection,
+    conversation_id: &str,
+    admitted_run_id: Option<&str>,
+) -> rusqlite::Result<Vec<AttachmentRecord>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT
+            attachment.id,
+            attachment.conversation_id,
+            attachment.message_id,
+            attachment.project_id,
+            attachment.kind,
+            attachment.original_name,
+            attachment.mime_type,
+            attachment.size_bytes,
+            attachment.storage_rel_path,
+            attachment.created_at
+        FROM attachments AS attachment
+        WHERE attachment.conversation_id = ?1
+          AND (
+            NOT EXISTS (
+                SELECT 1
+                FROM agent_run_guidance_attachments AS ownership
+                WHERE ownership.attachment_id = attachment.id
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM agent_run_guidance_attachments AS ownership
+                JOIN agent_run_guidances AS guidance
+                  ON guidance.guidance_id = ownership.guidance_id
+                WHERE ownership.attachment_id = attachment.id
+                  AND (
+                    guidance.status = 'applied'
+                    OR (
+                        ?2 IS NOT NULL
+                        AND guidance.run_id = ?2
+                        AND guidance.status = 'queued'
+                    )
+                  )
+            )
+          )
+        ORDER BY attachment.created_at ASC, attachment.id ASC
+        ",
+    )?;
+    let attachments = statement
+        .query_map(
+            params![conversation_id, admitted_run_id],
+            attachment_from_row,
+        )?
+        .collect();
+    attachments
+}
+
+pub fn list_project_attachments_for_library_excluding_conversation(
+    connection: &Connection,
+    project_id: &str,
+    excluded_conversation_id: &str,
+) -> rusqlite::Result<Vec<AttachmentRecord>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT
+            attachment.id,
+            attachment.conversation_id,
+            attachment.message_id,
+            attachment.project_id,
+            attachment.kind,
+            attachment.original_name,
+            attachment.mime_type,
+            attachment.size_bytes,
+            attachment.storage_rel_path,
+            attachment.created_at
+        FROM attachments AS attachment
+        WHERE attachment.project_id = ?1
+          AND attachment.conversation_id != ?2
+          AND (
+            NOT EXISTS (
+                SELECT 1
+                FROM agent_run_guidance_attachments AS ownership
+                WHERE ownership.attachment_id = attachment.id
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM agent_run_guidance_attachments AS ownership
+                JOIN agent_run_guidances AS guidance
+                  ON guidance.guidance_id = ownership.guidance_id
+                WHERE ownership.attachment_id = attachment.id
+                  AND guidance.status = 'applied'
+            )
+          )
+        ORDER BY attachment.created_at DESC, attachment.id ASC
+        ",
+    )?;
+    let attachments = statement
+        .query_map(
+            params![project_id, excluded_conversation_id],
+            attachment_from_row,
+        )?
+        .collect();
+    attachments
+}
+
+pub fn list_ordinary_conversation_attachments(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Vec<AttachmentRecord>> {
+    let mut statement = connection.prepare(
+        "
+        SELECT
+            attachment.id,
+            attachment.conversation_id,
+            attachment.message_id,
+            attachment.project_id,
+            attachment.kind,
+            attachment.original_name,
+            attachment.mime_type,
+            attachment.size_bytes,
+            attachment.storage_rel_path,
+            attachment.created_at
+        FROM attachments AS attachment
+        WHERE attachment.conversation_id = ?1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM agent_run_guidance_attachments AS ownership
+            WHERE ownership.attachment_id = attachment.id
+          )
+        ORDER BY attachment.created_at ASC, attachment.id ASC
+        ",
+    )?;
+    let attachments = statement
+        .query_map([conversation_id], attachment_from_row)?
+        .collect();
     attachments
 }
 

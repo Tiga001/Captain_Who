@@ -36,6 +36,12 @@ impl StorageService {
         guidance_repository::list_queued_guidances(&connection).map_err(storage_error)
     }
 
+    pub fn agent_run_guidance_attachment_bytes(&self, run_id: &str) -> Result<u64, String> {
+        let connection = self.state.connection()?;
+        guidance_repository::sum_attachment_bytes_for_run(&connection, run_id)
+            .map_err(storage_error)
+    }
+
     pub fn mark_agent_run_guidance_applied(
         &self,
         guidance_id: &str,

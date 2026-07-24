@@ -865,7 +865,11 @@ impl AgentService {
             skill_resources,
         );
         Arc::new(move |action, cancellation_token| {
-            service.execute_auto_approved_action(context.clone(), action, cancellation_token)
+            let mut refreshed = context.clone();
+            service
+                .refresh_agent_input_attachment_library(&mut refreshed.agent_input)
+                .map_err(AgentError::new)?;
+            service.execute_auto_approved_action(refreshed, action, cancellation_token)
         })
     }
 
@@ -3079,7 +3083,17 @@ impl AgentService {
                 checkpoint,
             } = &event
             {
-                let agent_input = agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
+                let mut agent_input =
+                    agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
+                if let Err(error) =
+                    emitter_service.refresh_agent_input_attachment_library(&mut agent_input)
+                {
+                    emitter_terminal_event_gate.discard();
+                    *emitter_pending_store_failure
+                        .lock()
+                        .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
+                    return;
+                }
                 match emitter_service.store_pending_action(
                     run_id,
                     emitter_conversation_id.as_deref().unwrap_or_default(),

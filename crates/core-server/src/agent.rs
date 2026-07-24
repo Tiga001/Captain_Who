@@ -264,6 +264,7 @@ enum ActiveRunSteerState {
 struct ActiveRunControl {
     conversation_id: String,
     assistant_message_id: String,
+    project_id: Option<String>,
     model_capabilities: ModelCapabilities,
     steer_state: ActiveRunSteerState,
     steer_input: AgentSteerInputQueue,

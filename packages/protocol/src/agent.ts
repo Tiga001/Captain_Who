@@ -496,6 +496,9 @@ export type AgentSteerRunRejectionCode =
   | 'identity_conflict'
   | 'attachments_not_supported'
   | 'model_does_not_support_attachments'
+  | 'attachment_validation_failed'
+  | 'attachment_limit_exceeded'
+  | 'attachment_persistence_failed'
 
 export interface AgentSteerRunOutput {
   guidanceId: string

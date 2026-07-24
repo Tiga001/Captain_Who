@@ -12,6 +12,7 @@ use crate::{
     ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
     ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
+use base64::Engine;
 
 fn message(role: &str, content: &str) -> AgentChatMessage {
     AgentChatMessage {
@@ -367,6 +368,145 @@ fn attachment_context_reads_text_with_registered_tool() {
     assert!(context.text.contains("hello from file"));
 }
 
+fn runtime_test_zip(entries: &[(&str, &str)]) -> Vec<u8> {
+    use std::io::Write;
+
+    let mut output = std::io::Cursor::new(Vec::new());
+    {
+        let mut archive = zip::ZipWriter::new(&mut output);
+        for (path, content) in entries {
+            archive
+                .start_file(*path, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(content.as_bytes()).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+    output.into_inner()
+}
+
+fn runtime_test_pdf(text: &str) -> Vec<u8> {
+    let stream = format!("BT /F1 12 Tf 72 720 Td ({text}) Tj ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /MediaBox [0 0 612 792] /Contents 5 0 R >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+    ];
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![0_usize];
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets.into_iter().skip(1) {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    pdf
+}
+
+fn runtime_binary_attachment(
+    id: &str,
+    name: &str,
+    mime_type: &str,
+    bytes: Vec<u8>,
+) -> AgentInputAttachment {
+    AgentInputAttachment {
+        id: id.to_string(),
+        kind: AgentInputAttachmentKind::File,
+        name: name.to_string(),
+        mime_type: Some(mime_type.to_string()),
+        size_bytes: bytes.len() as u64,
+        encoding: AgentInputAttachmentEncoding::Base64,
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        truncated: None,
+    }
+}
+
+#[test]
+fn attachment_context_extracts_pdf_office_and_delimited_guidance_files() {
+    let attachments = vec![
+        runtime_binary_attachment(
+            "attachment-pdf",
+            "paper.pdf",
+            "application/pdf",
+            runtime_test_pdf("Guidance PDF"),
+        ),
+        runtime_binary_attachment(
+            "attachment-docx",
+            "document.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            runtime_test_zip(&[(
+                "word/document.xml",
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Guidance DOCX</w:t></w:r></w:p></w:body></w:document>"#,
+            )]),
+        ),
+        runtime_binary_attachment(
+            "attachment-pptx",
+            "slides.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            runtime_test_zip(&[(
+                "ppt/slides/slide1.xml",
+                r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><a:t xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">Guidance PPTX</a:t></p:spTree></p:cSld></p:sld>"#,
+            )]),
+        ),
+        runtime_binary_attachment(
+            "attachment-xlsx",
+            "table.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            runtime_test_zip(&[
+                (
+                    "xl/sharedStrings.xml",
+                    r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Guidance XLSX</t></si></sst>"#,
+                ),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>"#,
+                ),
+            ]),
+        ),
+        runtime_binary_attachment(
+            "attachment-csv",
+            "table.csv",
+            "text/csv",
+            b"name,value\nGuidance CSV,1\n".to_vec(),
+        ),
+        runtime_binary_attachment(
+            "attachment-tsv",
+            "table.tsv",
+            "text/tab-separated-values",
+            b"name\tvalue\nGuidance TSV\t1\n".to_vec(),
+        ),
+    ];
+
+    let context = build_attachment_context(&attachments).unwrap();
+    for expected in [
+        "Guidance PDF",
+        "Guidance DOCX",
+        "Guidance PPTX",
+        "Guidance XLSX",
+        "Guidance CSV",
+        "Guidance TSV",
+    ] {
+        assert!(
+            context.text.contains(expected),
+            "missing extracted text: {expected}\n{}",
+            context.text
+        );
+    }
+}
+
 #[test]
 fn read_image_tool_result_is_redacted_but_creates_visual_message() {
     let result = AgentToolResult {
@@ -630,6 +770,7 @@ fn runtime_steer_input(
         client_message_id: client_message_id.to_string(),
         content: content.to_string(),
         attachments: Vec::new(),
+        attachment_library: None,
         created_at: 42,
     }
 }

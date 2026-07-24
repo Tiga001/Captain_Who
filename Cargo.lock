@@ -1256,6 +1256,7 @@ name = "mycopilot-core-server"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "image",
  "libc",
  "mycopilot-core",
  "mycopilot-protocol-rs",
@@ -1265,6 +1266,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "zip",
 ]
 
 [[package]]

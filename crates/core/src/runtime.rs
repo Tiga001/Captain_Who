@@ -320,7 +320,7 @@ impl AgentRuntime {
         );
         let tool_output_budget = capacity_detector
             .tool_output_text_budget(llm_request.context_window_tokens, llm_request.max_tokens);
-        let tool_context = ToolExecutionContext::from_run_context(context.as_ref())
+        let mut tool_context = ToolExecutionContext::from_run_context(context.as_ref())
             .with_cancellation(cancellation_token.clone())
             .with_model_capabilities(model_capabilities)
             .with_runtime_services(run_id.clone(), storage)
@@ -401,6 +401,7 @@ impl AgentRuntime {
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                     &mut event_stream,
+                                    &mut tool_context,
                                 )?;
                             }
                         }
@@ -893,6 +894,7 @@ impl AgentRuntime {
                                         &conversation_trace,
                                         trace_observer.as_ref(),
                                         &mut event_stream,
+                                        &mut tool_context,
                                     )?;
                                     continue;
                                 }
@@ -1539,6 +1541,7 @@ impl AgentRuntime {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_steer_inputs(
     run_id: &str,
     preceding_assistant_content: Option<&str>,
@@ -1547,20 +1550,21 @@ fn apply_steer_inputs(
     conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
     trace_observer: Option<&AgentConversationTraceObserver>,
     event_stream: &mut AgentEventStream,
+    tool_context: &mut ToolExecutionContext,
 ) -> AgentResult<Option<AgentContextBaseline>> {
-    if inputs.iter().any(|input| !input.attachments.is_empty()) {
-        return Err(AgentError::structured(
-            "agent.steer_attachments_not_supported",
-            "当前 runtime 阶段只支持文本引导，附件引导将在附件接入阶段启用。",
-            json!({
-                "guidanceIds": inputs
-                    .iter()
-                    .filter(|input| !input.attachments.is_empty())
-                    .map(|input| input.guidance_id.as_str())
-                    .collect::<Vec<_>>(),
-            }),
-        ));
-    }
+    let attachment_contexts = inputs
+        .iter()
+        .map(|input| {
+            if !input.attachments.is_empty() && input.attachment_library.is_none() {
+                return Err(AgentError::structured(
+                    "agent.steer_attachment_library_missing",
+                    "用户引导附件缺少 Host 构造的附件库快照。",
+                    json!({ "guidanceId": input.guidance_id }),
+                ));
+            }
+            build_attachment_context(&input.attachments)
+        })
+        .collect::<AgentResult<Vec<_>>>()?;
 
     let preceding_assistant_content = preceding_assistant_content
         .map(str::trim)
@@ -1605,14 +1609,27 @@ fn apply_steer_inputs(
             ContextRetention::Retained,
         ));
     }
-    for (input, attachments, sequence) in applied {
+    for ((input, attachments, sequence), attachment_context) in
+        applied.into_iter().zip(attachment_contexts)
+    {
+        if let Some(library) = input.attachment_library {
+            tool_context.replace_attachment_library(library);
+        }
         let content = input.content.trim().to_string();
-        active_context.push(ContextItem::text(
-            LlmMessageRole::User,
-            content.clone(),
-            ContextSource::UserGuidance,
-            ContextScope::Run,
-            ContextRetention::Retained,
+        let context_content = if attachment_context.text.trim().is_empty() {
+            content.clone()
+        } else {
+            format!("{content}\n\n{}", attachment_context.text)
+        };
+        let mut message = LlmMessage::text(LlmMessageRole::User, context_content);
+        message.images = attachment_context.images;
+        active_context.push(ContextItem::new(
+            message,
+            ContextMetadata::new(
+                ContextSource::UserGuidance,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
         ));
         event_stream.emit(AgentEvent::GuidanceApplied {
             run_id: run_id.to_string(),

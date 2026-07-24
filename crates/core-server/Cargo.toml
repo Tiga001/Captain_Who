@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = "0.2"
 mycopilot-core.workspace = true
 mycopilot-protocol-rs.workspace = true
@@ -16,6 +17,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 tokio.workspace = true
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7"

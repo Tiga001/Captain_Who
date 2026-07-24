@@ -549,6 +549,7 @@ mod steer_input_queue_tests {
             client_message_id: client_message_id.to_string(),
             content: content.to_string(),
             attachments: Vec::new(),
+            attachment_library: None,
             created_at: 10,
         }
     }

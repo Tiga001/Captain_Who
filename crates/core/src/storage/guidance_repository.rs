@@ -27,9 +27,18 @@ pub fn store_guidance(
     connection: &mut Connection,
     record: &AgentRunGuidanceRecord,
 ) -> rusqlite::Result<AgentRunGuidanceStoreOutcome> {
-    validate_new_record(record)?;
     let transaction = connection.transaction()?;
-    let role = transaction
+    let outcome = store_guidance_in_connection(&transaction, record)?;
+    transaction.commit()?;
+    Ok(outcome)
+}
+
+pub(crate) fn store_guidance_in_connection(
+    connection: &Connection,
+    record: &AgentRunGuidanceRecord,
+) -> rusqlite::Result<AgentRunGuidanceStoreOutcome> {
+    validate_new_record(record)?;
+    let role = connection
         .query_row(
             "SELECT role FROM messages
              WHERE id = ?1 AND conversation_id = ?2",
@@ -43,7 +52,7 @@ pub fn store_guidance(
         ));
     }
 
-    let affected = transaction.execute(
+    let affected = connection.execute(
         "INSERT INTO agent_run_guidances (
             guidance_id, client_message_id, run_id, conversation_id, assistant_message_id,
             content, status, applied_trace_sequence, terminal_reason, created_at, updated_at
@@ -62,9 +71,9 @@ pub fn store_guidance(
         ],
     )?;
     if affected == 0 {
-        let existing = load_guidance_by_id_in_connection(&transaction, &record.guidance_id)?
+        let existing = load_guidance_by_id_in_connection(connection, &record.guidance_id)?
             .or(load_guidance_by_client_message_in_connection(
-                &transaction,
+                connection,
                 &record.run_id,
                 &record.client_message_id,
             )?)
@@ -77,12 +86,11 @@ pub fn store_guidance(
                 existing_status: existing.status,
             }
         };
-        transaction.commit()?;
         return Ok(outcome);
     }
 
     for (position, attachment_id) in record.attachment_ids.iter().enumerate() {
-        transaction.execute(
+        connection.execute(
             "INSERT INTO agent_run_guidance_attachments (
                 guidance_id, attachment_id, position
              ) VALUES (?1, ?2, ?3)",
@@ -95,8 +103,26 @@ pub fn store_guidance(
             ],
         )?;
     }
-    transaction.commit()?;
     Ok(AgentRunGuidanceStoreOutcome::Inserted)
+}
+
+pub fn sum_attachment_bytes_for_run(
+    connection: &Connection,
+    run_id: &str,
+) -> rusqlite::Result<u64> {
+    let total = connection.query_row(
+        "SELECT COALESCE(SUM(attachment.size_bytes), 0)
+         FROM agent_run_guidances AS guidance
+         JOIN agent_run_guidance_attachments AS ownership
+           ON ownership.guidance_id = guidance.guidance_id
+         JOIN attachments AS attachment ON attachment.id = ownership.attachment_id
+         WHERE guidance.run_id = ?1",
+        [run_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    u64::try_from(total).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(0, Type::Integer, Box::new(error))
+    })
 }
 
 pub fn load_guidance(

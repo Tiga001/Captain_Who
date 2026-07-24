@@ -279,6 +279,120 @@ impl StorageService {
         Ok(())
     }
 
+    /// Persists every guidance attachment and its ownership journal before queue admission.
+    ///
+    /// Files are written first, then attachment rows, guidance identity, and ownership rows commit
+    /// in one SQLite transaction. Any pre-commit failure removes the newly written files. A crash
+    /// between file publication and the database commit leaves only unreferenced files, which the
+    /// existing startup orphan scan removes.
+    pub fn store_agent_run_guidance_with_attachments(
+        &self,
+        record: AgentRunGuidanceRecord,
+        project_id: Option<&str>,
+        attachments: &[AgentInputAttachment],
+    ) -> Result<AgentRunGuidanceStoreOutcome, String> {
+        if attachments.is_empty() {
+            return self.store_agent_run_guidance(record);
+        }
+        let attachment_ids = attachments
+            .iter()
+            .map(|attachment| attachment.id.clone())
+            .collect::<Vec<_>>();
+        if record.attachment_ids != attachment_ids {
+            return Err(
+                "guidance attachment ownership does not match the persisted attachment order"
+                    .to_string(),
+            );
+        }
+
+        fs::create_dir_all(&self.attachment_root)
+            .map_err(|error| format!("创建附件库目录失败：{error}"))?;
+        let mut connection = self.state.connection()?;
+        ensure_conversation_exists(&connection, &record.conversation_id)?;
+        ensure_project_reference_exists(&connection, project_id)?;
+
+        let mut prepared = Vec::with_capacity(attachments.len());
+        for attachment in attachments {
+            if attachment_repository::get_attachment(&connection, &attachment.id)
+                .map_err(storage_error)?
+                .is_some()
+            {
+                return Err(format!("附件 id 已存在：{}", attachment.id));
+            }
+            let bytes = input_attachment_bytes(attachment)?;
+            let storage_rel_path = attachment_storage_rel_path(
+                &record.conversation_id,
+                &record.assistant_message_id,
+                &attachment.id,
+                &attachment.name,
+            );
+            let storage_path = self.attachment_root.join(&storage_rel_path);
+            prepared.push((
+                AttachmentRecord {
+                    id: attachment.id.clone(),
+                    conversation_id: record.conversation_id.clone(),
+                    // The assistant message is only the lifecycle anchor. The explicit
+                    // agent_run_guidance_attachments relation is the authoritative owner.
+                    message_id: record.assistant_message_id.clone(),
+                    project_id: project_id.map(ToString::to_string),
+                    kind: input_attachment_kind_label(attachment.kind).to_string(),
+                    original_name: attachment.name.clone(),
+                    mime_type: attachment.mime_type.clone(),
+                    size_bytes: bytes.len() as u64,
+                    storage_rel_path: slash_path(&storage_rel_path),
+                    created_at: record.created_at,
+                },
+                storage_path,
+                bytes,
+            ));
+        }
+
+        let mut written_paths = Vec::with_capacity(prepared.len());
+        for (_, storage_path, bytes) in &prepared {
+            let parent = storage_path
+                .parent()
+                .ok_or_else(|| "附件存储路径无效。".to_string())?;
+            fs::create_dir_all(parent).map_err(|error| format!("创建附件目录失败：{error}"))?;
+            let write_result = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(storage_path)
+                .and_then(|mut file| {
+                    use std::io::Write;
+                    file.write_all(bytes)?;
+                    file.sync_all()
+                });
+            if let Err(error) = write_result {
+                cleanup_new_guidance_attachment_files(self, &written_paths);
+                return Err(format!("写入引导附件失败：{error}"));
+            }
+            written_paths.push(storage_path.clone());
+        }
+
+        let database_result = (|| -> Result<AgentRunGuidanceStoreOutcome, String> {
+            let transaction = connection.transaction().map_err(storage_error)?;
+            for (attachment, _, _) in &prepared {
+                attachment_repository::insert_attachment(&transaction, attachment)
+                    .map_err(storage_error)?;
+            }
+            let outcome = guidance_repository::store_guidance_in_connection(&transaction, &record)
+                .map_err(storage_error)?;
+            if outcome != AgentRunGuidanceStoreOutcome::Inserted {
+                return Err(
+                    "guidance identity changed while attachment admission was committing"
+                        .to_string(),
+                );
+            }
+            transaction.commit().map_err(storage_error)?;
+            Ok(outcome)
+        })();
+
+        if database_result.is_err() {
+            cleanup_new_guidance_attachment_files(self, &written_paths);
+        }
+        database_result
+    }
+
     pub fn load_input_attachments(
         &self,
         attachment_ids: &[String],
@@ -318,15 +432,37 @@ impl StorageService {
         conversation_id: &str,
         project_id: Option<&str>,
     ) -> Result<AgentAttachmentLibraryContext, String> {
+        self.build_attachment_library_context_inner(conversation_id, project_id, None)
+    }
+
+    pub fn build_attachment_library_context_for_active_run(
+        &self,
+        conversation_id: &str,
+        project_id: Option<&str>,
+        run_id: &str,
+    ) -> Result<AgentAttachmentLibraryContext, String> {
+        self.build_attachment_library_context_inner(conversation_id, project_id, Some(run_id))
+    }
+
+    fn build_attachment_library_context_inner(
+        &self,
+        conversation_id: &str,
+        project_id: Option<&str>,
+        admitted_run_id: Option<&str>,
+    ) -> Result<AgentAttachmentLibraryContext, String> {
         let connection = self.state.connection()?;
         let conversation_attachments =
-            attachment_repository::list_conversation_attachments(&connection, conversation_id)
-                .map_err(storage_error)?
-                .into_iter()
-                .map(agent_attachment_reference)
-                .collect::<Vec<_>>();
+            attachment_repository::list_conversation_attachments_for_library(
+                &connection,
+                conversation_id,
+                admitted_run_id,
+            )
+            .map_err(storage_error)?
+            .into_iter()
+            .map(agent_attachment_reference)
+            .collect::<Vec<_>>();
         let project_attachments = if let Some(project_id) = project_id {
-            attachment_repository::list_project_attachments_excluding_conversation(
+            attachment_repository::list_project_attachments_for_library_excluding_conversation(
                 &connection,
                 project_id,
                 conversation_id,
@@ -354,9 +490,11 @@ impl StorageService {
         conversations: &mut [ChatConversationRecord],
     ) -> Result<(), String> {
         for conversation in conversations {
-            let attachments =
-                attachment_repository::list_conversation_attachments(connection, &conversation.id)
-                    .map_err(storage_error)?;
+            let attachments = attachment_repository::list_ordinary_conversation_attachments(
+                connection,
+                &conversation.id,
+            )
+            .map_err(storage_error)?;
             if attachments.is_empty() {
                 continue;
             }
@@ -576,6 +714,17 @@ impl StorageService {
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
                 ) => {}
             Err(error) => errors.push(format!("删除空附件目录失败 {}: {error}", path.display())),
+        }
+    }
+}
+
+fn cleanup_new_guidance_attachment_files(service: &StorageService, paths: &[PathBuf]) {
+    let mut errors = Vec::new();
+    for path in paths {
+        match fs::remove_file(path) {
+            Ok(()) => service.prune_empty_attachment_dirs(path.parent(), &mut errors),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {}
         }
     }
 }
