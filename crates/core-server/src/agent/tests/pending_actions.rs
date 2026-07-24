@@ -43,6 +43,7 @@ fn pending_command_round_trip_keeps_the_host_frozen_runtime_binding() {
             risk_level: None,
             reason: Some("build an Office artifact".to_string()),
             observe: None,
+            inputs: Vec::new(),
             runtime: None,
             runtime_binding: Some(Box::new(binding.clone())),
         },
@@ -103,6 +104,7 @@ fn pending_command_round_trip_keeps_the_frozen_runtime_request() {
             risk_level: None,
             reason: Some("build an Office artifact".to_string()),
             observe: None,
+            inputs: Vec::new(),
             runtime: Some(AgentCommandRuntimeRequest {
                 provider: AgentCommandRuntimeProvider::ManagedArtifact,
                 kind: AgentCommandRuntimeKind::Python,
@@ -741,6 +743,89 @@ fn missing_pending_transition_row_fails_closed_without_terminal_success() {
 
     let reloaded = AgentService::new(storage);
     assert!(reloaded.list_pending_actions().is_empty());
+}
+
+#[test]
+fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(Arc::clone(&storage));
+    let call = AgentToolCall {
+        id: "call-invalid-checkpoint".to_string(),
+        tool: "approval_tool".to_string(),
+        args: json!({ "value": "trusted" }),
+        approval_status: AgentApprovalStatus::Required,
+        reason: None,
+    };
+    let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
+        "apiUrl": "https://example.test/v1/chat/completions",
+        "apiToken": "secret",
+        "model": "test-model",
+        "messages": []
+    }))
+    .unwrap();
+    agent_input.resume_checkpoint = Some(AgentRunCheckpoint {
+        version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+        run_id: "run-invalid-checkpoint".to_string(),
+        context_items: vec![mycopilot_core::AgentContextCheckpointItem {
+            role: "assistant".to_string(),
+            content: String::new(),
+            images: Vec::new(),
+            tool_call_id: None,
+            tool_calls: vec![mycopilot_core::AgentContextCheckpointToolCall {
+                id: call.id.clone(),
+                name: "tampered_tool".to_string(),
+                args: call.args.clone(),
+            }],
+            is_error: false,
+            sources: vec!["tool_call".to_string()],
+            scope: "run".to_string(),
+            retention: "retained".to_string(),
+            group: None,
+            origin: None,
+        }],
+        next_model_request_index: 1,
+        queued_tool_calls: Vec::new(),
+        suppressed_narration: false,
+        extension_snapshots: Vec::new(),
+        pending_tool_call_id: call.id.clone(),
+        conversation_trace_items: Vec::new(),
+        next_conversation_trace_sequence: 0,
+        conversation_trace_truncated: false,
+        model_visible_trace_item_count: 0,
+    });
+    service
+        .store_pending_action(
+            "run-invalid-checkpoint",
+            "conversation-invalid-checkpoint",
+            "assistant-invalid-checkpoint",
+            AgentProposedAction::ToolCall { call: call.clone() },
+            agent_input,
+        )
+        .unwrap();
+
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    let approval_error = service
+        .approve_action("run-invalid-checkpoint", &call.id, notifications)
+        .unwrap_err();
+    assert!(approval_error.contains("原始 ToolCall 与冻结 action 不一致"));
+    assert_eq!(
+        service.list_pending_actions()[0].status,
+        PendingActionStatus::Pending
+    );
+
+    let cancellation_error = service
+        .cancel_action("run-invalid-checkpoint", &call.id)
+        .unwrap_err();
+    assert!(cancellation_error.contains("原始 ToolCall 与冻结 action 不一致"));
+    assert_eq!(
+        service.list_pending_actions()[0].status,
+        PendingActionStatus::Pending
+    );
+    let persisted = storage.list_pending_agent_actions().unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].status, "pending");
+    assert_eq!(persisted[0].target_status, None);
 }
 
 #[test]

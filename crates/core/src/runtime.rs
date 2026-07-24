@@ -8,6 +8,7 @@ mod events;
 mod extensions;
 mod file_transactions;
 mod preparation;
+mod tool_failure_guard;
 mod tool_flow;
 mod tool_input_stream;
 mod trace;
@@ -31,8 +32,8 @@ use crate::context::{
 use crate::conversation_trace::ConversationTraceRecorder;
 use crate::file_write::{file_write_approval_route, FileWriteApprovalRoute};
 use crate::llm::{
-    complete_chat, complete_chat_streaming, detect_api_style, LlmChatRequest, LlmMessage,
-    LlmMessageRole, LlmStreamEvent,
+    complete_chat, complete_chat_streaming, detect_api_style, is_repairable_empty_model_action,
+    LlmChatRequest, LlmMessage, LlmMessageRole, LlmStreamEvent,
 };
 use crate::model_request_observation::{
     ModelRequestEstimate, ModelRequestObservation, ModelRequestObservationBuilder,
@@ -57,7 +58,7 @@ use crate::{
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
     create_run_checkpoint, restore_run_checkpoint, RestoredRunCheckpoint, RunCheckpointState,
-    ToolCallBatch,
+    ToolCallBatch, ToolCallBatchClaim,
 };
 use context_compaction::{ContextCompactionExecution, ContextCompactionExecutor};
 use extensions::{
@@ -72,6 +73,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex;
+use tool_failure_guard::ToolFailureGuard;
 use tool_flow::{
     approve_proposed_action, build_tool_observation_message, cancellation_preempts_tool_result,
     cancelled_output, done_event, enforce_skill_activation_barrier,
@@ -286,6 +288,7 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
+        let mut tool_failure_guard = ToolFailureGuard::from_trace(&conversation_trace.snapshot());
         let conversation_trace = Arc::new(Mutex::new(conversation_trace));
         let mut pending_trace_baseline =
             publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
@@ -312,6 +315,7 @@ impl AgentRuntime {
         let mut usage = None;
         let mut finish_reason = None;
         let mut response_fence_corrections = 0_usize;
+        let mut empty_model_action_repair_pending = false;
         let context_capacity_detector = context_window_configured.then_some(capacity_detector);
         let context_compaction_planner = context_window_configured
             .then(|| ContextCompactionPlanner::for_tools(&llm_request.tools));
@@ -347,7 +351,10 @@ impl AgentRuntime {
                 if tool_batch.take_suppressed_narration() {
                     active_context.push(suppressed_narration_context_item());
                 }
-                if tool_batch.is_empty() && next_model_request_index > self.max_tool_iterations {
+                if tool_batch.is_empty()
+                    && next_model_request_index > self.max_tool_iterations
+                    && !empty_model_action_repair_pending
+                {
                     let message = "工具调用次数超过限制，已停止继续执行。".to_string();
                     event_stream.emit(AgentEvent::Error {
                         run_id: Some(run_id.clone()),
@@ -373,6 +380,9 @@ impl AgentRuntime {
                             &ModelRequestContext::agent_work(),
                             &mut request_context,
                         )?;
+                        if empty_model_action_repair_pending {
+                            request_context.push(empty_model_action_repair_context_item());
+                        }
                         if let Some(context) = file_transactions.request_context() {
                             request_context.push(ContextItem::text(
                                 LlmMessageRole::System,
@@ -709,9 +719,16 @@ impl AgentRuntime {
                                 ));
                             }
                             merge_total_usage(&mut usage, error.usage().cloned());
+                            if is_repairable_empty_model_action(&error)
+                                && !empty_model_action_repair_pending
+                            {
+                                empty_model_action_repair_pending = true;
+                                continue 'agent_loop;
+                            }
                             return Err(error.with_usage(usage));
                         }
                     };
+                    empty_model_action_repair_pending = false;
                     merge_total_usage(&mut usage, llm_response.usage);
                     finish_reason = llm_response.finish_reason;
 
@@ -875,6 +892,7 @@ impl AgentRuntime {
                             finish_reason,
                         ));
                     }
+                    let batch_claim = tool_batch.claim(&queued_tool_call.call);
                     let tool_exchange_group = queued_tool_call.context_group();
                     active_context.push(ContextItem::assistant(
                         queued_tool_call.assistant_content,
@@ -912,10 +930,53 @@ impl AgentRuntime {
                         call.tool == "run_command" || call.tool == "skills_run_script";
                     let mut prepared_policy_action = None;
                     let mut policy_preflight_failure = None;
+                    let mut terminate_after_repeat_guard_result = false;
                     let mut auto_execute_policy_action = false;
                     let mut requires_approval = definition_requires_approval;
+                    let duplicate_in_batch = matches!(
+                        batch_claim,
+                        ToolCallBatchClaim::Duplicate { .. }
+                    );
 
-                    if !tool_is_exposed {
+                    if let ToolCallBatchClaim::Duplicate {
+                        semantic_fingerprint,
+                    } = batch_claim
+                    {
+                        let message = format!(
+                            "Tool `{}` repeated the same semantic operation in one model response. \
+                             The duplicate was not executed; use the result from the earlier call.",
+                            call.tool
+                        );
+                        policy_preflight_failure = Some(AgentToolResult {
+                            call_id: call.id.clone(),
+                            tool: call.tool.clone(),
+                            ok: false,
+                            result: Some(json!({
+                                "type": "runtime_guard",
+                                "code": "duplicateToolCallInBatch",
+                                "errorCode": "agent.duplicate_tool_call_in_batch",
+                                "recovery": "useEarlierCallResult",
+                                "tool": call.tool,
+                                "semanticFingerprint": semantic_fingerprint,
+                                "executed": false,
+                                "message": message,
+                            })),
+                            error: Some(message),
+                        });
+                        requires_approval = false;
+                        call.approval_status = AgentApprovalStatus::NotRequired;
+                    }
+
+                    if policy_preflight_failure.is_none() {
+                        if let Some(block) = tool_failure_guard.before_call(&call) {
+                            terminate_after_repeat_guard_result = block.terminate_after_result;
+                            policy_preflight_failure = Some(block.result);
+                            requires_approval = false;
+                            call.approval_status = AgentApprovalStatus::NotRequired;
+                        }
+                    }
+
+                    if policy_preflight_failure.is_none() && !tool_is_exposed {
                         policy_preflight_failure = Some(failed_tool_call_result(
                             &call,
                             AgentError::structured(
@@ -933,7 +994,10 @@ impl AgentRuntime {
                         ));
                     }
 
-                    if is_policy_process_tool && tool_is_exposed {
+                    if policy_preflight_failure.is_none()
+                        && is_policy_process_tool
+                        && tool_is_exposed
+                    {
                         match tool_registry.proposed_action(&tool_context, &call) {
                             Ok(action) => match if call.tool == "run_command" {
                                 prepare_command_dispatch(
@@ -1074,6 +1138,7 @@ impl AgentRuntime {
                             }
                             Err(error) => {
                                 let result = failed_tool_call_result(&call, error);
+                                tool_failure_guard.observe(&call, &result);
                                 let llm_result = tool_registry.model_projection(&result);
                                 let trace_result = tool_registry.trace_projection(&result);
                                 conversation_trace
@@ -1139,7 +1204,7 @@ impl AgentRuntime {
                         };
                         event_stream.emit(AgentEvent::ApprovalRequired {
                             run_id: run_id.clone(),
-                            action: action.clone(),
+                            action: Box::new(action.clone()),
                             checkpoint,
                         });
                         event_stream.emit(state_event(
@@ -1209,6 +1274,7 @@ impl AgentRuntime {
                                         .expect("automatic host action requires host executor")
                                         .clone(),
                                     action,
+                                    call.clone(),
                                     cancellation_token.clone(),
                                 )
                                 .await
@@ -1242,6 +1308,9 @@ impl AgentRuntime {
                         }
                         Err(error) => return Err(error),
                     };
+                    if !duplicate_in_batch {
+                        tool_failure_guard.observe(&call, &result);
+                    }
                     let llm_result = tool_registry.model_projection(&result);
                     let trace_result = tool_registry.trace_projection(&result);
                     let checkpoint_result = tool_registry.checkpoint_projection(&result);
@@ -1335,6 +1404,9 @@ impl AgentRuntime {
                                 active_context.push(item)
                             }
                         }
+                    }
+                    if terminate_after_repeat_guard_result {
+                        return Err(ToolFailureGuard::terminal_error(&call));
                     }
                     if cancellation_token.is_cancelled() {
                         return Ok(cancelled_output(

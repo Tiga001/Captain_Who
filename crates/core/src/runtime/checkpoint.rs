@@ -5,6 +5,7 @@
 //! belong to the same model response but have not started yet. On resume, the approved/rejected
 //! result closes the pending exchange before queued calls continue.
 
+use super::tool_failure_guard::semantic_tool_call_fingerprint;
 use super::tool_flow::build_tool_observation_message;
 use crate::context::{ContextFrame, ContextGroup};
 use crate::conversation_trace::{
@@ -36,6 +37,18 @@ impl QueuedToolCall {
 pub(super) struct ToolCallBatch {
     queue: VecDeque<QueuedToolCall>,
     suppressed_narration: bool,
+    /// Semantic calls already accepted from this one model response.
+    ///
+    /// This is not a global result cache. It only prevents duplicate side effects inside one
+    /// provider response. Approval restore reconstructs it from the checkpoint's durable tool
+    /// exchange groups, so pausing cannot make a queued duplicate executable again.
+    seen_semantic_fingerprints: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ToolCallBatchClaim {
+    Execute,
+    Duplicate { semantic_fingerprint: String },
 }
 
 impl ToolCallBatch {
@@ -66,6 +79,21 @@ impl ToolCallBatch {
         Self {
             queue,
             suppressed_narration,
+            seen_semantic_fingerprints: BTreeSet::new(),
+        }
+    }
+
+    pub(super) fn claim(&mut self, call: &LlmToolCall) -> ToolCallBatchClaim {
+        let semantic_fingerprint = semantic_tool_call_fingerprint(&call.name, &call.args);
+        if self
+            .seen_semantic_fingerprints
+            .insert(semantic_fingerprint.clone())
+        {
+            ToolCallBatchClaim::Execute
+        } else {
+            ToolCallBatchClaim::Duplicate {
+                semantic_fingerprint,
+            }
         }
     }
 
@@ -194,6 +222,12 @@ pub(super) fn restore_run_checkpoint(
             continuation.call.id, continuation.result.call_id
         )));
     }
+    if continuation.call.tool != continuation.result.tool {
+        return Err(AgentError::new(format!(
+            "无法恢复运行检查点：续跑调用工具 `{}` 与工具结果 `{}` 不一致。",
+            continuation.call.tool, continuation.result.tool
+        )));
+    }
     if checkpoint.next_model_request_index == 0 {
         return Err(AgentError::new(
             "无法恢复运行检查点：下一次模型请求序号无效。",
@@ -218,12 +252,22 @@ pub(super) fn restore_run_checkpoint(
         ));
     }
     let visible_trace_item_count = checkpoint.model_visible_trace_item_count;
+    let restored_batch_fingerprints =
+        restore_batch_fingerprints(&checkpoint.context_items, &checkpoint.pending_tool_call_id)?;
     let mut conversation_trace = ConversationTraceRecorder::from_checkpoint(
         checkpoint.conversation_trace_items,
         checkpoint.next_conversation_trace_sequence,
         checkpoint.conversation_trace_truncated,
     );
     let mut context = ContextFrame::from_checkpoint_items(checkpoint.context_items)?;
+    let checkpoint_call = context.validate_pending_tool_call(&checkpoint.pending_tool_call_id)?;
+    if checkpoint_call.name != continuation.call.tool
+        || checkpoint_call.args != continuation.call.args
+    {
+        return Err(AgentError::new(
+            "无法恢复运行检查点：续跑调用的工具或参数与冻结的待审批调用不一致。",
+        ));
+    }
     let continuation_call = LlmToolCall {
         id: continuation.call.id.clone(),
         name: continuation.call.tool.clone(),
@@ -249,11 +293,71 @@ pub(super) fn restore_run_checkpoint(
         tool_batch: ToolCallBatch {
             queue,
             suppressed_narration: checkpoint.suppressed_narration,
+            seen_semantic_fingerprints: restored_batch_fingerprints,
         },
         extension_snapshots: checkpoint.extension_snapshots,
         conversation_trace,
         visible_trace_item_count,
     })
+}
+
+fn restore_batch_fingerprints(
+    context_items: &[AgentContextCheckpointItem],
+    pending_tool_call_id: &str,
+) -> AgentResult<BTreeSet<String>> {
+    let pending_item = context_items
+        .iter()
+        .find(|item| {
+            item.tool_calls
+                .iter()
+                .any(|call| call.id == pending_tool_call_id)
+        })
+        .ok_or_else(|| AgentError::new("运行检查点缺少冻结的待审批工具调用。"))?;
+    let pending_call = pending_item
+        .tool_calls
+        .iter()
+        .find(|call| call.id == pending_tool_call_id)
+        .expect("pending item was selected by this call");
+    let pending_group = pending_item
+        .group
+        .as_ref()
+        .ok_or_else(|| AgentError::new("运行检查点中的待审批工具调用缺少交换分组。"))?;
+    let response_group_prefix = tool_exchange_response_prefix(&pending_group.id);
+
+    let mut fingerprints = BTreeSet::new();
+    // Always seed the pending call. This is sufficient for the most important approval boundary:
+    // a duplicate queued after the pending action can never execute after resume.
+    fingerprints.insert(semantic_tool_call_fingerprint(
+        &pending_call.name,
+        &pending_call.args,
+    ));
+
+    if let Some(prefix) = response_group_prefix {
+        for item in context_items {
+            let belongs_to_same_response = item
+                .group
+                .as_ref()
+                .and_then(|group| tool_exchange_response_prefix(&group.id))
+                .is_some_and(|candidate| candidate == prefix);
+            if !belongs_to_same_response {
+                continue;
+            }
+            for call in &item.tool_calls {
+                fingerprints.insert(semantic_tool_call_fingerprint(&call.name, &call.args));
+            }
+        }
+    }
+
+    Ok(fingerprints)
+}
+
+fn tool_exchange_response_prefix(group_id: &str) -> Option<&str> {
+    let (prefix, tool_index) = group_id.rsplit_once(':')?;
+    tool_index.parse::<usize>().ok()?;
+    prefix
+        .starts_with("run:")
+        .then_some(prefix)
+        .filter(|prefix| prefix.contains(":tool-exchange:"))
 }
 
 fn queued_tool_call_checkpoint(call: &QueuedToolCall) -> AgentQueuedToolCallCheckpoint {
@@ -449,6 +553,154 @@ mod tests {
 
         assert!(error.to_string().contains("不支持版本 2"));
         assert!(error.to_string().contains("当前版本为 3"));
+    }
+
+    #[test]
+    fn one_model_response_claims_reason_only_duplicates_once() {
+        let mut batch = ToolCallBatch::from_model_response(
+            "claim-run",
+            0,
+            String::new(),
+            vec![
+                LlmToolCall {
+                    id: canonical_test_call_id(0, "claim-first"),
+                    name: "write_file".to_string(),
+                    args: json!({
+                        "filePath": "report.txt",
+                        "content": "same",
+                        "reason": "Create the report"
+                    }),
+                },
+                LlmToolCall {
+                    id: canonical_test_call_id(1, "claim-duplicate"),
+                    name: "write_file".to_string(),
+                    args: json!({
+                        "reason": "Write the requested file",
+                        "content": "same",
+                        "filePath": "report.txt"
+                    }),
+                },
+            ],
+            false,
+        );
+        let first = batch.pop_front().unwrap();
+        let duplicate = batch.pop_front().unwrap();
+
+        assert_eq!(batch.claim(&first.call), ToolCallBatchClaim::Execute);
+        assert!(matches!(
+            batch.claim(&duplicate.call),
+            ToolCallBatchClaim::Duplicate { .. }
+        ));
+    }
+
+    #[test]
+    fn approval_restore_reconstructs_all_seen_calls_from_the_same_model_response() {
+        let first = LlmToolCall {
+            id: canonical_test_call_id(0, "restore-first"),
+            name: "read_file".to_string(),
+            args: json!({ "path": "source.txt", "reason": "Read source" }),
+        };
+        let pending = LlmToolCall {
+            id: canonical_test_call_id(1, "restore-pending"),
+            name: "write_file".to_string(),
+            args: json!({
+                "filePath": "report.txt",
+                "content": "draft",
+                "reason": "Write report"
+            }),
+        };
+        let duplicate_first = LlmToolCall {
+            id: canonical_test_call_id(2, "restore-duplicate"),
+            name: "read_file".to_string(),
+            args: json!({ "reason": "Read it again", "path": "source.txt" }),
+        };
+        let mut batch = ToolCallBatch::from_model_response(
+            "checkpoint-validation-run",
+            0,
+            String::new(),
+            vec![first.clone(), pending.clone(), duplicate_first],
+            false,
+        );
+        let first = batch.pop_front().unwrap();
+        assert_eq!(batch.claim(&first.call), ToolCallBatchClaim::Execute);
+        let pending_queued = batch.pop_front().unwrap();
+        assert_eq!(
+            batch.claim(&pending_queued.call),
+            ToolCallBatchClaim::Execute
+        );
+
+        let first_group = first.context_group();
+        let pending_group = pending_queued.context_group();
+        let context = ContextFrame::new(vec![
+            ContextItem::assistant(
+                "",
+                vec![first.call.clone()],
+                ContextMetadata::new(
+                    ContextSource::ModelResponse,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                )
+                .with_group(first_group.clone()),
+            ),
+            ContextItem::tool_result(
+                first.call.id.clone(),
+                "{}",
+                false,
+                ContextMetadata::new(
+                    ContextSource::ToolResult,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                )
+                .with_group(first_group),
+            ),
+            ContextItem::assistant(
+                "",
+                vec![pending_queued.call.clone()],
+                ContextMetadata::new(
+                    ContextSource::ModelResponse,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                )
+                .with_group(pending_group),
+            ),
+        ]);
+        let checkpoint = create_run_checkpoint(
+            "checkpoint-validation-run",
+            RunCheckpointState {
+                context: &context,
+                next_model_request_index: 1,
+                tool_batch: &batch,
+                extension_snapshots: Vec::new(),
+                model_visible_trace_item_count: 0,
+                pending_tool_call_id: &pending.id,
+                conversation_trace: &ConversationTraceRecorder::default(),
+            },
+        )
+        .unwrap();
+        let continuation = AgentToolContinuation {
+            call: AgentToolCall {
+                id: pending.id.clone(),
+                tool: pending.name.clone(),
+                args: pending.args.clone(),
+                approval_status: AgentApprovalStatus::Approved,
+                reason: None,
+            },
+            result: AgentToolResult {
+                call_id: pending.id,
+                tool: pending.name,
+                ok: true,
+                result: Some(json!({ "status": "written" })),
+                error: None,
+            },
+        };
+
+        let mut restored =
+            restore_run_checkpoint(checkpoint, "checkpoint-validation-run", &continuation).unwrap();
+        let queued_duplicate = restored.tool_batch.pop_front().unwrap();
+        assert!(matches!(
+            restored.tool_batch.claim(&queued_duplicate.call),
+            ToolCallBatchClaim::Duplicate { .. }
+        ));
     }
 
     #[test]
@@ -680,6 +932,40 @@ mod tests {
         assert!(error.to_string().contains("续跑调用"));
         assert!(error.to_string().contains("工具结果"));
         assert!(error.to_string().contains("不一致"));
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_changed_call_tool_args_and_result_tool() {
+        let (checkpoint, continuation) = restorable_checkpoint_fixture();
+
+        let mut changed_tool = continuation.clone();
+        changed_tool.call.tool = "run_command".to_string();
+        changed_tool.result.tool = "run_command".to_string();
+        let error = restore_error(restore_run_checkpoint(
+            checkpoint.clone(),
+            "checkpoint-validation-run",
+            &changed_tool,
+        ));
+        assert!(error.to_string().contains("工具或参数"));
+
+        let mut changed_args = continuation.clone();
+        changed_args.call.args = json!({ "path": "different.txt" });
+        let error = restore_error(restore_run_checkpoint(
+            checkpoint.clone(),
+            "checkpoint-validation-run",
+            &changed_args,
+        ));
+        assert!(error.to_string().contains("工具或参数"));
+
+        let mut changed_result_tool = continuation;
+        changed_result_tool.result.tool = "run_command".to_string();
+        let error = restore_error(restore_run_checkpoint(
+            checkpoint,
+            "checkpoint-validation-run",
+            &changed_result_tool,
+        ));
+        assert!(error.to_string().contains("续跑调用工具"));
+        assert!(error.to_string().contains("工具结果"));
     }
 
     #[test]

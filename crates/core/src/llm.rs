@@ -9,7 +9,7 @@ pub(crate) use tool_call_id::{
 };
 pub(crate) use transport::{
     complete_chat, complete_chat_allow_empty, complete_chat_streaming,
-    complete_chat_streaming_allow_empty,
+    complete_chat_streaming_allow_empty, is_repairable_empty_model_action,
 };
 
 use crate::cancellation::AgentCancellationToken;

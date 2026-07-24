@@ -639,7 +639,7 @@ mod tests {
     fn approval_event_keeps_run_checkpoint_internal() {
         let event = AgentEvent::ApprovalRequired {
             run_id: "run-1".to_string(),
-            action: AgentProposedAction::ToolCall {
+            action: Box::new(AgentProposedAction::ToolCall {
                 call: AgentToolCall {
                     id: "call-1".to_string(),
                     tool: "test".to_string(),
@@ -647,7 +647,7 @@ mod tests {
                     approval_status: AgentApprovalStatus::Required,
                     reason: None,
                 },
-            },
+            }),
             checkpoint: crate::protocol::AgentRunCheckpoint {
                 version: crate::protocol::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
                 run_id: "run-1".to_string(),

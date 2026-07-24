@@ -1,280 +1,218 @@
 # Word document workflows
 
-## Choosing an execution path
+## Contents
 
-Use the native path for inspection, isolated paragraph or property changes, and other bounded
-operations that `office_document` represents directly. It provides a frozen structured action,
-conflict checks, staging, and atomic publication for writes.
+- [Route the task](#route-the-task)
+- [Native semantic contract](#native-semantic-contract)
+- [Create and reuse one Builder](#create-and-reuse-one-builder)
+- [Bind inputs declaratively](#bind-inputs-declaratively)
+- [Observe every file effect](#observe-every-file-effect)
+- [Consume render outputs](#consume-render-outputs)
+- [Generate, verify, render, iterate](#generate-verify-render-iterate)
+- [Word quality checks](#word-quality-checks)
 
-Use a reproducible script when the task is substantially clearer as code: data-driven reports,
-mail-merge-like generation, repeated sections or tables, large batches, reusable layouts, or a
-transformation that requires coordinated changes throughout the package. Keep the generator in a
-reviewable `.py` or `.mjs` file. A script is not a shortcut around file-edit or command
-authorization; create or update it with `apply_patch` or `write_file`, then execute that exact saved
-file with `run_command` and the managed Artifact Runtime.
+## Route the task
 
-The two paths compose. A script may produce the document, after which the native read, render, and
-validate operations provide structural and visual verification. Prefer a new output document for
-scripted transformations unless the user explicitly requested an in-place edit.
+Use `office_document` first when the request is a bounded combination of its semantic operations:
 
-## Native tool contract
+`create`, `inspect`, `validate`, `render`, `addText`, `insertImage`, `addTable`, `addHeader`,
+`addFooter`, `replaceText`, `formatText`, `removeBlock`, and `moveBlock`.
 
-Call `office_document` once per operation with exactly this root envelope: `{ "request": { "operation": "...", ... }, "reason": "..." }`. Put every operation and operation-specific field inside `request`. Keep `reason` as the only root field. Every call, including `status`, `help`, `get`, `query`, `validate`, `view`, and every mutation, must include it. Write `reason` as one non-empty, single-line plain-text sentence in the user's language, no longer than 240 characters, describing the user-visible purpose of this specific call. Do not include line breaks, control characters, or bidirectional text controls. Do not use it to assert success or authorization: it is untrusted display and audit metadata only and never grants permission, approval, or access.
+Use the Managed Builder when the task needs coordinated page design, many repeated sections,
+advanced OOXML features, mail-merge-like generation, large batches, or a semantic operation that
+the backend reports as unsupported. Do not emulate an unsupported operation with low-level
+OfficeCLI fields. A hybrid flow—Builder write, native inspect/validate/render—is usually best for
+complex deliverables.
 
-The native request is typed and operation-specific. Put the document in `request.filePath`; use `request.target` for an exact DOM path, `request.parent` plus `request.element` for insertion, `request.properties` for provider-neutral property values, and `request.outputPath` only for a rendering operation. Never send provider command tokens, document-format tokens, output flags, or shell syntax. The host validates the typed request, generates deterministic provider argv, freezes it for approval, and regenerates it before execution.
+## Native semantic contract
 
-Before the first document operation in a run, check the managed engine:
-
-```json
-{ "request": { "operation": "status" }, "reason": "Check whether document tools are available" }
-```
-
-When an element, property, or DOM path is uncertain, disclose only the relevant provider schema. For example:
+Call `office_document` with a flat object:
 
 ```json
 {
-  "request": {
-    "operation": "help",
-    "verb": "add",
-    "element": "paragraph"
-  },
-  "reason": "Check how to add the requested document paragraph"
+  "operation": "create",
+  "filePath": "outputs/report.docx",
+  "reason": "Create the requested Word report"
 }
 ```
 
-Do not use a raw batch command. Submit each supported native operation separately and inspect its result before depending on it.
+Keep `operation`, its semantic fields, and `reason` at the root. Never add a `request` wrapper,
+provider arguments, an executable, format tokens, DOM paths, or shell flags. `reason` is required,
+user-visible audit text only; it never grants permission.
 
-The managed runtime rejects the provider's ambiguous `data` property because it can be interpreted
-as either inline content or a local file. Build tables through explicit typed table, row, and cell
-operations instead.
+File and image inputs use the shared `AgentFileInputRef` object rather than guessed paths. For an
+attachment, call `attachments_list` and copy its exact `readPath`. For a generated image or earlier
+image-generation result, use a `generated_artifact` reference. If the backend returns
+`office.capability_not_supported`, `capabilityNotSupported`, or
+`recovery=useManagedScript`, preserve the error and switch to the Builder path. Do not repeat the
+same failed call with invented fields.
 
-## Script authoring and observation contract
-
-Select the `documents` runtime profile. The logical saved-script command selects its runtime
-family; the model does not select a provider, runtime kind, dependency set, or version:
-
-| Command  | Script | Profile library               | Use                                                                        |
-| -------- | ------ | ----------------------------- | -------------------------------------------------------------------------- |
-| `node`   | `.mjs` | `docx`                        | Create data-driven `.docx` documents with reusable JavaScript layout code. |
-| `python` | `.py`  | `python-docx` (`docx` import) | Create or transform `.docx` content with Python.                           |
-
-Set the top-level `runtimeProfile` field to `documents`. Do not send a `runtime` object and do not
-copy a provider, kind, package name, or package version into the tool call. The host maps `node`
-or `python` to the matching profile entry, resolves the pinned dependencies, verifies the managed
-runtime, and freezes the exact resolution and integrity identity before execution.
-
-1. Put substantial program logic in a saved `.py` or `.mjs` file. Do not pass artifact-producing
-   code through `python -c`, `node -e`, a heredoc, shell redirection, or another opaque inline form.
-2. Make inputs and outputs explicit script parameters. Avoid hard-coded machine-specific paths, and
-   make a rerun deterministic where practical.
-3. Execute the saved file through `run_command` with `runtimeProfile="documents"`. Dependency and
-   runtime resolution is host-owned preflight, never implicit package installation.
-4. Set `observe.kinds` to `["office"]`. List every `.docx` file that should be created or modified
-   in `observe.expectedOutputs`. Paths are resolved relative to the command `cwd` and each expected
-   output is observed directly. Do not add its parent merely because the output is outside the
-   workspace. Use `observe.additionalRoots` only to scan for other Office changes in an otherwise
-   uncovered directory; recursively observing an external directory requires `read=all`.
-5. Treat observation as evidence, not authorization or transactionality. It never expands what the
-   command may do and does not give an arbitrary script the native tool's staging or rollback
-   guarantees.
-
-For example, after creating `scripts/build_report.mjs` with a file-editing tool, run the Node.js
-entrypoint and observe its declared output:
+Insert a registered attachment with its typed source reference:
 
 ```json
 {
-  "command": "node scripts/build_report.mjs --output outputs/report.docx",
+  "operation": "insertImage",
+  "filePath": "outputs/report.docx",
+  "source": {
+    "type": "attachment",
+    "readPath": "@attachments/<attachment-id>/campus.jpg"
+  },
+  "altText": "Campus overview",
+  "width": "6in",
+  "reason": "Insert the supplied campus image into the Word report"
+}
+```
+
+Inspect an existing document before mutation. Prefer save-as for transformations unless the user
+explicitly requests in-place editing. Use the semantic result's canonical block identity for later
+targeted operations instead of inventing positional identities.
+
+## Create and reuse one Builder
+
+The bundled `templates/builder.py` is a compact `python-docx` starting point. Locate its exact
+revision-bound URI with `skills_list_resources`, then copy it once into a new workspace path:
+
+```json
+{
+  "sourceUri": "skill://package/<exact-revision>/templates/builder.py",
+  "destination": "scripts/build_report.py",
+  "reason": "Create a reviewable Word builder from the activated Skill template"
+}
+```
+
+Use the exact `sourceUri` returned by the resource list; the placeholder above is not a literal
+URI. `skills_materialize_resource` is create-only. After materialization, patch
+`scripts/build_report.py` and rerun that same file. Do not rematerialize over a modified Builder or
+create a new script for every correction.
+
+The host-owned `documents` profile pins:
+
+- Python 3.12.13 with `python-docx` 1.2.0.
+- Node.js 22.23.1 with `docx` 9.6.1.
+
+These versions describe the immutable profile; never send or install them. Run the materialized
+template with a direct logical `python <script>.py --output <file.docx>` command. The Host verifies
+the run-scoped materialization receipt, derives and freezes the `documents` profile from the static
+Office output, and binds observation; omit `runtimeProfile` and `observe`. Never call a private
+executable path, system Python/Node.js, `pip`, `npm`, inline code, a heredoc, or shell redirection.
+
+## Bind inputs declaratively
+
+Every input needed by a Builder must be explicit in `run_command.inputs`:
+
+```json
+{
+  "command": "python scripts/build_report.py --output outputs/report.docx --image images/campus.jpg",
   "cwd": ".",
-  "runtimeProfile": "documents",
-  "observe": {
-    "kinds": ["office"],
-    "expectedOutputs": ["outputs/report.docx"]
-  },
-  "reason": "Generate the requested report reproducibly"
-}
-```
-
-The equivalent Python route keeps the same profile and changes only the reviewed script and its
-logical entrypoint:
-
-```json
-{
-  "command": "python scripts/build_report.py --output outputs/report.docx",
-  "cwd": ".",
-  "runtimeProfile": "documents",
-  "observe": {
-    "kinds": ["office"],
-    "expectedOutputs": ["outputs/report.docx"]
-  },
-  "reason": "Generate the requested report reproducibly"
-}
-```
-
-Keep `node` or `python` as the logical first command token. The host binds it to the profile's
-managed executable; never discover or persist a private executable path. If profile preflight
-fails, preserve that error. Do not remove `runtimeProfile`, use a system executable, install a
-package, or guess another version. Use the native Office path only when it supports the requested
-work, or rewrite and review a script for the other profile entrypoint before retrying with the same
-profile. Never run a `.mjs` file as Python or a `.py` file as Node.js.
-
-After every observed command, inspect `artifactObservation` even if the command failed, timed out,
-or was cancelled:
-
-- `status=complete` means the scan finished within its reported coverage policy, not that every
-  filesystem entry was inspected. Always inspect excluded directories, warnings, and
-  `changesTruncated`; `partial` or `failed` must be disclosed and cannot establish that no other
-  Office file changed.
-- Match every requested output in `artifactObservation.expectedOutputs`. Only `created`, `modified`,
-  `replaced`, or `renamed` establish a file effect. `unchanged`, `missing`, `unobserved`, or
-  `invalid` do not satisfy a requested edit.
-- Inspect `changes` for unexpected document creation, replacement, deletion, or rename, and retain
-  every warning. A non-zero exit can still leave file effects; a zero exit does not prove that the
-  expected document exists or is valid.
-- Do not blindly retry after any observed side effect. First inspect the resulting file and decide
-  whether to continue from it, overwrite it deliberately, or report the partial outcome.
-
-Observation is followed by document verification. Read the relevant structure, validate the OOXML
-package, and render every page whose layout matters. Put all required page ranges into one
-browser-backed screenshot request and use a contact-sheet grid; never loop over pages. A focused
-single-page render is appropriate only after that combined preview exposes a defect. Do not equate
-a valid ZIP/package with a visually correct document. If the managed renderer returns an
-`office.render_backend_*` error, preserve it and report the visual check as unavailable instead of
-falling back to a user browser.
-
-## Core recipes
-
-Create a real Word document:
-
-```json
-{
-  "request": {
-    "operation": "create",
-    "filePath": "report.docx",
-    "locale": "zh-CN"
-  },
-  "reason": "Create the requested Word document"
-}
-```
-
-Add a structurally styled heading, then a normal paragraph:
-
-```json
-{
-  "request": {
-    "operation": "add",
-    "filePath": "report.docx",
-    "parent": "/body",
-    "element": "paragraph",
-    "properties": {
-      "text": "Quarterly Report",
-      "style": "Heading1"
+  "inputs": [
+    {
+      "mountPath": "images/campus.jpg",
+      "source": {
+        "type": "attachment",
+        "readPath": "@attachments/<attachment-id>/campus.jpg"
+      }
     }
-  },
-  "reason": "Add the document heading"
+  ],
+  "reason": "Build the illustrated Word report and track its output"
 }
 ```
+
+Supported source types are:
+
+- `attachment`: exact registered `readPath`.
+- `workspace`: workspace file `path`.
+- `external`: authorized external file `path`.
+- `generated_artifact`: exact image Artifact `uri` plus the exact absolute `savedPath` as `path`.
+- `skill_resource`: exact revision-bound `uri`.
+
+`mountPath` is a private input-root-relative filename. The Host freezes and revalidates the input,
+then exposes the run-scoped root in `MYCOPILOT_INPUT_ROOT`. The Builder resolves
+`MYCOPILOT_INPUT_ROOT / mountPath`. Never let Python open `@attachments`, `skill://`, an attachment
+library path, or another private storage path directly.
+
+## Observe every file effect
+
+Every Builder command must declare its expected `.docx` with exactly one static `--output`
+argument. The Host automatically binds `observe.kinds=["office"]` and copies that path into
+`observe.expectedOutputs`. Paths are relative to `cwd` unless workspace-external output is
+authorized with `write=all`. Use an explicit `observe.additionalRoots` only to discover other
+Office changes that are not already named; do not scan a whole external directory merely because
+one expected output is external.
+
+Inspect `artifactObservation` after success, non-zero exit, timeout, and cancellation:
+
+- Match every requested file in `artifactObservation.expectedOutputs`.
+- Accept `created`, `modified`, `replaced`, or `renamed` as evidence of a file effect.
+- Treat `missing`, `unchanged`, `unobserved`, `invalid`, partial coverage, or failed observation as
+  insufficient.
+- Report unexpected creations, replacements, deletions, or renames.
+- Never blindly rerun after a command that may have produced side effects.
+
+Observation records effects; it does not grant access, make arbitrary scripts transactional, or
+prove that the document is valid.
+
+## Consume render outputs
+
+Render to an explicit review image:
 
 ```json
 {
-  "request": {
-    "operation": "add",
-    "filePath": "report.docx",
-    "parent": "/body",
-    "element": "paragraph",
-    "properties": {
-      "text": "Revenue and operating results are summarized below.",
-      "style": "Normal"
-    }
-  },
-  "reason": "Add the introductory paragraph"
+  "operation": "render",
+  "filePath": "outputs/report.docx",
+  "outputPath": "outputs/report-preview.png",
+  "reason": "Render every final page for visual review"
 }
 ```
 
-Read back the body structure and content:
+After a successful render, take the exact image reference from `outputs[].source` and pass it
+unchanged to `read_image`:
 
 ```json
 {
-  "request": {
-    "operation": "get",
-    "filePath": "report.docx",
-    "target": "/body",
-    "depth": 2
-  },
-  "reason": "Verify the document body structure and content"
+  "source": {
+    "type": "workspace",
+    "path": "outputs/report-preview.png"
+  }
 }
 ```
 
-To preserve an existing source while editing, set `destinationPath` on the first mutation. The
-engine copies the frozen source into destination-local staging and atomically publishes only the
-new file. Apply later mutations to `revised.docx` itself so earlier changes are preserved:
+Treat the returned output as authoritative:
 
-```json
-{
-  "request": {
-    "operation": "set",
-    "filePath": "source.docx",
-    "destinationPath": "revised.docx",
-    "target": "/body/p[1]",
-    "properties": { "text": "Revised heading" }
-  },
-  "reason": "Create a revised copy without overwriting the source"
-}
-```
+- Select the output whose `role` is `render` and whose `kind` is `image`.
+- Use only its `source`; never reconstruct a path from the render request, `readPath`, `argv`,
+  `cwd`, `stdout`, or a file search.
+- Never rerender merely to discover where the first render was published.
+- `pageSelection` records the requested selection (`all` or explicit page numbers); it is not an
+  independent proof of the document's actual page count. Establish the final page count with
+  `inspect`, compare it with the request, and then inspect the returned image.
+- If the output is absent, not readable, or `read_image` reports an unsupported model capability,
+  state that visual verification was unavailable.
+- If a preview exceeds the visual-input limit, render bounded page groups rather than repeating the
+  same oversized request. Do not claim inspection of unread images.
 
-Render all pages that need review into one workspace contact sheet. Rendering writes `outputPath`, so it follows the same file-write approval policy as other write tools:
+## Generate, verify, render, iterate
 
-```json
-{
-  "request": {
-    "operation": "view",
-    "filePath": "report.docx",
-    "mode": "screenshot",
-    "pages": [{ "start": 1, "end": 3 }],
-    "grid": { "mode": "auto" },
-    "outputPath": "report-preview.png"
-  },
-  "reason": "Render the finished document pages for visual inspection"
-}
-```
+Use this fixed loop for a final document:
 
-Validate the OOXML package:
+1. Generate or edit the `.docx`.
+2. Confirm the expected file effect.
+3. Inspect headings, body order, tables, headers, footers, media, and required content.
+4. Run native `validate`.
+5. Run one native `render` request covering all final pages with a contact-sheet grid.
+6. Read the exact returned render output with `read_image`, then visually inspect every rendered
+   page for clipping, overflow, blank pages, broken images, font substitution, weak hierarchy, and
+   inconsistent spacing.
+7. If a defect exists, patch the same Builder or issue one corrected semantic operation, regenerate,
+   and repeat validation and rendering.
 
-```json
-{
-  "request": {
-    "operation": "validate",
-    "filePath": "report.docx"
-  },
-  "reason": "Validate the finished Word document"
-}
-```
+Do not claim visual quality from package validation alone. If rendering returns an
+`office.render_backend_*` error, report that visual verification was unavailable; do not launch a
+user browser or render every page in separate retry calls.
 
-## Create
+## Word quality checks
 
-1. Confirm the requested output name, content hierarchy, page size, and any visual requirements.
-2. Choose native operations for bounded authoring or a saved generator for coordinated,
-   repetitive authoring. Never substitute a plain-text file with a `.docx` extension.
-3. Apply named styles consistently. Prefer real headings, lists, tables, page breaks, headers, and footers over visual approximations.
-4. Render the result and inspect every page for overflow, clipped content, accidental blank pages, weak hierarchy, and inconsistent spacing.
-5. Validate the final package and confirm that the requested path exists.
-
-## Edit
-
-1. Inspect the document structure and relevant content before changing it.
-2. Preserve styles, relationships, media, sections, and unrelated content unless the user asks to replace them.
-3. Prefer targeted native operations for local changes. Use a saved script only when its coordinated
-   transformation is materially clearer or more reproducible than many isolated calls.
-4. With the native path, use `destinationPath` for save-as edits. With the script path, pass distinct
-   input and output parameters. Omit the distinct destination only when the user clearly requested
-   in-place editing.
-5. Re-inspect and render the result. Verify both the intended change and preservation of surrounding content, and reconcile those checks with the observed file effects.
-
-## Quality checks
-
-- Verify headings and reading order, table widths, pagination, margins, headers and footers, and image placement.
-- Check that important semantics are represented structurally rather than with repeated spaces or manual line breaks.
-- Treat a successful engine exit as necessary but insufficient when visual layout matters.
-- Treat a successful script exit as necessary but insufficient; require matching complete artifact
-  observation plus structural, package, and visual checks appropriate to the task.
-- If a requested feature is not reported by `help` or validation, describe the limitation instead of simulating support.
-- Report only checks that actually ran, including any warnings returned by the tool.
+- Use real heading styles, lists, tables, page breaks, headers, footers, and page fields.
+- Preserve sections, relationships, media, styles, and unrelated content during edits.
+- Keep images proportional and within page margins; add useful alt text when supported.
+- Check table widths, cell content, page breaks, orphaned headings, and accidental empty pages.
+- Reopen or inspect the final package and report only checks that actually ran.

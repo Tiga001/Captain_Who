@@ -317,6 +317,16 @@ pub(super) fn suppressed_narration_context_item() -> ContextItem {
     )
 }
 
+pub(super) fn empty_model_action_repair_context_item() -> ContextItem {
+    ContextItem::text(
+        LlmMessageRole::System,
+        "The preceding model response ended normally but contained neither user-visible assistant text nor a tool call. Continue the current task now. If work remains, return valid tool calls using the supplied schemas. If the task is complete or cannot proceed, return a concrete user-visible assistant response. Do not return an empty response, and do not repeat already completed operations merely because this repair request was issued; rely on the existing tool results.",
+        ContextSource::RuntimeGuard,
+        ContextScope::Run,
+        ContextRetention::RequestOnly,
+    )
+}
+
 pub(super) fn apply_permission_policy_to_tool_definitions(
     definitions: &mut Vec<AgentToolDefinition>,
     context: Option<&AgentRunContext>,

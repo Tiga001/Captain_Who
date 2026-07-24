@@ -6,6 +6,7 @@ mod context_compaction_audit;
 mod context_compaction_receipt;
 mod conversation_trace;
 pub mod durable_fs;
+pub mod file_input;
 pub mod file_write;
 pub mod git_review;
 pub mod image_generation;
@@ -57,6 +58,25 @@ pub use model_request_observation::{
     ModelRequestPurpose, ModelRequestUsageNormalization, MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
 };
 pub use protocol::is_valid_agent_office_reason;
+
+/// Re-parse and recompile a frozen Office semantic request, proving that it
+/// still matches the canonical request authorized by the Host.
+pub fn validate_frozen_agent_office_semantic_args(
+    frozen: &AgentOfficeOperationRequest,
+) -> Result<(), String> {
+    tools::validate_frozen_office_trace_args(frozen, &frozen.semantic_args)
+}
+
+/// Re-parse the model-authored command ToolCall arguments and prove that they still describe the
+/// exact host-prepared action. Host-derived runtime and observation fields are reconstructed
+/// internally; callers must pass the original model-visible argument object.
+pub fn validate_frozen_agent_command_args(
+    frozen: &AgentCommandRequest,
+    operation: &serde_json::Value,
+) -> Result<(), String> {
+    tools::validate_frozen_command_trace_args(frozen, operation)
+}
+
 pub use protocol::{
     AgentActivatedSkill, AgentActivatedSkillResources, AgentApiStyle, AgentApprovalDecision,
     AgentApprovalDecisionStatus, AgentApprovalStatus, AgentAttachmentLibraryContext,
@@ -77,28 +97,30 @@ pub use protocol::{
     AgentContextCheckpointOrigin, AgentContextCheckpointToolCall, AgentContextWindowPhase,
     AgentContextWindowSnapshot, AgentContextWindowStatus, AgentDiffProposal, AgentError,
     AgentEvent, AgentExtensionSnapshot, AgentFileDraftSnapshot, AgentFileDraftStatus,
-    AgentFileWriteMode, AgentFileWriteProposal, AgentFileWriteResult, AgentFileWriteResultStatus,
-    AgentGitDiffSnapshot, AgentImageGenerationArtifact, AgentImageGenerationArtifactKind,
-    AgentImageGenerationAudit, AgentImageGenerationFailure, AgentImageGenerationOperation,
-    AgentImageGenerationResult, AgentImageGenerationResultStatus, AgentInputAttachment,
-    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentOfficeOperationRequest,
-    AgentPatchOperation, AgentPatchPermission, AgentPatchResult, AgentPatchResultStatus,
-    AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone,
-    AgentPromptWorkMode, AgentProposedAction, AgentQueuedToolCallCheckpoint, AgentReadPermission,
-    AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentSearchConfig,
-    AgentSearchMode, AgentSkillActivation, AgentSkillDependencyCheck, AgentSkillDependencyKind,
-    AgentSkillDependencyStatus, AgentSkillMaterializationRequest, AgentSkillMaterializationResult,
-    AgentSkillMaterializationResultStatus, AgentSkillScriptInterpreter,
-    AgentSkillScriptPreflightReport, AgentSkillScriptPreflightStatus, AgentSkillScriptRequest,
-    AgentSkillScriptRequirements, AgentSkillScriptResult, AgentStateSnapshot,
-    AgentToolApprovalMode, AgentToolCall, AgentToolContinuation, AgentToolDefinition,
-    AgentToolResult, AgentToolSafety, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
-    AgentUsageModelSummary, AgentUsageSummaryInput, AgentUsageSummaryOutput,
+    AgentFileInputBinding, AgentFileInputEvidence, AgentFileInputRef, AgentFileInputSourceKind,
+    AgentFileInputSpec, AgentFileWriteMode, AgentFileWriteProposal, AgentFileWriteResult,
+    AgentFileWriteResultStatus, AgentGitDiffSnapshot, AgentImageGenerationArtifact,
+    AgentImageGenerationArtifactKind, AgentImageGenerationAudit, AgentImageGenerationFailure,
+    AgentImageGenerationOperation, AgentImageGenerationResult, AgentImageGenerationResultStatus,
+    AgentInputAttachment, AgentInputAttachmentEncoding, AgentInputAttachmentKind,
+    AgentOfficeOperationRequest, AgentPatchOperation, AgentPatchPermission, AgentPatchResult,
+    AgentPatchResultStatus, AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences,
+    AgentPromptTone, AgentPromptWorkMode, AgentProposedAction, AgentQueuedToolCallCheckpoint,
+    AgentReadPermission, AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus,
+    AgentSearchConfig, AgentSearchMode, AgentSkillActivation, AgentSkillDependencyCheck,
+    AgentSkillDependencyKind, AgentSkillDependencyStatus, AgentSkillMaterializationRequest,
+    AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus,
+    AgentSkillScriptInterpreter, AgentSkillScriptPreflightReport, AgentSkillScriptPreflightStatus,
+    AgentSkillScriptRequest, AgentSkillScriptRequirements, AgentSkillScriptResult,
+    AgentStateSnapshot, AgentToolApprovalMode, AgentToolCall, AgentToolContinuation,
+    AgentToolDefinition, AgentToolResult, AgentToolSafety, AgentUsage, AgentUsageClearInput,
+    AgentUsageClearOutput, AgentUsageModelSummary, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     AgentUsageSummaryRange, AgentWorkspaceContext, AgentWritePermission, ModelCapabilities,
     AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
     AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION, AGENT_COMMAND_RUNTIME_RESOLUTION_SCHEMA_VERSION,
-    AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION, AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
-    AGENT_OFFICE_REASON_MAX_CHARS, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+    AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION, AGENT_IMAGE_GENERATION_RESULT_SCHEMA_VERSION,
+    AGENT_OFFICE_OPERATION_SCHEMA_VERSION, AGENT_OFFICE_REASON_MAX_CHARS,
+    AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
 };
 pub use revision::content_revision;
 pub use runtime::{

@@ -5,6 +5,7 @@ pub(super) const LLM_RETRY_BASE_DELAY_MS: u64 = 350;
 pub(super) const LLM_RETRY_MAX_DELAY_MS: u64 = 2_000;
 pub(super) const RETRYABLE_UPSTREAM_CONTENT_TYPE_ERROR: &str =
     "the provided content type is invalid or not supported for this model";
+pub(crate) const EMPTY_MODEL_ACTION_ERROR_CODE: &str = "agent.empty_model_action";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LlmResponseValidation {
@@ -225,6 +226,7 @@ where
         &streamed.content,
         &streamed.tool_calls,
         &diagnostic,
+        streamed.finish_reason.as_deref(),
         validation,
     )
     .map_err(|error| error.with_usage(streamed.usage.clone()))?;
@@ -250,14 +252,21 @@ pub(super) fn parse_non_stream_response(
     let tool_calls = extract_tool_calls(&value, api_style)
         .map_err(|error| error.with_usage(Some(usage.clone())))?;
     let content = extract_response_text(&value).unwrap_or_default();
-    validate_llm_response(&content, &tool_calls, body, validation)
-        .map_err(|error| error.with_usage(Some(usage.clone())))?;
+    let finish_reason = extract_finish_reason(&value);
+    validate_llm_response(
+        &content,
+        &tool_calls,
+        body,
+        finish_reason.as_deref(),
+        validation,
+    )
+    .map_err(|error| error.with_usage(Some(usage.clone())))?;
 
     Ok(LlmChatResponse {
         content,
         tool_calls,
         usage: Some(usage),
-        finish_reason: extract_finish_reason(&value),
+        finish_reason,
     })
 }
 
@@ -347,19 +356,46 @@ pub(super) fn validate_llm_response(
     content: &str,
     tool_calls: &[LlmToolCall],
     raw_response: &str,
+    finish_reason: Option<&str>,
     validation: LlmResponseValidation,
 ) -> AgentResult<()> {
     if validation == LlmResponseValidation::RequireModelAction
         && content.trim().is_empty()
         && tool_calls.is_empty()
     {
-        return Err(AgentError::new(format!(
-            "模型响应里没有可显示文本：{}",
-            truncate_for_error(raw_response)
-        )));
+        let repairable = matches!(finish_reason, Some("stop" | "end_turn"));
+        return Err(AgentError::structured(
+            EMPTY_MODEL_ACTION_ERROR_CODE,
+            format!(
+                "模型响应里没有可显示文本或工具调用：{}",
+                truncate_for_error(raw_response)
+            ),
+            json!({
+                "type": "model_response_validation",
+                "code": "emptyModelAction",
+                "finishReason": finish_reason,
+                "contentLength": content.len(),
+                "toolCallCount": tool_calls.len(),
+                "repairable": repairable,
+                "recovery": if repairable {
+                    "repairRetryOnce"
+                } else {
+                    "retryOrChangeModel"
+                },
+            }),
+        ));
     }
 
     Ok(())
+}
+
+pub(crate) fn is_repairable_empty_model_action(error: &AgentError) -> bool {
+    error.code() == Some(EMPTY_MODEL_ACTION_ERROR_CODE)
+        && error
+            .details()
+            .and_then(|details| details.get("repairable"))
+            .and_then(Value::as_bool)
+            == Some(true)
 }
 
 pub(super) fn retry_exhausted_error(error: AgentError, attempts: usize) -> AgentError {
@@ -388,6 +424,13 @@ pub(super) fn retry_delay(attempt: usize) -> Duration {
 }
 
 pub(super) fn is_retryable_llm_error(error: &AgentError) -> bool {
+    // An empty normal model action is repaired by the agent loop with an explicit semantic
+    // instruction. Never let transport-level text heuristics replay the original request first:
+    // the redacted raw response can itself contain words such as "timeout" or "overloaded".
+    if error.code() == Some(EMPTY_MODEL_ACTION_ERROR_CODE) {
+        return false;
+    }
+
     let message = error.to_string().to_ascii_lowercase();
     if message.trim().is_empty() {
         return false;

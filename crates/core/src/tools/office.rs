@@ -1,11 +1,24 @@
-use super::{AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess, ToolExecutionContext};
+use super::{
+    schema::agent_file_input_ref_schema, AgentTool, AgentToolPermissionPolicy, FileWriteToolAccess,
+    ToolExecutionContext,
+};
 use crate::office::{
-    validate_office_request, OfficeCellShift, OfficeDocumentKind, OfficeElementPosition,
-    OfficeEngine, OfficeEngineError, OfficeExecutionContext, OfficeExecutionRequest,
-    OfficeExecutionResult, OfficeGridLayout, OfficeHelpVerb, OfficeOperation,
-    OfficeOperationAccess, OfficeOperationParameters, OfficePageRange, OfficePropertyMap,
-    OfficeRequestParameters, OfficeTextReplacement, OfficeViewMode, OfficeViewRenderMode,
-    OfficeViewport, DEFAULT_OFFICE_TIMEOUT_MS, MAX_OFFICE_TIMEOUT_MS,
+    compile_office_semantic_request, OfficeChartKind, OfficeChartSeries,
+    OfficeConditionalFormatKind, OfficeCreateIntent, OfficeDocumentBlockIntent,
+    OfficeDocumentBlockKind, OfficeDocumentFormatIntent, OfficeDocumentKind,
+    OfficeDocumentMoveIntent, OfficeDocumentTextIntent, OfficeEngine, OfficeEngineError,
+    OfficeExecutionContext, OfficeExecutionRequest, OfficeExecutionResult,
+    OfficeHeaderFooterIntent, OfficeImageIntent, OfficeInspectIntent, OfficeOperationAccess,
+    OfficePresentationChartIntent, OfficePresentationFooterIntent, OfficePresentationImageIntent,
+    OfficePresentationMoveSlideIntent, OfficePresentationShapeIntent,
+    OfficePresentationSlideIndexIntent, OfficePresentationSlideIntent,
+    OfficePresentationTableIntent, OfficePresentationTextIntent, OfficeRenderIntent,
+    OfficeReplaceTextIntent, OfficeSemanticError, OfficeSemanticIntent, OfficeSemanticRequest,
+    OfficeSemanticStyle, OfficeSpreadsheetCellIntent, OfficeSpreadsheetChartIntent,
+    OfficeSpreadsheetConditionalFormatIntent, OfficeSpreadsheetFormulaIntent,
+    OfficeSpreadsheetFreezeIntent, OfficeSpreadsheetImageIntent, OfficeSpreadsheetMoveSheetIntent,
+    OfficeSpreadsheetRangeFormatIntent, OfficeSpreadsheetSheetIntent, OfficeSpreadsheetTableIntent,
+    OfficeTableIntent, OfficeViewport, DEFAULT_OFFICE_TIMEOUT_MS, MAX_OFFICE_TIMEOUT_MS,
 };
 use crate::protocol::{
     has_unsafe_agent_office_reason_character, normalize_agent_office_reason, AgentError,
@@ -13,6 +26,7 @@ use crate::protocol::{
     AgentToolDefinition, AgentToolSafety, AgentWritePermission,
     AGENT_OFFICE_OPERATION_SCHEMA_VERSION, AGENT_OFFICE_REASON_MAX_CHARS,
 };
+use crate::{file_input::AgentFileInputExecutionContext, AgentFileInputRef};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::sync::Arc;
@@ -118,16 +132,8 @@ impl OfficeTool {
                 |error| AgentError::new(format!("cannot serialize Office status: {error}")),
             );
         }
-        if let Some((topic, requested_element)) = args.host_managed_help()? {
-            return Ok(host_managed_operation_help(
-                self.document_kind,
-                self.tool_name(),
-                topic,
-                requested_element,
-            ));
-        }
 
-        let request = args.into_request(self.document_kind)?;
+        let request = args.into_request()?;
         if request.access() == OfficeOperationAccess::FileWrite {
             return Err(AgentError::structured(
                 "office.approval_required",
@@ -167,13 +173,13 @@ impl OfficeTool {
                 "The Office status operation is read-only and does not create an approval action.",
             ));
         }
-        if args.host_managed_help()?.is_some() {
-            return Err(AgentError::new(
-                "Host-managed Office operation help is read-only and does not create an approval action.",
-            ));
-        }
         let reason = args.reason.clone();
-        let request = args.into_request(self.document_kind)?;
+        let mut semantic_args = call.args.clone();
+        semantic_args
+            .as_object_mut()
+            .expect("validated Office semantic arguments")
+            .insert("reason".to_string(), Value::String(reason.clone()));
+        let request = args.into_request()?;
         if request.access() != OfficeOperationAccess::FileWrite {
             return Err(AgentError::new(
                 "This Office operation is read-only and does not create an approval action.",
@@ -213,6 +219,7 @@ impl OfficeTool {
             office_operation: Box::new(AgentOfficeOperationRequest {
                 schema_version: AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
                 id: call.id.clone(),
+                semantic_args,
                 prepared,
                 approval_status: call.approval_status,
                 reason,
@@ -227,12 +234,7 @@ impl OfficeTool {
         if args.is_status() {
             return args.validate_status_call(self.tool_name()).is_err();
         }
-        match args.host_managed_help() {
-            Ok(Some(_)) => return false,
-            Err(_) => return true,
-            Ok(None) => {}
-        }
-        let Ok(request) = args.into_request(self.document_kind) else {
+        let Ok(request) = args.into_request() else {
             return true;
         };
         request.access() == OfficeOperationAccess::FileWrite
@@ -273,32 +275,37 @@ impl OfficeTool {
 
     fn description(&self) -> &'static str {
         match self.document_kind {
-            OfficeDocumentKind::Document => "Inspect, create, edit, render, and validate Word-compatible .docx documents through typed managed operations. Pass `{ request: { operation: ... }, reason: ... }` and call request.operation=status before first use. Put filePath and operation-specific fields such as target, parent, properties, pages, and outputPath inside request; provider flags are generated by the host. Read-only operations run immediately, while file changes run as frozen host actions under the normal file-write approval policy.",
-            OfficeDocumentKind::Spreadsheet => "Inspect, create, edit, render, and validate Excel-compatible .xlsx/.xlsm/.csv files through typed managed operations. Pass `{ request: { operation: ... }, reason: ... }` and call request.operation=status before first use. Put filePath and operation-specific fields such as target, parent, properties, range, and outputPath inside request; provider flags are generated by the host. Read-only operations run immediately, while file changes run as frozen host actions under the normal file-write approval policy.",
-            OfficeDocumentKind::Presentation => "Inspect, create, edit, render, and validate PowerPoint-compatible .pptx presentations through typed managed operations. Pass `{ request: { operation: ... }, reason: ... }` and call request.operation=status before first use. Put filePath and operation-specific fields such as target, parent, properties, pages, and outputPath inside request; provider flags are generated by the host. Read-only operations run immediately, while file changes run as frozen host actions under the normal file-write approval policy.",
+            OfficeDocumentKind::Document => "Create, inspect, validate, render, and edit Word-compatible .docx documents with a flat provider-neutral semantic request. Use operations such as addText, insertImage, addTable, addHeader, addFooter, replaceText, formatText, removeBlock, and moveBlock. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].source; pass it unchanged to read_image and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, or arbitrary property maps. Read-only operations run immediately; writes compile into the same frozen, permission-checked Host action. If a requested long-tail capability is unsupported, use the structured recommendedRoute=managedScript recovery.",
+            OfficeDocumentKind::Spreadsheet => "Create, inspect, validate, render, and edit Excel-compatible .xlsx/.xlsm/.csv files with a flat provider-neutral semantic request. Use operations such as addSheet, writeCell, setFormula, formatRange, freezePanes, addConditionalFormat, addTable, addChart, insertImage, removeSheet, and moveSheet. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].source; pass it unchanged to read_image and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, or arbitrary property maps. Read-only operations run immediately; writes compile into the same frozen, permission-checked Host action. If a requested long-tail capability is unsupported, use the structured recommendedRoute=managedScript recovery.",
+            OfficeDocumentKind::Presentation => "Create, inspect, validate, render, and edit PowerPoint-compatible .pptx presentations with a flat provider-neutral semantic request. Use operations such as addSlide, addText, insertImage, addTable, addChart, addShape, addFooter, removeSlide, and moveSlide. Always include a concise user-facing reason. A successful render returns an authoritative outputs[].source; pass it unchanged to read_image and never guess a path from argv, cwd, stdout, or a file search. Never send OfficeCLI arguments, DOM paths, or arbitrary property maps. Read-only operations run immediately; writes compile into the same frozen, permission-checked Host action. If a requested long-tail capability is unsupported, use the structured recommendedRoute=managedScript recovery.",
         }
     }
 }
 
 fn office_execution_context(context: &ToolExecutionContext) -> AgentResult<OfficeExecutionContext> {
+    let file_inputs = AgentFileInputExecutionContext::new(
+        context.attachment_library().cloned(),
+        context.skill_resources_optional(),
+    )
+    .with_storage(context.storage_optional());
     Ok(OfficeExecutionContext::new(
         context.workspace_root_optional()?,
         context.permissions(),
         context.attachment_library().cloned(),
-    ))
+    )
+    .with_file_inputs(file_inputs))
 }
 
 #[derive(Debug)]
 struct OfficeToolArgs {
-    operation: OfficeToolOperationWire,
+    request: OfficeParsedRequest,
     reason: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct OfficeToolCallWire {
-    request: OfficeToolOperationWire,
-    reason: String,
+#[derive(Debug)]
+enum OfficeParsedRequest {
+    Status,
+    Semantic(Box<OfficeSemanticRequest>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -308,422 +315,1072 @@ struct OfficeToolCallWire {
     rename_all_fields = "camelCase",
     deny_unknown_fields
 )]
-enum OfficeToolOperationWire {
+enum OfficeSemanticOperationWire {
     Status {},
-    Help {
-        verb: Option<OfficeHelpVerb>,
-        element: Option<String>,
-        timeout_ms: Option<u64>,
-    },
     Create {
         file_path: String,
-        locale: Option<String>,
-        #[serde(default)]
-        minimal: bool,
         #[serde(default)]
         overwrite_existing: bool,
+        locale: Option<String>,
         timeout_ms: Option<u64>,
     },
-    View {
+    Inspect {
         file_path: String,
-        mode: OfficeViewMode,
-        start: Option<u32>,
-        end: Option<u32>,
-        max_lines: Option<u32>,
-        issue_type: Option<String>,
-        limit: Option<u32>,
-        #[serde(default)]
-        columns: Vec<String>,
-        #[serde(default)]
-        pages: Vec<OfficePageRange>,
+        block_index: Option<u32>,
+        sheet_name: Option<String>,
         range: Option<String>,
-        viewport: Option<OfficeViewport>,
-        grid: Option<OfficeGridLayout>,
-        render_mode: Option<OfficeViewRenderMode>,
-        #[serde(default)]
-        include_page_count: bool,
-        output_path: Option<String>,
-        timeout_ms: Option<u64>,
-    },
-    Get {
-        file_path: String,
-        target: Option<String>,
+        slide_number: Option<u32>,
         depth: Option<u32>,
-        timeout_ms: Option<u64>,
-    },
-    Query {
-        file_path: String,
-        selector: String,
-        contains_text: Option<String>,
-        #[serde(default)]
-        compact: bool,
-        #[serde(default)]
-        fields: Vec<String>,
         timeout_ms: Option<u64>,
     },
     Validate {
         file_path: String,
         timeout_ms: Option<u64>,
     },
-    Set {
+    Render {
         file_path: String,
-        target: String,
+        output_path: String,
+        page_or_slide: Option<u32>,
+        sheet_name: Option<String>,
+        range: Option<String>,
+        viewport: Option<OfficeViewport>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "add_text")]
+    AddText {
+        file_path: String,
+        text: String,
+        block_kind: Option<OfficeDocumentBlockKind>,
+        slide_number: Option<u32>,
+        x: Option<String>,
+        y: Option<String>,
+        width: Option<String>,
+        height: Option<String>,
         #[serde(default)]
-        properties: OfficePropertyMap,
-        text_replacement: Option<OfficeTextReplacement>,
-        #[serde(default)]
-        override_protection: bool,
+        style: OfficeSemanticStyle,
         destination_path: Option<String>,
         timeout_ms: Option<u64>,
     },
-    Add {
+    #[serde(
+        rename = "insertImage",
+        alias = "insert_image",
+        alias = "addImage",
+        alias = "add_image"
+    )]
+    InsertImage {
         file_path: String,
-        parent: String,
-        element: String,
-        copy_from: Option<String>,
-        placement: Option<OfficeElementPosition>,
-        #[serde(default)]
-        properties: OfficePropertyMap,
-        #[serde(default)]
-        override_protection: bool,
+        source: AgentFileInputRef,
+        alt_text: Option<String>,
+        sheet_name: Option<String>,
+        slide_number: Option<u32>,
+        anchor: Option<String>,
+        x: Option<String>,
+        y: Option<String>,
+        width: Option<String>,
+        height: Option<String>,
         destination_path: Option<String>,
         timeout_ms: Option<u64>,
     },
-    Remove {
+    #[serde(alias = "add_table")]
+    AddTable {
         file_path: String,
-        target: String,
-        shift: Option<OfficeCellShift>,
         #[serde(default)]
-        properties: OfficePropertyMap,
+        data: Vec<Vec<String>>,
+        style: Option<String>,
+        width: Option<String>,
+        height: Option<String>,
+        header_fill: Option<String>,
+        sheet_name: Option<String>,
+        range: Option<String>,
+        name: Option<String>,
+        header_row: Option<bool>,
+        total_row: Option<bool>,
+        slide_number: Option<u32>,
+        x: Option<String>,
+        y: Option<String>,
         destination_path: Option<String>,
         timeout_ms: Option<u64>,
     },
-    Move {
+    #[serde(alias = "add_header")]
+    AddHeader {
         file_path: String,
-        target: String,
-        to_parent: Option<String>,
-        placement: Option<OfficeElementPosition>,
+        text: Option<String>,
         #[serde(default)]
-        properties: OfficePropertyMap,
+        page_number: bool,
+        #[serde(default)]
+        style: OfficeSemanticStyle,
         destination_path: Option<String>,
         timeout_ms: Option<u64>,
     },
-    Swap {
+    #[serde(alias = "add_footer")]
+    AddFooter {
         file_path: String,
-        first_target: String,
-        second_target: String,
+        text: Option<String>,
+        #[serde(default)]
+        page_number: bool,
+        slide_number: Option<u32>,
+        #[serde(default)]
+        style: OfficeSemanticStyle,
         destination_path: Option<String>,
         timeout_ms: Option<u64>,
     },
+    #[serde(alias = "replace_text")]
+    ReplaceText {
+        file_path: String,
+        find_text: String,
+        replace_text: String,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "format_text")]
+    FormatText {
+        file_path: String,
+        block_index: u32,
+        style: OfficeSemanticStyle,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "remove_block")]
+    RemoveBlock {
+        file_path: String,
+        block_index: u32,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "move_block")]
+    MoveBlock {
+        file_path: String,
+        block_index: u32,
+        new_index: u32,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "add_sheet")]
+    AddSheet {
+        file_path: String,
+        sheet_name: String,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "write_cell")]
+    WriteCell {
+        file_path: String,
+        sheet_name: String,
+        cell: String,
+        value: Value,
+        #[serde(default)]
+        style: OfficeSemanticStyle,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "set_formula")]
+    SetFormula {
+        file_path: String,
+        sheet_name: String,
+        cell: String,
+        formula: String,
+        number_format: Option<String>,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "format_range")]
+    FormatRange {
+        file_path: String,
+        sheet_name: String,
+        range: String,
+        style: OfficeSemanticStyle,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "freeze_panes")]
+    FreezePanes {
+        file_path: String,
+        sheet_name: String,
+        freeze_at: String,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "add_conditional_format")]
+    AddConditionalFormat {
+        file_path: String,
+        sheet_name: String,
+        range: String,
+        kind: OfficeConditionalFormatKind,
+        operator: Option<String>,
+        value: Option<Value>,
+        second_value: Option<Value>,
+        text: Option<String>,
+        fill_color: Option<String>,
+        min_color: Option<String>,
+        mid_color: Option<String>,
+        max_color: Option<String>,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "add_chart")]
+    AddChart {
+        file_path: String,
+        chart_type: OfficeChartKind,
+        title: String,
+        sheet_name: Option<String>,
+        data_range: Option<String>,
+        category_range: Option<String>,
+        anchor: Option<String>,
+        slide_number: Option<u32>,
+        #[serde(default)]
+        series: Vec<OfficeChartSeries>,
+        #[serde(default)]
+        categories: Vec<String>,
+        x: Option<String>,
+        y: Option<String>,
+        width: Option<String>,
+        height: Option<String>,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "remove_sheet")]
+    RemoveSheet {
+        file_path: String,
+        sheet_name: String,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "move_sheet")]
+    MoveSheet {
+        file_path: String,
+        sheet_name: String,
+        new_index: u32,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "add_slide")]
+    AddSlide {
+        file_path: String,
+        layout: Option<String>,
+        title: Option<String>,
+        body: Option<String>,
+        background_color: Option<String>,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "add_shape")]
+    AddShape {
+        file_path: String,
+        slide_number: u32,
+        shape_type: String,
+        text: Option<String>,
+        x: String,
+        y: String,
+        width: String,
+        height: String,
+        #[serde(default)]
+        style: OfficeSemanticStyle,
+        line_color: Option<String>,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "remove_slide")]
+    RemoveSlide {
+        file_path: String,
+        slide_number: u32,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    #[serde(alias = "move_slide")]
+    MoveSlide {
+        file_path: String,
+        slide_number: u32,
+        new_index: u32,
+        destination_path: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+}
+
+impl OfficeSemanticOperationWire {
+    fn into_parsed(
+        self,
+        document_kind: OfficeDocumentKind,
+    ) -> Result<OfficeParsedRequest, OfficeSemanticError> {
+        let (file_path, destination_path, timeout_ms, intent) = match self {
+            Self::Status {} => return Ok(OfficeParsedRequest::Status),
+            Self::Create {
+                file_path,
+                overwrite_existing,
+                locale,
+                timeout_ms,
+            } => (
+                file_path,
+                None,
+                timeout_ms,
+                OfficeSemanticIntent::Create(OfficeCreateIntent {
+                    overwrite_existing,
+                    locale,
+                }),
+            ),
+            Self::Inspect {
+                file_path,
+                block_index,
+                sheet_name,
+                range,
+                slide_number,
+                depth,
+                timeout_ms,
+            } => (
+                file_path,
+                None,
+                timeout_ms,
+                OfficeSemanticIntent::Inspect(OfficeInspectIntent {
+                    block_index,
+                    sheet_name,
+                    range,
+                    slide_number,
+                    depth,
+                }),
+            ),
+            Self::Validate {
+                file_path,
+                timeout_ms,
+            } => (file_path, None, timeout_ms, OfficeSemanticIntent::Validate),
+            Self::Render {
+                file_path,
+                output_path,
+                page_or_slide,
+                sheet_name,
+                range,
+                viewport,
+                timeout_ms,
+            } => (
+                file_path,
+                None,
+                timeout_ms,
+                OfficeSemanticIntent::Render(OfficeRenderIntent {
+                    output_path,
+                    page_or_slide,
+                    sheet_name,
+                    range,
+                    viewport,
+                }),
+            ),
+            Self::AddText {
+                file_path,
+                text,
+                block_kind,
+                slide_number,
+                x,
+                y,
+                width,
+                height,
+                style,
+                destination_path,
+                timeout_ms,
+            } => {
+                let intent = match document_kind {
+                    OfficeDocumentKind::Document => {
+                        reject_semantic_extras(
+                            [
+                                ("slideNumber", slide_number.is_some()),
+                                ("x", x.is_some()),
+                                ("y", y.is_some()),
+                                ("width", width.is_some()),
+                                ("height", height.is_some()),
+                            ],
+                            "addText",
+                        )?;
+                        OfficeSemanticIntent::DocumentAddText(OfficeDocumentTextIntent {
+                            block_kind: block_kind.unwrap_or(OfficeDocumentBlockKind::Paragraph),
+                            text,
+                            style,
+                        })
+                    }
+                    OfficeDocumentKind::Presentation => {
+                        reject_semantic_extras(
+                            [("blockKind", block_kind.is_some())],
+                            "addText",
+                        )?;
+                        OfficeSemanticIntent::PresentationAddText(OfficePresentationTextIntent {
+                            slide_number: required_wire(slide_number, "slideNumber", "addText")?,
+                            text,
+                            x: required_wire(x, "x", "addText")?,
+                            y: required_wire(y, "y", "addText")?,
+                            width: required_wire(width, "width", "addText")?,
+                            height: required_wire(height, "height", "addText")?,
+                            style,
+                        })
+                    }
+                    OfficeDocumentKind::Spreadsheet => {
+                        return Err(OfficeSemanticError::unsupported(
+                            "spreadsheet.addText",
+                            "Spreadsheets use writeCell for text values; use managedScript for rich drawing text.",
+                        ))
+                    }
+                };
+                (file_path, destination_path, timeout_ms, intent)
+            }
+            Self::InsertImage {
+                file_path,
+                source,
+                alt_text,
+                sheet_name,
+                slide_number,
+                anchor,
+                x,
+                y,
+                width,
+                height,
+                destination_path,
+                timeout_ms,
+            } => {
+                let intent = match document_kind {
+                    OfficeDocumentKind::Document => {
+                        reject_semantic_extras(
+                            [
+                                ("sheetName", sheet_name.is_some()),
+                                ("slideNumber", slide_number.is_some()),
+                                ("anchor", anchor.is_some()),
+                                ("x", x.is_some()),
+                                ("y", y.is_some()),
+                            ],
+                            "insertImage",
+                        )?;
+                        OfficeSemanticIntent::DocumentAddImage(OfficeImageIntent {
+                            source,
+                            alt_text,
+                            width,
+                            height,
+                        })
+                    }
+                    OfficeDocumentKind::Spreadsheet => {
+                        reject_semantic_extras(
+                            [
+                                ("slideNumber", slide_number.is_some()),
+                                ("x", x.is_some()),
+                                ("y", y.is_some()),
+                            ],
+                            "insertImage",
+                        )?;
+                        OfficeSemanticIntent::SpreadsheetAddImage(OfficeSpreadsheetImageIntent {
+                            sheet_name: required_wire(sheet_name, "sheetName", "insertImage")?,
+                            source,
+                            alt_text,
+                            anchor,
+                            width,
+                            height,
+                        })
+                    }
+                    OfficeDocumentKind::Presentation => {
+                        reject_semantic_extras(
+                            [
+                                ("sheetName", sheet_name.is_some()),
+                                ("anchor", anchor.is_some()),
+                            ],
+                            "insertImage",
+                        )?;
+                        OfficeSemanticIntent::PresentationAddImage(OfficePresentationImageIntent {
+                            slide_number: required_wire(
+                                slide_number,
+                                "slideNumber",
+                                "insertImage",
+                            )?,
+                            source,
+                            x: required_wire(x, "x", "insertImage")?,
+                            y: required_wire(y, "y", "insertImage")?,
+                            width: required_wire(width, "width", "insertImage")?,
+                            height: required_wire(height, "height", "insertImage")?,
+                            alt_text,
+                        })
+                    }
+                };
+                (file_path, destination_path, timeout_ms, intent)
+            }
+            Self::AddTable {
+                file_path,
+                data,
+                style,
+                width,
+                height,
+                header_fill,
+                sheet_name,
+                range,
+                name,
+                header_row,
+                total_row,
+                slide_number,
+                x,
+                y,
+                destination_path,
+                timeout_ms,
+            } => {
+                let intent = match document_kind {
+                    OfficeDocumentKind::Document => {
+                        reject_semantic_extras(
+                            [
+                                ("height", height.is_some()),
+                                ("sheetName", sheet_name.is_some()),
+                                ("range", range.is_some()),
+                                ("name", name.is_some()),
+                                ("headerRow", header_row.is_some()),
+                                ("totalRow", total_row.is_some()),
+                                ("slideNumber", slide_number.is_some()),
+                                ("x", x.is_some()),
+                                ("y", y.is_some()),
+                            ],
+                            "addTable",
+                        )?;
+                        OfficeSemanticIntent::DocumentAddTable(OfficeTableIntent {
+                            data,
+                            style,
+                            width,
+                            header_fill,
+                        })
+                    }
+                    OfficeDocumentKind::Spreadsheet => {
+                        reject_semantic_extras(
+                            [
+                                ("data", !data.is_empty()),
+                                ("width", width.is_some()),
+                                ("height", height.is_some()),
+                                ("headerFill", header_fill.is_some()),
+                                ("slideNumber", slide_number.is_some()),
+                                ("x", x.is_some()),
+                                ("y", y.is_some()),
+                            ],
+                            "addTable",
+                        )?;
+                        OfficeSemanticIntent::SpreadsheetAddTable(OfficeSpreadsheetTableIntent {
+                            sheet_name: required_wire(sheet_name, "sheetName", "addTable")?,
+                            range: required_wire(range, "range", "addTable")?,
+                            name,
+                            style,
+                            header_row: header_row.unwrap_or(true),
+                            total_row: total_row.unwrap_or(false),
+                        })
+                    }
+                    OfficeDocumentKind::Presentation => {
+                        reject_semantic_extras(
+                            [
+                                ("sheetName", sheet_name.is_some()),
+                                ("range", range.is_some()),
+                                ("name", name.is_some()),
+                                ("headerRow", header_row.is_some()),
+                                ("totalRow", total_row.is_some()),
+                            ],
+                            "addTable",
+                        )?;
+                        OfficeSemanticIntent::PresentationAddTable(OfficePresentationTableIntent {
+                            slide_number: required_wire(slide_number, "slideNumber", "addTable")?,
+                            data,
+                            x: required_wire(x, "x", "addTable")?,
+                            y: required_wire(y, "y", "addTable")?,
+                            width: required_wire(width, "width", "addTable")?,
+                            height: required_wire(height, "height", "addTable")?,
+                            style,
+                            header_fill,
+                        })
+                    }
+                };
+                (file_path, destination_path, timeout_ms, intent)
+            }
+            Self::AddHeader {
+                file_path,
+                text,
+                page_number,
+                style,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::DocumentAddHeader(OfficeHeaderFooterIntent {
+                    text,
+                    page_number,
+                    style,
+                }),
+            ),
+            Self::AddFooter {
+                file_path,
+                text,
+                page_number,
+                slide_number,
+                style,
+                destination_path,
+                timeout_ms,
+            } => {
+                let intent = match document_kind {
+                    OfficeDocumentKind::Document => {
+                        reject_semantic_extras(
+                            [("slideNumber", slide_number.is_some())],
+                            "addFooter",
+                        )?;
+                        OfficeSemanticIntent::DocumentAddFooter(OfficeHeaderFooterIntent {
+                            text,
+                            page_number,
+                            style,
+                        })
+                    }
+                    OfficeDocumentKind::Presentation => {
+                        if page_number {
+                            return Err(OfficeSemanticError::unsupported(
+                                "presentation.footerPageNumber",
+                                "Native presentation footer page-number fields are not in the semantic surface; use managedScript.",
+                            ));
+                        }
+                        OfficeSemanticIntent::PresentationAddFooter(
+                            OfficePresentationFooterIntent {
+                                slide_number: required_wire(
+                                    slide_number,
+                                    "slideNumber",
+                                    "addFooter",
+                                )?,
+                                text: required_wire(text, "text", "addFooter")?,
+                                style,
+                            },
+                        )
+                    }
+                    OfficeDocumentKind::Spreadsheet => {
+                        return Err(OfficeSemanticError::unsupported(
+                            "spreadsheet.addFooter",
+                            "Spreadsheet print footer composition is outside the native semantic surface; use managedScript.",
+                        ))
+                    }
+                };
+                (file_path, destination_path, timeout_ms, intent)
+            }
+            Self::ReplaceText {
+                file_path,
+                find_text,
+                replace_text,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::DocumentReplaceText(OfficeReplaceTextIntent {
+                    find: find_text,
+                    replace: replace_text,
+                }),
+            ),
+            Self::FormatText {
+                file_path,
+                block_index,
+                style,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::DocumentFormatText(OfficeDocumentFormatIntent {
+                    block_index,
+                    style,
+                }),
+            ),
+            Self::RemoveBlock {
+                file_path,
+                block_index,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::DocumentRemoveBlock(OfficeDocumentBlockIntent {
+                    block_index,
+                }),
+            ),
+            Self::MoveBlock {
+                file_path,
+                block_index,
+                new_index,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::DocumentMoveBlock(OfficeDocumentMoveIntent {
+                    block_index,
+                    new_index,
+                }),
+            ),
+            Self::AddSheet {
+                file_path,
+                sheet_name,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::SpreadsheetAddSheet(OfficeSpreadsheetSheetIntent {
+                    sheet_name,
+                }),
+            ),
+            Self::WriteCell {
+                file_path,
+                sheet_name,
+                cell,
+                value,
+                style,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::SpreadsheetWriteCell(OfficeSpreadsheetCellIntent {
+                    sheet_name,
+                    cell,
+                    value,
+                    style,
+                }),
+            ),
+            Self::SetFormula {
+                file_path,
+                sheet_name,
+                cell,
+                formula,
+                number_format,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::SpreadsheetSetFormula(OfficeSpreadsheetFormulaIntent {
+                    sheet_name,
+                    cell,
+                    formula,
+                    number_format,
+                }),
+            ),
+            Self::FormatRange {
+                file_path,
+                sheet_name,
+                range,
+                style,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::SpreadsheetFormatRange(OfficeSpreadsheetRangeFormatIntent {
+                    sheet_name,
+                    range,
+                    style,
+                }),
+            ),
+            Self::FreezePanes {
+                file_path,
+                sheet_name,
+                freeze_at,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::SpreadsheetFreezePanes(OfficeSpreadsheetFreezeIntent {
+                    sheet_name,
+                    freeze_at,
+                }),
+            ),
+            Self::AddConditionalFormat {
+                file_path,
+                sheet_name,
+                range,
+                kind,
+                operator,
+                value,
+                second_value,
+                text,
+                fill_color,
+                min_color,
+                mid_color,
+                max_color,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::SpreadsheetAddConditionalFormat(
+                    OfficeSpreadsheetConditionalFormatIntent {
+                        sheet_name,
+                        range,
+                        kind,
+                        operator,
+                        value,
+                        second_value,
+                        text,
+                        fill_color,
+                        min_color,
+                        mid_color,
+                        max_color,
+                    },
+                ),
+            ),
+            Self::AddChart {
+                file_path,
+                chart_type,
+                title,
+                sheet_name,
+                data_range,
+                category_range,
+                anchor,
+                slide_number,
+                series,
+                categories,
+                x,
+                y,
+                width,
+                height,
+                destination_path,
+                timeout_ms,
+            } => {
+                let intent = match document_kind {
+                    OfficeDocumentKind::Spreadsheet => {
+                        reject_semantic_extras(
+                            [
+                                ("slideNumber", slide_number.is_some()),
+                                ("series", !series.is_empty()),
+                                ("categories", !categories.is_empty()),
+                                ("x", x.is_some()),
+                                ("y", y.is_some()),
+                                ("width", width.is_some()),
+                                ("height", height.is_some()),
+                            ],
+                            "addChart",
+                        )?;
+                        OfficeSemanticIntent::SpreadsheetAddChart(
+                            OfficeSpreadsheetChartIntent {
+                                sheet_name: required_wire(
+                                    sheet_name,
+                                    "sheetName",
+                                    "addChart",
+                                )?,
+                                chart_type,
+                                title,
+                                data_range: required_wire(
+                                    data_range,
+                                    "dataRange",
+                                    "addChart",
+                                )?,
+                                category_range,
+                                anchor,
+                            },
+                        )
+                    }
+                    OfficeDocumentKind::Presentation => {
+                        reject_semantic_extras(
+                            [
+                                ("sheetName", sheet_name.is_some()),
+                                ("dataRange", data_range.is_some()),
+                                ("categoryRange", category_range.is_some()),
+                                ("anchor", anchor.is_some()),
+                            ],
+                            "addChart",
+                        )?;
+                        OfficeSemanticIntent::PresentationAddChart(
+                            OfficePresentationChartIntent {
+                                slide_number: required_wire(
+                                    slide_number,
+                                    "slideNumber",
+                                    "addChart",
+                                )?,
+                                chart_type,
+                                title,
+                                series,
+                                categories,
+                                x: required_wire(x, "x", "addChart")?,
+                                y: required_wire(y, "y", "addChart")?,
+                                width: required_wire(width, "width", "addChart")?,
+                                height: required_wire(height, "height", "addChart")?,
+                            },
+                        )
+                    }
+                    OfficeDocumentKind::Document => {
+                        return Err(OfficeSemanticError::unsupported(
+                            "document.addChart",
+                            "Native Word chart creation is outside the semantic surface; use managedScript.",
+                        ))
+                    }
+                };
+                (file_path, destination_path, timeout_ms, intent)
+            }
+            Self::RemoveSheet {
+                file_path,
+                sheet_name,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::SpreadsheetRemoveSheet(OfficeSpreadsheetSheetIntent {
+                    sheet_name,
+                }),
+            ),
+            Self::MoveSheet {
+                file_path,
+                sheet_name,
+                new_index,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::SpreadsheetMoveSheet(OfficeSpreadsheetMoveSheetIntent {
+                    sheet_name,
+                    new_index,
+                }),
+            ),
+            Self::AddSlide {
+                file_path,
+                layout,
+                title,
+                body,
+                background_color,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::PresentationAddSlide(OfficePresentationSlideIntent {
+                    layout,
+                    title,
+                    body,
+                    background_color,
+                }),
+            ),
+            Self::AddShape {
+                file_path,
+                slide_number,
+                shape_type,
+                text,
+                x,
+                y,
+                width,
+                height,
+                style,
+                line_color,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::PresentationAddShape(OfficePresentationShapeIntent {
+                    slide_number,
+                    shape_type,
+                    text,
+                    x,
+                    y,
+                    width,
+                    height,
+                    style,
+                    line_color,
+                }),
+            ),
+            Self::RemoveSlide {
+                file_path,
+                slide_number,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::PresentationRemoveSlide(OfficePresentationSlideIndexIntent {
+                    slide_number,
+                }),
+            ),
+            Self::MoveSlide {
+                file_path,
+                slide_number,
+                new_index,
+                destination_path,
+                timeout_ms,
+            } => (
+                file_path,
+                destination_path,
+                timeout_ms,
+                OfficeSemanticIntent::PresentationMoveSlide(OfficePresentationMoveSlideIntent {
+                    slide_number,
+                    new_index,
+                }),
+            ),
+        };
+        Ok(OfficeParsedRequest::Semantic(Box::new(
+            OfficeSemanticRequest::new(
+                document_kind,
+                Some(file_path),
+                destination_path,
+                timeout_ms,
+                intent,
+            ),
+        )))
+    }
+}
+
+fn required_wire<T>(
+    value: Option<T>,
+    field: &str,
+    operation: &str,
+) -> Result<T, OfficeSemanticError> {
+    value.ok_or_else(|| {
+        OfficeSemanticError::invalid(format!(
+            "{operation} requires the `{field}` field for this Office file type."
+        ))
+    })
+}
+
+fn reject_semantic_extras<const N: usize>(
+    fields: [(&str, bool); N],
+    operation: &str,
+) -> Result<(), OfficeSemanticError> {
+    let extras = fields
+        .into_iter()
+        .filter_map(|(name, present)| present.then_some(name))
+        .collect::<Vec<_>>();
+    if extras.is_empty() {
+        Ok(())
+    } else {
+        Err(OfficeSemanticError::invalid(format!(
+            "{operation} does not accept {} for this Office file type.",
+            extras.join(", ")
+        )))
+    }
 }
 
 impl OfficeToolArgs {
     fn is_status(&self) -> bool {
-        matches!(self.operation, OfficeToolOperationWire::Status {})
+        matches!(self.request, OfficeParsedRequest::Status)
     }
 
     fn validate_status_call(&self, _tool_name: &str) -> AgentResult<()> {
-        // The internally tagged, deny-unknown wire variant has no fields. A
-        // status call carrying paths, timeouts, or mutation parameters cannot
-        // deserialize and therefore never reaches this point.
         Ok(())
     }
 
-    fn host_managed_help(&self) -> AgentResult<Option<(OfficeHelpVerb, Option<&str>)>> {
-        let OfficeToolOperationWire::Help {
-            verb,
-            element,
-            timeout_ms,
-        } = &self.operation
-        else {
-            return Ok(None);
-        };
-        let Some(topic) = verb.filter(|verb| verb.is_host_managed()) else {
-            return Ok(None);
-        };
-        if let Some(timeout_ms) = timeout_ms {
-            if !(1..=MAX_OFFICE_TIMEOUT_MS).contains(timeout_ms) {
-                return Err(AgentError::new(format!(
-                    "Office timeout must be between 1 and {MAX_OFFICE_TIMEOUT_MS} milliseconds."
-                )));
+    fn into_request(self) -> AgentResult<OfficeExecutionRequest> {
+        match self.request {
+            OfficeParsedRequest::Status => Err(AgentError::structured(
+                "office.semantic_invalid_request",
+                "The Office status operation does not create an execution request.",
+                json!({
+                    "type": "office_semantic_request",
+                    "code": "semanticInvalidRequest",
+                    "recovery": "changeRequest",
+                }),
+            )),
+            OfficeParsedRequest::Semantic(request) => {
+                compile_office_semantic_request(&request).map_err(map_semantic_error)
             }
         }
-        let requested_element = element
-            .as_deref()
-            .map(str::trim)
-            .filter(|element| !element.is_empty());
-        Ok(Some((topic, requested_element)))
-    }
-
-    fn into_request(
-        self,
-        document_kind: OfficeDocumentKind,
-    ) -> AgentResult<OfficeExecutionRequest> {
-        let (operation, document_path, parameters, output_path, destination_path, timeout_ms) =
-            match self.operation {
-                OfficeToolOperationWire::Status {} => {
-                    return Err(AgentError::new(
-                        "The Office status operation does not create an execution request.",
-                    ))
-                }
-                OfficeToolOperationWire::Help {
-                    verb,
-                    element,
-                    timeout_ms,
-                } => (
-                    OfficeOperation::Help,
-                    None,
-                    OfficeOperationParameters::Help { verb, element },
-                    None,
-                    None,
-                    timeout_ms,
-                ),
-                OfficeToolOperationWire::Create {
-                    file_path,
-                    locale,
-                    minimal,
-                    overwrite_existing,
-                    timeout_ms,
-                } => (
-                    OfficeOperation::Create,
-                    non_empty_owned(Some(file_path)),
-                    OfficeOperationParameters::Create {
-                        locale,
-                        minimal,
-                        overwrite: overwrite_existing,
-                    },
-                    None,
-                    None,
-                    timeout_ms,
-                ),
-                OfficeToolOperationWire::View {
-                    file_path,
-                    mode,
-                    start,
-                    end,
-                    max_lines,
-                    issue_type,
-                    limit,
-                    columns,
-                    pages,
-                    range,
-                    viewport,
-                    grid,
-                    render_mode,
-                    include_page_count,
-                    output_path,
-                    timeout_ms,
-                } => (
-                    OfficeOperation::View,
-                    non_empty_owned(Some(file_path)),
-                    OfficeOperationParameters::View {
-                        mode,
-                        start,
-                        end,
-                        max_lines,
-                        issue_type,
-                        limit,
-                        columns,
-                        pages,
-                        range,
-                        viewport,
-                        grid,
-                        render_mode,
-                        page_count: include_page_count,
-                    },
-                    non_empty_owned(output_path),
-                    None,
-                    timeout_ms,
-                ),
-                OfficeToolOperationWire::Get {
-                    file_path,
-                    target,
-                    depth,
-                    timeout_ms,
-                } => (
-                    OfficeOperation::Get,
-                    non_empty_owned(Some(file_path)),
-                    OfficeOperationParameters::Get { target, depth },
-                    None,
-                    None,
-                    timeout_ms,
-                ),
-                OfficeToolOperationWire::Query {
-                    file_path,
-                    selector,
-                    contains_text,
-                    compact,
-                    fields,
-                    timeout_ms,
-                } => (
-                    OfficeOperation::Query,
-                    non_empty_owned(Some(file_path)),
-                    OfficeOperationParameters::Query {
-                        selector,
-                        contains: contains_text,
-                        compact,
-                        fields,
-                    },
-                    None,
-                    None,
-                    timeout_ms,
-                ),
-                OfficeToolOperationWire::Validate {
-                    file_path,
-                    timeout_ms,
-                } => (
-                    OfficeOperation::Validate,
-                    non_empty_owned(Some(file_path)),
-                    OfficeOperationParameters::Validate,
-                    None,
-                    None,
-                    timeout_ms,
-                ),
-                OfficeToolOperationWire::Set {
-                    file_path,
-                    target,
-                    properties,
-                    text_replacement,
-                    override_protection,
-                    destination_path,
-                    timeout_ms,
-                } => (
-                    OfficeOperation::Set,
-                    non_empty_owned(Some(file_path)),
-                    OfficeOperationParameters::Set {
-                        target,
-                        properties,
-                        replacement: text_replacement,
-                        force: override_protection,
-                    },
-                    None,
-                    non_empty_owned(destination_path),
-                    timeout_ms,
-                ),
-                OfficeToolOperationWire::Add {
-                    file_path,
-                    parent,
-                    element,
-                    copy_from,
-                    placement,
-                    properties,
-                    override_protection,
-                    destination_path,
-                    timeout_ms,
-                } => (
-                    OfficeOperation::Add,
-                    non_empty_owned(Some(file_path)),
-                    OfficeOperationParameters::Add {
-                        parent,
-                        element_type: element,
-                        copy_from,
-                        position: placement,
-                        properties,
-                        force: override_protection,
-                    },
-                    None,
-                    non_empty_owned(destination_path),
-                    timeout_ms,
-                ),
-                OfficeToolOperationWire::Remove {
-                    file_path,
-                    target,
-                    shift,
-                    properties,
-                    destination_path,
-                    timeout_ms,
-                } => (
-                    OfficeOperation::Remove,
-                    non_empty_owned(Some(file_path)),
-                    OfficeOperationParameters::Remove {
-                        target,
-                        shift,
-                        properties,
-                    },
-                    None,
-                    non_empty_owned(destination_path),
-                    timeout_ms,
-                ),
-                OfficeToolOperationWire::Move {
-                    file_path,
-                    target,
-                    to_parent,
-                    placement,
-                    properties,
-                    destination_path,
-                    timeout_ms,
-                } => (
-                    OfficeOperation::Move,
-                    non_empty_owned(Some(file_path)),
-                    OfficeOperationParameters::Move {
-                        target,
-                        new_parent: to_parent,
-                        position: placement,
-                        properties,
-                    },
-                    None,
-                    non_empty_owned(destination_path),
-                    timeout_ms,
-                ),
-                OfficeToolOperationWire::Swap {
-                    file_path,
-                    first_target,
-                    second_target,
-                    destination_path,
-                    timeout_ms,
-                } => (
-                    OfficeOperation::Swap,
-                    non_empty_owned(Some(file_path)),
-                    OfficeOperationParameters::Swap {
-                        first_target,
-                        second_target,
-                    },
-                    None,
-                    non_empty_owned(destination_path),
-                    timeout_ms,
-                ),
-            };
-        validate_model_kind_parameters(document_kind, &parameters)?;
-        let request = OfficeExecutionRequest {
-            document_kind,
-            operation,
-            document_path,
-            parameters: OfficeRequestParameters::Typed(parameters),
-            output_path,
-            destination_path,
-            timeout_ms,
-        };
-        validate_office_request(&request).map_err(map_engine_error)?;
-        Ok(request)
-    }
-}
-
-fn validate_model_kind_parameters(
-    document_kind: OfficeDocumentKind,
-    parameters: &OfficeOperationParameters,
-) -> AgentResult<()> {
-    match parameters {
-        OfficeOperationParameters::View {
-            grid,
-            render_mode,
-            ..
-        } if document_kind == OfficeDocumentKind::Spreadsheet
-            && (grid.is_some() || render_mode.is_some()) =>
-        {
-            Err(AgentError::new(
-                "office_spreadsheet view does not accept grid or renderMode; use range, columns, pages, and viewport as applicable.",
-            ))
-        }
-        OfficeOperationParameters::Query {
-            compact, fields, ..
-        } if document_kind == OfficeDocumentKind::Spreadsheet
-            && (*compact || !fields.is_empty()) =>
-        {
-            Err(AgentError::new(
-                "office_spreadsheet query does not accept compact or fields; use view mode=text with range or columns for compact worksheet inspection.",
-            ))
-        }
-        _ => Ok(()),
     }
 }
 
@@ -777,19 +1434,70 @@ fn parse_args(value: Value, tool_name: &str) -> AgentResult<OfficeToolArgs> {
         ));
     }
     let reason = reason.to_string();
-    let parsed: OfficeToolCallWire = serde_json::from_value(value)
-        .map_err(|error| AgentError::new(format!("{tool_name} parameters are invalid: {error}")))?;
-    debug_assert_eq!(parsed.reason, raw_reason);
-    Ok(OfficeToolArgs {
-        operation: parsed.request,
-        reason,
-    })
+    let document_kind = document_kind_for_tool_name(tool_name)?;
+    let mut semantic_value = value;
+    semantic_value
+        .as_object_mut()
+        .expect("validated object")
+        .remove("reason");
+    let parsed: OfficeSemanticOperationWire =
+        serde_json::from_value(semantic_value).map_err(|error| {
+            AgentError::structured(
+                "office.semantic_invalid_request",
+                format!("{tool_name} semantic parameters are invalid: {error}"),
+                json!({
+                    "type": "office_semantic_request",
+                    "code": "semanticInvalidRequest",
+                    "recovery": "changeRequest",
+                    "canonicalOperations": semantic_operation_names(document_kind),
+                }),
+            )
+        })?;
+    let request = parsed
+        .into_parsed(document_kind)
+        .map_err(map_semantic_error)?;
+    Ok(OfficeToolArgs { request, reason })
+}
+
+fn document_kind_for_tool_name(tool_name: &str) -> AgentResult<OfficeDocumentKind> {
+    match tool_name {
+        "office_document" => Ok(OfficeDocumentKind::Document),
+        "office_spreadsheet" => Ok(OfficeDocumentKind::Spreadsheet),
+        "office_presentation" => Ok(OfficeDocumentKind::Presentation),
+        _ => Err(AgentError::new(format!(
+            "Unknown managed Office tool `{tool_name}`."
+        ))),
+    }
+}
+
+fn map_semantic_error(error: OfficeSemanticError) -> AgentError {
+    let recovery = error
+        .recommended_route()
+        .map_or("changeRequest", |_| "useManagedScript");
+    AgentError::structured(
+        error.code().stable_name(),
+        error.message(),
+        json!({
+            "type": "office_semantic_request",
+            "code": match error.code() {
+                crate::office::OfficeSemanticErrorCode::InvalidRequest => "semanticInvalidRequest",
+                crate::office::OfficeSemanticErrorCode::KindMismatch => "semanticKindMismatch",
+                crate::office::OfficeSemanticErrorCode::CapabilityNotSupported => "capabilityNotSupported",
+            },
+            "recovery": recovery,
+            "recommendedRoute": error.recommended_route(),
+            "capability": error.capability(),
+        }),
+    )
 }
 
 pub(crate) fn validate_frozen_office_trace_args(
     frozen: &AgentOfficeOperationRequest,
     operation: &Value,
 ) -> Result<(), String> {
+    if operation != &frozen.semantic_args {
+        return Err("Office ToolCall differs from the frozen semantic request".to_string());
+    }
     let document_kind = frozen.prepared.request.document_kind;
     let tool_name = match document_kind {
         OfficeDocumentKind::Document => "office_document",
@@ -800,7 +1508,7 @@ pub(crate) fn validate_frozen_office_trace_args(
         .map_err(|_| format!("{tool_name} frozen ToolCall arguments are invalid"))?;
     let reason = args.reason.clone();
     let request = args
-        .into_request(document_kind)
+        .into_request()
         .map_err(|_| format!("{tool_name} frozen ToolCall request is invalid"))?;
     if request != frozen.prepared.request || reason != frozen.reason {
         return Err(format!(
@@ -860,560 +1568,486 @@ fn map_engine_error(error: OfficeEngineError) -> AgentError {
     )
 }
 
-const MANAGED_OFFICE_HELP_SCHEMA_VERSION: u32 = 1;
-
-fn host_managed_operation_help(
-    document_kind: OfficeDocumentKind,
-    tool_name: &str,
-    topic: OfficeHelpVerb,
-    requested_element: Option<&str>,
-) -> Value {
-    debug_assert!(topic.is_host_managed());
-    let example_file = match document_kind {
-        OfficeDocumentKind::Document => "document.docx",
-        OfficeDocumentKind::Spreadsheet => "workbook.xlsx",
-        OfficeDocumentKind::Presentation => "presentation.pptx",
-    };
-    let (summary, access, approval, request_schema, example) = match topic {
-        OfficeHelpVerb::Status => (
-            "Inspect Office engine availability, version, revision, and managed capabilities. This operation does not accept a file path.",
-            "readOnly",
-            "notRequired",
-            status_schema(),
-            json!({ "operation": "status" }),
-        ),
-        OfficeHelpVerb::Help => (
-            "Read Host-owned managed-operation help, or request OfficeCLI element-schema help with get, query, set, add, or remove.",
-            "readOnly",
-            "notRequired",
-            help_schema(),
-            json!({ "operation": "help", "verb": "create" }),
-        ),
-        OfficeHelpVerb::Create => (
-            "Create a new Office file through a frozen Host-managed write. The target is staged, validated, and atomically published after approval.",
-            "fileWrite",
-            "required",
-            create_schema(document_kind),
-            json!({ "operation": "create", "filePath": example_file }),
-        ),
-        OfficeHelpVerb::View => (
-            "Inspect text or structure read-only, or render html, svg, or screenshot output as a managed file write. The selected mode determines access and approval.",
-            "dependsOnMode",
-            "dependsOnMode",
-            view_schema(document_kind),
-            json!({ "operation": "view", "filePath": example_file, "mode": "text" }),
-        ),
-        OfficeHelpVerb::Validate => (
-            "Validate an existing Office file and return structured provider output without modifying the source.",
-            "readOnly",
-            "notRequired",
-            validate_schema(document_kind),
-            json!({ "operation": "validate", "filePath": example_file }),
-        ),
-        OfficeHelpVerb::Move => (
-            "Move or reorder an existing Office element through a frozen Host-managed write. Use target plus an optional destination parent and placement anchor.",
-            "fileWrite",
-            "required",
-            move_schema(document_kind),
-            json!({ "operation": "move", "filePath": example_file, "target": "/body/p[2]", "placement": { "type": "index", "index": 0 } }),
-        ),
-        OfficeHelpVerb::Swap => (
-            "Swap two existing Office elements through a frozen Host-managed write. Both targets are validated and bound into the approved request.",
-            "fileWrite",
-            "required",
-            swap_schema(document_kind),
-            json!({ "operation": "swap", "filePath": example_file, "firstTarget": "/body/p[1]", "secondTarget": "/body/p[2]" }),
-        ),
-        OfficeHelpVerb::Get
-        | OfficeHelpVerb::Query
-        | OfficeHelpVerb::Set
-        | OfficeHelpVerb::Add
-        | OfficeHelpVerb::Remove => unreachable!("provider element help is not Host-managed"),
-    };
-    let mut notes = vec![
-        "Place operation fields inside `request` and provide the concise audit `reason` beside it."
-            .to_string(),
-        "Provider argv, document-format tokens, staging paths, and output flags are generated by the Host."
-            .to_string(),
-    ];
-    if let Some(element) = requested_element {
-        notes.push(format!(
-            "The requested element `{element}` is not applicable to `{}` managed-operation help and was not forwarded to OfficeCLI.",
-            topic.stable_name()
-        ));
-        if topic == OfficeHelpVerb::Create {
-            notes.push(format!(
-                "To inspect properties for an element such as `{element}` after creating the file, request help with `verb=add` and that element."
-            ));
-        }
-    }
-    json!({
-        "schemaVersion": MANAGED_OFFICE_HELP_SCHEMA_VERSION,
-        "kind": "managedOfficeOperationHelp",
-        "source": "host",
-        "providerNeutral": true,
-        "tool": tool_name,
-        "documentKind": document_kind,
-        "operation": topic.stable_name(),
-        "summary": summary,
-        "access": access,
-        "approval": approval,
-        "requestSchema": request_schema,
-        "exampleRequest": example,
-        "notes": notes,
-    })
-}
-
 fn office_input_schema(document_kind: OfficeDocumentKind) -> Value {
-    // Some model providers reject composed schemas at the tool-input root. Keep the root as one
-    // portable object and place the exact discriminated union one level below it. This preserves
-    // provider compatibility without lying to the model about operation-specific required fields.
-    let request_schemas = [
-        status_schema(),
-        help_schema(),
-        create_schema(document_kind),
-        view_schema(document_kind),
-        get_schema(document_kind),
-        query_schema(document_kind),
-        validate_schema(document_kind),
-        set_schema(document_kind),
-        add_schema(document_kind),
-        remove_schema(document_kind),
-        move_schema(document_kind),
-        swap_schema(document_kind),
-    ];
-    json!({
-        "type": "object",
-        "description": "Typed managed Office call. Select one exact request variant and provide a concise user-facing reason. Provider argv, output flags, and document-format tokens are generated and frozen by the host and are never accepted from callers.",
-        "properties": {
-            "request": {
-                "description": "Exact operation-specific request. The selected branch declares every required and allowed field; do not add fields from another operation.",
-                "oneOf": request_schemas,
-            },
-            "reason": reason_schema(),
-        },
-        "required": ["request", "reason"],
-        "additionalProperties": false,
-    })
-}
-
-fn status_schema() -> Value {
-    office_operation_schema("status", Map::new(), &[])
-}
-
-fn office_operation_schema(
-    operation: &'static str,
-    mut properties: Map<String, Value>,
-    operation_required: &[&str],
-) -> Value {
-    properties.insert(
-        "operation".to_string(),
-        json!({
-            "type": "string",
-            "enum": [operation],
-            "description": format!("Run the typed `{operation}` Office operation."),
-        }),
-    );
-    let required = std::iter::once("operation")
-        .chain(operation_required.iter().copied())
-        .collect::<Vec<_>>();
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    })
-}
-
-fn help_schema() -> Value {
-    office_operation_schema(
-        "help",
-        schema_properties([
-            (
-                "verb",
-                json!({
-                    "type": "string",
-                    "enum": ["status", "help", "create", "view", "get", "query", "validate", "set", "add", "remove", "move", "swap"],
-                    "description": "Optional provider-neutral help topic. status, help, create, view, validate, move, and swap return Host-owned managed-operation help without invoking OfficeCLI. get, query, set, add, and remove select OfficeCLI element-schema help. The document format is inferred from the selected tool.",
-                }),
-            ),
-            (
-                "element",
-                json!({
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Optional element name for get, query, set, add, or remove provider-schema help. For Host-managed status, help, create, view, validate, move, or swap topics it is accepted for recovery from an over-specified model call, reported as not applicable, and never forwarded to OfficeCLI. To inspect element properties after create, use verb=add with the element name.",
-                }),
-            ),
-            ("timeoutMs", timeout_schema()),
-        ]),
-        &[],
-    )
-}
-
-fn create_schema(document_kind: OfficeDocumentKind) -> Value {
     let mut properties = schema_properties([
-        ("filePath", file_path_schema(document_kind)),
         (
-            "overwriteExisting",
+            "operation",
             json!({
-                "type": "boolean",
-                "description": "Whether this create operation is intended to replace an existing target. This never bypasses file permissions, approval, conflict checks, staging, or atomic publication.",
+                "type": "string",
+                "enum": semantic_operation_names(document_kind),
+                "description": "Select one semantic Office intent. snake_case aliases are accepted at the trusted parser boundary, but use the canonical camelCase name.",
             }),
         ),
+        ("reason", reason_schema()),
+        ("filePath", file_path_schema(document_kind)),
+        ("destinationPath", destination_path_schema(document_kind)),
         ("timeoutMs", timeout_schema()),
-    ]);
-    if document_kind == OfficeDocumentKind::Document {
-        properties.insert(
-            "locale".to_string(),
+        (
+            "outputPath",
             json!({
                 "type": "string",
                 "minLength": 1,
-                "description": "Optional BCP-47 locale such as zh-CN. It selects document defaults and script-aware fonts.",
+                "description": "Required only for render. The Host owns the render flag, stages and atomically publishes the output, then returns its authoritative model-readable reference in outputs[].source.",
             }),
-        );
-        properties.insert(
-            "minimal".to_string(),
+        ),
+        (
+            "pageOrSlide",
+            positive_integer_schema("Optional one-based page or slide rendered by render."),
+        ),
+        (
+            "depth",
             json!({
-                "type": "boolean",
-                "description": "Create a minimal raw OOXML document without the normal Word baseline. Prefer false for ordinary documents.",
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32,
+                "description": "Optional inspection depth.",
             }),
+        ),
+    ]);
+
+    properties.insert(
+        "overwriteExisting".to_string(),
+        json!({
+            "type": "boolean",
+            "description": "create only. Replacing an existing target still uses approval, conflict checks, staging, and atomic publication.",
+        }),
+    );
+    properties.insert(
+        "locale".to_string(),
+        json!({
+            "type": "string",
+            "minLength": 1,
+            "description": "Document create only. Optional BCP-47 locale such as zh-CN.",
+        }),
+    );
+    properties.insert("style".to_string(), semantic_style_schema());
+    properties.insert("source".to_string(), agent_file_input_ref_schema());
+    properties.insert(
+        "altText".to_string(),
+        json!({
+            "type": "string",
+            "description": "Accessible description for insertImage.",
+        }),
+    );
+    for (name, description) in [
+        ("x", "Presentation element x position, for example 1in."),
+        ("y", "Presentation element y position, for example 1in."),
+        ("width", "Element width, for example 15cm or 6in."),
+        ("height", "Element height, for example 3in."),
+        (
+            "anchor",
+            "Spreadsheet chart or image anchor such as G2:N18.",
+        ),
+    ] {
+        properties.insert(
+            name.to_string(),
+            json!({ "type": "string", "minLength": 1, "description": description }),
         );
     }
-    office_operation_schema("create", properties, &["filePath"])
+
+    match document_kind {
+        OfficeDocumentKind::Document => {
+            properties.extend(schema_properties([
+                (
+                    "blockKind",
+                    json!({
+                        "type": "string",
+                        "enum": ["paragraph", "heading1", "heading2", "heading3", "bullet", "numbered"],
+                        "description": "addText block kind; defaults to paragraph.",
+                    }),
+                ),
+                (
+                    "text",
+                    json!({
+                        "type": "string",
+                        "description": "Text for addText, addHeader, or addFooter.",
+                    }),
+                ),
+                ("data", table_data_schema()),
+                (
+                    "headerFill",
+                    json!({
+                        "type": "string",
+                        "description": "Optional table header fill color.",
+                    }),
+                ),
+                (
+                    "pageNumber",
+                    json!({
+                        "type": "boolean",
+                        "description": "addHeader/addFooter: include the PAGE field.",
+                    }),
+                ),
+                (
+                    "findText",
+                    json!({
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "replaceText literal search text.",
+                    }),
+                ),
+                (
+                    "replaceText",
+                    json!({
+                        "type": "string",
+                        "description": "replaceText replacement.",
+                    }),
+                ),
+                (
+                    "blockIndex",
+                    positive_integer_schema(
+                        "One-based body block for inspect, formatText, removeBlock, or moveBlock.",
+                    ),
+                ),
+                (
+                    "newIndex",
+                    positive_integer_schema("One-based destination for moveBlock."),
+                ),
+            ]));
+        }
+        OfficeDocumentKind::Spreadsheet => {
+            properties.extend(spreadsheet_semantic_schema_properties());
+        }
+        OfficeDocumentKind::Presentation => {
+            properties.extend(presentation_semantic_schema_properties());
+        }
+    }
+
+    json!({
+        "type": "object",
+        "description": format!(
+            "Versioned provider-neutral semantic {:?} request. Keep operation, filePath, operation fields, and reason at this single flat root. The Host validates conditional requirements, compiles the intent to a canonical frozen Office action, and never accepts OfficeCLI argv, DOM paths, or provider property maps. Unsupported long-tail capabilities return capabilityNotSupported with recommendedRoute=managedScript.",
+            document_kind
+        ),
+        "properties": properties,
+        "required": ["operation", "reason"],
+        "additionalProperties": false,
+    })
 }
 
-fn view_schema(document_kind: OfficeDocumentKind) -> Value {
-    let mut properties = schema_properties([
-        ("filePath", file_path_schema(document_kind)),
+fn semantic_operation_names(document_kind: OfficeDocumentKind) -> Vec<&'static str> {
+    let mut operations = vec!["status", "create", "inspect", "validate", "render"];
+    operations.extend(match document_kind {
+        OfficeDocumentKind::Document => vec![
+            "addText",
+            "insertImage",
+            "addTable",
+            "addHeader",
+            "addFooter",
+            "replaceText",
+            "formatText",
+            "removeBlock",
+            "moveBlock",
+        ],
+        OfficeDocumentKind::Spreadsheet => vec![
+            "addSheet",
+            "writeCell",
+            "setFormula",
+            "formatRange",
+            "freezePanes",
+            "addConditionalFormat",
+            "addTable",
+            "addChart",
+            "insertImage",
+            "removeSheet",
+            "moveSheet",
+        ],
+        OfficeDocumentKind::Presentation => vec![
+            "addSlide",
+            "addText",
+            "insertImage",
+            "addTable",
+            "addChart",
+            "addShape",
+            "addFooter",
+            "removeSlide",
+            "moveSlide",
+        ],
+    });
+    operations
+}
+
+fn semantic_style_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "fontName": { "type": "string", "minLength": 1 },
+            "fontSize": { "type": "number", "minimum": 1, "maximum": 400 },
+            "fontColor": { "type": "string", "minLength": 1 },
+            "fillColor": { "type": "string", "minLength": 1 },
+            "bold": { "type": "boolean" },
+            "italic": { "type": "boolean" },
+            "alignment": {
+                "type": "string",
+                "enum": ["left", "center", "right", "justify"]
+            },
+            "wrapText": { "type": "boolean" },
+            "numberFormat": { "type": "string", "minLength": 1 },
+            "lineSpacing": { "type": "number", "minimum": 0.5, "maximum": 10 }
+        },
+        "additionalProperties": false,
+        "description": "Small cross-format style vocabulary. The backend rejects fields that do not apply to the selected file kind.",
+    })
+}
+
+fn table_data_schema() -> Value {
+    json!({
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 2000,
+        "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "items": { "type": "string", "maxLength": 32768 }
+        },
+        "description": "Rectangular table rows. Cells containing commas, semicolons, or line breaks require managedScript.",
+    })
+}
+
+fn spreadsheet_semantic_schema_properties() -> Map<String, Value> {
+    schema_properties([
         (
-            "mode",
+            "sheetName",
             json!({
                 "type": "string",
-                "enum": ["text", "annotated", "outline", "stats", "issues", "html", "svg", "screenshot", "forms"],
-                "description": "Typed view mode. html, svg, and screenshot require outputPath and are file-write operations; the other modes are read-only.",
+                "minLength": 1,
+                "maxLength": 31,
+                "description": "Worksheet name used by spreadsheet semantic operations.",
             }),
         ),
         (
-            "start",
-            positive_integer_schema("First line, row, paragraph, or slide to include."),
-        ),
-        (
-            "end",
-            positive_integer_schema("Last line, row, paragraph, or slide to include."),
-        ),
-        (
-            "maxLines",
-            positive_integer_schema("Maximum number of lines, rows, or slides returned."),
-        ),
-        ("issueType", issue_type_schema(document_kind)),
-        (
-            "limit",
-            positive_integer_schema("Maximum number of matching results."),
-        ),
-        (
-            "pages",
+            "cell",
             json!({
-                "type": "array",
-                "maxItems": 64,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "start": { "type": "integer", "minimum": 1 },
-                        "end": { "type": "integer", "minimum": 1 }
-                    },
-                    "required": ["start"],
-                    "additionalProperties": false
-                },
-                "description": "One-based page or slide ranges. Use start=end or omit end for one page. The host compiles the range expression.",
+                "type": "string",
+                "minLength": 2,
+                "description": "A1 cell reference for writeCell or setFormula.",
             }),
         ),
         (
             "range",
             json!({
                 "type": "string",
-                "minLength": 1,
-                "description": "Office-internal region to inspect or render, such as a worksheet range or element data path. This is not a filesystem path.",
+                "minLength": 2,
+                "description": "A1 cell or contiguous range for inspect, render, formatRange, addConditionalFormat, or addTable.",
             }),
         ),
         (
-            "viewport",
+            "value",
             json!({
-                "type": "object",
-                "properties": {
-                    "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
-                    "height": { "type": "integer", "minimum": 1, "maximum": 16384 }
-                },
-                "required": ["width", "height"],
-                "additionalProperties": false,
-                "description": "Screenshot viewport dimensions. Valid only in screenshot mode.",
-            }),
-        ),
-        ("outputPath", render_output_path_schema()),
-        ("timeoutMs", timeout_schema()),
-    ]);
-    if document_kind == OfficeDocumentKind::Spreadsheet {
-        properties.insert(
-            "columns".to_string(),
-            json!({
-                "type": "array",
-                "maxItems": 64,
-                "items": { "type": "string", "minLength": 1 },
-                "description": "Spreadsheet columns to include, for example [\"A\", \"B\", \"C\"]. The host generates the provider column list.",
-            }),
-        );
-    } else {
-        properties.insert(
-            "grid".to_string(),
-            json!({
-                "description": "Optional screenshot contact-sheet layout. Use auto for a managed square layout or columns for an explicit column count. Valid only in screenshot mode.",
                 "oneOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "mode": { "type": "string", "enum": ["auto"] }
-                        },
-                        "required": ["mode"],
-                        "additionalProperties": false
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "mode": { "type": "string", "enum": ["columns"] },
-                            "columns": { "type": "integer", "minimum": 1, "maximum": 32 }
-                        },
-                        "required": ["mode", "columns"],
-                        "additionalProperties": false
-                    }
-                ]
-            }),
-        );
-        properties.insert(
-            "renderMode".to_string(),
-            json!({
-                "type": "string",
-                "enum": ["auto", "html"],
-                "description": "Managed screenshot renderer. Native desktop application launch is intentionally unavailable.",
-            }),
-        );
-    }
-    if document_kind == OfficeDocumentKind::Document {
-        properties.insert(
-            "includePageCount".to_string(),
-            json!({
-                "type": "boolean",
-                "description": "Include the repaginated page count in document stats mode when supported.",
-            }),
-        );
-    }
-    office_operation_schema("view", properties, &["filePath", "mode"])
-}
-
-fn get_schema(document_kind: OfficeDocumentKind) -> Value {
-    office_operation_schema(
-        "get",
-        schema_properties([
-            ("filePath", file_path_schema(document_kind)),
-            (
-                "target",
-                json!({
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "get/set/remove/move: Office DOM target path, range, cell, or element. get defaults to the document root. This is never a filesystem path.",
-                }),
-            ),
-            (
-                "depth",
-                json!({
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Maximum child depth returned for the target node.",
-                }),
-            ),
-            ("timeoutMs", timeout_schema()),
-        ]),
-        &["filePath"],
-    )
-}
-
-fn query_schema(document_kind: OfficeDocumentKind) -> Value {
-    let mut properties = schema_properties([
-        ("filePath", file_path_schema(document_kind)),
-        (
-            "selector",
-            json!({
-                "type": "string",
-                "minLength": 1,
-                "description": "Element name or CSS-like Office selector, for example slide or shape[text=Hello]. Use get, not query, for paths beginning with '/'.",
+                    { "type": "string" },
+                    { "type": "number" },
+                    { "type": "boolean" }
+                ],
+                "description": "writeCell value or a conditional-format threshold.",
             }),
         ),
         (
-            "containsText",
+            "secondValue",
+            json!({
+                "oneOf": [
+                    { "type": "string" },
+                    { "type": "number" },
+                    { "type": "boolean" }
+                ],
+                "description": "Optional second conditional-format threshold.",
+            }),
+        ),
+        (
+            "formula",
             json!({
                 "type": "string",
                 "minLength": 1,
-                "description": "Optional case-insensitive text substring used to filter matching elements.",
+                "description": "setFormula expression. Leading '=' is optional.",
             }),
         ),
-        ("timeoutMs", timeout_schema()),
-    ]);
-    if document_kind != OfficeDocumentKind::Spreadsheet {
-        properties.insert(
-            "compact".to_string(),
+        (
+            "numberFormat",
             json!({
-                "type": "boolean",
-                "description": "Return the stable compact one-line-per-element representation.",
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional setFormula number format.",
             }),
-        );
-        properties.insert(
-            "fields".to_string(),
+        ),
+        (
+            "freezeAt",
+            json!({
+                "type": "string",
+                "minLength": 2,
+                "description": "freezePanes anchor, for example A2 to freeze the first row.",
+            }),
+        ),
+        (
+            "kind",
+            json!({
+                "type": "string",
+                "enum": ["cellValue", "colorScale", "dataBar", "containsText"],
+                "description": "addConditionalFormat rule kind.",
+            }),
+        ),
+        (
+            "operator",
+            json!({
+                "type": "string",
+                "minLength": 1,
+                "description": "cellValue operator such as greaterThan or between.",
+            }),
+        ),
+        (
+            "text",
+            json!({
+                "type": "string",
+                "description": "containsText conditional-format text.",
+            }),
+        ),
+        ("fillColor", json!({ "type": "string", "minLength": 1 })),
+        ("minColor", json!({ "type": "string", "minLength": 1 })),
+        ("midColor", json!({ "type": "string", "minLength": 1 })),
+        ("maxColor", json!({ "type": "string", "minLength": 1 })),
+        (
+            "name",
+            json!({
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional spreadsheet table display name.",
+            }),
+        ),
+        (
+            "headerRow",
+            json!({ "type": "boolean", "description": "addTable; defaults to true." }),
+        ),
+        (
+            "totalRow",
+            json!({ "type": "boolean", "description": "addTable; defaults to false." }),
+        ),
+        ("chartType", chart_type_schema()),
+        (
+            "title",
+            json!({ "type": "string", "minLength": 1, "description": "Chart title." }),
+        ),
+        (
+            "dataRange",
+            json!({
+                "type": "string",
+                "minLength": 2,
+                "description": "addChart data range without a sheet prefix; sheetName is authoritative.",
+            }),
+        ),
+        (
+            "categoryRange",
+            json!({
+                "type": "string",
+                "minLength": 2,
+                "description": "Optional addChart category range without a sheet prefix.",
+            }),
+        ),
+        (
+            "newIndex",
+            positive_integer_schema("One-based destination for moveSheet."),
+        ),
+    ])
+}
+
+fn presentation_semantic_schema_properties() -> Map<String, Value> {
+    schema_properties([
+        (
+            "slideNumber",
+            positive_integer_schema(
+                "One-based slide used by inspect and presentation element operations.",
+            ),
+        ),
+        (
+            "newIndex",
+            positive_integer_schema("One-based destination for moveSlide."),
+        ),
+        (
+            "layout",
+            json!({
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional addSlide layout name.",
+            }),
+        ),
+        (
+            "title",
+            json!({
+                "type": "string",
+                "description": "addSlide title or addChart title.",
+            }),
+        ),
+        (
+            "body",
+            json!({
+                "type": "string",
+                "description": "Optional addSlide body text.",
+            }),
+        ),
+        (
+            "backgroundColor",
+            json!({
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional addSlide background color.",
+            }),
+        ),
+        (
+            "text",
+            json!({
+                "type": "string",
+                "description": "Text for addText, addShape, or addFooter.",
+            }),
+        ),
+        ("data", table_data_schema()),
+        ("headerFill", json!({ "type": "string", "minLength": 1 })),
+        ("chartType", chart_type_schema()),
+        (
+            "series",
             json!({
                 "type": "array",
+                "minItems": 1,
                 "maxItems": 64,
-                "items": { "type": "string", "minLength": 1 },
-                "description": "Additional provider-reported format keys to append to compact output, such as x, y, or width.",
-            }),
-        );
-    }
-    office_operation_schema("query", properties, &["filePath", "selector"])
-}
-
-fn validate_schema(document_kind: OfficeDocumentKind) -> Value {
-    office_operation_schema(
-        "validate",
-        schema_properties([
-            ("filePath", file_path_schema(document_kind)),
-            ("timeoutMs", timeout_schema()),
-        ]),
-        &["filePath"],
-    )
-}
-
-fn set_schema(document_kind: OfficeDocumentKind) -> Value {
-    office_operation_schema(
-        "set",
-        schema_properties([
-            ("filePath", file_path_schema(document_kind)),
-            (
-                "target",
-                mutation_target_schema("Office DOM element, range, or cell to update."),
-            ),
-            ("properties", property_map_schema()),
-            (
-                "textReplacement",
-                json!({
+                "items": {
                     "type": "object",
                     "properties": {
-                        "find": { "type": "string", "minLength": 1 },
-                        "replace": { "type": "string" }
+                        "name": { "type": "string", "minLength": 1 },
+                        "values": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 10000,
+                            "items": { "type": "number" }
+                        }
                     },
-                    "required": ["find", "replace"],
-                    "additionalProperties": false,
-                    "description": "Optional literal text replacement. At least one property or textReplacement is required.",
-                }),
-            ),
-            ("overrideProtection", override_protection_schema()),
-            ("destinationPath", destination_path_schema(document_kind)),
-            ("timeoutMs", timeout_schema()),
-        ]),
-        &["filePath", "target"],
-    )
-}
-
-fn add_schema(document_kind: OfficeDocumentKind) -> Value {
-    office_operation_schema(
-        "add",
-        schema_properties([
-            ("filePath", file_path_schema(document_kind)),
-            (
-                "parent",
-                mutation_target_schema("Office DOM parent that receives the new element."),
-            ),
-            (
-                "element",
-                json!({
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Element type reported by typed help, such as paragraph, cell, slide, shape, table, chart, or picture.",
-                }),
-            ),
-            (
-                "copyFrom",
-                mutation_target_schema(
-                    "Optional existing Office DOM element to copy. This is not a filesystem path.",
-                ),
-            ),
-            ("placement", placement_schema()),
-            ("properties", property_map_schema()),
-            ("overrideProtection", override_protection_schema()),
-            ("destinationPath", destination_path_schema(document_kind)),
-            ("timeoutMs", timeout_schema()),
-        ]),
-        &["filePath", "parent", "element"],
-    )
-}
-
-fn remove_schema(document_kind: OfficeDocumentKind) -> Value {
-    let mut properties = schema_properties([
-        ("filePath", file_path_schema(document_kind)),
-        (
-            "target",
-            mutation_target_schema("Office DOM element, cell, row, or range to remove."),
+                    "required": ["name", "values"],
+                    "additionalProperties": false
+                }
+            }),
         ),
-        ("properties", property_map_schema()),
-        ("destinationPath", destination_path_schema(document_kind)),
-        ("timeoutMs", timeout_schema()),
-    ]);
-    if document_kind == OfficeDocumentKind::Spreadsheet {
-        properties.insert(
-            "shift".to_string(),
+        (
+            "categories",
+            json!({
+                "type": "array",
+                "maxItems": 10000,
+                "items": { "type": "string" }
+            }),
+        ),
+        (
+            "shapeType",
             json!({
                 "type": "string",
-                "enum": ["left", "up"],
-                "description": "For a spreadsheet cell removal, shift surrounding cells left or up to fill the gap.",
+                "minLength": 1,
+                "description": "addShape geometry such as rect, roundRect, ellipse, or line.",
             }),
-        );
-    }
-    office_operation_schema("remove", properties, &["filePath", "target"])
+        ),
+        ("lineColor", json!({ "type": "string", "minLength": 1 })),
+    ])
 }
 
-fn move_schema(document_kind: OfficeDocumentKind) -> Value {
-    office_operation_schema(
-        "move",
-        schema_properties([
-            ("filePath", file_path_schema(document_kind)),
-            ("target", mutation_target_schema("Office DOM element to move.")),
-            (
-                "toParent",
-                mutation_target_schema("Optional Office DOM destination parent. Omit to reorder within the current parent."),
-            ),
-            ("placement", placement_schema()),
-            ("properties", property_map_schema()),
-            ("destinationPath", destination_path_schema(document_kind)),
-            ("timeoutMs", timeout_schema()),
-        ]),
-        &["filePath", "target"],
-    )
-}
-
-fn swap_schema(document_kind: OfficeDocumentKind) -> Value {
-    office_operation_schema(
-        "swap",
-        schema_properties([
-            ("filePath", file_path_schema(document_kind)),
-            (
-                "firstTarget",
-                mutation_target_schema("First Office DOM element to swap."),
-            ),
-            (
-                "secondTarget",
-                mutation_target_schema("Second Office DOM element to swap."),
-            ),
-            ("destinationPath", destination_path_schema(document_kind)),
-            ("timeoutMs", timeout_schema()),
-        ]),
-        &["filePath", "firstTarget", "secondTarget"],
-    )
+fn chart_type_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["column", "bar", "line", "pie", "area", "scatter"],
+    })
 }
 
 fn schema_properties<const N: usize>(entries: [(&str, Value); N]) -> Map<String, Value> {
@@ -1463,144 +2097,13 @@ fn destination_path_schema(document_kind: OfficeDocumentKind) -> Value {
     })
 }
 
-fn render_output_path_schema() -> Value {
-    json!({
-        "type": "string",
-        "minLength": 1,
-        "description": "Managed render output path. Required for html, svg, and screenshot modes; its extension must match the mode. The host constructs the provider output option.",
-    })
-}
-
-fn mutation_target_schema(description: &str) -> Value {
-    json!({
-        "type": "string",
-        "minLength": 1,
-        "description": description,
-    })
-}
-
-fn override_protection_schema() -> Value {
-    json!({
-        "type": "boolean",
-        "description": "Allow the provider to edit a protected Office document. This does not bypass MyCopilot file permissions, approval, frozen preconditions, staging, or atomic publication.",
-    })
-}
-
-fn placement_schema() -> Value {
-    json!({
-        "description": "Optional mutually exclusive insertion anchor. Omit to append.",
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "type": "string", "enum": ["index"] },
-                    "index": { "type": "integer", "minimum": 0 }
-                },
-                "required": ["type", "index"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "type": "string", "enum": ["after"] },
-                    "target": { "type": "string", "minLength": 1 }
-                },
-                "required": ["type", "target"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "type": "string", "enum": ["before"] },
-                    "target": { "type": "string", "minLength": 1 }
-                },
-                "required": ["type", "target"],
-                "additionalProperties": false
-            }
-        ]
-    })
-}
-
-fn property_map_schema() -> Value {
-    json!({
-        "type": "object",
-        "maxProperties": 96,
-        "additionalProperties": {
-            "oneOf": [
-                { "type": "string" },
-                { "type": "number" },
-                { "type": "boolean" },
-                {
-                    "type": "object",
-                    "properties": {
-                        "resourcePath": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Local input resource path to authorize, freeze, snapshot, and pass to the provider."
-                        }
-                    },
-                    "required": ["resourcePath"],
-                    "additionalProperties": false
-                }
-            ]
-        },
-        "description": "Typed provider-reported Office properties. Use scalar JSON values instead of key=value strings. Use {resourcePath: ...} only with documented file-bearing properties: background, csv, fallback, file, image, imagefill, imagepath, path, poster, preview, src, or template. Other property names accept scalar values only.",
-    })
-}
-
-fn issue_type_schema(document_kind: OfficeDocumentKind) -> Value {
-    let values: &[&str] = match document_kind {
-        OfficeDocumentKind::Document => &[
-            "format",
-            "content",
-            "structure",
-            "field_not_evaluated",
-            "field_cache_stale",
-        ],
-        OfficeDocumentKind::Spreadsheet => &[
-            "format",
-            "content",
-            "structure",
-            "formula_not_evaluated",
-            "formula_cache_stale",
-            "formula_ref_missing_sheet",
-            "formula_eval_error",
-            "chart_series_ref_missing_sheet",
-            "chart_cache_stale",
-            "definedname_broken",
-            "definedname_target_missing",
-        ],
-        OfficeDocumentKind::Presentation => &[
-            "format",
-            "content",
-            "structure",
-            "slide_field_not_evaluated",
-            "notes_unresolved_rid",
-            "broken_part_ref",
-            "low_contrast",
-        ],
-    };
-    json!({
-        "type": "string",
-        "enum": values,
-        "description": "Optional issue bucket or format-specific subtype. Valid only in issues mode.",
-    })
-}
-
-fn non_empty_owned(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::office::{
         OfficeEngineAvailability, OfficeEngineCapabilities, OfficeEngineSource, OfficeEngineStatus,
-        OfficePreparedExecution, OFFICECLI_PROVIDER_ID, OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
-        OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
+        OfficeOperation, OfficeOperationParameters, OfficePreparedExecution, OFFICECLI_PROVIDER_ID,
+        OFFICE_ENGINE_STATUS_SCHEMA_VERSION, OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
     };
     use crate::protocol::{
         AgentApprovalStatus, AgentCommandPermission, AgentCommandSafetyPolicy,
@@ -1647,6 +2150,7 @@ mod tests {
                 request: request.clone(),
                 argv: vec![request.operation.cli_name().to_string()],
                 paths: Vec::new(),
+                input_bindings: Vec::new(),
                 document_precondition: None,
                 output_precondition: None,
                 destination_precondition: None,
@@ -1678,65 +2182,37 @@ mod tests {
                 stderr_truncated: false,
                 error_code: None,
                 error: None,
+                outputs: Vec::new(),
             })
         }
     }
 
-    #[derive(Clone)]
-    struct ProviderMustNotRunOfficeEngine;
-
-    impl OfficeEngine for ProviderMustNotRunOfficeEngine {
-        fn capabilities(&self) -> OfficeEngineCapabilities {
-            OfficeEngineCapabilities::office_cli()
-        }
-
-        fn status(&self, _cancellation: AgentCancellationToken) -> OfficeEngineStatus {
-            panic!("Host-managed operation help must not query provider status")
-        }
-
-        fn prepare(
-            &self,
-            _context: &OfficeExecutionContext,
-            _request: &OfficeExecutionRequest,
-        ) -> Result<OfficePreparedExecution, OfficeEngineError> {
-            panic!("Host-managed operation help must not prepare provider execution")
-        }
-
-        fn execute_prepared(
-            &self,
-            _context: &OfficeExecutionContext,
-            _prepared: &OfficePreparedExecution,
-            _cancellation: AgentCancellationToken,
-            _action_cancel_flag: Option<Arc<AtomicBool>>,
-        ) -> Result<OfficeExecutionResult, OfficeEngineError> {
-            panic!("Host-managed operation help must not execute the provider")
-        }
-    }
-
     fn office_args(operation: &str, reason: Option<Value>) -> Value {
-        let mut request = json!({ "operation": operation });
-        if operation != "status" {
-            request["filePath"] = json!("budget.xlsx");
-        }
-        if operation == "set" {
-            request["target"] = json!("/Sheet1/A1");
-            request["properties"] = json!({ "value": "Budget" });
-        }
-        let mut args = json!({ "request": request });
+        let mut args = match operation {
+            "status" => json!({ "operation": "status" }),
+            "get" | "inspect" => json!({
+                "operation": "inspect",
+                "filePath": "budget.xlsx",
+                "sheetName": "Sheet1",
+                "range": "A1"
+            }),
+            "set" | "writeCell" => json!({
+                "operation": "writeCell",
+                "filePath": "budget.xlsx",
+                "sheetName": "Sheet1",
+                "cell": "A1",
+                "value": "Budget"
+            }),
+            other => json!({ "operation": other, "filePath": "budget.xlsx" }),
+        };
         if let Some(reason) = reason {
             args["reason"] = reason;
         }
         args
     }
 
-    fn typed_call(mut flat: Value) -> Value {
-        let object = flat
-            .as_object_mut()
-            .expect("typed Office test call must be an object");
-        let reason = object
-            .remove("reason")
-            .expect("typed Office test call must include reason");
-        json!({ "request": flat, "reason": reason })
+    fn typed_call(flat: Value) -> Value {
+        flat
     }
 
     #[test]
@@ -1794,89 +2270,50 @@ mod tests {
     }
 
     #[test]
-    fn managed_create_help_accepts_the_2157_call_shape_without_running_officecli() {
-        let tool = OfficeTool::new(
-            OfficeDocumentKind::Document,
-            Arc::new(ProviderMustNotRunOfficeEngine),
-        );
-        let call = typed_call(json!({
+    fn retired_raw_help_is_rejected_with_semantic_recovery() {
+        let error = parse_args(
+            json!({
             "operation": "help",
             "verb": "create",
             "element": "document",
             "reason": "了解创建文档和添加元素的操作参数"
-        }));
-
-        assert!(!tool.requires_approval_for_call(&call));
-        let result = tool
-            .execute(&ToolExecutionContext::from_run_context(None), call)
-            .expect("managed create help should be returned by the Host");
-
-        assert_eq!(result["schemaVersion"], MANAGED_OFFICE_HELP_SCHEMA_VERSION);
-        assert_eq!(result["kind"], "managedOfficeOperationHelp");
-        assert_eq!(result["source"], "host");
-        assert_eq!(result["providerNeutral"], true);
-        assert_eq!(result["tool"], "office_document");
-        assert_eq!(result["documentKind"], "document");
-        assert_eq!(result["operation"], "create");
-        assert_eq!(result["access"], "fileWrite");
-        assert_eq!(result["approval"], "required");
+            }),
+            "office_document",
+        )
+        .expect_err("raw provider help is not part of the semantic model surface");
+        assert_eq!(error.code(), Some("office.semantic_invalid_request"));
         assert_eq!(
-            result["requestSchema"]["properties"]["operation"]["enum"],
-            json!(["create"])
+            error.details().expect("structured semantic error")["recovery"],
+            "changeRequest"
         );
-        assert!(result.get("argv").is_none());
-        let notes = result["notes"].as_array().expect("managed help notes");
-        assert!(notes.iter().any(|note| {
-            note.as_str().is_some_and(|note| {
-                note.contains("not applicable") && note.contains("not forwarded")
-            })
-        }));
-        assert!(notes.iter().any(|note| note
-            .as_str()
-            .is_some_and(|note| note.contains("verb=add") && note.contains("document"))));
-
-        let invalid_timeout = typed_call(json!({
-            "operation": "help",
-            "verb": "create",
-            "timeoutMs": 0,
-            "reason": "Inspect create help with an invalid timeout"
-        }));
-        assert!(tool.requires_approval_for_call(&invalid_timeout));
-        let error = tool
-            .execute(
-                &ToolExecutionContext::from_run_context(None),
-                invalid_timeout,
-            )
-            .expect_err("Host-managed help must still validate the shared timeout field");
-        assert!(error
-            .to_string()
-            .contains("Office timeout must be between 1 and"));
     }
 
     #[test]
-    fn every_non_provider_help_topic_is_host_owned_and_read_only_to_query() {
+    fn common_semantic_reads_do_not_require_approval() {
         let tool = OfficeTool::new(
             OfficeDocumentKind::Document,
-            Arc::new(ProviderMustNotRunOfficeEngine),
+            Arc::new(PreparingOfficeEngine),
         );
-        for topic in [
-            "status", "help", "create", "view", "validate", "move", "swap",
+        for call in [
+            json!({
+                "operation": "status",
+                "reason": "检查文档引擎状态"
+            }),
+            json!({
+                "operation": "inspect",
+                "filePath": "document.docx",
+                "reason": "查看文档结构"
+            }),
+            json!({
+                "operation": "validate",
+                "filePath": "document.docx",
+                "reason": "校验文档结构"
+            }),
         ] {
-            let call = typed_call(json!({
-                "operation": "help",
-                "verb": topic,
-                "reason": format!("Inspect managed {topic} help")
-            }));
             assert!(
                 !tool.requires_approval_for_call(&call),
-                "querying {topic} help must remain read-only"
+                "{call} must remain read-only"
             );
-            let result = tool
-                .execute(&ToolExecutionContext::from_run_context(None), call)
-                .unwrap_or_else(|error| panic!("managed {topic} help failed: {error}"));
-            assert_eq!(result["operation"], topic);
-            assert_eq!(result["source"], "host");
-            assert_eq!(result["providerNeutral"], true);
         }
     }
 
@@ -2033,67 +2470,17 @@ mod tests {
                 .expect("Office input schema must be portable across model providers");
             assert!(schema.get("oneOf").is_none());
             assert!(!contains_object_key(&schema, "arguments"));
-            assert!(!contains_object_key(&schema, "path"));
+            assert!(!contains_object_key(&schema, "request"));
+            assert!(!contains_object_key(&schema, "target"));
+            assert!(!contains_object_key(&schema, "parent"));
             assert_eq!(schema["type"], "object");
             assert_eq!(schema["additionalProperties"], false);
-            assert_eq!(schema["required"], json!(["request", "reason"]));
-            assert_eq!(
-                schema["properties"]
-                    .as_object()
-                    .expect("root properties")
-                    .keys()
-                    .cloned()
-                    .collect::<std::collections::BTreeSet<_>>(),
-                ["reason".to_string(), "request".to_string()]
-                    .into_iter()
-                    .collect()
-            );
-            assert_eq!(
-                schema["properties"]["request"]["oneOf"]
-                    .as_array()
-                    .expect("typed operation union")
-                    .len(),
-                12
-            );
-            for operation in [
-                "status", "help", "create", "view", "get", "query", "validate", "set", "add",
-                "remove", "move", "swap",
-            ] {
-                request_schema_for(&schema, operation);
-            }
-            assert_eq!(
-                request_schema_for(&schema, "help")["properties"]["verb"]["enum"],
-                json!([
-                    "status", "help", "create", "view", "get", "query", "validate", "set", "add",
-                    "remove", "move", "swap"
-                ])
-            );
-            for field in [
-                "filePath",
-                "verb",
-                "element",
-                "overwriteExisting",
-                "mode",
-                "outputPath",
-                "target",
-                "selector",
-                "containsText",
-                "properties",
-                "textReplacement",
-                "parent",
-                "copyFrom",
-                "placement",
-                "overrideProtection",
-                "destinationPath",
-                "toParent",
-                "firstTarget",
-                "secondTarget",
-                "timeoutMs",
-            ] {
-                assert!(
-                    contains_object_key(&schema["properties"]["request"], field),
-                    "missing typed field {field} for {kind:?}"
-                );
+            assert_eq!(schema["required"], json!(["operation", "reason"]));
+            assert!(schema["properties"]["operation"]["enum"]
+                .as_array()
+                .is_some_and(|operations| operations.len() >= 14));
+            for field in ["operation", "reason", "filePath", "outputPath", "timeoutMs"] {
+                assert!(schema["properties"].get(field).is_some(), "missing {field}");
             }
         }
     }
@@ -2104,52 +2491,24 @@ mod tests {
         let spreadsheet = office_input_schema(OfficeDocumentKind::Spreadsheet);
         let presentation = office_input_schema(OfficeDocumentKind::Presentation);
 
-        let document_create = request_schema_for(&document, "create");
-        let spreadsheet_create = request_schema_for(&spreadsheet, "create");
-        assert!(document_create["properties"].get("locale").is_some());
-        assert!(document_create["properties"].get("minimal").is_some());
-        assert!(spreadsheet_create["properties"].get("locale").is_none());
-        assert!(spreadsheet_create["properties"].get("minimal").is_none());
+        assert!(document["properties"].get("blockKind").is_some());
+        assert!(document["properties"].get("sheetName").is_none());
+        assert!(document["properties"].get("slideNumber").is_none());
 
-        let document_view = request_schema_for(&document, "view");
-        let spreadsheet_view = request_schema_for(&spreadsheet, "view");
-        let presentation_view = request_schema_for(&presentation, "view");
-        assert!(document_view["properties"]
-            .get("includePageCount")
-            .is_some());
-        assert!(document_view["properties"].get("renderMode").is_some());
-        assert!(presentation_view["properties"].get("renderMode").is_some());
-        assert!(presentation_view["properties"]
-            .get("includePageCount")
-            .is_none());
-        assert!(spreadsheet_view["properties"].get("columns").is_some());
-        assert!(spreadsheet_view["properties"].get("grid").is_none());
-        assert!(spreadsheet_view["properties"].get("renderMode").is_none());
-        assert!(document_view["properties"].get("grid").is_some());
+        assert!(spreadsheet["properties"].get("sheetName").is_some());
+        assert!(spreadsheet["properties"].get("formula").is_some());
+        assert!(spreadsheet["properties"].get("blockKind").is_none());
+        assert!(spreadsheet["properties"].get("slideNumber").is_none());
 
-        assert!(request_schema_for(&spreadsheet, "remove")["properties"]
-            .get("shift")
-            .is_some());
-        assert!(request_schema_for(&document, "remove")["properties"]
-            .get("shift")
-            .is_none());
-        assert!(request_schema_for(&document, "query")["properties"]
-            .get("compact")
-            .is_some());
-        assert!(request_schema_for(&spreadsheet, "query")["properties"]
-            .get("compact")
-            .is_none());
+        assert!(presentation["properties"].get("slideNumber").is_some());
+        assert!(presentation["properties"].get("shapeType").is_some());
+        assert!(presentation["properties"].get("sheetName").is_none());
+        assert!(presentation["properties"].get("blockKind").is_none());
     }
 
     #[test]
     fn every_model_operation_parses_into_the_matching_typed_request() {
         let calls = [
-            json!({
-                "operation": "help",
-                "verb": "add",
-                "element": "cell",
-                "reason": "Inspect the cell schema"
-            }),
             json!({
                 "operation": "create",
                 "filePath": "budget.xlsx",
@@ -2157,27 +2516,21 @@ mod tests {
                 "reason": "Create the workbook"
             }),
             json!({
-                "operation": "view",
+                "operation": "render",
                 "filePath": "budget.xlsx",
-                "mode": "screenshot",
-                "range": "Sheet1!A1:E8",
+                "sheetName": "Sheet1",
+                "range": "A1:E8",
                 "viewport": { "width": 1600, "height": 1200 },
                 "outputPath": "preview.png",
                 "reason": "Render the workbook"
             }),
             json!({
-                "operation": "get",
+                "operation": "inspect",
                 "filePath": "budget.xlsx",
-                "target": "/Sheet1/A1:E8",
+                "sheetName": "Sheet1",
+                "range": "A1:E8",
                 "depth": 2,
                 "reason": "Read the workbook range"
-            }),
-            json!({
-                "operation": "query",
-                "filePath": "budget.xlsx",
-                "selector": "cell",
-                "containsText": "Budget",
-                "reason": "Find matching workbook cells"
             }),
             json!({
                 "operation": "validate",
@@ -2185,63 +2538,72 @@ mod tests {
                 "reason": "Validate the workbook"
             }),
             json!({
-                "operation": "set",
+                "operation": "addSheet",
                 "filePath": "budget.xlsx",
-                "target": "/Sheet1/A1",
-                "properties": { "value": "Budget", "bold": true },
+                "sheetName": "预算",
+                "reason": "Add the budget sheet"
+            }),
+            json!({
+                "operation": "writeCell",
+                "filePath": "budget.xlsx",
+                "sheetName": "预算",
+                "cell": "A1",
+                "value": "Budget",
+                "style": { "bold": true },
                 "reason": "Update the workbook title"
             }),
             json!({
-                "operation": "add",
+                "operation": "setFormula",
                 "filePath": "budget.xlsx",
-                "parent": "/Sheet1",
-                "element": "chart",
-                "placement": { "type": "index", "index": 0 },
-                "properties": { "title": "Quarterly budget" },
+                "sheetName": "预算",
+                "cell": "E2",
+                "formula": "=SUM(B2:D2)",
+                "reason": "Set the quarterly formula"
+            }),
+            json!({
+                "operation": "formatRange",
+                "filePath": "budget.xlsx",
+                "sheetName": "预算",
+                "range": "A1:E1",
+                "style": { "bold": true, "fillColor": "1F4E79" },
+                "reason": "Format the header"
+            }),
+            json!({
+                "operation": "freezePanes",
+                "filePath": "budget.xlsx",
+                "sheetName": "预算",
+                "freezeAt": "A2",
+                "reason": "Freeze the header row"
+            }),
+            json!({
+                "operation": "addChart",
+                "filePath": "budget.xlsx",
+                "sheetName": "预算",
+                "chartType": "column",
+                "title": "Quarterly budget",
+                "dataRange": "E2:E5",
+                "categoryRange": "A2:A5",
+                "anchor": "G2:N18",
                 "reason": "Add the budget chart"
             }),
-            json!({
-                "operation": "remove",
-                "filePath": "budget.xlsx",
-                "target": "/Sheet1/A2",
-                "shift": "up",
-                "reason": "Remove the obsolete value"
-            }),
-            json!({
-                "operation": "move",
-                "filePath": "budget.xlsx",
-                "target": "/Sheet1/chart[1]",
-                "toParent": "/Sheet1",
-                "placement": { "type": "after", "target": "/Sheet1/chart[2]" },
-                "reason": "Reorder the workbook charts"
-            }),
-            json!({
-                "operation": "swap",
-                "filePath": "budget.xlsx",
-                "firstTarget": "/Sheet1/chart[1]",
-                "secondTarget": "/Sheet1/chart[2]",
-                "reason": "Swap the workbook charts"
-            }),
-        ]
-        .map(typed_call);
+        ];
         let expected = [
-            OfficeOperation::Help,
             OfficeOperation::Create,
             OfficeOperation::View,
             OfficeOperation::Get,
-            OfficeOperation::Query,
             OfficeOperation::Validate,
+            OfficeOperation::Add,
+            OfficeOperation::Set,
+            OfficeOperation::Set,
+            OfficeOperation::Set,
             OfficeOperation::Set,
             OfficeOperation::Add,
-            OfficeOperation::Remove,
-            OfficeOperation::Move,
-            OfficeOperation::Swap,
         ];
 
         for (call, expected) in calls.into_iter().zip(expected) {
             let request = parse_args(call, "office_spreadsheet")
                 .expect("typed model call should parse")
-                .into_request(OfficeDocumentKind::Spreadsheet)
+                .into_request()
                 .expect("typed model call should validate");
             assert_eq!(request.operation, expected);
             assert_eq!(request.typed_parameters().unwrap().operation(), expected);
@@ -2287,47 +2649,86 @@ mod tests {
     }
 
     #[test]
-    fn typed_properties_preserve_scalar_and_resource_values_without_provider_tokens() {
+    fn semantic_image_input_compiles_without_model_visible_provider_tokens() {
         let request = parse_args(
-            typed_call(json!({
-                "operation": "add",
+            json!({
+                "operation": "insertImage",
                 "filePath": "deck.pptx",
-                "parent": "/slide[1]",
-                "element": "picture",
-                "properties": {
-                    "src": { "resourcePath": "assets/hero.png" },
-                    "width": "12cm",
-                    "decorative": false,
-                    "opacity": 0.8
-                },
+                "slideNumber": 1,
+                "source": { "type": "workspace", "path": "assets/hero.png" },
+                "x": "1in",
+                "y": "1in",
+                "width": "12cm",
+                "height": "7cm",
+                "altText": "Hero illustration",
                 "reason": "Add the local hero image"
-            })),
+            }),
             "office_presentation",
         )
         .unwrap()
-        .into_request(OfficeDocumentKind::Presentation)
+        .into_request()
         .unwrap();
 
         let OfficeOperationParameters::Add { properties, .. } = request.typed_parameters().unwrap()
         else {
             panic!("add must remain a typed add request");
         };
-        assert_eq!(properties["src"]["resourcePath"], "assets/hero.png");
-        assert_eq!(properties["decorative"], false);
-        assert_eq!(properties["opacity"], 0.8);
+        assert_eq!(
+            properties["src"]["resourcePath"],
+            "__mycopilot_agent_input__/office/image-input-1.png"
+        );
+        assert_eq!(properties["alt"], "Hero illustration");
+        assert_eq!(properties["width"], "12cm");
+        assert_eq!(request.inputs.len(), 1);
+        assert_eq!(request.inputs[0].mount_path, "office/image-input-1.png");
+        assert_eq!(
+            request.inputs[0].source,
+            AgentFileInputRef::Workspace {
+                path: "assets/hero.png".to_string()
+            }
+        );
     }
 
-    fn request_schema_for<'a>(schema: &'a Value, operation: &str) -> &'a Value {
-        schema["properties"]["request"]["oneOf"]
-            .as_array()
-            .expect("Office request must be a typed union")
-            .iter()
-            .find(|branch| {
-                branch["properties"]["operation"]["enum"]
-                    .as_array()
-                    .is_some_and(|values| values.len() == 1 && values[0] == operation)
-            })
-            .unwrap_or_else(|| panic!("missing typed schema for {operation}"))
+    #[test]
+    fn semantic_image_inputs_preserve_all_unified_source_variants() {
+        let sources = [
+            json!({ "type": "attachment", "readPath": "@attachments/a/hero.png" }),
+            json!({ "type": "workspace", "path": "assets/hero.png" }),
+            json!({ "type": "external", "path": "/tmp/hero.png" }),
+            json!({
+                "type": "generated_artifact",
+                "uri": format!("image-artifact://sha256/{}", "a".repeat(64)),
+                "path": "/app-data/image-generation-artifacts/objects/hero.png"
+            }),
+            json!({
+                "type": "skill_resource",
+                "uri": "skill://bundled:documents/references/hero.png?revision=abc"
+            }),
+        ];
+        for source in sources {
+            let request = parse_args(
+                json!({
+                    "operation": "insertImage",
+                    "filePath": "document.docx",
+                    "source": source,
+                    "reason": "Insert the authorized image"
+                }),
+                "office_document",
+            )
+            .unwrap()
+            .into_request()
+            .unwrap();
+            assert_eq!(request.inputs.len(), 1);
+            let OfficeOperationParameters::Add { properties, .. } =
+                request.typed_parameters().unwrap()
+            else {
+                panic!("insertImage must compile to add");
+            };
+            assert_eq!(
+                properties["src"]["resourcePath"],
+                format!("__mycopilot_agent_input__/{}", request.inputs[0].mount_path)
+            );
+        }
     }
 
     fn contains_object_key(value: &Value, key: &str) -> bool {

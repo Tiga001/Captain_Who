@@ -7,26 +7,34 @@ use super::render_runtime::{
     BROWSER_PROXY_SELF_TEST_TIMEOUT,
 };
 use super::types::{
-    OfficeDocumentKind, OfficeElementPosition, OfficeEngine, OfficeEngineAvailability,
-    OfficeEngineError, OfficeEngineErrorCode, OfficeEngineRecovery, OfficeEngineStatus,
-    OfficeExecutionContext, OfficeExecutionRequest, OfficeExecutionResult, OfficeFileState,
-    OfficeFrozenPath, OfficeGridLayout, OfficeOperation, OfficeOperationAccess,
+    office_agent_input_placeholder, OfficeDocumentKind, OfficeElementPosition, OfficeEngine,
+    OfficeEngineAvailability, OfficeEngineError, OfficeEngineErrorCode, OfficeEngineRecovery,
+    OfficeEngineStatus, OfficeExecutionContext, OfficeExecutionRequest, OfficeExecutionResult,
+    OfficeFileState, OfficeFrozenPath, OfficeGridLayout, OfficeOperation, OfficeOperationAccess,
     OfficeOperationParameters, OfficePathIdentity, OfficePathPurpose, OfficePathScope,
-    OfficePathSlot, OfficePreparedExecution, OfficePropertyMap, OfficeRequestParameters,
-    OfficeViewMode, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
-    OFFICE_ENGINE_STATUS_SCHEMA_VERSION, OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
+    OfficePathSlot, OfficePreparedExecution, OfficePropertyMap, OfficePublishedOutput,
+    OfficePublishedOutputKind, OfficePublishedOutputRole, OfficeRenderPageSelection,
+    OfficeRequestParameters, OfficeViewMode, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
+    OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX, OFFICE_ENGINE_STATUS_SCHEMA_VERSION,
+    OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
 };
 use crate::command::{
     configure_command_process_group, join_output_reader, spawn_bounded_output_reader,
     terminate_command_process_group, try_wait_command_process_group,
 };
+use crate::file_input::{
+    materialize_agent_file_inputs, normalize_agent_file_input_specs,
+    prepare_agent_file_input_bindings, AgentFileInputError, AgentFileInputExecutionContext,
+    PreparedAgentFileInputs,
+};
 use crate::{
-    expand_system_path, AgentAttachmentLibraryContext, AgentCancellationToken, AgentPermissions,
-    AgentReadPermission, AgentWritePermission,
+    expand_system_path, AgentAttachmentLibraryContext, AgentCancellationToken,
+    AgentFileInputBinding, AgentFileInputRef, AgentPermissions, AgentReadPermission,
+    AgentWritePermission,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -173,6 +181,14 @@ pub(super) fn prepare_office_cli(
     let _ = compile_office_arguments(request)?;
     let context = ResolvedExecutionContext::resolve(context)?;
     let prepared = prepare_request(&context, request)?;
+    let input_bindings = prepare_agent_file_input_bindings(
+        context.workspace.as_deref(),
+        context.permissions,
+        &context.file_inputs,
+        &request.inputs,
+        None,
+    )
+    .map_err(office_input_prepare_error)?;
     if request_requires_browser_runtime(request) {
         engine.render_runtime()?.verify_integrity()?;
     }
@@ -185,6 +201,7 @@ pub(super) fn prepare_office_cli(
         request: request.clone(),
         argv: prepared.argv,
         paths: prepared.paths,
+        input_bindings,
         document_precondition: None,
         output_precondition: None,
         destination_precondition: None,
@@ -229,6 +246,15 @@ pub(super) fn run_prepared_office_cli(
             prepared.argv.clone(),
         ));
     }
+    validate_frozen_agent_inputs(&prepared.request, &prepared.input_bindings)?;
+    let prepared_inputs = materialize_agent_file_inputs(
+        context.workspace.as_deref(),
+        context.permissions,
+        &context.file_inputs,
+        &prepared.input_bindings,
+        Some(&cancellation),
+    )
+    .map_err(office_input_execution_error)?;
 
     let timeout = Duration::from_millis(
         prepared
@@ -245,6 +271,7 @@ pub(super) fn run_prepared_office_cli(
             timeout,
             &cancellation,
             action_cancel_flag.as_ref(),
+            prepared_inputs.as_ref(),
         ),
         OfficeOperationAccess::FileWrite if prepared.request.operation == OfficeOperation::View => {
             execute_render_transaction(
@@ -263,6 +290,7 @@ pub(super) fn run_prepared_office_cli(
             timeout,
             &cancellation,
             action_cancel_flag.as_ref(),
+            prepared_inputs.as_ref(),
         ),
     }
 }
@@ -897,6 +925,7 @@ struct ResolvedExecutionContext {
     workspace_revision: Option<String>,
     permissions: AgentPermissions,
     attachment_library: Option<AgentAttachmentLibraryContext>,
+    file_inputs: AgentFileInputExecutionContext,
 }
 
 impl ResolvedExecutionContext {
@@ -911,6 +940,7 @@ impl ResolvedExecutionContext {
             workspace_revision,
             permissions: context.permissions(),
             attachment_library: context.attachment_library().cloned(),
+            file_inputs: context.file_inputs().clone(),
         })
     }
 }
@@ -1021,6 +1051,7 @@ fn execute_read_only(
     timeout: Duration,
     cancellation: &AgentCancellationToken,
     action_cancel_flag: Option<&Arc<AtomicBool>>,
+    prepared_inputs: Option<&PreparedAgentFileInputs>,
 ) -> Result<OfficeExecutionResult, OfficeEngineError> {
     let private = tempfile::Builder::new()
         .prefix("mycopilot-office-read-")
@@ -1045,7 +1076,8 @@ fn execute_read_only(
         }
         actual_argv[1] = snapshot.to_string_lossy().into_owned();
     }
-    let (_resource_snapshots, resource_paths) = snapshot_prepared_resources(prepared)?;
+    let (_resource_snapshots, mut resource_paths) = snapshot_prepared_resources(prepared)?;
+    extend_agent_input_resource_paths(prepared, prepared_inputs, &mut resource_paths)?;
     rewrite_path_bearing_properties(&resource_paths, &mut actual_argv)?;
     verify_preconditions(context, prepared)?;
     engine.verify_engine_revision()?;
@@ -1069,6 +1101,7 @@ fn execute_document_transaction(
     timeout: Duration,
     cancellation: &AgentCancellationToken,
     action_cancel_flag: Option<&Arc<AtomicBool>>,
+    prepared_inputs: Option<&PreparedAgentFileInputs>,
 ) -> Result<OfficeExecutionResult, OfficeEngineError> {
     let document = frozen_path(prepared, &OfficePathSlot::Document)
         .ok_or_else(|| precondition_error("Office document precondition is missing."))?;
@@ -1093,7 +1126,8 @@ fn execute_document_transaction(
         .ok_or_else(|| invalid_request("Staged Office document has no file name."))?
         .to_string_lossy()
         .into_owned();
-    let (_resource_snapshots, resource_paths) = snapshot_prepared_resources(prepared)?;
+    let (_resource_snapshots, mut resource_paths) = snapshot_prepared_resources(prepared)?;
+    extend_agent_input_resource_paths(prepared, prepared_inputs, &mut resource_paths)?;
     rewrite_path_bearing_properties(&resource_paths, &mut actual_argv)?;
     engine.verify_engine_revision()?;
     let started = Instant::now();
@@ -1179,7 +1213,7 @@ fn execute_render_transaction(
     actual_argv[output_index] = staging.path().to_string_lossy().into_owned();
     engine.verify_engine_revision()?;
     let started = Instant::now();
-    let output = run_process(
+    let mut output = run_process(
         engine.executable_path(),
         Some(private.path()),
         &actual_argv,
@@ -1188,6 +1222,29 @@ fn execute_render_transaction(
         action_cancel_flag,
         browser_process_policy(engine, &prepared.request)?,
     )?;
+    redact_private_render_paths(
+        &mut output,
+        [
+            (
+                staging.path(),
+                prepared
+                    .request
+                    .output_path
+                    .as_deref()
+                    .unwrap_or("<render-output>"),
+            ),
+            (
+                snapshot.as_path(),
+                prepared
+                    .request
+                    .document_path
+                    .as_deref()
+                    .unwrap_or("<office-document>"),
+            ),
+            (staging.directory(), "<office-staging>"),
+            (private.path(), "<office-render-snapshot>"),
+        ],
+    );
     let mut result = process_result(engine, prepared, output, started);
     if result.error_code.is_some() {
         return Ok(result);
@@ -1199,6 +1256,13 @@ fn execute_render_transaction(
         attach_post_process_error(&mut result, error);
         return Ok(result);
     }
+    let staged_output = match prepare_published_render_output(context, prepared, staging.path()) {
+        Ok(output) => output,
+        Err(error) => {
+            attach_post_process_error(&mut result, error);
+            return Ok(result);
+        }
+    };
     let commit_lock = office_target_commit_lock(&target);
     let _commit_guard = commit_lock
         .lock()
@@ -1214,10 +1278,217 @@ fn execute_render_transaction(
     }
     // See the document transaction: after this point cancellation is intentionally ignored.
     run_commit_test_hook(&target, CommitTestPhase::AfterCancellationCheck);
-    if let Err(error) = staging.publish(&target, output_precondition.state) {
-        attach_post_process_error(&mut result, error);
+    match staging.publish(&target, output_precondition.state) {
+        Ok(()) => match prepare_published_render_output(context, prepared, &target) {
+            Ok(published_output) if published_output == staged_output => {
+                result.outputs.push(published_output);
+            }
+            Ok(_) => attach_post_process_error(
+                &mut result,
+                published_output_verification_error(
+                    "The final Office render bytes changed during atomic publication.",
+                ),
+            ),
+            Err(error) => attach_post_process_error(
+                &mut result,
+                published_output_verification_error(format!(
+                    "The final Office render content identity could not be verified: {}",
+                    error.message()
+                )),
+            ),
+        },
+        Err(error) => attach_post_process_error(&mut result, error),
     }
     Ok(result)
+}
+
+fn published_output_verification_error(message: impl Into<String>) -> OfficeEngineError {
+    OfficeEngineError::new(
+        OfficeEngineErrorCode::CommitIndeterminate,
+        OfficeEngineRecovery::InspectState,
+        message,
+    )
+}
+
+fn prepare_published_render_output(
+    context: &ResolvedExecutionContext,
+    prepared: &OfficePreparedExecution,
+    staged_path: &Path,
+) -> Result<OfficePublishedOutput, OfficeEngineError> {
+    let output = frozen_path(prepared, &OfficePathSlot::Output)
+        .ok_or_else(|| precondition_error("Office render output precondition is missing."))?;
+    let final_path = Path::new(&output.normalized_path);
+    let read_path = match output.scope {
+        OfficePathScope::Workspace => {
+            let workspace = context.workspace.as_deref().ok_or_else(|| {
+                precondition_error("Workspace-scoped Office output has no workspace identity.")
+            })?;
+            let relative = final_path.strip_prefix(workspace).map_err(|_| {
+                precondition_error(
+                    "Workspace-scoped Office output escaped the current workspace identity.",
+                )
+            })?;
+            portable_relative_path(relative)?
+        }
+        OfficePathScope::External => final_path.to_string_lossy().into_owned(),
+        OfficePathScope::Attachment => {
+            return Err(precondition_error(
+                "An Office render output cannot target an immutable attachment.",
+            ))
+        }
+    };
+    let readable_by_agent = match output.scope {
+        OfficePathScope::Workspace => true,
+        OfficePathScope::External => context.permissions.read == AgentReadPermission::All,
+        OfficePathScope::Attachment => false,
+    };
+    let source = match output.scope {
+        OfficePathScope::Workspace => AgentFileInputRef::Workspace {
+            path: read_path.clone(),
+        },
+        OfficePathScope::External => AgentFileInputRef::External {
+            path: read_path.clone(),
+        },
+        OfficePathScope::Attachment => unreachable!("rejected above"),
+    };
+    let (content_revision, size_bytes) = file_revision(staged_path).map_err(|error| {
+        let private_path = staged_path.to_string_lossy();
+        OfficeEngineError::new(
+            error.code(),
+            error.recovery(),
+            error
+                .message()
+                .replace(private_path.as_ref(), "<office-render-output>"),
+        )
+    })?;
+    let sha256 = content_revision
+        .strip_prefix(FILE_REVISION_PREFIX)
+        .ok_or_else(|| precondition_error("Office render output has an invalid content identity."))?
+        .to_string();
+    let mode = prepared.request.view_mode().map(OfficeViewMode::cli_name);
+    let (kind, mime_type, dimensions) = match mode {
+        Some("screenshot") => (
+            OfficePublishedOutputKind::Image,
+            "image/png",
+            png_dimensions(staged_path),
+        ),
+        Some("svg") => (OfficePublishedOutputKind::Image, "image/svg+xml", None),
+        Some("html") => (OfficePublishedOutputKind::Document, "text/html", None),
+        _ => {
+            return Err(precondition_error(
+                "Office render output has an unsupported managed render mode.",
+            ))
+        }
+    };
+    let (width, height) =
+        dimensions.map_or((None, None), |(width, height)| (Some(width), Some(height)));
+    Ok(OfficePublishedOutput {
+        role: OfficePublishedOutputRole::Render,
+        kind,
+        mime_type: mime_type.to_string(),
+        source,
+        read_path,
+        scope: output.scope,
+        readable_by_agent,
+        size_bytes,
+        sha256,
+        width,
+        height,
+        page_selection: requested_page_selection(&prepared.request),
+    })
+}
+
+fn portable_relative_path(path: &Path) -> Result<String, OfficeEngineError> {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(Ok(value.to_string_lossy().into_owned())),
+            Component::CurDir => None,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => Some(Err(
+                precondition_error("Office output has a non-portable workspace-relative path."),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if components.is_empty() {
+        return Err(precondition_error(
+            "Office output path cannot resolve to the workspace root.",
+        ));
+    }
+    Ok(components.join("/"))
+}
+
+fn requested_page_selection(request: &OfficeExecutionRequest) -> OfficeRenderPageSelection {
+    let Some(OfficeOperationParameters::View { pages, .. }) = request.typed_parameters() else {
+        return OfficeRenderPageSelection::All;
+    };
+    if pages.is_empty() {
+        return OfficeRenderPageSelection::All;
+    }
+    let pages = pages
+        .iter()
+        .flat_map(|range| range.start..=range.end.unwrap_or(range.start))
+        .take(MAX_OFFICE_TOTAL_PAGES as usize)
+        .collect();
+    OfficeRenderPageSelection::Explicit { pages }
+}
+
+fn png_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut header = [0_u8; 24];
+    file.read_exact(&mut header).ok()?;
+    if header[..8] != [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] || &header[12..16] != b"IHDR"
+    {
+        return None;
+    }
+    let width = u32::from_be_bytes(header[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(header[20..24].try_into().ok()?);
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+fn redact_private_render_paths<'a, const N: usize>(
+    output: &mut ProcessOutput,
+    replacements: [(&'a Path, &'a str); N],
+) {
+    for (private_path, replacement) in replacements {
+        let mut spellings = vec![private_path.to_string_lossy().into_owned()];
+        if let Ok(canonical) = fs::canonicalize(private_path) {
+            let canonical = canonical.to_string_lossy().into_owned();
+            if !spellings.contains(&canonical) {
+                spellings.push(canonical);
+            }
+        }
+        #[cfg(target_vendor = "apple")]
+        {
+            let aliases = spellings
+                .iter()
+                .filter_map(|path| {
+                    if path.starts_with("/var/") || path.starts_with("/tmp/") {
+                        Some(format!("/private{path}"))
+                    } else {
+                        path.strip_prefix("/private")
+                            .filter(|path| path.starts_with("/var/") || path.starts_with("/tmp/"))
+                            .map(str::to_string)
+                    }
+                })
+                .collect::<Vec<_>>();
+            for alias in aliases {
+                if !spellings.contains(&alias) {
+                    spellings.push(alias);
+                }
+            }
+        }
+        spellings.sort_by_key(|path| std::cmp::Reverse(path.len()));
+        for private_path in spellings {
+            if private_path.is_empty() {
+                continue;
+            }
+            output.stdout = output.stdout.replace(&private_path, replacement);
+            output.stderr = output.stderr.replace(&private_path, replacement);
+            if let Some(failure) = output.render_failure.as_mut() {
+                failure.message = failure.message.replace(&private_path, replacement);
+            }
+        }
+    }
 }
 
 fn process_result(
@@ -1248,6 +1519,7 @@ fn process_result(
         stderr_truncated: output.stderr_truncated,
         error_code,
         error,
+        outputs: Vec::new(),
     }
 }
 
@@ -1442,6 +1714,9 @@ fn prepare_request(
         paths.push(destination);
     }
     for (index, resource) in resource_paths.into_iter().enumerate() {
+        if resource.starts_with(OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX) {
+            continue;
+        }
         paths.push(freeze_path(
             context,
             OfficePathSlot::Resource {
@@ -1471,6 +1746,7 @@ fn validate_request_syntax(
 ) -> Result<(Vec<String>, Vec<String>), OfficeEngineError> {
     let arguments = compile_office_arguments(request)?;
     let resource_paths = validate_operation_arguments(request.operation, &arguments)?;
+    validate_agent_input_contract(request, &resource_paths)?;
 
     if request
         .timeout_ms
@@ -1559,6 +1835,94 @@ fn validate_request_syntax(
     }
 
     Ok((arguments, resource_paths))
+}
+
+fn validate_agent_input_contract(
+    request: &OfficeExecutionRequest,
+    resource_paths: &[String],
+) -> Result<(), OfficeEngineError> {
+    let normalized =
+        normalize_agent_file_input_specs(&request.inputs).map_err(office_input_prepare_error)?;
+    if normalized != request.inputs {
+        return Err(invalid_request(
+            "Office input specs must use canonical mount paths and source references.",
+        ));
+    }
+
+    let mut expected = BTreeMap::<String, usize>::new();
+    for input in &normalized {
+        let placeholder = office_agent_input_placeholder(&input.mount_path);
+        expected.insert(placeholder, 1);
+    }
+    let mut observed = BTreeMap::<String, usize>::new();
+    for resource in resource_paths {
+        if !resource.starts_with(OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX) {
+            continue;
+        }
+        if !expected.contains_key(resource) {
+            return Err(invalid_request(format!(
+                "Office resource `{resource}` does not have a matching declared Agent input.",
+            )));
+        }
+        *observed.entry(resource.clone()).or_default() += 1;
+    }
+    if observed != expected {
+        return Err(invalid_request(
+            "Every declared Office Agent input must be referenced exactly once by its trusted placeholder.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_frozen_agent_inputs(
+    request: &OfficeExecutionRequest,
+    bindings: &[AgentFileInputBinding],
+) -> Result<(), OfficeEngineError> {
+    if bindings.len() != request.inputs.len() {
+        return Err(precondition_error(
+            "The frozen Office input bindings no longer match the canonical request.",
+        ));
+    }
+    for (spec, binding) in request.inputs.iter().zip(bindings) {
+        if spec.mount_path != binding.mount_path || spec.source != binding.source {
+            return Err(precondition_error(
+                "A frozen Office input binding does not match its declared logical source.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn office_input_prepare_error(error: AgentFileInputError) -> OfficeEngineError {
+    OfficeEngineError::new(
+        if error.code() == "agent.fileInput.authorizationDenied" {
+            OfficeEngineErrorCode::WorkspaceViolation
+        } else {
+            OfficeEngineErrorCode::InvalidRequest
+        },
+        OfficeEngineRecovery::ChangeRequest,
+        format!(
+            "Office input preparation failed ({}): {}",
+            error.code(),
+            error.message()
+        ),
+    )
+}
+
+fn office_input_execution_error(error: AgentFileInputError) -> OfficeEngineError {
+    OfficeEngineError::new(
+        if error.code() == "agent.fileInput.authorizationDenied" {
+            OfficeEngineErrorCode::WorkspaceViolation
+        } else {
+            OfficeEngineErrorCode::PreconditionFailed
+        },
+        OfficeEngineRecovery::Retry,
+        format!(
+            "Office input revalidation failed ({}): {}",
+            error.code(),
+            error.message()
+        ),
+    )
 }
 
 fn validate_render_output_extension(
@@ -1816,9 +2180,7 @@ fn validate_operation_arguments(
                     "inline resource payloads are not part of the frozen workspace resource set",
                 ));
             }
-            if !resource_paths.iter().any(|candidate| candidate == path) {
-                resource_paths.push(path.to_string());
-            }
+            resource_paths.push(path.to_string());
         }
     }
 
@@ -2507,6 +2869,38 @@ fn snapshot_prepared_resources(
         resolved.insert(resource.logical_path.clone(), snapshot);
     }
     Ok((snapshots, resolved))
+}
+
+fn extend_agent_input_resource_paths(
+    prepared: &OfficePreparedExecution,
+    inputs: Option<&PreparedAgentFileInputs>,
+    resolved: &mut HashMap<String, PathBuf>,
+) -> Result<(), OfficeEngineError> {
+    match (prepared.input_bindings.is_empty(), inputs) {
+        (true, None) => return Ok(()),
+        (true, Some(_)) | (false, None) => {
+            return Err(precondition_error(
+                "The private Office Agent input view does not match the frozen bindings.",
+            ))
+        }
+        (false, Some(_)) => {}
+    }
+    let inputs = inputs.expect("non-empty frozen bindings require materialized inputs");
+    if inputs.evidence().len() != prepared.input_bindings.len() {
+        return Err(precondition_error(
+            "The private Office Agent input view is incomplete.",
+        ));
+    }
+    for binding in &prepared.input_bindings {
+        let placeholder = office_agent_input_placeholder(&binding.mount_path);
+        let path = inputs.root().join(&binding.mount_path);
+        if resolved.insert(placeholder.clone(), path).is_some() {
+            return Err(precondition_error(format!(
+                "Office input placeholder `{placeholder}` collides with another frozen resource.",
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn frozen_path<'a>(
@@ -3384,6 +3778,7 @@ fn cancelled_result(
         stderr_truncated: false,
         error_code: Some("office.cancelled".to_string()),
         error: Some("OfficeCLI execution was cancelled before launch.".to_string()),
+        outputs: Vec::new(),
     }
 }
 

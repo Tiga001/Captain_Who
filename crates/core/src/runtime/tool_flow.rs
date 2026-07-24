@@ -87,9 +87,30 @@ pub(super) fn tool_calls_from_response(
         .map(|(tool_index, call)| LlmToolCall {
             id: model_response_tool_call_id(run_id, iteration, tool_index, &call.id),
             name: call.name,
-            args: call.args,
+            args: normalize_tool_arguments(call.args),
         })
         .collect()
+}
+
+/// Repairs a common provider compatibility defect without changing any Tool contract.
+///
+/// Tool inputs are JSON objects in every supported provider protocol. Some compatible gateways
+/// serialize that object one additional time and return it as a JSON string. Decode at most two
+/// such layers, and only accept an object at each repair boundary. Arbitrary strings, arrays, and
+/// malformed JSON remain untouched so the Tool's typed validator can reject them normally.
+fn normalize_tool_arguments(value: Value) -> Value {
+    let Value::String(encoded) = &value else {
+        return value;
+    };
+    let mut candidate = encoded.clone();
+    for _ in 0..2 {
+        match serde_json::from_str::<Value>(candidate.trim()) {
+            Ok(decoded @ Value::Object(_)) => return decoded,
+            Ok(Value::String(next_candidate)) => candidate = next_candidate,
+            _ => return value,
+        }
+    }
+    value
 }
 
 /// Makes progressive Skill disclosure a model-request boundary.
@@ -171,6 +192,7 @@ pub(super) async fn execute_tool_on_blocking_thread(
 pub(super) async fn execute_host_action_on_blocking_thread(
     executor: AgentHostActionExecutor,
     action: AgentProposedAction,
+    expected_call: AgentToolCall,
     cancellation_token: AgentCancellationToken,
 ) -> AgentResult<AgentToolResult> {
     let execution_token = cancellation_token.clone();
@@ -178,9 +200,58 @@ pub(super) async fn execute_host_action_on_blocking_thread(
     // A host action may have crossed its atomic commit boundary when cancellation arrives.
     // Never detach a mutating blocking task and guess its outcome: the cancellation token is
     // delivered to the executor, then we wait for its authoritative committed/cancelled result.
-    handle
-        .await
-        .map_err(|error| AgentError::new(format!("host 执行线程失败：{error}")))?
+    let settlement = match handle.await {
+        Ok(settlement) => settlement,
+        Err(error) => Err(AgentError::structured(
+            "agent.host_executor_join_failed",
+            format!("Host action execution thread failed: {error}"),
+            json!({
+                "type": "host_execution",
+                "code": "hostExecutorJoinFailed",
+                "outcome": "indeterminate",
+                "recovery": "inspectAuthoritativeStateBeforeRetry",
+            }),
+        )),
+    };
+
+    Ok(match settlement {
+        Ok(result) if result.call_id == expected_call.id && result.tool == expected_call.tool => {
+            result
+        }
+        Ok(result) => failed_tool_call_result(
+            &expected_call,
+            AgentError::structured(
+                "agent.host_result_identity_mismatch",
+                "Host returned a ToolResult for a different call or tool.",
+                json!({
+                    "type": "host_execution",
+                    "code": "hostResultIdentityMismatch",
+                    "outcome": "indeterminate",
+                    "recovery": "inspectAuthoritativeStateBeforeRetry",
+                    "expectedCallId": expected_call.id,
+                    "expectedTool": expected_call.tool,
+                    "returnedCallId": result.call_id,
+                    "returnedTool": result.tool,
+                }),
+            ),
+        ),
+        Err(error) if error.code().is_some() || error.details().is_some() => {
+            failed_tool_call_result(&expected_call, error)
+        }
+        Err(error) => failed_tool_call_result(
+            &expected_call,
+            AgentError::structured(
+                "agent.host_executor_failed",
+                error.to_string(),
+                json!({
+                    "type": "host_execution",
+                    "code": "hostExecutorFailed",
+                    "outcome": "indeterminate",
+                    "recovery": "inspectAuthoritativeStateBeforeRetry",
+                }),
+            ),
+        ),
+    })
 }
 
 pub(super) fn cancellation_preempts_tool_result(
@@ -189,9 +260,9 @@ pub(super) fn cancellation_preempts_tool_result(
     cancellation_requested: bool,
     result: &AgentToolResult,
 ) -> bool {
-    settlement == AgentToolCancellationSettlement::Interruptible
-        && ((!auto_execute_host_action && cancellation_requested)
-            || result.error.as_deref() == Some("agent run 已取消。"))
+    !auto_execute_host_action
+        && settlement == AgentToolCancellationSettlement::Interruptible
+        && (cancellation_requested || result.error.as_deref() == Some("agent run 已取消。"))
 }
 
 pub(super) fn approve_proposed_action(mut action: AgentProposedAction) -> AgentProposedAction {
@@ -504,6 +575,82 @@ mod tests {
     }
 
     #[test]
+    fn provider_stringified_tool_objects_are_normalized_before_validation() {
+        let native = tool_calls_from_response(
+            vec![LlmToolCall {
+                id: "provider-call".to_string(),
+                name: "office_document".to_string(),
+                args: Value::String(
+                    r#"{"operation":"status","reason":"Check the document engine"}"#.to_string(),
+                ),
+            }],
+            "",
+            "run-stringified-native",
+            0,
+        );
+        assert_eq!(native[0].args["operation"], "status");
+
+        let fallback = tool_calls_from_response(
+            Vec::new(),
+            r#"{
+                "type": "tool_call",
+                "tool": "office_document",
+                "args": "{\"operation\":\"status\",\"reason\":\"Check the document engine\"}"
+            }"#,
+            "run-stringified-fallback",
+            0,
+        );
+        assert_eq!(fallback[0].args["operation"], "status");
+    }
+
+    #[test]
+    fn provider_double_stringified_tool_object_is_normalized_within_the_bound() {
+        let object = r#"{"operation":"status","reason":"Check the engine"}"#;
+        let double_encoded = serde_json::to_string(object).unwrap();
+        let calls = tool_calls_from_response(
+            vec![LlmToolCall {
+                id: "provider-double-string".to_string(),
+                name: "office_document".to_string(),
+                args: Value::String(double_encoded),
+            }],
+            "",
+            "run-double-stringified-native",
+            0,
+        );
+
+        assert_eq!(calls[0].args["operation"], "status");
+        assert_eq!(calls[0].args["reason"], "Check the engine");
+    }
+
+    #[test]
+    fn arbitrary_top_level_strings_are_not_reinterpreted() {
+        let calls = tool_calls_from_response(
+            vec![LlmToolCall {
+                id: "provider-call".to_string(),
+                name: "office_document".to_string(),
+                args: Value::String("status".to_string()),
+            }],
+            "",
+            "run-invalid-string",
+            0,
+        );
+        assert_eq!(calls[0].args, Value::String("status".to_string()));
+
+        let encoded_array = Value::String("[1,2,3]".to_string());
+        let calls = tool_calls_from_response(
+            vec![LlmToolCall {
+                id: "provider-array".to_string(),
+                name: "office_document".to_string(),
+                args: encoded_array.clone(),
+            }],
+            "",
+            "run-invalid-array",
+            0,
+        );
+        assert_eq!(calls[0].args, encoded_array);
+    }
+
+    #[test]
     fn skill_activation_barrier_defers_calls_planned_without_full_instructions() {
         let calls = vec![
             LlmToolCall {
@@ -576,8 +723,18 @@ mod tests {
         };
         let cancellation = AgentCancellationToken::new();
         let task_cancellation = cancellation.clone();
+        let expected_call = match &action {
+            AgentProposedAction::ToolCall { call } => call.clone(),
+            _ => unreachable!(),
+        };
         let task = tokio::spawn(async move {
-            execute_host_action_on_blocking_thread(executor, action, task_cancellation).await
+            execute_host_action_on_blocking_thread(
+                executor,
+                action,
+                expected_call,
+                task_cancellation,
+            )
+            .await
         });
 
         while !started.load(Ordering::SeqCst) {
@@ -595,6 +752,81 @@ mod tests {
                 .and_then(|value| value["cancelled"].as_bool()),
             Some(true)
         );
+    }
+
+    #[tokio::test]
+    async fn host_executor_error_becomes_a_paired_indeterminate_tool_result() {
+        let expected_call = AgentToolCall {
+            id: "write-error".to_string(),
+            tool: "write_file".to_string(),
+            args: json!({ "filePath": "report.txt" }),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: None,
+        };
+        let action = AgentProposedAction::ToolCall {
+            call: expected_call.clone(),
+        };
+        let executor: AgentHostActionExecutor =
+            Arc::new(|_action, _cancellation| Err(AgentError::new("host channel closed")));
+
+        let result = execute_host_action_on_blocking_thread(
+            executor,
+            action,
+            expected_call.clone(),
+            AgentCancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.call_id, expected_call.id);
+        assert_eq!(result.tool, expected_call.tool);
+        assert!(!result.ok);
+        let details = result.result.expect("structured host failure");
+        assert_eq!(details["errorCode"], "agent.host_executor_failed");
+        assert_eq!(details["outcome"], "indeterminate");
+        assert_eq!(details["recovery"], "inspectAuthoritativeStateBeforeRetry");
+    }
+
+    #[tokio::test]
+    async fn host_result_identity_mismatch_is_not_forwarded_as_another_calls_success() {
+        let expected_call = AgentToolCall {
+            id: "write-expected".to_string(),
+            tool: "write_file".to_string(),
+            args: json!({ "filePath": "report.txt" }),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: None,
+        };
+        let action = AgentProposedAction::ToolCall {
+            call: expected_call.clone(),
+        };
+        let executor: AgentHostActionExecutor = Arc::new(|_action, _cancellation| {
+            Ok(AgentToolResult {
+                call_id: "write-wrong".to_string(),
+                tool: "run_command".to_string(),
+                ok: true,
+                result: Some(json!({ "status": "committed" })),
+                error: None,
+            })
+        });
+
+        let result = execute_host_action_on_blocking_thread(
+            executor,
+            action,
+            expected_call.clone(),
+            AgentCancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.call_id, expected_call.id);
+        assert_eq!(result.tool, expected_call.tool);
+        assert!(!result.ok);
+        let details = result.result.expect("identity mismatch details");
+        assert_eq!(details["errorCode"], "agent.host_result_identity_mismatch");
+        assert_eq!(details["code"], "hostResultIdentityMismatch");
+        assert_eq!(details["outcome"], "indeterminate");
+        assert_eq!(details["returnedCallId"], "write-wrong");
+        assert_eq!(details["returnedTool"], "run_command");
     }
 
     struct AuthoritativeCancellationTool {

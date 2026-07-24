@@ -33,6 +33,10 @@ const DOCUMENTS_RESOURCES: &[EmbeddedSkillResource] = &[
         path: "references/workflows.md",
         bytes: include_bytes!("bundled/documents/references/workflows.md"),
     },
+    EmbeddedSkillResource {
+        path: "templates/builder.py",
+        bytes: include_bytes!("bundled/documents/templates/builder.py"),
+    },
 ];
 
 const IMAGE_GENERATION_PATH: &str = "image-generation/SKILL.md";
@@ -49,6 +53,10 @@ const PRESENTATIONS_RESOURCES: &[EmbeddedSkillResource] = &[
         path: "references/workflows.md",
         bytes: include_bytes!("bundled/presentations/references/workflows.md"),
     },
+    EmbeddedSkillResource {
+        path: "templates/builder.mjs",
+        bytes: include_bytes!("bundled/presentations/templates/builder.mjs"),
+    },
 ];
 
 const SPREADSHEETS_PATH: &str = "spreadsheets/SKILL.md";
@@ -61,6 +69,10 @@ const SPREADSHEETS_RESOURCES: &[EmbeddedSkillResource] = &[
     EmbeddedSkillResource {
         path: "references/workflows.md",
         bytes: include_bytes!("bundled/spreadsheets/references/workflows.md"),
+    },
+    EmbeddedSkillResource {
+        path: "templates/builder.py",
+        bytes: include_bytes!("bundled/spreadsheets/templates/builder.py"),
     },
 ];
 
@@ -409,8 +421,14 @@ mod tests {
     use crate::skills::model::{
         SkillErrorCode, SkillResourceKind, SkillRevision, SKILL_PACKAGE_FORMAT_VERSION_V3,
     };
-    use crate::skills::{SkillResourcePath, SkillResourceTextReadOptions, SkillsService};
+    use crate::skills::{
+        SkillMaterializationDestination, SkillMaterializationRequest, SkillMaterializationStatus,
+        SkillResourceListOptions, SkillResourceMaterializer, SkillResourcePath,
+        SkillResourceTextReadOptions, SkillsService,
+    };
     use serde_json::Value;
+    use std::fs;
+    use tempfile::tempdir;
 
     fn markdown_json_examples(document_name: &str, markdown: &str) -> Vec<(usize, Value)> {
         let mut examples = Vec::new();
@@ -515,7 +533,7 @@ mod tests {
         assert_eq!(package.source_text(), DOCUMENTS_SOURCE);
         assert!(package
             .instructions()
-            .contains("Choose the execution path that matches the task"));
+            .contains("Use one of two supported paths"));
         assert!(!package.instructions().contains("description:"));
         assert_eq!(package.revision(), descriptor.revision());
     }
@@ -569,20 +587,50 @@ mod tests {
     fn office_skills_are_v3_packages_with_progressively_disclosed_resources() {
         let source = BundledSkillSource::new().unwrap();
         let catalog = source.list().unwrap();
+        let runtime_manifest: Value = serde_json::from_str(include_str!(
+            "../../../../resources/artifact-runtime-manifest.json"
+        ))
+        .unwrap();
 
-        for (local_id, tool, extension, runtime_profile) in [
-            (DOCUMENTS_LOCAL_ID, "office_document", ".docx", "documents"),
+        for (
+            local_id,
+            tool,
+            extension,
+            runtime_profile,
+            template_path,
+            first_entrypoint,
+            first_dependency,
+            first_dependency_version,
+        ) in [
+            (
+                DOCUMENTS_LOCAL_ID,
+                "office_document",
+                ".docx",
+                "documents",
+                "templates/builder.py",
+                "python",
+                "python-docx",
+                "1.2.0",
+            ),
             (
                 PRESENTATIONS_LOCAL_ID,
                 "office_presentation",
                 ".pptx",
                 "presentations",
+                "templates/builder.mjs",
+                "node",
+                "pptxgenjs",
+                "4.0.1",
             ),
             (
                 SPREADSHEETS_LOCAL_ID,
                 "office_spreadsheet",
                 ".xlsx",
                 "spreadsheets",
+                "templates/builder.py",
+                "python",
+                "openpyxl",
+                "3.1.5",
             ),
         ] {
             let descriptor = catalog
@@ -597,7 +645,7 @@ mod tests {
                 .revision()
                 .as_str()
                 .starts_with("skill-package-sha256-v3:"));
-            assert_eq!(package.resources().len(), 2);
+            assert_eq!(package.resources().len(), 3);
             assert_eq!(
                 package.resources().entries()[0].path(),
                 "office-capability.json"
@@ -614,60 +662,137 @@ mod tests {
                 package.resources().entries()[1].kind(),
                 SkillResourceKind::Reference
             );
+            assert_eq!(package.resources().entries()[2].path(), template_path);
+            assert_eq!(
+                package.resources().entries()[2].kind(),
+                SkillResourceKind::Other
+            );
             assert!(package.instructions().contains(tool));
-            assert!(package.instructions().contains("`status`"));
-            assert!(package.instructions().contains("managed Artifact Runtime"));
+            assert!(package.instructions().contains("flat semantic"));
+            assert!(package.instructions().contains("Managed Builder"));
             assert!(package.instructions().contains("runtimeProfile"));
-            assert!(package.instructions().contains("observe.expectedOutputs"));
+            assert!(package.instructions().contains("run_command.inputs"));
+            assert!(package.instructions().contains("MYCOPILOT_INPUT_ROOT"));
+            assert!(package.instructions().contains("static `--output`"));
             assert!(package.instructions().contains("artifactObservation"));
+            assert!(package.instructions().contains("outputs[].source"));
+            assert!(package.instructions().contains("read_image"));
 
             let reader = source.open_resource_reader(&package).unwrap().unwrap();
             let capability = reader.read(&package.resources().entries()[0]).unwrap();
             let capability: serde_json::Value = serde_json::from_slice(&capability).unwrap();
-            assert_eq!(capability["contractVersion"], 4);
+            assert_eq!(capability["contractVersion"], 7);
             assert_eq!(capability["engine"], "officecli");
             assert_eq!(capability["tool"], tool);
             assert_eq!(capability["extensions"][0], extension);
             assert_eq!(capability["modes"]["native"]["tool"], tool);
             assert_eq!(
                 capability["modes"]["native"]["requestStyle"],
-                "typed_request_envelope"
+                "flat_semantic_v1"
             );
-            assert_eq!(capability["modes"]["native"]["envelopeField"], "request");
             assert_eq!(capability["modes"]["native"]["reasonField"], "reason");
-            assert_eq!(capability["modes"]["native"]["filePathField"], "filePath");
+            assert_eq!(capability["modes"]["native"]["reasonRequired"], true);
             assert_eq!(
                 capability["modes"]["native"]["providerArguments"],
                 "host_generated"
             );
+            assert_eq!(
+                capability["modes"]["native"]["unsupportedRecovery"],
+                "useManagedScript"
+            );
+            let render_output = &capability["modes"]["native"]["renderOutput"];
+            assert_eq!(render_output["resultField"], "outputs");
+            assert_eq!(render_output["role"], "render");
+            assert_eq!(render_output["kind"], "image");
+            assert_eq!(render_output["sourceField"], "source");
+            assert_eq!(render_output["consumerTool"], "read_image");
+            assert_eq!(render_output["consumerField"], "source");
+            assert_eq!(render_output["readabilityField"], "readableByAgent");
+            assert_eq!(render_output["sizeField"], "sizeBytes");
+            assert_eq!(render_output["selectionField"], "pageSelection");
+            assert_eq!(
+                render_output["selectionSemantics"],
+                "requested_not_verified_coverage"
+            );
+            assert_eq!(render_output["pathInference"], "forbidden");
             let script = &capability["modes"]["script"];
+            assert_eq!(script["builderTemplate"], template_path);
             assert_eq!(script["executionTool"], "run_command");
             assert_eq!(script["runtimeProfile"], runtime_profile);
-            assert_eq!(script["runtimeProfileField"], "runtimeProfile");
-            assert_eq!(script["entrypoints"][0]["command"], "python");
-            assert_eq!(script["entrypoints"][0]["extension"], ".py");
-            assert_eq!(script["entrypoints"][1]["command"], "node");
-            assert_eq!(script["entrypoints"][1]["extension"], ".mjs");
+            assert_eq!(
+                script["runtimeProfileBinding"],
+                "host_from_materialized_builder_receipt"
+            );
+            assert_eq!(script["outputArgument"], "--output");
+            assert!(script.get("runtimeProfileField").is_none());
+            assert_eq!(script["entrypoints"][0]["command"], first_entrypoint);
+            assert_eq!(
+                script["entrypoints"][0]["dependencies"][0]["name"],
+                first_dependency
+            );
+            assert_eq!(
+                script["entrypoints"][0]["dependencies"][0]["version"],
+                first_dependency_version
+            );
             assert_eq!(script["resolution"]["authority"], "host");
             assert_eq!(script["resolution"]["runtimeKindFrom"], "command");
             assert_eq!(script["resolution"]["dependencyPolicy"], "profilePinned");
             assert!(script.get("runtimes").is_none());
             assert!(script.get("requiredPackagesField").is_none());
-            assert_eq!(script["observation"]["kind"], "office");
+            assert_eq!(script["inputs"]["field"], "inputs");
+            assert_eq!(script["inputs"]["mountPathField"], "mountPath");
+            assert_eq!(script["inputs"]["sourceField"], "source");
+            assert_eq!(script["inputs"]["rootEnvironment"], "MYCOPILOT_INPUT_ROOT");
             assert_eq!(
-                script["observation"]["expectedOutputsField"],
-                "observe.expectedOutputs"
+                script["inputs"]["sourceTypes"],
+                serde_json::json!([
+                    "attachment",
+                    "workspace",
+                    "external",
+                    "generated_artifact",
+                    "skill_resource"
+                ])
             );
+            assert_eq!(script["observation"]["requiredFromModel"], false);
+            assert_eq!(
+                script["observation"]["binding"],
+                "host_from_materialization_and_output_argument"
+            );
+            assert_eq!(script["observation"]["kind"], "office");
+            assert!(script["observation"].get("expectedOutputsField").is_none());
             assert_eq!(
                 script["observation"]["additionalRootsField"],
                 "observe.additionalRoots"
             );
             assert_eq!(script["observation"]["resultField"], "artifactObservation");
+            for entrypoint in script["entrypoints"].as_array().unwrap() {
+                let command = entrypoint["command"].as_str().unwrap();
+                let runtime = if command == "node" { "node" } else { "python" };
+                assert_eq!(
+                    entrypoint["runtimeVersion"],
+                    runtime_manifest[runtime]["version"]
+                );
+                for dependency in entrypoint["dependencies"].as_array().unwrap() {
+                    let expected_name = dependency["name"].as_str().unwrap();
+                    let expected_version = dependency["version"].as_str().unwrap();
+                    assert!(
+                        runtime_manifest[runtime]["dependencies"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|resolved| {
+                                resolved["name"] == expected_name
+                                    && resolved["version"] == expected_version
+                            }),
+                        "{local_id} declares {expected_name}@{expected_version}, which is not pinned by the managed Artifact Runtime"
+                    );
+                }
+            }
         }
     }
 
     #[test]
-    fn office_skill_native_json_examples_use_typed_request_envelopes() {
+    fn office_skill_native_json_examples_use_flat_semantic_requests() {
         let documents = [
             ("documents/SKILL.md", DOCUMENTS_SOURCE),
             (
@@ -692,42 +817,28 @@ mod tests {
                 let Some(object) = example.as_object() else {
                     continue;
                 };
-                assert!(
-                    !object.contains_key("operation"),
-                    "{document_name}:{line_number} native Office operation must be nested under request"
-                );
-                let Some(request) = object.get("request") else {
+                let Some(operation) = object.get("operation").and_then(Value::as_str) else {
                     continue;
                 };
                 native_example_count += 1;
-                assert_eq!(
-                    object.len(),
-                    2,
-                    "{document_name}:{line_number} native Office envelope may contain only request and reason"
-                );
-                let request = request.as_object().unwrap_or_else(|| {
-                    panic!(
-                        "{document_name}:{line_number} native Office request must be a JSON object"
-                    )
-                });
                 assert!(
-                    request
-                        .get("operation")
-                        .and_then(Value::as_str)
-                        .is_some_and(|operation| !operation.trim().is_empty()),
-                    "{document_name}:{line_number} native Office request must include a non-empty operation"
+                    !operation.trim().is_empty(),
+                    "{document_name}:{line_number} native Office operation must not be empty"
                 );
                 assert!(
-                    !request.contains_key("arguments"),
-                    "{document_name}:{line_number} native Office example must use typed fields instead of arguments"
+                    !object.contains_key("request"),
+                    "{document_name}:{line_number} native Office example must use the flat semantic surface"
                 );
                 assert!(
-                    !request.contains_key("path"),
-                    "{document_name}:{line_number} native Office example must use filePath instead of path"
+                    !object.contains_key("arguments"),
+                    "{document_name}:{line_number} native Office example must not expose provider arguments"
                 );
                 assert!(
-                    !request.contains_key("reason"),
-                    "{document_name}:{line_number} reason must stay at the native Office envelope root"
+                    !object.contains_key("target")
+                        && !object.contains_key("parent")
+                        && !object.contains_key("element")
+                        && !object.contains_key("properties"),
+                    "{document_name}:{line_number} native Office example must not expose low-level DOM fields"
                 );
 
                 let reason = object
@@ -764,17 +875,35 @@ mod tests {
 
         assert!(
             native_example_count > 0,
-            "the bundled Office Skill documents must retain native JSON examples"
+            "the bundled Office Skill documents must include flat native semantic examples"
         );
     }
 
     #[test]
-    fn bundled_resources_are_readable_through_the_revision_bound_runtime() {
+    fn bundled_resources_are_listable_readable_and_builder_templates_materialize() {
         let service = SkillsService::new().with_bundled_source().unwrap();
-        for (local_id, heading) in [
-            (DOCUMENTS_LOCAL_ID, "# Word document workflows"),
-            (PRESENTATIONS_LOCAL_ID, "# Presentation workflows"),
-            (SPREADSHEETS_LOCAL_ID, "# Spreadsheet workflows"),
+        for (local_id, heading, template_path, marker, destination) in [
+            (
+                DOCUMENTS_LOCAL_ID,
+                "# Word document workflows",
+                "templates/builder.py",
+                "from docx import Document",
+                "build_document.py",
+            ),
+            (
+                PRESENTATIONS_LOCAL_ID,
+                "# Presentation workflows",
+                "templates/builder.mjs",
+                "pptxgenjs",
+                "build_presentation.mjs",
+            ),
+            (
+                SPREADSHEETS_LOCAL_ID,
+                "# Spreadsheet workflows",
+                "templates/builder.py",
+                "openpyxl",
+                "build_spreadsheet.py",
+            ),
         ] {
             let descriptor = service
                 .list()
@@ -787,23 +916,57 @@ mod tests {
             let activated = service.activate(&[descriptor.selection()]).unwrap();
             let resources = service.resource_session(&activated).unwrap();
             let package = resources.package_uris().into_iter().next().unwrap();
+            let listed = resources
+                .list(&package, &SkillResourceListOptions::default())
+                .unwrap();
+            assert_eq!(listed.entries().len(), 3);
+            assert!(listed
+                .entries()
+                .iter()
+                .any(|entry| entry.descriptor().path() == template_path));
             let workflow =
                 package.resource(SkillResourcePath::parse("references/workflows.md").unwrap());
+            let template = package.resource(SkillResourcePath::parse(template_path).unwrap());
 
             let page = resources
                 .read_text(&workflow, SkillResourceTextReadOptions::default())
                 .unwrap();
+            let builder = resources
+                .read_text(&template, SkillResourceTextReadOptions::default())
+                .unwrap();
 
             assert!(page.text().contains(heading));
-            assert!(page.text().contains("managed Artifact Runtime"));
-            assert!(page.text().contains("\"runtimeProfile\":"));
+            assert!(page.text().contains("Managed Builder"));
+            assert!(!page.text().contains("\"runtimeProfile\":"));
+            assert!(page.text().contains("--output"));
             assert!(!page.text().contains("runtime.requiredPackages"));
             assert!(!page.text().contains("\"provider\": \"managedArtifact\""));
+            assert!(page.text().contains("\"inputs\":"));
+            assert!(page.text().contains("MYCOPILOT_INPUT_ROOT"));
             assert!(page.text().contains("observe.expectedOutputs"));
             assert!(page.text().contains("observe.additionalRoots"));
             assert!(page.text().contains("artifactObservation.expectedOutputs"));
             assert!(page.text().contains("non-zero exit"));
             assert!(!page.truncated());
+            assert!(builder.text().contains(marker));
+            assert!(builder.text().contains("MYCOPILOT_INPUT_ROOT"));
+            assert!(!builder.truncated());
+
+            let workspace = tempdir().unwrap();
+            let request = SkillMaterializationRequest::new(
+                template,
+                workspace.path(),
+                SkillMaterializationDestination::parse(destination).unwrap(),
+            )
+            .unwrap();
+            let outcome = SkillResourceMaterializer::new()
+                .materialize(&resources, &request)
+                .unwrap();
+            assert_eq!(outcome.status(), SkillMaterializationStatus::Created);
+            assert_eq!(
+                fs::read_to_string(workspace.path().join(destination)).unwrap(),
+                builder.text()
+            );
         }
     }
 

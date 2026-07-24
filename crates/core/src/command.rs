@@ -1,3 +1,7 @@
+use crate::file_input::{
+    evidence_from_bindings, materialize_agent_file_inputs, AgentFileInputExecutionContext,
+    PreparedAgentFileInputs, AGENT_FILE_INPUT_ROOT_ENV,
+};
 use crate::system_paths::expand_system_path;
 use crate::{
     AgentCancellationToken, AgentCommandArtifactChange, AgentCommandArtifactChangeKind,
@@ -44,10 +48,14 @@ pub(crate) use artifact_observer::{
 };
 pub use execution::*;
 use lexer::*;
-pub use managed_runtime::run_authorized_command_with_artifact_runtime;
 pub(crate) use managed_runtime::{
-    infer_managed_artifact_command_kind, validate_command_runtime_request,
+    infer_managed_artifact_builder_command, infer_managed_artifact_command_kind,
+    validate_command_runtime_request, validate_managed_artifact_builder_output_scope,
     validate_managed_artifact_command_shape,
+};
+pub use managed_runtime::{
+    run_authorized_command_with_artifact_runtime,
+    run_authorized_command_with_artifact_runtime_and_inputs,
 };
 pub use policy::*;
 use risk::*;

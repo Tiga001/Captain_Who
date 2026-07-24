@@ -39,7 +39,37 @@ pub fn run_authorized_command_with_artifact_runtime(
     action_cancel_flag: Option<Arc<AtomicBool>>,
     artifact_runtime: Option<&ArtifactRuntimeProvider>,
 ) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
+    run_authorized_command_with_artifact_runtime_and_inputs(
+        workspace_root,
+        request,
+        permissions,
+        authorization_source,
+        cancellation_token,
+        action_cancel_flag,
+        artifact_runtime,
+        None,
+    )
+}
+
+/// Executes a command with the private, run-scoped authorities needed to revalidate declarative
+/// file inputs. The context itself is never persisted or projected into a Tool Result.
+#[allow(clippy::too_many_arguments)]
+pub fn run_authorized_command_with_artifact_runtime_and_inputs(
+    workspace_root: Option<&Path>,
+    request: &AgentCommandRequest,
+    permissions: AgentPermissions,
+    authorization_source: CommandAuthorizationSource,
+    cancellation_token: AgentCancellationToken,
+    action_cancel_flag: Option<Arc<AtomicBool>>,
+    artifact_runtime: Option<&ArtifactRuntimeProvider>,
+    file_inputs: Option<&AgentFileInputExecutionContext>,
+) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
     if request.runtime.is_none() && request.runtime_binding.is_none() {
+        if !request.inputs.is_empty() {
+            return Err(CommandExecutionError::from(
+                "run_command.inputs 只适用于后端已绑定运行配置的 Managed Builder。".to_string(),
+            ));
+        }
         return run_authorized_command(
             workspace_root,
             request,
@@ -63,6 +93,17 @@ pub fn run_authorized_command_with_artifact_runtime(
         root.as_deref(),
         Some(&cwd),
     )?;
+    if let Some(builder) = infer_managed_artifact_builder_command(&request.command)
+        .map_err(CommandExecutionError::from)?
+    {
+        validate_managed_artifact_builder_output_scope(
+            root.as_deref(),
+            &cwd,
+            &builder.output_paths,
+            permissions.write,
+        )
+        .map_err(CommandExecutionError::from)?;
+    }
 
     let observer = CommandArtifactObserver::prepare(
         root.as_deref(),
@@ -88,6 +129,7 @@ pub fn run_authorized_command_with_artifact_runtime(
             action_cancel_flag,
             artifact_runtime,
             binding,
+            file_inputs,
         ),
         (None, Some(legacy)) => runtime_failure_result(
             root.as_deref(),
@@ -136,6 +178,7 @@ fn execute_with_frozen_profile(
     action_cancel_flag: Option<Arc<AtomicBool>>,
     provider: Option<&ArtifactRuntimeProvider>,
     binding: &AgentCommandRuntimeBinding,
+    file_inputs: Option<&AgentFileInputExecutionContext>,
 ) -> AgentCommandExecutionResult {
     if let Err(error) = super::validate_command_runtime_binding(binding) {
         return runtime_failure_result(
@@ -236,6 +279,26 @@ fn execute_with_frozen_profile(
     }
 
     let resolution = ready_binding_resolution(binding, &prepared.invocation);
+    let empty_input_context = AgentFileInputExecutionContext::default();
+    let input_context = file_inputs.unwrap_or(&empty_input_context);
+    let prepared_inputs = match materialize_agent_file_inputs(
+        root,
+        permissions,
+        input_context,
+        &request.inputs,
+        Some(&cancellation_token),
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return runtime_failure_result(
+                root,
+                cwd,
+                request,
+                binding_resolution_error(binding, error.code(), error.recovery(), error.message()),
+                0,
+            )
+        }
+    };
     let mut result = run_managed_process(
         root,
         cwd,
@@ -245,6 +308,7 @@ fn execute_with_frozen_profile(
         resolution,
         cancellation_token,
         action_cancel_flag,
+        prepared_inputs.as_ref(),
     );
     if let Err(error) = provider.verify_integrity() {
         let code = format!("artifactRuntime.{}", error.code().stable_name());
@@ -429,6 +493,7 @@ fn execute_with_provider<P: ManagedRuntimeProvider>(
         resolution,
         cancellation_token,
         action_cancel_flag,
+        None,
     );
 
     // Treat postflight integrity as part of command success. The process's
@@ -457,6 +522,13 @@ struct ManagedArtifactCommand {
     process_arguments: Vec<OsString>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedArtifactBuilderCommand {
+    pub kind: AgentCommandRuntimeKind,
+    pub script: String,
+    pub output_paths: Vec<String>,
+}
+
 pub(crate) fn validate_managed_artifact_command_shape(
     command: &str,
     runtime: &AgentCommandRuntimeRequest,
@@ -480,6 +552,201 @@ pub(crate) fn infer_managed_artifact_command_kind(
     };
     parse_managed_artifact_command(command, kind)?;
     Ok(kind)
+}
+
+/// Recognizes the deliberately narrow Managed Builder command shape and extracts its declared
+/// output paths without executing the script. Ordinary shell commands return `None`; malformed
+/// direct Builder output flags fail closed so approval cannot freeze an ambiguous observation.
+pub(crate) fn infer_managed_artifact_builder_command(
+    command: &str,
+) -> Result<Option<ManagedArtifactBuilderCommand>, String> {
+    let tokens = match managed_artifact_command_tokens(command) {
+        Ok(tokens) => tokens,
+        Err(error) if looks_like_office_builder_intent(command) => return Err(error),
+        Err(_) => return Ok(None),
+    };
+    let kind = match tokens[0].as_str() {
+        "node" => AgentCommandRuntimeKind::Node,
+        "python" | "python3" => AgentCommandRuntimeKind::Python,
+        _ => return Ok(None),
+    };
+    let parsed = match parse_managed_artifact_command(command, kind) {
+        Ok(parsed) => parsed,
+        Err(error) if looks_like_office_builder_intent(command) => return Err(error),
+        Err(_) => return Ok(None),
+    };
+
+    let mut output_paths = Vec::new();
+    let mut saw_output = false;
+    let mut index = 2;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if token == "--" {
+            break;
+        }
+        let output = if token == "--output" {
+            if saw_output {
+                return Err(
+                    "Managed Builder 只允许一个静态 `--output` 参数；请拆分为独立命令。"
+                        .to_string(),
+                );
+            }
+            index += 1;
+            Some(
+                tokens
+                    .get(index)
+                    .ok_or_else(|| {
+                        "Managed Builder 的 `--output` 必须紧跟一个输出文件路径。".to_string()
+                    })?
+                    .as_str(),
+            )
+        } else {
+            let output = token.strip_prefix("--output=");
+            if output.is_some() && saw_output {
+                return Err(
+                    "Managed Builder 只允许一个静态 `--output` 参数；请拆分为独立命令。"
+                        .to_string(),
+                );
+            }
+            output
+        };
+        if let Some(output) = output {
+            let output = output.trim();
+            if output.is_empty() || output.starts_with('-') {
+                return Err("Managed Builder 的 `--output` 必须指定非空输出文件路径。".to_string());
+            }
+            saw_output = true;
+            output_paths.push(output.to_string());
+        }
+        index += 1;
+    }
+
+    Ok(Some(ManagedArtifactBuilderCommand {
+        kind,
+        script: parsed.script,
+        output_paths,
+    }))
+}
+
+fn looks_like_office_builder_intent(command: &str) -> bool {
+    let command = command.trim_start();
+    let has_direct_launcher = ["node", "python", "python3"].iter().any(|launcher| {
+        command
+            .strip_prefix(launcher)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    });
+    let lower = command.to_ascii_lowercase();
+    has_direct_launcher
+        && lower.contains("--output")
+        && [".docx", ".xlsx", ".pptx"]
+            .iter()
+            .any(|extension| lower.contains(extension))
+}
+
+/// Revalidates every host-bound Builder output against the effective write scope.
+///
+/// This runs both while preparing an action and again immediately before process spawn. It is
+/// deliberately independent of artifact observation: observation is telemetry and never grants
+/// filesystem authority.
+pub(crate) fn validate_managed_artifact_builder_output_scope(
+    workspace_root: Option<&Path>,
+    cwd: &Path,
+    outputs: &[String],
+    write_permission: AgentWritePermission,
+) -> Result<(), String> {
+    if outputs.is_empty() || write_permission == AgentWritePermission::All {
+        return Ok(());
+    }
+    let workspace_root = workspace_root.ok_or_else(|| {
+        "没有 workspace 时，Managed Builder 输出需要 write=all 权限。".to_string()
+    })?;
+    if !cwd.is_absolute() || !workspace_root.is_absolute() {
+        return Err("Managed Builder 输出范围校验要求绝对 workspace 与 cwd。".to_string());
+    }
+    for output in outputs {
+        let requested = Path::new(output);
+        let candidate = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            cwd.join(requested)
+        };
+        let normalized = normalize_absolute_builder_path(&candidate)?;
+        let resolved = resolve_builder_scope_path(&normalized)?;
+        if !resolved.starts_with(workspace_root) {
+            return Err(format!(
+                "Managed Builder 输出 `{output}` 位于 workspace 外；当前权限只允许写入 workspace。"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_absolute_builder_path(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("Managed Builder 输出路径规范化前必须是绝对路径。".to_string());
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err("Managed Builder 输出路径不能越过文件系统根目录。".to_string());
+                }
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+fn resolve_builder_scope_path(path: &Path) -> Result<PathBuf, String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            return path
+                .canonicalize()
+                .map_err(|error| format!("Managed Builder 输出路径无法规范化：{error}"));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!("Managed Builder 输出路径无法检查：{error}"));
+        }
+    }
+    let mut ancestor = path
+        .parent()
+        .ok_or_else(|| "Managed Builder 输出路径缺少可解析的父目录。".to_string())?;
+    let mut tail = Vec::new();
+    loop {
+        match fs::symlink_metadata(ancestor) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = ancestor.file_name().ok_or_else(|| {
+                    "Managed Builder 输出路径没有可访问的已有祖先目录。".to_string()
+                })?;
+                tail.push(name.to_os_string());
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    "Managed Builder 输出路径没有可访问的已有祖先目录。".to_string()
+                })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Managed Builder 输出路径的已有祖先无法检查：{error}"
+                ));
+            }
+        }
+    }
+    let mut resolved = ancestor
+        .canonicalize()
+        .map_err(|error| format!("Managed Builder 输出路径的已有祖先无法规范化：{error}"))?;
+    for component in tail.iter().rev() {
+        resolved.push(component);
+    }
+    if let Some(name) = path.file_name() {
+        resolved.push(name);
+    }
+    Ok(resolved)
 }
 
 fn parse_managed_artifact_command(
@@ -660,6 +927,7 @@ fn run_managed_process(
     resolution: AgentCommandRuntimeResolution,
     cancellation_token: AgentCancellationToken,
     action_cancel_flag: Option<Arc<AtomicBool>>,
+    prepared_inputs: Option<&PreparedAgentFileInputs>,
 ) -> AgentCommandExecutionResult {
     if command_cancel_requested(&cancellation_token, action_cancel_flag.as_ref()) {
         return AgentCommandExecutionResult {
@@ -676,6 +944,7 @@ fn run_managed_process(
             error: None,
             policy_evaluation: None,
             artifact_observation: None,
+            input_files: evidence_from_bindings(&request.inputs),
             runtime: Some(resolution),
         };
     }
@@ -689,7 +958,7 @@ fn run_managed_process(
     command.args(invocation.arguments_prefix());
     command.args(&parsed.process_arguments);
     configure_command_process_group(&mut command);
-    configure_managed_environment(&mut command, invocation);
+    configure_managed_environment(&mut command, invocation, prepared_inputs);
     let child = command
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -791,6 +1060,9 @@ fn run_managed_process(
                 error: None,
                 policy_evaluation: None,
                 artifact_observation: None,
+                input_files: prepared_inputs
+                    .map(|prepared| prepared.evidence().to_vec())
+                    .unwrap_or_default(),
                 runtime: Some(resolution),
             }
         }
@@ -812,7 +1084,11 @@ fn run_managed_process(
     }
 }
 
-fn configure_managed_environment(command: &mut Command, invocation: &ArtifactRuntimeInvocation) {
+fn configure_managed_environment(
+    command: &mut Command,
+    invocation: &ArtifactRuntimeInvocation,
+    prepared_inputs: Option<&PreparedAgentFileInputs>,
+) {
     command.env_clear();
     // Deliberately exclude PATH, NODE_OPTIONS, user Python injection variables,
     // and dynamic-loader overrides. Only inert locale/temp/system context is
@@ -837,6 +1113,9 @@ fn configure_managed_environment(command: &mut Command, invocation: &ArtifactRun
     command.envs(invocation.environment());
     command.env("TERM", "dumb");
     command.env("CI", "1");
+    if let Some(prepared_inputs) = prepared_inputs {
+        command.env(AGENT_FILE_INPUT_ROOT_ENV, prepared_inputs.root());
+    }
 }
 
 #[cfg(test)]
@@ -1066,6 +1345,7 @@ fn runtime_cancelled_result(
         error: None,
         policy_evaluation: None,
         artifact_observation: None,
+        input_files: evidence_from_bindings(&request.inputs),
         runtime: Some(runtime),
     }
 }
@@ -1091,6 +1371,7 @@ fn runtime_failure_result(
         error: runtime.message.clone(),
         policy_evaluation: None,
         artifact_observation: None,
+        input_files: evidence_from_bindings(&request.inputs),
         runtime: Some(runtime),
     }
 }
@@ -1174,6 +1455,75 @@ mod tests {
             &runtime(AgentCommandRuntimeKind::Python)
         )
         .is_err());
+    }
+
+    #[test]
+    fn managed_builder_output_contract_fails_closed_without_reaching_path() {
+        let builder = infer_managed_artifact_builder_command(
+            "python scripts/build.py --output 'outputs/report.docx'",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(builder.kind, AgentCommandRuntimeKind::Python);
+        assert_eq!(builder.script, "scripts/build.py");
+        assert_eq!(builder.output_paths, ["outputs/report.docx"]);
+
+        for command in [
+            "python scripts/build.py --output",
+            "python scripts/build.py --output --title",
+            "python scripts/build.py --output report.docx --output report.docx",
+            "python scripts/build.py --output report.docx | tee build.log",
+            "python scripts/build.py --output report.docx && echo done",
+            "python -u scripts/build.py --output report.docx",
+        ] {
+            assert!(
+                infer_managed_artifact_builder_command(command).is_err(),
+                "malformed Builder intent unexpectedly fell through: {command}"
+            );
+        }
+        assert!(
+            infer_managed_artifact_builder_command("python ordinary.py | tee ordinary.log")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn builder_scope_rejects_existing_and_broken_external_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = TempDir::new().unwrap();
+        let workspace_root = workspace.path().canonicalize().unwrap();
+        let outside = TempDir::new().unwrap();
+        symlink(outside.path(), workspace_root.join("external")).unwrap();
+        assert!(validate_managed_artifact_builder_output_scope(
+            Some(&workspace_root),
+            &workspace_root,
+            &["external/report.docx".to_string()],
+            AgentWritePermission::WorkspaceOnly,
+        )
+        .is_err());
+
+        symlink(
+            outside.path().join("missing"),
+            workspace_root.join("broken"),
+        )
+        .unwrap();
+        assert!(validate_managed_artifact_builder_output_scope(
+            Some(&workspace_root),
+            &workspace_root,
+            &["broken/report.docx".to_string()],
+            AgentWritePermission::WorkspaceOnly,
+        )
+        .is_err());
+        assert!(validate_managed_artifact_builder_output_scope(
+            Some(&workspace_root),
+            &workspace_root,
+            &["external/report.docx".to_string()],
+            AgentWritePermission::All,
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1262,6 +1612,7 @@ mod tests {
             risk_level: None,
             reason: None,
             observe: None,
+            inputs: Vec::new(),
             runtime: Some(runtime),
             runtime_binding: None,
         };
@@ -1305,6 +1656,7 @@ mod tests {
             risk_level: None,
             reason: None,
             observe: None,
+            inputs: Vec::new(),
             runtime: Some(runtime(AgentCommandRuntimeKind::Python)),
             runtime_binding: None,
         };
@@ -1346,6 +1698,7 @@ mod tests {
             risk_level: None,
             reason: None,
             observe: None,
+            inputs: Vec::new(),
             runtime: Some(runtime(AgentCommandRuntimeKind::Python)),
             runtime_binding: None,
         };
@@ -1403,7 +1756,7 @@ mod tests {
         let mut environment_probe = Command::new(invocation.executable());
         environment_probe.env("PATH", "/tmp/hostile-bin");
         environment_probe.env("NODE_OPTIONS", "--require=/tmp/hostile.cjs");
-        configure_managed_environment(&mut environment_probe, &invocation);
+        configure_managed_environment(&mut environment_probe, &invocation, None);
         let configured_environment = environment_probe
             .get_envs()
             .map(|(name, value)| (name.to_os_string(), value.map(OsStr::to_os_string)))
@@ -1422,6 +1775,7 @@ mod tests {
             risk_level: None,
             reason: None,
             observe: None,
+            inputs: Vec::new(),
             runtime: Some(runtime(AgentCommandRuntimeKind::Node)),
             runtime_binding: None,
         };

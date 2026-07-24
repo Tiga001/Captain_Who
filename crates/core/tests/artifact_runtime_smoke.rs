@@ -171,6 +171,7 @@ fn execute(
             expected_outputs: vec![expected_output.to_string()],
             additional_roots: Vec::new(),
         }),
+        inputs: Vec::new(),
         runtime: None,
         runtime_binding: Some(Box::new(runtime_binding)),
     };

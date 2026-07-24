@@ -112,6 +112,14 @@ pub struct ImageGenerationArtifactJournalRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedImageArtifactInputRecord {
+    pub artifact_id: String,
+    pub storage_relative_path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageGenerationExecutionJournalRecord {
     pub identity: ImageGenerationExecutionIdentityRecord,
     pub status: StoredImageGenerationExecutionStatus,
@@ -132,6 +140,37 @@ pub enum ImageGenerationExecutionClaimOutcome {
     Claimed(ImageGenerationExecutionJournalRecord),
     Existing(ImageGenerationExecutionJournalRecord),
     IdentityConflict(ImageGenerationExecutionJournalRecord),
+}
+
+pub fn list_published_artifact_inputs_by_id(
+    connection: &Connection,
+    artifact_id: &str,
+) -> rusqlite::Result<Vec<PublishedImageArtifactInputRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT a.artifact_id, a.storage_relative_path, a.size_bytes, a.sha256
+         FROM image_generation_artifacts a
+         INNER JOIN image_generation_executions e ON e.execution_id = a.execution_id
+         WHERE a.artifact_id = ?1
+           AND a.state = 'published'
+           AND e.status = 'succeeded'
+         ORDER BY a.execution_id, a.ordinal",
+    )?;
+    let rows = statement.query_map([artifact_id], |row| {
+        let size_bytes = u64::try_from(row.get::<_, i64>(2)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Integer,
+                Box::new(error),
+            )
+        })?;
+        Ok(PublishedImageArtifactInputRecord {
+            artifact_id: row.get(0)?,
+            storage_relative_path: row.get(1)?,
+            size_bytes,
+            sha256: row.get(3)?,
+        })
+    })?;
+    rows.collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

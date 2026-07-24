@@ -3,11 +3,14 @@ use mycopilot_core::office::{
     OfficeDocumentKind, OfficeEngine, OfficeEngineAvailability, OfficeEngineCapabilities,
     OfficeEngineErrorCode, OfficeEngineRecovery, OfficeEngineSource, OfficeEngineStatus,
     OfficeExecutionContext, OfficeExecutionRequest, OfficeFileState, OfficeFrozenPath,
-    OfficeOperation, OfficeOperationAccess, OfficeOperationParameters, OfficePathIdentity,
-    OfficePathPurpose, OfficePathScope, OfficePathSlot, OfficePreparedExecution,
-    OfficeRequestParameters, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
+    OfficeGridLayout, OfficeOperation, OfficeOperationAccess, OfficeOperationParameters,
+    OfficePathIdentity, OfficePathPurpose, OfficePathScope, OfficePathSlot,
+    OfficePreparedExecution, OfficePublishedOutput, OfficePublishedOutputKind,
+    OfficePublishedOutputRole, OfficeRenderPageSelection, OfficeRequestParameters, OfficeViewMode,
+    OfficeViewRenderMode, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
     OFFICE_ENGINE_STATUS_SCHEMA_VERSION, OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
 };
+use mycopilot_core::skills::SkillResourceSession;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Barrier;
@@ -142,6 +145,7 @@ impl OfficeEngine for LifecycleTestOfficeEngine {
             stderr_truncated: false,
             error_code: None,
             error: None,
+            outputs: Vec::new(),
         })
     }
 }
@@ -211,6 +215,8 @@ impl OfficeEngine for FailedOfficeEngine {
             stderr_truncated: false,
             error_code: None,
             error: None,
+            // A buggy provider must not be able to attach a success artifact to a failed result.
+            outputs: vec![test_published_render_output()],
         })
     }
 }
@@ -221,7 +227,34 @@ struct SuccessfulTrackingOfficeEngine {
 }
 
 #[derive(Clone)]
+struct SkillSessionTrackingOfficeEngine {
+    executions_with_runtime_session: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+struct PublishedRenderOfficeEngine;
+
+#[derive(Clone)]
 struct RevalidationFailureOfficeEngine;
+
+fn test_published_render_output() -> OfficePublishedOutput {
+    OfficePublishedOutput {
+        role: OfficePublishedOutputRole::Render,
+        kind: OfficePublishedOutputKind::Image,
+        mime_type: "image/png".to_string(),
+        source: mycopilot_core::AgentFileInputRef::Workspace {
+            path: "preview.png".to_string(),
+        },
+        read_path: "preview.png".to_string(),
+        scope: OfficePathScope::Workspace,
+        readable_by_agent: true,
+        size_bytes: 128,
+        sha256: "ab".repeat(32),
+        width: Some(640),
+        height: Some(360),
+        page_selection: OfficeRenderPageSelection::Explicit { pages: vec![1] },
+    }
+}
 
 impl OfficeEngine for RevalidationFailureOfficeEngine {
     fn capabilities(&self) -> OfficeEngineCapabilities {
@@ -297,6 +330,103 @@ impl OfficeEngine for SuccessfulTrackingOfficeEngine {
             stderr_truncated: false,
             error_code: None,
             error: None,
+            outputs: Vec::new(),
+        })
+    }
+}
+
+impl OfficeEngine for SkillSessionTrackingOfficeEngine {
+    fn capabilities(&self) -> OfficeEngineCapabilities {
+        FailedOfficeEngine.capabilities()
+    }
+
+    fn status(&self, cancellation: AgentCancellationToken) -> OfficeEngineStatus {
+        FailedOfficeEngine.status(cancellation)
+    }
+
+    fn prepare(
+        &self,
+        _context: &OfficeExecutionContext,
+        _request: &OfficeExecutionRequest,
+    ) -> Result<OfficePreparedExecution, OfficeEngineError> {
+        unreachable!("the Host executes only the approval-frozen plan")
+    }
+
+    fn execute_prepared(
+        &self,
+        context: &OfficeExecutionContext,
+        prepared: &OfficePreparedExecution,
+        _cancellation: AgentCancellationToken,
+        _action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<OfficeExecutionResult, OfficeEngineError> {
+        if format!("{context:?}").contains("skill_resource_session: Some(0)") {
+            self.executions_with_runtime_session
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(OfficeExecutionResult {
+            provider_id: OFFICECLI_PROVIDER_ID.to_string(),
+            engine_revision: prepared.engine_revision.clone(),
+            document_kind: prepared.request.document_kind,
+            operation: prepared.request.operation,
+            argv: prepared.argv.clone(),
+            cwd: ".".to_string(),
+            exit_code: Some(0),
+            stdout: "provider-success\n".to_string(),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled: false,
+            duration_ms: 1,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            error_code: None,
+            error: None,
+            outputs: Vec::new(),
+        })
+    }
+}
+
+impl OfficeEngine for PublishedRenderOfficeEngine {
+    fn capabilities(&self) -> OfficeEngineCapabilities {
+        FailedOfficeEngine.capabilities()
+    }
+
+    fn status(&self, cancellation: AgentCancellationToken) -> OfficeEngineStatus {
+        FailedOfficeEngine.status(cancellation)
+    }
+
+    fn prepare(
+        &self,
+        _context: &OfficeExecutionContext,
+        _request: &OfficeExecutionRequest,
+    ) -> Result<OfficePreparedExecution, OfficeEngineError> {
+        unreachable!("the Host executes only the approval-frozen plan")
+    }
+
+    fn execute_prepared(
+        &self,
+        _context: &OfficeExecutionContext,
+        prepared: &OfficePreparedExecution,
+        _cancellation: AgentCancellationToken,
+        _action_cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<OfficeExecutionResult, OfficeEngineError> {
+        Ok(OfficeExecutionResult {
+            provider_id: OFFICECLI_PROVIDER_ID.to_string(),
+            engine_revision: prepared.engine_revision.clone(),
+            document_kind: prepared.request.document_kind,
+            operation: prepared.request.operation,
+            argv: prepared.argv.clone(),
+            cwd: ".".to_string(),
+            exit_code: Some(0),
+            stdout: "rendered\n".to_string(),
+            stderr: String::new(),
+            timed_out: false,
+            cancelled: false,
+            duration_ms: 9,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            error_code: None,
+            error: None,
+            outputs: vec![test_published_render_output()],
         })
     }
 }
@@ -328,6 +458,7 @@ fn prepared_spreadsheet_operation() -> OfficePreparedExecution {
             }),
             output_path: None,
             destination_path: None,
+            inputs: Vec::new(),
             timeout_ms: Some(5_000),
         },
         argv: vec![
@@ -350,11 +481,114 @@ fn prepared_spreadsheet_operation() -> OfficePreparedExecution {
             size: Some(128),
             write_disposition: Some(OfficeWriteDisposition::ReplaceExisting),
         }],
+        input_bindings: Vec::new(),
         document_precondition: None,
         output_precondition: None,
         destination_precondition: None,
         resource_preconditions: Vec::new(),
     }
+}
+
+fn prepared_document_render_operation() -> OfficePreparedExecution {
+    OfficePreparedExecution {
+        schema_version: OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
+        provider_id: OFFICECLI_PROVIDER_ID.to_string(),
+        engine_revision: "office-engine-test".to_string(),
+        workspace_revision: Some("office-workspace-test".to_string()),
+        access: OfficeOperationAccess::FileWrite,
+        request: OfficeExecutionRequest {
+            document_kind: OfficeDocumentKind::Document,
+            operation: OfficeOperation::View,
+            document_path: Some("sample.docx".to_string()),
+            parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::View {
+                mode: OfficeViewMode::Screenshot,
+                start: None,
+                end: None,
+                max_lines: None,
+                issue_type: None,
+                limit: None,
+                columns: Vec::new(),
+                pages: Vec::new(),
+                range: None,
+                viewport: None,
+                grid: Some(OfficeGridLayout::Auto),
+                render_mode: Some(OfficeViewRenderMode::Auto),
+                page_count: false,
+            }),
+            output_path: Some("preview.png".to_string()),
+            destination_path: None,
+            inputs: Vec::new(),
+            timeout_ms: Some(5_000),
+        },
+        argv: vec![
+            "view".to_string(),
+            "sample.docx".to_string(),
+            "--mode".to_string(),
+            "screenshot".to_string(),
+            "--grid".to_string(),
+            "auto".to_string(),
+            "--render-mode".to_string(),
+            "auto".to_string(),
+            "--json".to_string(),
+            "--output".to_string(),
+            "preview.png".to_string(),
+        ],
+        paths: vec![
+            OfficeFrozenPath {
+                slot: OfficePathSlot::Document,
+                logical_path: "sample.docx".to_string(),
+                purpose: OfficePathPurpose::ReadSource,
+                scope: OfficePathScope::Workspace,
+                normalized_path: "/workspace/sample.docx".to_string(),
+                state: OfficeFileState::Present,
+                object_identity: Some(test_path_identity("office-render-input-identity")),
+                parent_identity: test_path_identity("office-render-input-parent"),
+                content_revision: Some("office-render-input-revision".to_string()),
+                size: Some(256),
+                write_disposition: None,
+            },
+            OfficeFrozenPath {
+                slot: OfficePathSlot::Output,
+                logical_path: "preview.png".to_string(),
+                purpose: OfficePathPurpose::WriteTarget,
+                scope: OfficePathScope::Workspace,
+                normalized_path: "/workspace/preview.png".to_string(),
+                state: OfficeFileState::Missing,
+                object_identity: None,
+                parent_identity: test_path_identity("office-render-output-parent"),
+                content_revision: None,
+                size: None,
+                write_disposition: Some(OfficeWriteDisposition::CreateNew),
+            },
+        ],
+        input_bindings: Vec::new(),
+        document_precondition: None,
+        output_precondition: None,
+        destination_precondition: None,
+        resource_preconditions: Vec::new(),
+    }
+}
+
+fn semantic_spreadsheet_operation_args(reason: &str) -> Value {
+    serde_json::json!({
+        "operation": "writeCell",
+        "filePath": "budget.xlsx",
+        "sheetName": "Sheet1",
+        "cell": "A1",
+        "value": 42,
+        "timeoutMs": 5_000,
+        "reason": reason
+    })
+}
+
+fn semantic_document_render_args(reason: &str) -> Value {
+    serde_json::json!({
+        "operation": "render",
+        "filePath": "sample.docx",
+        "outputPath": "preview.png",
+        "timeoutMs": 5_000,
+        "reason": reason
+    })
 }
 
 fn automatic_office_input(workspace: &Path) -> AgentChatInput {
@@ -373,9 +607,24 @@ fn prepared_office_action(id: &str) -> AgentProposedAction {
         office_operation: Box::new(mycopilot_core::AgentOfficeOperationRequest {
             schema_version: mycopilot_core::AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
             id: id.to_string(),
+            semantic_args: semantic_spreadsheet_operation_args("Update the approved workbook cell"),
             prepared: prepared_spreadsheet_operation(),
             approval_status: AgentApprovalStatus::Approved,
             reason: "Update the approved workbook cell".to_string(),
+        }),
+    }
+}
+
+fn prepared_render_action(id: &str) -> AgentProposedAction {
+    let reason = "Render the approved document preview";
+    AgentProposedAction::OfficeOperation {
+        office_operation: Box::new(mycopilot_core::AgentOfficeOperationRequest {
+            schema_version: mycopilot_core::AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
+            id: id.to_string(),
+            semantic_args: semantic_document_render_args(reason),
+            prepared: prepared_document_render_operation(),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: reason.to_string(),
         }),
     }
 }
@@ -514,6 +763,7 @@ fn approved_office_action_is_not_replayed_across_engine_rediscovery() {
     let result = service.execute_office_operation(
         &automatic_office_input(fixture.path()),
         &operation,
+        None,
         AgentCancellationToken::new(),
         None,
     );
@@ -543,13 +793,19 @@ fn approved_office_failure_preserves_exit_stdout_and_stderr() {
     let operation = mycopilot_core::AgentOfficeOperationRequest {
         schema_version: mycopilot_core::AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
         id: "office-call-1".to_string(),
+        semantic_args: semantic_spreadsheet_operation_args("Update the approved workbook cell"),
         prepared: prepared_spreadsheet_operation(),
         approval_status: AgentApprovalStatus::Approved,
         reason: "Update the approved workbook cell".to_string(),
     };
 
-    let result =
-        service.execute_office_operation(&input, &operation, AgentCancellationToken::new(), None);
+    let result = service.execute_office_operation(
+        &input,
+        &operation,
+        None,
+        AgentCancellationToken::new(),
+        None,
+    );
 
     assert!(!result.ok);
     assert_eq!(result.tool, "office_spreadsheet");
@@ -562,7 +818,51 @@ fn approved_office_failure_preserves_exit_stdout_and_stderr() {
         result.result.as_ref().unwrap()["stderr"],
         "provider-error\n"
     );
+    assert!(result.result.as_ref().unwrap().get("outputs").is_none());
     assert!(result.error.as_deref().unwrap().contains("code 7"));
+}
+
+#[test]
+fn approved_render_tool_result_preserves_authoritative_published_output() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service =
+        AgentService::new(storage).with_office_engine(Arc::new(PublishedRenderOfficeEngine));
+    let operation = match prepared_render_action("office-render-output") {
+        AgentProposedAction::OfficeOperation { office_operation } => office_operation,
+        _ => unreachable!(),
+    };
+
+    let result = service.execute_office_operation(
+        &automatic_office_input(fixture.path()),
+        &operation,
+        None,
+        AgentCancellationToken::new(),
+        None,
+    );
+
+    assert!(result.ok, "{:?}", result.error);
+    assert_eq!(result.call_id, "office-render-output");
+    assert_eq!(result.tool, "office_document");
+    let output = &result.result.as_ref().unwrap()["outputs"][0];
+    assert_eq!(output["role"], "render");
+    assert_eq!(output["kind"], "image");
+    assert_eq!(output["mimeType"], "image/png");
+    assert_eq!(
+        output["source"],
+        serde_json::json!({ "type": "workspace", "path": "preview.png" })
+    );
+    assert_eq!(output["readPath"], "preview.png");
+    assert_eq!(output["scope"], "workspace");
+    assert_eq!(output["readableByAgent"], true);
+    assert_eq!(output["sizeBytes"], 128);
+    assert_eq!(output["sha256"], "ab".repeat(32));
+    assert_eq!(output["width"], 640);
+    assert_eq!(output["height"], 360);
+    assert_eq!(
+        output["pageSelection"],
+        serde_json::json!({ "type": "explicit", "pages": [1] })
+    );
 }
 
 #[test]
@@ -577,8 +877,13 @@ fn office_revalidation_failure_preserves_frozen_execution_context() {
         _ => unreachable!(),
     };
 
-    let result =
-        service.execute_office_operation(&input, &operation, AgentCancellationToken::new(), None);
+    let result = service.execute_office_operation(
+        &input,
+        &operation,
+        None,
+        AgentCancellationToken::new(),
+        None,
+    );
 
     let evidence = result.result.as_ref().unwrap();
     assert!(!result.ok);
@@ -616,8 +921,13 @@ fn legacy_office_action_envelope_is_rejected_before_provider_execution() {
     };
     operation.schema_version = 1;
 
-    let result =
-        service.execute_office_operation(&input, &operation, AgentCancellationToken::new(), None);
+    let result = service.execute_office_operation(
+        &input,
+        &operation,
+        None,
+        AgentCancellationToken::new(),
+        None,
+    );
 
     assert!(!result.ok);
     assert_eq!(result.call_id, "office-legacy-envelope");
@@ -661,6 +971,7 @@ fn host_rejects_noncanonical_or_overlong_frozen_office_reasons_before_execution(
         let result = service.execute_office_operation(
             &input,
             &operation,
+            None,
             AgentCancellationToken::new(),
             None,
         );
@@ -679,6 +990,7 @@ fn office_action_helpers_expose_stable_identity_without_executable_path() {
     let request = mycopilot_core::AgentOfficeOperationRequest {
         schema_version: mycopilot_core::AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
         id: "office-call-2".to_string(),
+        semantic_args: semantic_spreadsheet_operation_args("Update budget"),
         prepared: prepared_spreadsheet_operation(),
         approval_status: AgentApprovalStatus::Required,
         reason: "Update budget".to_string(),
@@ -692,12 +1004,13 @@ fn office_action_helpers_expose_stable_identity_without_executable_path() {
     assert_eq!(tool_name_for_action(&action), "office_spreadsheet");
     let call = tool_call_for_action(&action);
     assert_eq!(call.tool, "office_spreadsheet");
-    assert_eq!(call.args["request"]["operation"], "set");
-    assert_eq!(call.args["request"]["filePath"], "budget.xlsx");
-    assert_eq!(call.args["request"]["target"], "/Sheet1/A1");
-    assert_eq!(call.args["request"]["properties"]["value"], 42);
+    assert_eq!(call.args["operation"], "writeCell");
+    assert_eq!(call.args["filePath"], "budget.xlsx");
+    assert_eq!(call.args["sheetName"], "Sheet1");
+    assert_eq!(call.args["cell"], "A1");
+    assert_eq!(call.args["value"], 42);
     assert_eq!(call.args["reason"], "Update budget");
-    assert!(call.args.get("operation").is_none());
+    assert!(call.args.get("request").is_none());
     assert!(call.args.get("parameters").is_none());
     assert!(call.args.get("arguments").is_none());
     assert!(call.args["request"].get("parameters").is_none());
@@ -736,6 +1049,52 @@ fn automatic_office_authorization_failure_returns_paired_structured_tool_result(
     assert_eq!(
         result.result.as_ref().unwrap()["code"],
         "explicitApprovalRequired"
+    );
+}
+
+#[test]
+fn automatic_dynamic_and_manual_restored_skill_sessions_share_office_execution_context() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let observed = Arc::new(AtomicUsize::new(0));
+    let service =
+        AgentService::new(storage).with_office_engine(Arc::new(SkillSessionTrackingOfficeEngine {
+            executions_with_runtime_session: Arc::clone(&observed),
+        }));
+    let input = automatic_office_input(fixture.path());
+
+    let auto_result = service
+        .execute_auto_approved_action(
+            AutoApprovedActionContext::new(
+                input.clone(),
+                "run-office-dynamic-skill-session".to_string(),
+                None,
+                None,
+                Some(Arc::new(SkillResourceSession::empty())),
+            ),
+            prepared_office_action("office-dynamic-skill-session"),
+            AgentCancellationToken::new(),
+        )
+        .expect("automatic Office execution must preserve the live runtime Skill session");
+    assert!(auto_result.ok, "{:?}", auto_result.error);
+
+    let AgentProposedAction::OfficeOperation { office_operation } =
+        prepared_office_action("office-manual-restored-skill-session")
+    else {
+        unreachable!("fixture always creates an Office action")
+    };
+    let manual_result = service.execute_office_operation(
+        &input,
+        &office_operation,
+        Some(Arc::new(SkillResourceSession::empty())),
+        AgentCancellationToken::new(),
+        None,
+    );
+    assert!(manual_result.ok, "{:?}", manual_result.error);
+    assert_eq!(
+        observed.load(Ordering::SeqCst),
+        2,
+        "automatic live activation and manual checkpoint restoration must reach the same Host Office context"
     );
 }
 
@@ -1086,6 +1445,7 @@ fn office_audit_path_scope_summarizes_every_frozen_path_purpose_and_scope() {
         office_operation: Box::new(mycopilot_core::AgentOfficeOperationRequest {
             schema_version: mycopilot_core::AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
             id: "office-path-audit".to_string(),
+            semantic_args: semantic_spreadsheet_operation_args("Audit Office path scopes"),
             prepared,
             approval_status: AgentApprovalStatus::Approved,
             reason: "Audit Office path scopes".to_string(),

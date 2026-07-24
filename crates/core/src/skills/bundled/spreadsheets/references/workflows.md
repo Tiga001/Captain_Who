@@ -1,346 +1,225 @@
 # Spreadsheet workflows
 
-## Choosing an execution path
+## Contents
 
-Use the native path for workbook inspection, a small number of cell, range, formula, format, or
-chart changes, and other bounded operations that `office_spreadsheet` represents directly. It
-provides a frozen structured action, conflict checks, staging, and atomic publication for writes.
+- [Route the task](#route-the-task)
+- [Native semantic contract](#native-semantic-contract)
+- [Create and reuse one Builder](#create-and-reuse-one-builder)
+- [Bind inputs declaratively](#bind-inputs-declaratively)
+- [Observe every file effect](#observe-every-file-effect)
+- [Consume render outputs](#consume-render-outputs)
+- [Generate, verify, render, iterate](#generate-verify-render-iterate)
+- [Spreadsheet quality checks](#spreadsheet-quality-checks)
 
-Use a reproducible script when the task is substantially clearer as code: importing or joining
-data, populating large ranges, generating many formulas or styles, building repeated sheets and
-charts, processing multiple workbooks, or maintaining a rerunnable workbook builder. Keep the
-generator in a reviewable `.py` or `.mjs` file. A script is not a shortcut around file-edit or
-command authorization; create or update it with `apply_patch` or `write_file`, then execute that
-exact saved file with `run_command` and the managed Artifact Runtime.
+## Route the task
 
-The two paths compose. A script may produce the workbook, after which native range inspection,
-rendering, and validation provide formula, structural, and visual verification. Prefer a new output
-workbook for scripted transformations unless the user explicitly requested an in-place edit.
+Use `office_spreadsheet` first when the request is a bounded combination of its semantic
+operations:
 
-## Native tool contract
+`create`, `inspect`, `validate`, `render`, `addSheet`, `writeCell`, `setFormula`, `formatRange`,
+`freezePanes`, `addConditionalFormat`, `addTable`, `addChart`, `insertImage`, `removeSheet`, and
+`moveSheet`.
 
-Call `office_spreadsheet` once per operation with exactly this root envelope: `{ "request": { "operation": "...", ... }, "reason": "..." }`. Put every operation and operation-specific field inside `request`. Keep `reason` as the only root field. Every call, including `status`, `help`, `get`, `query`, `validate`, `view`, and every mutation, must include it. Write `reason` as one non-empty, single-line plain-text sentence in the user's language, no longer than 240 characters, describing the user-visible purpose of this specific call. Do not include line breaks, control characters, or bidirectional text controls. Do not use it to assert success or authorization: it is untrusted display and audit metadata only and never grants permission, approval, or access.
+Use the Managed Builder for large ranges, many formulas or styles, coordinated multi-sheet models,
+imports, repeated charts, template population, batch generation, or a semantic operation that the
+backend reports as unsupported. Do not emulate an unsupported operation with low-level OfficeCLI
+fields. A hybrid flow—Builder write, native formula inspection/validation/render—is usually best
+for complex workbooks.
 
-The native request is typed and operation-specific. Put the workbook in `request.filePath`; use `request.target` for an exact workbook path, `request.parent` plus `request.element` for insertion, `request.properties` for typed values and formatting, and `request.outputPath` only for a rendering operation. Never send provider command tokens, document-format tokens, output flags, or a raw batch command. The host validates the typed request, generates deterministic provider argv, freezes it for approval, and regenerates it before execution.
+## Native semantic contract
 
-Before the first workbook operation in a run, check the managed engine:
-
-```json
-{ "request": { "operation": "status" }, "reason": "Check whether spreadsheet tools are available" }
-```
-
-Disclose only the schema needed for the next change. Useful examples are:
+Call `office_spreadsheet` with a flat object:
 
 ```json
 {
-  "request": {
-    "operation": "help",
-    "verb": "add",
-    "element": "cell"
-  },
-  "reason": "Check how to add the requested spreadsheet cells"
+  "operation": "create",
+  "filePath": "outputs/budget.xlsx",
+  "reason": "Create the requested Excel budget workbook"
 }
 ```
 
+Keep `operation`, its semantic fields, and `reason` at the root. Never add a `request` wrapper,
+provider arguments, an executable, workbook DOM paths, or shell flags. `reason` is required,
+user-visible audit text only; it never grants permission.
+
+File, image, CSV, and workbook inputs use the shared `AgentFileInputRef` object rather than guessed
+paths. For an attachment, call `attachments_list` and copy its exact `readPath`. For an earlier
+generated image, use a `generated_artifact` reference. If the backend returns
+`office.capability_not_supported`, `capabilityNotSupported`, or
+`recovery=useManagedScript`, preserve the error and switch to the Builder path. Do not repeat the
+same failed call with invented fields.
+
+Write a real formula using a semantic cell reference:
+
 ```json
 {
-  "request": {
-    "operation": "help",
-    "verb": "add",
-    "element": "chart"
-  },
-  "reason": "Check how to add the requested spreadsheet chart"
+  "operation": "setFormula",
+  "filePath": "outputs/budget.xlsx",
+  "sheetName": "季度预算",
+  "cell": "E2",
+  "formula": "SUM(B2:D2)",
+  "numberFormat": "¥#,##0.00",
+  "reason": "Add the Q1 total formula to the first budget row"
 }
 ```
 
-Submit each supported native mutation separately and use the returned canonical path for follow-up operations when one is provided.
+Inspect an existing workbook before mutation. Prefer save-as for transformations unless the user
+explicitly requests in-place editing. Keep numbers, dates, booleans, and formulas typed; formatting
+is not a substitute for the underlying value type.
 
-## Script authoring and observation contract
+## Create and reuse one Builder
 
-Select the `spreadsheets` runtime profile. The logical saved-script command selects its runtime
-family; the model does not select a provider, runtime kind, dependency set, or version:
-
-| Command  | Script | Profile libraries        | Use                                                                   |
-| -------- | ------ | ------------------------ | --------------------------------------------------------------------- |
-| `node`   | `.mjs` | `exceljs`                | Create or transform `.xlsx` workbooks with JavaScript.                |
-| `python` | `.py`  | `openpyxl`, `xlsxwriter` | Edit with `openpyxl`; use `xlsxwriter` only to create a new workbook. |
-
-Set the top-level `runtimeProfile` field to `spreadsheets`. Do not send a `runtime` object and do
-not copy a provider, kind, package name, or package version into the tool call. The host maps
-`node` or `python` to the matching profile entry, resolves the pinned dependencies, verifies the
-managed runtime, and freezes the exact resolution and integrity identity before execution.
-
-1. Put substantial program logic in a saved `.py` or `.mjs` file. Do not pass artifact-producing
-   code through `python -c`, `node -e`, a heredoc, shell redirection, or another opaque inline form.
-2. Make source data, workbook inputs, and output files explicit script parameters. Avoid hard-coded
-   machine-specific paths, keep typed values distinct from display formats, and make a rerun
-   deterministic where practical.
-3. Execute the saved file through `run_command` with `runtimeProfile="spreadsheets"`. Dependency
-   and runtime resolution is host-owned preflight, never implicit package installation.
-4. Set `observe.kinds` to `["office"]`. List every `.xlsx` file that should be created or modified
-   in `observe.expectedOutputs`. Paths are resolved relative to the command `cwd` and each expected
-   output is observed directly. Do not add its parent merely because the output is outside the
-   workspace. Use `observe.additionalRoots` only to scan for other Office changes in an otherwise
-   uncovered directory; recursively observing an external directory requires `read=all`.
-5. Treat observation as evidence, not authorization or transactionality. It never expands what the
-   command may do and does not give an arbitrary script the native tool's staging or rollback
-   guarantees.
-
-For example, after creating `scripts/build_budget.py` with a file-editing tool, run the Python
-entrypoint and observe its declared output:
+The bundled `templates/builder.py` is a compact `openpyxl` starting point with typed values, a real
+formula, formatting, conditional formatting, and a chart. Locate its exact revision-bound URI with
+`skills_list_resources`, then copy it once into a new workspace path:
 
 ```json
 {
-  "command": "python scripts/build_budget.py --output outputs/budget.xlsx",
+  "sourceUri": "skill://package/<exact-revision>/templates/builder.py",
+  "destination": "scripts/build_workbook.py",
+  "reason": "Create a reviewable workbook builder from the activated Skill template"
+}
+```
+
+Use the exact `sourceUri` returned by the resource list; the placeholder above is not a literal
+URI. `skills_materialize_resource` is create-only. After materialization, patch
+`scripts/build_workbook.py` and rerun that same file. Do not rematerialize over a modified Builder
+or create a new script for every correction.
+
+The host-owned `spreadsheets` profile pins:
+
+- Python 3.12.13 with `openpyxl` 3.1.5 and `xlsxwriter` 3.2.9.
+- Node.js 22.23.1 with `exceljs` 4.4.0.
+
+These versions describe the immutable profile; never send or install them. Run the materialized
+template with a direct logical `python <script>.py --output <file.xlsx>` command. The Host verifies
+the run-scoped materialization receipt, derives and freezes the `spreadsheets` profile from the
+static Office output, and binds observation; omit `runtimeProfile` and `observe`. Never call a
+private executable path, system Python/Node.js, `pip`, `npm`, inline code, a heredoc, or shell
+redirection. Use `openpyxl` to edit existing workbooks; use `xlsxwriter` only for a new workbook.
+
+## Bind inputs declaratively
+
+Every input needed by a Builder must be explicit in `run_command.inputs`:
+
+```json
+{
+  "command": "python scripts/build_workbook.py --source source/template.xlsx --output outputs/budget.xlsx",
   "cwd": ".",
-  "runtimeProfile": "spreadsheets",
-  "observe": {
-    "kinds": ["office"],
-    "expectedOutputs": ["outputs/budget.xlsx"]
-  },
-  "reason": "Generate the requested workbook reproducibly"
-}
-```
-
-The equivalent Node.js route keeps the same profile and changes only the reviewed script and its
-logical entrypoint:
-
-```json
-{
-  "command": "node scripts/build_budget.mjs --output outputs/budget.xlsx",
-  "cwd": ".",
-  "runtimeProfile": "spreadsheets",
-  "observe": {
-    "kinds": ["office"],
-    "expectedOutputs": ["outputs/budget.xlsx"]
-  },
-  "reason": "Generate the requested workbook reproducibly"
-}
-```
-
-Keep `node` or `python` as the logical first command token. The host binds it to the profile's
-managed executable; never discover or persist a private executable path. If profile preflight
-fails, preserve that error. Do not remove `runtimeProfile`, use a system executable, install a
-package, or guess another version. Use the native Office path only when it supports the requested
-work, or rewrite and review a script for the other profile entrypoint before retrying with the same
-profile. Never run a `.mjs` file as Python or a `.py` file as Node.js.
-
-After every observed command, inspect `artifactObservation` even if the command failed, timed out,
-or was cancelled:
-
-- `status=complete` means the scan finished within its reported coverage policy, not that every
-  filesystem entry was inspected. Always inspect excluded directories, warnings, and
-  `changesTruncated`; `partial` or `failed` must be disclosed and cannot establish that no other
-  Office file changed.
-- Match every requested output in `artifactObservation.expectedOutputs`. Only `created`, `modified`,
-  `replaced`, or `renamed` establish a file effect. `unchanged`, `missing`, `unobserved`, or
-  `invalid` do not satisfy a requested edit.
-- Inspect `changes` for unexpected workbook creation, replacement, deletion, or rename, and retain
-  every warning. A non-zero exit can still leave file effects; a zero exit does not prove that the
-  expected workbook exists or is valid.
-- Do not blindly retry after any observed side effect. First inspect the resulting workbook and
-  decide whether to continue from it, overwrite it deliberately, or report the partial outcome.
-
-Observation is followed by workbook verification. Read representative ranges and exact formulas,
-validate the package, and render each complete sheet or range whose layout matters once. Do not
-fragment one visual range into repeated browser-backed calls unless the first combined preview
-exposes a concrete defect. If the managed renderer returns an `office.render_backend_*` error,
-preserve it and report the visual check as unavailable instead of falling back to a user browser.
-Do not infer formula results that the selected library or engine did not calculate.
-
-## Core recipes
-
-Create a real workbook and rename its default sheet:
-
-```json
-{
-  "request": {
-    "operation": "create",
-    "filePath": "budget.xlsx"
-  },
-  "reason": "Create the requested Excel workbook"
-}
-```
-
-```json
-{
-  "request": {
-    "operation": "set",
-    "filePath": "budget.xlsx",
-    "target": "/Sheet1",
-    "properties": { "name": "预算" }
-  },
-  "reason": "Name the budget worksheet"
-}
-```
-
-Write a typed value and a SUM formula. Formula text excludes the leading `=`:
-
-```json
-{
-  "request": {
-    "operation": "set",
-    "filePath": "budget.xlsx",
-    "target": "/预算/B2",
-    "properties": {
-      "value": 3000,
-      "type": "number",
-      "numberformat": "¥#,##0"
+  "inputs": [
+    {
+      "mountPath": "source/template.xlsx",
+      "source": {
+        "type": "workspace",
+        "path": "outputs/template.xlsx"
+      }
     }
-  },
-  "reason": "Write a formatted budget amount"
+  ],
+  "reason": "Build the budget workbook and track its output"
 }
 ```
+
+Supported source types are:
+
+- `attachment`: exact registered `readPath`.
+- `workspace`: workspace file `path`.
+- `external`: authorized external file `path`.
+- `generated_artifact`: exact image Artifact `uri` plus the exact absolute `savedPath` as `path`.
+- `skill_resource`: exact revision-bound `uri`.
+
+`mountPath` is a private input-root-relative filename. The Host freezes and revalidates the input,
+then exposes the run-scoped root in `MYCOPILOT_INPUT_ROOT`. The Builder resolves
+`MYCOPILOT_INPUT_ROOT / mountPath`. Never let Python or Node.js open `@attachments`, `skill://`, an
+attachment library path, or another private storage path directly.
+
+## Observe every file effect
+
+Every Builder command must declare its expected `.xlsx` with exactly one static `--output`
+argument. The Host automatically binds `observe.kinds=["office"]` and copies that path into
+`observe.expectedOutputs`. Paths are relative to `cwd` unless workspace-external output is
+authorized with `write=all`. Use an explicit `observe.additionalRoots` only to discover other
+Office changes that are not already named; do not scan a whole external directory merely because
+one expected output is external.
+
+Inspect `artifactObservation` after success, non-zero exit, timeout, and cancellation:
+
+- Match every requested file in `artifactObservation.expectedOutputs`.
+- Accept `created`, `modified`, `replaced`, or `renamed` as evidence of a file effect.
+- Treat `missing`, `unchanged`, `unobserved`, `invalid`, partial coverage, or failed observation as
+  insufficient.
+- Report unexpected creations, replacements, deletions, or renames.
+- Never blindly rerun after a command that may have produced side effects.
+
+Observation records effects; it does not grant access, make arbitrary scripts transactional, or
+prove that the workbook is valid.
+
+## Consume render outputs
+
+Render a populated sheet or range to an explicit review image:
 
 ```json
 {
-  "request": {
-    "operation": "set",
-    "filePath": "budget.xlsx",
-    "target": "/预算/E2",
-    "properties": {
-      "formula": "SUM(B2:D2)",
-      "numberformat": "¥#,##0"
-    }
-  },
-  "reason": "Add the Q1 total formula"
+  "operation": "render",
+  "filePath": "outputs/budget.xlsx",
+  "outputPath": "outputs/budget-preview.png",
+  "sheetName": "季度预算",
+  "range": "A1:J30",
+  "reason": "Render the completed budget sheet for visual review"
 }
 ```
 
-Format a header range and freeze the first row:
+After a successful render, take the exact image reference from `outputs[].source` and pass it
+unchanged to `read_image`:
 
 ```json
 {
-  "request": {
-    "operation": "set",
-    "filePath": "budget.xlsx",
-    "target": "/预算/A1:E1",
-    "properties": {
-      "fill": "1F4E78",
-      "font.color": "FFFFFF",
-      "bold": true
-    }
-  },
-  "reason": "Format the workbook header"
+  "source": {
+    "type": "workspace",
+    "path": "outputs/budget-preview.png"
+  }
 }
 ```
 
-```json
-{
-  "request": {
-    "operation": "set",
-    "filePath": "budget.xlsx",
-    "target": "/预算",
-    "properties": { "freeze": "A2" }
-  },
-  "reason": "Freeze the first worksheet row"
-}
-```
+Treat the returned output as authoritative:
 
-Add a column chart using category and Q1-total ranges that already exist:
+- Select the output whose `role` is `render` and whose `kind` is `image`.
+- Use only its `source`; never reconstruct a path from the render request, `readPath`, `argv`,
+  `cwd`, `stdout`, or a file search.
+- Never rerender merely to discover where the first render was published.
+- `pageSelection` records the requested render selection; it is not an independent proof of sheet,
+  range, or layout coverage. Establish the intended sheet and used range with `inspect`, compare
+  them with the render request, and then inspect the returned image.
+- If the output is absent, not readable, or `read_image` reports an unsupported model capability,
+  state that visual verification was unavailable.
+- If a preview exceeds the visual-input limit, render bounded complete ranges or sheet groups
+  rather than repeating the same oversized request. Do not claim inspection of unread images.
 
-```json
-{
-  "request": {
-    "operation": "add",
-    "filePath": "budget.xlsx",
-    "parent": "/预算",
-    "element": "chart",
-    "properties": {
-      "chartType": "column",
-      "dataRange": "预算!E2:E4",
-      "categories": "预算!A2:A4",
-      "title": "Q1 合计",
-      "anchor": "G2:N18"
-    }
-  },
-  "reason": "Add the category Q1 total chart"
-}
-```
+## Generate, verify, render, iterate
 
-Read back the relevant range, including exact formula text and formats:
+Use this fixed loop for a final workbook:
 
-```json
-{
-  "request": {
-    "operation": "get",
-    "filePath": "budget.xlsx",
-    "target": "/预算/A1:E4",
-    "depth": 1
-  },
-  "reason": "Verify the budget values, formulas, and formats"
-}
-```
+1. Generate or edit the `.xlsx`.
+2. Confirm the expected file effect.
+3. Inspect required sheet names, dimensions, representative typed values, exact formulas, number
+   formats, frozen panes, conditional formatting, tables, and chart source ranges.
+4. Run native `validate`; do not invent cached formula values the selected engine did not compute.
+5. Render every final worksheet once. Use one combined request when the semantic renderer accepts
+   multiple sheets; otherwise render one complete populated range per sheet without fragmenting it.
+6. Read each exact returned render output with `read_image`, then visually inspect labels, column
+   widths, wrapped text, hidden or clipped content, totals, chart placement, legends, and axis
+   labels.
+7. If a defect exists, patch the same Builder or issue one corrected semantic operation,
+   regenerate, and repeat validation and rendering.
 
-For the first save-as edit, keep `filePath` as the frozen source and supply a distinct
-`destinationPath`. Apply later mutations to `budget-q1.xlsx` itself so earlier changes are
-preserved:
+Do not claim visual quality from package validation alone. If rendering returns an
+`office.render_backend_*` error, report that visual verification was unavailable; do not launch a
+user browser or fragment one range into repeated retry calls.
 
-```json
-{
-  "request": {
-    "operation": "set",
-    "filePath": "budget-template.xlsx",
-    "destinationPath": "budget-q1.xlsx",
-    "target": "/预算/E2",
-    "properties": { "formula": "SUM(B2:D2)" }
-  },
-  "reason": "Create the Q1 workbook without overwriting the template"
-}
-```
+## Spreadsheet quality checks
 
-Render the populated region to a workspace PNG:
-
-```json
-{
-  "request": {
-    "operation": "view",
-    "filePath": "budget.xlsx",
-    "mode": "screenshot",
-    "range": "预算!A1:N18",
-    "outputPath": "budget-preview.png"
-  },
-  "reason": "Render the workbook for visual inspection"
-}
-```
-
-Validate the OOXML package and formula references:
-
-```json
-{
-  "request": {
-    "operation": "validate",
-    "filePath": "budget.xlsx"
-  },
-  "reason": "Validate the finished Excel workbook"
-}
-```
-
-## Create
-
-1. Confirm sheet names, headers, data types, formulas, formats, filters, frozen panes, and chart requirements.
-2. Choose native operations for bounded authoring or a saved generator for coordinated,
-   repetitive authoring. Always create a real `.xlsx`; keep numeric and date values typed rather
-   than storing them as formatted strings.
-3. Write formulas into formula cells. Use absolute and relative references deliberately and keep ranges aligned with the data.
-4. Apply number formats separately from values. Use reusable styles consistently across headers, totals, inputs, and outputs.
-5. Add charts only after the source range is stable, and verify category and series references.
-
-## Edit
-
-1. Inspect relevant sheets, formulas, named ranges, tables, merged cells, and charts before mutation.
-2. Preserve unrelated sheets, formulas, styles, workbook metadata, and embedded objects.
-3. Prefer targeted native range or object changes for local edits. Use a saved script only when its
-   coordinated transformation is materially clearer or more reproducible than many isolated calls.
-4. With the native path, use `destinationPath` to save to a new workbook. With the script path,
-   pass distinct input and output parameters. Edit in place only when it was explicitly requested.
-
-## Verification
-
-- Confirm required sheets and dimensions, representative cell values and types, exact formula text, number formats, frozen panes, and chart ranges.
-- Check formula errors and validation warnings reported by the tool. Do not infer calculated values when the engine did not calculate them.
-- Render the relevant sheet or range and inspect clipping, column widths, hidden content, chart labels, and totals.
-- Treat a successful engine exit as necessary but insufficient when formulas or layout are material.
-- Treat a successful script exit as necessary but insufficient; require matching complete artifact
-  observation plus formula, structural, package, and visual checks appropriate to the task.
-- Report only checks that actually ran and preserve warnings in the final result.
+- Store formulas as formulas, never as displayed numeric results.
+- Apply number formats separately from typed values.
+- Keep formula references aligned with the final data range.
+- Preserve unrelated sheets, formulas, styles, names, charts, and embedded media during edits.
+- Verify chart categories and series against exact source ranges.
+- Report formula or validation warnings and only checks that actually ran.

@@ -474,6 +474,68 @@ fn rejects_duplicate_and_unpaired_tool_protocol_before_network_io() {
     );
 }
 
+#[tokio::test]
+async fn streaming_stop_without_text_or_tools_is_a_repairable_semantic_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_test_http_request(&mut stream).await;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let terminal = json!({
+            "choices": [{
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 2,
+                "total_tokens": 11
+            }
+        });
+        stream
+            .write_all(format!("data: {terminal}\n\ndata: [DONE]\n\n").as_bytes())
+            .await
+            .unwrap();
+    });
+    let request = LlmChatRequest {
+        api_url: format!("http://{address}/v1/chat/completions"),
+        api_token: "token".to_string(),
+        model: "test-model".to_string(),
+        api_style: AgentApiStyle::OpenAiCompatible,
+        max_tokens: 1_024,
+        temperature: 0.2,
+        stream: true,
+        messages: vec![message(LlmMessageRole::User, "Hello")],
+        tools: Vec::new(),
+    };
+    let mut events = Vec::new();
+    let error = complete_chat_streaming(request, AgentCancellationToken::new(), |event| {
+        events.push(event);
+    })
+    .await
+    .unwrap_err();
+    server.await.unwrap();
+
+    assert_eq!(error.code(), Some(EMPTY_MODEL_ACTION_ERROR_CODE));
+    assert!(is_repairable_empty_model_action(&error));
+    assert_eq!(
+        error.usage().and_then(|usage| usage.billable_request_count),
+        Some(1)
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, LlmStreamEvent::AttemptReset { .. })));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, LlmStreamEvent::Retrying { .. })));
+}
+
 #[test]
 fn retry_exhausted_error_mentions_retry_count() {
     let error = retry_exhausted_error(
@@ -517,9 +579,31 @@ fn internal_callers_can_defer_empty_response_validation() {
     )
     .unwrap();
 
-    assert!(strict.unwrap_err().to_string().contains("没有可显示文本"));
+    let strict = strict.unwrap_err();
+    assert!(strict.to_string().contains("没有可显示文本"));
+    assert_eq!(strict.code(), Some(EMPTY_MODEL_ACTION_ERROR_CODE));
+    assert!(!is_repairable_empty_model_action(&strict));
     assert!(deferred.content.is_empty());
     assert_eq!(deferred.finish_reason.as_deref(), Some("length"));
+
+    let normal_stop = json!({
+        "choices": [{
+            "message": { "role": "assistant", "content": "" },
+            "finish_reason": "stop"
+        }],
+        // Response metadata must not trick the transport retry heuristic into replaying the
+        // original empty request before the agent loop sends its one semantic repair request.
+        "gatewayDiagnostic": "upstream timeout"
+    })
+    .to_string();
+    let repairable = parse_non_stream_response(
+        &normal_stop,
+        AgentApiStyle::OpenAiCompatible,
+        LlmResponseValidation::RequireModelAction,
+    )
+    .unwrap_err();
+    assert!(is_repairable_empty_model_action(&repairable));
+    assert!(!is_retryable_llm_error(&repairable));
 }
 
 #[test]

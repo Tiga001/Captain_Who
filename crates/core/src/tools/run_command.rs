@@ -1,18 +1,33 @@
-use super::{clean_relative_path, AgentTool, ToolExecutionContext};
+use super::{
+    clean_relative_path, schema::agent_file_input_ref_schema, AgentTool, ToolExecutionContext,
+};
 use crate::command::{
-    classify_command_risk, infer_managed_artifact_command_kind, validate_command_runtime_binding,
-    validate_command_runtime_request, validate_managed_artifact_command_shape,
-    MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS, MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
+    classify_command_risk, infer_managed_artifact_builder_command,
+    infer_managed_artifact_command_kind, validate_command_runtime_binding,
+    validate_command_runtime_request, validate_managed_artifact_builder_output_scope,
+    validate_managed_artifact_command_shape, MAX_ADDITIONAL_ROOTS, MAX_COMMAND_CHARS,
+    MAX_EXPECTED_OUTPUTS, MAX_OBSERVATION_PATH_CHARS,
+};
+use crate::file_input::{
+    normalize_agent_file_input_specs, prepare_agent_file_input_bindings,
+    AgentFileInputExecutionContext, MAX_AGENT_FILE_INPUTS, MAX_AGENT_FILE_INPUT_MOUNT_PATH_CHARS,
 };
 use crate::protocol::{
     AgentApprovalStatus, AgentCommandArtifactObservationKind,
     AgentCommandArtifactObservationRequest, AgentCommandRequest, AgentCommandRuntimeProfile,
-    AgentCommandRuntimeRequest, AgentError, AgentProposedAction, AgentResult, AgentToolCall,
+    AgentCommandRuntimeRequest, AgentError, AgentFileInputSpec, AgentProposedAction, AgentResult,
+    AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus, AgentToolCall,
     AgentToolDefinition, AgentToolSafety,
+};
+use crate::skills::{
+    SkillResourceUri, APPLICATION_BUNDLED_SKILL_SOURCE_ID, DOCUMENTS_LOCAL_ID,
+    PRESENTATIONS_LOCAL_ID, SPREADSHEETS_LOCAL_ID,
 };
 use crate::system_paths::expand_system_path;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
@@ -27,7 +42,7 @@ impl AgentTool for RunCommandTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "run_command".to_string(),
-            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters. Use observe to request best-effort, permission-neutral tracking and validation of Office files changed by the command.".to_string(),
+            description: "Run one single-line non-interactive shell command through the host for builds, tests, queries, dependency management, or program execution. Command policy may execute it automatically, request explicit user approval, or deny catastrophic/unsupported operations. This policy is not an OS sandbox. Prefer apply_patch for reviewable source edits. The command must not contain literal newlines or null characters. For a backend-verified Office Skill Builder materialized in this run, use one direct Python/Node command with `--output <file.docx|file.xlsx|file.pptx>`; the host binds the matching managed runtime and observes the output, so runtimeProfile and observe are not required. inputs may bind authorized attachments, workspace/external files, generated Artifacts, or activated Skill resources into a private read-only input root. The managed script reads MYCOPILOT_INPUT_ROOT plus each declared mountPath; it must never open @attachments or skill:// directly.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -37,7 +52,7 @@ impl AgentTool for RunCommandTool {
                     "reason": { "type": "string", "description": "Why this command is needed and what result is expected." },
                     "observe": {
                         "type": "object",
-                        "description": "Best-effort artifact observation hint. It does not grant command, read, or write permission. When present, the workspace is observed automatically; expected outputs and additional roots are resolved relative to cwd.",
+                        "description": "Optional extra best-effort artifact observation hint. Managed Office Builders are observed automatically. This field does not grant command, read, or write permission. Expected outputs and additional roots are resolved relative to cwd.",
                         "properties": {
                             "kinds": {
                                 "type": "array",
@@ -64,7 +79,26 @@ impl AgentTool for RunCommandTool {
                     "runtimeProfile": {
                         "type": "string",
                         "enum": ["documents", "spreadsheets", "presentations"],
-                        "description": "Run a saved .mjs or .py artifact script in the matching fixed, host-owned Office environment. The host infers Node/Python from the direct script command and freezes exact packages, runtime version, and integrity identity. Never provide package versions. This does not grant command/file permission and never falls back to PATH."
+                        "description": "Optional compatibility selector for a custom saved .mjs or .py Office script that is not a backend-verified Skill Builder. Materialized Office Skill Builders must omit it: the host verifies their run-scoped materialization receipt, derives the profile, infers Node/Python, and freezes exact packages, runtime version, and integrity identity. Never provide package versions. This does not grant command/file permission and never falls back to PATH."
+                    },
+                    "inputs": {
+                        "type": "array",
+                        "maxItems": MAX_AGENT_FILE_INPUTS,
+                        "description": "Optional read-only inputs for a managed Office Builder or explicit runtimeProfile command. The host freezes hash/size, revalidates after approval, and materializes each source below MYCOPILOT_INPUT_ROOT at mountPath. This field is unavailable for ordinary shell commands.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "mountPath": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": MAX_AGENT_FILE_INPUT_MOUNT_PATH_CHARS,
+                                    "description": "Stable safe relative path beneath MYCOPILOT_INPUT_ROOT, for example images/campus.png."
+                                },
+                                "source": agent_file_input_ref_schema()
+                            },
+                            "required": ["mountPath", "source"],
+                            "additionalProperties": false
+                        }
                     }
                 },
                 "required": ["command"],
@@ -103,6 +137,8 @@ struct RunCommandArgs {
     reason: Option<String>,
     observe: Option<AgentCommandArtifactObservationRequest>,
     runtime_profile: Option<AgentCommandRuntimeProfile>,
+    #[serde(default)]
+    inputs: Vec<AgentFileInputSpec>,
 }
 
 fn command_request_from_call(
@@ -118,11 +154,58 @@ fn command_request_from_call(
         .or_else(|| call.reason.clone())
         .map(|reason| reason.trim().to_string())
         .filter(|reason| !reason.is_empty());
-    let observe = args.observe.map(sanitize_observe).transpose()?;
-    let runtime_binding = args
+    let host_builder_profile =
+        trusted_materialized_builder_profile(context, &command, cwd.as_deref())?;
+    let builder_config = derive_managed_builder_config(
+        &command,
+        args.runtime_profile,
+        args.observe,
+        host_builder_profile,
+    )?;
+    validate_managed_builder_output_scope(
+        context,
+        cwd.as_deref(),
+        &builder_config.inferred_outputs,
+    )?;
+    let runtime_binding = builder_config
         .runtime_profile
         .map(|profile| prepare_runtime_binding(context, &command, profile))
         .transpose()?;
+    if !args.inputs.is_empty() && runtime_binding.is_none() {
+        return Err(AgentError::structured(
+            "agent.fileInput.invalidRequest",
+            "run_command.inputs 只适用于带有 `--output` Office 文件的 Managed Builder，或显式设置了 runtimeProfile 的托管脚本命令。",
+            json!({
+                "type": "agentFileInput",
+                "code": "agent.fileInput.invalidRequest",
+                "recovery": "changeRequest"
+            }),
+        ));
+    }
+    let input_context = AgentFileInputExecutionContext::new(
+        context.attachment_library().cloned(),
+        context.skill_resources_optional(),
+    )
+    .with_storage(context.storage_optional());
+    let workspace_root = context.workspace_root_optional()?;
+    let inputs = prepare_agent_file_input_bindings(
+        workspace_root.as_deref(),
+        context.permissions(),
+        &input_context,
+        &args.inputs,
+        Some(&context.cancellation_token()),
+    )
+    .map_err(|error| {
+        AgentError::structured(
+            error.code(),
+            error.message(),
+            json!({
+                "type": "agentFileInput",
+                "code": error.code(),
+                "recovery": error.recovery()
+            }),
+        )
+    })?;
 
     Ok(AgentCommandRequest {
         id: call.id.clone(),
@@ -136,9 +219,450 @@ fn command_request_from_call(
         approval_status: AgentApprovalStatus::Required,
         risk_level: Some(classify_command_risk(&command)),
         reason,
-        observe,
+        observe: builder_config.observe,
+        inputs,
         runtime: None,
         runtime_binding: runtime_binding.map(Box::new),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedBuilderConfig {
+    runtime_profile: Option<AgentCommandRuntimeProfile>,
+    observe: Option<AgentCommandArtifactObservationRequest>,
+    inferred_outputs: Vec<String>,
+}
+
+fn trusted_materialized_builder_profile(
+    context: &ToolExecutionContext,
+    command: &str,
+    cwd: Option<&str>,
+) -> AgentResult<Option<AgentCommandRuntimeProfile>> {
+    let builder =
+        infer_managed_artifact_builder_command(command).map_err(builder_contract_error)?;
+    let Some(builder) = builder else {
+        return Ok(None);
+    };
+    let (Some(storage), Ok(run_id), Some(workspace_root)) = (
+        context.storage_optional(),
+        context.run_id(),
+        context.workspace_root_optional()?,
+    ) else {
+        return Ok(None);
+    };
+    let command_cwd = match cwd {
+        None => workspace_root.clone(),
+        Some(cwd) if Path::new(cwd).is_absolute() => PathBuf::from(cwd),
+        Some(cwd) => workspace_root.join(cwd),
+    };
+    let script = Path::new(&builder.script);
+    let script_path = normalize_builder_script_path(if script.is_absolute() {
+        script.to_path_buf()
+    } else {
+        command_cwd.join(script)
+    })?;
+    let Ok(relative_script) = script_path.strip_prefix(&workspace_root) else {
+        return Ok(None);
+    };
+    let relative_script = relative_script
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    let results = storage
+        .list_agent_tool_results_for_run(run_id, "skills_materialize_resource")
+        .map_err(|message| {
+            AgentError::structured(
+                "managedBuilder.provenanceUnavailable",
+                format!("无法读取 Managed Builder 的后端物化记录：{message}"),
+                json!({
+                    "type": "managedBuilder",
+                    "code": "managedBuilder.provenanceUnavailable",
+                    "recovery": "retry"
+                }),
+            )
+        })?;
+    let mut profiles = BTreeSet::new();
+    for result in results {
+        if !result.ok {
+            continue;
+        }
+        let value = result.result.ok_or_else(|| {
+            AgentError::structured(
+                "managedBuilder.provenanceInvalid",
+                "成功的 Skill 物化审计缺少结果，不能作为 Managed Builder 依据。",
+                json!({
+                    "type": "managedBuilder",
+                    "code": "managedBuilder.provenanceInvalid",
+                    "recovery": "restartRun"
+                }),
+            )
+        })?;
+        let receipt: AgentSkillMaterializationResult =
+            serde_json::from_value(value).map_err(|error| {
+                AgentError::structured(
+                    "managedBuilder.provenanceInvalid",
+                    format!("Skill 物化审计无法解析：{error}"),
+                    json!({
+                        "type": "managedBuilder",
+                        "code": "managedBuilder.provenanceInvalid",
+                        "recovery": "restartRun"
+                    }),
+                )
+            })?;
+        if receipt.destination != relative_script {
+            continue;
+        }
+        if receipt.source_prefix.is_some()
+            || receipt.file_count != 1
+            || receipt.plan_digest.is_none()
+            || !matches!(
+                receipt.status,
+                AgentSkillMaterializationResultStatus::Applied
+                    | AgentSkillMaterializationResultStatus::AlreadyApplied
+            )
+        {
+            return Err(AgentError::structured(
+                "managedBuilder.provenanceInvalid",
+                "匹配 Builder 路径的 Skill 物化审计不是成功的单文件内容寻址记录。",
+                json!({
+                    "type": "managedBuilder",
+                    "code": "managedBuilder.provenanceInvalid",
+                    "recovery": "rematerializeBuilder"
+                }),
+            ));
+        }
+        let Some(profile) = profile_for_bundled_builder_receipt(&receipt, builder.kind)? else {
+            continue;
+        };
+        profiles.insert(profile);
+    }
+    if profiles.len() > 1 {
+        return Err(AgentError::structured(
+            "managedBuilder.provenanceInvalid",
+            "同一个 Builder 路径存在相互冲突的后端 Skill 物化记录。",
+            json!({
+                "type": "managedBuilder",
+                "code": "managedBuilder.provenanceInvalid",
+                "recovery": "restartRun"
+            }),
+        ));
+    }
+    let Some(profile) = profiles.into_iter().next() else {
+        return Ok(None);
+    };
+
+    let metadata = std::fs::symlink_metadata(&script_path).map_err(|error| {
+        AgentError::structured(
+            "managedBuilder.provenanceInvalid",
+            format!("后端物化的 Managed Builder 不再可访问：{error}"),
+            json!({
+                "type": "managedBuilder",
+                "code": "managedBuilder.provenanceInvalid",
+                "recovery": "rematerializeBuilder"
+            }),
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AgentError::structured(
+            "managedBuilder.provenanceInvalid",
+            "后端物化的 Managed Builder 必须仍是非符号链接普通文件。",
+            json!({
+                "type": "managedBuilder",
+                "code": "managedBuilder.provenanceInvalid",
+                "recovery": "rematerializeBuilder"
+            }),
+        ));
+    }
+    let canonical_script = script_path
+        .canonicalize()
+        .map_err(|error| AgentError::new(format!("Managed Builder 路径无法规范化：{error}")))?;
+    if !canonical_script.starts_with(&workspace_root) {
+        return Err(AgentError::structured(
+            "managedBuilder.provenanceInvalid",
+            "后端物化的 Managed Builder 路径已经通过符号链接离开 workspace。",
+            json!({
+                "type": "managedBuilder",
+                "code": "managedBuilder.provenanceInvalid",
+                "recovery": "rematerializeBuilder"
+            }),
+        ));
+    }
+    Ok(Some(profile))
+}
+
+fn profile_for_bundled_builder_receipt(
+    receipt: &AgentSkillMaterializationResult,
+    command_kind: crate::AgentCommandRuntimeKind,
+) -> AgentResult<Option<AgentCommandRuntimeProfile>> {
+    let source = SkillResourceUri::parse(&receipt.source_uri)
+        .map_err(|error| AgentError::new(format!("Skill 物化审计包含无效 sourceUri：{error}")))?;
+    if source.package().skill_id().source_id().as_str() != APPLICATION_BUNDLED_SKILL_SOURCE_ID {
+        return Ok(None);
+    }
+    if receipt.source_revision != source.package().revision().as_str() {
+        return Err(AgentError::structured(
+            "managedBuilder.provenanceInvalid",
+            "内置 Builder 物化审计的 source revision 不一致。",
+            json!({
+                "type": "managedBuilder",
+                "code": "managedBuilder.provenanceInvalid",
+                "recovery": "restartRun"
+            }),
+        ));
+    }
+    let local_id = source.package().skill_id().local_id();
+    let path = source.path().as_str();
+    let profile = match (local_id, path, command_kind) {
+        (DOCUMENTS_LOCAL_ID, "templates/builder.py", crate::AgentCommandRuntimeKind::Python) => {
+            AgentCommandRuntimeProfile::Documents
+        }
+        (SPREADSHEETS_LOCAL_ID, "templates/builder.py", crate::AgentCommandRuntimeKind::Python) => {
+            AgentCommandRuntimeProfile::Spreadsheets
+        }
+        (PRESENTATIONS_LOCAL_ID, "templates/builder.mjs", crate::AgentCommandRuntimeKind::Node) => {
+            AgentCommandRuntimeProfile::Presentations
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(profile))
+}
+
+fn normalize_builder_script_path(path: PathBuf) -> AgentResult<PathBuf> {
+    if !path.is_absolute() {
+        return Err(AgentError::new(
+            "Managed Builder 脚本路径规范化前必须是绝对路径。",
+        ));
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(AgentError::new(
+                        "Managed Builder 脚本路径不能越过文件系统根目录。",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+fn builder_contract_error(message: String) -> AgentError {
+    AgentError::structured(
+        "managedBuilder.invalidOutputContract",
+        message,
+        json!({
+            "type": "managedBuilder",
+            "code": "managedBuilder.invalidOutputContract",
+            "recovery": "changeRequest"
+        }),
+    )
+}
+
+fn derive_managed_builder_config(
+    command: &str,
+    explicit_profile: Option<AgentCommandRuntimeProfile>,
+    explicit_observe: Option<AgentCommandArtifactObservationRequest>,
+    host_builder_profile: Option<AgentCommandRuntimeProfile>,
+) -> AgentResult<ManagedBuilderConfig> {
+    // The inferred profile selects only a host-owned dependency family; it is not command or
+    // filesystem authority. Normal command policy, write-scope checks, approval, frozen runtime
+    // identity, and post-approval revalidation remain mandatory.
+    let explicit_observe = explicit_observe.map(sanitize_observe).transpose()?;
+    let builder =
+        infer_managed_artifact_builder_command(command).map_err(builder_contract_error)?;
+
+    let mut inferred_profiles = BTreeSet::new();
+    let mut office_outputs = Vec::new();
+    if let Some(builder) = builder {
+        for output in builder.output_paths {
+            if let Some(profile) = office_profile_for_output(&output) {
+                inferred_profiles.insert(profile);
+                office_outputs.push(output);
+            }
+        }
+    }
+    if inferred_profiles.len() > 1 {
+        if explicit_profile.is_none() && host_builder_profile.is_none() {
+            return Ok(ManagedBuilderConfig {
+                runtime_profile: None,
+                observe: explicit_observe,
+                inferred_outputs: Vec::new(),
+            });
+        }
+        return Err(AgentError::structured(
+            "managedBuilder.ambiguousProfile",
+            "同一个 Managed Builder 命令声明了不同 Office 类型的输出，后端无法绑定唯一运行配置。",
+            json!({
+                "type": "managedBuilder",
+                "code": "managedBuilder.ambiguousProfile",
+                "recovery": "splitCommand"
+            }),
+        ));
+    }
+    let inferred_profile = inferred_profiles.into_iter().next();
+    if explicit_profile.is_none() && host_builder_profile.is_none() {
+        return Ok(ManagedBuilderConfig {
+            runtime_profile: None,
+            observe: explicit_observe,
+            inferred_outputs: Vec::new(),
+        });
+    }
+    if host_builder_profile.is_some() && inferred_profile.is_none() {
+        return Err(AgentError::structured(
+            "managedBuilder.invalidOutputContract",
+            "后端验证的 Managed Builder 必须声明一个静态 .docx、.xlsx 或 .pptx `--output`。",
+            json!({
+                "type": "managedBuilder",
+                "code": "managedBuilder.invalidOutputContract",
+                "recovery": "changeRequest"
+            }),
+        ));
+    }
+    if explicit_profile.is_some()
+        && inferred_profile.is_some()
+        && explicit_profile != inferred_profile
+    {
+        return Err(AgentError::structured(
+            "managedBuilder.profileMismatch",
+            "run_command.runtimeProfile 与 Managed Builder 的 Office 输出类型不一致。",
+            json!({
+                "type": "managedBuilder",
+                "code": "managedBuilder.profileMismatch",
+                "recovery": "removeRuntimeProfile",
+                "explicitProfile": explicit_profile,
+                "inferredProfile": inferred_profile
+            }),
+        ));
+    }
+    if host_builder_profile.is_some()
+        && inferred_profile.is_some()
+        && host_builder_profile != inferred_profile
+    {
+        return Err(AgentError::structured(
+            "managedBuilder.profileMismatch",
+            "Managed Builder 的来源 Skill 与 `--output` Office 类型不一致。",
+            json!({
+                "type": "managedBuilder",
+                "code": "managedBuilder.profileMismatch",
+                "recovery": "changeOutput",
+                "hostProfile": host_builder_profile,
+                "inferredProfile": inferred_profile
+            }),
+        ));
+    }
+    if host_builder_profile.is_some()
+        && explicit_profile.is_some()
+        && host_builder_profile != explicit_profile
+    {
+        return Err(AgentError::structured(
+            "managedBuilder.profileMismatch",
+            "run_command.runtimeProfile 与后端验证的 Managed Builder 来源不一致。",
+            json!({
+                "type": "managedBuilder",
+                "code": "managedBuilder.profileMismatch",
+                "recovery": "removeRuntimeProfile",
+                "hostProfile": host_builder_profile,
+                "explicitProfile": explicit_profile
+            }),
+        ));
+    }
+    let runtime_profile = host_builder_profile.or(explicit_profile);
+    let observe = if runtime_profile.is_some() {
+        let mut observe =
+            explicit_observe.unwrap_or_else(default_office_artifact_observation_request);
+        for output in &office_outputs {
+            if !observe
+                .expected_outputs
+                .iter()
+                .any(|existing| existing == output)
+            {
+                observe.expected_outputs.push(output.clone());
+            }
+        }
+        Some(sanitize_observe(observe)?)
+    } else {
+        explicit_observe
+    };
+
+    Ok(ManagedBuilderConfig {
+        runtime_profile,
+        observe,
+        inferred_outputs: office_outputs,
+    })
+}
+
+fn default_office_artifact_observation_request() -> AgentCommandArtifactObservationRequest {
+    AgentCommandArtifactObservationRequest {
+        kinds: vec![AgentCommandArtifactObservationKind::Office],
+        expected_outputs: Vec::new(),
+        additional_roots: Vec::new(),
+    }
+}
+
+fn office_profile_for_output(path: &str) -> Option<AgentCommandRuntimeProfile> {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("docx") => Some(AgentCommandRuntimeProfile::Documents),
+        Some("xlsx") => Some(AgentCommandRuntimeProfile::Spreadsheets),
+        Some("pptx") => Some(AgentCommandRuntimeProfile::Presentations),
+        _ => None,
+    }
+}
+
+fn validate_managed_builder_output_scope(
+    context: &ToolExecutionContext,
+    cwd: Option<&str>,
+    outputs: &[String],
+) -> AgentResult<()> {
+    let workspace_root = context.workspace_root_optional()?;
+    let command_cwd = match (cwd, workspace_root.as_ref()) {
+        (None, Some(root)) => root.clone(),
+        (None, None) => PathBuf::from("/"),
+        (Some(cwd), _) if Path::new(cwd).is_absolute() => PathBuf::from(cwd),
+        (Some(cwd), Some(root)) => root.join(cwd),
+        (Some(_), None) => {
+            return Err(AgentError::structured(
+                "managedBuilder.outputOutsideWriteScope",
+                "没有 workspace 时，Managed Builder 相对 cwd 无法解析。",
+                json!({
+                    "type": "managedBuilder",
+                    "code": "managedBuilder.outputOutsideWriteScope",
+                    "recovery": "changePermissionsOrOutput"
+                }),
+            ))
+        }
+    };
+    validate_managed_artifact_builder_output_scope(
+        workspace_root.as_deref(),
+        &command_cwd,
+        outputs,
+        context.permissions().write,
+    )
+    .map_err(|message| {
+        AgentError::structured(
+            "managedBuilder.outputOutsideWriteScope",
+            message,
+            json!({
+                "type": "managedBuilder",
+                "code": "managedBuilder.outputOutsideWriteScope",
+                "recovery": "changePermissionsOrOutput"
+            }),
+        )
     })
 }
 
@@ -216,16 +740,45 @@ pub(crate) fn validate_frozen_command_trace_args(
         .reason
         .map(|reason| reason.trim().to_string())
         .filter(|reason| !reason.is_empty());
-    let observe = args
+    let explicit_observe = args
         .observe
+        .clone()
         .map(sanitize_observe)
         .transpose()
         .map_err(|_| "run_command frozen ToolCall observe hint is invalid".to_string())?;
+    let inputs = normalize_agent_file_input_specs(&args.inputs)
+        .map_err(|_| "run_command frozen ToolCall inputs are invalid".to_string())?;
+    let frozen_inputs = frozen
+        .inputs
+        .iter()
+        .map(|binding| AgentFileInputSpec {
+            mount_path: binding.mount_path.clone(),
+            source: binding.source.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut expected_observe = explicit_observe.clone();
     let runtime_matches = match (&frozen.runtime_binding, &frozen.runtime) {
         (Some(binding), None) => {
+            let derived = derive_managed_builder_config(
+                &command,
+                args.runtime_profile,
+                args.observe.clone(),
+                args.runtime_profile.is_none().then_some(binding.profile),
+            )
+            .map_err(|_| {
+                "run_command frozen ToolCall Managed Builder config is invalid".to_string()
+            })?;
+            // Pending actions created before backend observation binding may legitimately have
+            // neither a model-authored nor a frozen observation. Preserve that narrow legacy
+            // shape; every newly prepared managed command freezes a non-empty Office observer.
+            expected_observe = if frozen.observe.is_none() && explicit_observe.is_none() {
+                None
+            } else {
+                derived.observe
+            };
             validate_command_runtime_binding(binding).is_ok()
                 && args.runtime.is_none()
-                && args.runtime_profile == Some(binding.profile)
+                && derived.runtime_profile == Some(binding.profile)
                 && infer_managed_artifact_command_kind(&command).ok() == Some(binding.kind)
         }
         (None, Some(legacy)) => {
@@ -247,7 +800,8 @@ pub(crate) fn validate_frozen_command_trace_args(
     if command != frozen.command
         || cwd != frozen.cwd
         || timeout_ms != frozen.timeout_ms
-        || observe != frozen.observe
+        || expected_observe != frozen.observe
+        || inputs != frozen_inputs
         || !runtime_matches
         || (reason_was_present && reason != frozen.reason)
     {
@@ -267,6 +821,8 @@ struct FrozenRunCommandArgs {
     reason: Option<String>,
     observe: Option<AgentCommandArtifactObservationRequest>,
     runtime_profile: Option<AgentCommandRuntimeProfile>,
+    #[serde(default)]
+    inputs: Vec<AgentFileInputSpec>,
     /// Legacy field accepted only while reconciling already-persisted pending actions.
     runtime: Option<AgentCommandRuntimeRequest>,
 }
@@ -446,12 +1002,21 @@ fn sanitize_cwd(
 mod tests {
     use super::*;
     use crate::protocol::{
-        AgentApprovalStatus, AgentCommandRiskLevel, AgentCommandRuntimeBinding,
-        AgentCommandRuntimeKind, AgentCommandRuntimeResolvedPackage, AgentPermissions,
-        AgentRunContext, AgentToolCall, AgentWorkspaceContext, AgentWritePermission,
-        AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
+        AgentApprovalStatus, AgentAttachmentLibraryContext, AgentAttachmentReference,
+        AgentCommandRiskLevel, AgentCommandRuntimeBinding, AgentCommandRuntimeKind,
+        AgentCommandRuntimeResolvedPackage, AgentInputAttachmentKind, AgentPermissions,
+        AgentReadPermission, AgentRunContext, AgentSkillMaterializationResult,
+        AgentSkillMaterializationResultStatus, AgentToolCall, AgentToolResult,
+        AgentWorkspaceContext, AgentWritePermission, AGENT_COMMAND_RUNTIME_BINDING_SCHEMA_VERSION,
     };
+    use crate::skills::{
+        SkillId, SkillPackageUri, SkillResourcePath, SkillRevision,
+        APPLICATION_BUNDLED_SKILL_SOURCE_ID,
+    };
+    use crate::storage::models::AgentActionAuditRecord;
+    use crate::storage::service::StorageService;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use std::sync::Arc;
 
     #[derive(Clone)]
@@ -508,6 +1073,73 @@ mod tests {
     ) -> ToolExecutionContext {
         context
             .with_command_runtime_profile_resolver(Some(Arc::new(FakeProfileResolver { binding })))
+    }
+
+    fn record_materialized_builder(
+        storage: &StorageService,
+        run_id: &str,
+        profile: AgentCommandRuntimeProfile,
+        destination: &str,
+    ) {
+        let (local_id, template_path) = match profile {
+            AgentCommandRuntimeProfile::Documents => (DOCUMENTS_LOCAL_ID, "templates/builder.py"),
+            AgentCommandRuntimeProfile::Spreadsheets => {
+                (SPREADSHEETS_LOCAL_ID, "templates/builder.py")
+            }
+            AgentCommandRuntimeProfile::Presentations => {
+                (PRESENTATIONS_LOCAL_ID, "templates/builder.mjs")
+            }
+        };
+        let revision = SkillRevision::parse(format!("revision-{local_id}")).unwrap();
+        let source = SkillPackageUri::new(
+            SkillId::parse(format!("{APPLICATION_BUNDLED_SKILL_SOURCE_ID}:{local_id}")).unwrap(),
+            revision.clone(),
+        )
+        .resource(SkillResourcePath::parse(template_path.to_string()).unwrap());
+        let result = AgentSkillMaterializationResult {
+            status: AgentSkillMaterializationResultStatus::Applied,
+            source_uri: source.to_string(),
+            source_prefix: None,
+            destination: destination.to_string(),
+            source_revision: revision.to_string(),
+            file_count: 1,
+            byte_count: 100,
+            plan_digest: Some("skill-materialization-sha256-v1:test".to_string()),
+            error: None,
+            message: Some("created".to_string()),
+        };
+        let tool_result = AgentToolResult {
+            call_id: format!("materialize-{local_id}"),
+            tool: "skills_materialize_resource".to_string(),
+            ok: true,
+            result: Some(serde_json::to_value(result).unwrap()),
+            error: None,
+        };
+        storage
+            .upsert_agent_action_audit(AgentActionAuditRecord {
+                action_id: format!("materialize-{local_id}"),
+                run_id: run_id.to_string(),
+                conversation_id: None,
+                assistant_message_id: None,
+                action_type: "skill_materialization".to_string(),
+                tool_name: "skills_materialize_resource".to_string(),
+                decision: Some("approved".to_string()),
+                status: "completed".to_string(),
+                action_json: "{}".to_string(),
+                patch_result_json: None,
+                command_result_json: None,
+                tool_result_json: Some(serde_json::to_string(&tool_result).unwrap()),
+                error: None,
+                created_at: 1,
+                decided_at: Some(2),
+                completed_at: Some(3),
+                effective_permissions_json: None,
+                path_scope: None,
+                command_cwd_scope: None,
+                blocked_reason: None,
+                decision_source: Some("manual".to_string()),
+            })
+            .unwrap();
     }
 
     #[test]
@@ -628,6 +1260,320 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("artifact-runtime-sha256-v1:"));
+    }
+
+    #[test]
+    fn backend_binds_managed_builder_profile_and_observation_from_office_output() {
+        struct Case {
+            command: &'static str,
+            script: &'static str,
+            profile: AgentCommandRuntimeProfile,
+            kind: AgentCommandRuntimeKind,
+            packages: &'static [(&'static str, &'static str)],
+        }
+        let cases = [
+            Case {
+                command: "python scripts/build.py --output outputs/report.docx",
+                script: "scripts/build.py",
+                profile: AgentCommandRuntimeProfile::Documents,
+                kind: AgentCommandRuntimeKind::Python,
+                packages: &[("python-docx", "1.2.0")],
+            },
+            Case {
+                command: "python scripts/build.py --output=outputs/report.xlsx",
+                script: "scripts/build.py",
+                profile: AgentCommandRuntimeProfile::Spreadsheets,
+                kind: AgentCommandRuntimeKind::Python,
+                packages: &[("openpyxl", "3.1.5"), ("xlsxwriter", "3.2.9")],
+            },
+            Case {
+                command: "node scripts/build.mjs --output 'outputs/product intro.pptx'",
+                script: "scripts/build.mjs",
+                profile: AgentCommandRuntimeProfile::Presentations,
+                kind: AgentCommandRuntimeKind::Node,
+                packages: &[("pptxgenjs", "4.0.1")],
+            },
+        ];
+        for case in cases {
+            let workspace = tempfile::tempdir().unwrap();
+            let script_path = workspace.path().join(case.script);
+            std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+            std::fs::write(&script_path, "# managed builder\n").unwrap();
+            let storage =
+                Arc::new(StorageService::open(&workspace.path().join("storage.sqlite")).unwrap());
+            let run_id = format!("run-auto-{:?}", case.profile);
+            record_materialized_builder(&storage, &run_id, case.profile, case.script);
+            let args = json!({ "command": case.command });
+            let call = AgentToolCall {
+                id: format!("tool-auto-{:?}", case.profile),
+                tool: "run_command".to_string(),
+                args: args.clone(),
+                approval_status: AgentApprovalStatus::Required,
+                reason: None,
+            };
+            let context = with_profile_resolver(
+                ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                    conversation_id: None,
+                    project_id: None,
+                    workspace: Some(AgentWorkspaceContext {
+                        project_id: None,
+                        display_name: Some("managed-builder".to_string()),
+                        root_path: Some(workspace.path().to_string_lossy().to_string()),
+                    }),
+                    attachment_library: None,
+                    permissions: AgentPermissions {
+                        write: AgentWritePermission::WorkspaceOnly,
+                        ..Default::default()
+                    },
+                })),
+                test_binding(case.profile, case.kind, case.packages),
+            )
+            .with_runtime_services(run_id, Some(storage));
+
+            let request = command_request_from_call(&context, &call).unwrap();
+            assert_eq!(
+                request
+                    .runtime_binding
+                    .as_deref()
+                    .map(|binding| binding.profile),
+                Some(case.profile)
+            );
+            let observe = request.observe.as_ref().expect("backend observation");
+            assert_eq!(observe.kinds, [AgentCommandArtifactObservationKind::Office]);
+            assert_eq!(observe.expected_outputs.len(), 1);
+            assert!(observe.expected_outputs[0].starts_with("outputs/"));
+            validate_frozen_command_trace_args(&request, &args).unwrap();
+        }
+    }
+
+    #[test]
+    fn ordinary_saved_scripts_are_not_silently_rebound_without_backend_provenance() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("ordinary.py"), "print('ordinary')\n").unwrap();
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: None,
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("ordinary-script".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().to_string()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..Default::default()
+                },
+            })),
+            test_binding(
+                AgentCommandRuntimeProfile::Documents,
+                AgentCommandRuntimeKind::Python,
+                &[("python-docx", "1.2.0")],
+            ),
+        );
+        let call = AgentToolCall {
+            id: "ordinary-script".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": "python ordinary.py --output report.docx"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+
+        let request = command_request_from_call(&context, &call).unwrap();
+        assert!(request.runtime_binding.is_none());
+        assert!(request.observe.is_none());
+    }
+
+    #[test]
+    fn backend_rejects_conflicting_builder_profile_and_workspace_escape() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("builder.py"), "# managed builder\n").unwrap();
+        let storage =
+            Arc::new(StorageService::open(&workspace.path().join("storage.sqlite")).unwrap());
+        let run_id = "run-builder-scope";
+        record_materialized_builder(
+            &storage,
+            run_id,
+            AgentCommandRuntimeProfile::Documents,
+            "builder.py",
+        );
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: None,
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("managed-builder".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().to_string()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..Default::default()
+                },
+            })),
+            test_binding(
+                AgentCommandRuntimeProfile::Documents,
+                AgentCommandRuntimeKind::Python,
+                &[("python-docx", "1.2.0")],
+            ),
+        )
+        .with_runtime_services(run_id.to_string(), Some(Arc::clone(&storage)));
+        let conflicting = AgentToolCall {
+            id: "tool-conflicting-profile".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": "python builder.py --output report.docx",
+                "runtimeProfile": "spreadsheets"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let error = command_request_from_call(&context, &conflicting).unwrap_err();
+        assert_eq!(error.code(), Some("managedBuilder.profileMismatch"));
+
+        let escaping = AgentToolCall {
+            id: "tool-escaping-output".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": "python builder.py --output ../outside.docx"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let error = command_request_from_call(&context, &escaping).unwrap_err();
+        assert_eq!(error.code(), Some("managedBuilder.outputOutsideWriteScope"));
+
+        let full_access_context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: None,
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("managed-builder".to_string()),
+                    root_path: Some(workspace.path().to_string_lossy().to_string()),
+                }),
+                attachment_library: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::All,
+                    ..Default::default()
+                },
+            })),
+            test_binding(
+                AgentCommandRuntimeProfile::Documents,
+                AgentCommandRuntimeKind::Python,
+                &[("python-docx", "1.2.0")],
+            ),
+        )
+        .with_runtime_services(run_id.to_string(), Some(storage));
+        let external = AgentToolCall {
+            id: "tool-external-output".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": "python builder.py --output /tmp/mycopilot-managed-builder.docx"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let request = command_request_from_call(&full_access_context, &external).unwrap();
+        assert_eq!(
+            request
+                .observe
+                .as_ref()
+                .unwrap()
+                .expected_outputs
+                .as_slice(),
+            ["/tmp/mycopilot-managed-builder.docx"]
+        );
+    }
+
+    #[test]
+    fn freezes_declared_attachment_input_without_persisting_library_paths() {
+        let library = tempfile::tempdir().unwrap();
+        let root = library.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("objects")).unwrap();
+        std::fs::write(root.join("objects/campus.png"), b"campus-image").unwrap();
+        std::fs::create_dir(root.join("scripts")).unwrap();
+        std::fs::write(root.join("scripts/build.py"), "# managed builder\n").unwrap();
+        let storage = Arc::new(StorageService::open(&root.join("storage.sqlite")).unwrap());
+        let run_id = "run-runtime-input";
+        record_materialized_builder(
+            &storage,
+            run_id,
+            AgentCommandRuntimeProfile::Documents,
+            "scripts/build.py",
+        );
+        let read_path = "@attachments/attachment-1/campus.png";
+        let call = AgentToolCall {
+            id: "tool-runtime-input".to_string(),
+            tool: "run_command".to_string(),
+            args: json!({
+                "command": "python scripts/build.py --output report.docx",
+                "inputs": [{
+                    "mountPath": "images/campus.png",
+                    "source": {
+                        "type": "attachment",
+                        "readPath": read_path
+                    }
+                }]
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let context = with_profile_resolver(
+            ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+                conversation_id: Some("conversation-1".to_string()),
+                project_id: None,
+                workspace: Some(AgentWorkspaceContext {
+                    project_id: None,
+                    display_name: Some("attachment-input-test".to_string()),
+                    root_path: Some(root.to_string_lossy().to_string()),
+                }),
+                attachment_library: Some(AgentAttachmentLibraryContext {
+                    root_path: Some(root.to_string_lossy().to_string()),
+                    conversation_id: Some("conversation-1".to_string()),
+                    project_id: None,
+                    conversation_attachments: vec![AgentAttachmentReference {
+                        id: "attachment-1".to_string(),
+                        conversation_id: "conversation-1".to_string(),
+                        message_id: "message-1".to_string(),
+                        project_id: None,
+                        kind: AgentInputAttachmentKind::Image,
+                        name: "campus.png".to_string(),
+                        mime_type: Some("image/png".to_string()),
+                        size_bytes: 12,
+                        read_path: read_path.to_string(),
+                        storage_rel_path: "objects/campus.png".to_string(),
+                        created_at: 1,
+                    }],
+                    project_attachments: Vec::new(),
+                }),
+                permissions: AgentPermissions {
+                    read: AgentReadPermission::WorkspaceOnly,
+                    write: AgentWritePermission::WorkspaceOnly,
+                    ..Default::default()
+                },
+            })),
+            test_binding(
+                AgentCommandRuntimeProfile::Documents,
+                AgentCommandRuntimeKind::Python,
+                &[("python-docx", "1.2.0")],
+            ),
+        )
+        .with_runtime_services(run_id.to_string(), Some(storage));
+
+        let request = command_request_from_call(&context, &call).unwrap();
+        assert_eq!(request.inputs.len(), 1);
+        assert_eq!(request.inputs[0].mount_path, "images/campus.png");
+        assert_eq!(request.inputs[0].size_bytes, 12);
+        assert_eq!(
+            request.inputs[0].sha256,
+            format!("{:x}", Sha256::digest(b"campus-image"))
+        );
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert!(!serialized.contains(root.to_string_lossy().as_ref()));
     }
 
     #[test]

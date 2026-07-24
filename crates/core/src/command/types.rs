@@ -150,6 +150,8 @@ pub struct AgentCommandExecutionResult {
     pub policy_evaluation: Option<CommandPolicyEvaluation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub artifact_observation: Option<AgentCommandArtifactObservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_files: Vec<crate::AgentFileInputEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<AgentCommandRuntimeResolution>,
 }

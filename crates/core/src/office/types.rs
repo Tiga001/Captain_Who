@@ -1,5 +1,7 @@
 use crate::{
-    AgentAttachmentLibraryContext, AgentCancellationToken, AgentPermissions, AgentRunContext,
+    file_input::AgentFileInputExecutionContext, AgentAttachmentLibraryContext,
+    AgentCancellationToken, AgentFileInputBinding, AgentFileInputRef, AgentFileInputSpec,
+    AgentPermissions, AgentRunContext,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,7 +14,13 @@ use std::sync::Arc;
 
 pub const OFFICECLI_PROVIDER_ID: &str = "officecli";
 pub const OFFICE_ENGINE_STATUS_SCHEMA_VERSION: u32 = 1;
-pub const OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION: u32 = 4;
+pub const OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION: u32 = 5;
+
+pub(crate) const OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX: &str = "__mycopilot_agent_input__/";
+
+pub(crate) fn office_agent_input_placeholder(mount_path: &str) -> String {
+    format!("{OFFICE_AGENT_INPUT_PLACEHOLDER_PREFIX}{mount_path}")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -483,6 +491,7 @@ pub struct OfficeExecutionContext {
     workspace_root: Option<PathBuf>,
     permissions: AgentPermissions,
     attachment_library: Option<AgentAttachmentLibraryContext>,
+    file_inputs: AgentFileInputExecutionContext,
 }
 
 impl OfficeExecutionContext {
@@ -494,8 +503,19 @@ impl OfficeExecutionContext {
         Self {
             workspace_root,
             permissions,
+            file_inputs: AgentFileInputExecutionContext::from_attachment_library(
+                attachment_library.clone(),
+            ),
             attachment_library,
         }
+    }
+
+    /// Adds the trusted, run-scoped authorities required to resolve unified Agent file inputs.
+    ///
+    /// This authority is execution-only. It is never serialized into a proposed action.
+    pub fn with_file_inputs(mut self, file_inputs: AgentFileInputExecutionContext) -> Self {
+        self.file_inputs = file_inputs;
+        self
     }
 
     pub fn from_run_context(context: Option<&AgentRunContext>) -> Self {
@@ -520,6 +540,10 @@ impl OfficeExecutionContext {
 
     pub fn attachment_library(&self) -> Option<&AgentAttachmentLibraryContext> {
         self.attachment_library.as_ref()
+    }
+
+    pub(crate) fn file_inputs(&self) -> &AgentFileInputExecutionContext {
+        &self.file_inputs
     }
 }
 
@@ -623,6 +647,13 @@ pub struct OfficeExecutionRequest {
     /// is published. Omit for an in-place mutation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_path: Option<String>,
+    /// Unified, model-declared read inputs used by path-bearing semantic operations.
+    ///
+    /// The request contains logical sources only. Preparation freezes exact bytes into
+    /// `OfficePreparedExecution::input_bindings`; execution re-resolves and materializes them
+    /// into a private read-only directory before invoking the provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<AgentFileInputSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 }
@@ -649,6 +680,15 @@ pub struct OfficeExecutionResult {
     pub engine_revision: String,
     pub document_kind: OfficeDocumentKind,
     pub operation: OfficeOperation,
+    /// Authoritative files published by this execution.
+    ///
+    /// This model-actionable field intentionally precedes low-level process
+    /// diagnostics in the serialized result. Entries are added only after
+    /// validation and atomic publication succeed. `read_path` always
+    /// identifies the final target and never a staging or private snapshot
+    /// path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<OfficePublishedOutput>,
     /// Exact argv passed after the executable. This is diagnostic data, not a
     /// command string and cannot be replayed through a shell.
     pub argv: Vec<String>,
@@ -666,6 +706,65 @@ pub struct OfficeExecutionResult {
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OfficePublishedOutputRole {
+    Render,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OfficePublishedOutputKind {
+    Image,
+    Document,
+}
+
+/// The page/slide selection requested for a rendered output.
+///
+/// This records selection intent, not independently verified per-page
+/// coverage. Provider success and artifact validation prove that the published
+/// file is valid, but do not prove that every requested page appears in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum OfficeRenderPageSelection {
+    All,
+    Explicit { pages: Vec<u32> },
+}
+
+/// One validated Office artifact at its final, atomically published location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OfficePublishedOutput {
+    pub role: OfficePublishedOutputRole,
+    pub kind: OfficePublishedOutputKind,
+    pub mime_type: String,
+    /// Typed reference that can be reused by tools accepting
+    /// [`AgentFileInputRef`]. It remains subject to the current read policy.
+    pub source: AgentFileInputRef,
+    /// Logical final path that can be supplied to ordinary file-reading tools.
+    /// Every consumer still enforces its own format, size, and delivery limits.
+    pub read_path: String,
+    pub scope: OfficePathScope,
+    /// Whether the current Agent read permission covers `read_path`.
+    ///
+    /// This is not a promise that a downstream visual/file tool accepts the
+    /// artifact's MIME type, dimensions, or byte size.
+    pub readable_by_agent: bool,
+    pub size_bytes: u64,
+    /// Lowercase hexadecimal SHA-256 of the published bytes.
+    pub sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    pub page_selection: OfficeRenderPageSelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -771,6 +870,12 @@ pub struct OfficePreparedExecution {
     /// and the current execution context immediately before execution.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<OfficeFrozenPath>,
+    /// Immutable content identities for every model-declared Office input.
+    ///
+    /// These bindings are prepared before approval and revalidated against current run
+    /// authorities immediately before provider execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_bindings: Vec<AgentFileInputBinding>,
     // The schema-v2 fields remain deserializable so persisted pending actions
     // receive an explicit unsupported-schema error instead of a decode error.
     // They are not trusted or populated by schema-v3 preparation.

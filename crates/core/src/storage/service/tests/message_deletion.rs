@@ -46,6 +46,7 @@ fn persist_settled_manual_command(
             risk_level: None,
             reason: Some("build the reviewed artifact".to_string()),
             observe: None,
+            inputs: Vec::new(),
             runtime: None,
             runtime_binding: None,
         },
@@ -140,6 +141,7 @@ fn persist_settled_manual_command(
         error: None,
         policy_evaluation: None,
         artifact_observation: None,
+        input_files: Vec::new(),
         runtime: None,
     };
     let tool_result = crate::command::command_tool_result(call_id, &command_result);

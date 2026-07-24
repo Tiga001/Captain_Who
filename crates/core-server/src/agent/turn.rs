@@ -73,7 +73,7 @@ impl AgentService {
                         run_id,
                         &emitter_conversation_id,
                         &emitter_assistant_message_id,
-                        action.clone(),
+                        action.as_ref().clone(),
                         agent_input,
                     ) {
                         Ok(true) => {}

@@ -8,6 +8,7 @@
 mod discovery;
 mod execution;
 mod render_runtime;
+mod semantic;
 mod types;
 
 pub use discovery::{office_cli_component_relative_path, OfficeCliDiscoveryOptions};
@@ -22,6 +23,24 @@ pub use render_runtime::{
     run_office_browser_proxy, OfficeRenderRuntime, OfficeRenderRuntimeDiscoveryOptions,
     OFFICE_RENDER_RUNTIME_BUNDLE_VERSION, OFFICE_RENDER_RUNTIME_PROVIDER_ID,
 };
+pub use semantic::{
+    compile_office_semantic_request, OfficeChartKind, OfficeChartSeries,
+    OfficeConditionalFormatKind, OfficeCreateIntent, OfficeDocumentBlockIntent,
+    OfficeDocumentBlockKind, OfficeDocumentFormatIntent, OfficeDocumentMoveIntent,
+    OfficeDocumentTextIntent, OfficeHeaderFooterIntent, OfficeHorizontalAlignment,
+    OfficeImageIntent, OfficeInspectIntent, OfficePresentationChartIntent,
+    OfficePresentationFooterIntent, OfficePresentationImageIntent,
+    OfficePresentationMoveSlideIntent, OfficePresentationShapeIntent,
+    OfficePresentationSlideIndexIntent, OfficePresentationSlideIntent,
+    OfficePresentationTableIntent, OfficePresentationTextIntent, OfficeRenderIntent,
+    OfficeReplaceTextIntent, OfficeSemanticError, OfficeSemanticErrorCode, OfficeSemanticIntent,
+    OfficeSemanticRequest, OfficeSemanticStyle, OfficeSpreadsheetCellIntent,
+    OfficeSpreadsheetChartIntent, OfficeSpreadsheetConditionalFormatIntent,
+    OfficeSpreadsheetFormulaIntent, OfficeSpreadsheetFreezeIntent, OfficeSpreadsheetImageIntent,
+    OfficeSpreadsheetMoveSheetIntent, OfficeSpreadsheetRangeFormatIntent,
+    OfficeSpreadsheetSheetIntent, OfficeSpreadsheetTableIntent, OfficeTableIntent,
+    OFFICE_SEMANTIC_REQUEST_SCHEMA_VERSION,
+};
 pub use types::{
     OfficeCellShift, OfficeDocumentKind, OfficeElementPosition, OfficeEngine,
     OfficeEngineAvailability, OfficeEngineCapabilities, OfficeEngineError, OfficeEngineErrorCode,
@@ -30,8 +49,9 @@ pub use types::{
     OfficeFrozenPath, OfficeGridLayout, OfficeHelpVerb, OfficeOperation, OfficeOperationAccess,
     OfficeOperationParameters, OfficePageRange, OfficePathIdentity, OfficePathPurpose,
     OfficePathScope, OfficePathSlot, OfficePreparedExecution, OfficePropertyMap,
-    OfficeRequestParameters, OfficeTextReplacement, OfficeViewMode, OfficeViewRenderMode,
-    OfficeViewport, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
+    OfficePublishedOutput, OfficePublishedOutputKind, OfficePublishedOutputRole,
+    OfficeRenderPageSelection, OfficeRequestParameters, OfficeTextReplacement, OfficeViewMode,
+    OfficeViewRenderMode, OfficeViewport, OfficeWriteDisposition, OFFICECLI_PROVIDER_ID,
     OFFICE_ENGINE_STATUS_SCHEMA_VERSION, OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
 };
 

@@ -84,6 +84,7 @@ fn command_request(id: &str, command: &str) -> AgentCommandRequest {
         risk_level: Some(AgentCommandRiskLevel::ReadOnly),
         reason: Some("exercise server authorization boundary".to_string()),
         observe: None,
+        inputs: Vec::new(),
         runtime: None,
         runtime_binding: None,
     }

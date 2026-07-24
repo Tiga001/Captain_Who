@@ -537,6 +537,11 @@ mod tests {
             office_operation: Box::new(crate::AgentOfficeOperationRequest {
                 schema_version: crate::AGENT_OFFICE_OPERATION_SCHEMA_VERSION,
                 id: "office-1".to_string(),
+                semantic_args: serde_json::json!({
+                    "operation": "create",
+                    "filePath": "budget.xlsx",
+                    "reason": "create the reviewed workbook"
+                }),
                 prepared: crate::office::OfficePreparedExecution {
                     schema_version: crate::office::OFFICE_PREPARED_EXECUTION_SCHEMA_VERSION,
                     provider_id: "test".to_string(),
@@ -556,10 +561,12 @@ mod tests {
                         ),
                         output_path: None,
                         destination_path: None,
+                        inputs: Vec::new(),
                         timeout_ms: None,
                     },
                     argv: vec!["create".to_string(), "budget.xlsx".to_string()],
                     paths: Vec::new(),
+                    input_bindings: Vec::new(),
                     document_precondition: None,
                     output_precondition: None,
                     destination_precondition: None,
@@ -597,6 +604,7 @@ mod tests {
                     risk_level: None,
                     reason: None,
                     observe: None,
+                    inputs: Vec::new(),
                     runtime: None,
                     runtime_binding: None,
                 },

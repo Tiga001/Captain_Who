@@ -553,6 +553,79 @@ pub struct AgentAttachmentReference {
     pub created_at: i64,
 }
 
+/// One model-visible, purpose-limited file input.
+///
+/// This is a logical reference, not a filesystem path grant. Trusted adapters resolve the
+/// reference against the current run authority, freeze its content identity, and revalidate that
+/// identity before bytes cross an execution boundary.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum AgentFileInputRef {
+    /// Exact `readPath` returned by the attachment library.
+    Attachment { read_path: String },
+    /// Workspace-relative path. Absolute paths are deliberately rejected for this variant.
+    Workspace { path: String },
+    /// Absolute path or supported system-path alias. Requires read=all.
+    External { path: String },
+    /// Immutable application Artifact. The URI is resolved through the authoritative publication
+    /// registry; `path` is only an exact-consistency hint from the prior Tool Result.
+    GeneratedArtifact { uri: String, path: String },
+    /// Exact revision-bound `skill://` URI from an activated Skill.
+    SkillResource { uri: String },
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentFileInputSpec {
+    /// Stable relative path beneath the private input root exposed to the managed process.
+    pub mount_path: String,
+    pub source: AgentFileInputRef,
+}
+
+pub const AGENT_FILE_INPUT_BINDING_SCHEMA_VERSION: u32 = 1;
+
+/// Approval-time content identity for one declarative file input.
+///
+/// Host-private source paths and the temporary materialization root are intentionally absent.
+/// Workspace/external paths remain logical user-authored references; attachment and Skill store
+/// paths never enter this contract.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentFileInputBinding {
+    pub schema_version: u32,
+    pub mount_path: String,
+    pub source: AgentFileInputRef,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFileInputSourceKind {
+    Attachment,
+    Workspace,
+    External,
+    GeneratedArtifact,
+    SkillResource,
+}
+
+/// Presentation-safe execution evidence for a materialized input.
+///
+/// This deliberately records no source or temporary filesystem path.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentFileInputEvidence {
+    pub mount_path: String,
+    pub source_kind: AgentFileInputSourceKind,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentContextWindowStatus {
@@ -831,12 +904,14 @@ pub enum AgentSkillDependencyStatus {
 
 /// Version of the persisted, approval-gated Office action envelope.
 ///
-/// Version 4 binds a provider-neutral typed operation request and a normalized,
-/// non-empty, user-facing reason of at most [`AGENT_OFFICE_REASON_MAX_CHARS`]
-/// characters to the frozen Office action. Provider argv is generated and
-/// revalidated by the trusted host. Older actions must be prepared again instead
-/// of being interpreted under this stricter contract.
-pub const AGENT_OFFICE_OPERATION_SCHEMA_VERSION: u32 = 4;
+/// Version 5 binds the original flat semantic model request, its compiled
+/// provider-neutral operation request, and a normalized, non-empty user-facing
+/// reason of at most [`AGENT_OFFICE_REASON_MAX_CHARS`] characters to the same
+/// frozen Office action. The Host re-parses and recompiles `semantic_args`
+/// before execution, so neither approval nor history recovery ever has to infer
+/// model intent from provider parameters. Provider argv remains trusted
+/// Host-owned state. Older actions must be prepared again.
+pub const AGENT_OFFICE_OPERATION_SCHEMA_VERSION: u32 = 5;
 
 /// Maximum number of Unicode scalar values accepted in an Office call reason.
 pub const AGENT_OFFICE_REASON_MAX_CHARS: usize = 240;
@@ -889,6 +964,7 @@ pub fn is_valid_agent_office_reason(reason: &str) -> bool {
 pub struct AgentOfficeOperationRequest {
     pub schema_version: u32,
     pub id: String,
+    pub semantic_args: Value,
     pub prepared: crate::office::OfficePreparedExecution,
     pub approval_status: AgentApprovalStatus,
     pub reason: String,
@@ -1544,6 +1620,8 @@ pub struct AgentCommandRequest {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observe: Option<AgentCommandArtifactObservationRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<AgentFileInputBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Legacy exact-package request retained only so old pending actions can be deserialized and
     /// retired safely. New model calls never populate this field and the host never executes it.
@@ -1809,7 +1887,7 @@ pub enum AgentEvent {
     },
     ApprovalRequired {
         run_id: String,
-        action: AgentProposedAction,
+        action: Box<AgentProposedAction>,
         #[serde(skip)]
         checkpoint: AgentRunCheckpoint,
     },

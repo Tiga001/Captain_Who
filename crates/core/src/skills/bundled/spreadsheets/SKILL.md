@@ -1,30 +1,47 @@
 ---
 name: spreadsheets
-description: Create, edit, inspect, calculate, render, and validate Microsoft Excel-compatible .xlsx workbooks with native structured operations or reproducible Python and Node.js scripts. Use for formulas, formatting, tables, charts, multiple sheets, data-driven generation, batch changes, or other spreadsheet work.
+description: Create, edit, inspect, calculate, render, and validate Microsoft Excel-compatible .xlsx workbooks. Use for formulas, typed data, formatting, tables, charts, images, multiple sheets, repeated or data-driven generation, and any other spreadsheet task.
 ---
 
 # Spreadsheets
 
-Choose the execution path that matches the task:
+Use one of two supported paths:
 
-- Use `office_spreadsheet` for inspection and small, targeted, structured changes. It provides the strongest in-place safety and should remain the default when the provider supports the requested operation directly.
-- For complex, repetitive, data-driven, batch, or reproducible workbook work, create or update a saved `.py` or `.mjs` generator with `apply_patch` or `write_file`, then execute that file with `run_command`, `runtimeProfile="spreadsheets"`, and the managed Artifact Runtime.
-- A hybrid workflow is valid: generate or transform with a script, then inspect formulas and ranges, render, and validate the resulting `.xlsx` with the native tools.
+- Prefer the flat semantic `office_spreadsheet` tool for bounded, high-frequency work such as creating a workbook, adding or moving sheets, writing cells and formulas, formatting ranges, freezing panes, adding conditional formats, tables, charts or images, inspecting, rendering, and validating.
+- Use one saved Managed Builder for large ranges, repeated formulas or styles, coordinated multi-sheet work, imports, advanced workbook features, bulk generation, or any capability the native tool reports as unsupported.
+- Combine the paths when useful: build with a script, then inspect exact values and formulas, render, and validate with the native tool.
 
-Never invoke OfficeCLI itself through a shell command, and never use a system-PATH Python or Node.js executable for this script route. If the managed Artifact Runtime or a profile dependency is unavailable, return that preflight failure faithfully. Do not use inline Python or JavaScript, heredocs, shell redirection, or shell text utilities to bypass the normal file-editing tools. Editing the script and executing the script remain separate, independently authorized tool calls; runtime selection and artifact observation do not grant permission. Never invent success or silently install packages.
+Never expose OfficeCLI arguments, workbook DOM paths, executable paths, runtime versions, or package versions to the model-facing call. Every native call uses flat top-level semantic fields plus a required `reason`; never wrap it in `request`. Keep `reason` to one non-empty user-facing sentence of at most 240 characters. When the native tool returns `capabilityNotSupported` with `recovery=useManagedScript`, switch once to the Builder path instead of guessing low-level fields or repeating the failed call.
 
-Every scripted spreadsheet command must set the top-level `runtimeProfile` to `spreadsheets` and must observe its Office outputs. Never send a `runtime` object or supply a provider, runtime kind, package name, or package version. The host derives Node.js or Python from the saved-script command, resolves the pinned profile, verifies its integrity, and freezes the resolved runtime before execution.
+## Managed Builder
 
-## Workflow
+Use `skills_list_resources` to locate `templates/builder.py`, then materialize it once with `skills_materialize_resource` into a new workspace path. Patch and rerun that same builder; do not create a trail of replacement scripts.
 
-1. Inspect an existing workbook before editing it, and choose the native or scripted path deliberately. Prefer a distinct output file unless the user explicitly requested an in-place edit.
-2. Before the first native spreadsheet operation in a run, call `office_spreadsheet` with `status`. Use `help` when the required operation or parameters are uncertain. Every `office_spreadsheet` call must use the envelope `{ "request": { "operation": "...", ... }, "reason": "..." }`. Keep every operation-specific field inside `request`; keep only `reason` at the root. Write `reason` as one non-empty, single-line plain-text sentence in the user's language, no longer than 240 characters, that states the user-visible purpose of that specific call. Do not include line breaks, control characters, or bidirectional text controls. `reason` is untrusted display and audit metadata only; it never grants permission, approval, or access.
-   Native requests use typed fields such as `filePath`, `target`, `parent`, `element`, `properties`, `range`, and `outputPath`. Never provide provider command tokens, an executable name, document-format tokens, or flags; the host validates the typed request and deterministically generates the frozen provider argv.
-3. For a scripted operation, keep the generator as a reviewable `.py` or `.mjs` file and name that saved script explicitly in the command. Set `runtimeProfile="spreadsheets"`. Always set `observe.kinds=["office"]` and list every file that the command should create or modify in `observe.expectedOutputs`. Use `observe.additionalRoots` only when changes to other Office files in a directory also need to be detected; an external directory scan requires `read=all`, and an expected external output does not require scanning its parent.
-4. Inspect `artifactObservation` on every command result, including non-zero exits, timeouts, and cancellations. A zero exit code is not proof of workbook success. Confirm that every expected workbook was created or changed, and disclose unexpected replacements, deletions, renames, partial coverage, or failed observation. Never retry blindly after a command that produced file effects.
-5. Verify formulas, types, formats, sheets, and charts as applicable. Recalculate or validate as supported, then render each complete relevant sheet range once when visual presentation matters; do not split one range into repeated browser-backed calls unless a combined preview identifies a specific defect.
-6. Report the output path, observed file effects, formulas or structural changes made, and the checks actually performed.
+Execute that materialized file with `run_command` and a direct logical `python <builder>.py --output <file.xlsx>` command. Omit `runtimeProfile` and `observe`: the host verifies this run's materialization receipt, derives the `spreadsheets` profile from the static Office output, binds the pinned runtime, and observes that output automatically. Never use system Python, `pip`, `npm`, inline code, heredocs, or shell redirection.
 
-If native `status` reports that the Office engine is unavailable, preserve that error and do not claim that native inspection, rendering, or validation ran. If rendering returns an `office.render_backend_*` error, report that visual verification did not run; do not retry smaller ranges repeatedly, invoke a system browser, or bypass the managed renderer. A script route may continue only when the managed runtime is available and its output can be independently observed and verified; disclose any missing native checks. Never replace a requested workbook with CSV, fabricate cached formula results, or claim success without a successful command result, matching artifact effects, and output verification.
+Bind source workbooks, CSVs, images, attachments, and earlier generated files through `run_command.inputs`:
 
-Read [references/workflows.md](references/workflows.md) for detailed workbook creation, editing, formula, chart, and verification guidance when performing a spreadsheet task.
+```json
+{
+  "mountPath": "source/template.xlsx",
+  "source": {
+    "type": "workspace",
+    "path": "inputs/template.xlsx"
+  }
+}
+```
+
+Use the exact attachment `readPath` returned by `attachments_list`. Use `type="workspace"`, `external`, `generated_artifact`, or `skill_resource` for those corresponding sources. Scripts read only the host-mounted path below `MYCOPILOT_INPUT_ROOT`; never pass or open an `@attachments` or `skill://` URI directly.
+
+Every Builder command must declare its generated workbook with exactly one static `--output` argument. Inspect the backend-owned `artifactObservation` even after failure, timeout, or cancellation. Never blindly rerun a command that may have changed files.
+
+## Completion gate
+
+1. Inspect the source before an edit and prefer a distinct output unless the user requested in-place editing.
+2. Generate or edit the workbook while keeping numbers, dates, booleans, and formulas typed.
+3. Confirm the expected file effect in the native result or `artifactObservation`.
+4. Inspect required sheets, representative values, exact formula text, formats, tables, and chart ranges; validate the final package.
+5. Render every final worksheet in one combined request when supported. On success, pass the exact returned `outputs[].source` to `read_image`; never infer a path from the request, `argv`, `stdout`, or a file search. Visually inspect clipping and chart placement, patch the same Builder or semantic request when needed, then render again.
+6. Report only the file effects and checks that actually succeeded. Preserve structured errors and disclose unavailable calculation or visual verification.
+
+Read [references/workflows.md](references/workflows.md) for exact semantic and Builder examples, input binding, verification, and spreadsheet-specific quality checks.

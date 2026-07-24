@@ -102,6 +102,21 @@ fn proposed_action_failure_result(
     }
 }
 
+fn agent_file_input_execution_context(
+    input: &AgentChatInput,
+    skill_resources: Option<Arc<SkillResourceSession>>,
+    storage: Arc<StorageService>,
+) -> AgentFileInputExecutionContext {
+    AgentFileInputExecutionContext::new(
+        input
+            .context
+            .as_ref()
+            .and_then(|context| context.attachment_library.clone()),
+        skill_resources,
+    )
+    .with_storage(Some(storage))
+}
+
 fn bounded_audit_error(error: &str) -> String {
     const MAX_AUDIT_ERROR_CHARS: usize = 2_048;
     error.chars().take(MAX_AUDIT_ERROR_CHARS).collect()
@@ -151,6 +166,26 @@ fn office_audit_persistence_failure(
             })),
         })),
         error: Some(message.to_string()),
+    }
+}
+
+fn office_skill_resource_restore_failure(
+    office_operation: &mycopilot_core::AgentOfficeOperationRequest,
+    tool: &str,
+    error: &str,
+) -> AgentToolResult {
+    AgentToolResult {
+        call_id: office_operation.id.clone(),
+        tool: tool.to_string(),
+        ok: false,
+        result: Some(serde_json::json!({
+            "type": "office_operation_policy",
+            "code": "skillResourceSnapshotUnavailable",
+            "recovery": "retry",
+        })),
+        error: Some(format!(
+            "The approved Office input resources could not be restored: {error}"
+        )),
     }
 }
 
@@ -771,12 +806,18 @@ fn office_engine_failure(
 fn office_operation_tool_result(
     call_id: &str,
     tool: &str,
-    result: OfficeExecutionResult,
+    mut result: OfficeExecutionResult,
 ) -> AgentToolResult {
     let succeeded = result.exit_code == Some(0)
         && !result.timed_out
         && !result.cancelled
         && result.error_code.is_none();
+    if !succeeded {
+        // A provider failure, timeout, or cancellation can preserve complete
+        // process diagnostics, but it can never advertise a successful
+        // published output to the model or UI.
+        result.outputs.clear();
+    }
     let error = if succeeded {
         None
     } else {
@@ -1307,8 +1348,13 @@ impl AgentService {
                 let workspace_root = workspace_root_optional(&agent_input);
                 let permissions = permissions_from_input(&agent_input);
                 let command_for_error = command.clone();
+                let file_input_context = agent_file_input_execution_context(
+                    &agent_input,
+                    skill_resources.clone(),
+                    Arc::clone(&self.storage),
+                );
                 file_effect_guard.mark_effects_started();
-                let command_result = run_authorized_command_with_artifact_runtime(
+                let command_result = run_authorized_command_with_artifact_runtime_and_inputs(
                     workspace_root.as_deref(),
                     &command,
                     permissions,
@@ -1316,6 +1362,7 @@ impl AgentService {
                     cancellation_token.clone(),
                     None,
                     self.artifact_runtime.as_deref(),
+                    Some(&file_input_context),
                 )
                 .unwrap_or_else(|error| {
                     let policy_evaluation = error.policy_evaluation().cloned();
@@ -1749,6 +1796,7 @@ impl AgentService {
                 let tool_result = self.execute_office_operation(
                     &agent_input,
                     office_operation,
+                    skill_resources.clone(),
                     cancellation_token,
                     None,
                 );
@@ -1806,6 +1854,7 @@ impl AgentService {
         &self,
         agent_input: &AgentChatInput,
         office_operation: &mycopilot_core::AgentOfficeOperationRequest,
+        skill_resources: Option<Arc<SkillResourceSession>>,
         cancellation_token: AgentCancellationToken,
         action_cancel_flag: Option<Arc<AtomicBool>>,
     ) -> AgentToolResult {
@@ -1824,6 +1873,7 @@ impl AgentService {
         }
         if office_operation.schema_version != mycopilot_core::AGENT_OFFICE_OPERATION_SCHEMA_VERSION
             || !mycopilot_core::is_valid_agent_office_reason(&office_operation.reason)
+            || mycopilot_core::validate_frozen_agent_office_semantic_args(office_operation).is_err()
             || office_operation.prepared.access
                 != mycopilot_core::office::OfficeOperationAccess::FileWrite
             || office_operation.prepared.request.access()
@@ -1863,9 +1913,28 @@ impl AgentService {
         // Rebuild the Host-owned execution context at the last responsible moment. The Office
         // engine re-resolves every frozen path against these current run-scoped permissions and
         // attachment capabilities before it creates staging or invokes the provider.
+        let skill_resources = match skill_resources {
+            Some(resources) => Some(resources),
+            None => match self.restore_skill_resource_session(agent_input) {
+                Ok(resources) => resources,
+                Err(error) => {
+                    return office_skill_resource_restore_failure(
+                        office_operation,
+                        tool,
+                        &error.to_string(),
+                    );
+                }
+            },
+        };
+        let file_inputs = agent_file_input_execution_context(
+            agent_input,
+            skill_resources,
+            Arc::clone(&self.storage),
+        );
         let execution_context = mycopilot_core::office::OfficeExecutionContext::from_run_context(
             agent_input.context.as_ref(),
-        );
+        )
+        .with_file_inputs(file_inputs);
         match self.office_engine.execute_prepared(
             &execution_context,
             &office_operation.prepared,
@@ -2229,12 +2298,20 @@ impl AgentService {
         file_effect_guard.mark_effects_started();
         let task_result = tokio::task::spawn_blocking(move || {
             let _guard = guard;
-            service.execute_office_operation(
-                &agent_input,
-                &office_operation,
-                cancellation_token,
-                Some(cancel_flag),
-            )
+            match service.restore_skill_resource_session(&agent_input) {
+                Ok(skill_resources) => service.execute_office_operation(
+                    &agent_input,
+                    &office_operation,
+                    skill_resources,
+                    cancellation_token,
+                    Some(cancel_flag),
+                ),
+                Err(error) => office_skill_resource_restore_failure(
+                    &office_operation,
+                    office_tool_name(office_operation.prepared.request.document_kind),
+                    &error.to_string(),
+                ),
+            }
         })
         .await;
         let mut tool_result = match task_result {
@@ -2557,6 +2634,15 @@ impl AgentService {
         let command_for_error = command.clone();
         let execution_record = record.clone();
         let artifact_runtime = self.artifact_runtime.clone();
+        let skill_resources = self
+            .restore_skill_resource_session(&record.agent_input)
+            .ok()
+            .flatten();
+        let file_input_context = agent_file_input_execution_context(
+            &record.agent_input,
+            skill_resources,
+            Arc::clone(&self.storage),
+        );
         file_effect_guard.mark_effects_started();
         let mut command_result = match tokio::task::spawn_blocking(move || {
             let _guard = guard;
@@ -2569,6 +2655,7 @@ impl AgentService {
                 cancellation_token,
                 Some(cancel_flag),
                 artifact_runtime.as_deref(),
+                Some(&file_input_context),
             )
         })
         .await
@@ -2997,7 +3084,7 @@ impl AgentService {
                     run_id,
                     emitter_conversation_id.as_deref().unwrap_or_default(),
                     emitter_assistant_message_id.as_deref().unwrap_or_default(),
-                    action.clone(),
+                    action.as_ref().clone(),
                     agent_input,
                 ) {
                     Ok(true) => {}
@@ -3329,6 +3416,7 @@ pub(super) fn run_explicitly_approved_command_from_snapshot(
         cancellation_token,
         action_cancel_flag,
         None,
+        None,
     )
 }
 
@@ -3337,12 +3425,13 @@ pub(super) fn run_explicitly_approved_command_from_snapshot_with_artifact_runtim
     cancellation_token: AgentCancellationToken,
     action_cancel_flag: Option<Arc<AtomicBool>>,
     artifact_runtime: Option<&mycopilot_core::artifact_runtime::ArtifactRuntimeProvider>,
+    file_inputs: Option<&AgentFileInputExecutionContext>,
 ) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
     let AgentProposedAction::Command { command } = &record.snapshot.action else {
         return Err("待审批操作不包含可执行命令。".to_string().into());
     };
     let workspace_root = workspace_root_optional(&record.agent_input);
-    run_authorized_command_with_artifact_runtime(
+    run_authorized_command_with_artifact_runtime_and_inputs(
         workspace_root.as_deref(),
         command,
         permissions_from_input(&record.agent_input),
@@ -3350,6 +3439,7 @@ pub(super) fn run_explicitly_approved_command_from_snapshot_with_artifact_runtim
         cancellation_token,
         action_cancel_flag,
         artifact_runtime,
+        file_inputs,
     )
 }
 

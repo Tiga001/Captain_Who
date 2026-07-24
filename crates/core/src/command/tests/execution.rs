@@ -25,6 +25,69 @@ fn runs_simple_command_in_workspace() {
 }
 
 #[test]
+fn compatibility_entry_never_executes_a_host_bound_runtime_through_path() {
+    let workspace = TestWorkspace::new();
+    let marker = workspace.path.join("compatibility-bypass.txt");
+    let mut command = request(
+        "printf compatibility-bypass > compatibility-bypass.txt",
+        Some(5_000),
+    );
+    command.runtime_binding = Some(Box::new(frozen_runtime_binding()));
+
+    let result = run_authorized_command(
+        Some(&workspace.path),
+        &command,
+        AgentPermissions {
+            read: AgentReadPermission::WorkspaceOnly,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::RequireApproval,
+            ..Default::default()
+        },
+        CommandAuthorizationSource::ExplicitUser,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap();
+
+    assert!(!marker.exists());
+    assert!(result.runtime.is_some());
+    assert!(result
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("Managed Artifact Runtime")));
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_builder_output_scope_is_revalidated_before_spawn() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = TestWorkspace::new();
+    let outside = TestWorkspace::new();
+    symlink(&outside.path, workspace.path.join("exports")).unwrap();
+    let mut command = request("python build.py --output exports/report.docx", Some(5_000));
+    command.runtime_binding = Some(Box::new(frozen_runtime_binding()));
+
+    let error = run_authorized_command(
+        Some(&workspace.path),
+        &command,
+        AgentPermissions {
+            read: AgentReadPermission::WorkspaceOnly,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::RequireApproval,
+            ..Default::default()
+        },
+        CommandAuthorizationSource::ExplicitUser,
+        AgentCancellationToken::new(),
+        None,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("当前权限只允许写入 workspace"));
+    assert!(!outside.path.join("report.docx").exists());
+}
+
+#[test]
 fn runs_simple_command_outside_workspace_with_full_write() {
     let workspace = TestWorkspace::new();
     let outside = TestWorkspace::new();

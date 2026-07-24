@@ -1,35 +1,90 @@
 {
-  "contractVersion": 4,
+  "contractVersion": 7,
   "engine": "officecli",
   "tool": "office_document",
   "extensions": [".docx"],
   "modes": {
     "native": {
       "tool": "office_document",
-      "bestFor": "targeted_structured_operations",
-      "requestStyle": "typed_request_envelope",
-      "envelopeField": "request",
+      "bestFor": "bounded_high_frequency_tasks",
+      "requestStyle": "flat_semantic_v1",
       "reasonField": "reason",
-      "filePathField": "filePath",
-      "providerArguments": "host_generated"
+      "reasonRequired": true,
+      "providerArguments": "host_generated",
+      "operations": [
+        "status",
+        "create",
+        "inspect",
+        "validate",
+        "render",
+        "addText",
+        "insertImage",
+        "addTable",
+        "addHeader",
+        "addFooter",
+        "replaceText",
+        "formatText",
+        "removeBlock",
+        "moveBlock"
+      ],
+      "unsupportedRecovery": "useManagedScript",
+      "renderOutput": {
+        "resultField": "outputs",
+        "role": "render",
+        "kind": "image",
+        "sourceField": "source",
+        "consumerTool": "read_image",
+        "consumerField": "source",
+        "readabilityField": "readableByAgent",
+        "sizeField": "sizeBytes",
+        "selectionField": "pageSelection",
+        "selectionSemantics": "requested_not_verified_coverage",
+        "pathInference": "forbidden"
+      }
     },
     "script": {
+      "builderTemplate": "templates/builder.py",
       "editTools": ["apply_patch", "write_file"],
       "executionTool": "run_command",
       "runtimeProfile": "documents",
-      "runtimeProfileField": "runtimeProfile",
+      "runtimeProfileBinding": "host_from_materialized_builder_receipt",
+      "outputArgument": "--output",
       "entrypoints": [
-        { "command": "python", "extension": ".py" },
-        { "command": "node", "extension": ".mjs" }
+        {
+          "command": "python",
+          "extension": ".py",
+          "runtimeVersion": "3.12.13",
+          "dependencies": [{ "name": "python-docx", "version": "1.2.0" }]
+        },
+        {
+          "command": "node",
+          "extension": ".mjs",
+          "runtimeVersion": "22.23.1",
+          "dependencies": [{ "name": "docx", "version": "9.6.1" }]
+        }
       ],
       "resolution": {
         "authority": "host",
         "runtimeKindFrom": "command",
         "dependencyPolicy": "profilePinned"
       },
+      "inputs": {
+        "field": "inputs",
+        "mountPathField": "mountPath",
+        "sourceField": "source",
+        "rootEnvironment": "MYCOPILOT_INPUT_ROOT",
+        "sourceTypes": [
+          "attachment",
+          "workspace",
+          "external",
+          "generated_artifact",
+          "skill_resource"
+        ]
+      },
       "observation": {
+        "requiredFromModel": false,
+        "binding": "host_from_materialization_and_output_argument",
         "kind": "office",
-        "expectedOutputsField": "observe.expectedOutputs",
         "additionalRootsField": "observe.additionalRoots",
         "resultField": "artifactObservation"
       }

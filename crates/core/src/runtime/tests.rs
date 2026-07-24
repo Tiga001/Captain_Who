@@ -157,6 +157,7 @@ fn command_dispatch_fixture(command: &str) -> (AgentToolCall, AgentProposedActio
             risk_level: None,
             reason: None,
             observe: None,
+            inputs: Vec::new(),
             runtime: None,
             runtime_binding: None,
         },
@@ -569,6 +570,281 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         skill_discovery: None,
         messages,
     }
+}
+
+#[tokio::test]
+async fn empty_normal_completion_is_repaired_once_for_openai_and_anthropic() {
+    use crate::model_request_observation::ModelRequestObservationStatus;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_json_request(stream: &mut TcpStream) -> Value {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4_096];
+        let mut body_start = None;
+        let mut expected_length = None;
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request completed");
+            request.extend_from_slice(&buffer[..read]);
+            if body_start.is_none() {
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    let start = header_end + 4;
+                    body_start = Some(start);
+                    expected_length = Some(start + content_length);
+                }
+            }
+            if expected_length.is_some_and(|length| request.len() >= length) {
+                break;
+            }
+        }
+        serde_json::from_slice(
+            &request[body_start.unwrap()..expected_length.expect("content length")],
+        )
+        .unwrap()
+    }
+
+    async fn write_json_response(stream: &mut TcpStream, body: Value) {
+        let body = serde_json::to_vec(&body).unwrap();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+    }
+
+    async fn run_case(style: crate::protocol::AgentApiStyle) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let captured_for_server = Arc::clone(&captured);
+        let server = tokio::spawn(async move {
+            for request_index in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_json_request(&mut stream).await;
+                captured_for_server.lock().unwrap().push(request);
+                let response = match (style, request_index) {
+                    (crate::protocol::AgentApiStyle::OpenAiCompatible, 0) => json!({
+                        "choices": [{
+                            "message": { "role": "assistant", "content": "" },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 11,
+                            "completion_tokens": 3,
+                            "total_tokens": 14
+                        }
+                    }),
+                    (crate::protocol::AgentApiStyle::OpenAiCompatible, _) => json!({
+                        "choices": [{
+                            "message": { "role": "assistant", "content": "recovered response" },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 12,
+                            "completion_tokens": 4,
+                            "total_tokens": 16
+                        }
+                    }),
+                    (crate::protocol::AgentApiStyle::AnthropicCompatible, 0) => json!({
+                        "content": [],
+                        "stop_reason": "end_turn",
+                        "usage": { "input_tokens": 11, "output_tokens": 3 }
+                    }),
+                    (crate::protocol::AgentApiStyle::AnthropicCompatible, _) => json!({
+                        "content": [{ "type": "text", "text": "recovered response" }],
+                        "stop_reason": "end_turn",
+                        "usage": { "input_tokens": 12, "output_tokens": 4 }
+                    }),
+                };
+                write_json_response(&mut stream, response).await;
+            }
+        });
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let observations_for_host = Arc::clone(&observations);
+        let observer: AgentModelRequestObserver = Arc::new(move |observation| {
+            observations_for_host.lock().unwrap().push(observation);
+        });
+        let mut input = conversation_context_input(vec![message("user", "complete the task")]);
+        input.api_url = format!("http://{address}/v1/messages");
+        input.api_token = "test-token".to_string();
+        input.api_style = Some(style);
+        input.stream = Some(false);
+        input.assistant_message_id = Some("assistant-empty-repair".to_string());
+        input.context = Some(AgentRunContext {
+            conversation_id: Some("conversation-empty-repair".to_string()),
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: Default::default(),
+        });
+
+        let output = AgentRuntime::default()
+            .send_chat_with_events_and_cancellation(
+                input,
+                Some("run-empty-repair".to_string()),
+                None,
+                AgentCancellationToken::new(),
+                Some(AgentRuntimeHostServices::new().with_model_request_observer(observer)),
+            )
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(output.content, "recovered response");
+        assert_eq!(
+            output
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.billable_request_count),
+            Some(2)
+        );
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let first = serde_json::to_string(&requests[0]).unwrap();
+        let second = serde_json::to_string(&requests[1]).unwrap();
+        assert!(!first.contains("preceding model response ended normally"));
+        assert!(second.contains("preceding model response ended normally"));
+        match style {
+            crate::protocol::AgentApiStyle::OpenAiCompatible => {
+                assert!(requests[1]["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|message| {
+                        message["role"] == "system"
+                            && message["content"]
+                                .as_str()
+                                .is_some_and(|content| content.contains("do not repeat"))
+                    }));
+            }
+            crate::protocol::AgentApiStyle::AnthropicCompatible => {
+                assert!(requests[1]["system"]
+                    .as_str()
+                    .is_some_and(|system| system.contains("do not repeat")));
+                assert!(!requests[1]["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|message| message["role"] == "system"));
+            }
+        }
+        drop(requests);
+
+        let observations = observations.lock().unwrap();
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].request_index, 1);
+        assert_eq!(
+            observations[0].status,
+            ModelRequestObservationStatus::Failed
+        );
+        assert_eq!(
+            observations[0].error_code.as_deref(),
+            Some("agent.empty_model_action")
+        );
+        assert_eq!(observations[1].request_index, 2);
+        assert_eq!(
+            observations[1].status,
+            ModelRequestObservationStatus::Completed
+        );
+        let trace = serde_json::to_string(
+            output
+                .conversation_turn_trace
+                .as_ref()
+                .expect("completed trace"),
+        )
+        .unwrap();
+        assert!(!trace.contains("preceding model response ended normally"));
+    }
+
+    run_case(crate::protocol::AgentApiStyle::OpenAiCompatible).await;
+    run_case(crate::protocol::AgentApiStyle::AnthropicCompatible).await;
+}
+
+#[tokio::test]
+async fn empty_model_action_repair_stops_after_the_second_empty_response() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let request_count_for_server = Arc::clone(&request_count);
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2_048];
+            let expected_length = loop {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    let expected = header_end + 4 + content_length;
+                    if request.len() >= expected {
+                        break expected;
+                    }
+                }
+            };
+            assert!(request.len() >= expected_length);
+            request_count_for_server.fetch_add(1, Ordering::SeqCst);
+            let body = serde_json::to_vec(&json!({
+                "choices": [{
+                    "message": { "role": "assistant", "content": "" },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 5,
+                    "completion_tokens": 1,
+                    "total_tokens": 6
+                }
+            }))
+            .unwrap();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+        }
+    });
+
+    let mut input = conversation_context_input(vec![message("user", "complete the task")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    let error = AgentRuntime::default().send_chat(input).await.unwrap_err();
+    server.await.unwrap();
+
+    assert_eq!(error.code(), Some("agent.empty_model_action"));
+    assert_eq!(
+        error.usage().and_then(|usage| usage.billable_request_count),
+        Some(2)
+    );
+    assert_eq!(request_count.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -3305,6 +3581,13 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         })
         .expect("first read call event");
     let pending_call_id = checkpoint.pending_tool_call_id.clone();
+    let pending_checkpoint_call = checkpoint
+        .context_items
+        .iter()
+        .flat_map(|item| item.tool_calls.iter())
+        .find(|call| call.id == pending_call_id)
+        .cloned()
+        .expect("checkpoint must freeze the pending call");
     let queued_call_id = checkpoint.queued_tool_calls[0].call.id.clone();
     for call_id in [
         &todo_call_id,
@@ -3369,8 +3652,8 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
     resume_input.tool_continuation = Some(AgentToolContinuation {
         call: AgentToolCall {
             id: pending_call_id.clone(),
-            tool: "apply_patch".to_string(),
-            args: json!({ "operation": "create", "filePath": "report.txt" }),
+            tool: pending_checkpoint_call.name,
+            args: pending_checkpoint_call.args,
             approval_status: AgentApprovalStatus::Rejected,
             reason: None,
         },

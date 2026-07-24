@@ -311,10 +311,20 @@ impl ToolExecutionContext {
             .ok_or_else(|| AgentError::new("当前 host 未提供会话存储服务。"))
     }
 
+    pub(super) fn storage_optional(&self) -> Option<Arc<StorageService>> {
+        self.storage.clone()
+    }
+
     pub(super) fn skill_resources(&self) -> AgentResult<&Arc<crate::skills::SkillResourceSession>> {
         self.skill_resources.as_ref().ok_or_else(|| {
             AgentError::new("当前运行没有激活可访问资源的 Skill；请先选择并激活一个 Skill。")
         })
+    }
+
+    pub(super) fn skill_resources_optional(
+        &self,
+    ) -> Option<Arc<crate::skills::SkillResourceSession>> {
+        self.skill_resources.clone()
     }
 
     pub(super) fn command_runtime_profile_resolver(

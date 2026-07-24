@@ -1,10 +1,14 @@
 use super::discovery::discover_with_test_path;
 use super::execution::{compile_office_arguments, install_commit_test_hook, CommitTestPhase};
+use super::types::office_agent_input_placeholder;
 use super::*;
+use crate::file_input::{read_verified_agent_file_input, AgentFileInputExecutionContext};
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentCancellationToken,
-    AgentInputAttachmentKind, AgentPermissions, AgentReadPermission, AgentWritePermission,
+    AgentFileInputRef, AgentFileInputSpec, AgentInputAttachmentKind, AgentPermissions,
+    AgentReadPermission, AgentWritePermission,
 };
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -60,6 +64,7 @@ impl Fixture {
             parameters: OfficeRequestParameters::Typed(default_parameters(operation)),
             output_path: None,
             destination_path: None,
+            inputs: Vec::new(),
             timeout_ms: Some(10_000),
         }
     }
@@ -148,6 +153,27 @@ fn workspace_context(path: &Path) -> OfficeExecutionContext {
         ..AgentPermissions::default()
     };
     OfficeExecutionContext::new(Some(path.to_path_buf()), permissions, None)
+}
+
+fn screenshot_request(fixture: &Fixture, output_path: &str) -> OfficeExecutionRequest {
+    let mut request = fixture.request(OfficeOperation::View);
+    request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::View {
+        mode: OfficeViewMode::Screenshot,
+        start: None,
+        end: None,
+        max_lines: None,
+        issue_type: None,
+        limit: None,
+        columns: Vec::new(),
+        pages: Vec::new(),
+        range: None,
+        viewport: None,
+        grid: None,
+        render_mode: None,
+        page_count: false,
+    });
+    request.output_path = Some(output_path.to_string());
+    request
 }
 
 fn permission_context(
@@ -531,6 +557,7 @@ fn parallel_short_lived_office_process_groups_do_not_cross_signal() {
                         ),
                         output_path: None,
                         destination_path: None,
+                        inputs: Vec::new(),
                         timeout_ms: Some(10_000),
                     };
                     let result = engine
@@ -712,7 +739,7 @@ fn create_and_render_publish_only_the_valid_staged_artifact() {
     );
 
     let fixture = Fixture::new(
-        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf '\\211PNG\\r\\n\\032\\nbody' > \"$output\"\n",
+        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf 'render-output:%s\\ncwd:%s\\n' \"$output\" \"$PWD\"\nprintf '\\211PNG\\r\\n\\032\\n\\000\\000\\000\\rIHDR\\000\\000\\002\\200\\000\\000\\001h' > \"$output\"\n",
     );
     fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
     let mut request = fixture.request(OfficeOperation::View);
@@ -724,7 +751,10 @@ fn create_and_render_publish_only_the_valid_staged_artifact() {
         issue_type: None,
         limit: None,
         columns: Vec::new(),
-        pages: Vec::new(),
+        pages: vec![OfficePageRange {
+            start: 1,
+            end: Some(2),
+        }],
         range: None,
         viewport: None,
         grid: None,
@@ -743,6 +773,214 @@ fn create_and_render_publish_only_the_valid_staged_artifact() {
         .unwrap();
     assert!(result.error_code.is_none(), "{:?}", result.error);
     assert!(fixture.workspace.path().join("preview.png").is_file());
+    assert!(!result.stdout.contains(".mycopilot-office-"));
+    assert!(!result.stdout.contains("mycopilot-office-render-"));
+    assert!(result.stdout.contains("render-output:preview.png"));
+    assert!(
+        result.stdout.contains("cwd:<office-render-snapshot>"),
+        "{}",
+        result.stdout
+    );
+    let serialized = serde_json::to_string(&result).unwrap();
+    assert!(
+        serialized.find("\"outputs\"").unwrap() < serialized.find("\"argv\"").unwrap(),
+        "model-actionable outputs must precede provider diagnostics"
+    );
+    let result = serde_json::to_value(result).unwrap();
+    let output = &result["outputs"][0];
+    assert_eq!(output["role"], "render");
+    assert_eq!(output["kind"], "image");
+    assert_eq!(output["mimeType"], "image/png");
+    assert_eq!(
+        output["source"],
+        serde_json::json!({ "type": "workspace", "path": "preview.png" })
+    );
+    assert_eq!(output["readPath"], "preview.png");
+    assert_eq!(output["scope"], "workspace");
+    assert_eq!(output["readableByAgent"], true);
+    assert_eq!(output["sizeBytes"], 24);
+    assert!(output["sha256"]
+        .as_str()
+        .is_some_and(|digest| digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))));
+    assert_eq!(output["width"], 640);
+    assert_eq!(output["height"], 360);
+    assert_eq!(
+        output["pageSelection"],
+        serde_json::json!({ "type": "explicit", "pages": [1, 2] })
+    );
+}
+
+#[test]
+fn failed_timed_out_or_cancelled_render_never_reports_a_published_output() {
+    let invalid = Fixture::new(
+        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf 'not-png' > \"$output\"\n",
+    );
+    fs::write(invalid.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let result = invalid
+        .engine
+        .execute(
+            &workspace_context(invalid.workspace.path()),
+            &screenshot_request(&invalid, "invalid.png"),
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(result.error_code.as_deref(), Some("office.invalid_output"));
+    assert!(serde_json::to_value(&result)
+        .unwrap()
+        .get("outputs")
+        .is_none());
+    assert!(!invalid.workspace.path().join("invalid.png").exists());
+
+    let timed_out = Fixture::new(
+        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf '\\211PNG\\r\\n\\032\\npartial' > \"$output\"\n/bin/sleep 5\n",
+    );
+    fs::write(timed_out.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let mut request = screenshot_request(&timed_out, "timed-out.png");
+    request.timeout_ms = Some(40);
+    let result = timed_out
+        .engine
+        .execute(
+            &workspace_context(timed_out.workspace.path()),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+    assert!(result.timed_out);
+    assert_eq!(result.error_code.as_deref(), Some("office.timeout"));
+    assert!(serde_json::to_value(&result)
+        .unwrap()
+        .get("outputs")
+        .is_none());
+    assert!(!timed_out.workspace.path().join("timed-out.png").exists());
+
+    let cancelled = Fixture::new(
+        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf '\\211PNG\\r\\n\\032\\nbody' > \"$output\"\n",
+    );
+    fs::write(cancelled.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let context = workspace_context(cancelled.workspace.path());
+    let prepared = cancelled
+        .engine
+        .prepare(&context, &screenshot_request(&cancelled, "cancelled.png"))
+        .unwrap();
+    let target = PathBuf::from(&prepared_path(&prepared, &OfficePathSlot::Output).normalized_path);
+    let cancellation = Arc::new(AtomicBool::new(false));
+    install_commit_test_hook(
+        target.clone(),
+        CommitTestPhase::BeforeCancellationCheck,
+        cancellation.clone(),
+    );
+    let result = cancelled
+        .engine
+        .execute_prepared(
+            &context,
+            &prepared,
+            AgentCancellationToken::new(),
+            Some(cancellation),
+        )
+        .unwrap();
+    assert!(result.cancelled);
+    assert_eq!(result.error_code.as_deref(), Some("office.cancelled"));
+    assert!(serde_json::to_value(&result)
+        .unwrap()
+        .get("outputs")
+        .is_none());
+    assert!(!target.exists());
+}
+
+#[test]
+fn document_spreadsheet_and_presentation_renders_share_the_published_output_contract() {
+    for (document_kind, input_name, output_name) in [
+        (
+            OfficeDocumentKind::Document,
+            "source.docx",
+            "document-preview.png",
+        ),
+        (
+            OfficeDocumentKind::Spreadsheet,
+            "source.xlsx",
+            "spreadsheet-preview.png",
+        ),
+        (
+            OfficeDocumentKind::Presentation,
+            "source.pptx",
+            "presentation-preview.png",
+        ),
+    ] {
+        let fixture = Fixture::new(
+            "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf '\\211PNG\\r\\n\\032\\nbody' > \"$output\"\n",
+        );
+        fs::write(fixture.workspace.path().join(input_name), b"office-input").unwrap();
+        let mut request = screenshot_request(&fixture, output_name);
+        request.document_kind = document_kind;
+        request.document_path = Some(input_name.to_string());
+
+        let result = fixture
+            .engine
+            .execute(
+                &workspace_context(fixture.workspace.path()),
+                &request,
+                AgentCancellationToken::new(),
+                None,
+            )
+            .unwrap();
+
+        assert!(result.error_code.is_none(), "{:?}", result.error);
+        assert_eq!(result.document_kind, document_kind);
+        assert_eq!(result.outputs.len(), 1);
+        assert_eq!(result.outputs[0].read_path, output_name);
+        assert_eq!(result.outputs[0].scope, OfficePathScope::Workspace);
+        assert_eq!(
+            result.outputs[0].page_selection,
+            OfficeRenderPageSelection::All
+        );
+        assert!(fixture.workspace.path().join(output_name).is_file());
+    }
+}
+
+#[test]
+fn external_render_output_reports_whether_the_current_read_policy_can_reuse_it() {
+    let fixture = Fixture::new(
+        "#!/bin/sh\nfor output in \"$@\"; do :; done\nprintf '\\211PNG\\r\\n\\032\\nbody' > \"$output\"\n",
+    );
+    fs::write(fixture.workspace.path().join("sample.docx"), b"doc").unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let target = fs::canonicalize(external.path())
+        .unwrap()
+        .join("preview.png");
+    let mut request = screenshot_request(&fixture, &target.to_string_lossy());
+    request.output_path = Some(target.to_string_lossy().into_owned());
+
+    let result = fixture
+        .engine
+        .execute(
+            &permission_context(
+                Some(fixture.workspace.path()),
+                AgentReadPermission::WorkspaceOnly,
+                AgentWritePermission::All,
+            ),
+            &request,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .unwrap();
+
+    assert!(result.error_code.is_none(), "{:?}", result.error);
+    assert_eq!(result.outputs.len(), 1);
+    let output = &result.outputs[0];
+    assert_eq!(output.scope, OfficePathScope::External);
+    assert!(!output.readable_by_agent);
+    assert_eq!(output.read_path, target.to_string_lossy());
+    assert_eq!(
+        output.source,
+        AgentFileInputRef::External {
+            path: target.to_string_lossy().into_owned(),
+        }
+    );
 }
 
 #[test]
@@ -764,6 +1002,7 @@ fn unavailable_engine_is_a_stable_null_object() {
                 }),
                 output_path: None,
                 destination_path: None,
+                inputs: Vec::new(),
                 timeout_ms: None,
             },
         )
@@ -1106,6 +1345,119 @@ fn workspace_paths_and_file_properties_are_contained() {
         )
         .unwrap_err();
     assert_eq!(error.code(), OfficeEngineErrorCode::WorkspaceViolation);
+}
+
+#[test]
+fn agent_file_inputs_are_frozen_revalidated_and_exactly_referenced() {
+    let replacement = tempfile::NamedTempFile::new().unwrap();
+    write_docx(replacement.path(), "replacement");
+    let script = format!(
+        "#!/bin/sh\nresource=''\nfor argument in \"$@\"; do case \"$argument\" in src=*) resource=${{argument#src=}} ;; esac; done\n/bin/cat \"$resource\"\n/bin/cp '{}' \"$2\"\n",
+        replacement.path().display()
+    );
+    let fixture = Fixture::new(&script);
+    write_docx(&fixture.workspace.path().join("sample.docx"), "original");
+    fs::write(fixture.workspace.path().join("hero.png"), b"approved-image").unwrap();
+
+    let mount_path = "office/image-input-1.png".to_string();
+    let placeholder = office_agent_input_placeholder(&mount_path);
+    let mut request = fixture.request(OfficeOperation::Add);
+    request.inputs = vec![AgentFileInputSpec {
+        mount_path: mount_path.clone(),
+        source: AgentFileInputRef::Workspace {
+            path: "hero.png".to_string(),
+        },
+    }];
+    request.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Add {
+        parent: "/body".to_string(),
+        element_type: "picture".to_string(),
+        copy_from: None,
+        position: None,
+        properties: [(
+            "src".to_string(),
+            serde_json::json!({ "resourcePath": placeholder }),
+        )]
+        .into_iter()
+        .collect(),
+        force: false,
+    });
+    let context = workspace_context(fixture.workspace.path());
+    let prepared = fixture.engine.prepare(&context, &request).unwrap();
+    assert_eq!(prepared.input_bindings.len(), 1);
+    assert!(!prepared
+        .paths
+        .iter()
+        .any(|path| matches!(path.slot, OfficePathSlot::Resource { .. })));
+
+    let mut mismatched = prepared.clone();
+    mismatched.input_bindings[0].mount_path = "office/other.png".to_string();
+    let error = fixture
+        .engine
+        .execute_prepared(&context, &mismatched, AgentCancellationToken::new(), None)
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::PreconditionFailed);
+
+    fs::write(fixture.workspace.path().join("hero.png"), b"changed").unwrap();
+    let error = fixture
+        .engine
+        .execute_prepared(&context, &prepared, AgentCancellationToken::new(), None)
+        .unwrap_err();
+    assert_eq!(error.code(), OfficeEngineErrorCode::PreconditionFailed);
+
+    fs::write(fixture.workspace.path().join("hero.png"), b"approved-image").unwrap();
+    let result = fixture
+        .engine
+        .execute_prepared(&context, &prepared, AgentCancellationToken::new(), None)
+        .unwrap();
+    assert_eq!(result.exit_code, Some(0), "{:?}", result.error);
+    assert!(result.stdout.contains("approved-image"));
+
+    let mut unreferenced = request.clone();
+    unreferenced.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Add {
+        parent: "/body".to_string(),
+        element_type: "picture".to_string(),
+        copy_from: None,
+        position: None,
+        properties: BTreeMap::new(),
+        force: false,
+    });
+    assert_eq!(
+        fixture
+            .engine
+            .prepare(&context, &unreferenced)
+            .unwrap_err()
+            .code(),
+        OfficeEngineErrorCode::InvalidRequest
+    );
+
+    let mut duplicate = request.clone();
+    duplicate.parameters = OfficeRequestParameters::Typed(OfficeOperationParameters::Add {
+        parent: "/body".to_string(),
+        element_type: "picture".to_string(),
+        copy_from: None,
+        position: None,
+        properties: [
+            (
+                "src".to_string(),
+                serde_json::json!({ "resourcePath": office_agent_input_placeholder(&mount_path) }),
+            ),
+            (
+                "image".to_string(),
+                serde_json::json!({ "resourcePath": office_agent_input_placeholder(&mount_path) }),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        force: false,
+    });
+    assert_eq!(
+        fixture
+            .engine
+            .prepare(&context, &duplicate)
+            .unwrap_err()
+            .code(),
+        OfficeEngineErrorCode::InvalidRequest
+    );
 }
 
 #[test]
@@ -1612,6 +1964,7 @@ fn missing_managed_browser_fails_before_officecli_starts() {
         }),
         output_path: Some("preview.png".to_string()),
         destination_path: None,
+        inputs: Vec::new(),
         timeout_ms: Some(MAX_OFFICE_TIMEOUT_MS),
     };
 
@@ -1680,6 +2033,7 @@ fn browser_proxy_self_test_rejects_an_unidentified_executable_before_officecli_s
         }),
         output_path: Some("preview.png".to_string()),
         destination_path: None,
+        inputs: Vec::new(),
         timeout_ms: Some(MAX_OFFICE_TIMEOUT_MS),
     };
 
@@ -1772,6 +2126,7 @@ fn office_paths_follow_the_read_write_permission_matrix() {
         }),
         output_path: None,
         destination_path: None,
+        inputs: Vec::new(),
         timeout_ms: Some(10_000),
     };
     for write in [
@@ -1960,6 +2315,7 @@ fn execution_rechecks_current_permissions_and_rejects_schema_v2() {
         }),
         output_path: None,
         destination_path: None,
+        inputs: Vec::new(),
         timeout_ms: Some(10_000),
     };
     let all = permission_context(None, AgentReadPermission::All, AgentWritePermission::All);
@@ -2003,6 +2359,7 @@ fn system_alias_targets_are_supported_only_with_write_all() {
         }),
         output_path: None,
         destination_path: None,
+        inputs: Vec::new(),
         timeout_ms: Some(10_000),
     };
     let error = fixture
@@ -2064,6 +2421,7 @@ fn real_officecli_creates_and_validates_all_supported_formats() {
                     }),
                     output_path: None,
                     destination_path: None,
+                    inputs: Vec::new(),
                     timeout_ms: Some(30_000),
                 },
                 AgentCancellationToken::new(),
@@ -2084,6 +2442,7 @@ fn real_officecli_creates_and_validates_all_supported_formats() {
                     parameters: OfficeRequestParameters::Typed(OfficeOperationParameters::Validate),
                     output_path: None,
                     destination_path: None,
+                    inputs: Vec::new(),
                     timeout_ms: Some(30_000),
                 },
                 AgentCancellationToken::new(),
@@ -2129,6 +2488,7 @@ fn real_officecli_renders_through_the_application_managed_browser() {
                 }),
                 output_path: None,
                 destination_path: None,
+                inputs: Vec::new(),
                 timeout_ms: Some(30_000),
             },
             AgentCancellationToken::new(),
@@ -2164,6 +2524,7 @@ fn real_officecli_renders_through_the_application_managed_browser() {
                 }),
                 output_path: Some("managed-render.png".to_string()),
                 destination_path: None,
+                inputs: Vec::new(),
                 timeout_ms: Some(45_000),
             },
             AgentCancellationToken::new(),
@@ -2177,6 +2538,31 @@ fn real_officecli_renders_through_the_application_managed_browser() {
         .join("managed-render.png")
         .metadata()
         .is_ok_and(|metadata| metadata.len() > 1_024));
+    assert_eq!(render.outputs.len(), 1);
+    let published = &render.outputs[0];
+    assert_eq!(
+        published.source,
+        AgentFileInputRef::Workspace {
+            path: "managed-render.png".to_string(),
+        }
+    );
+    assert_eq!(published.mime_type, "image/png");
+    assert!(published.readable_by_agent);
+    assert_eq!(
+        published.page_selection,
+        OfficeRenderPageSelection::Explicit { pages: vec![1] }
+    );
+    let verified = read_verified_agent_file_input(
+        Some(workspace.path()),
+        AgentPermissions::default(),
+        &AgentFileInputExecutionContext::default(),
+        &published.source,
+        None,
+        8 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(verified.size_bytes, published.size_bytes);
+    assert_eq!(verified.sha256, published.sha256);
 }
 
 #[test]

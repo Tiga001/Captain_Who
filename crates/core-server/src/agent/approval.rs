@@ -164,6 +164,7 @@ impl AgentService {
         if record.snapshot.status != PendingActionStatus::Pending {
             return Ok(false);
         }
+        let call = tool_call_for_pending_record(record)?;
         self.persist_pending_status(
             record,
             PendingActionStatus::Pending,
@@ -196,7 +197,7 @@ impl AgentService {
         let record = record.clone();
         drop(pending_actions);
         drop(deletion_lifecycle);
-        if let Err(error) = self.finalize_cancelled_pending_action(&record) {
+        if let Err(error) = self.finalize_cancelled_pending_action(&record, call) {
             if cancelled_file_write_outcome_is_durable_or_unknown(&self.storage, &record) {
                 return Err(format!(
                     "{error} 文件草稿的拒绝结果已经持久化或无法安全判定；待审批操作保持 executing 并保留 cancelled 目标终态，等待启动对账，禁止重新执行。"
@@ -218,9 +219,9 @@ impl AgentService {
     pub(super) fn finalize_cancelled_pending_action(
         &self,
         record: &PendingActionRecord,
+        mut call: AgentToolCall,
     ) -> Result<(), String> {
         const REASON: &str = "Pending action was cancelled by the user.";
-        let mut call = tool_call_for_action(&record.snapshot.action);
         call.approval_status = AgentApprovalStatus::Rejected;
         let execution = action_execution_for_decision(
             &self.storage,
@@ -294,6 +295,7 @@ impl AgentService {
         );
         let (
             record,
+            call,
             approved_process_guard,
             approved_materialization_guard,
             inline_continuation_guard,
@@ -322,6 +324,7 @@ impl AgentService {
             {
                 return Err("项目或会话正在移除，无法处理待审批操作。".to_string());
             }
+            let call = tool_call_for_pending_record(record)?;
             if decision_status == AgentApprovalDecisionStatus::Approved {
                 authorize_structured_file_write(
                     &record.agent_input,
@@ -373,6 +376,7 @@ impl AgentService {
             record.snapshot.status = execution_status;
             (
                 record.clone(),
+                call,
                 approved_process_guard,
                 approved_materialization_guard,
                 inline_continuation_guard,
@@ -380,7 +384,7 @@ impl AgentService {
         };
         let mut approved_materialization_guard = approved_materialization_guard;
 
-        let mut call = tool_call_for_action(&record.snapshot.action);
+        let mut call = call;
         call.approval_status = match decision_status {
             AgentApprovalDecisionStatus::Approved => AgentApprovalStatus::Approved,
             AgentApprovalDecisionStatus::Rejected => AgentApprovalStatus::Rejected,

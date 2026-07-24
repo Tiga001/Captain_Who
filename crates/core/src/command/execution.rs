@@ -8,10 +8,10 @@ pub fn run_authorized_command(
     cancellation_token: AgentCancellationToken,
     action_cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<AgentCommandExecutionResult, CommandExecutionError> {
-    if request.runtime.is_some() {
-        // A runtime-bearing request must never be interpreted as an ordinary
-        // PATH/shell command by a compatibility caller that has not supplied
-        // the managed provider.
+    if request.runtime.is_some() || request.runtime_binding.is_some() || !request.inputs.is_empty()
+    {
+        // A host-bound runtime or file input must never be interpreted as an ordinary PATH/shell
+        // command by a compatibility caller that has not supplied the managed provider.
         return run_authorized_command_with_artifact_runtime(
             workspace_root,
             request,
@@ -207,6 +207,7 @@ pub(super) fn run_shell_command(
             error: None,
             policy_evaluation: None,
             artifact_observation: None,
+            input_files: Vec::new(),
             runtime: None,
         });
     }
@@ -283,6 +284,7 @@ pub(super) fn run_shell_command(
         error: None,
         policy_evaluation: None,
         artifact_observation: None,
+        input_files: Vec::new(),
         runtime: None,
     })
 }

@@ -3,7 +3,15 @@ use crate::storage::image_generation_execution_repository::{
     self, ImageGenerationArtifactJournalRecord, ImageGenerationExecutionClaimOutcome,
     ImageGenerationExecutionIdentityRecord, ImageGenerationExecutionJournalRecord,
     ImageGenerationExecutionMutationOutcome, ImageGenerationExecutionTerminalUpdate,
+    PublishedImageArtifactInputRecord,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedGeneratedArtifactInput {
+    pub path: PathBuf,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
 
 impl StorageService {
     pub fn claim_image_generation_execution(
@@ -70,5 +78,71 @@ impl StorageService {
             &connection,
         )
         .map_err(storage_error)
+    }
+
+    /// Resolves one immutable generated-image Artifact from the authoritative publication journal.
+    ///
+    /// Caller-provided paths and hashes are never consulted here. Duplicate successful journal
+    /// rows are accepted only when every immutable storage identity is identical.
+    pub(crate) fn resolve_published_generated_artifact_input(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<ResolvedGeneratedArtifactInput>, String> {
+        let connection = self.state.connection()?;
+        let records = image_generation_execution_repository::list_published_artifact_inputs_by_id(
+            &connection,
+            artifact_id,
+        )
+        .map_err(storage_error)?;
+        let Some(first) = records.first() else {
+            return Ok(None);
+        };
+        if records
+            .iter()
+            .any(|record| !same_published_artifact_identity(first, record))
+        {
+            return Err(
+                "generated Artifact publication journal contains conflicting identities"
+                    .to_string(),
+            );
+        }
+        let relative = safe_artifact_relative_path(&first.storage_relative_path)?;
+        Ok(Some(ResolvedGeneratedArtifactInput {
+            path: self.image_artifact_root.join(relative),
+            size_bytes: first.size_bytes,
+            sha256: first.sha256.clone(),
+        }))
+    }
+}
+
+fn same_published_artifact_identity(
+    left: &PublishedImageArtifactInputRecord,
+    right: &PublishedImageArtifactInputRecord,
+) -> bool {
+    left.artifact_id == right.artifact_id
+        && left.storage_relative_path == right.storage_relative_path
+        && left.size_bytes == right.size_bytes
+        && left.sha256 == right.sha256
+}
+
+fn safe_artifact_relative_path(value: &str) -> Result<PathBuf, String> {
+    let path = Path::new(value);
+    if value.trim().is_empty() || path.is_absolute() {
+        return Err("generated Artifact journal contains an invalid storage path".to_string());
+    }
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("generated Artifact journal contains an unsafe storage path".to_string())
+            }
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        Err("generated Artifact journal contains an empty storage path".to_string())
+    } else {
+        Ok(relative)
     }
 }

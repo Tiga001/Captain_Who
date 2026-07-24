@@ -752,7 +752,7 @@ pub(super) struct SkillResourceSessionBinding {
 /// Owned bytes verified against the descriptor frozen in a resource session.
 /// Kept crate-internal so materialization and script policy can share the same
 /// authority path without exposing arbitrary binary reads to protocol callers.
-pub(super) struct VerifiedSkillResourceSnapshot {
+pub(crate) struct VerifiedSkillResourceSnapshot {
     pub descriptor: SkillResourceDescriptor,
     pub bytes: Vec<u8>,
 }
@@ -1038,7 +1038,7 @@ impl SkillResourceSession {
         })
     }
 
-    pub(super) fn read_verified_bytes(
+    pub(crate) fn read_verified_bytes(
         &self,
         uri: &SkillResourceUri,
     ) -> Result<VerifiedSkillResourceSnapshot, SkillResourceError> {

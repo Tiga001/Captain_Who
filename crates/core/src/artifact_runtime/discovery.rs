@@ -1488,6 +1488,7 @@ mod tests {
             risk_level: None,
             reason: Some("verify frozen profile conflict".to_string()),
             observe: None,
+            inputs: Vec::new(),
             runtime: None,
             runtime_binding: Some(Box::new(binding)),
         };

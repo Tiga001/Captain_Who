@@ -3,6 +3,7 @@ use super::*;
 pub struct StorageService {
     pub(super) state: StorageState,
     pub(super) attachment_root: PathBuf,
+    pub(super) image_artifact_root: PathBuf,
 }
 
 impl StorageService {
@@ -11,10 +12,15 @@ impl StorageService {
             .parent()
             .map(|parent| parent.join("attachments"))
             .unwrap_or_else(|| PathBuf::from("attachments"));
+        let image_artifact_root = database_path
+            .parent()
+            .map(|parent| parent.join("image-generation-artifacts"))
+            .unwrap_or_else(|| PathBuf::from("image-generation-artifacts"));
 
         let service = Self {
             state: StorageState::open(database_path)?,
             attachment_root,
+            image_artifact_root,
         };
 
         match service.state.connection() {

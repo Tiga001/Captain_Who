@@ -19,9 +19,10 @@ use std::time::Duration;
 
 use mycopilot_core::artifact_runtime::{ArtifactRuntimeDiscoveryOptions, ArtifactRuntimeProvider};
 use mycopilot_core::command::{
-    run_authorized_command_with_artifact_runtime, AgentCommandExecutionResult,
+    run_authorized_command_with_artifact_runtime_and_inputs, AgentCommandExecutionResult,
     CommandAuthorizationSource, CommandExecutionError, CommandRunGuard, CommandRunState,
 };
+use mycopilot_core::file_input::AgentFileInputExecutionContext;
 use mycopilot_core::file_write::{
     file_draft_snapshot, file_write_action_approval_status, file_write_approval_route,
     file_write_authorized, file_write_diff, proposed_action_uses_file_write_policy,

@@ -434,90 +434,11 @@ fn validate_frozen_manual_file_effect_tool_call(
     Ok(reason)
 }
 
-const LEGACY_OFFICE_ACTION_SCHEMA_VERSION_V3: u32 = 3;
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LegacyOfficeToolCallV3 {
-    operation: String,
-    path: Option<String>,
-    #[serde(default)]
-    arguments: Vec<String>,
-    output_path: Option<String>,
-    destination_path: Option<String>,
-    timeout_ms: Option<u64>,
-    reason: Option<String>,
-}
-
-/// Verifies an Office ToolCall for settlement without making an old frozen action executable.
-///
-/// Schema v3 calls used the flat `operation/path/arguments` wire shape. Once the live tool moved
-/// to the typed schema-v4 request, replaying that historical trace through the current parser
-/// incorrectly made completed Office actions look unsettled and blocked project deletion. The
-/// compatibility branch below only compares already-durable evidence field by field; execution
-/// continues to reject every obsolete prepared-action schema.
 fn validate_frozen_office_settlement_trace_args(
     frozen: &crate::AgentOfficeOperationRequest,
     operation: &serde_json::Value,
 ) -> Result<(), String> {
-    if frozen.schema_version == crate::AGENT_OFFICE_OPERATION_SCHEMA_VERSION {
-        return crate::tools::validate_frozen_office_trace_args(frozen, operation);
-    }
-    if frozen.schema_version != LEGACY_OFFICE_ACTION_SCHEMA_VERSION_V3
-        || frozen.prepared.schema_version != LEGACY_OFFICE_ACTION_SCHEMA_VERSION_V3
-    {
-        return Err(format!(
-            "unsupported historical Office action schema {}",
-            frozen.schema_version
-        ));
-    }
-
-    let legacy = serde_json::from_value::<LegacyOfficeToolCallV3>(operation.clone())
-        .map_err(|error| format!("historical Office ToolCall arguments are invalid: {error}"))?;
-    let trace_operation = crate::office::OfficeOperation::parse_supported(&legacy.operation)
-        .map_err(|error| {
-            format!(
-                "historical Office operation is invalid: {}",
-                error.message()
-            )
-        })?;
-    let request = &frozen.prepared.request;
-    let crate::office::OfficeRequestParameters::Legacy(expected_arguments) = &request.parameters
-    else {
-        return Err(
-            "historical Office action does not contain legacy frozen arguments".to_string(),
-        );
-    };
-
-    let path = normalize_legacy_office_optional(legacy.path);
-    let output_path = normalize_legacy_office_optional(legacy.output_path);
-    let destination_path = normalize_legacy_office_optional(legacy.destination_path);
-    if trace_operation != request.operation
-        || path != request.document_path
-        || legacy.arguments != *expected_arguments
-        || output_path != request.output_path
-        || destination_path != request.destination_path
-        || legacy.timeout_ms != request.timeout_ms
-    {
-        return Err("historical Office ToolCall differs from the frozen request".to_string());
-    }
-
-    if let Some(reason) = legacy.reason {
-        let reason = reason.trim().chars().take(2_000).collect::<String>();
-        if reason != frozen.reason {
-            return Err(
-                "historical Office ToolCall reason differs from the frozen action".to_string(),
-            );
-        }
-    }
-    Ok(())
-}
-
-fn normalize_legacy_office_optional(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    })
+    crate::tools::validate_frozen_office_trace_args(frozen, operation)
 }
 
 /// Proves that a manual file-producing action has one coherent terminal receipt.

@@ -459,9 +459,10 @@ fn explicit_bundled_registration_exposes_the_real_embedded_skill() {
     let package = service.resolve(&descriptor.selection()).unwrap();
     assert_eq!(package.descriptor(), descriptor);
     assert_eq!(package.format_version(), SKILL_PACKAGE_FORMAT_VERSION_V3);
-    assert_eq!(package.resources().len(), 2);
+    assert_eq!(package.resources().len(), 3);
     assert!(package.resources().get("office-capability.json").is_some());
     assert!(package.resources().get("references/workflows.md").is_some());
+    assert!(package.resources().get("templates/builder.py").is_some());
 }
 
 #[test]

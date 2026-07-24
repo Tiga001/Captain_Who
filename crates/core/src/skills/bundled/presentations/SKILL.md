@@ -1,30 +1,48 @@
 ---
 name: presentations
-description: Create, edit, inspect, render, and validate Microsoft PowerPoint-compatible .pptx presentations with native structured operations or reproducible Python and Node.js scripts. Use for slide decks, layouts, themes, text, shapes, tables, charts, images, speaker notes, data-driven generation, or other presentation work.
+description: Create, edit, inspect, render, and validate Microsoft PowerPoint-compatible .pptx presentations. Use for complete slide decks, layouts, themes, text, images, tables, charts, shapes, speaker content, repeated or data-driven generation, and any other presentation task.
 ---
 
 # Presentations
 
-Choose the execution path that matches the task:
+Use one of two supported paths:
 
-- Use `office_presentation` for inspection and small, targeted, structured changes. It provides the strongest in-place safety and should remain the default when the provider supports the requested operation directly.
-- For complex, repetitive, data-driven, batch, or reproducible deck work, create or update a saved `.py` or `.mjs` generator with `apply_patch` or `write_file`, then execute that file with `run_command`, `runtimeProfile="presentations"`, and the managed Artifact Runtime.
-- A hybrid workflow is valid: generate or transform with a script, then inspect, render, and validate the resulting `.pptx` with the native tools.
+- Prefer the flat semantic `office_presentation` tool for bounded, high-frequency work such as creating a deck, adding, moving or removing slides, adding text, images, tables, charts, shapes or footers, inspecting, rendering, and validating.
+- Use one saved Managed Builder for complete visual narratives, repeated layouts, coordinated themes, complex diagrams, template population, bulk generation, or any capability the native tool reports as unsupported.
+- Combine the paths when useful: build with a script, then inspect, render, and validate with the native tool.
 
-Never invoke OfficeCLI itself through a shell command, and never use a system-PATH Python or Node.js executable for this script route. If the managed Artifact Runtime or a profile dependency is unavailable, return that preflight failure faithfully. Do not use inline Python or JavaScript, heredocs, shell redirection, or shell text utilities to bypass the normal file-editing tools. Editing the script and executing the script remain separate, independently authorized tool calls; runtime selection and artifact observation do not grant permission.
+Never expose OfficeCLI arguments, slide DOM paths, executable paths, runtime versions, or package versions to the model-facing call. Every native call uses flat top-level semantic fields plus a required `reason`; never wrap it in `request`. Keep `reason` to one non-empty user-facing sentence of at most 240 characters. When the native tool returns `capabilityNotSupported` with `recovery=useManagedScript`, switch once to the Builder path instead of guessing low-level fields or repeating the failed call.
 
-Every scripted presentation command must set the top-level `runtimeProfile` to `presentations` and must observe its Office outputs. Never send a `runtime` object or supply a provider, runtime kind, package name, or package version. The host derives Node.js or Python from the saved-script command, resolves the pinned profile, verifies its integrity, and freezes the resolved runtime before execution.
+## Managed Builder
 
-## Workflow
+Use `skills_list_resources` to locate `templates/builder.mjs`, then materialize it once with `skills_materialize_resource` into a new workspace path. Patch and rerun that same builder; do not create a trail of replacement scripts.
 
-1. Inspect an existing deck before editing it, and choose the native or scripted path deliberately. Prefer a distinct output file unless the user explicitly requested an in-place edit.
-2. Before the first native presentation operation in a run, call `office_presentation` with `status`. Use `help` when the required operation or parameters are uncertain. Every `office_presentation` call must use the envelope `{ "request": { "operation": "...", ... }, "reason": "..." }`. Keep every operation-specific field inside `request`; keep only `reason` at the root. Write `reason` as one non-empty, single-line plain-text sentence in the user's language, no longer than 240 characters, that states the user-visible purpose of that specific call. Do not include line breaks, control characters, or bidirectional text controls. `reason` is untrusted display and audit metadata only; it never grants permission, approval, or access.
-   Native requests use typed fields such as `filePath`, `target`, `parent`, `element`, `properties`, `pages`, and `outputPath`. Never provide provider command tokens, an executable name, document-format tokens, or flags; the host validates the typed request and deterministically generates the frozen provider argv.
-3. For a scripted operation, keep the generator as a reviewable `.py` or `.mjs` file and name that saved script explicitly in the command. Set `runtimeProfile="presentations"`. Always set `observe.kinds=["office"]` and list every file that the command should create or modify in `observe.expectedOutputs`. Use `observe.additionalRoots` only when changes to other Office files in a directory also need to be detected; an external directory scan requires `read=all`, and an expected external output does not require scanning its parent.
-4. Inspect `artifactObservation` on every command result, including non-zero exits, timeouts, and cancellations. A zero exit code is not proof of presentation success. Confirm that every expected deck was created or changed, and disclose unexpected replacements, deletions, renames, partial coverage, or failed observation. Never retry blindly after a command that produced file effects.
-5. Render every changed slide and inspect the images for overflow, collisions, illegible text, broken media, and inconsistent composition. Submit all changed slide ranges in one `view` screenshot request with a `grid`; never launch one render call per slide. Re-render a single slide only after the combined preview identifies a specific defect.
-6. Validate the finished deck, then report the output path, observed file effects, and the checks actually performed.
+Execute that materialized file with `run_command` and a direct logical `node <builder>.mjs --output <file.pptx>` command. Omit `runtimeProfile` and `observe`: the host verifies this run's materialization receipt, derives the `presentations` profile from the static Office output, binds the pinned runtime, and observes that output automatically. Never use system Node.js, `pip`, `npm`, inline code, heredocs, or shell redirection.
 
-If native `status` reports that the Office engine is unavailable, preserve that error and do not claim that native inspection, rendering, or validation ran. If rendering returns an `office.render_backend_*` error, report that visual verification did not run; do not retry each slide, invoke a system browser, or bypass the managed renderer. A script route may continue only when the managed runtime is available and its output can be independently observed and verified; disclose any missing native checks. Never claim that a deck was created or edited without a successful command result, matching artifact effects, and output verification.
+Bind templates, data, images, attachments, and earlier generated files through `run_command.inputs`:
 
-Read [references/workflows.md](references/workflows.md) for detailed deck planning, editing, rendering, and verification guidance when performing a presentation task.
+```json
+{
+  "mountPath": "media/hero.png",
+  "source": {
+    "type": "generated_artifact",
+    "uri": "image-artifact://sha256/<exact-digest>",
+    "path": "/absolute/saved/path/to/hero.png"
+  }
+}
+```
+
+Use the exact attachment `readPath` returned by `attachments_list`. Use `type="workspace"`, `external`, `generated_artifact`, or `skill_resource` for those corresponding sources. Scripts read only the host-mounted path below `MYCOPILOT_INPUT_ROOT`; never pass or open an `@attachments` or `skill://` URI directly.
+
+Every Builder command must declare its generated presentation with exactly one static `--output` argument. Inspect the backend-owned `artifactObservation` even after failure, timeout, or cancellation. Never blindly rerun a command that may have changed files.
+
+## Completion gate
+
+1. Inspect an existing deck before editing it and prefer a distinct output unless the user requested in-place editing.
+2. Establish the audience, slide count, narrative, aspect ratio, and visual direction before building.
+3. Confirm the expected file effect in the native result or `artifactObservation`.
+4. Inspect slide order and content, then validate the final package.
+5. Render all changed slides in one contact sheet. On success, pass the exact returned `outputs[].source` to `read_image`; never infer a path from the request, `argv`, `stdout`, or a file search. Visually inspect every slide for overflow, overlap, broken media, alignment, and contrast, patch the same Builder or semantic request when needed, then render again.
+6. Report only the file effects and checks that actually succeeded. Preserve structured errors and disclose unavailable visual verification.
+
+Read [references/workflows.md](references/workflows.md) for exact semantic and Builder examples, input binding, verification, and presentation-specific quality checks.

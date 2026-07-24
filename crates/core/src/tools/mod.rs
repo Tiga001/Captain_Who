@@ -541,7 +541,7 @@ mod tests {
     static TEST_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
     fn office_tool_args(request: Value, reason: Option<Value>) -> Value {
-        let mut args = json!({ "request": request });
+        let mut args = request;
         if let Some(reason) = reason {
             args["reason"] = reason;
         }
@@ -629,6 +629,35 @@ mod tests {
         for definition in registry.definitions() {
             validate_portable_tool_input_schema(&definition.name, &definition.input_schema)
                 .unwrap_or_else(|error| panic!("{}: {error}", definition.name));
+        }
+    }
+
+    #[test]
+    fn every_file_input_consumer_exposes_the_same_discriminated_source_contract() {
+        let engine =
+            crate::office::resolve_office_engine(&crate::office::OfficeCliDiscoveryOptions::new());
+        let registry = ToolRegistry::defaults_with_search_and_office(None, Some(engine));
+        let expected = schema::agent_file_input_ref_schema();
+
+        assert_eq!(
+            registry.definition_for("read_image").unwrap().input_schema["properties"]["source"],
+            expected
+        );
+        assert_eq!(
+            registry.definition_for("run_command").unwrap().input_schema["properties"]["inputs"]
+                ["items"]["properties"]["source"],
+            expected
+        );
+        for tool_name in [
+            "office_document",
+            "office_spreadsheet",
+            "office_presentation",
+        ] {
+            assert_eq!(
+                registry.definition_for(tool_name).unwrap().input_schema["properties"]["source"],
+                expected,
+                "{tool_name} drifted from the shared AgentFileInputRef schema"
+            );
         }
     }
 
@@ -724,16 +753,8 @@ mod tests {
             ));
             for args in [
                 office_tool_args(
-                    json!({ "operation": "help" }),
-                    Some(json!("Inspect supported operations")),
-                ),
-                office_tool_args(
-                    json!({ "operation": "get", "filePath": document_path, "target": "/" }),
+                    json!({ "operation": "inspect", "filePath": document_path }),
                     Some(json!("Inspect document structure")),
-                ),
-                office_tool_args(
-                    json!({ "operation": "query", "filePath": document_path, "selector": "*" }),
-                    Some(json!("Inspect matching elements")),
                 ),
                 office_tool_args(
                     json!({ "operation": "validate", "filePath": document_path }),
@@ -745,48 +766,24 @@ mod tests {
             assert!(!registry.requires_approval_for_call(
                 tool_name,
                 &office_tool_args(
-                    json!({ "operation": "view", "filePath": document_path, "mode": "text" }),
-                    Some(json!("Inspect rendered text")),
+                    json!({ "operation": "inspect", "filePath": document_path, "depth": 2 }),
+                    Some(json!("Inspect document details")),
                 )
             ));
-            for args in [
-                office_tool_args(
-                    json!({ "operation": "create", "filePath": document_path }),
-                    Some(json!("Create the Office file")),
-                ),
-                office_tool_args(
-                    json!({ "operation": "set", "filePath": document_path, "target": "/sheet[1]", "properties": { "name": "Updated" } }),
-                    Some(json!("Update the first sheet")),
-                ),
-                office_tool_args(
-                    json!({ "operation": "add", "filePath": document_path, "parent": "/", "element": "paragraph" }),
-                    Some(json!("Add document content")),
-                ),
-                office_tool_args(
-                    json!({ "operation": "remove", "filePath": document_path, "target": "/sheet[1]" }),
-                    Some(json!("Remove the first sheet")),
-                ),
-                office_tool_args(
-                    json!({ "operation": "move", "filePath": document_path, "target": "/sheet[1]" }),
-                    Some(json!("Move the first sheet")),
-                ),
-                office_tool_args(
-                    json!({ "operation": "swap", "filePath": document_path, "firstTarget": "/sheet[1]", "secondTarget": "/sheet[2]" }),
-                    Some(json!("Swap the first two sheets")),
-                ),
-            ] {
-                assert!(
-                    registry.requires_approval_for_call(tool_name, &args),
-                    "{tool_name} write operations must use the file-edit approval path"
-                );
-            }
+            let create_args = office_tool_args(
+                json!({ "operation": "create", "filePath": document_path }),
+                Some(json!("Create the Office file")),
+            );
+            assert!(
+                registry.requires_approval_for_call(tool_name, &create_args),
+                "{tool_name} write operations must use the file-edit approval path"
+            );
             assert!(registry.requires_approval_for_call(
                 tool_name,
                 &office_tool_args(
                     json!({
-                        "operation": "view",
+                        "operation": "render",
                         "filePath": document_path,
-                        "mode": "html",
                         "outputPath": "preview.html"
                     }),
                     Some(json!("Render an HTML preview")),
@@ -811,11 +808,7 @@ mod tests {
                     Some(json!("Check Office engine status")),
                 ),
                 office_tool_args(
-                    json!({ "operation": "help", "filePath": document_path }),
-                    Some(json!("Inspect supported operations")),
-                ),
-                office_tool_args(
-                    json!({ "operation": "query", "filePath": document_path }),
+                    json!({ "operation": "inspect" }),
                     Some(json!("Inspect the document")),
                 ),
                 office_tool_args(
