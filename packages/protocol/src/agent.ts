@@ -108,11 +108,29 @@ export type ConversationTurnTraceTerminalStatus = 'completed' | 'failed' | 'canc
 export type ConversationTraceToolResultStatus =
   'succeeded' | 'failed' | 'rejected' | 'conflict' | 'cancelled'
 
+export interface ConversationTraceAttachment {
+  id: string
+  kind: AgentInputAttachmentKind
+  name: string
+  mimeType?: string
+  sizeBytes: number
+}
+
 export type ConversationTurnTraceItem =
   | {
       type: 'assistant_narration'
       sequence: number
       content: string
+      truncated: boolean
+    }
+  | {
+      type: 'user_guidance'
+      sequence: number
+      guidanceId: string
+      clientMessageId: string
+      content: string
+      attachments: ConversationTraceAttachment[]
+      createdAt: number
       truncated: boolean
     }
   | {
@@ -458,6 +476,23 @@ export interface AgentConversationTurnInput {
   permissions?: AgentPermissions
   /** Ordered, revision-bound Skills selected for this agent run. */
   skills?: SkillSelection[]
+}
+
+export type AgentGuidanceStatus = 'queued' | 'applied' | 'rejected' | 'abandoned'
+
+export interface AgentSteerRunInput {
+  conversationId: string
+  expectedRunId: string
+  clientMessageId: string
+  content: string
+  attachments?: AgentInputAttachment[]
+}
+
+export type AgentSteerRunResultStatus = 'queued' | 'duplicate'
+
+export interface AgentSteerRunOutput {
+  guidanceId: string
+  status: AgentSteerRunResultStatus
 }
 
 export interface AgentContextWindowSnapshotInput {
@@ -1403,6 +1438,16 @@ export type AgentEvent =
       attempt: number
     }
   | { type: 'message'; runId: string; content: string }
+  | {
+      type: 'guidance_applied'
+      runId: string
+      guidanceId: string
+      clientMessageId: string
+      content: string
+      attachments: ConversationTraceAttachment[]
+      createdAt: number
+      sequence: number
+    }
   | { type: 'tool_call'; runId: string; call: AgentToolCall }
   | { type: 'tool_result'; runId: string; result: AgentToolResult }
   | { type: 'todo_updated'; runId: string; todo: AgentTodoState }

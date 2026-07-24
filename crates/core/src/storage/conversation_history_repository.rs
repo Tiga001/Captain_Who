@@ -148,6 +148,7 @@ pub fn search_records(
         for row in rows {
             let (assistant_message_id, sequence, item_kind, item_json, created_at, position) = row?;
             let item = parse_trace_item(&item_json)?;
+            let created_at = trace_item_created_at(&item, created_at);
             let (preview, preview_truncated) = make_preview(&item_json, query);
             hits.push(OrderedHit {
                 position,
@@ -270,7 +271,15 @@ fn trace_item_tool(item: &ConversationTurnTraceItem) -> Option<&str> {
     match item {
         ConversationTurnTraceItem::ToolCall { tool, .. }
         | ConversationTurnTraceItem::ToolResult { tool, .. } => Some(tool),
-        ConversationTurnTraceItem::AssistantNarration { .. } => None,
+        ConversationTurnTraceItem::AssistantNarration { .. }
+        | ConversationTurnTraceItem::UserGuidance { .. } => None,
+    }
+}
+
+fn trace_item_created_at(item: &ConversationTurnTraceItem, fallback: i64) -> i64 {
+    match item {
+        ConversationTurnTraceItem::UserGuidance { created_at, .. } => *created_at,
+        _ => fallback,
     }
 }
 

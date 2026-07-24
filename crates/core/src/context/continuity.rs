@@ -167,6 +167,19 @@ impl ContextContinuitySnapshot {
                             truncated: *truncated || preview_truncated,
                         });
                     }
+                    ConversationTurnTraceItem::UserGuidance {
+                        content,
+                        created_at,
+                        ..
+                    } => {
+                        ensure_no_pending_call(&pending_call)?;
+                        entries.push(ContextContinuityEntry::UserMessage {
+                            cursor: cursor.clone(),
+                            created_at: format_message_created_at(*created_at)?,
+                            text: project_text(content, USER_MESSAGE_INLINE_CHARS),
+                            status: Some("applied".to_string()),
+                        });
+                    }
                     ConversationTurnTraceItem::ToolCall {
                         call_id,
                         tool,

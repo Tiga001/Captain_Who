@@ -572,6 +572,338 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
     }
 }
 
+async fn read_runtime_test_json_request(stream: &mut tokio::net::TcpStream) -> Value {
+    use tokio::io::AsyncReadExt;
+
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 4_096];
+    let mut body_start = None;
+    let mut expected_length = None;
+    loop {
+        let read = stream.read(&mut buffer).await.unwrap();
+        assert!(read > 0, "connection closed before request completed");
+        request.extend_from_slice(&buffer[..read]);
+        if body_start.is_none() {
+            if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or_default();
+                let start = header_end + 4;
+                body_start = Some(start);
+                expected_length = Some(start + content_length);
+            }
+        }
+        if expected_length.is_some_and(|length| request.len() >= length) {
+            break;
+        }
+    }
+    serde_json::from_slice(&request[body_start.unwrap()..expected_length.expect("content length")])
+        .unwrap()
+}
+
+async fn write_runtime_test_json_response(stream: &mut tokio::net::TcpStream, body: Value) {
+    use tokio::io::AsyncWriteExt;
+
+    let body = serde_json::to_vec(&body).unwrap();
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(headers.as_bytes()).await.unwrap();
+    stream.write_all(&body).await.unwrap();
+}
+
+fn runtime_steer_input(
+    guidance_id: &str,
+    client_message_id: &str,
+    content: &str,
+) -> crate::AgentSteerInput {
+    crate::AgentSteerInput {
+        guidance_id: guidance_id.to_string(),
+        client_message_id: client_message_id.to_string(),
+        content: content.to_string(),
+        attachments: Vec::new(),
+        created_at: 42,
+    }
+}
+
+#[tokio::test]
+async fn steer_during_sampling_turns_a_terminal_response_into_intermediate_narration() {
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests_for_server = Arc::clone(&requests);
+    let (first_request_seen_tx, first_request_seen_rx) = oneshot::channel();
+    let (release_first_response_tx, release_first_response_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut first_request_seen_tx = Some(first_request_seen_tx);
+        let mut release_first_response_rx = Some(release_first_response_rx);
+        for request_index in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_runtime_test_json_request(&mut stream).await;
+            requests_for_server.lock().unwrap().push(request);
+            if request_index == 0 {
+                first_request_seen_tx.take().unwrap().send(()).unwrap();
+                release_first_response_rx.take().unwrap().await.unwrap();
+            }
+            let content = if request_index == 0 {
+                "Initial answer before guidance."
+            } else {
+                "Final answer after guidance."
+            };
+            write_runtime_test_json_response(
+                &mut stream,
+                json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": content },
+                        "finish_reason": "stop"
+                    }]
+                }),
+            )
+            .await;
+        }
+    });
+
+    let queue = AgentSteerInputQueue::new();
+    let mut input = conversation_context_input(vec![message("user", "Start the task.")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    input.assistant_message_id = Some("assistant-steer".to_string());
+    input.context = Some(AgentRunContext {
+        conversation_id: Some("conversation-steer".to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: Default::default(),
+    });
+    let runtime_queue = queue.clone();
+    let runtime = tokio::spawn(async move {
+        AgentRuntime::default()
+            .send_chat_with_events_and_cancellation(
+                input,
+                Some("run-steer".to_string()),
+                None,
+                AgentCancellationToken::new(),
+                Some(AgentRuntimeHostServices::new().with_steer_input(runtime_queue)),
+            )
+            .await
+            .unwrap()
+    });
+
+    first_request_seen_rx.await.unwrap();
+    assert_eq!(
+        queue
+            .enqueue(runtime_steer_input(
+                "guidance-1",
+                "client-1",
+                "Also include the migration risk."
+            ))
+            .unwrap(),
+        AgentSteerEnqueueOutcome::Queued
+    );
+    release_first_response_tx.send(()).unwrap();
+    let output = runtime.await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(output.content, "Final answer after guidance.");
+    let requests = requests.lock().unwrap();
+    let second_messages = requests[1]["messages"].as_array().unwrap();
+    let intermediate_index = second_messages
+        .iter()
+        .position(|message| {
+            message["role"] == "assistant"
+                && message["content"] == "Initial answer before guidance."
+        })
+        .unwrap();
+    let guidance_index = second_messages
+        .iter()
+        .position(|message| {
+            message["role"] == "user" && message["content"] == "Also include the migration risk."
+        })
+        .unwrap();
+    assert!(intermediate_index < guidance_index);
+    drop(requests);
+
+    let trace = output.conversation_turn_trace.as_ref().unwrap();
+    assert!(matches!(
+        &trace.items[..],
+        [
+            ConversationTurnTraceItem::AssistantNarration { content, .. },
+            ConversationTurnTraceItem::UserGuidance {
+                guidance_id,
+                client_message_id,
+                ..
+            }
+        ] if content == "Initial answer before guidance."
+            && guidance_id == "guidance-1"
+            && client_message_id == "client-1"
+    ));
+    assert!(output.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::GuidanceApplied {
+            guidance_id,
+            sequence: 1,
+            ..
+        } if guidance_id == "guidance-1"
+    )));
+    assert!(!queue.is_accepting());
+    assert_eq!(
+        queue
+            .enqueue(runtime_steer_input(
+                "guidance-late",
+                "client-late",
+                "too late"
+            ))
+            .unwrap(),
+        AgentSteerEnqueueOutcome::Closed
+    );
+}
+
+#[tokio::test]
+async fn steer_waits_until_a_complete_tool_exchange_before_next_sampling() {
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let second_request = Arc::new(Mutex::new(None::<Value>));
+    let second_request_for_server = Arc::clone(&second_request);
+    let (first_request_seen_tx, first_request_seen_rx) = oneshot::channel();
+    let (release_first_response_tx, release_first_response_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut first_request_seen_tx = Some(first_request_seen_tx);
+        let mut release_first_response_rx = Some(release_first_response_rx);
+        for request_index in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_runtime_test_json_request(&mut stream).await;
+            if request_index == 0 {
+                first_request_seen_tx.take().unwrap().send(()).unwrap();
+                release_first_response_rx.take().unwrap().await.unwrap();
+            } else {
+                *second_request_for_server.lock().unwrap() = Some(request);
+            }
+            let response = if request_index == 0 {
+                json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{
+                                "id": "provider-call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "attachments_list",
+                                    "arguments": "{}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                })
+            } else {
+                json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": "Done after the tool." },
+                        "finish_reason": "stop"
+                    }]
+                })
+            };
+            write_runtime_test_json_response(&mut stream, response).await;
+        }
+    });
+
+    let queue = AgentSteerInputQueue::new();
+    let mut input = conversation_context_input(vec![message("user", "List attachments.")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    input.assistant_message_id = Some("assistant-tool-steer".to_string());
+    input.context = Some(AgentRunContext {
+        conversation_id: Some("conversation-tool-steer".to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: Default::default(),
+    });
+    let runtime_queue = queue.clone();
+    let runtime = tokio::spawn(async move {
+        AgentRuntime::default()
+            .send_chat_with_events_and_cancellation(
+                input,
+                Some("run-tool-steer".to_string()),
+                None,
+                AgentCancellationToken::new(),
+                Some(AgentRuntimeHostServices::new().with_steer_input(runtime_queue)),
+            )
+            .await
+            .unwrap()
+    });
+
+    first_request_seen_rx.await.unwrap();
+    queue
+        .enqueue(runtime_steer_input(
+            "guidance-tool",
+            "client-tool",
+            "After the tool, summarize the count.",
+        ))
+        .unwrap();
+    release_first_response_tx.send(()).unwrap();
+    let output = runtime.await.unwrap();
+    server.await.unwrap();
+
+    let second_request = second_request.lock().unwrap().take().unwrap();
+    let messages = second_request["messages"].as_array().unwrap();
+    let tool_call_index = messages
+        .iter()
+        .position(|message| message["role"] == "assistant" && message["tool_calls"].is_array())
+        .unwrap();
+    let tool_result_index = messages
+        .iter()
+        .position(|message| message["role"] == "tool")
+        .unwrap();
+    let guidance_index = messages
+        .iter()
+        .position(|message| {
+            message["role"] == "user"
+                && message["content"] == "After the tool, summarize the count."
+        })
+        .unwrap();
+    assert!(tool_call_index < tool_result_index);
+    assert!(tool_result_index < guidance_index);
+
+    let trace = output.conversation_turn_trace.unwrap();
+    assert!(matches!(
+        trace.items.last(),
+        Some(ConversationTurnTraceItem::UserGuidance {
+            guidance_id,
+            ..
+        }) if guidance_id == "guidance-tool"
+    ));
+    let tool_call_index = trace
+        .items
+        .iter()
+        .position(|item| matches!(item, ConversationTurnTraceItem::ToolCall { .. }))
+        .unwrap();
+    let tool_result_index = trace
+        .items
+        .iter()
+        .position(|item| matches!(item, ConversationTurnTraceItem::ToolResult { .. }))
+        .unwrap();
+    assert_eq!(tool_result_index, tool_call_index + 1);
+    assert!(tool_result_index < trace.items.len() - 1);
+}
+
 #[tokio::test]
 async fn empty_normal_completion_is_repaired_once_for_openai_and_anthropic() {
     use crate::model_request_observation::ModelRequestObservationStatus;

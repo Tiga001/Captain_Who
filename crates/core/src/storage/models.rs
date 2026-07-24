@@ -1,4 +1,4 @@
-use crate::protocol::AgentPermissions;
+use crate::protocol::{AgentGuidanceStatus, AgentPermissions};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
@@ -500,6 +500,22 @@ pub struct AgentPendingActionRecord {
     pub target_status: Option<String>,
     pub action_json: String,
     pub agent_input_json: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRunGuidanceRecord {
+    pub guidance_id: String,
+    pub client_message_id: String,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub assistant_message_id: String,
+    pub content: String,
+    pub status: AgentGuidanceStatus,
+    pub attachment_ids: Vec<String>,
+    pub applied_trace_sequence: Option<u64>,
+    pub terminal_reason: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }

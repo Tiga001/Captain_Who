@@ -6,13 +6,14 @@
 //! derive a smaller view, but they are never used to rebuild model context.
 
 use crate::protocol::{
-    AgentApprovalStatus, AgentProposedAction, AgentRunCheckpoint, AgentToolCall, AgentToolResult,
+    AgentApprovalStatus, AgentInputAttachment, AgentInputAttachmentKind, AgentProposedAction,
+    AgentRunCheckpoint, AgentToolCall, AgentToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-pub const CONVERSATION_TURN_TRACE_SCHEMA_VERSION: u32 = 2;
+pub const CONVERSATION_TURN_TRACE_SCHEMA_VERSION: u32 = 3;
 const BINARY_OMITTED_MARKER: &str = "[binary/base64 omitted]";
 const BINARY_OMITTED_FROM_HISTORY_KEY: &str = "binaryomittedfromhistory";
 
@@ -74,6 +75,16 @@ pub enum ConversationTurnTraceItem {
         content: String,
         truncated: bool,
     },
+    UserGuidance {
+        sequence: u64,
+        guidance_id: String,
+        client_message_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<ConversationTraceAttachment>,
+        created_at: i64,
+        truncated: bool,
+    },
     ToolCall {
         sequence: u64,
         call_id: String,
@@ -96,10 +107,22 @@ pub enum ConversationTurnTraceItem {
     },
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationTraceAttachment {
+    pub id: String,
+    pub kind: AgentInputAttachmentKind,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub size_bytes: u64,
+}
+
 impl ConversationTurnTraceItem {
     pub fn sequence(&self) -> u64 {
         match self {
             Self::AssistantNarration { sequence, .. }
+            | Self::UserGuidance { sequence, .. }
             | Self::ToolCall { sequence, .. }
             | Self::ToolResult { sequence, .. } => *sequence,
         }
@@ -108,6 +131,7 @@ impl ConversationTurnTraceItem {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::AssistantNarration { .. } => "assistant_narration",
+            Self::UserGuidance { .. } => "user_guidance",
             Self::ToolCall { .. } => "tool_call",
             Self::ToolResult { .. } => "tool_result",
         }
@@ -181,6 +205,45 @@ impl ConversationTurnTrace {
                         return Err("conversation trace narration cannot be empty".to_string());
                     }
                     ensure_no_binary_text("assistant narration", content)?;
+                }
+                ConversationTurnTraceItem::UserGuidance {
+                    guidance_id,
+                    client_message_id,
+                    content,
+                    attachments,
+                    created_at,
+                    ..
+                } => {
+                    if pending_call.is_some() {
+                        return Err(
+                            "conversation trace user guidance cannot split a tool exchange"
+                                .to_string(),
+                        );
+                    }
+                    if guidance_id.trim().is_empty()
+                        || client_message_id.trim().is_empty()
+                        || content.trim().is_empty()
+                        || *created_at < 0
+                    {
+                        return Err(
+                            "conversation trace user guidance identity is invalid".to_string()
+                        );
+                    }
+                    ensure_no_binary_text("user guidance", content)?;
+                    let mut attachment_ids = BTreeSet::new();
+                    for attachment in attachments {
+                        if attachment.id.trim().is_empty()
+                            || attachment.name.trim().is_empty()
+                            || !attachment_ids.insert(attachment.id.as_str())
+                        {
+                            return Err("conversation trace user guidance attachment is invalid"
+                                .to_string());
+                        }
+                        ensure_no_binary_text("user guidance attachment name", &attachment.name)?;
+                        if let Some(mime_type) = &attachment.mime_type {
+                            ensure_no_binary_text("user guidance attachment MIME type", mime_type)?;
+                        }
+                    }
                 }
                 ConversationTurnTraceItem::ToolCall {
                     call_id,
@@ -581,6 +644,39 @@ impl ConversationTraceRecorder {
         self.truncated |= redacted;
     }
 
+    pub(crate) fn record_user_guidance(
+        &mut self,
+        guidance_id: &str,
+        client_message_id: &str,
+        content: &str,
+        attachments: &[AgentInputAttachment],
+        created_at: i64,
+    ) -> Option<u64> {
+        let content = content.trim();
+        if content.is_empty()
+            || matches!(
+                self.items.last(),
+                Some(ConversationTurnTraceItem::ToolCall { .. })
+            )
+        {
+            return None;
+        }
+        let (content, content_redacted) = sanitize_text(content);
+        let (attachments, attachment_redacted) = trace_attachments_from_input(attachments);
+        let sequence = self.take_sequence();
+        self.items.push(ConversationTurnTraceItem::UserGuidance {
+            sequence,
+            guidance_id: guidance_id.to_string(),
+            client_message_id: client_message_id.to_string(),
+            content,
+            attachments,
+            created_at,
+            truncated: content_redacted || attachment_redacted,
+        });
+        self.truncated |= content_redacted || attachment_redacted;
+        Some(sequence)
+    }
+
     pub(crate) fn record_tool_call(&mut self, call: &AgentToolCall) {
         if self.items.iter().any(|item| {
             matches!(item, ConversationTurnTraceItem::ToolCall { call_id, .. } if call_id == &call.id)
@@ -738,6 +834,55 @@ impl ConversationTraceRecorder {
         self.next_sequence = self.next_sequence.saturating_add(1);
         sequence
     }
+}
+
+pub(crate) fn trace_attachments_from_input(
+    attachments: &[AgentInputAttachment],
+) -> (Vec<ConversationTraceAttachment>, bool) {
+    let mut redacted = false;
+    let attachments = attachments
+        .iter()
+        .map(|attachment| {
+            let (name, name_redacted) = sanitize_text(&attachment.name);
+            let (mime_type, mime_redacted) =
+                sanitize_optional_text(attachment.mime_type.as_deref());
+            redacted |= name_redacted || mime_redacted || attachment.truncated.unwrap_or(false);
+            ConversationTraceAttachment {
+                id: attachment.id.clone(),
+                kind: attachment.kind,
+                name,
+                mime_type,
+                size_bytes: attachment.size_bytes,
+            }
+        })
+        .collect();
+    (attachments, redacted)
+}
+
+pub(crate) fn render_user_guidance_content(
+    content: &str,
+    attachments: &[ConversationTraceAttachment],
+) -> String {
+    if attachments.is_empty() {
+        return content.to_string();
+    }
+    let attachment_list = attachments
+        .iter()
+        .map(|attachment| {
+            format!(
+                "- {} ({}, {} bytes, id: {})",
+                attachment.name,
+                match attachment.kind {
+                    AgentInputAttachmentKind::File => "file",
+                    AgentInputAttachmentKind::Image => "image",
+                },
+                attachment.size_bytes,
+                attachment.id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{content}\n\nAttachments supplied with this user guidance:\n{attachment_list}")
 }
 
 /// Produces the canonical persisted trace item for a ToolResult.
@@ -1156,5 +1301,52 @@ mod tests {
             Some(ConversationTurnTraceItem::ToolResult { call_id, .. }) if call_id == "image-call"
         ));
         assert!(conversation_trace_with_recovered_tool_result(&recovered, &result).is_err());
+    }
+
+    #[test]
+    fn user_guidance_is_canonical_ordered_and_never_persists_attachment_bytes() {
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_narration("Initial answer.");
+        let sequence = recorder
+            .record_user_guidance(
+                "guidance-1",
+                "client-1",
+                "Please also inspect the image.",
+                &[AgentInputAttachment {
+                    id: "attachment-1".to_string(),
+                    kind: AgentInputAttachmentKind::Image,
+                    name: "diagram.png".to_string(),
+                    mime_type: Some("image/png".to_string()),
+                    size_bytes: 6,
+                    encoding: crate::protocol::AgentInputAttachmentEncoding::Base64,
+                    data: "c2VjcmV0".to_string(),
+                    truncated: None,
+                }],
+                42,
+            )
+            .unwrap();
+        assert_eq!(sequence, 1);
+
+        let trace = recorder.finish(
+            "run-1",
+            "conversation-1",
+            "assistant-1",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+        trace.validate().unwrap();
+        let serialized = serde_json::to_string(&trace).unwrap();
+        assert!(serialized.contains("\"type\":\"user_guidance\""));
+        assert!(serialized.contains("diagram.png"));
+        assert!(!serialized.contains("c2VjcmV0"));
+    }
+
+    #[test]
+    fn user_guidance_cannot_split_an_open_tool_exchange() {
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_tool_call(&call("pending"));
+        assert!(recorder
+            .record_user_guidance("guidance-1", "client-1", "change course", &[], 42)
+            .is_none());
     }
 }

@@ -1,5 +1,7 @@
 use crate::context::ContextCompactionSummary;
-use crate::conversation_trace::{ConversationTurnTrace, ConversationTurnTraceItem};
+use crate::conversation_trace::{
+    ConversationTraceAttachment, ConversationTurnTrace, ConversationTurnTraceItem,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
@@ -296,7 +298,7 @@ pub enum AgentInputAttachmentEncoding {
     Base64,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentInputAttachment {
     pub id: String,
@@ -309,6 +311,76 @@ pub struct AgentInputAttachment {
     pub data: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentGuidanceStatus {
+    Queued,
+    Applied,
+    Rejected,
+    Abandoned,
+}
+
+impl AgentGuidanceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Applied => "applied",
+            Self::Rejected => "rejected",
+            Self::Abandoned => "abandoned",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(Self::Queued),
+            "applied" => Some(Self::Applied),
+            "rejected" => Some(Self::Rejected),
+            "abandoned" => Some(Self::Abandoned),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSteerRunInput {
+    pub conversation_id: String,
+    pub expected_run_id: String,
+    pub client_message_id: String,
+    pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<AgentInputAttachment>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSteerRunResultStatus {
+    Queued,
+    Duplicate,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSteerRunOutput {
+    pub guidance_id: String,
+    pub status: AgentSteerRunResultStatus,
+}
+
+/// Validated, run-scoped input consumed by the agent loop at a safe sampling boundary.
+///
+/// The Host owns durable admission and attachment persistence. The runtime only receives inputs
+/// that have already been associated with the expected active run.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSteerInput {
+    pub guidance_id: String,
+    pub client_message_id: String,
+    pub content: String,
+    #[serde(default)]
+    pub attachments: Vec<AgentInputAttachment>,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1847,6 +1919,15 @@ pub enum AgentEvent {
     Message {
         run_id: String,
         content: String,
+    },
+    GuidanceApplied {
+        run_id: String,
+        guidance_id: String,
+        client_message_id: String,
+        content: String,
+        attachments: Vec<ConversationTraceAttachment>,
+        created_at: i64,
+        sequence: u64,
     },
     ToolCall {
         run_id: String,

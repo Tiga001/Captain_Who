@@ -80,7 +80,8 @@ impl ToolFailureGuard {
                         record.executed_failures = record.executed_failures.saturating_add(1);
                     }
                 }
-                ConversationTurnTraceItem::AssistantNarration { .. } => {}
+                ConversationTurnTraceItem::AssistantNarration { .. }
+                | ConversationTurnTraceItem::UserGuidance { .. } => {}
             }
         }
 

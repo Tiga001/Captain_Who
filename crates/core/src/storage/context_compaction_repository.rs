@@ -578,7 +578,13 @@ fn list_journal_entries(
                         entries.push(ContextCompactionSourceItem::TraceItem {
                             cursor: ContextJournalCursor::trace_item(&message_id, item.sequence()),
                             run_id: trace.run_id.clone(),
-                            created_at,
+                            created_at: match item {
+                                crate::ConversationTurnTraceItem::UserGuidance {
+                                    created_at,
+                                    ..
+                                } => *created_at,
+                                _ => created_at,
+                            },
                             item: item.clone(),
                         });
                     }

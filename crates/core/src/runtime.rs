@@ -29,7 +29,7 @@ use crate::context::{
     ContextCompactionPlanner, ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata,
     ContextRetention, ContextScope, ContextSource,
 };
-use crate::conversation_trace::ConversationTraceRecorder;
+use crate::conversation_trace::{trace_attachments_from_input, ConversationTraceRecorder};
 use crate::file_write::{file_write_approval_route, FileWriteApprovalRoute};
 use crate::llm::{
     complete_chat, complete_chat_streaming, detect_api_style, is_repairable_empty_model_action,
@@ -45,8 +45,9 @@ use crate::protocol::{
     AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowPhase,
     AgentContextWindowSnapshot, AgentError, AgentEvent, AgentExtensionSnapshot, AgentPermissions,
     AgentPromptPreferences, AgentProposedAction, AgentReadPermission, AgentResult, AgentRunContext,
-    AgentRunStatus, AgentSkillActivation, AgentSkillScriptPreflightStatus, AgentToolApprovalMode,
-    AgentToolCall, AgentToolDefinition, AgentToolResult, AgentWritePermission,
+    AgentRunStatus, AgentSkillActivation, AgentSkillScriptPreflightStatus, AgentSteerInput,
+    AgentToolApprovalMode, AgentToolCall, AgentToolDefinition, AgentToolResult,
+    AgentWritePermission,
 };
 use crate::revision::content_revision;
 use crate::storage::service::StorageService;
@@ -139,6 +140,24 @@ struct PreparedRuntimeCapabilities {
 
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+struct AgentSteerInputCloseGuard {
+    input: Option<AgentSteerInputQueue>,
+}
+
+impl AgentSteerInputCloseGuard {
+    fn new(input: Option<AgentSteerInputQueue>) -> Self {
+        Self { input }
+    }
+}
+
+impl Drop for AgentSteerInputCloseGuard {
+    fn drop(&mut self) {
+        if let Some(input) = &self.input {
+            input.close();
+        }
+    }
+}
+
 pub struct AgentRuntime {
     max_tool_iterations: usize,
 }
@@ -191,7 +210,9 @@ impl AgentRuntime {
             office_engine,
             image_generation_execution,
             command_runtime_profile_resolver,
+            steer_input,
         } = host_services.unwrap_or_default();
+        let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
         let run_id = run_id.unwrap_or_else(generate_run_id);
         let context = input.context.clone();
         let model_capabilities = input.model_capabilities;
@@ -316,6 +337,7 @@ impl AgentRuntime {
         let mut finish_reason = None;
         let mut response_fence_corrections = 0_usize;
         let mut empty_model_action_repair_pending = false;
+        let mut can_drain_steer_input = false;
         let context_capacity_detector = context_window_configured.then_some(capacity_detector);
         let context_compaction_planner = context_window_configured
             .then(|| ContextCompactionPlanner::for_tools(&llm_request.tools));
@@ -367,6 +389,22 @@ impl AgentRuntime {
                 }
                 if tool_batch.is_empty() {
                     active_context.validate_complete_tool_protocol()?;
+                    if can_drain_steer_input {
+                        if let Some(steer_input) = &steer_input {
+                            let pending = steer_input.drain_pending();
+                            if !pending.is_empty() {
+                                pending_trace_baseline = apply_steer_inputs(
+                                    &run_id,
+                                    None,
+                                    pending,
+                                    &mut active_context,
+                                    &conversation_trace,
+                                    trace_observer.as_ref(),
+                                    &mut event_stream,
+                                )?;
+                            }
+                        }
+                    }
                     let model_request_index = next_model_request_index;
                     next_model_request_index = next_model_request_index.saturating_add(1);
                     let file_transactions =
@@ -731,6 +769,7 @@ impl AgentRuntime {
                     empty_model_action_repair_pending = false;
                     merge_total_usage(&mut usage, llm_response.usage);
                     finish_reason = llm_response.finish_reason;
+                    can_drain_steer_input = true;
 
                     // Every persisted trace item present in this successful request has now been
                     // observed by the main model and may join the compactable durable baseline.
@@ -843,6 +882,23 @@ impl AgentRuntime {
                         continue;
                     }
                     if tool_requests.is_empty() {
+                        if let Some(steer_input) = &steer_input {
+                            match steer_input.take_pending_or_close() {
+                                AgentSteerDrainOrClose::Pending(pending) => {
+                                    pending_trace_baseline = apply_steer_inputs(
+                                        &run_id,
+                                        Some(&llm_response.content),
+                                        pending,
+                                        &mut active_context,
+                                        &conversation_trace,
+                                        trace_observer.as_ref(),
+                                        &mut event_stream,
+                                    )?;
+                                    continue;
+                                }
+                                AgentSteerDrainOrClose::Closed => {}
+                            }
+                        }
                         break 'agent_loop llm_response.content;
                     }
                     response_fence_corrections = 0;
@@ -1481,6 +1537,95 @@ impl AgentRuntime {
             trace_assistant_message_id.as_deref(),
         )
     }
+}
+
+fn apply_steer_inputs(
+    run_id: &str,
+    preceding_assistant_content: Option<&str>,
+    inputs: Vec<AgentSteerInput>,
+    active_context: &mut ContextFrame,
+    conversation_trace: &Arc<Mutex<ConversationTraceRecorder>>,
+    trace_observer: Option<&AgentConversationTraceObserver>,
+    event_stream: &mut AgentEventStream,
+) -> AgentResult<Option<AgentContextBaseline>> {
+    if inputs.iter().any(|input| !input.attachments.is_empty()) {
+        return Err(AgentError::structured(
+            "agent.steer_attachments_not_supported",
+            "当前 runtime 阶段只支持文本引导，附件引导将在附件接入阶段启用。",
+            json!({
+                "guidanceIds": inputs
+                    .iter()
+                    .filter(|input| !input.attachments.is_empty())
+                    .map(|input| input.guidance_id.as_str())
+                    .collect::<Vec<_>>(),
+            }),
+        ));
+    }
+
+    let preceding_assistant_content = preceding_assistant_content
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(ToString::to_string);
+    let mut applied = Vec::with_capacity(inputs.len());
+    {
+        let mut recorder = conversation_trace
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(content) = preceding_assistant_content.as_deref() {
+            recorder.record_narration(content);
+        }
+        for input in &inputs {
+            let sequence = recorder
+                .record_user_guidance(
+                    &input.guidance_id,
+                    &input.client_message_id,
+                    &input.content,
+                    &input.attachments,
+                    input.created_at,
+                )
+                .ok_or_else(|| {
+                    AgentError::structured(
+                        "agent.invalid_steer_input",
+                        "用户引导正文不能为空。",
+                        json!({ "guidanceId": input.guidance_id }),
+                    )
+                })?;
+            let (attachments, _) = trace_attachments_from_input(&input.attachments);
+            applied.push((input.clone(), attachments, sequence));
+        }
+    }
+    let baseline = publish_trace_snapshot(conversation_trace, trace_observer)?;
+
+    if let Some(content) = preceding_assistant_content {
+        active_context.push(ContextItem::text(
+            LlmMessageRole::Assistant,
+            content,
+            ContextSource::ModelResponse,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ));
+    }
+    for (input, attachments, sequence) in applied {
+        let content = input.content.trim().to_string();
+        active_context.push(ContextItem::text(
+            LlmMessageRole::User,
+            content.clone(),
+            ContextSource::UserGuidance,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ));
+        event_stream.emit(AgentEvent::GuidanceApplied {
+            run_id: run_id.to_string(),
+            guidance_id: input.guidance_id,
+            client_message_id: input.client_message_id,
+            content,
+            attachments,
+            created_at: input.created_at,
+            sequence,
+        });
+    }
+
+    Ok(baseline)
 }
 
 fn clear_deferred_tool_input_preview(

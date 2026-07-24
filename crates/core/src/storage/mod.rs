@@ -13,6 +13,7 @@ pub mod conversation_history_repository;
 pub mod conversation_trace_repository;
 mod database_snapshot;
 pub mod file_draft_repository;
+pub mod guidance_repository;
 pub mod image_generation_execution_repository;
 pub mod image_generation_repository;
 pub mod migrations;

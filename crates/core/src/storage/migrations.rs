@@ -399,7 +399,7 @@ fn upgrade_conversation_trace_commit_schema(connection: &Connection) -> rusqlite
         CREATE TABLE conversation_turn_trace_items (
             assistant_message_id TEXT NOT NULL,
             sequence INTEGER NOT NULL CHECK (sequence >= 0),
-            item_kind TEXT NOT NULL CHECK (item_kind IN ('assistant_narration', 'tool_call', 'tool_result')),
+            item_kind TEXT NOT NULL CHECK (item_kind IN ('assistant_narration', 'user_guidance', 'tool_call', 'tool_result')),
             item_json TEXT NOT NULL,
             PRIMARY KEY (assistant_message_id, sequence),
             FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
@@ -431,6 +431,59 @@ fn upgrade_conversation_trace_commit_schema(connection: &Connection) -> rusqlite
         return Err(error);
     }
     connection.execute_batch("PRAGMA foreign_keys = ON;")
+}
+
+fn upgrade_conversation_trace_v3_schema(connection: &Connection) -> rusqlite::Result<()> {
+    let item_table_sql = connection.query_row(
+        "SELECT sql FROM sqlite_master
+         WHERE type = 'table' AND name = 'conversation_turn_trace_items'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    if !item_table_sql.contains("'user_guidance'") {
+        connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        let migration = connection.execute_batch(
+            "
+            BEGIN IMMEDIATE;
+            ALTER TABLE conversation_turn_trace_items
+                RENAME TO conversation_turn_trace_items_pre_guidance;
+            CREATE TABLE conversation_turn_trace_items (
+                assistant_message_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK (sequence >= 0),
+                item_kind TEXT NOT NULL CHECK (item_kind IN (
+                    'assistant_narration', 'user_guidance', 'tool_call', 'tool_result'
+                )),
+                item_json TEXT NOT NULL,
+                PRIMARY KEY (assistant_message_id, sequence),
+                FOREIGN KEY (assistant_message_id)
+                    REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
+            );
+            INSERT INTO conversation_turn_trace_items (
+                assistant_message_id, sequence, item_kind, item_json
+            )
+            SELECT assistant_message_id, sequence, item_kind, item_json
+            FROM conversation_turn_trace_items_pre_guidance;
+            DROP TABLE conversation_turn_trace_items_pre_guidance;
+            COMMIT;
+            ",
+        );
+        if let Err(error) = migration {
+            let _ = connection.execute_batch("ROLLBACK;");
+            let _ = connection.execute_batch("PRAGMA foreign_keys = ON;");
+            return Err(error);
+        }
+        connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    }
+
+    // Version 3 only adds a trace item kind. Existing v2 JSON remains canonical and must be
+    // upgraded before the incompatible-version cleanup below runs.
+    connection.execute(
+        "UPDATE conversation_turn_traces
+         SET schema_version = ?1
+         WHERE schema_version = 2",
+        [CONVERSATION_TURN_TRACE_SCHEMA_VERSION],
+    )?;
+    Ok(())
 }
 
 fn reset_incompatible_context_compaction_schema(connection: &Connection) -> rusqlite::Result<()> {
@@ -1151,10 +1204,52 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS conversation_turn_trace_items (
             assistant_message_id TEXT NOT NULL,
             sequence INTEGER NOT NULL CHECK (sequence >= 0),
-            item_kind TEXT NOT NULL CHECK (item_kind IN ('assistant_narration', 'tool_call', 'tool_result')),
+            item_kind TEXT NOT NULL CHECK (item_kind IN ('assistant_narration', 'user_guidance', 'tool_call', 'tool_result')),
             item_json TEXT NOT NULL,
             PRIMARY KEY (assistant_message_id, sequence),
             FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_run_guidances (
+            guidance_id TEXT PRIMARY KEY CHECK (length(trim(guidance_id)) > 0),
+            client_message_id TEXT NOT NULL CHECK (length(trim(client_message_id)) > 0),
+            run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+            status TEXT NOT NULL CHECK (status IN ('queued', 'applied', 'rejected', 'abandoned')),
+            applied_trace_sequence INTEGER CHECK (
+                applied_trace_sequence IS NULL OR applied_trace_sequence >= 0
+            ),
+            terminal_reason TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            UNIQUE (run_id, client_message_id),
+            UNIQUE (assistant_message_id, applied_trace_sequence),
+            CHECK (
+                (status = 'queued' AND applied_trace_sequence IS NULL AND terminal_reason IS NULL)
+                OR (
+                    status = 'applied'
+                    AND applied_trace_sequence IS NOT NULL
+                    AND terminal_reason IS NULL
+                )
+                OR (
+                    status IN ('rejected', 'abandoned')
+                    AND applied_trace_sequence IS NULL
+                    AND length(trim(terminal_reason)) > 0
+                )
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS agent_run_guidance_attachments (
+            guidance_id TEXT NOT NULL,
+            attachment_id TEXT NOT NULL UNIQUE,
+            position INTEGER NOT NULL CHECK (position >= 0),
+            PRIMARY KEY (guidance_id, position),
+            FOREIGN KEY (guidance_id) REFERENCES agent_run_guidances(guidance_id) ON DELETE CASCADE,
+            FOREIGN KEY (attachment_id) REFERENCES attachments(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS agent_turn_diffs (
@@ -1370,6 +1465,8 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at);
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, position);
         CREATE INDEX IF NOT EXISTS idx_conversation_turn_traces_conversation_id ON conversation_turn_traces(conversation_id, completed_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_run_guidances_run_status ON agent_run_guidances(run_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_run_guidances_conversation ON agent_run_guidances(conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_agent_turn_diffs_conversation_project ON agent_turn_diffs(conversation_id, project_id, updated_at);
         CREATE INDEX IF NOT EXISTS idx_context_compaction_summaries_conversation_id ON context_compaction_summaries(conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_context_compaction_summary_lineage_owner ON context_compaction_summary_lineage(conversation_id, introduced_by_assistant_message_id);
@@ -1478,6 +1575,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     )?;
 
     upgrade_conversation_trace_commit_schema(connection)?;
+    upgrade_conversation_trace_v3_schema(connection)?;
     connection.execute(
         "DELETE FROM conversation_turn_traces WHERE schema_version != ?1",
         [CONVERSATION_TURN_TRACE_SCHEMA_VERSION],
@@ -1859,7 +1957,7 @@ mod tests {
                 CREATE TABLE conversation_turn_trace_items (
                     assistant_message_id TEXT NOT NULL,
                     sequence INTEGER NOT NULL CHECK (sequence >= 0),
-                    item_kind TEXT NOT NULL CHECK (item_kind IN ('assistant_narration', 'tool_call', 'tool_result')),
+                    item_kind TEXT NOT NULL CHECK (item_kind IN ('assistant_narration', 'user_guidance', 'tool_call', 'tool_result')),
                     item_json TEXT NOT NULL,
                     PRIMARY KEY (assistant_message_id, sequence),
                     FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
@@ -1912,6 +2010,84 @@ mod tests {
             )
             .unwrap();
         assert!(sql.contains("in_progress"));
+    }
+
+    #[test]
+    fn upgrades_v2_trace_items_in_place_before_incompatible_cleanup() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO conversations (
+                    id, project_id, model_id, title, created_at, updated_at,
+                    pinned_at, archived_at, unread_at
+                 ) VALUES ('conversation-v2', NULL, NULL, 'title', 1, 1, NULL, NULL, NULL);
+                 INSERT INTO messages (
+                    id, conversation_id, role, content, status, agent_run_json,
+                    ui_state_json, created_at, position
+                 ) VALUES (
+                    'assistant-v2', 'conversation-v2', 'assistant', 'done', 'sent',
+                    NULL, NULL, 1, 0
+                 );
+                 INSERT INTO conversation_turn_traces (
+                    assistant_message_id, conversation_id, run_id, schema_version,
+                    terminal_status, terminal_error, truncated, created_at, updated_at, completed_at
+                 ) VALUES (
+                    'assistant-v2', 'conversation-v2', 'run-v2', 2,
+                    'completed', NULL, 0, 1, 2, 2
+                 );
+                 INSERT INTO conversation_turn_trace_items (
+                    assistant_message_id, sequence, item_kind, item_json
+                 ) VALUES (
+                    'assistant-v2', 0, 'assistant_narration',
+                    '{\"type\":\"assistant_narration\",\"sequence\":0,\"content\":\"kept\",\"truncated\":false}'
+                 );
+                 PRAGMA foreign_keys = OFF;
+                 ALTER TABLE conversation_turn_trace_items
+                    RENAME TO conversation_turn_trace_items_current;
+                 CREATE TABLE conversation_turn_trace_items (
+                    assistant_message_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK (sequence >= 0),
+                    item_kind TEXT NOT NULL CHECK (
+                        item_kind IN ('assistant_narration', 'tool_call', 'tool_result')
+                    ),
+                    item_json TEXT NOT NULL,
+                    PRIMARY KEY (assistant_message_id, sequence),
+                    FOREIGN KEY (assistant_message_id)
+                        REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
+                 );
+                 INSERT INTO conversation_turn_trace_items
+                 SELECT * FROM conversation_turn_trace_items_current;
+                 DROP TABLE conversation_turn_trace_items_current;
+                 PRAGMA foreign_keys = ON;",
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        let (schema_version, item_count) = connection
+            .query_row(
+                "SELECT trace.schema_version, COUNT(item.sequence)
+                 FROM conversation_turn_traces AS trace
+                 LEFT JOIN conversation_turn_trace_items AS item
+                   ON item.assistant_message_id = trace.assistant_message_id
+                 WHERE trace.assistant_message_id = 'assistant-v2'
+                 GROUP BY trace.schema_version",
+                [],
+                |row| Ok((row.get::<_, u32>(0)?, row.get::<_, usize>(1)?)),
+            )
+            .unwrap();
+        assert_eq!(schema_version, CONVERSATION_TURN_TRACE_SCHEMA_VERSION);
+        assert_eq!(item_count, 1);
+        let item_table_sql = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'conversation_turn_trace_items'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert!(item_table_sql.contains("'user_guidance'"));
     }
 
     #[test]

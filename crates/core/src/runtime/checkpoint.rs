@@ -404,7 +404,8 @@ fn validate_conversation_trace_tool_call_ids(
             | ConversationTurnTraceItem::ToolResult { call_id, .. } => {
                 validate_model_tool_call_id(call_id)?;
             }
-            ConversationTurnTraceItem::AssistantNarration { .. } => {}
+            ConversationTurnTraceItem::AssistantNarration { .. }
+            | ConversationTurnTraceItem::UserGuidance { .. } => {}
         }
     }
     Ok(())

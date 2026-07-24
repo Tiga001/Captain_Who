@@ -1,4 +1,151 @@
 use super::*;
+use std::collections::{HashMap, VecDeque};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSteerEnqueueOutcome {
+    Queued,
+    Duplicate,
+    Closed,
+}
+
+#[derive(Debug)]
+struct AgentSteerInputQueueState {
+    accepting: bool,
+    pending: VecDeque<crate::AgentSteerInput>,
+    seen_by_client_message_id: HashMap<String, crate::AgentSteerInput>,
+    client_message_id_by_guidance_id: HashMap<String, String>,
+}
+
+impl Default for AgentSteerInputQueueState {
+    fn default() -> Self {
+        Self {
+            accepting: true,
+            pending: VecDeque::new(),
+            seen_by_client_message_id: HashMap::new(),
+            client_message_id_by_guidance_id: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AgentSteerInputQueue {
+    state: Arc<Mutex<AgentSteerInputQueueState>>,
+}
+
+pub(crate) enum AgentSteerDrainOrClose {
+    Pending(Vec<crate::AgentSteerInput>),
+    Closed,
+}
+
+impl AgentSteerInputQueue {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn enqueue(&self, input: crate::AgentSteerInput) -> AgentResult<AgentSteerEnqueueOutcome> {
+        validate_steer_input(&input)?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if !state.accepting {
+            return Ok(AgentSteerEnqueueOutcome::Closed);
+        }
+        if let Some(existing) = state
+            .seen_by_client_message_id
+            .get(&input.client_message_id)
+        {
+            return if existing == &input {
+                Ok(AgentSteerEnqueueOutcome::Duplicate)
+            } else {
+                Err(AgentError::structured(
+                    "agent.steer_client_message_conflict",
+                    "同一个 clientMessageId 不能表示不同的用户引导。",
+                    json!({
+                        "clientMessageId": input.client_message_id,
+                        "existingGuidanceId": existing.guidance_id,
+                        "candidateGuidanceId": input.guidance_id,
+                    }),
+                ))
+            };
+        }
+        if let Some(existing_client_message_id) = state
+            .client_message_id_by_guidance_id
+            .get(&input.guidance_id)
+        {
+            return Err(AgentError::structured(
+                "agent.steer_guidance_id_conflict",
+                "同一个 guidanceId 不能关联不同的 clientMessageId。",
+                json!({
+                    "guidanceId": input.guidance_id,
+                    "existingClientMessageId": existing_client_message_id,
+                    "candidateClientMessageId": input.client_message_id,
+                }),
+            ));
+        }
+
+        state
+            .client_message_id_by_guidance_id
+            .insert(input.guidance_id.clone(), input.client_message_id.clone());
+        state
+            .seen_by_client_message_id
+            .insert(input.client_message_id.clone(), input.clone());
+        state.pending.push_back(input);
+        Ok(AgentSteerEnqueueOutcome::Queued)
+    }
+
+    pub fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.accepting = false;
+    }
+
+    pub fn is_accepting(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .accepting
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pending
+            .len()
+    }
+
+    pub(crate) fn drain_pending(&self) -> Vec<crate::AgentSteerInput> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.pending.drain(..).collect()
+    }
+
+    pub(crate) fn take_pending_or_close(&self) -> AgentSteerDrainOrClose {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.pending.is_empty() {
+            state.accepting = false;
+            AgentSteerDrainOrClose::Closed
+        } else {
+            AgentSteerDrainOrClose::Pending(state.pending.drain(..).collect())
+        }
+    }
+}
+
+fn validate_steer_input(input: &crate::AgentSteerInput) -> AgentResult<()> {
+    if input.guidance_id.trim().is_empty()
+        || input.client_message_id.trim().is_empty()
+        || input.content.trim().is_empty()
+        || input.created_at < 0
+    {
+        return Err(AgentError::structured(
+            "agent.invalid_steer_input",
+            "用户引导缺少有效的身份、正文或创建时间。",
+            json!({
+                "guidanceIdPresent": !input.guidance_id.trim().is_empty(),
+                "clientMessageIdPresent": !input.client_message_id.trim().is_empty(),
+                "contentPresent": !input.content.trim().is_empty(),
+                "createdAt": input.created_at,
+            }),
+        ));
+    }
+    Ok(())
+}
 
 pub type AgentEventEmitter = Arc<dyn Fn(AgentEvent) + Send + Sync + 'static>;
 pub type AgentConversationTraceObserver = Arc<
@@ -55,6 +202,7 @@ pub struct AgentRuntimeHostServices {
         Option<Arc<crate::image_generation::ImageGenerationExecutionService>>,
     pub(super) command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
+    pub(super) steer_input: Option<AgentSteerInputQueue>,
 }
 
 impl AgentRuntimeHostServices {
@@ -140,6 +288,11 @@ impl AgentRuntimeHostServices {
         resolver: Arc<dyn crate::command::CommandRuntimeProfileResolver>,
     ) -> Self {
         self.command_runtime_profile_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_steer_input(mut self, input: AgentSteerInputQueue) -> Self {
+        self.steer_input = Some(input);
         self
     }
 }
@@ -362,4 +515,121 @@ pub(super) fn conversation_context_configuration_revision_from_parts(
     }))
     .map_err(|error| AgentError::new(format!("无法生成上下文计量配置指纹：{error}")))?;
     Ok(content_revision(&material))
+}
+
+#[cfg(test)]
+mod steer_input_queue_tests {
+    use super::*;
+    use std::sync::Barrier;
+    use std::thread;
+
+    fn input(guidance_id: &str, client_message_id: &str, content: &str) -> crate::AgentSteerInput {
+        crate::AgentSteerInput {
+            guidance_id: guidance_id.to_string(),
+            client_message_id: client_message_id.to_string(),
+            content: content.to_string(),
+            attachments: Vec::new(),
+            created_at: 10,
+        }
+    }
+
+    #[test]
+    fn steer_queue_is_fifo_idempotent_and_conflict_safe() {
+        let queue = AgentSteerInputQueue::new();
+        let first = input("guidance-1", "client-1", "first");
+        let second = input("guidance-2", "client-2", "second");
+
+        assert_eq!(
+            queue.enqueue(first.clone()).unwrap(),
+            AgentSteerEnqueueOutcome::Queued
+        );
+        assert_eq!(
+            queue.enqueue(first.clone()).unwrap(),
+            AgentSteerEnqueueOutcome::Duplicate
+        );
+        assert!(queue
+            .enqueue(input("guidance-other", "client-1", "changed"))
+            .is_err());
+        assert!(queue
+            .enqueue(input("guidance-1", "client-other", "changed"))
+            .is_err());
+        assert_eq!(
+            queue.enqueue(second.clone()).unwrap(),
+            AgentSteerEnqueueOutcome::Queued
+        );
+
+        assert_eq!(queue.drain_pending(), vec![first, second]);
+        assert!(queue.is_accepting());
+    }
+
+    #[test]
+    fn take_pending_or_close_keeps_accepting_only_when_work_was_taken() {
+        let queue = AgentSteerInputQueue::new();
+        let first = input("guidance-1", "client-1", "first");
+        queue.enqueue(first.clone()).unwrap();
+
+        assert!(matches!(
+            queue.take_pending_or_close(),
+            AgentSteerDrainOrClose::Pending(items) if items == vec![first]
+        ));
+        assert!(queue.is_accepting());
+        assert!(matches!(
+            queue.take_pending_or_close(),
+            AgentSteerDrainOrClose::Closed
+        ));
+        assert!(!queue.is_accepting());
+        assert_eq!(
+            queue
+                .enqueue(input("guidance-2", "client-2", "second"))
+                .unwrap(),
+            AgentSteerEnqueueOutcome::Closed
+        );
+    }
+
+    #[test]
+    fn enqueue_and_terminal_close_race_never_loses_an_accepted_input() {
+        for index in 0..100 {
+            let queue = AgentSteerInputQueue::new();
+            let barrier = Arc::new(Barrier::new(3));
+            let enqueue_queue = queue.clone();
+            let enqueue_barrier = Arc::clone(&barrier);
+            let enqueue = thread::spawn(move || {
+                enqueue_barrier.wait();
+                enqueue_queue
+                    .enqueue(input(
+                        &format!("guidance-{index}"),
+                        &format!("client-{index}"),
+                        "race",
+                    ))
+                    .unwrap()
+            });
+            let close_queue = queue.clone();
+            let close_barrier = Arc::clone(&barrier);
+            let close = thread::spawn(move || {
+                close_barrier.wait();
+                close_queue.take_pending_or_close()
+            });
+            barrier.wait();
+
+            let enqueue_outcome = enqueue.join().unwrap();
+            let close_outcome = close.join().unwrap();
+            match enqueue_outcome {
+                AgentSteerEnqueueOutcome::Queued => {
+                    let accepted_was_taken = matches!(
+                        close_outcome,
+                        AgentSteerDrainOrClose::Pending(ref items) if items.len() == 1
+                    );
+                    let accepted_remains_pending = queue.pending_len() == 1;
+                    assert!(accepted_was_taken || accepted_remains_pending);
+                }
+                AgentSteerEnqueueOutcome::Closed => {
+                    assert!(matches!(close_outcome, AgentSteerDrainOrClose::Closed));
+                    assert_eq!(queue.pending_len(), 0);
+                }
+                AgentSteerEnqueueOutcome::Duplicate => {
+                    panic!("a fresh race cannot produce a duplicate")
+                }
+            }
+        }
+    }
 }

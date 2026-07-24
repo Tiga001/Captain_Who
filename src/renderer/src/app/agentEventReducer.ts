@@ -1177,6 +1177,12 @@ export function applyAgentEventToChatMessage(
     return message
   }
 
+  // Guidance rendering and optimistic message reconciliation belong to the RPC/UI round.
+  // Until then, the runtime event is informational and must not be treated as terminal output.
+  if (agentEvent.type === 'guidance_applied') {
+    return message
+  }
+
   if (agentEvent.type === 'error') {
     const nextStatus = agentEvent.recoverable ? currentRun.status : 'failed'
     const nextRun = settleAgentRunToolActivities(

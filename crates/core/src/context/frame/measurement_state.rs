@@ -161,6 +161,7 @@ impl ContextFrame {
                         matches!(
                             source,
                             ContextSource::ModelResponse
+                                | ContextSource::UserGuidance
                                 | ContextSource::ToolResult
                                 | ContextSource::ToolContinuation
                         )

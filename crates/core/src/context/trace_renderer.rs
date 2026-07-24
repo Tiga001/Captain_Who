@@ -3,8 +3,8 @@ use super::{
     ContextSource,
 };
 use crate::conversation_trace::{
-    render_tool_observation, ConversationTraceToolResultStatus, ConversationTurnTrace,
-    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    render_tool_observation, render_user_guidance_content, ConversationTraceToolResultStatus,
+    ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
 };
 use crate::llm::{validate_model_tool_call_id, LlmMessageRole, LlmToolCall};
 use crate::protocol::{AgentError, AgentResult, AgentToolResult};
@@ -40,6 +40,25 @@ impl ConversationTraceRenderer {
                             trace_item_metadata(&trace.assistant_message_id, *sequence),
                         ));
                     }
+                }
+                ConversationTurnTraceItem::UserGuidance {
+                    sequence,
+                    content,
+                    attachments,
+                    ..
+                } => {
+                    if pending_exchange.is_some() {
+                        return Err(AgentError::new(
+                            "ConversationTurnTrace 用户引导不能拆分工具调用与结果。",
+                        ));
+                    }
+                    activity_items.push(ContextItem::new(
+                        crate::llm::LlmMessage::text(
+                            LlmMessageRole::User,
+                            render_user_guidance_content(content, attachments),
+                        ),
+                        trace_item_metadata(&trace.assistant_message_id, *sequence),
+                    ));
                 }
                 ConversationTurnTraceItem::ToolCall {
                     sequence: _,
@@ -335,7 +354,8 @@ mod tests {
                 | ConversationTurnTraceItem::ToolResult { call_id, .. } => {
                     *call_id = legacy_id.clone();
                 }
-                ConversationTurnTraceItem::AssistantNarration { .. } => {}
+                ConversationTurnTraceItem::AssistantNarration { .. }
+                | ConversationTurnTraceItem::UserGuidance { .. } => {}
             }
         }
 
