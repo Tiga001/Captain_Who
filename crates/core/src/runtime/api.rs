@@ -42,6 +42,14 @@ impl AgentSteerInputQueue {
         Self::default()
     }
 
+    /// Returns whether both handles refer to the same runtime steering queue.
+    ///
+    /// Hosts use this identity check to prevent a stale run-finalizer from removing a newer
+    /// continuation queue that reuses the same run id after an approval boundary.
+    pub fn is_same_queue(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
     pub fn enqueue(&self, input: crate::AgentSteerInput) -> AgentResult<AgentSteerEnqueueOutcome> {
         self.enqueue_with(input, || {})
     }

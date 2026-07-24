@@ -7,6 +7,7 @@ import type {
   RightSidebarModuleAvailabilityMap,
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
+  RightSidebarModulePageState,
   RightSidebarPage,
   RightSidebarPageOpenRequest,
   RightSidebarPageUpdate,
@@ -22,6 +23,7 @@ export interface RightSidebarPlatformState {
 export type RightSidebarPlatformAction =
   | {
       module: RightSidebarModuleDefinition
+      moduleState?: RightSidebarModulePageState
       pageId: string
       t: Translate
       type: 'open'
@@ -60,9 +62,20 @@ export function reduceRightSidebarPlatform(
     case 'open': {
       const existingPage = findExistingPage(state.pages, action.module, action.workspace)
       if (existingPage) {
-        return state.activePageId === existingPage.id
-          ? state
-          : { ...state, activePageId: existingPage.id }
+        const moduleState = action.moduleState ?? existingPage.moduleState
+        if (state.activePageId === existingPage.id && moduleState === existingPage.moduleState) {
+          return state
+        }
+        return {
+          ...state,
+          activePageId: existingPage.id,
+          pages:
+            moduleState === existingPage.moduleState
+              ? state.pages
+              : state.pages.map((page) =>
+                  page.id === existingPage.id ? { ...page, moduleState } : page
+                )
+        }
       }
 
       const createdPage = action.module.createPage({
@@ -71,7 +84,11 @@ export function reduceRightSidebarPlatform(
         t: action.t,
         workspace: action.workspace
       })
-      const page = bindNewPageToWorkspace(createdPage, action.module, action.workspace)
+      const page = bindNewPageToWorkspace(
+        action.moduleState ? { ...createdPage, moduleState: action.moduleState } : createdPage,
+        action.module,
+        action.workspace
+      )
       return {
         activePageId: page.id,
         pages: [...state.pages, page]

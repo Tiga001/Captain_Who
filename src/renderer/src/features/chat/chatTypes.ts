@@ -76,7 +76,10 @@ export interface ChatGuidanceTimelineItem {
   clientMessageId: string
   content: string
   attachments: ChatMessageAttachment[]
-  status: 'submitting' | 'queued' | 'applied'
+  status: 'submitting' | 'queued' | 'applied' | 'rejected'
+  rejectionCode?: string
+  error?: string
+  recoverable?: boolean
   createdAt: number
   sequence?: number
 }

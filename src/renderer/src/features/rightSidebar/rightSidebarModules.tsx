@@ -187,6 +187,7 @@ function renderGitReviewModule({
         onOpenFile={(path) => {
           onOpenPage(createWorkspaceFileOpenRequest(path, 'reuse-source-if-empty'))
         }}
+        pageState={page.moduleState}
         projectId={page.workspaceKey ?? ''}
       />
     </Suspense>
@@ -196,19 +197,29 @@ function renderGitReviewModule({
 function GitReviewModuleSurface({
   isActive,
   onOpenFile,
+  pageState,
   projectId
 }: {
   isActive: boolean
   onOpenFile: (path: string) => void
+  pageState: RightSidebarPage['moduleState']
   projectId: string
 }) {
   const { activeConversationId, activeWorkspaceKey } = useRightSidebarRuntimeContext()
+  const scopeNavigation =
+    pageState?.kind === 'git-review' && pageState.projectId === projectId
+      ? {
+          requestId: pageState.requestId,
+          scope: pageState.scope
+        }
+      : undefined
   return (
     <GitReviewPanel
       conversationId={projectId === activeWorkspaceKey ? activeConversationId : null}
       isActive={isActive}
       onOpenFile={onOpenFile}
       projectId={projectId}
+      scopeNavigation={scopeNavigation}
     />
   )
 }

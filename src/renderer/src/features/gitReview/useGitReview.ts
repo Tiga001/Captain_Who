@@ -70,8 +70,13 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-export function useGitReview(projectId: string, isActive: boolean, conversationId?: string | null) {
-  const [scope, setScope] = useState<GitReviewScope>('unstaged')
+export function useGitReview(
+  projectId: string,
+  isActive: boolean,
+  conversationId?: string | null,
+  initialScope: GitReviewScope = 'unstaged'
+) {
+  const [scope, setScope] = useState<GitReviewScope>(initialScope)
   const lastTurnConversationId = scope === 'lastTurn' ? (conversationId ?? null) : null
   const [summaryState, setSummaryState] = useState<GitReviewSummaryState>({ status: 'idle' })
   const [diffStates, setDiffStates] = useState<Record<string, GitReviewDiffState>>({})

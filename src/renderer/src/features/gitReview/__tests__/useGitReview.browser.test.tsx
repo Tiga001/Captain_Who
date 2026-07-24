@@ -1,4 +1,9 @@
-import type { GitReviewFileContent, GitReviewFileDiff, GitReviewSummary } from '@mycopilot/protocol'
+import type {
+  GitReviewFileContent,
+  GitReviewFileDiff,
+  GitReviewScope,
+  GitReviewSummary
+} from '@mycopilot/protocol'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
 
@@ -60,10 +65,17 @@ function readyContent(snapshotId = 'snapshot-1'): GitReviewFileContent {
   }
 }
 
-function ReviewHarness({ active }: { active: boolean }) {
-  const review = useGitReview('project-1', active, 'conversation-1')
+function ReviewHarness({
+  active,
+  initialScope
+}: {
+  active: boolean
+  initialScope?: GitReviewScope
+}) {
+  const review = useGitReview('project-1', active, 'conversation-1', initialScope)
   return (
     <div>
+      <output data-testid="scope">{review.scope}</output>
       <output data-testid="summary-status">
         {review.summaryState.status}:{review.summaryState.value?.snapshotId ?? 'none'}:
         {review.summaryState.status === 'error' ? review.summaryState.error : 'ok'}
@@ -105,6 +117,18 @@ beforeEach(() => {
 })
 
 describe('useGitReview request lifecycle', () => {
+  it('uses a requested last-turn scope for the first review request', async () => {
+    const screen = await render(<ReviewHarness active initialScope="lastTurn" />)
+
+    await expect.element(screen.getByTestId('scope')).toHaveTextContent('lastTurn')
+    await expect.poll(() => summarySpy.mock.calls.length).toBe(1)
+    expect(summarySpy).toHaveBeenCalledWith({
+      conversationId: 'conversation-1',
+      projectId: 'project-1',
+      scope: 'lastTurn'
+    })
+  })
+
   it('keeps the last ready review usable when foreground refresh fails', async () => {
     const screen = await render(<ReviewHarness active />)
     await expect

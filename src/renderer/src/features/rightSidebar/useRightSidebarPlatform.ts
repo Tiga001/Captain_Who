@@ -12,6 +12,7 @@ import type {
   RightSidebarCapabilities,
   RightSidebarModuleDefinition,
   RightSidebarModuleId,
+  RightSidebarModulePageState,
   RightSidebarPageOpenRequest,
   RightSidebarPageUpdate
 } from './rightSidebarTypes'
@@ -59,7 +60,7 @@ export function useRightSidebarPlatform({
   )
 
   const openModule = useCallback(
-    (moduleId: RightSidebarModuleId) => {
+    (moduleId: RightSidebarModuleId, moduleState?: RightSidebarModulePageState) => {
       const module = modules.find((candidate) => candidate.id === moduleId)
       if (
         !module ||
@@ -70,6 +71,7 @@ export function useRightSidebarPlatform({
 
       dispatch({
         module,
+        moduleState,
         pageId: createPageId(moduleId),
         t,
         type: 'open',

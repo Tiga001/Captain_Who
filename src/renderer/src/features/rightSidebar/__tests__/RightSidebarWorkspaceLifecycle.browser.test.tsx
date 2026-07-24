@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { PanelTop } from 'lucide-react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
@@ -184,6 +184,61 @@ describe('RightSidebar workspace lifecycle', () => {
 
     expect(lifecycleCount('mount', 'git-review')).toBe(1)
     expect(lifecycleCount('unmount', 'git-review')).toBe(0)
+  })
+
+  it('opens and reactivates last-turn review without resetting its mounted page state', async () => {
+    const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
+    const renderSidebar = (requestId?: number) => (
+      <RightSidebar
+        {...workspace}
+        capabilities={gitCapability(workspace, 'available')}
+        isMaximized={false}
+        isOpen
+        modules={MODULES}
+        onToggleMaximized={NOOP}
+        reviewNavigationRequest={
+          requestId === undefined
+            ? null
+            : {
+                kind: 'git-review',
+                projectId: workspace.workspaceKey,
+                requestId,
+                scope: 'lastTurn'
+              }
+        }
+      />
+    )
+    const screen = await render(renderSidebar())
+
+    await openHomeModule(screen, 'rightSidebar.terminal')
+    await screen.rerender(renderSidebar(1))
+    await expect
+      .poll(() => getSurface(screen.container, 'git-review').dataset.activity)
+      .toBe('foreground')
+    expect(getSurface(screen.container, 'git-review').dataset.reviewScope).toBe('lastTurn')
+    expect(getSurface(screen.container, 'git-review').dataset.reviewRequestId).toBe('1')
+    const localStateButton = getSurface(screen.container, 'git-review').querySelector('button')
+    if (!localStateButton) throw new Error('Missing review-local state control')
+    localStateButton.click()
+    await expect.poll(() => localStateButton.textContent).toBe('1')
+
+    await screen.getByRole('tab', { name: 'rightSidebar.terminal' }).click()
+    await expect
+      .poll(() => getSurface(screen.container, 'git-review').dataset.activity)
+      .toBe('background')
+
+    await screen.rerender(renderSidebar(2))
+    await expect
+      .poll(() => getSurface(screen.container, 'git-review').dataset.activity)
+      .toBe('foreground')
+    expect(getSurface(screen.container, 'git-review').dataset.reviewRequestId).toBe('2')
+    await expect.poll(() => localStateButton.textContent).toBe('1')
+    expect(lifecycleCount('mount', 'git-review')).toBe(1)
+    expect(lifecycleCount('unmount', 'git-review')).toBe(0)
+
+    await screen.rerender(renderSidebar(3))
+    await expect.poll(() => localStateButton.textContent).toBe('1')
+    expect(lifecycleCount('mount', 'git-review')).toBe(1)
   })
 
   it('keeps files pinned across conversations without disturbing retained modules', async () => {
@@ -485,6 +540,7 @@ function renderTestModule(id: RightSidebarModuleId, props: RightSidebarModuleRen
     <TrackedSurface
       activity={props.activity}
       isSelected={props.isSelected}
+      moduleState={props.page.moduleState}
       moduleId={id}
       workspaceKey={props.page.workspaceKey}
     />
@@ -494,14 +550,17 @@ function renderTestModule(id: RightSidebarModuleId, props: RightSidebarModuleRen
 function TrackedSurface({
   activity,
   isSelected,
+  moduleState,
   moduleId,
   workspaceKey
 }: {
   activity: RightSidebarActivity
   isSelected: boolean
+  moduleState: RightSidebarModuleRenderProps['page']['moduleState']
   moduleId: RightSidebarModuleId
   workspaceKey?: string | null
 }) {
+  const [localState, setLocalState] = useState(0)
   surfaceRenderSpy(moduleId, activity, isSelected)
   useEffect(() => {
     surfaceLifecycleSpy('mount', moduleId)
@@ -510,10 +569,22 @@ function TrackedSurface({
   return (
     <div
       data-activity={activity}
+      data-review-request-id={
+        moduleState?.kind === 'git-review' ? String(moduleState.requestId) : undefined
+      }
+      data-review-scope={moduleState?.kind === 'git-review' ? moduleState.scope : undefined}
       data-selected={isSelected ? 'true' : 'false'}
       data-testid={`${moduleId}-surface`}
       data-workspace-key={workspaceKey ?? 'global'}
-    />
+    >
+      <button
+        data-testid={`${moduleId}-local-state`}
+        onClick={() => setLocalState((current) => current + 1)}
+        type="button"
+      >
+        {localState}
+      </button>
+    </div>
   )
 }
 

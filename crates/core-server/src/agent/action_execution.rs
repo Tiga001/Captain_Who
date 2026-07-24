@@ -3066,6 +3066,25 @@ impl AgentService {
             self.discard_usage_context(&run_id);
             return;
         }
+        let steer_input = match (
+            record.snapshot.conversation_id.as_deref(),
+            record.snapshot.assistant_message_id.as_deref(),
+        ) {
+            (Some(conversation_id), Some(assistant_message_id)) => Some(
+                self.register_active_run_control(
+                    &run_id,
+                    conversation_id,
+                    assistant_message_id,
+                    record
+                        .agent_input
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.project_id.as_deref()),
+                    record.agent_input.model_capabilities,
+                ),
+            ),
+            _ => None,
+        };
 
         let emitter_notifications = notifications.clone();
         let emitter_service = self.clone();
@@ -3083,6 +3102,18 @@ impl AgentService {
                 checkpoint,
             } = &event
             {
+                if let Err(error) = emitter_service.close_active_run_steering(
+                    run_id,
+                    AgentSteerRunRejectionCode::RunNotSteerable,
+                    "The agent run is waiting for approval and no longer accepts guidance.",
+                    &emitter_notifications,
+                ) {
+                    emitter_terminal_event_gate.discard();
+                    *emitter_pending_store_failure
+                        .lock()
+                        .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
+                    return;
+                }
                 let mut agent_input =
                     agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
                 if let Err(error) =
@@ -3130,6 +3161,15 @@ impl AgentService {
             Err(error) => {
                 let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
                 self.discard_usage_context(&run_id);
+                if let Some(steer_input) = steer_input.as_ref() {
+                    let _ = self.unregister_active_run_control(
+                        &run_id,
+                        steer_input,
+                        AgentSteerRunRejectionCode::RunNotSteerable,
+                        "The agent run has finished and no longer accepts guidance.",
+                        &notifications,
+                    );
+                }
                 self.unregister_cancellation_if_current(&run_id, &cancellation_token);
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {
                     run_id: Some(run_id),
@@ -3194,6 +3234,9 @@ impl AgentService {
         if let Some(resolver) = self.artifact_runtime.clone() {
             host_services = host_services.with_command_runtime_profile_resolver(resolver);
         }
+        if let Some(steer_input) = steer_input.as_ref() {
+            host_services = host_services.with_steer_input(steer_input.clone());
+        }
         let result = send_chat_with_host_services(
             agent_input,
             run_id.clone(),
@@ -3212,6 +3255,31 @@ impl AgentService {
                 Err(pending_action_persistence_error(error))
             }
             None => result,
+        };
+        let close_message = match &result {
+            Ok(output) if output.status == AgentRunStatus::WaitingForApproval => {
+                "The agent run is waiting for approval and no longer accepts guidance."
+            }
+            _ => "The agent run has finished and no longer accepts guidance.",
+        };
+        let result = if let Some(steer_input) = steer_input.as_ref() {
+            match self.unregister_active_run_control(
+                &run_id,
+                steer_input,
+                AgentSteerRunRejectionCode::RunNotSteerable,
+                close_message,
+                &notifications,
+            ) {
+                Ok(()) => result,
+                Err(error) => {
+                    terminal_event_gate.discard();
+                    Err(AgentError::new(format!(
+                        "无法关闭审批续跑的用户引导通道并持久化剩余引导：{error}"
+                    )))
+                }
+            }
+        } else {
+            result
         };
         let keep_trace_snapshot = matches!(
             &result,

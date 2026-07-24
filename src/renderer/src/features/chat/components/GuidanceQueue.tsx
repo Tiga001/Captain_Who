@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type DragEvent,
+  type KeyboardEvent
+} from 'react'
 import {
   CornerDownRight,
   GripVertical,
@@ -33,7 +40,12 @@ export function GuidanceQueue({
   const { t } = useFrontendConfig()
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [dragOverId, setDragOverId] = useState<string | null>(null)
   const menuHostRef = useRef<HTMLDivElement>(null)
+  const itemRefs = useRef(new Map<string, HTMLDivElement>())
+  const previousItemRectsRef = useRef(new Map<string, DOMRect>())
+  const itemAnimationsRef = useRef(new Map<string, Animation>())
+  const lastDragTargetRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!openMenuId) return undefined
@@ -46,7 +58,65 @@ export function GuidanceQueue({
     return () => window.removeEventListener('pointerdown', closeMenu)
   }, [openMenuId])
 
+  useEffect(
+    () => () => {
+      itemAnimationsRef.current.forEach((animation) => animation.cancel())
+      itemAnimationsRef.current.clear()
+    },
+    []
+  )
+
+  useLayoutEffect(() => {
+    const previousRects = previousItemRectsRef.current
+    previousItemRectsRef.current = new Map()
+    if (previousRects.size === 0 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      return
+    }
+
+    itemRefs.current.forEach((element, messageId) => {
+      if (messageId === draggingId) return
+      const previousRect = previousRects.get(messageId)
+      if (!previousRect) return
+      const deltaY = previousRect.top - element.getBoundingClientRect().top
+      if (Math.abs(deltaY) < 1) return
+
+      itemAnimationsRef.current.get(messageId)?.cancel()
+      element.dataset.reordering = 'true'
+      const animation = element.animate(
+        [{ transform: `translateY(${deltaY}px)` }, { transform: 'translateY(0)' }],
+        {
+          duration: 180,
+          easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)'
+        }
+      )
+      itemAnimationsRef.current.set(messageId, animation)
+      const finishAnimation = () => {
+        if (itemAnimationsRef.current.get(messageId) === animation) {
+          itemAnimationsRef.current.delete(messageId)
+          delete element.dataset.reordering
+        }
+      }
+      animation.addEventListener('finish', finishAnimation, { once: true })
+      animation.addEventListener('cancel', finishAnimation, { once: true })
+    })
+  }, [draggingId, messages])
+
   if (messages.length === 0) return null
+
+  const captureItemPositions = () => {
+    previousItemRectsRef.current = new Map(
+      Array.from(itemRefs.current, ([messageId, element]) => [
+        messageId,
+        element.getBoundingClientRect()
+      ])
+    )
+  }
+
+  const finishDragging = () => {
+    setDraggingId(null)
+    setDragOverId(null)
+    lastDragTargetRef.current = null
+  }
 
   const moveWithKeyboard = (
     event: KeyboardEvent<HTMLButtonElement>,
@@ -61,13 +131,20 @@ export function GuidanceQueue({
           : index
     if (targetIndex === index) return
     event.preventDefault()
+    captureItemPositions()
     onMove(message.id, messages[targetIndex].id)
   }
 
   const startDragging = (event: DragEvent<HTMLButtonElement>, messageId: string) => {
     setDraggingId(messageId)
+    setDragOverId(null)
+    lastDragTargetRef.current = null
     event.dataTransfer.effectAllowed = 'move'
     event.dataTransfer.setData('text/plain', messageId)
+    const row = itemRefs.current.get(messageId)
+    if (row) {
+      event.dataTransfer.setDragImage(row, 24, row.offsetHeight / 2)
+    }
   }
 
   return (
@@ -79,17 +156,34 @@ export function GuidanceQueue({
           <div
             className="guidance-queue__item"
             data-dragging={draggingId === message.id || undefined}
+            data-drop-target={dragOverId === message.id || undefined}
             data-status={message.status}
             key={message.id}
+            ref={(element) => {
+              if (element) {
+                itemRefs.current.set(message.id, element)
+              } else {
+                itemRefs.current.delete(message.id)
+              }
+            }}
             onDragOver={(event) => {
-              if (!draggingId || draggingId === message.id || isSubmitting) return
+              if (!draggingId || isSubmitting) return
               event.preventDefault()
               event.dataTransfer.dropEffect = 'move'
+              if (draggingId === message.id) {
+                setDragOverId(null)
+                lastDragTargetRef.current = null
+                return
+              }
+              setDragOverId(message.id)
+              if (lastDragTargetRef.current === message.id) return
+              lastDragTargetRef.current = message.id
+              captureItemPositions()
               onMove(draggingId, message.id)
             }}
             onDrop={(event) => {
               event.preventDefault()
-              setDraggingId(null)
+              finishDragging()
             }}
           >
             <button
@@ -97,7 +191,7 @@ export function GuidanceQueue({
               className="guidance-queue__drag-handle"
               disabled={isSubmitting}
               draggable={!isSubmitting}
-              onDragEnd={() => setDraggingId(null)}
+              onDragEnd={finishDragging}
               onDragStart={(event) => startDragging(event, message.id)}
               onKeyDown={(event) => moveWithKeyboard(event, message, index)}
               type="button"

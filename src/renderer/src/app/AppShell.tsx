@@ -18,13 +18,17 @@ import { featureFlags } from '../config/featureFlags'
 import { hostClient } from '../host/hostClient'
 import { useGitRepositoryCapability } from '../features/gitReview/useGitRepositoryCapability'
 import { useAppStartupStage } from '../features/startup/AppStartupContext'
-import type { RightSidebarCapabilities } from '../features/rightSidebar/rightSidebarTypes'
+import type {
+  RightSidebarCapabilities,
+  RightSidebarReviewNavigationRequest
+} from '../features/rightSidebar/rightSidebarTypes'
 import { ChatConversationPage } from '../features/chat/ChatConversationPage'
 import { NewConversationPage } from '../features/chat/NewConversationPage'
 import type { SettingsPageId } from '../features/settings/SettingsPage'
 import type {
   ChatComposerDraft,
   ChatConversation,
+  ChatGuidanceTimelineItem,
   ChatPermissionMode,
   ChatMessage,
   ChatMessageUiState,
@@ -138,6 +142,7 @@ export function AppShell() {
   const {
     leftOpen,
     leftWidth,
+    openRightSidebar,
     resizeSide,
     rightMaximized,
     rightOpen,
@@ -148,6 +153,9 @@ export function AppShell() {
     toggleRightSidebarMaximized
   } = useShellLayout()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [rightSidebarReviewNavigationRequest, setRightSidebarReviewNavigationRequest] =
+    useState<RightSidebarReviewNavigationRequest | null>(null)
+  const rightSidebarReviewNavigationRequestIdRef = useRef(0)
   const workspaceFocusBeforeSettingsRef = useRef<HTMLElement | null>(null)
   const [appWindowState, setAppWindowState] = useState<AppWindowState>(DEFAULT_APP_WINDOW_STATE)
   const [settingsInitialPage, setSettingsInitialPage] = useState<SettingsPageId>('general')
@@ -199,6 +207,7 @@ export function AppShell() {
       }
     >
   >(new Map())
+  const recoveredGuidanceKeysRef = useRef<Set<string>>(new Set())
   const autoSubmitQueuedMessageRef = useRef<(conversationId: string) => void>(() => undefined)
   const editSubmissionSeqRef = useRef(0)
   const contextWindowRequestSeqRef = useRef(0)
@@ -278,6 +287,18 @@ export function AppShell() {
     () => ({ 'git-repository': gitRepositoryCapability }),
     [gitRepositoryCapability]
   )
+  const openLastTurnReview = useCallback(() => {
+    const projectId = rightSidebarWorkspaceProject?.id
+    if (!projectId) return
+    rightSidebarReviewNavigationRequestIdRef.current += 1
+    setRightSidebarReviewNavigationRequest({
+      kind: 'git-review',
+      projectId,
+      requestId: rightSidebarReviewNavigationRequestIdRef.current,
+      scope: 'lastTurn'
+    })
+    openRightSidebar()
+  }, [openRightSidebar, rightSidebarWorkspaceProject?.id])
   const rightSidebarMaximizedToolbarControls = useMemo(
     () =>
       rightMaximized ? (
@@ -622,6 +643,92 @@ export function AppShell() {
     },
     [setDraftsWithRef]
   )
+
+  useEffect(() => {
+    for (const conversation of conversations) {
+      if (conversation.messagesLoaded === false) continue
+      const recoverableItems = conversation.messages.flatMap((message) =>
+        (message.agentRun?.timeline ?? []).filter(
+          (item): item is ChatGuidanceTimelineItem =>
+            item.type === 'user_guidance' &&
+            item.status === 'rejected' &&
+            item.recoverable === true &&
+            item.rejectionCode === 'run_interrupted'
+        )
+      )
+      const unseenItems = recoverableItems.filter((item) => {
+        const key = `${conversation.id}:${item.clientMessageId}`
+        if (recoveredGuidanceKeysRef.current.has(key)) return false
+        recoveredGuidanceKeysRef.current.add(key)
+        return true
+      })
+      if (unseenItems.length === 0) continue
+
+      void Promise.all(
+        unseenItems.map(async (item) => {
+          try {
+            return {
+              item,
+              attachments: await loadInputAttachments(
+                item.attachments.map((attachment) => attachment.id)
+              ),
+              attachmentRecoveryFailed: false
+            }
+          } catch (error) {
+            console.error('Failed to recover interrupted guidance attachments', error)
+            return {
+              item,
+              attachments: [],
+              attachmentRecoveryFailed: item.attachments.length > 0
+            }
+          }
+        })
+      ).then((recoveredItems) => {
+        if (!conversationsRef.current.some((candidate) => candidate.id === conversation.id)) return
+        const recovered = recoveredItems.sort(
+          (left, right) => left.item.createdAt - right.item.createdAt
+        )
+        mutateDraft(conversation.id, (draft) => {
+          const existingClientMessageIds = new Set(
+            draft.queuedMessages.map((message) => message.clientMessageId)
+          )
+          const recoveredMessages = recovered
+            .filter(({ item }) => !existingClientMessageIds.has(item.clientMessageId))
+            .map(({ item, attachments, attachmentRecoveryFailed }) => ({
+              id: `recovered-guidance-${item.guidanceId ?? item.clientMessageId}`,
+              clientMessageId: item.clientMessageId,
+              content: item.content,
+              attachments,
+              modelId: conversation.modelId ?? draft.modelId,
+              permissionMode: draft.permissionMode,
+              projectId: conversation.projectId,
+              skills: [],
+              status: 'error' as const,
+              error: attachmentRecoveryFailed
+                ? t('chat.guidanceRecoveryAttachmentFailed')
+                : t('chat.guidanceInterrupted'),
+              createdAt: item.createdAt
+            }))
+          const recoveredIds = new Set(recoverableItems.map((item) => item.clientMessageId))
+          return {
+            ...draft,
+            queuedMessages: [
+              ...recoveredMessages,
+              ...draft.queuedMessages.map((message) =>
+                recoveredIds.has(message.clientMessageId)
+                  ? {
+                      ...message,
+                      status: 'error' as const,
+                      error: t('chat.guidanceInterrupted')
+                    }
+                  : message
+              )
+            ]
+          }
+        })
+      })
+    }
+  }, [conversations, mutateDraft, t])
 
   const restoreSubmittedSkills = useCallback(
     (
@@ -2370,6 +2477,7 @@ export function AppShell() {
                   }
                 }}
                 onRejectAgentAction={handleRejectAgentAction}
+                onReviewLastTurn={openLastTurnReview}
                 onScrollPositionChange={rememberConversationScrollPosition}
                 onStopGenerating={stopActiveGeneration}
                 onSubmitMessage={submitMessage}
@@ -2405,6 +2513,7 @@ export function AppShell() {
           workspaceName={rightSidebarWorkspaceProject?.name}
           workspacePath={rightSidebarWorkspacePath}
           onToggleMaximized={toggleRightSidebarMaximized}
+          reviewNavigationRequest={rightSidebarReviewNavigationRequest}
           maximizedToolbarControls={rightSidebarMaximizedToolbarControls}
         />
       </aside>

@@ -61,15 +61,27 @@ export interface RightSidebarPageUpdate {
   title?: string
 }
 
-export type RightSidebarModulePageState = {
-  kind: 'workspace-file'
-  path: string
-  preview?: {
-    markdownView?: 'preview' | 'source'
-    pdfPage?: number
-    wrapLines?: boolean
-  }
-}
+export type RightSidebarModulePageState =
+  | {
+      kind: 'workspace-file'
+      path: string
+      preview?: {
+        markdownView?: 'preview' | 'source'
+        pdfPage?: number
+        wrapLines?: boolean
+      }
+    }
+  | {
+      kind: 'git-review'
+      projectId: string
+      requestId: number
+      scope: 'lastTurn'
+    }
+
+export type RightSidebarReviewNavigationRequest = Extract<
+  RightSidebarModulePageState,
+  { kind: 'git-review' }
+>
 
 export interface RightSidebarPageOpenRequest {
   disposition?: 'new-page' | 'reuse-source-if-empty'

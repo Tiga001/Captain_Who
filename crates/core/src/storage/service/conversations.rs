@@ -416,7 +416,10 @@ fn project_guidance_timeline(
     }
 
     for guidance in guidances {
-        if guidance.status != crate::AgentGuidanceStatus::Queued {
+        if !matches!(
+            guidance.status,
+            crate::AgentGuidanceStatus::Queued | crate::AgentGuidanceStatus::Abandoned
+        ) {
             continue;
         }
         let mut attachments = Vec::with_capacity(guidance.attachment_ids.len());
@@ -425,7 +428,7 @@ fn project_guidance_timeline(
                 .map_err(storage_error)?
                 .ok_or_else(|| {
                     format!(
-                        "queued guidance `{}` references missing attachment `{attachment_id}`",
+                        "guidance `{}` references missing attachment `{attachment_id}`",
                         guidance.guidance_id
                     )
                 })?;
@@ -438,16 +441,32 @@ fn project_guidance_timeline(
             }));
         }
         run.insert("runId".to_string(), guidance.run_id.clone().into());
-        timeline.push(serde_json::json!({
-            "id": format!("user-guidance-{}", guidance.client_message_id),
-            "type": "user_guidance",
-            "guidanceId": guidance.guidance_id,
-            "clientMessageId": guidance.client_message_id,
-            "content": guidance.content,
-            "attachments": attachments,
-            "status": "queued",
-            "createdAt": guidance.created_at,
-        }));
+        if guidance.status == crate::AgentGuidanceStatus::Abandoned {
+            timeline.push(serde_json::json!({
+                "id": format!("user-guidance-{}", guidance.client_message_id),
+                "type": "user_guidance",
+                "guidanceId": guidance.guidance_id,
+                "clientMessageId": guidance.client_message_id,
+                "content": guidance.content,
+                "attachments": attachments,
+                "status": "rejected",
+                "rejectionCode": "run_interrupted",
+                "error": guidance.terminal_reason,
+                "recoverable": true,
+                "createdAt": guidance.created_at,
+            }));
+        } else {
+            timeline.push(serde_json::json!({
+                "id": format!("user-guidance-{}", guidance.client_message_id),
+                "type": "user_guidance",
+                "guidanceId": guidance.guidance_id,
+                "clientMessageId": guidance.client_message_id,
+                "content": guidance.content,
+                "attachments": attachments,
+                "status": "queued",
+                "createdAt": guidance.created_at,
+            }));
+        }
     }
 
     run.insert("timeline".to_string(), timeline.into());

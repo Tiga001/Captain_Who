@@ -412,22 +412,31 @@ impl AgentService {
         message: &str,
         notifications: &CoreServerNotificationSender,
     ) -> Result<(), String> {
-        self.close_active_run_steering_inner(run_id, code, message, notifications, false)
+        self.close_active_run_steering_inner(run_id, None, code, message, notifications, false)
     }
 
     pub(super) fn unregister_active_run_control(
         &self,
         run_id: &str,
+        expected_steer_input: &AgentSteerInputQueue,
         code: AgentSteerRunRejectionCode,
         message: &str,
         notifications: &CoreServerNotificationSender,
     ) -> Result<(), String> {
-        self.close_active_run_steering_inner(run_id, code, message, notifications, true)
+        self.close_active_run_steering_inner(
+            run_id,
+            Some(expected_steer_input),
+            code,
+            message,
+            notifications,
+            true,
+        )
     }
 
     fn close_active_run_steering_inner(
         &self,
         run_id: &str,
+        expected_steer_input: Option<&AgentSteerInputQueue>,
         code: AgentSteerRunRejectionCode,
         message: &str,
         notifications: &CoreServerNotificationSender,
@@ -440,6 +449,10 @@ impl AgentService {
         let Some(control) = active_runs.get_mut(run_id) else {
             return Ok(());
         };
+        if expected_steer_input.is_some_and(|expected| !control.steer_input.is_same_queue(expected))
+        {
+            return Ok(());
+        }
         control.steer_state = ActiveRunSteerState::Closed {
             code,
             message: message.to_string(),

@@ -230,7 +230,7 @@ function upsertGuidanceTimelineItem(
     return appendTimelineItem(run, item)
   }
 
-  const statusRank = { submitting: 0, queued: 1, applied: 2 } as const
+  const statusRank = { submitting: 0, queued: 1, applied: 2, rejected: 3 } as const
   const nextItem =
     statusRank[existing.status] > statusRank[item.status]
       ? {
@@ -1454,7 +1454,13 @@ export function applyAgentActionExecutionToChatMessage(
   execution: AgentActionExecutionOutput
 ): ChatMessage {
   const messageWithAgentOutput = applyAgentOutputToChatMessage(message, execution.agentOutput)
-  const currentRun = ensureAgentRun(messageWithAgentOutput.agentRun, execution.agentOutput.runId)
+  const outputRun = ensureAgentRun(messageWithAgentOutput.agentRun, execution.agentOutput.runId)
+  const currentRun: ChatAgentRunView =
+    message.agentRun?.status === 'waiting_for_approval' &&
+    execution.agentOutput.status === 'running' &&
+    execution.agentOutput.events.length === 0
+      ? { ...outputRun, status: 'starting' }
+      : outputRun
 
   if (!execution.toolResult) {
     const nextRun = normalizeAgentRunToolActivities({

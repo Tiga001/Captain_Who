@@ -13,7 +13,8 @@ import { RIGHT_SIDEBAR_MODULES } from '../../features/rightSidebar/rightSidebarM
 import type {
   RightSidebarCapabilities,
   RightSidebarModuleDefinition,
-  RightSidebarModuleId
+  RightSidebarModuleId,
+  RightSidebarReviewNavigationRequest
 } from '../../features/rightSidebar/rightSidebarTypes'
 import { useRightSidebarPlatform } from '../../features/rightSidebar/useRightSidebarPlatform'
 import './RightSidebar.css'
@@ -27,6 +28,7 @@ interface RightSidebarProps {
   maximizedToolbarControls?: ReactNode
   modules?: RightSidebarModuleDefinition[]
   onToggleMaximized: () => void
+  reviewNavigationRequest?: RightSidebarReviewNavigationRequest | null
   workspaceKey?: string | null
   workspaceKeys?: readonly string[]
   workspaceName?: string | null
@@ -60,6 +62,7 @@ export const RightSidebar = memo(function RightSidebar({
   maximizedToolbarControls,
   modules = RIGHT_SIDEBAR_MODULES,
   onToggleMaximized,
+  reviewNavigationRequest,
   workspaceKey,
   workspaceKeys,
   workspaceName,
@@ -67,6 +70,7 @@ export const RightSidebar = memo(function RightSidebar({
 }: RightSidebarProps): ReactNode {
   const { t } = useFrontendConfig()
   const documentVisible = useRightSidebarDocumentVisibility()
+  const handledReviewNavigationRequestIdRef = useRef<number | null>(null)
   const moduleMenuRef = useRef<HTMLDivElement>(null)
   const moduleMenuButtonRef = useRef<HTMLButtonElement>(null)
   const [isModuleMenuOpen, setIsModuleMenuOpen] = useState(false)
@@ -158,6 +162,24 @@ export const RightSidebar = memo(function RightSidebar({
     },
     [closeTransientUi, openPlatformModule]
   )
+
+  useEffect(() => {
+    if (
+      !reviewNavigationRequest ||
+      handledReviewNavigationRequestIdRef.current === reviewNavigationRequest.requestId
+    ) {
+      return
+    }
+    if (reviewNavigationRequest.projectId !== workspaceKey) {
+      handledReviewNavigationRequestIdRef.current = reviewNavigationRequest.requestId
+      return
+    }
+    const availability = moduleAvailability['git-review']
+    if (availability === 'checking') return
+    handledReviewNavigationRequestIdRef.current = reviewNavigationRequest.requestId
+    if (availability !== 'available') return
+    openPlatformModule('git-review', reviewNavigationRequest)
+  }, [moduleAvailability, openPlatformModule, reviewNavigationRequest, workspaceKey])
 
   return (
     <aside

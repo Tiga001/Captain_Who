@@ -492,6 +492,7 @@ export type AgentSteerRunResultStatus = 'queued' | 'applied' | 'rejected'
 
 export type AgentSteerRunRejectionCode =
   | 'run_not_steerable'
+  | 'run_interrupted'
   | 'conversation_mismatch'
   | 'identity_conflict'
   | 'attachments_not_supported'

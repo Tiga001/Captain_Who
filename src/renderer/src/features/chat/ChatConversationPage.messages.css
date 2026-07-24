@@ -602,6 +602,16 @@ button.chat-message-attachment:focus-visible {
   background: color-mix(in srgb, var(--mc-color-surface-muted) 72%, transparent);
 }
 
+.chat-guidance[data-status='rejected'] .chat-guidance__bubble {
+  color: var(--mc-color-text-muted);
+  background: color-mix(in srgb, var(--mc-color-text-danger) 6%, var(--mc-color-surface-muted));
+  outline: 1px solid color-mix(in srgb, var(--mc-color-text-danger) 18%, transparent);
+}
+
+.chat-guidance[data-status='rejected'] .chat-guidance__status {
+  color: var(--mc-color-text-danger);
+}
+
 .chat-guidance__status {
   padding-inline: 8px;
   color: var(--mc-color-text-subtle);

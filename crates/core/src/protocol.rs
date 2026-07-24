@@ -366,6 +366,7 @@ pub enum AgentSteerRunResultStatus {
 #[serde(rename_all = "snake_case")]
 pub enum AgentSteerRunRejectionCode {
     RunNotSteerable,
+    RunInterrupted,
     ConversationMismatch,
     IdentityConflict,
     AttachmentsNotSupported,

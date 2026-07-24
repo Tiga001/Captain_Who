@@ -399,6 +399,58 @@ pub fn list_message_attachments(
     Ok(attachments)
 }
 
+pub fn list_message_attachments_for_fork(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids: &[String],
+) -> rusqlite::Result<Vec<AttachmentRecord>> {
+    let mut attachments = Vec::new();
+
+    for message_id in message_ids {
+        let mut statement = connection.prepare(
+            "
+            SELECT
+                attachment.id,
+                attachment.conversation_id,
+                attachment.message_id,
+                attachment.project_id,
+                attachment.kind,
+                attachment.original_name,
+                attachment.mime_type,
+                attachment.size_bytes,
+                attachment.storage_rel_path,
+                attachment.created_at
+            FROM attachments AS attachment
+            WHERE attachment.conversation_id = ?1
+              AND attachment.message_id = ?2
+              AND (
+                NOT EXISTS (
+                    SELECT 1
+                    FROM agent_run_guidance_attachments AS ownership
+                    WHERE ownership.attachment_id = attachment.id
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM agent_run_guidance_attachments AS ownership
+                    JOIN agent_run_guidances AS guidance
+                      ON guidance.guidance_id = ownership.guidance_id
+                    WHERE ownership.attachment_id = attachment.id
+                      AND guidance.status = 'applied'
+                )
+              )
+            ORDER BY attachment.created_at ASC, attachment.id ASC
+            ",
+        )?;
+
+        let mut message_attachments = statement
+            .query_map(params![conversation_id, message_id], attachment_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        attachments.append(&mut message_attachments);
+    }
+
+    Ok(attachments)
+}
+
 pub fn delete_message_attachments(
     connection: &Connection,
     conversation_id: &str,

@@ -536,6 +536,66 @@ describe('conversation startup loading', () => {
 })
 
 describe('running conversation guidance queue', () => {
+  it('restores acknowledged guidance abandoned by a core restart into the editable queue', async () => {
+    const interrupted = storedConversation()
+    const assistant = interrupted.messages.at(-1)
+    if (!assistant?.agentRun) throw new Error('missing assistant run fixture')
+    assistant.agentRun.timeline.push({
+      id: 'user-guidance-client-interrupted',
+      type: 'user_guidance',
+      guidanceId: 'guidance-interrupted',
+      clientMessageId: 'client-interrupted',
+      content: 'Recover after restart.\n\nAttachments: recovery.txt',
+      attachments: [
+        {
+          id: 'attachment-interrupted',
+          kind: 'file',
+          name: 'recovery.txt',
+          mimeType: 'text/plain',
+          sizeBytes: 7
+        }
+      ],
+      status: 'rejected',
+      rejectionCode: 'run_interrupted',
+      error: 'Core process restarted.',
+      recoverable: true,
+      createdAt: 10
+    })
+    testState.loadConversation.mockResolvedValueOnce(interrupted)
+    testState.loadInputAttachments.mockResolvedValueOnce([
+      {
+        id: 'attachment-interrupted',
+        kind: 'file',
+        name: 'recovery.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 7,
+        encoding: 'base64',
+        data: 'cmVjb3Zlcg=='
+      }
+    ])
+
+    const screen = await renderSelectedConversation()
+
+    await expect
+      .element(screen.getByTestId('queued-message-ids'))
+      .toHaveTextContent('recovered-guidance-guidance-interrupted')
+    expect(testState.loadInputAttachments).toHaveBeenCalledWith(['attachment-interrupted'])
+    await expect
+      .poll(() => {
+        const draft = testState.saveComposerDraft.mock.calls.at(-1)?.[1] as
+          ChatComposerDraft | undefined
+        return draft?.queuedMessages[0]
+      })
+      .toEqual(
+        expect.objectContaining({
+          clientMessageId: 'client-interrupted',
+          content: 'Recover after restart.\n\nAttachments: recovery.txt',
+          status: 'error',
+          attachments: [expect.objectContaining({ id: 'attachment-interrupted' })]
+        })
+      )
+  })
+
   it('guides any selected item in the active run and auto-sends the remaining head item', async () => {
     const first = queuedMessage('queue-first', 'send me next', 10)
     const second = queuedMessage('queue-second', 'guide this run', 20)

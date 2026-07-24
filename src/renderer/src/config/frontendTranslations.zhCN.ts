@@ -574,6 +574,8 @@ export const zhCNTranslations = {
   'chat.guidanceQueued': '已排队',
   'chat.guidanceSubmittingStatus': '正在发送',
   'chat.guidanceFailed': '引导发送失败，请编辑后重试。',
+  'chat.guidanceInterrupted': '上次运行中断，消息已恢复到队列',
+  'chat.guidanceRecoveryAttachmentFailed': '上次运行中断；附件恢复失败，请重新添加附件。',
   'chat.attachments': '附件',
   'chat.removeAttachment': '移除附件',
   'chat.addMenuTitle': '添加',

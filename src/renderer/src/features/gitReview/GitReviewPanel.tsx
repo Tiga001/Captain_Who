@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { GitReviewFile, GitReviewScope } from '@mycopilot/protocol'
 import {
@@ -34,6 +34,10 @@ interface GitReviewPanelProps {
   isActive: boolean
   onOpenFile: (path: string) => void
   projectId: string
+  scopeNavigation?: {
+    requestId: number
+    scope: GitReviewScope
+  }
 }
 
 type OpenMenu = 'scope' | 'options' | null
@@ -56,7 +60,8 @@ export function GitReviewPanel({
   conversationId,
   isActive,
   onOpenFile,
-  projectId
+  projectId,
+  scopeNavigation
 }: GitReviewPanelProps): ReactNode {
   const { t } = useFrontendConfig()
   const {
@@ -77,7 +82,8 @@ export function GitReviewPanel({
     setHotFullContentFileIds,
     setScope,
     summaryState
-  } = useGitReview(projectId, isActive, conversationId)
+  } = useGitReview(projectId, isActive, conversationId, scopeNavigation?.scope)
+  const handledScopeNavigationRequestRef = useRef(scopeNavigation?.requestId ?? null)
   const [expandedFileIds, setExpandedFileIds] = useState<Set<string>>(() => new Set())
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<GitReviewViewMode>('unified')
@@ -103,6 +109,17 @@ export function GitReviewPanel({
     pendingFileAlignmentRef.current = null
     contentRef.current?.scrollBy({ behavior: 'auto', left: 0, top: 0 })
   }, [])
+
+  useLayoutEffect(() => {
+    if (
+      !scopeNavigation ||
+      handledScopeNavigationRequestRef.current === scopeNavigation.requestId
+    ) {
+      return
+    }
+    handledScopeNavigationRequestRef.current = scopeNavigation.requestId
+    if (scope !== scopeNavigation.scope) setScope(scopeNavigation.scope)
+  }, [scope, scopeNavigation, setScope])
 
   useEffect(() => {
     diffStatesRef.current = diffStates

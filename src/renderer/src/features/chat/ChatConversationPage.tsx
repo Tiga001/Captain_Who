@@ -46,6 +46,7 @@ interface ChatConversationPageProps {
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
   onScrollPositionChange?: (conversationId: string, scrollTop: number) => void
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
+  onReviewLastTurn?: () => void
   onStopGenerating?: () => void
   onSubmitMessage: (message: string, options: ChatSubmitOptions) => void
   onMessageUiStateChange?: (
@@ -145,6 +146,7 @@ export function ChatConversationPage({
   onContinueInNewTask,
   onScrollPositionChange,
   onRejectAgentAction,
+  onReviewLastTurn,
   onStopGenerating,
   onSubmitMessage,
   onMessageUiStateChange,
@@ -278,6 +280,7 @@ export function ChatConversationPage({
               isAssistantReplyComplete(message) ? onContinueInNewTask : undefined
             }
             onReject={onRejectAgentAction}
+            onReviewLastTurn={onReviewLastTurn}
             onUiStateChange={onMessageUiStateChange}
             projectId={conversation.projectId}
             showTokenUsageDetails={showTokenUsageDetails}

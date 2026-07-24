@@ -144,6 +144,10 @@ export function useShellLayout() {
     applyConstrainedLayout(leftOpen, nextRightOpen, nextRightOpen ? 'right' : undefined)
   }, [applyConstrainedLayout, leftOpen, rightOpen])
 
+  const openRightSidebar = useCallback(() => {
+    applyConstrainedLayout(leftOpen, true, 'right')
+  }, [applyConstrainedLayout, leftOpen])
+
   const toggleRightSidebarMaximized = useCallback(() => {
     setRightMaximized((isMaximized) => !isMaximized)
   }, [])
@@ -161,6 +165,7 @@ export function useShellLayout() {
   return {
     leftOpen,
     leftWidth,
+    openRightSidebar,
     resizeSide,
     rightMaximized,
     rightOpen,

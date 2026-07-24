@@ -432,6 +432,58 @@ describe('running composer guidance queue', () => {
       draftChangeSpy.mock.calls.at(-1)?.[0].queuedMessages.map((message) => message.id)
     ).toEqual(['two', 'one'])
   })
+
+  it('animates rows out of the way while dragging and keeps the queue compact', async () => {
+    const screen = await render(
+      <TestComposer
+        initialDraft={createComposerDraft({
+          modelId: 'model-1',
+          projectId: 'project-a',
+          queuedMessages: [
+            queuedMessage('one', '123', 1),
+            queuedMessage('two', '345', 2),
+            queuedMessage('three', '890', 3)
+          ]
+        })}
+        isGenerating
+      />
+    )
+    const rows = Array.from(screen.container.querySelectorAll<HTMLElement>('.guidance-queue__item'))
+    const handles = Array.from(
+      screen.container.querySelectorAll<HTMLButtonElement>('.guidance-queue__drag-handle')
+    )
+    expect(rows[0].getBoundingClientRect().height).toBeLessThanOrEqual(40)
+
+    const dataTransfer = new DataTransfer()
+    handles[0].dispatchEvent(
+      new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer })
+    )
+    await expect.element(rows[0]).toHaveAttribute('data-dragging', 'true')
+    rows[1].dispatchEvent(
+      new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer })
+    )
+
+    await expect
+      .poll(() => draftChangeSpy.mock.calls.at(-1)?.[0].queuedMessages.map((message) => message.id))
+      .toEqual(['two', 'one', 'three'])
+    await expect.element(rows[1]).toHaveAttribute('data-reordering', 'true')
+    expect(rows[1].getAnimations().length).toBeGreaterThan(0)
+    await expect
+      .element(screen.getByText('345').element().closest<HTMLElement>('.guidance-queue__item'))
+      .toHaveAttribute('data-drop-target', 'true')
+
+    rows[0].dispatchEvent(
+      new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer })
+    )
+    rows[1].dispatchEvent(
+      new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer })
+    )
+    await expect
+      .poll(() => draftChangeSpy.mock.calls.at(-1)?.[0].queuedMessages.map((message) => message.id))
+      .toEqual(['one', 'two', 'three'])
+
+    rows[1].dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }))
+  })
 })
 
 describe('Composer permission confirmation', () => {

@@ -64,7 +64,15 @@ fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
         created_at: 2,
         status: Some("sent".to_string()),
         attachments: Vec::new(),
-        agent_run_json: None,
+        agent_run_json: Some(
+            serde_json::json!({
+                "runId": "run-guidance-fork",
+                "status": "completed",
+                "state": { "status": "completed" },
+                "timeline": []
+            })
+            .to_string(),
+        ),
         ui_state_json: None,
     });
     source.updated_at = 2;
@@ -141,6 +149,204 @@ fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
             .decode(&recursive_payload[0].data)
             .unwrap(),
         b"independent fork attachment"
+    );
+}
+
+#[test]
+fn fork_clones_applied_guidance_attachments_but_not_abandoned_ones() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut source = conversation(
+        "conversation-guidance-fork",
+        Some("project-1"),
+        "message-user-guidance-fork",
+    );
+    source.messages.push(ChatMessageRecord {
+        id: "message-assistant-guidance-fork".to_string(),
+        role: "assistant".to_string(),
+        content: "done".to_string(),
+        created_at: 2,
+        status: Some("sent".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    source.updated_at = 2;
+    service.save_conversation(source).unwrap();
+
+    let applied = input_attachment(
+        "attachment-guidance-applied",
+        AgentInputAttachmentKind::File,
+        "applied.txt",
+        Some("text/plain"),
+        b"applied guidance payload",
+    );
+    let abandoned = input_attachment(
+        "attachment-guidance-abandoned",
+        AgentInputAttachmentKind::File,
+        "abandoned.txt",
+        Some("text/plain"),
+        b"abandoned guidance payload",
+    );
+    for (record, attachment) in [
+        (
+            AgentRunGuidanceRecord {
+                guidance_id: "guidance-applied-fork".to_string(),
+                client_message_id: "client-applied-fork".to_string(),
+                run_id: "run-guidance-fork".to_string(),
+                conversation_id: "conversation-guidance-fork".to_string(),
+                assistant_message_id: "message-assistant-guidance-fork".to_string(),
+                content: "Applied guidance.".to_string(),
+                status: crate::AgentGuidanceStatus::Queued,
+                attachment_ids: vec![applied.id.clone()],
+                applied_trace_sequence: None,
+                terminal_reason: None,
+                created_at: 3,
+                updated_at: 3,
+            },
+            applied.clone(),
+        ),
+        (
+            AgentRunGuidanceRecord {
+                guidance_id: "guidance-abandoned-fork".to_string(),
+                client_message_id: "client-abandoned-fork".to_string(),
+                run_id: "run-guidance-fork".to_string(),
+                conversation_id: "conversation-guidance-fork".to_string(),
+                assistant_message_id: "message-assistant-guidance-fork".to_string(),
+                content: "Abandoned guidance.".to_string(),
+                status: crate::AgentGuidanceStatus::Queued,
+                attachment_ids: vec![abandoned.id.clone()],
+                applied_trace_sequence: None,
+                terminal_reason: None,
+                created_at: 4,
+                updated_at: 4,
+            },
+            abandoned.clone(),
+        ),
+    ] {
+        service
+            .store_agent_run_guidance_with_attachments(record, Some("project-1"), &[attachment])
+            .unwrap();
+    }
+    service
+        .mark_agent_run_guidance_applied("guidance-applied-fork", 0, 5)
+        .unwrap();
+    service
+        .mark_agent_run_guidance_terminal(
+            "guidance-abandoned-fork",
+            crate::AgentGuidanceStatus::Abandoned,
+            "run interrupted",
+            5,
+        )
+        .unwrap();
+    service
+        .replace_conversation_turn_trace(
+            &ConversationTurnTrace {
+                schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                run_id: "run-guidance-fork".to_string(),
+                conversation_id: "conversation-guidance-fork".to_string(),
+                assistant_message_id: "message-assistant-guidance-fork".to_string(),
+                terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
+                terminal_error: None,
+                truncated: false,
+                items: vec![ConversationTurnTraceItem::UserGuidance {
+                    sequence: 0,
+                    guidance_id: "guidance-applied-fork".to_string(),
+                    client_message_id: "client-applied-fork".to_string(),
+                    content: "Applied guidance.".to_string(),
+                    attachments: vec![crate::ConversationTraceAttachment {
+                        id: "attachment-guidance-applied".to_string(),
+                        kind: AgentInputAttachmentKind::File,
+                        name: "applied.txt".to_string(),
+                        mime_type: Some("text/plain".to_string()),
+                        size_bytes: applied.size_bytes,
+                    }],
+                    created_at: 3,
+                    truncated: false,
+                }],
+            },
+            2,
+            5,
+        )
+        .unwrap();
+
+    let library = service
+        .build_attachment_library_context("conversation-guidance-fork", Some("project-1"))
+        .unwrap();
+    assert_eq!(library.conversation_attachments.len(), 1);
+    assert_eq!(
+        library.conversation_attachments[0].id,
+        "attachment-guidance-applied"
+    );
+    let attachment_root = PathBuf::from(library.root_path.unwrap());
+    let applied_source_path = attachment_root.join(attachment_storage_rel_path(
+        "conversation-guidance-fork",
+        "message-assistant-guidance-fork",
+        "attachment-guidance-applied",
+        "applied.txt",
+    ));
+    let abandoned_source_path = attachment_root.join(attachment_storage_rel_path(
+        "conversation-guidance-fork",
+        "message-assistant-guidance-fork",
+        "attachment-guidance-abandoned",
+        "abandoned.txt",
+    ));
+    assert!(applied_source_path.is_file());
+    assert!(abandoned_source_path.is_file());
+
+    let forked = service
+        .fork_conversation(ForkConversationInput {
+            request_id: "fork-guidance-attachments".to_string(),
+            source_conversation_id: "conversation-guidance-fork".to_string(),
+            through_assistant_message_id: "message-assistant-guidance-fork".to_string(),
+        })
+        .unwrap();
+    let forked_assistant = forked.messages.last().unwrap();
+    assert!(forked_assistant.attachments.is_empty());
+    let forked_run: serde_json::Value =
+        serde_json::from_str(forked_assistant.agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(forked_run["timeline"].as_array().unwrap().len(), 1);
+    assert_eq!(forked_run["timeline"][0]["type"], "user_guidance");
+    assert_eq!(forked_run["timeline"][0]["status"], "applied");
+    let forked_guidance_id = forked_run["timeline"][0]["guidanceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let forked_attachment_id = forked_run["timeline"][0]["attachments"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(forked_guidance_id, "guidance-applied-fork");
+    assert_ne!(forked_attachment_id, "attachment-guidance-applied");
+    let forked_guidance = service
+        .load_agent_run_guidance(&forked_guidance_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(forked_guidance.status, crate::AgentGuidanceStatus::Applied);
+    assert_eq!(
+        forked_guidance.attachment_ids,
+        vec![forked_attachment_id.clone()]
+    );
+
+    service
+        .delete_conversation("conversation-guidance-fork")
+        .unwrap();
+    assert!(!applied_source_path.exists());
+    assert!(!abandoned_source_path.exists());
+    assert!(service
+        .load_input_attachments(&[
+            "attachment-guidance-applied".to_string(),
+            "attachment-guidance-abandoned".to_string(),
+        ])
+        .is_err());
+    let forked_payload = service
+        .load_input_attachments(&[forked_attachment_id])
+        .unwrap();
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&forked_payload[0].data)
+            .unwrap(),
+        b"applied guidance payload"
     );
 }
 

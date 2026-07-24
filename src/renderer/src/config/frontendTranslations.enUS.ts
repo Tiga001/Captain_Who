@@ -596,6 +596,9 @@ export const enUSTranslations = {
   'chat.guidanceQueued': 'Queued',
   'chat.guidanceSubmittingStatus': 'Sending',
   'chat.guidanceFailed': 'Guidance could not be sent. Edit it and try again.',
+  'chat.guidanceInterrupted': 'The previous run was interrupted. Message restored to the queue.',
+  'chat.guidanceRecoveryAttachmentFailed':
+    'The previous run was interrupted. Reattach the missing attachments before retrying.',
   'chat.attachments': 'Attachments',
   'chat.removeAttachment': 'Remove attachment',
   'chat.addMenuTitle': 'Add',

@@ -90,6 +90,7 @@ interface ChatMessageItemProps {
   onEditSubmit?: (messageId: string, content: string) => void | Promise<void>
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
   onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
+  onReviewLastTurn?: () => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   showTokenUsageDetails: boolean
 }
@@ -282,10 +283,16 @@ function GuidanceTimelineItemView({ item }: { item: ChatGuidanceTimelineItem }) 
       ? t('chat.guidanceSubmittingStatus')
       : item.status === 'queued'
         ? t('chat.guidanceQueued')
-        : null
+        : item.status === 'rejected'
+          ? t('chat.guidanceInterrupted')
+          : null
 
   return (
-    <div className="chat-guidance" data-status={item.status}>
+    <div
+      className="chat-guidance"
+      data-status={item.status}
+      title={item.status === 'rejected' ? item.error : undefined}
+    >
       <div className="chat-guidance__bubble">
         <MessageAttachments attachments={item.attachments} messageId={item.id} />
         {content && <ChatMarkdown content={content} />}
@@ -414,10 +421,12 @@ function AgentTimelineItemView({
 
 function AgentRunView({
   message,
+  onReviewLastTurn,
   onUiStateChange,
   projectId
 }: {
   message: ChatMessage
+  onReviewLastTurn?: () => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   projectId?: string | null
 }) {
@@ -532,7 +541,9 @@ function AgentRunView({
         <ImageGenerationArtifactsCard resolver={hostImageArtifactResolver} run={run} />
       )}
       {isRunSettled(run) && <OfficeArtifactsCard projectId={projectId} run={run} />}
-      {isRunSettled(run) && <EditSummaryCard projectId={projectId} run={run} />}
+      {isRunSettled(run) && (
+        <EditSummaryCard onReview={onReviewLastTurn} projectId={projectId} run={run} />
+      )}
       {isRunSettled(run) && <AssistantSources sources={webSearchSources} />}
       {showTokenLimitNotice && (
         <div className="agent-run__notice" role="status">
@@ -548,10 +559,20 @@ function AgentRunView({
   )
 }
 
-function MessageContent({ message, onUiStateChange, projectId }: ChatMessageItemProps) {
+function MessageContent({
+  message,
+  onReviewLastTurn,
+  onUiStateChange,
+  projectId
+}: ChatMessageItemProps) {
   if (message.role === 'assistant') {
     return (
-      <AgentRunView message={message} onUiStateChange={onUiStateChange} projectId={projectId} />
+      <AgentRunView
+        message={message}
+        onReviewLastTurn={onReviewLastTurn}
+        onUiStateChange={onUiStateChange}
+        projectId={projectId}
+      />
     )
   }
 
@@ -762,6 +783,7 @@ export function ChatMessageItem({
   onEditSubmit,
   onContinueInNewTask,
   onReject,
+  onReviewLastTurn,
   onUiStateChange,
   projectId,
   showTokenUsageDetails
@@ -819,6 +841,7 @@ export function ChatMessageItem({
             onApprove={onApprove}
             onCancel={onCancel}
             onReject={onReject}
+            onReviewLastTurn={onReviewLastTurn}
             onUiStateChange={onUiStateChange}
             projectId={projectId}
             showTokenUsageDetails={showTokenUsageDetails}

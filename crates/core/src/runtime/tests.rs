@@ -776,7 +776,7 @@ fn runtime_steer_input(
 }
 
 #[tokio::test]
-async fn steer_during_sampling_turns_a_terminal_response_into_intermediate_narration() {
+async fn concurrent_steer_during_sampling_is_fifo_and_turns_a_terminal_response_into_narration() {
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
 
@@ -816,6 +816,16 @@ async fn steer_during_sampling_turns_a_terminal_response_into_intermediate_narra
     });
 
     let queue = AgentSteerInputQueue::new();
+    assert_eq!(
+        queue
+            .enqueue(runtime_steer_input(
+                "guidance-before-stream",
+                "client-before-stream",
+                "Include the pre-stream constraint."
+            ))
+            .unwrap(),
+        AgentSteerEnqueueOutcome::Queued
+    );
     let mut input = conversation_context_input(vec![message("user", "Start the task.")]);
     input.api_url = format!("http://{address}/v1/chat/completions");
     input.api_token = "test-token".to_string();
@@ -853,6 +863,16 @@ async fn steer_during_sampling_turns_a_terminal_response_into_intermediate_narra
             .unwrap(),
         AgentSteerEnqueueOutcome::Queued
     );
+    assert_eq!(
+        queue
+            .enqueue(runtime_steer_input(
+                "guidance-2",
+                "client-2",
+                "Keep the rollout steps in chronological order."
+            ))
+            .unwrap(),
+        AgentSteerEnqueueOutcome::Queued
+    );
     release_first_response_tx.send(()).unwrap();
     let output = runtime.await.unwrap();
     server.await.unwrap();
@@ -867,13 +887,28 @@ async fn steer_during_sampling_turns_a_terminal_response_into_intermediate_narra
                 && message["content"] == "Initial answer before guidance."
         })
         .unwrap();
-    let guidance_index = second_messages
+    let before_stream_guidance_index = second_messages
+        .iter()
+        .position(|message| {
+            message["role"] == "user" && message["content"] == "Include the pre-stream constraint."
+        })
+        .unwrap();
+    let first_guidance_index = second_messages
         .iter()
         .position(|message| {
             message["role"] == "user" && message["content"] == "Also include the migration risk."
         })
         .unwrap();
-    assert!(intermediate_index < guidance_index);
+    let second_guidance_index = second_messages
+        .iter()
+        .position(|message| {
+            message["role"] == "user"
+                && message["content"] == "Keep the rollout steps in chronological order."
+        })
+        .unwrap();
+    assert!(intermediate_index < before_stream_guidance_index);
+    assert!(before_stream_guidance_index < first_guidance_index);
+    assert!(first_guidance_index < second_guidance_index);
     drop(requests);
 
     let trace = output.conversation_turn_trace.as_ref().unwrap();
@@ -885,10 +920,24 @@ async fn steer_during_sampling_turns_a_terminal_response_into_intermediate_narra
                 guidance_id,
                 client_message_id,
                 ..
+            },
+            ConversationTurnTraceItem::UserGuidance {
+                guidance_id: second_guidance_id,
+                client_message_id: second_client_message_id,
+                ..
+            },
+            ConversationTurnTraceItem::UserGuidance {
+                guidance_id: third_guidance_id,
+                client_message_id: third_client_message_id,
+                ..
             }
         ] if content == "Initial answer before guidance."
-            && guidance_id == "guidance-1"
-            && client_message_id == "client-1"
+            && guidance_id == "guidance-before-stream"
+            && client_message_id == "client-before-stream"
+            && second_guidance_id == "guidance-1"
+            && second_client_message_id == "client-1"
+            && third_guidance_id == "guidance-2"
+            && third_client_message_id == "client-2"
     ));
     assert!(output.events.iter().any(|event| matches!(
         event,
@@ -896,7 +945,23 @@ async fn steer_during_sampling_turns_a_terminal_response_into_intermediate_narra
             guidance_id,
             sequence: 1,
             ..
+        } if guidance_id == "guidance-before-stream"
+    )));
+    assert!(output.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::GuidanceApplied {
+            guidance_id,
+            sequence: 2,
+            ..
         } if guidance_id == "guidance-1"
+    )));
+    assert!(output.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::GuidanceApplied {
+            guidance_id,
+            sequence: 3,
+            ..
+        } if guidance_id == "guidance-2"
     )));
     assert!(!queue.is_accepting());
     assert_eq!(
@@ -912,7 +977,118 @@ async fn steer_during_sampling_turns_a_terminal_response_into_intermediate_narra
 }
 
 #[tokio::test]
-async fn steer_waits_until_a_complete_tool_exchange_before_next_sampling() {
+async fn steer_accepted_during_transport_retry_is_applied_after_the_retried_response() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests_for_server = Arc::clone(&requests);
+    let (retry_started_tx, retry_started_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut retry_started_tx = Some(retry_started_tx);
+        for connection_index in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_runtime_test_json_request(&mut stream).await;
+            requests_for_server.lock().unwrap().push(request);
+            if connection_index == 0 {
+                let body = b"temporary upstream failure";
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                stream.write_all(body).await.unwrap();
+                retry_started_tx.take().unwrap().send(()).unwrap();
+                continue;
+            }
+            let content = if connection_index == 1 {
+                "Response after retry."
+            } else {
+                "Final response after retry guidance."
+            };
+            write_runtime_test_json_response(
+                &mut stream,
+                json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": content },
+                        "finish_reason": "stop"
+                    }]
+                }),
+            )
+            .await;
+        }
+    });
+
+    let queue = AgentSteerInputQueue::new();
+    let mut input = conversation_context_input(vec![message("user", "Start the retry task.")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    input.assistant_message_id = Some("assistant-retry-steer".to_string());
+    input.context = Some(AgentRunContext {
+        conversation_id: Some("conversation-retry-steer".to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: Default::default(),
+    });
+    let runtime_queue = queue.clone();
+    let runtime = tokio::spawn(async move {
+        AgentRuntime::default()
+            .send_chat_with_events_and_cancellation(
+                input,
+                Some("run-retry-steer".to_string()),
+                None,
+                AgentCancellationToken::new(),
+                Some(AgentRuntimeHostServices::new().with_steer_input(runtime_queue)),
+            )
+            .await
+            .unwrap()
+    });
+
+    retry_started_rx.await.unwrap();
+    assert_eq!(
+        queue
+            .enqueue(runtime_steer_input(
+                "guidance-retry",
+                "client-retry",
+                "Apply this only after the retry response."
+            ))
+            .unwrap(),
+        AgentSteerEnqueueOutcome::Queued
+    );
+    let output = runtime.await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(output.content, "Final response after retry guidance.");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(!serde_json::to_string(&requests[1])
+        .unwrap()
+        .contains("Apply this only after the retry response."));
+    assert!(serde_json::to_string(&requests[2])
+        .unwrap()
+        .contains("Apply this only after the retry response."));
+    let trace = output.conversation_turn_trace.unwrap();
+    assert!(matches!(
+        trace.items.as_slice(),
+        [
+            ConversationTurnTraceItem::AssistantNarration { content, .. },
+            ConversationTurnTraceItem::UserGuidance { guidance_id, .. }
+        ] if content == "Response after retry." && guidance_id == "guidance-retry"
+    ));
+}
+
+#[tokio::test]
+async fn steer_waits_until_a_complete_multi_tool_exchange_before_next_sampling() {
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
 
@@ -946,6 +1122,13 @@ async fn steer_waits_until_a_complete_tool_exchange_before_next_sampling() {
                                 "function": {
                                     "name": "attachments_list",
                                     "arguments": "{}"
+                                }
+                            }, {
+                                "id": "provider-call-2",
+                                "type": "function",
+                                "function": {
+                                    "name": "todo_update",
+                                    "arguments": "{\"items\":[{\"title\":\"Verify ordering\",\"status\":\"completed\"}]}"
                                 }
                             }]
                         },
@@ -1009,10 +1192,12 @@ async fn steer_waits_until_a_complete_tool_exchange_before_next_sampling() {
         .iter()
         .position(|message| message["role"] == "assistant" && message["tool_calls"].is_array())
         .unwrap();
-    let tool_result_index = messages
+    let tool_result_indices = messages
         .iter()
-        .position(|message| message["role"] == "tool")
-        .unwrap();
+        .enumerate()
+        .filter_map(|(index, message)| (message["role"] == "tool").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(tool_result_indices.len(), 2);
     let guidance_index = messages
         .iter()
         .position(|message| {
@@ -1020,10 +1205,13 @@ async fn steer_waits_until_a_complete_tool_exchange_before_next_sampling() {
                 && message["content"] == "After the tool, summarize the count."
         })
         .unwrap();
-    assert!(tool_call_index < tool_result_index);
-    assert!(tool_result_index < guidance_index);
+    assert!(tool_result_indices
+        .iter()
+        .all(|tool_result_index| tool_call_index < *tool_result_index
+            && *tool_result_index < guidance_index));
 
     let trace = output.conversation_turn_trace.unwrap();
+    trace.validate().unwrap();
     assert!(matches!(
         trace.items.last(),
         Some(ConversationTurnTraceItem::UserGuidance {
@@ -1031,18 +1219,30 @@ async fn steer_waits_until_a_complete_tool_exchange_before_next_sampling() {
             ..
         }) if guidance_id == "guidance-tool"
     ));
-    let tool_call_index = trace
+    let tool_call_indices = trace
         .items
         .iter()
-        .position(|item| matches!(item, ConversationTurnTraceItem::ToolCall { .. }))
-        .unwrap();
-    let tool_result_index = trace
+        .enumerate()
+        .filter_map(|(index, item)| {
+            matches!(item, ConversationTurnTraceItem::ToolCall { .. }).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let tool_result_indices = trace
         .items
         .iter()
-        .position(|item| matches!(item, ConversationTurnTraceItem::ToolResult { .. }))
-        .unwrap();
-    assert_eq!(tool_result_index, tool_call_index + 1);
-    assert!(tool_result_index < trace.items.len() - 1);
+        .enumerate()
+        .filter_map(|(index, item)| {
+            matches!(item, ConversationTurnTraceItem::ToolResult { .. }).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(tool_call_indices.len(), 2);
+    assert_eq!(tool_result_indices.len(), 2);
+    let exchange_start = *tool_call_indices.first().unwrap();
+    let exchange_end = *tool_result_indices.last().unwrap();
+    assert!(trace.items[exchange_start..=exchange_end]
+        .iter()
+        .all(|item| !matches!(item, ConversationTurnTraceItem::UserGuidance { .. })));
+    assert!(exchange_end < trace.items.len() - 1);
 }
 
 #[tokio::test]
@@ -3097,6 +3297,8 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     let compacted_baseline_for_commit = compacted_baseline.clone();
     let compacted_baseline_for_trace = compacted_baseline.clone();
     let durable_prefix_for_prepare = durable_prefix.clone();
+    let steer_input = AgentSteerInputQueue::new();
+    let steer_input_during_compaction = steer_input.clone();
     let services = AgentContextCompactionServices::new(
         move |request, _| {
             prepare_counter.fetch_add(1, Ordering::SeqCst);
@@ -3110,6 +3312,36 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         },
         move |request, _| {
             generate_counter.fetch_add(1, Ordering::SeqCst);
+            let large_attachment_text =
+                format!("LARGE_GUIDANCE_ATTACHMENT_MARKER {}", "z".repeat(20_000));
+            assert_eq!(
+                steer_input_during_compaction
+                    .enqueue(crate::AgentSteerInput {
+                        guidance_id: "guidance-during-compaction".to_string(),
+                        client_message_id: "client-during-compaction".to_string(),
+                        content: "Preserve this constraint across compaction.".to_string(),
+                        attachments: vec![AgentInputAttachment {
+                            id: "attachment-during-compaction".to_string(),
+                            kind: AgentInputAttachmentKind::File,
+                            name: "large-guidance.txt".to_string(),
+                            mime_type: Some("text/plain".to_string()),
+                            size_bytes: large_attachment_text.len() as u64,
+                            encoding: AgentInputAttachmentEncoding::Utf8,
+                            data: large_attachment_text,
+                            truncated: None,
+                        }],
+                        attachment_library: Some(crate::AgentAttachmentLibraryContext {
+                            root_path: None,
+                            conversation_id: Some("conversation-1".to_string()),
+                            project_id: None,
+                            conversation_attachments: Vec::new(),
+                            project_attachments: Vec::new(),
+                        }),
+                        created_at: 42,
+                    })
+                    .unwrap(),
+                AgentSteerEnqueueOutcome::Queued
+            );
             async move {
                 let observation =
                     crate::model_request_observation::ModelRequestObservationBuilder::new(
@@ -3204,7 +3436,8 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
                 AgentRuntimeHostServices::new()
                     .with_context_compaction(services)
                     .with_trace_observer(trace_observer)
-                    .with_model_request_observer(model_request_observer),
+                    .with_model_request_observer(model_request_observer)
+                    .with_steer_input(steer_input),
             ),
         )
         .await
@@ -3230,7 +3463,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         post_compaction_empty_trace_publish_count.load(Ordering::SeqCst),
         1
     );
-    assert_eq!(trace_publish_count.load(Ordering::SeqCst), 5);
+    assert_eq!(trace_publish_count.load(Ordering::SeqCst), 6);
     let usage = output.usage.as_ref().unwrap();
     assert_eq!(usage.input_tokens, Some(100));
     assert_eq!(usage.output_tokens, Some(20));
@@ -3241,11 +3474,19 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         observation.purpose == crate::ModelRequestPurpose::AgentLoop
             && observation.estimate.is_some()
     }));
-    for request_body in request_bodies {
+    for request_body in &request_bodies {
         assert!(request_body.contains("COMPACTED_HISTORY_MARKER"));
         assert!(!request_body.contains("OLD_USER_MARKER"));
         assert!(!request_body.contains("OLD_ASSISTANT_MARKER"));
     }
+    assert!(!request_bodies[0].contains("Preserve this constraint across compaction."));
+    assert!(request_bodies[1].contains("Preserve this constraint across compaction."));
+    assert!(request_bodies[1].contains("LARGE_GUIDANCE_ATTACHMENT_MARKER"));
+    assert!(output.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::GuidanceApplied { guidance_id, .. }
+            if guidance_id == "guidance-during-compaction"
+    )));
     let events = emitted_events.lock().unwrap();
     let compaction_events = events
         .iter()

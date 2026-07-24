@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { AgentEvent } from '@mycopilot/protocol'
 import type { ChatMessage, ChatQueuedMessage } from '../../features/chat/chatTypes'
 import {
+  applyAgentActionExecutionToChatMessage,
   applyAgentEventToChatMessage,
   applyOptimisticGuidanceToChatMessage
 } from '../agentEventReducer'
@@ -123,5 +124,43 @@ describe('agent guidance timeline projection', () => {
     })
 
     expect(rejected.agentRun?.timeline).toEqual([])
+  })
+
+  it('keeps guidance disabled until an approved continuation actually starts', () => {
+    const waiting: ChatMessage = {
+      ...assistantMessage(),
+      agentRun: {
+        ...assistantMessage().agentRun!,
+        status: 'waiting_for_approval'
+      }
+    }
+    const accepted = applyAgentActionExecutionToChatMessage(waiting, {
+      actionId: 'action-1',
+      actionType: 'tool_call',
+      toolName: 'apply_patch',
+      status: 'applied',
+      agentOutput: {
+        content: '',
+        status: 'running',
+        runId: 'run-1',
+        events: [],
+        toolDefinitions: [],
+        proposedActions: []
+      }
+    })
+
+    expect(accepted.agentRun?.status).toBe('starting')
+
+    const started = applyAgentEventToChatMessage(accepted, {
+      type: 'state',
+      runId: 'run-1',
+      state: {
+        status: 'running',
+        activeRunId: 'run-1',
+        lastError: null,
+        updatedAt: 20
+      }
+    })
+    expect(started.agentRun?.status).toBe('running')
   })
 })

@@ -3,14 +3,14 @@ use crate::context::{
     ContextJournalCursor,
 };
 use crate::storage::models::{
-    AgentFileDraftRecord, AttachmentRecord, ChatConversationRecord, ChatMessageRecord,
-    ForkConversationInput,
+    AgentFileDraftRecord, AgentRunGuidanceRecord, AttachmentRecord, ChatConversationRecord,
+    ChatMessageRecord, ForkConversationInput,
 };
 use crate::storage::{
     attachment_repository, chat_repository, context_compaction_repository,
-    conversation_trace_repository, file_draft_repository,
+    conversation_trace_repository, file_draft_repository, guidance_repository,
 };
-use crate::ConversationTurnTrace;
+use crate::{AgentGuidanceStatus, ConversationTurnTrace};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -30,6 +30,12 @@ struct ForkTrace {
 }
 
 #[derive(Debug)]
+struct ForkGuidance {
+    record: AgentRunGuidanceRecord,
+    applied_trace_sequence: u64,
+}
+
+#[derive(Debug)]
 pub(crate) struct ConversationForkPlan {
     pub request_id: String,
     pub source_conversation_id: String,
@@ -37,6 +43,7 @@ pub(crate) struct ConversationForkPlan {
     pub target: ChatConversationRecord,
     pub attachments: Vec<ForkAttachmentCopy>,
     traces: Vec<ForkTrace>,
+    guidances: Vec<ForkGuidance>,
     file_drafts: Vec<AgentFileDraftRecord>,
     summaries: Vec<context_compaction_repository::ContextCompactionSummaryVersion>,
     message_id_map: HashMap<String, String>,
@@ -107,7 +114,7 @@ pub(crate) fn build_fork_plan(
         .iter()
         .map(|message| message.id.clone())
         .collect::<Vec<_>>();
-    let source_attachments = attachment_repository::list_message_attachments(
+    let source_attachments = attachment_repository::list_message_attachments_for_fork(
         connection,
         &source.id,
         &source_message_ids,
@@ -191,9 +198,56 @@ pub(crate) fn build_fork_plan(
         }
     }
 
+    let mut guidance_id_map = HashMap::new();
+    let mut guidances = Vec::new();
+    for message in &source_messages {
+        for guidance in
+            guidance_repository::list_guidances_for_assistant_message(connection, &message.id)
+                .map_err(database_error)?
+        {
+            if guidance.status != AgentGuidanceStatus::Applied {
+                continue;
+            }
+            let target_guidance_id = new_id("guidance");
+            let target_run_id = mapped_id(&run_id_map, &guidance.run_id, "引导所属运行")?;
+            let target_assistant_message_id = mapped_id(
+                &message_id_map,
+                &guidance.assistant_message_id,
+                "引导所属消息",
+            )?;
+            let target_attachment_ids = guidance
+                .attachment_ids
+                .iter()
+                .map(|attachment_id| mapped_id(&attachment_id_map, attachment_id, "引导附件"))
+                .collect::<Result<Vec<_>, _>>()?;
+            let applied_trace_sequence = guidance
+                .applied_trace_sequence
+                .ok_or_else(|| "已应用引导缺少 trace 顺序。".to_string())?;
+            guidance_id_map.insert(guidance.guidance_id.clone(), target_guidance_id.clone());
+            guidances.push(ForkGuidance {
+                record: AgentRunGuidanceRecord {
+                    guidance_id: target_guidance_id,
+                    client_message_id: guidance.client_message_id,
+                    run_id: target_run_id,
+                    conversation_id: target_conversation_id.clone(),
+                    assistant_message_id: target_assistant_message_id,
+                    content: guidance.content,
+                    status: AgentGuidanceStatus::Queued,
+                    attachment_ids: target_attachment_ids,
+                    applied_trace_sequence: None,
+                    terminal_reason: None,
+                    created_at: guidance.created_at,
+                    updated_at: guidance.updated_at,
+                },
+                applied_trace_sequence,
+            });
+        }
+    }
+
     let mut replacements = message_id_map.clone();
     replacements.extend(run_id_map.clone());
     replacements.extend(attachment_id_map.clone());
+    replacements.extend(guidance_id_map);
     replacements.extend(draft_id_map);
     replacements.insert(source.id.clone(), target_conversation_id.clone());
     for fork_trace in &mut traces {
@@ -255,6 +309,7 @@ pub(crate) fn build_fork_plan(
         },
         attachments,
         traces,
+        guidances,
         file_drafts,
         summaries,
         message_id_map,
@@ -285,6 +340,31 @@ pub(crate) fn commit_fork_plan(
     for attachment in &plan.attachments {
         attachment_repository::save_attachment(&transaction, &attachment.target)
             .map_err(database_error)?;
+    }
+    for guidance in &plan.guidances {
+        match guidance_repository::store_guidance_in_connection(&transaction, &guidance.record)
+            .map_err(database_error)?
+        {
+            guidance_repository::AgentRunGuidanceStoreOutcome::Inserted => {}
+            outcome => {
+                return Err(format!("克隆用户引导 journal 时发生意外冲突：{outcome:?}"));
+            }
+        }
+        match guidance_repository::mark_guidance_applied(
+            &transaction,
+            &guidance.record.guidance_id,
+            guidance.applied_trace_sequence,
+            guidance.record.updated_at,
+        )
+        .map_err(database_error)?
+        {
+            guidance_repository::AgentRunGuidanceTransitionOutcome::Updated => {}
+            outcome => {
+                return Err(format!(
+                    "克隆用户引导 trace 状态时发生意外冲突：{outcome:?}"
+                ));
+            }
+        }
     }
     transaction
         .execute(

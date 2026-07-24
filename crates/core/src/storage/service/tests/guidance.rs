@@ -254,3 +254,95 @@ fn guidance_attachment_ownership_is_atomic_and_hidden_until_application() {
         1
     );
 }
+
+#[test]
+fn abandoned_acknowledged_guidance_projects_as_recoverable_without_binary_payloads() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_conversation(guidance_conversation(
+            "conversation-guidance-recovery",
+            "assistant-guidance-recovery",
+        ))
+        .unwrap();
+    let attachment = AgentInputAttachment {
+        id: "attachment-guidance-recovery".to_string(),
+        kind: AgentInputAttachmentKind::File,
+        name: "recovery.txt".to_string(),
+        mime_type: Some("text/plain".to_string()),
+        size_bytes: 7,
+        encoding: AgentInputAttachmentEncoding::Utf8,
+        data: "recover".to_string(),
+        truncated: None,
+    };
+    service
+        .store_agent_run_guidance_with_attachments(
+            AgentRunGuidanceRecord {
+                guidance_id: "guidance-recovery".to_string(),
+                client_message_id: "client-recovery".to_string(),
+                run_id: "run-recovery".to_string(),
+                conversation_id: "conversation-guidance-recovery".to_string(),
+                assistant_message_id: "assistant-guidance-recovery".to_string(),
+                content: "Recover this guidance.".to_string(),
+                status: crate::AgentGuidanceStatus::Queued,
+                attachment_ids: vec![attachment.id.clone()],
+                applied_trace_sequence: None,
+                terminal_reason: None,
+                created_at: 2,
+                updated_at: 2,
+            },
+            None,
+            &[attachment],
+        )
+        .unwrap();
+    assert_eq!(
+        service
+            .abandon_queued_agent_run_guidances(
+                "run-recovery",
+                "Core process restarted before guidance application.",
+                3,
+            )
+            .unwrap(),
+        1
+    );
+
+    let conversation = service
+        .load_conversation("conversation-guidance-recovery")
+        .unwrap()
+        .unwrap();
+    let run: serde_json::Value =
+        serde_json::from_str(conversation.messages[0].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        run["timeline"][0],
+        serde_json::json!({
+            "id": "user-guidance-client-recovery",
+            "type": "user_guidance",
+            "guidanceId": "guidance-recovery",
+            "clientMessageId": "client-recovery",
+            "content": "Recover this guidance.",
+            "attachments": [{
+                "id": "attachment-guidance-recovery",
+                "kind": "file",
+                "name": "recovery.txt",
+                "mimeType": "text/plain",
+                "sizeBytes": 7
+            }],
+            "status": "rejected",
+            "rejectionCode": "run_interrupted",
+            "error": "Core process restarted before guidance application.",
+            "recoverable": true,
+            "createdAt": 2
+        })
+    );
+    assert!(run["timeline"][0]["attachments"][0]["data"].is_null());
+    let restored = service
+        .load_input_attachments(&["attachment-guidance-recovery".to_string()])
+        .unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(&restored[0].data)
+            .unwrap(),
+        b"recover"
+    );
+}

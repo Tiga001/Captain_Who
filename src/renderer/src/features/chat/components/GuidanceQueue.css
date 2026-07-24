@@ -11,8 +11,8 @@
   position: relative;
   z-index: 1;
   display: grid;
-  margin: 0 28px -18px;
-  padding: 12px 16px 24px;
+  margin: 0 28px -16px;
+  padding: 7px 12px 20px;
   color: var(--mc-color-text-primary);
   background: color-mix(in srgb, var(--mc-color-surface-card) 94%, var(--mc-color-surface-muted));
   border: 0.5px solid var(--mc-color-border-subtle);
@@ -24,11 +24,15 @@
 .guidance-queue__item {
   position: relative;
   display: grid;
-  grid-template-columns: 18px 18px minmax(0, 1fr) auto;
-  min-height: 46px;
+  grid-template-columns: 16px 16px minmax(0, 1fr) auto;
+  min-height: 38px;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   border-bottom: 0.5px solid var(--mc-color-border-subtle);
+  transition:
+    background-color 120ms ease,
+    opacity 120ms ease;
+  will-change: transform;
 }
 
 .guidance-queue__item:last-child {
@@ -36,7 +40,15 @@
 }
 
 .guidance-queue__item[data-dragging='true'] {
-  opacity: 0.48;
+  opacity: 0.4;
+}
+
+.guidance-queue__item[data-drop-target='true']:not([data-dragging='true']) {
+  background: color-mix(in srgb, var(--mc-color-state-hover) 76%, transparent);
+}
+
+.guidance-queue__item[data-reordering='true'] {
+  z-index: 1;
 }
 
 .guidance-queue__item[data-status='submitting'] {
@@ -45,8 +57,8 @@
 
 .guidance-queue__drag-handle {
   display: grid;
-  width: 20px;
-  height: 28px;
+  width: 18px;
+  height: 24px;
   padding: 0;
   place-items: center;
   color: var(--mc-color-text-subtle);
@@ -79,7 +91,7 @@
 .guidance-queue__content {
   display: grid;
   min-width: 0;
-  gap: 2px;
+  gap: 1px;
   font-size: var(--mc-font-size-chat-input);
 }
 
@@ -105,14 +117,14 @@
 .guidance-queue__actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
 }
 
 .guidance-queue__actions button {
   display: inline-flex;
-  min-width: 30px;
-  height: 30px;
-  padding: 0 7px;
+  min-width: 27px;
+  height: 27px;
+  padding: 0 5px;
   align-items: center;
   justify-content: center;
   gap: 5px;
@@ -134,7 +146,7 @@
 }
 
 .guidance-queue__actions .guidance-queue__guide {
-  padding-inline: 9px;
+  padding-inline: 7px;
   font-weight: var(--mc-font-weight-strong);
 }
 
@@ -184,5 +196,11 @@
 
   .guidance-queue__guide span {
     display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .guidance-queue__item {
+    transition: none;
   }
 }

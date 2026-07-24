@@ -172,7 +172,7 @@ impl AgentService {
             host_services = host_services.with_skill_activation_resolver(
                 model_skill_activation_resolver(service.storage.clone(), service.skills.clone()),
             );
-            host_services = host_services.with_steer_input(steer_input);
+            host_services = host_services.with_steer_input(steer_input.clone());
             if let Some(resources) = skill_resources {
                 host_services = host_services.with_skill_resources(resources);
             }
@@ -206,6 +206,7 @@ impl AgentService {
             };
             let result = match service.unregister_active_run_control(
                 &worker_run_id,
+                &steer_input,
                 AgentSteerRunRejectionCode::RunNotSteerable,
                 close_message,
                 &notifications,

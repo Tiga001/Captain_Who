@@ -354,6 +354,52 @@ fn approval_close_rejects_every_accepted_guidance_and_fences_new_requests() {
 }
 
 #[test]
+fn stale_finalizer_cannot_remove_a_new_approval_continuation_queue() {
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let service = AgentService::new(storage);
+    let stale_queue = install_active_run(
+        &service,
+        "run-approval-resume",
+        "conversation-approval-resume",
+        "assistant-approval-resume",
+        false,
+    );
+    let continuation_queue = service.register_active_run_control(
+        "run-approval-resume",
+        "conversation-approval-resume",
+        "assistant-approval-resume",
+        None,
+        ModelCapabilities { image_input: false },
+    );
+    let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    service
+        .unregister_active_run_control(
+            "run-approval-resume",
+            &stale_queue,
+            AgentSteerRunRejectionCode::RunNotSteerable,
+            "stale run finished",
+            &notifications,
+        )
+        .unwrap();
+
+    assert!(continuation_queue.is_accepting());
+    let queued = service
+        .steer_run(
+            text_input(
+                "run-approval-resume",
+                "conversation-approval-resume",
+                "client-after-approval-resume",
+            ),
+            notifications,
+        )
+        .unwrap();
+    assert_eq!(queued.status, AgentSteerRunResultStatus::Queued);
+    assert_eq!(continuation_queue.pending_len(), 1);
+}
+
+#[test]
 fn steer_run_rejects_wrong_conversation_and_unsupported_model_images() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
@@ -775,26 +821,58 @@ fn service_startup_abandons_guidance_left_queued_by_the_previous_process() {
         .unwrap();
     assert_eq!(record.status, AgentGuidanceStatus::Abandoned);
     assert!(record.terminal_reason.is_some());
+    let conversation = storage
+        .load_conversation("conversation-startup-guidance")
+        .unwrap()
+        .unwrap();
+    let run: Value =
+        serde_json::from_str(conversation.messages[0].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(run["timeline"][0]["status"], "rejected");
+    assert_eq!(run["timeline"][0]["rejectionCode"], "run_interrupted");
+    assert_eq!(run["timeline"][0]["recoverable"], true);
 }
 
 #[tokio::test]
 async fn conversation_turn_steering_runs_through_rpc_control_trace_and_events() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let (first_request_seen_tx, first_request_seen_rx) = oneshot::channel();
+    let (first_delta_sent_tx, first_delta_sent_rx) = oneshot::channel();
     let (release_first_response_tx, release_first_response_rx) = oneshot::channel();
     let second_request = Arc::new(Mutex::new(None::<Value>));
     let second_request_for_server = Arc::clone(&second_request);
     let server = tokio::spawn(async move {
-        let mut first_request_seen_tx = Some(first_request_seen_tx);
+        let mut first_delta_sent_tx = Some(first_delta_sent_tx);
         let mut release_first_response_rx = Some(release_first_response_rx);
         for index in 0..2 {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = read_json_request(&mut stream).await;
             if index == 0 {
-                first_request_seen_tx.take().unwrap().send(()).unwrap();
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                let content_frame = json!({
+                    "choices": [{
+                        "delta": { "role": "assistant", "content": "Initial response." },
+                        "finish_reason": null
+                    }]
+                });
+                stream
+                    .write_all(format!("data: {content_frame}\n\n").as_bytes())
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+                first_delta_sent_tx.take().unwrap().send(()).unwrap();
                 release_first_response_rx.take().unwrap().await.unwrap();
-                write_text_stream(&mut stream, "Initial response.").await;
+                let finish_frame = json!({
+                    "choices": [{ "delta": {}, "finish_reason": "stop" }]
+                });
+                stream
+                    .write_all(format!("data: {finish_frame}\n\ndata: [DONE]\n\n").as_bytes())
+                    .await
+                    .unwrap();
             } else {
                 *second_request_for_server.lock().unwrap() = Some(request);
                 write_text_stream(&mut stream, "Final guided response.").await;
@@ -831,7 +909,7 @@ async fn conversation_turn_steering_runs_through_rpc_control_trace_and_events() 
         )
         .unwrap();
 
-    first_request_seen_rx.await.unwrap();
+    first_delta_sent_rx.await.unwrap();
     let response = crate::server::handle_request(
         storage.as_ref(),
         &service,
@@ -903,6 +981,103 @@ async fn conversation_turn_steering_runs_through_rpc_control_trace_and_events() 
         .any(|message| {
             message["role"] == "user" && message["content"] == "Please use the newer constraint."
         }));
+}
+
+#[tokio::test]
+async fn acknowledged_guidance_is_explicitly_rejected_when_network_retries_are_exhausted() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (first_request_seen_tx, first_request_seen_rx) = oneshot::channel();
+    let (release_first_failure_tx, release_first_failure_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut first_request_seen_tx = Some(first_request_seen_tx);
+        let mut release_first_failure_rx = Some(release_first_failure_rx);
+        for index in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _request = read_json_request(&mut stream).await;
+            if index == 0 {
+                first_request_seen_tx.take().unwrap().send(()).unwrap();
+                release_first_failure_rx.take().unwrap().await.unwrap();
+            }
+            let body = b"temporary upstream failure";
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            stream.write_all(body).await.unwrap();
+        }
+    });
+
+    let fixture = tempdir().unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+    let service = AgentService::new(storage.clone());
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-network-steer".to_string()),
+                project_id: None,
+                model_id: "model-1".to_string(),
+                context_window_indicator_enabled: true,
+                content: "Start a request that will fail.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some("user-network-steer".to_string()),
+                assistant_message_id: Some("assistant-network-steer".to_string()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions::default(),
+            },
+            notifications.clone(),
+        )
+        .unwrap();
+
+    first_request_seen_rx.await.unwrap();
+    let queued = service
+        .steer_run(
+            text_input(&turn.run_id, &turn.conversation_id, "client-network-steer"),
+            notifications,
+        )
+        .unwrap();
+    assert_eq!(queued.status, AgentSteerRunResultStatus::Queued);
+    release_first_failure_tx.send(()).unwrap();
+
+    let rejected_event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let notification = receiver.recv().await.unwrap();
+            if notification["params"]["type"] == "guidance_rejected" {
+                break notification;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(
+        rejected_event["params"]["rejectionCode"],
+        "run_not_steerable"
+    );
+    let journal = storage
+        .load_agent_run_guidance(&queued.guidance_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(journal.status, AgentGuidanceStatus::Rejected);
+    assert!(journal
+        .terminal_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("finished")));
 }
 
 #[tokio::test]
@@ -1184,5 +1359,155 @@ async fn waiting_for_approval_closes_steering_before_the_approval_event_is_publi
     assert_eq!(
         after_approval.rejection_code,
         Some(AgentSteerRunRejectionCode::RunNotSteerable)
+    );
+}
+
+#[tokio::test]
+async fn approved_run_reopens_steering_and_applies_guidance_to_the_same_turn() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (approval_response_tx, approval_response_rx) = oneshot::channel();
+    let (continuation_seen_tx, continuation_seen_rx) = oneshot::channel();
+    let (release_continuation_tx, release_continuation_rx) = oneshot::channel();
+    let (guided_request_tx, guided_request_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut approval_stream, _) = listener.accept().await.unwrap();
+        let _ = read_json_request(&mut approval_stream).await;
+        write_approval_tool_stream(&mut approval_stream).await;
+        drop(approval_stream);
+        approval_response_tx.send(()).unwrap();
+
+        let (mut continuation_stream, _) = listener.accept().await.unwrap();
+        let _ = read_json_request(&mut continuation_stream).await;
+        continuation_seen_tx.send(()).unwrap();
+        release_continuation_rx.await.unwrap();
+        write_text_stream(&mut continuation_stream, "Continuing after approval.").await;
+        drop(continuation_stream);
+
+        let (mut guided_stream, _) = listener.accept().await.unwrap();
+        let guided_request = read_json_request(&mut guided_stream).await;
+        guided_request_tx.send(guided_request).unwrap();
+        write_text_stream(&mut guided_stream, "Applied the guidance.").await;
+    });
+
+    let fixture = tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
+    let mut settings = test_model_settings();
+    settings.api_url = format!("http://{address}/v1/chat/completions");
+    storage.save_model_settings(settings).unwrap();
+    storage
+        .save_project(ProjectRecord {
+            id: "project-approval-resume-steer".to_string(),
+            name: "Approval resume steering".to_string(),
+            path: Some(workspace.to_string_lossy().into_owned()),
+            created_at: 1,
+            pinned_at: None,
+        })
+        .unwrap();
+    let service = AgentService::new(storage.clone());
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let turn = service
+        .start_conversation_turn(
+            AgentConversationTurnInput {
+                conversation_id: Some("conversation-approval-resume-e2e".to_string()),
+                project_id: Some("project-approval-resume-steer".to_string()),
+                model_id: "model-1".to_string(),
+                context_window_indicator_enabled: true,
+                content: "Create guided.txt.".to_string(),
+                attachments: Vec::new(),
+                skills: Vec::new(),
+                title: None,
+                user_message_id: Some("user-approval-resume-e2e".to_string()),
+                assistant_message_id: Some("assistant-approval-resume-e2e".to_string()),
+                max_tokens: None,
+                temperature: None,
+                prompt_preferences: None,
+                permissions: AgentPermissions {
+                    write: AgentWritePermission::WorkspaceOnly,
+                    patch: mycopilot_core::AgentPatchPermission::RequireApproval,
+                    ..Default::default()
+                },
+            },
+            notifications.clone(),
+        )
+        .unwrap();
+
+    approval_response_rx.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let notification = receiver.recv().await.unwrap();
+            assert_ne!(
+                notification["params"]["type"], "error",
+                "run failed before approval: {notification}"
+            );
+            if notification["params"]["type"] == "approval_required" {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let pending = service.list_pending_actions();
+    assert_eq!(pending.len(), 1);
+    let approval = service
+        .approve_action(&turn.run_id, &pending[0].action_id, notifications.clone())
+        .unwrap();
+    assert_eq!(approval.agent_output.status, AgentRunStatus::Running);
+
+    continuation_seen_rx.await.unwrap();
+    let queued = service
+        .steer_run(
+            text_input(
+                &turn.run_id,
+                &turn.conversation_id,
+                "client-after-approval-resume-e2e",
+            ),
+            notifications,
+        )
+        .unwrap();
+    assert_eq!(queued.status, AgentSteerRunResultStatus::Queued);
+    release_continuation_tx.send(()).unwrap();
+
+    let mut saw_queued = false;
+    let mut saw_applied = false;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let notification = receiver.recv().await.unwrap();
+            match notification["params"]["type"].as_str().unwrap() {
+                "guidance_queued" => saw_queued = true,
+                "guidance_applied" => saw_applied = true,
+                "done" if notification["params"]["status"] == "completed" => break,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let guided_request = guided_request_rx.await.unwrap();
+    server.await.unwrap();
+
+    assert!(saw_queued);
+    assert!(saw_applied);
+    assert!(serde_json::to_string(&guided_request)
+        .unwrap()
+        .contains("Please use the newer constraint."));
+    let journal = storage
+        .load_agent_run_guidance(&queued.guidance_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(journal.status, AgentGuidanceStatus::Applied);
+    let conversation = storage
+        .load_conversation(&turn.conversation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        conversation
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .count(),
+        1
     );
 }

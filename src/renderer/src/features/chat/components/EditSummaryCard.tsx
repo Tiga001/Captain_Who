@@ -7,6 +7,7 @@ import { revealStoredProjectFile } from '../../storage/storageClient'
 import { getApplyPatchItemView, isAbsoluteLocalPath } from './toolActivities/ApplyPatchToolActivity'
 
 interface EditSummaryCardProps {
+  onReview?: () => void
   projectId?: string | null
   run: ChatAgentRunView
 }
@@ -127,7 +128,11 @@ function EditSummaryPath({
   )
 }
 
-export function EditSummaryCard({ projectId, run }: EditSummaryCardProps): JSX.Element | null {
+export function EditSummaryCard({
+  onReview,
+  projectId,
+  run
+}: EditSummaryCardProps): JSX.Element | null {
   const { t } = useFrontendConfig()
   const [expanded, setExpanded] = useState(false)
   const entries = getAppliedEditEntries(run)
@@ -166,7 +171,12 @@ export function EditSummaryCard({ projectId, run }: EditSummaryCardProps): JSX.E
             <span>{t('agent.editSummary.undo')}</span>
             <Undo2 aria-hidden="true" />
           </button>
-          <button className="edit-summary-card__review" type="button">
+          <button
+            className="edit-summary-card__review"
+            disabled={!onReview}
+            onClick={() => onReview?.()}
+            type="button"
+          >
             {t('agent.editSummary.review')}
           </button>
         </div>
