@@ -29,6 +29,7 @@ mod image_generation;
 mod office;
 mod pending_actions;
 mod skills;
+mod steering;
 mod terminal_events;
 mod usage_lifecycle;
 

@@ -50,6 +50,23 @@ pub(crate) fn handle_agent_cancel_run(
     )
 }
 
+pub(crate) fn handle_agent_steer_run(
+    agent_service: &AgentService,
+    notification_tx: agent::CoreServerNotificationSender,
+    id: JsonRpcId,
+    params: Option<Value>,
+) -> Value {
+    let input = match parse_params::<AgentSteerRunInput>(params) {
+        Ok(input) => input,
+        Err(message) => return response_error(Some(id), -32602, message),
+    };
+
+    match agent_service.steer_run(input, notification_tx) {
+        Ok(output) => response_success(id, output),
+        Err(error) => agent_service_error_response(id, error),
+    }
+}
+
 pub(crate) fn handle_agent_approve_action(
     agent_service: &AgentService,
     notification_tx: agent::CoreServerNotificationSender,

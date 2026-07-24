@@ -488,11 +488,20 @@ export interface AgentSteerRunInput {
   attachments?: AgentInputAttachment[]
 }
 
-export type AgentSteerRunResultStatus = 'queued' | 'duplicate'
+export type AgentSteerRunResultStatus = 'queued' | 'applied' | 'rejected'
+
+export type AgentSteerRunRejectionCode =
+  | 'run_not_steerable'
+  | 'conversation_mismatch'
+  | 'identity_conflict'
+  | 'attachments_not_supported'
+  | 'model_does_not_support_attachments'
 
 export interface AgentSteerRunOutput {
   guidanceId: string
   status: AgentSteerRunResultStatus
+  rejectionCode?: AgentSteerRunRejectionCode
+  message?: string
 }
 
 export interface AgentContextWindowSnapshotInput {
@@ -1439,6 +1448,15 @@ export type AgentEvent =
     }
   | { type: 'message'; runId: string; content: string }
   | {
+      type: 'guidance_queued'
+      runId: string
+      guidanceId: string
+      clientMessageId: string
+      content: string
+      attachments: ConversationTraceAttachment[]
+      createdAt: number
+    }
+  | {
       type: 'guidance_applied'
       runId: string
       guidanceId: string
@@ -1447,6 +1465,16 @@ export type AgentEvent =
       attachments: ConversationTraceAttachment[]
       createdAt: number
       sequence: number
+    }
+  | {
+      type: 'guidance_rejected'
+      runId: string
+      guidanceId: string
+      clientMessageId: string
+      content: string
+      rejectionCode: AgentSteerRunRejectionCode
+      message: string
+      createdAt: number
     }
   | { type: 'tool_call'; runId: string; call: AgentToolCall }
   | { type: 'tool_result'; runId: string; result: AgentToolResult }

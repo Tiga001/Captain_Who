@@ -44,10 +44,14 @@ use mycopilot_core::storage::agent_action_audit_repository::{
     AgentActionAuditExecutionClaimOutcome, AgentActionAuditFinalizationOutcome,
 };
 use mycopilot_core::storage::models::{
-    AgentActionAuditRecord, AgentPendingActionRecord, AgentUsageRecordInsert,
+    AgentActionAuditRecord, AgentPendingActionRecord, AgentRunGuidanceRecord,
+    AgentUsageRecordInsert,
 };
 use mycopilot_core::storage::pending_action_repository::PendingActionStoreOutcome;
-use mycopilot_core::storage::service::{AgentPendingActionSettlementInspection, StorageService};
+use mycopilot_core::storage::service::{
+    AgentPendingActionSettlementInspection, AgentRunGuidanceStoreOutcome,
+    AgentRunGuidanceTransitionOutcome, StorageService,
+};
 use mycopilot_core::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
@@ -61,13 +65,15 @@ use mycopilot_core::{
     AgentContextCompactionGenerationRequest, AgentContextCompactionModelGenerator,
     AgentContextCompactionPrepareOutcome, AgentContextCompactionServices, AgentContextWindowPhase,
     AgentContextWindowSnapshot, AgentConversationContextState, AgentConversationTraceObserver,
-    AgentError, AgentEvent, AgentEventEmitter, AgentHostActionExecutor, AgentModelRequestObserver,
-    AgentPatchResult, AgentProposedAction, AgentResult, AgentRunCheckpoint, AgentRunContext,
-    AgentRunStatus, AgentRuntimeHostServices, AgentSearchConfig, AgentSkillMaterializationRequest,
-    AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus,
-    AgentSkillScriptRequest, AgentSkillScriptResult, AgentToolCall, AgentToolContinuation,
-    AgentToolResult, AgentUsage, AgentUsageClearInput, AgentUsageClearOutput,
-    AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
+    AgentError, AgentEvent, AgentEventEmitter, AgentGuidanceStatus, AgentHostActionExecutor,
+    AgentModelRequestObserver, AgentPatchResult, AgentProposedAction, AgentResult,
+    AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentRuntimeHostServices,
+    AgentSearchConfig, AgentSkillMaterializationRequest, AgentSkillMaterializationResult,
+    AgentSkillMaterializationResultStatus, AgentSkillScriptRequest, AgentSkillScriptResult,
+    AgentSteerEnqueueOutcome, AgentSteerInput, AgentSteerInputQueue, AgentSteerRunInput,
+    AgentSteerRunOutput, AgentSteerRunRejectionCode, AgentSteerRunResultStatus, AgentToolCall,
+    AgentToolContinuation, AgentToolResult, AgentUsage, AgentUsageClearInput,
+    AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput, ContextJournalCursor,
     ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceItem,
     ConversationTurnTraceTerminalStatus, ModelCapabilities,
 };
@@ -81,6 +87,7 @@ mod context_compaction;
 mod context_window;
 mod pending_action_store;
 mod run_lifecycle;
+mod steering;
 mod turn;
 mod usage;
 
@@ -244,11 +251,30 @@ struct ConversationContextStateUpdate {
     snapshot: Option<AgentContextWindowSnapshot>,
 }
 
+#[derive(Debug, Clone)]
+enum ActiveRunSteerState {
+    Accepting,
+    Closed {
+        code: AgentSteerRunRejectionCode,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ActiveRunControl {
+    conversation_id: String,
+    assistant_message_id: String,
+    model_capabilities: ModelCapabilities,
+    steer_state: ActiveRunSteerState,
+    steer_input: AgentSteerInputQueue,
+}
+
 #[derive(Clone)]
 pub struct AgentService {
     storage: Arc<StorageService>,
     skills: Arc<SkillsService>,
     cancellations: Arc<Mutex<HashMap<String, AgentCancellationToken>>>,
+    active_runs: Arc<Mutex<HashMap<String, ActiveRunControl>>>,
     pending_actions: Arc<Mutex<HashMap<String, PendingActionRecord>>>,
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
     trace_snapshots: Arc<Mutex<HashMap<String, ConversationTraceSnapshot>>>,
@@ -291,6 +317,24 @@ impl AgentService {
                     format!("failed to reconcile orphaned conversation traces: {error}")
                 })?;
         }
+        let interrupted_guidances = storage
+            .list_queued_agent_run_guidances()
+            .map_err(|error| format!("failed to list interrupted agent run guidance: {error}"))?;
+        let interrupted_run_ids = interrupted_guidances
+            .iter()
+            .map(|guidance| guidance.run_id.as_str())
+            .collect::<HashSet<_>>();
+        for run_id in interrupted_run_ids {
+            storage
+                .abandon_queued_agent_run_guidances(
+                    run_id,
+                    "Core process restarted before the guidance reached a terminal state.",
+                    now_ms(),
+                )
+                .map_err(|error| {
+                    format!("failed to reconcile interrupted agent run guidance: {error}")
+                })?;
+        }
         let pending_actions = load_persisted_pending_actions(&storage)?;
         let office_engine = resolve_default_office_engine();
         let artifact_runtime = resolve_default_artifact_runtime();
@@ -309,6 +353,7 @@ impl AgentService {
             storage,
             skills: Arc::new(SkillsService::new()),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
+            active_runs: Arc::new(Mutex::new(HashMap::new())),
             pending_actions: Arc::new(Mutex::new(pending_actions)),
             usage_contexts: Arc::new(Mutex::new(HashMap::new())),
             trace_snapshots: Arc::new(Mutex::new(HashMap::new())),

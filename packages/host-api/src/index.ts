@@ -17,6 +17,8 @@ import type {
   PendingAgentActionSnapshot,
   OfficeEngineStatus,
   AgentRejectActionRequest,
+  AgentSteerRunInput,
+  AgentSteerRunOutput,
   AgentUsageClearInput,
   AgentUsageClearOutput,
   AgentUsageSummaryInput,
@@ -246,6 +248,7 @@ export interface AgentHostApi {
   getContextCompactionAudit(
     input: AgentContextCompactionAuditInput
   ): Promise<AgentContextCompactionAuditOutput>
+  steerRun(input: AgentSteerRunInput): Promise<AgentSteerRunOutput>
   cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse>
   listPendingActions(): Promise<PendingAgentActionSnapshot[]>
   approveAction(input: AgentActionIdRequest): Promise<AgentActionExecutionOutput>

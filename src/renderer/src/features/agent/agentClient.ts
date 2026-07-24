@@ -9,6 +9,8 @@ import type {
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
   AgentActionExecutionOutput,
+  AgentSteerRunInput,
+  AgentSteerRunOutput,
   PendingAgentActionSnapshot,
   AgentUsageClearInput,
   AgentUsageClearOutput,
@@ -65,6 +67,10 @@ export async function cancelAgentAction(runId: string, actionId: string): Promis
 export async function cancelAgentRun(runId: string): Promise<boolean> {
   const response = await hostClient.agent.cancelRun({ runId })
   return response.cancelled
+}
+
+export async function steerAgentRun(input: AgentSteerRunInput): Promise<AgentSteerRunOutput> {
+  return hostClient.agent.steerRun(input)
 }
 
 export async function getAgentUsageSummary(

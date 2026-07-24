@@ -422,11 +422,13 @@ impl AgentService {
         } else {
             context_trace.clone()
         };
-        let changed = self.storage.append_in_progress_conversation_turn_trace(
-            &audit_trace,
-            created_at,
-            now_ms(),
-        )?;
+        let changed = self
+            .storage
+            .append_in_progress_conversation_turn_trace_and_apply_guidances(
+                &audit_trace,
+                created_at,
+                now_ms(),
+            )?;
         let update = self.update_running_conversation_context_state(
             agent_input,
             run_id,

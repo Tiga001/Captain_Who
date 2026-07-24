@@ -33,6 +33,12 @@ impl AgentService {
                 .to_string()
                 .into());
         }
+        let steer_input = self.register_active_run_control(
+            &run_id,
+            &prepared.output.conversation_id,
+            &prepared.output.assistant_message_id,
+            prepared.agent_input.model_capabilities,
+        );
         initialize_turn_diff_best_effort(
             &self.storage,
             &prepared.agent_input,
@@ -67,6 +73,18 @@ impl AgentService {
                     checkpoint,
                 } = &event
                 {
+                    if let Err(error) = emitter_service.close_active_run_steering(
+                        run_id,
+                        AgentSteerRunRejectionCode::RunNotSteerable,
+                        "The agent run is waiting for approval and no longer accepts guidance.",
+                        &emitter_notifications,
+                    ) {
+                        emitter_terminal_event_gate.discard();
+                        *emitter_pending_store_failure
+                            .lock()
+                            .unwrap_or_else(|lock_error| lock_error.into_inner()) = Some(error);
+                        return;
+                    }
                     let agent_input =
                         agent_input_with_run_checkpoint(&emitter_agent_input, checkpoint);
                     match emitter_service.store_pending_action(
@@ -140,6 +158,7 @@ impl AgentService {
             host_services = host_services.with_skill_activation_resolver(
                 model_skill_activation_resolver(service.storage.clone(), service.skills.clone()),
             );
+            host_services = host_services.with_steer_input(steer_input);
             if let Some(resources) = skill_resources {
                 host_services = host_services.with_skill_resources(resources);
             }
@@ -164,6 +183,26 @@ impl AgentService {
                     Err(pending_action_persistence_error(error))
                 }
                 None => result,
+            };
+            let close_message = match &result {
+                Ok(output) if output.status == AgentRunStatus::WaitingForApproval => {
+                    "The agent run is waiting for approval and no longer accepts guidance."
+                }
+                _ => "The agent run has finished and no longer accepts guidance.",
+            };
+            let result = match service.unregister_active_run_control(
+                &worker_run_id,
+                AgentSteerRunRejectionCode::RunNotSteerable,
+                close_message,
+                &notifications,
+            ) {
+                Ok(()) => result,
+                Err(error) => {
+                    terminal_event_gate.discard();
+                    Err(AgentError::new(format!(
+                        "无法关闭用户引导通道并持久化剩余引导：{error}"
+                    )))
+                }
             };
             let keep_trace_snapshot = matches!(
                 &result,

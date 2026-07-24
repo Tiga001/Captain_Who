@@ -64,6 +64,7 @@ const host: HostApi = {
       ipcRenderer.invoke('host:agent.getContextWindowSnapshot', input),
     getContextCompactionAudit: (input) =>
       ipcRenderer.invoke('host:agent.getContextCompactionAudit', input),
+    steerRun: (input) => ipcRenderer.invoke('host:agent.steerRun', input),
     cancelRun: (input) => ipcRenderer.invoke('host:agent.cancelRun', input),
     listPendingActions: () => ipcRenderer.invoke('host:agent.listPendingActions'),
     approveAction: (input) => ipcRenderer.invoke('host:agent.approveAction', input),

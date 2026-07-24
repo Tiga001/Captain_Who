@@ -358,7 +358,18 @@ pub struct AgentSteerRunInput {
 #[serde(rename_all = "snake_case")]
 pub enum AgentSteerRunResultStatus {
     Queued,
-    Duplicate,
+    Applied,
+    Rejected,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSteerRunRejectionCode {
+    RunNotSteerable,
+    ConversationMismatch,
+    IdentityConflict,
+    AttachmentsNotSupported,
+    ModelDoesNotSupportAttachments,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -366,6 +377,10 @@ pub enum AgentSteerRunResultStatus {
 pub struct AgentSteerRunOutput {
     pub guidance_id: String,
     pub status: AgentSteerRunResultStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejection_code: Option<AgentSteerRunRejectionCode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Validated, run-scoped input consumed by the agent loop at a safe sampling boundary.
@@ -1920,6 +1935,14 @@ pub enum AgentEvent {
         run_id: String,
         content: String,
     },
+    GuidanceQueued {
+        run_id: String,
+        guidance_id: String,
+        client_message_id: String,
+        content: String,
+        attachments: Vec<ConversationTraceAttachment>,
+        created_at: i64,
+    },
     GuidanceApplied {
         run_id: String,
         guidance_id: String,
@@ -1928,6 +1951,15 @@ pub enum AgentEvent {
         attachments: Vec<ConversationTraceAttachment>,
         created_at: i64,
         sequence: u64,
+    },
+    GuidanceRejected {
+        run_id: String,
+        guidance_id: String,
+        client_message_id: String,
+        content: String,
+        rejection_code: AgentSteerRunRejectionCode,
+        message: String,
+        created_at: i64,
     },
     ToolCall {
         run_id: String,

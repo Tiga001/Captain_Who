@@ -353,6 +353,7 @@ export function registerHostIpc(
   ipcMain.handle('host:agent.getContextCompactionAudit', (_event, input) =>
     coreServer.getContextCompactionAudit(input)
   )
+  ipcMain.handle('host:agent.steerRun', (_event, input) => coreServer.steerRun(input))
   ipcMain.handle('host:agent.cancelRun', (_event, input) => coreServer.cancelRun(input))
   ipcMain.handle('host:agent.listPendingActions', () => coreServer.listPendingActions())
   ipcMain.handle('host:agent.approveAction', (_event, input) => coreServer.approveAction(input))

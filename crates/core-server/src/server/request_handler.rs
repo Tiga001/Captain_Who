@@ -44,6 +44,9 @@ pub(crate) fn handle_request(
         AGENT_CANCEL_RUN_METHOD => {
             handle_agent_cancel_run(agent_service, request.id, request.params)
         }
+        AGENT_STEER_RUN_METHOD => {
+            handle_agent_steer_run(agent_service, notification_tx, request.id, request.params)
+        }
         AGENT_LIST_PENDING_ACTIONS_METHOD => {
             response_success(request.id, agent_service.list_pending_actions())
         }

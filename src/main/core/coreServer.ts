@@ -17,6 +17,8 @@ import type {
   AgentFileWriteDiffInput,
   AgentFileWriteDiffPage,
   AgentRejectActionRequest,
+  AgentSteerRunInput,
+  AgentSteerRunOutput,
   AgentUsageClearInput,
   AgentUsageClearOutput,
   AgentUsageSummaryInput,
@@ -139,6 +141,7 @@ import { CoreJsonRpcClient } from './jsonRpcClient'
 const CORE_PING_METHOD = 'core.ping'
 const CORE_SHUTDOWN_METHOD = 'core.shutdown'
 const AGENT_CANCEL_RUN_METHOD = 'agent.cancelRun'
+const AGENT_STEER_RUN_METHOD = 'agent.steerRun'
 const AGENT_START_CONVERSATION_TURN_METHOD = 'agent.startConversationTurn'
 const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD = 'agent.getContextWindowSnapshot'
 const AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD = 'agent.getContextCompactionAudit'
@@ -454,6 +457,10 @@ export class CoreServer {
       AGENT_CANCEL_RUN_METHOD,
       input
     )
+  }
+
+  steerRun(input: AgentSteerRunInput): Promise<AgentSteerRunOutput> {
+    return this.rpc.request<AgentSteerRunOutput, AgentSteerRunInput>(AGENT_STEER_RUN_METHOD, input)
   }
 
   listPendingActions(): Promise<PendingAgentActionSnapshot[]> {

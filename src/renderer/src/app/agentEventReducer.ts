@@ -1179,7 +1179,11 @@ export function applyAgentEventToChatMessage(
 
   // Guidance rendering and optimistic message reconciliation belong to the RPC/UI round.
   // Until then, the runtime event is informational and must not be treated as terminal output.
-  if (agentEvent.type === 'guidance_applied') {
+  if (
+    agentEvent.type === 'guidance_queued' ||
+    agentEvent.type === 'guidance_applied' ||
+    agentEvent.type === 'guidance_rejected'
+  ) {
     return message
   }
 

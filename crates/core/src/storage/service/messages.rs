@@ -61,6 +61,60 @@ impl StorageService {
         .map_err(storage_error)
     }
 
+    /// Atomically appends an in-progress trace and advances every included guidance journal row
+    /// to `applied`. A crash can therefore never expose guidance in model history while leaving
+    /// its durable admission record in `queued`.
+    pub fn append_in_progress_conversation_turn_trace_and_apply_guidances(
+        &self,
+        trace: &ConversationTurnTrace,
+        created_at: i64,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        let mut connection = self.state.connection()?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let changed = conversation_trace_repository::commit_trace_in_connection(
+            &transaction,
+            trace,
+            created_at,
+            updated_at,
+        )
+        .map_err(storage_error)?;
+        for item in &trace.items {
+            let ConversationTurnTraceItem::UserGuidance {
+                guidance_id,
+                sequence,
+                ..
+            } = item
+            else {
+                continue;
+            };
+            match guidance_repository::mark_guidance_applied(
+                &transaction,
+                guidance_id,
+                *sequence,
+                updated_at,
+            )
+            .map_err(storage_error)?
+            {
+                AgentRunGuidanceTransitionOutcome::Updated
+                | AgentRunGuidanceTransitionOutcome::Idempotent => {}
+                AgentRunGuidanceTransitionOutcome::NotFound => {
+                    return Err(format!(
+                        "conversation trace references missing guidance journal `{guidance_id}`"
+                    ));
+                }
+                AgentRunGuidanceTransitionOutcome::Conflict { current_status } => {
+                    return Err(format!(
+                        "conversation trace guidance `{guidance_id}` conflicts with journal status `{}`",
+                        current_status.as_str()
+                    ));
+                }
+            }
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(changed)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn finalize_chat_message_with_conversation_trace(
         &self,

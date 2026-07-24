@@ -43,6 +43,18 @@ impl AgentSteerInputQueue {
     }
 
     pub fn enqueue(&self, input: crate::AgentSteerInput) -> AgentResult<AgentSteerEnqueueOutcome> {
+        self.enqueue_with(input, || {})
+    }
+
+    /// Enqueues one input and invokes `on_queued` before releasing the queue lock.
+    ///
+    /// Hosts use this to publish the durable `guidance_queued` acknowledgement before the
+    /// runtime can drain the input and publish `guidance_applied`.
+    pub fn enqueue_with(
+        &self,
+        input: crate::AgentSteerInput,
+        on_queued: impl FnOnce(),
+    ) -> AgentResult<AgentSteerEnqueueOutcome> {
         validate_steer_input(&input)?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if !state.accepting {
@@ -88,12 +100,20 @@ impl AgentSteerInputQueue {
             .seen_by_client_message_id
             .insert(input.client_message_id.clone(), input.clone());
         state.pending.push_back(input);
+        on_queued();
         Ok(AgentSteerEnqueueOutcome::Queued)
     }
 
     pub fn close(&self) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.accepting = false;
+    }
+
+    /// Atomically stops admission and returns every input that was accepted but not yet drained.
+    pub fn close_and_take_pending(&self) -> Vec<crate::AgentSteerInput> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.accepting = false;
+        state.pending.drain(..).collect()
     }
 
     pub fn is_accepting(&self) -> bool {
