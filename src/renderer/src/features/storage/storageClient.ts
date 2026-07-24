@@ -24,7 +24,8 @@ import type {
   ChatConversation,
   ChatMessage,
   ChatMessageAttachment,
-  ChatMessageUiState
+  ChatMessageUiState,
+  ChatQueuedMessage
 } from '../chat/chatTypes'
 import { normalizeSkillSelections, parseStoredSkillSelections } from '../skills/skillSelection'
 import { hostClient } from '../../host/hostClient'
@@ -464,6 +465,7 @@ function mapDraftFromStorage(draft: StorageComposerDraftRecord): ChatComposerDra
     projectId: draft.projectId ?? null,
     attachments: parseDraftAttachments(draft.attachmentsJson),
     skills: parseStoredSkillSelections(draft.skillsJson),
+    queuedMessages: parseQueuedMessages(draft.queuedMessagesJson),
     updatedAt: draft.updatedAt
   }
 }
@@ -477,6 +479,7 @@ function mapDraftToStorage(scopeId: string, draft: ChatComposerDraft): StorageCo
     projectId: draft.projectId,
     attachmentsJson: JSON.stringify(draft.attachments),
     skillsJson: JSON.stringify(normalizeSkillSelections(draft.skills)),
+    queuedMessagesJson: JSON.stringify(draft.queuedMessages),
     updatedAt: draft.updatedAt
   }
 }
@@ -561,6 +564,38 @@ function parseDraftAttachments(value: string): AgentInputAttachment[] {
   try {
     const parsed = JSON.parse(value) as AgentInputAttachment[]
     return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function parseQueuedMessages(value: string | undefined): ChatQueuedMessage[] {
+  if (!value) return []
+  try {
+    const parsed = JSON.parse(value) as ChatQueuedMessage[]
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter(
+        (message) =>
+          message &&
+          typeof message.id === 'string' &&
+          typeof message.clientMessageId === 'string' &&
+          typeof message.content === 'string' &&
+          Array.isArray(message.attachments) &&
+          typeof message.modelId === 'string' &&
+          (message.permissionMode === 'default' ||
+            message.permissionMode === 'custom' ||
+            message.permissionMode === 'full') &&
+          (message.projectId === null || typeof message.projectId === 'string') &&
+          Array.isArray(message.skills) &&
+          typeof message.createdAt === 'number'
+      )
+      .map((message) => ({
+        ...message,
+        skills: normalizeSkillSelections(message.skills),
+        status: message.status === 'error' ? 'error' : 'pending',
+        error: message.status === 'error' ? message.error : undefined
+      }))
   } catch {
     return []
   }

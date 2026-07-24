@@ -876,6 +876,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             project_id TEXT,
             attachments_json TEXT NOT NULL,
             skills_json TEXT NOT NULL DEFAULT '[]',
+            queued_messages_json TEXT NOT NULL DEFAULT '[]',
             updated_at INTEGER NOT NULL
         );
 
@@ -1148,6 +1149,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         connection,
         "composer_drafts",
         "skills_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    add_column_if_missing(
+        connection,
+        "composer_drafts",
+        "queued_messages_json",
         "TEXT NOT NULL DEFAULT '[]'",
     )?;
     add_column_if_missing(
@@ -1666,9 +1673,10 @@ mod tests {
 
         run_migrations(&connection).unwrap();
 
-        let (permission_mode, permission_mode_version, skills_json) = connection
+        let (permission_mode, permission_mode_version, skills_json, queued_messages_json) =
+            connection
             .query_row(
-                "SELECT permission_mode, permission_mode_version, skills_json
+                "SELECT permission_mode, permission_mode_version, skills_json, queued_messages_json
                  FROM composer_drafts WHERE scope_id = 'conversation-1'",
                 [],
                 |row| {
@@ -1676,6 +1684,7 @@ mod tests {
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
@@ -1683,6 +1692,7 @@ mod tests {
         assert_eq!(permission_mode, "default");
         assert_eq!(permission_mode_version, 0);
         assert_eq!(skills_json, "[]");
+        assert_eq!(queued_messages_json, "[]");
     }
 
     #[test]

@@ -100,8 +100,14 @@ fn composer_drafts_only_preserve_full_for_current_permission_semantics() {
     current.permission_mode = "full".to_string();
     current.permission_mode_version =
         crate::storage::models::CURRENT_COMPOSER_PERMISSION_MODE_VERSION;
+    current.queued_messages_json =
+        r#"[{"id":"queued-1","clientMessageId":"client-1","content":"guide"}]"#.to_string();
     let current = service.save_composer_draft(current).unwrap();
     assert_eq!(current.permission_mode, "full");
+    assert_eq!(
+        current.queued_messages_json,
+        r#"[{"id":"queued-1","clientMessageId":"client-1","content":"guide"}]"#
+    );
 
     let stored = service.load_composer_drafts().unwrap();
     assert_eq!(
@@ -119,6 +125,14 @@ fn composer_drafts_only_preserve_full_for_current_permission_semantics() {
             .unwrap()
             .permission_mode,
         "full"
+    );
+    assert_eq!(
+        stored
+            .iter()
+            .find(|draft| draft.scope_id == "current")
+            .unwrap()
+            .queued_messages_json,
+        r#"[{"id":"queued-1","clientMessageId":"client-1","content":"guide"}]"#
     );
 }
 

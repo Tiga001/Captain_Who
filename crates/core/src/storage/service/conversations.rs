@@ -53,6 +53,7 @@ impl StorageService {
         let mut conversations =
             chat_repository::list_conversations(&connection).map_err(storage_error)?;
         self.attach_message_attachments(&connection, &mut conversations)?;
+        attach_message_guidance_timelines(&connection, &mut conversations)?;
         Ok(conversations)
     }
 
@@ -70,6 +71,7 @@ impl StorageService {
             .map_err(storage_error)?;
         if let Some(conversation) = &mut conversation {
             self.attach_message_attachments(&connection, std::slice::from_mut(conversation))?;
+            attach_message_guidance_timelines(&connection, std::slice::from_mut(conversation))?;
         }
         Ok(conversation)
     }
@@ -93,6 +95,10 @@ impl StorageService {
                     .map_err(storage_error)?
                     .ok_or_else(|| "分叉记录指向的新任务不存在。".to_string())?;
             self.attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
+            attach_message_guidance_timelines(
+                &connection,
+                std::slice::from_mut(&mut conversation),
+            )?;
             return Ok(conversation);
         }
 
@@ -159,6 +165,7 @@ impl StorageService {
             .map_err(storage_error)?
             .ok_or_else(|| "新任务创建后无法重新读取。".to_string())?;
         self.attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
+        attach_message_guidance_timelines(&connection, std::slice::from_mut(&mut conversation))?;
         Ok(conversation)
     }
 
@@ -297,4 +304,182 @@ impl StorageService {
         }
         Ok(())
     }
+}
+
+fn attach_message_guidance_timelines(
+    connection: &rusqlite::Connection,
+    conversations: &mut [ChatConversationRecord],
+) -> Result<(), String> {
+    for conversation in conversations {
+        let traces = conversation_trace_repository::list_traces_for_conversation(
+            connection,
+            &conversation.id,
+        )
+        .map_err(storage_error)?;
+        let traces = traces
+            .into_iter()
+            .map(|trace| (trace.assistant_message_id.clone(), trace))
+            .collect::<HashMap<_, _>>();
+
+        for message in &mut conversation.messages {
+            if message.role != "assistant" {
+                continue;
+            }
+            let guidances =
+                guidance_repository::list_guidances_for_assistant_message(connection, &message.id)
+                    .map_err(storage_error)?;
+            let trace = traces.get(&message.id);
+            if trace.is_none() && guidances.is_empty() {
+                continue;
+            }
+            message.agent_run_json = Some(project_guidance_timeline(
+                connection,
+                message.agent_run_json.as_deref(),
+                trace,
+                &guidances,
+                message.created_at,
+            )?);
+        }
+    }
+    Ok(())
+}
+
+fn project_guidance_timeline(
+    connection: &rusqlite::Connection,
+    existing_run_json: Option<&str>,
+    trace: Option<&ConversationTurnTrace>,
+    guidances: &[AgentRunGuidanceRecord],
+    fallback_started_at: i64,
+) -> Result<String, String> {
+    let mut run = existing_run_json
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let existing_timeline = run
+        .remove("timeline")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let presentation_only_items = existing_timeline
+        .into_iter()
+        .filter(|item| {
+            !matches!(
+                item.get("type").and_then(serde_json::Value::as_str),
+                Some("message" | "tool_call" | "user_guidance")
+            )
+        })
+        .collect::<Vec<_>>();
+    // Renderer-only items are not derivable from the durable trace. Keep them in their existing
+    // leading order and rebuild only the canonical trace/guidance suffix.
+    let mut timeline = presentation_only_items;
+
+    if let Some(trace) = trace {
+        run.insert("runId".to_string(), trace.run_id.clone().into());
+        for item in &trace.items {
+            match item {
+                ConversationTurnTraceItem::AssistantNarration {
+                    sequence, content, ..
+                } => timeline.push(serde_json::json!({
+                    "id": format!("trace-message-{sequence}"),
+                    "type": "message",
+                    "content": content,
+                })),
+                ConversationTurnTraceItem::UserGuidance {
+                    sequence,
+                    guidance_id,
+                    client_message_id,
+                    content,
+                    attachments,
+                    created_at,
+                    ..
+                } => timeline.push(serde_json::json!({
+                    "id": format!("user-guidance-{client_message_id}"),
+                    "type": "user_guidance",
+                    "guidanceId": guidance_id,
+                    "clientMessageId": client_message_id,
+                    "content": content,
+                    "attachments": attachments,
+                    "status": "applied",
+                    "createdAt": created_at,
+                    "sequence": sequence,
+                })),
+                ConversationTurnTraceItem::ToolCall {
+                    call_id, sequence, ..
+                } => timeline.push(serde_json::json!({
+                    "id": format!("tool-call-{call_id}"),
+                    "type": "tool_call",
+                    "callId": call_id,
+                    "traceSequence": sequence,
+                })),
+                ConversationTurnTraceItem::ToolResult { .. } => {}
+            }
+        }
+    }
+
+    for guidance in guidances {
+        if guidance.status != crate::AgentGuidanceStatus::Queued {
+            continue;
+        }
+        let mut attachments = Vec::with_capacity(guidance.attachment_ids.len());
+        for attachment_id in &guidance.attachment_ids {
+            let attachment = attachment_repository::get_attachment(connection, attachment_id)
+                .map_err(storage_error)?
+                .ok_or_else(|| {
+                    format!(
+                        "queued guidance `{}` references missing attachment `{attachment_id}`",
+                        guidance.guidance_id
+                    )
+                })?;
+            attachments.push(serde_json::json!({
+                "id": attachment.id,
+                "kind": attachment.kind,
+                "name": attachment.original_name,
+                "mimeType": attachment.mime_type,
+                "sizeBytes": attachment.size_bytes,
+            }));
+        }
+        run.insert("runId".to_string(), guidance.run_id.clone().into());
+        timeline.push(serde_json::json!({
+            "id": format!("user-guidance-{}", guidance.client_message_id),
+            "type": "user_guidance",
+            "guidanceId": guidance.guidance_id,
+            "clientMessageId": guidance.client_message_id,
+            "content": guidance.content,
+            "attachments": attachments,
+            "status": "queued",
+            "createdAt": guidance.created_at,
+        }));
+    }
+
+    run.insert("timeline".to_string(), timeline.into());
+    run.entry("startedAt".to_string())
+        .or_insert_with(|| fallback_started_at.into());
+    for field in [
+        "toolDefinitions",
+        "toolCalls",
+        "toolResults",
+        "approvals",
+        "diffs",
+        "fileDrafts",
+        "webSearchActivities",
+        "readActivities",
+    ] {
+        run.entry(field.to_string())
+            .or_insert_with(|| serde_json::json!([]));
+    }
+    run.entry("messageStreamCheckpoints".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !run.contains_key("status") {
+        let status = trace
+            .map(|trace| match trace.terminal_status {
+                crate::ConversationTurnTraceTerminalStatus::InProgress => "running",
+                crate::ConversationTurnTraceTerminalStatus::Completed => "completed",
+                crate::ConversationTurnTraceTerminalStatus::Failed => "failed",
+                crate::ConversationTurnTraceTerminalStatus::Cancelled => "cancelled",
+            })
+            .unwrap_or("running");
+        run.insert("status".to_string(), status.into());
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(run))
+        .map_err(|error| format!("serialize guidance timeline: {error}"))
 }

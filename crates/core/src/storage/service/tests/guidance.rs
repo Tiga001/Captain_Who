@@ -100,6 +100,26 @@ fn in_progress_trace_and_guidance_application_commit_atomically() {
         .get_conversation_turn_trace("assistant-guidance-atomic")
         .unwrap()
         .is_some());
+    let conversation = service
+        .load_conversation("conversation-guidance-atomic")
+        .unwrap()
+        .unwrap();
+    let run: serde_json::Value =
+        serde_json::from_str(conversation.messages[0].agent_run_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        run["timeline"],
+        serde_json::json!([{
+            "id": "user-guidance-client-guidance-atomic",
+            "type": "user_guidance",
+            "guidanceId": "guidance-atomic",
+            "clientMessageId": "client-guidance-atomic",
+            "content": "Use the updated constraint.",
+            "attachments": [],
+            "status": "applied",
+            "createdAt": 2,
+            "sequence": 0
+        }])
+    );
 }
 
 #[test]
@@ -194,13 +214,30 @@ fn guidance_attachment_ownership_is_atomic_and_hidden_until_application() {
         admitted.conversation_attachments[0].read_path,
         "@attachments/attachment-guidance-owned/notes.txt"
     );
-    assert!(service
+    let queued_conversation = service
         .load_conversation("conversation-guidance-attachment")
         .unwrap()
-        .unwrap()
-        .messages[0]
-        .attachments
-        .is_empty());
+        .unwrap();
+    assert!(queued_conversation.messages[0].attachments.is_empty());
+    let queued_run: serde_json::Value = serde_json::from_str(
+        queued_conversation.messages[0]
+            .agent_run_json
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(queued_run["timeline"][0]["status"], "queued");
+    assert_eq!(
+        queued_run["timeline"][0]["attachments"][0],
+        serde_json::json!({
+            "id": "attachment-guidance-owned",
+            "kind": "file",
+            "name": "notes.txt",
+            "mimeType": "text/plain",
+            "sizeBytes": 5
+        })
+    );
+    assert!(!queued_run.to_string().contains("hello"));
 
     assert_eq!(
         service

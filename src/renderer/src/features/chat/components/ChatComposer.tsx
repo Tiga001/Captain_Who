@@ -27,7 +27,8 @@ import {
   composerAttachmentFromAgentAttachment,
   createComposerAttachmentsFromFiles,
   createAttachmentSummary,
-  selectComposerAttachments
+  selectComposerAttachments,
+  stripAttachmentSummary
 } from '../chatAttachments'
 import type { ComposerAttachment, ComposerAttachmentKind } from '../chatAttachments'
 import {
@@ -36,7 +37,12 @@ import {
   getAttachmentIcon,
   getAttachmentTypeLabel
 } from '../attachmentDisplay'
-import type { ChatComposerDraft, ChatPermissionMode, ChatSubmitOptions } from '../chatTypes'
+import type {
+  ChatComposerDraft,
+  ChatPermissionMode,
+  ChatQueuedMessage,
+  ChatSubmitOptions
+} from '../chatTypes'
 import {
   filterSkillDescriptors,
   matchSkillSelection,
@@ -48,8 +54,10 @@ import {
 import { useSkillCatalog } from '../../skills/useSkillCatalog'
 import { ContextWindowIndicator } from './ContextWindowIndicator'
 import { ComposerSelectedSkills, ComposerSkillPicker } from './ComposerSkillPicker'
+import { GuidanceQueue } from './GuidanceQueue'
 import { useImagePreview } from './ImagePreview'
 import './ChatComposer.css'
+import './GuidanceQueue.css'
 
 interface PermissionOption {
   id: ChatPermissionMode
@@ -70,8 +78,11 @@ interface ChatComposerProps {
   contextWindowSnapshot?: AgentContextWindowSnapshot
   draft: ChatComposerDraft
   defaultProjectId?: string | null
+  canGuideQueuedMessages?: boolean
   isGenerating?: boolean
   onDraftChange: (draft: ChatComposerDraft) => void
+  onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
+  onOpenQueuedMessageInSideChat?: (message: ChatQueuedMessage) => void
   onSubmitMessage?: (message: string, options: ChatSubmitOptions) => void
   onStopGenerating?: () => void
   permissionModeAvailability?: {
@@ -88,8 +99,11 @@ export function ChatComposer({
   contextWindowSnapshot,
   draft,
   defaultProjectId = null,
+  canGuideQueuedMessages = false,
   isGenerating = false,
   onDraftChange,
+  onGuideQueuedMessage,
+  onOpenQueuedMessageInSideChat,
   onSubmitMessage,
   onStopGenerating,
   permissionModeAvailability = { custom: true, full: true },
@@ -193,7 +207,13 @@ export function ChatComposer({
     !hasUnsupportedImageAttachment &&
     !hasInvalidSkillSelection &&
     Boolean(selectedModel)
-  const submitButtonState = isGenerating ? 'stop' : canSend ? 'ready' : 'disabled'
+  const submitButtonState = isGenerating
+    ? canSend
+      ? 'ready'
+      : 'stop'
+    : canSend
+      ? 'ready'
+      : 'disabled'
   const isConfirmingImeInput = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     const nativeEvent = event.nativeEvent
     const keyCode = 'keyCode' in nativeEvent ? nativeEvent.keyCode : 0
@@ -319,7 +339,7 @@ export function ChatComposer({
   }, [message])
 
   const submitMessage = async () => {
-    if (isGenerating || !canSend) return
+    if (!canSend) return
 
     const trimmedMessage = message.trim()
     const attachmentSummary = createAttachmentSummary(attachments)
@@ -334,13 +354,41 @@ export function ChatComposer({
       return
     }
 
-    onSubmitMessage?.(messageContent, {
+    const submitOptions: ChatSubmitOptions = {
       attachments: inputAttachments,
       modelId: selectedModel?.id ?? selectedModelId,
       permissionMode,
       projectId: selectedProject?.id ?? null,
       skills: [...draftRef.current.skills]
-    })
+    }
+
+    if (isGenerating) {
+      const createdAt = Date.now()
+      updateDraft({
+        message: '',
+        attachments: [],
+        queuedMessages: [
+          ...draftRef.current.queuedMessages,
+          {
+            id: `queued-message-${createdAt}-${Math.random().toString(36).slice(2, 8)}`,
+            clientMessageId: `guidance-${createdAt}-${Math.random().toString(36).slice(2, 10)}`,
+            content: messageContent,
+            attachments: inputAttachments ?? [],
+            modelId: submitOptions.modelId,
+            permissionMode: submitOptions.permissionMode,
+            projectId: submitOptions.projectId,
+            skills: submitOptions.skills,
+            status: 'pending',
+            createdAt
+          }
+        ]
+      })
+      setIsAttachmentMenuOpen(false)
+      setIsSkillMenuOpen(false)
+      return
+    }
+
+    onSubmitMessage?.(messageContent, submitOptions)
     updateDraft({
       message: '',
       attachments: [],
@@ -362,6 +410,37 @@ export function ChatComposer({
         (attachment) => attachment.id !== attachmentId
       )
     })
+  }
+
+  const deleteQueuedMessage = (messageId: string) => {
+    updateDraft({
+      queuedMessages: draftRef.current.queuedMessages.filter((message) => message.id !== messageId)
+    })
+  }
+
+  const editQueuedMessage = (messageId: string) => {
+    const queuedMessage = draftRef.current.queuedMessages.find(
+      (message) => message.id === messageId
+    )
+    if (!queuedMessage || queuedMessage.status === 'submitting') return
+
+    updateDraft({
+      message: stripAttachmentSummary(queuedMessage.content, queuedMessage.attachments),
+      attachments: queuedMessage.attachments,
+      queuedMessages: draftRef.current.queuedMessages.filter((message) => message.id !== messageId)
+    })
+    window.requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+
+  const moveQueuedMessage = (messageId: string, targetMessageId: string) => {
+    const queuedMessages = [...draftRef.current.queuedMessages]
+    const sourceIndex = queuedMessages.findIndex((message) => message.id === messageId)
+    const targetIndex = queuedMessages.findIndex((message) => message.id === targetMessageId)
+    if (sourceIndex === -1 || targetIndex === -1 || sourceIndex === targetIndex) return
+
+    const [message] = queuedMessages.splice(sourceIndex, 1)
+    queuedMessages.splice(targetIndex, 0, message)
+    updateDraft({ queuedMessages })
   }
 
   const removeSkill = (skillId: string) => {
@@ -443,467 +522,490 @@ export function ChatComposer({
   }
 
   return (
-    <form
-      ref={composerRef}
-      className="chat-composer"
-      data-drag-active={isFileDragActive || undefined}
-      data-submit-state={submitButtonState}
-      aria-label={t('chat.composer')}
-      onSubmit={(event) => {
-        event.preventDefault()
-        submitMessage()
-      }}
-      onDragOver={(event) => {
-        if (event.dataTransfer.types.includes('Files')) {
-          event.preventDefault()
-          setIsFileDragActive(true)
-        }
-      }}
-      onDragLeave={(event) => {
-        const nextTarget = event.relatedTarget
-        if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return
-        setIsFileDragActive(false)
-      }}
-      onDrop={(event) => {
-        if (event.dataTransfer.files.length === 0) return
-        event.preventDefault()
-        setIsFileDragActive(false)
-        void addDroppedOrPastedFiles(event.dataTransfer.files)
-      }}
-      onPaste={(event) => {
-        if (event.clipboardData.files.length === 0) return
-        event.preventDefault()
-        void addDroppedOrPastedFiles(event.clipboardData.files)
-      }}
-    >
-      {attachments.length > 0 && (
-        <div className="chat-composer__attachments" aria-label={t('chat.attachments')}>
-          {attachments.map((attachment) => {
-            const extension = getAttachmentExtension(attachment.name)
-            const AttachmentIcon = getAttachmentIcon(attachment.kind, extension)
-            const badgeLabel = getAttachmentBadgeLabel(extension)
-            const typeLabel = getAttachmentTypeLabel(attachment)
-            const isImagePreview = attachment.kind === 'image' && Boolean(attachment.previewUrl)
-
-            return (
-              <div className="composer-attachment" data-kind={attachment.kind} key={attachment.id}>
-                {isImagePreview ? (
-                  <button
-                    className="composer-attachment__image-button"
-                    onClick={() =>
-                      openImagePreview({
-                        alt: attachment.name,
-                        fileName: attachment.name,
-                        src: attachment.previewUrl ?? ''
-                      })
-                    }
-                    title={attachment.name}
-                    type="button"
-                  >
-                    <img
-                      className="composer-attachment__thumbnail"
-                      src={attachment.previewUrl}
-                      alt={attachment.name}
-                    />
-                  </button>
-                ) : (
-                  <>
-                    <div className="composer-attachment__icon" aria-hidden="true">
-                      {badgeLabel ? (
-                        <span className="composer-attachment__language-badge">{badgeLabel}</span>
-                      ) : (
-                        <AttachmentIcon />
-                      )}
-                    </div>
-                    <div className="composer-attachment__details">
-                      <span className="composer-attachment__name">{attachment.name}</span>
-                      <span className="composer-attachment__type">{typeLabel}</span>
-                    </div>
-                  </>
-                )}
-                <button
-                  type="button"
-                  className="composer-attachment__remove"
-                  aria-label={`${t('chat.removeAttachment')} ${attachment.name}`}
-                  onClick={() => removeAttachment(attachment.id)}
-                >
-                  <X aria-hidden="true" />
-                </button>
-              </div>
-            )
-          })}
-        </div>
-      )}
-
-      <ComposerSelectedSkills
-        catalog={skillCatalog}
-        onRemove={removeSkill}
-        selections={draft.skills}
+    <div className="chat-composer-shell">
+      <GuidanceQueue
+        guideEnabled={canGuideQueuedMessages}
+        messages={draft.queuedMessages}
+        onDelete={deleteQueuedMessage}
+        onEdit={editQueuedMessage}
+        onGuide={(queuedMessage) => onGuideQueuedMessage?.(queuedMessage)}
+        onMove={moveQueuedMessage}
+        onOpenSideChat={(queuedMessage) => onOpenQueuedMessageInSideChat?.(queuedMessage)}
       />
-
-      <textarea
-        ref={textareaRef}
-        value={message}
-        placeholder={t('chat.inputPlaceholder')}
-        aria-label={t('chat.inputAria')}
-        rows={1}
-        onChange={(event) => updateDraft({ message: event.target.value })}
-        onCompositionStart={() => {
-          isComposingRef.current = true
-        }}
-        onCompositionEnd={() => {
-          isComposingRef.current = false
-          lastCompositionEndAtRef.current = Date.now()
-        }}
-        onKeyDown={(event) => {
-          if (event.key !== 'Enter' || event.shiftKey || isConfirmingImeInput(event)) return
-
+      <form
+        ref={composerRef}
+        className="chat-composer"
+        data-drag-active={isFileDragActive || undefined}
+        data-submit-state={submitButtonState}
+        aria-label={t('chat.composer')}
+        onSubmit={(event) => {
           event.preventDefault()
-          if (!isGenerating) {
-            submitMessage()
+          void submitMessage()
+        }}
+        onDragOver={(event) => {
+          if (event.dataTransfer.types.includes('Files')) {
+            event.preventDefault()
+            setIsFileDragActive(true)
           }
         }}
-      />
+        onDragLeave={(event) => {
+          const nextTarget = event.relatedTarget
+          if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return
+          setIsFileDragActive(false)
+        }}
+        onDrop={(event) => {
+          if (event.dataTransfer.files.length === 0) return
+          event.preventDefault()
+          setIsFileDragActive(false)
+          void addDroppedOrPastedFiles(event.dataTransfer.files)
+        }}
+        onPaste={(event) => {
+          if (event.clipboardData.files.length === 0) return
+          event.preventDefault()
+          void addDroppedOrPastedFiles(event.clipboardData.files)
+        }}
+      >
+        {attachments.length > 0 && (
+          <div className="chat-composer__attachments" aria-label={t('chat.attachments')}>
+            {attachments.map((attachment) => {
+              const extension = getAttachmentExtension(attachment.name)
+              const AttachmentIcon = getAttachmentIcon(attachment.kind, extension)
+              const badgeLabel = getAttachmentBadgeLabel(extension)
+              const typeLabel = getAttachmentTypeLabel(attachment)
+              const isImagePreview = attachment.kind === 'image' && Boolean(attachment.previewUrl)
 
-      {hasUnsupportedImageAttachment && (
-        <p className="chat-composer__warning">{t('chat.unsupportedImageWarning')}</p>
-      )}
-      {attachmentError && <p className="chat-composer__warning">{attachmentError}</p>}
-      {hasStaleSkillSelection && (
-        <p className="chat-composer__warning" role="alert">
-          {t('chat.skillStaleDescription')}
-        </p>
-      )}
-      {hasUnavailableSkillSelection && (
-        <p className="chat-composer__warning" role="alert">
-          {t('chat.skillUnavailableDescription')}
-        </p>
-      )}
-
-      <div className="chat-composer__toolbar">
-        <div className="composer-add-picker" ref={attachmentPickerRef}>
-          <button
-            ref={attachmentTriggerRef}
-            type="button"
-            className="composer-icon-button"
-            aria-haspopup={isSkillMenuOpen ? 'dialog' : 'menu'}
-            aria-expanded={isAttachmentMenuOpen || isSkillMenuOpen}
-            aria-label={t('chat.addContext')}
-            onClick={() => {
-              setAttachmentError(null)
-              setIsAttachmentMenuOpen((open) => !open)
-              setIsSkillMenuOpen(false)
-              setIsPermissionMenuOpen(false)
-              setIsModelMenuOpen(false)
-              setIsProjectMenuOpen(false)
-            }}
-          >
-            <Plus aria-hidden="true" />
-          </button>
-
-          {isAttachmentMenuOpen && (
-            <div className="composer-add-menu" role="menu" aria-label={t('chat.addMenuTitle')}>
-              <p>{t('chat.addMenuTitle')}</p>
-              <button type="button" role="menuitem" onClick={() => void addAttachments('file')}>
-                <Paperclip aria-hidden="true" />
-                <span>{t('chat.addFile')}</span>
-              </button>
-              <button type="button" role="menuitem" onClick={() => void addAttachments('image')}>
-                <ImageIcon aria-hidden="true" />
-                <span>{t('chat.addImage')}</span>
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setIsAttachmentMenuOpen(false)
-                  setIsSkillMenuOpen(true)
-                  setSkillSearch('')
-                }}
-              >
-                <Sparkles aria-hidden="true" />
-                <span>{t('chat.skills')}</span>
-              </button>
-            </div>
-          )}
-
-          {isSkillMenuOpen && (
-            <ComposerSkillPicker
-              catalogState={skillCatalogState}
-              projectId={selectedProjectId}
-              search={skillSearch}
-              selections={draft.skills}
-              onClose={() => {
-                setIsSkillMenuOpen(false)
-                setSkillSearch('')
-                window.requestAnimationFrame(() => attachmentTriggerRef.current?.focus())
-              }}
-              onRefresh={refreshSkillCatalog}
-              onSearchChange={setSkillSearch}
-              onToggle={toggleSkill}
-              onUseLatest={useLatestSkill}
-            />
-          )}
-        </div>
-
-        <div className="composer-permission-picker" ref={permissionPickerRef}>
-          <button
-            type="button"
-            className="composer-permission-button"
-            data-permission={selectedPermission.id}
-            aria-haspopup="listbox"
-            aria-expanded={isPermissionMenuOpen}
-            aria-label={`${t('chat.permission')}：${t(selectedPermission.labelKey)}`}
-            onClick={() => {
-              setIsAttachmentMenuOpen(false)
-              setIsSkillMenuOpen(false)
-              setIsModelMenuOpen(false)
-              setIsPermissionMenuOpen((open) => !open)
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') {
-                setIsPermissionMenuOpen(false)
-              }
-            }}
-          >
-            <SelectedPermissionIcon aria-hidden="true" />
-            <span>{t(selectedPermission.labelKey)}</span>
-            <ChevronDown aria-hidden="true" />
-          </button>
-
-          {isPermissionMenuOpen && (
-            <div
-              className="composer-permission-menu"
-              role="listbox"
-              aria-label={t('chat.selectPermission')}
-            >
-              {permissionOptions.map((option) => {
-                const OptionIcon = option.icon
-                const isSelected = option.id === permissionMode
-
-                return (
+              return (
+                <div
+                  className="composer-attachment"
+                  data-kind={attachment.kind}
+                  key={attachment.id}
+                >
+                  {isImagePreview ? (
+                    <button
+                      className="composer-attachment__image-button"
+                      onClick={() =>
+                        openImagePreview({
+                          alt: attachment.name,
+                          fileName: attachment.name,
+                          src: attachment.previewUrl ?? ''
+                        })
+                      }
+                      title={attachment.name}
+                      type="button"
+                    >
+                      <img
+                        className="composer-attachment__thumbnail"
+                        src={attachment.previewUrl}
+                        alt={attachment.name}
+                      />
+                    </button>
+                  ) : (
+                    <>
+                      <div className="composer-attachment__icon" aria-hidden="true">
+                        {badgeLabel ? (
+                          <span className="composer-attachment__language-badge">{badgeLabel}</span>
+                        ) : (
+                          <AttachmentIcon />
+                        )}
+                      </div>
+                      <div className="composer-attachment__details">
+                        <span className="composer-attachment__name">{attachment.name}</span>
+                        <span className="composer-attachment__type">{typeLabel}</span>
+                      </div>
+                    </>
+                  )}
                   <button
                     type="button"
-                    role="option"
-                    aria-selected={isSelected}
-                    className="composer-permission-option"
-                    data-permission={option.id}
-                    data-selected={isSelected || undefined}
-                    key={option.id}
-                    onClick={() => selectPermissionMode(option.id)}
+                    className="composer-attachment__remove"
+                    aria-label={`${t('chat.removeAttachment')} ${attachment.name}`}
+                    onClick={() => removeAttachment(attachment.id)}
                   >
-                    <OptionIcon aria-hidden="true" />
-                    <span>{t(option.labelKey)}</span>
-                    {isSelected && (
-                      <Check className="composer-permission-option__check" aria-hidden="true" />
-                    )}
+                    <X aria-hidden="true" />
                   </button>
-                )
-              })}
-            </div>
-          )}
-        </div>
-
-        <span className="chat-composer__spacer" />
-
-        {contextWindowIndicatorEnabled && contextWindowSnapshot && (
-          <ContextWindowIndicator snapshot={contextWindowSnapshot} />
+                </div>
+              )
+            })}
+          </div>
         )}
 
-        <div className="composer-model-picker" ref={modelPickerRef}>
-          <button
-            type="button"
-            className="composer-model-button"
-            aria-haspopup="listbox"
-            aria-expanded={isModelMenuOpen}
-            aria-label={t('chat.selectModel')}
-            onClick={() => {
-              setIsAttachmentMenuOpen(false)
-              setIsSkillMenuOpen(false)
-              setIsPermissionMenuOpen(false)
-              setIsModelMenuOpen((open) => !open)
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') {
-                setIsModelMenuOpen(false)
-              }
-            }}
-          >
-            <span>{selectedModel?.displayName ?? t('chat.noEnabledModels')}</span>
-            <ChevronDown aria-hidden="true" />
-          </button>
+        <ComposerSelectedSkills
+          catalog={skillCatalog}
+          onRemove={removeSkill}
+          selections={draft.skills}
+        />
 
-          {isModelMenuOpen && (
-            <div className="composer-model-menu" role="listbox" aria-label={t('chat.selectModel')}>
-              {enabledModels.length === 0 ? (
-                <span className="composer-model-empty">{t('chat.noEnabledModels')}</span>
-              ) : (
-                enabledModels.map((model) => {
-                  const isSelected = model.id === selectedModel?.id
+        <textarea
+          ref={textareaRef}
+          value={message}
+          placeholder={t('chat.inputPlaceholder')}
+          aria-label={t('chat.inputAria')}
+          rows={1}
+          onChange={(event) => updateDraft({ message: event.target.value })}
+          onCompositionStart={() => {
+            isComposingRef.current = true
+          }}
+          onCompositionEnd={() => {
+            isComposingRef.current = false
+            lastCompositionEndAtRef.current = Date.now()
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' || event.shiftKey || isConfirmingImeInput(event)) return
+
+            event.preventDefault()
+            void submitMessage()
+          }}
+        />
+
+        {hasUnsupportedImageAttachment && (
+          <p className="chat-composer__warning">{t('chat.unsupportedImageWarning')}</p>
+        )}
+        {attachmentError && <p className="chat-composer__warning">{attachmentError}</p>}
+        {hasStaleSkillSelection && (
+          <p className="chat-composer__warning" role="alert">
+            {t('chat.skillStaleDescription')}
+          </p>
+        )}
+        {hasUnavailableSkillSelection && (
+          <p className="chat-composer__warning" role="alert">
+            {t('chat.skillUnavailableDescription')}
+          </p>
+        )}
+
+        <div className="chat-composer__toolbar">
+          <div className="composer-add-picker" ref={attachmentPickerRef}>
+            <button
+              ref={attachmentTriggerRef}
+              type="button"
+              className="composer-icon-button"
+              aria-haspopup={isSkillMenuOpen ? 'dialog' : 'menu'}
+              aria-expanded={isAttachmentMenuOpen || isSkillMenuOpen}
+              aria-label={t('chat.addContext')}
+              onClick={() => {
+                setAttachmentError(null)
+                setIsAttachmentMenuOpen((open) => !open)
+                setIsSkillMenuOpen(false)
+                setIsPermissionMenuOpen(false)
+                setIsModelMenuOpen(false)
+                setIsProjectMenuOpen(false)
+              }}
+            >
+              <Plus aria-hidden="true" />
+            </button>
+
+            {isAttachmentMenuOpen && (
+              <div className="composer-add-menu" role="menu" aria-label={t('chat.addMenuTitle')}>
+                <p>{t('chat.addMenuTitle')}</p>
+                <button type="button" role="menuitem" onClick={() => void addAttachments('file')}>
+                  <Paperclip aria-hidden="true" />
+                  <span>{t('chat.addFile')}</span>
+                </button>
+                <button type="button" role="menuitem" onClick={() => void addAttachments('image')}>
+                  <ImageIcon aria-hidden="true" />
+                  <span>{t('chat.addImage')}</span>
+                </button>
+                {!isGenerating && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsAttachmentMenuOpen(false)
+                      setIsSkillMenuOpen(true)
+                      setSkillSearch('')
+                    }}
+                  >
+                    <Sparkles aria-hidden="true" />
+                    <span>{t('chat.skills')}</span>
+                  </button>
+                )}
+              </div>
+            )}
+
+            {isSkillMenuOpen && (
+              <ComposerSkillPicker
+                catalogState={skillCatalogState}
+                projectId={selectedProjectId}
+                search={skillSearch}
+                selections={draft.skills}
+                onClose={() => {
+                  setIsSkillMenuOpen(false)
+                  setSkillSearch('')
+                  window.requestAnimationFrame(() => attachmentTriggerRef.current?.focus())
+                }}
+                onRefresh={refreshSkillCatalog}
+                onSearchChange={setSkillSearch}
+                onToggle={toggleSkill}
+                onUseLatest={useLatestSkill}
+              />
+            )}
+          </div>
+
+          <div className="composer-permission-picker" ref={permissionPickerRef}>
+            <button
+              type="button"
+              className="composer-permission-button"
+              disabled={isGenerating}
+              data-permission={selectedPermission.id}
+              aria-haspopup="listbox"
+              aria-expanded={isPermissionMenuOpen}
+              aria-label={`${t('chat.permission')}：${t(selectedPermission.labelKey)}`}
+              onClick={() => {
+                setIsAttachmentMenuOpen(false)
+                setIsSkillMenuOpen(false)
+                setIsModelMenuOpen(false)
+                setIsPermissionMenuOpen((open) => !open)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  setIsPermissionMenuOpen(false)
+                }
+              }}
+            >
+              <SelectedPermissionIcon aria-hidden="true" />
+              <span>{t(selectedPermission.labelKey)}</span>
+              <ChevronDown aria-hidden="true" />
+            </button>
+
+            {isPermissionMenuOpen && (
+              <div
+                className="composer-permission-menu"
+                role="listbox"
+                aria-label={t('chat.selectPermission')}
+              >
+                {permissionOptions.map((option) => {
+                  const OptionIcon = option.icon
+                  const isSelected = option.id === permissionMode
 
                   return (
                     <button
                       type="button"
                       role="option"
                       aria-selected={isSelected}
-                      className="composer-model-option"
+                      className="composer-permission-option"
+                      data-permission={option.id}
                       data-selected={isSelected || undefined}
-                      key={model.id}
-                      onClick={() => {
-                        updateDraft({ modelId: model.id })
-                        setIsModelMenuOpen(false)
-                      }}
+                      key={option.id}
+                      onClick={() => selectPermissionMode(option.id)}
                     >
-                      <span className="composer-model-option__name">{model.displayName}</span>
-                      <span
-                        className="composer-model-option__capability"
-                        data-supported={model.supportsImage || undefined}
-                      >
-                        {model.supportsImage ? t('configuration.image') : t('configuration.text')}
-                      </span>
+                      <OptionIcon aria-hidden="true" />
+                      <span>{t(option.labelKey)}</span>
+                      {isSelected && (
+                        <Check className="composer-permission-option__check" aria-hidden="true" />
+                      )}
                     </button>
                   )
-                })
-              )}
-            </div>
-          )}
-        </div>
+                })}
+              </div>
+            )}
+          </div>
 
-        <button
-          type={isGenerating ? 'button' : 'submit'}
-          className="composer-submit-button"
-          data-state={submitButtonState}
-          disabled={!isGenerating && !canSend}
-          aria-label={isGenerating ? t('chat.stop') : t('chat.send')}
-          onClick={() => {
-            if (isGenerating) {
-              onStopGenerating?.()
-            }
-          }}
-        >
-          {isGenerating ? (
-            <span className="composer-stop-square" aria-hidden="true" />
-          ) : (
-            <ArrowUp aria-hidden="true" />
-          )}
-        </button>
-      </div>
+          <span className="chat-composer__spacer" />
 
-      {showProjectSelector && (
-        <div className="chat-composer__project-row">
-          <div className="composer-project-picker" ref={projectPickerRef}>
+          {contextWindowIndicatorEnabled && contextWindowSnapshot && (
+            <ContextWindowIndicator snapshot={contextWindowSnapshot} />
+          )}
+
+          <div className="composer-model-picker" ref={modelPickerRef}>
             <button
-              className="composer-project-button"
               type="button"
+              className="composer-model-button"
+              disabled={isGenerating}
               aria-haspopup="listbox"
-              aria-expanded={isProjectMenuOpen}
+              aria-expanded={isModelMenuOpen}
+              aria-label={t('chat.selectModel')}
               onClick={() => {
                 setIsAttachmentMenuOpen(false)
                 setIsSkillMenuOpen(false)
                 setIsPermissionMenuOpen(false)
-                setIsModelMenuOpen(false)
-                setIsProjectMenuOpen((open) => !open)
+                setIsModelMenuOpen((open) => !open)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  setIsModelMenuOpen(false)
+                }
               }}
             >
-              <Folder aria-hidden="true" />
-              <span>{selectedProject?.name ?? t('project.chooseProject')}</span>
+              <span>{selectedModel?.displayName ?? t('chat.noEnabledModels')}</span>
+              <ChevronDown aria-hidden="true" />
             </button>
 
-            {isProjectMenuOpen && (
+            {isModelMenuOpen && (
               <div
-                className="composer-project-menu"
+                className="composer-model-menu"
                 role="listbox"
-                aria-label={t('project.chooseProject')}
+                aria-label={t('chat.selectModel')}
               >
-                <label className="composer-project-menu__search">
-                  <Search aria-hidden="true" />
-                  <input
-                    value={projectSearch}
-                    placeholder={t('project.searchProject')}
-                    onChange={(event) => setProjectSearch(event.target.value)}
-                  />
-                </label>
-
-                <div className="composer-project-menu__items">
-                  {filteredProjects.map((project) => {
-                    const isSelected = project.id === selectedProjectId
+                {enabledModels.length === 0 ? (
+                  <span className="composer-model-empty">{t('chat.noEnabledModels')}</span>
+                ) : (
+                  enabledModels.map((model) => {
+                    const isSelected = model.id === selectedModel?.id
 
                     return (
                       <button
-                        className="composer-project-option"
-                        data-selected={isSelected || undefined}
                         type="button"
                         role="option"
                         aria-selected={isSelected}
-                        key={project.id}
+                        className="composer-model-option"
+                        data-selected={isSelected || undefined}
+                        key={model.id}
                         onClick={() => {
-                          updateDraft({
-                            projectId: project.id,
-                            skills:
-                              draftRef.current.projectId === project.id
-                                ? draftRef.current.skills
-                                : retainGlobalSkillSelections(draftRef.current.skills)
-                          })
-                          setProjectSearch('')
-                          setIsProjectMenuOpen(false)
+                          updateDraft({ modelId: model.id })
+                          setIsModelMenuOpen(false)
                         }}
                       >
-                        <Folder aria-hidden="true" />
-                        <span>{project.name}</span>
-                        {isSelected && <Check aria-hidden="true" />}
+                        <span className="composer-model-option__name">{model.displayName}</span>
+                        <span
+                          className="composer-model-option__capability"
+                          data-supported={model.supportsImage || undefined}
+                        >
+                          {model.supportsImage ? t('configuration.image') : t('configuration.text')}
+                        </span>
                       </button>
                     )
-                  })}
-                </div>
-
-                <div className="composer-project-menu__divider" />
-
-                <button
-                  className="composer-project-command"
-                  type="button"
-                  onClick={() => {
-                    void handleSelectProjectDirectory()
-                  }}
-                >
-                  <Plus aria-hidden="true" />
-                  <span>{t('project.newProject')}</span>
-                </button>
-
-                <button
-                  className="composer-project-command"
-                  type="button"
-                  onClick={() => {
-                    updateDraft({
-                      projectId: null,
-                      skills: retainGlobalSkillSelections(draftRef.current.skills)
-                    })
-                    setProjectSearch('')
-                    setIsProjectMenuOpen(false)
-                  }}
-                >
-                  <X aria-hidden="true" />
-                  <span>{t('project.noProject')}</span>
-                </button>
+                  })
+                )}
               </div>
             )}
           </div>
-        </div>
-      )}
-      {isFullPermissionConfirmationOpen && (
-        <ConfirmationDialog
-          cancelLabel={t('chat.fullPermissionConfirmCancel')}
-          confirmLabel={t('chat.fullPermissionConfirmAction')}
-          description={t('chat.fullPermissionConfirmDescription')}
-          onCancel={() => setIsFullPermissionConfirmationOpen(false)}
-          onConfirm={() => {
-            if (permissionModeAvailability.full) {
-              updateDraft({ permissionMode: 'full' })
+
+          <button
+            type={isGenerating && !canSend ? 'button' : 'submit'}
+            className="composer-submit-button"
+            data-state={submitButtonState}
+            disabled={!isGenerating && !canSend}
+            aria-label={
+              isGenerating ? (canSend ? t('chat.queueMessage') : t('chat.stop')) : t('chat.send')
             }
-            setIsFullPermissionConfirmationOpen(false)
-          }}
-          title={t('chat.fullPermissionConfirmTitle')}
-        />
-      )}
-    </form>
+            onClick={() => {
+              if (isGenerating && !canSend) {
+                onStopGenerating?.()
+              }
+            }}
+          >
+            {isGenerating && !canSend ? (
+              <span className="composer-stop-square" aria-hidden="true" />
+            ) : (
+              <ArrowUp aria-hidden="true" />
+            )}
+          </button>
+        </div>
+
+        {showProjectSelector && (
+          <div className="chat-composer__project-row">
+            <div className="composer-project-picker" ref={projectPickerRef}>
+              <button
+                className="composer-project-button"
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded={isProjectMenuOpen}
+                onClick={() => {
+                  setIsAttachmentMenuOpen(false)
+                  setIsSkillMenuOpen(false)
+                  setIsPermissionMenuOpen(false)
+                  setIsModelMenuOpen(false)
+                  setIsProjectMenuOpen((open) => !open)
+                }}
+              >
+                <Folder aria-hidden="true" />
+                <span>{selectedProject?.name ?? t('project.chooseProject')}</span>
+              </button>
+
+              {isProjectMenuOpen && (
+                <div
+                  className="composer-project-menu"
+                  role="listbox"
+                  aria-label={t('project.chooseProject')}
+                >
+                  <label className="composer-project-menu__search">
+                    <Search aria-hidden="true" />
+                    <input
+                      value={projectSearch}
+                      placeholder={t('project.searchProject')}
+                      onChange={(event) => setProjectSearch(event.target.value)}
+                    />
+                  </label>
+
+                  <div className="composer-project-menu__items">
+                    {filteredProjects.map((project) => {
+                      const isSelected = project.id === selectedProjectId
+
+                      return (
+                        <button
+                          className="composer-project-option"
+                          data-selected={isSelected || undefined}
+                          type="button"
+                          role="option"
+                          aria-selected={isSelected}
+                          key={project.id}
+                          onClick={() => {
+                            updateDraft({
+                              projectId: project.id,
+                              skills:
+                                draftRef.current.projectId === project.id
+                                  ? draftRef.current.skills
+                                  : retainGlobalSkillSelections(draftRef.current.skills)
+                            })
+                            setProjectSearch('')
+                            setIsProjectMenuOpen(false)
+                          }}
+                        >
+                          <Folder aria-hidden="true" />
+                          <span>{project.name}</span>
+                          {isSelected && <Check aria-hidden="true" />}
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  <div className="composer-project-menu__divider" />
+
+                  <button
+                    className="composer-project-command"
+                    type="button"
+                    onClick={() => {
+                      void handleSelectProjectDirectory()
+                    }}
+                  >
+                    <Plus aria-hidden="true" />
+                    <span>{t('project.newProject')}</span>
+                  </button>
+
+                  <button
+                    className="composer-project-command"
+                    type="button"
+                    onClick={() => {
+                      updateDraft({
+                        projectId: null,
+                        skills: retainGlobalSkillSelections(draftRef.current.skills)
+                      })
+                      setProjectSearch('')
+                      setIsProjectMenuOpen(false)
+                    }}
+                  >
+                    <X aria-hidden="true" />
+                    <span>{t('project.noProject')}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {isFullPermissionConfirmationOpen && (
+          <ConfirmationDialog
+            cancelLabel={t('chat.fullPermissionConfirmCancel')}
+            confirmLabel={t('chat.fullPermissionConfirmAction')}
+            description={t('chat.fullPermissionConfirmDescription')}
+            onCancel={() => setIsFullPermissionConfirmationOpen(false)}
+            onConfirm={() => {
+              if (permissionModeAvailability.full) {
+                updateDraft({ permissionMode: 'full' })
+              }
+              setIsFullPermissionConfirmationOpen(false)
+            }}
+            title={t('chat.fullPermissionConfirmTitle')}
+          />
+        )}
+      </form>
+    </div>
   )
 }

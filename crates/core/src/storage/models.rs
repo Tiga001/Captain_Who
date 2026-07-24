@@ -372,7 +372,13 @@ pub struct ComposerDraftRecord {
     pub project_id: Option<String>,
     pub attachments_json: String,
     pub skills_json: String,
+    #[serde(default = "empty_json_array")]
+    pub queued_messages_json: String,
     pub updated_at: i64,
+}
+
+fn empty_json_array() -> String {
+    "[]".to_string()
 }
 
 impl ComposerDraftRecord {

@@ -104,6 +104,7 @@ fn composer_draft(scope_id: &str, project_id: Option<&str>, message: &str) -> Co
         project_id: project_id.map(ToString::to_string),
         attachments_json: "[]".to_string(),
         skills_json: "[]".to_string(),
+        queued_messages_json: "[]".to_string(),
         updated_at: 1,
     }
 }

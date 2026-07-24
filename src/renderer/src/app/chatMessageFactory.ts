@@ -61,6 +61,7 @@ export function createComposerDraft(overrides: Partial<ChatComposerDraft> = {}):
     projectId: null,
     attachments: [],
     skills: [],
+    queuedMessages: [],
     updatedAt: Date.now(),
     ...overrides
   }
@@ -75,7 +76,8 @@ export function createComposerDraft(overrides: Partial<ChatComposerDraft> = {}):
         ? draft.permissionMode
         : 'default',
     attachments: draft.attachments ?? [],
-    skills: normalizeSkillSelections(draft.skills)
+    skills: normalizeSkillSelections(draft.skills),
+    queuedMessages: draft.queuedMessages ?? []
   }
 }
 

@@ -111,6 +111,7 @@ export interface StorageComposerDraftRecord {
   projectId?: string | null
   attachmentsJson: string
   skillsJson: string
+  queuedMessagesJson?: string
   updatedAt: number
 }
 

@@ -13,7 +13,9 @@ import type { AgentProposedAction, AgentUsage } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../config/translationFormat'
 import type { ChatAgentRunView, ChatMessage } from '../chatTypes'
+import type { ChatGuidanceTimelineItem } from '../chatTypes'
 import { getUniqueWebSearchSources } from '../agentWebSearch'
+import { stripAttachmentSummary } from '../chatAttachments'
 import {
   getAttachmentBadgeLabel,
   getAttachmentExtension,
@@ -272,6 +274,27 @@ function AgentThinkingActivity() {
   )
 }
 
+function GuidanceTimelineItemView({ item }: { item: ChatGuidanceTimelineItem }) {
+  const { t } = useFrontendConfig()
+  const content = stripAttachmentSummary(item.content, item.attachments)
+  const statusLabel =
+    item.status === 'submitting'
+      ? t('chat.guidanceSubmittingStatus')
+      : item.status === 'queued'
+        ? t('chat.guidanceQueued')
+        : null
+
+  return (
+    <div className="chat-guidance" data-status={item.status}>
+      <div className="chat-guidance__bubble">
+        <MessageAttachments attachments={item.attachments} messageId={item.id} />
+        {content && <ChatMarkdown content={content} />}
+      </div>
+      {statusLabel && <span className="chat-guidance__status">{statusLabel}</span>}
+    </div>
+  )
+}
+
 function AgentTimelineItemView({
   item,
   projectId,
@@ -346,6 +369,10 @@ function AgentTimelineItemView({
   if (item.type === 'message') {
     if (!item.content.trim()) return null
     return <ChatMarkdown className="chat-agent-text" content={item.content} />
+  }
+
+  if (item.type === 'user_guidance') {
+    return <GuidanceTimelineItemView item={item} />
   }
 
   if (item.type === 'tool_call') {
@@ -457,7 +484,10 @@ function AgentRunView({
     ) : null
   }
 
-  const timelineCollapsed = canToggleTimeline ? (message.uiState?.timelineCollapsed ?? true) : false
+  const hasGuidance = timeline.some((item) => item.type === 'user_guidance')
+  const timelineCollapsed = canToggleTimeline
+    ? (message.uiState?.timelineCollapsed ?? !hasGuidance)
+    : false
   const showTimeline = hasTimeline && !(canToggleTimeline && timelineCollapsed)
   const finalAnswerContent = getLastMessageTimelineContent(timeline) || message.content
   const showFinalContent =

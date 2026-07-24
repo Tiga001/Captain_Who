@@ -160,6 +160,28 @@ pub fn list_queued_guidances(
         .collect()
 }
 
+pub fn list_guidances_for_assistant_message(
+    connection: &Connection,
+    assistant_message_id: &str,
+) -> rusqlite::Result<Vec<AgentRunGuidanceRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT guidance_id
+         FROM agent_run_guidances
+         WHERE assistant_message_id = ?1
+         ORDER BY created_at ASC, guidance_id ASC",
+    )?;
+    let guidance_ids = statement
+        .query_map([assistant_message_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    guidance_ids
+        .into_iter()
+        .map(|guidance_id| {
+            load_guidance_by_id_in_connection(connection, &guidance_id)?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)
+        })
+        .collect()
+}
+
 pub fn mark_guidance_applied(
     connection: &Connection,
     guidance_id: &str,

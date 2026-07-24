@@ -3,6 +3,7 @@ import type {
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
   AgentEvent,
+  AgentSteerRunOutput,
   SkillSelection
 } from '@mycopilot/protocol'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -10,6 +11,7 @@ import { render } from 'vitest-browser-react'
 import type {
   ChatComposerDraft,
   ChatConversation,
+  ChatQueuedMessage,
   ChatSubmitOptions
 } from '../../features/chat/chatTypes'
 
@@ -30,6 +32,7 @@ const testState = vi.hoisted(() => ({
   saveConversationMeta: vi.fn(),
   showToast: vi.fn(),
   startConversationTurn: vi.fn(),
+  steerAgentRun: vi.fn(),
   upsertChatMessages: vi.fn(),
   enabledModels: [
     {
@@ -105,7 +108,8 @@ vi.mock('../../features/agent/agentClient', () => ({
   listPendingAgentActions: vi.fn().mockResolvedValue([]),
   onAgentEvent: testState.onAgentEvent,
   rejectAgentAction: vi.fn(),
-  startConversationTurn: testState.startConversationTurn
+  startConversationTurn: testState.startConversationTurn,
+  steerAgentRun: testState.steerAgentRun
 }))
 
 vi.mock('../../features/storage/storageClient', async (importOriginal) => {
@@ -166,6 +170,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     onComposerDraftChange,
     onContinueInNewTask,
     onEditLastUserMessage,
+    onGuideQueuedMessage,
     onStopGenerating,
     onSubmitMessage,
     skillCatalogRefreshToken
@@ -175,6 +180,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     onComposerDraftChange: (draft: ChatComposerDraft) => void
     onContinueInNewTask?: (messageId: string) => void
     onEditLastUserMessage: (messageId: string, content: string) => Promise<void>
+    onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
     onStopGenerating: () => void
     onSubmitMessage: (message: string, options: ChatSubmitOptions) => void
     skillCatalogRefreshToken?: number
@@ -193,6 +199,16 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
           ?.agentRun?.activatedSkills?.map((skill) => skill.id)
           .join(',') ?? ''}
       </output>
+      <output data-testid="queued-message-ids">
+        {composerDraft.queuedMessages.map((message) => message.id).join(',')}
+      </output>
+      <output data-testid="guidance-timeline">
+        {conversation.messages
+          .at(-1)
+          ?.agentRun?.timeline.filter((item) => item.type === 'user_guidance')
+          .map((item) => `${item.clientMessageId}:${item.status}`)
+          .join(',') ?? ''}
+      </output>
       <button
         type="button"
         onClick={() => void onEditLastUserMessage(conversation.messages.at(-2)?.id ?? '', 'edited')}
@@ -207,6 +223,24 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
         onClick={() => onContinueInNewTask?.(conversation.messages.at(-1)?.id ?? '')}
       >
         continue-in-new-task
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          const queuedMessage = composerDraft.queuedMessages[0]
+          if (queuedMessage) onGuideQueuedMessage?.(queuedMessage)
+        }}
+      >
+        guide-first-message
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          const queuedMessage = composerDraft.queuedMessages[1]
+          if (queuedMessage) onGuideQueuedMessage?.(queuedMessage)
+        }}
+      >
+        guide-second-message
       </button>
       <button
         type="button"
@@ -382,6 +416,21 @@ function storedConversation(): ChatConversation {
   }
 }
 
+function queuedMessage(id: string, content: string, createdAt: number): ChatQueuedMessage {
+  return {
+    id,
+    clientMessageId: `client-${id}`,
+    content,
+    attachments: [],
+    modelId: 'model-1',
+    permissionMode: 'full',
+    projectId: 'project-a',
+    skills: [],
+    status: 'pending',
+    createdAt
+  }
+}
+
 beforeEach(() => {
   testState.cancelAgentRun.mockReset().mockResolvedValue(true)
   testState.deleteChatMessages.mockReset().mockResolvedValue(undefined)
@@ -410,6 +459,10 @@ beforeEach(() => {
   testState.saveConversationMeta.mockReset().mockResolvedValue(undefined)
   testState.showToast.mockReset()
   testState.startConversationTurn.mockReset()
+  testState.steerAgentRun.mockReset().mockResolvedValue({
+    guidanceId: 'guidance-1',
+    status: 'queued'
+  })
   testState.upsertChatMessages.mockReset().mockResolvedValue(undefined)
 })
 
@@ -479,6 +532,114 @@ describe('conversation startup loading', () => {
       .toHaveTextContent('independent draft')
 
     conversationMetas.resolve([])
+  })
+})
+
+describe('running conversation guidance queue', () => {
+  it('guides any selected item in the active run and auto-sends the remaining head item', async () => {
+    const first = queuedMessage('queue-first', 'send me next', 10)
+    const second = queuedMessage('queue-second', 'guide this run', 20)
+    testState.loadComposerDrafts.mockResolvedValueOnce({
+      'conversation-a': createComposerDraft({
+        modelId: 'model-1',
+        projectId: 'project-a',
+        queuedMessages: [first, second]
+      })
+    })
+    mockSuccessfulTurnStarts()
+    const steering = deferred<AgentSteerRunOutput>()
+    testState.steerAgentRun.mockReturnValueOnce(steering.promise)
+    const screen = await renderSelectedConversation()
+
+    await expect
+      .element(screen.getByTestId('queued-message-ids'))
+      .toHaveTextContent('queue-first,queue-second')
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+
+    await screen.getByRole('button', { name: 'guide-second-message' }).click()
+    await expect.poll(() => testState.steerAgentRun.mock.calls.length).toBe(1)
+    expect(testState.steerAgentRun).toHaveBeenCalledWith({
+      conversationId: 'conversation-a',
+      expectedRunId: 'run-1',
+      clientMessageId: 'client-queue-second',
+      content: 'guide this run',
+      attachments: []
+    })
+    await expect
+      .element(screen.getByTestId('guidance-timeline'))
+      .toHaveTextContent('client-queue-second:submitting')
+
+    steering.resolve({ guidanceId: 'guidance-1', status: 'queued' })
+    await expect.element(screen.getByTestId('queued-message-ids')).toHaveTextContent('queue-first')
+    await expect
+      .element(screen.getByTestId('guidance-timeline'))
+      .toHaveTextContent('client-queue-second:queued')
+
+    emitAgentEvent({
+      type: 'guidance_applied',
+      runId: 'run-1',
+      guidanceId: 'guidance-1',
+      clientMessageId: 'client-queue-second',
+      content: 'guide this run',
+      attachments: [],
+      createdAt: 20,
+      sequence: 1
+    })
+    await expect
+      .element(screen.getByTestId('guidance-timeline'))
+      .toHaveTextContent('client-queue-second:applied')
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: true,
+      status: 'completed',
+      content: 'finished current run'
+    })
+
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(2)
+    expect(
+      (testState.startConversationTurn.mock.calls[1]?.[0] as AgentConversationTurnInput).content
+    ).toBe('send me next')
+    await expect.element(screen.getByTestId('queued-message-ids')).toHaveTextContent('')
+  })
+
+  it('auto-sends the next row when the steer acknowledgement arrives after run completion', async () => {
+    const first = queuedMessage('queue-first', 'late guidance', 10)
+    const second = queuedMessage('queue-second', 'send after the race', 20)
+    testState.loadComposerDrafts.mockResolvedValueOnce({
+      'conversation-a': createComposerDraft({
+        modelId: 'model-1',
+        projectId: 'project-a',
+        queuedMessages: [first, second]
+      })
+    })
+    mockSuccessfulTurnStarts()
+    const steering = deferred<AgentSteerRunOutput>()
+    testState.steerAgentRun.mockReturnValueOnce(steering.promise)
+    const screen = await renderSelectedConversation()
+
+    await screen.getByRole('button', { name: 'submit-without-skill' }).click()
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(1)
+    await screen.getByRole('button', { name: 'guide-first-message' }).click()
+    await expect.poll(() => testState.steerAgentRun.mock.calls.length).toBe(1)
+
+    emitAgentEvent({
+      type: 'done',
+      runId: 'run-1',
+      success: true,
+      status: 'completed',
+      content: 'finished before steering acknowledgement'
+    })
+    await new Promise((resolve) => window.setTimeout(resolve, 0))
+    expect(testState.startConversationTurn).toHaveBeenCalledTimes(1)
+
+    steering.resolve({ guidanceId: 'guidance-late', status: 'queued' })
+    await expect.poll(() => testState.startConversationTurn.mock.calls.length).toBe(2)
+    expect(
+      (testState.startConversationTurn.mock.calls[1]?.[0] as AgentConversationTurnInput).content
+    ).toBe('send after the race')
   })
 })
 

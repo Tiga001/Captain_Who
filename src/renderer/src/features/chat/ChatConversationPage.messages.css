@@ -573,6 +573,45 @@ button.chat-message-attachment:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.chat-guidance {
+  display: flex;
+  width: 100%;
+  margin: 8px 0;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+}
+
+.chat-guidance__bubble {
+  width: auto;
+  max-width: min(78%, 760px);
+  min-width: 0;
+  padding: 7px 17px;
+  color: var(--mc-color-text-primary);
+  background: var(--mc-color-surface-muted);
+  border-radius: var(--mc-radius-message);
+  font-size: var(--mc-font-size-chat-assistant);
+  font-weight: var(--mc-font-weight-medium);
+  line-height: var(--mc-line-height-roomy);
+  overflow-wrap: break-word;
+}
+
+.chat-guidance[data-status='submitting'] .chat-guidance__bubble,
+.chat-guidance[data-status='queued'] .chat-guidance__bubble {
+  color: var(--mc-color-text-muted);
+  background: color-mix(in srgb, var(--mc-color-surface-muted) 72%, transparent);
+}
+
+.chat-guidance__status {
+  padding-inline: 8px;
+  color: var(--mc-color-text-subtle);
+  font-size: var(--mc-font-size-xs);
+}
+
+.chat-guidance .chat-message__attachments {
+  margin-bottom: 7px;
+}
+
 .chat-markdown {
   max-width: 100%;
   min-width: 0;

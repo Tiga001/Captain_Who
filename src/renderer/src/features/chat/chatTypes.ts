@@ -69,8 +69,21 @@ export interface ChatReadActivity {
   updatedAt: number
 }
 
+export interface ChatGuidanceTimelineItem {
+  id: string
+  type: 'user_guidance'
+  guidanceId?: string
+  clientMessageId: string
+  content: string
+  attachments: ChatMessageAttachment[]
+  status: 'submitting' | 'queued' | 'applied'
+  createdAt: number
+  sequence?: number
+}
+
 export type ChatAgentTimelineItem =
   | { id: string; type: 'message'; content: string; streamId?: string }
+  | ChatGuidanceTimelineItem
   | { id: string; type: 'tool_call'; callId: string }
   | {
       id: string
@@ -139,6 +152,20 @@ export interface ChatMessage {
 
 export type ChatPermissionMode = 'default' | 'full' | 'custom'
 
+export interface ChatQueuedMessage {
+  id: string
+  clientMessageId: string
+  content: string
+  attachments: AgentInputAttachment[]
+  modelId: string
+  permissionMode: ChatPermissionMode
+  projectId: string | null
+  skills: SkillSelection[]
+  status: 'pending' | 'submitting' | 'error'
+  error?: string
+  createdAt: number
+}
+
 export interface ChatComposerDraft {
   message: string
   permissionMode: ChatPermissionMode
@@ -146,6 +173,7 @@ export interface ChatComposerDraft {
   projectId: string | null
   attachments: AgentInputAttachment[]
   skills: SkillSelection[]
+  queuedMessages: ChatQueuedMessage[]
   updatedAt: number
 }
 

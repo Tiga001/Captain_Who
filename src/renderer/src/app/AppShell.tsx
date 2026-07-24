@@ -28,6 +28,7 @@ import type {
   ChatPermissionMode,
   ChatMessage,
   ChatMessageUiState,
+  ChatQueuedMessage,
   ChatSubmitOptions
 } from '../features/chat/chatTypes'
 import {
@@ -38,7 +39,8 @@ import {
   listPendingAgentActions,
   onAgentEvent,
   rejectAgentAction,
-  startConversationTurn
+  startConversationTurn,
+  steerAgentRun
 } from '../features/agent/agentClient'
 import { resolveChatPermissions } from '../features/chat/chatPermissions'
 import {
@@ -70,7 +72,9 @@ import {
   applyAgentActionDecisionToChatMessage,
   applyAgentActionExecutionToChatMessage,
   applyAgentEventToChatMessage,
+  applyOptimisticGuidanceToChatMessage,
   ensureAgentRun,
+  removeGuidanceFromChatMessage,
   settleAgentRunToolActivities,
   shouldTouchConversationForAgentEvent
 } from './agentEventReducer'
@@ -184,6 +188,18 @@ export function AppShell() {
   const cancelledRunIdsRef = useRef<Set<string>>(new Set())
   const stopRequestedPendingMessageIdsRef = useRef<Set<string>>(new Set())
   const stopRequestedRunIdsRef = useRef<Set<string>>(new Set())
+  const pendingGuidancePayloadsRef = useRef<
+    Map<
+      string,
+      {
+        assistantMessageId: string
+        conversationId: string
+        index: number
+        message: ChatQueuedMessage
+      }
+    >
+  >(new Map())
+  const autoSubmitQueuedMessageRef = useRef<(conversationId: string) => void>(() => undefined)
   const editSubmissionSeqRef = useRef(0)
   const contextWindowRequestSeqRef = useRef(0)
   const contextWindowEventSeqRef = useRef<Map<string, number>>(new Map())
@@ -590,6 +606,23 @@ export function AppShell() {
     [setDraftsWithRef]
   )
 
+  const mutateDraft = useCallback(
+    (scopeId: string, updater: (draft: ChatComposerDraft) => ChatComposerDraft) => {
+      const currentDraft = draftsRef.current[scopeId] ?? createComposerDraft()
+      const nextDraft = {
+        ...updater(currentDraft),
+        updatedAt: Date.now()
+      }
+      setDraftsWithRef({
+        ...draftsRef.current,
+        [scopeId]: nextDraft
+      })
+      void saveComposerDraft(scopeId, nextDraft)
+      return nextDraft
+    },
+    [setDraftsWithRef]
+  )
+
   const restoreSubmittedSkills = useCallback(
     (
       scopeId: string,
@@ -702,6 +735,118 @@ export function AppShell() {
       }
     },
     [enqueueChatMessageStateSave, setConversationsWithRef]
+  )
+
+  const removeQueuedMessageByClientId = useCallback(
+    (conversationId: string, clientMessageId: string) => {
+      mutateDraft(conversationId, (draft) => ({
+        ...draft,
+        queuedMessages: draft.queuedMessages.filter(
+          (message) => message.clientMessageId !== clientMessageId
+        )
+      }))
+    },
+    [mutateDraft]
+  )
+
+  const restoreRejectedGuidance = useCallback(
+    (
+      conversationId: string,
+      assistantMessageId: string,
+      clientMessageId: string,
+      errorMessage: string,
+      fallback?: {
+        content: string
+        attachments: Array<{ id: string }>
+        createdAt: number
+      }
+    ) => {
+      const pending = pendingGuidancePayloadsRef.current.get(clientMessageId)
+      pendingGuidancePayloadsRef.current.delete(clientMessageId)
+      const alreadyRestored = draftsRef.current[conversationId]?.queuedMessages.find(
+        (message) => message.clientMessageId === clientMessageId
+      )
+
+      const restore = (message: ChatQueuedMessage, preferredIndex: number) => {
+        mutateDraft(conversationId, (draft) => {
+          const withoutMessage = draft.queuedMessages.filter(
+            (candidate) => candidate.clientMessageId !== clientMessageId
+          )
+          const insertAt = Math.min(Math.max(0, preferredIndex), withoutMessage.length)
+          withoutMessage.splice(insertAt, 0, {
+            ...message,
+            status: 'error',
+            error: errorMessage
+          })
+          return {
+            ...draft,
+            queuedMessages: withoutMessage
+          }
+        })
+      }
+
+      updateAssistantMessage(
+        conversationId,
+        assistantMessageId,
+        (message) => removeGuidanceFromChatMessage(message, clientMessageId),
+        { touchConversation: true }
+      )
+
+      if (!pending && alreadyRestored) {
+        restore(
+          alreadyRestored,
+          draftsRef.current[conversationId].queuedMessages.indexOf(alreadyRestored)
+        )
+        return
+      }
+      if (pending) {
+        restore(pending.message, pending.index)
+        return
+      }
+      if (!fallback) return
+
+      void loadInputAttachments(fallback.attachments.map((attachment) => attachment.id))
+        .then((attachments) => {
+          const draft = draftsRef.current[conversationId] ?? createComposerDraft()
+          restore(
+            {
+              id: `queued-message-${fallback.createdAt}-${Math.random().toString(36).slice(2, 8)}`,
+              clientMessageId,
+              content: fallback.content,
+              attachments,
+              modelId: draft.modelId,
+              permissionMode: draft.permissionMode,
+              projectId: draft.projectId,
+              skills: [],
+              status: 'error',
+              error: errorMessage,
+              createdAt: fallback.createdAt
+            },
+            draft.queuedMessages.length
+          )
+        })
+        .catch((error) => {
+          console.error('Failed to restore rejected guidance attachments', error)
+          const draft = draftsRef.current[conversationId] ?? createComposerDraft()
+          restore(
+            {
+              id: `queued-message-${fallback.createdAt}-${Math.random().toString(36).slice(2, 8)}`,
+              clientMessageId,
+              content: fallback.content,
+              attachments: [],
+              modelId: draft.modelId,
+              permissionMode: draft.permissionMode,
+              projectId: draft.projectId,
+              skills: [],
+              status: 'error',
+              error: errorMessage,
+              createdAt: fallback.createdAt
+            },
+            draft.queuedMessages.length
+          )
+        })
+    },
+    [mutateDraft, updateAssistantMessage]
   )
 
   const flushPendingMessageDelta = useCallback(
@@ -842,6 +987,29 @@ export function AppShell() {
         flushPendingMessageDelta(agentEvent.runId)
       }
 
+      if (agentEvent.type === 'guidance_queued' || agentEvent.type === 'guidance_applied') {
+        removeQueuedMessageByClientId(conversationId, agentEvent.clientMessageId)
+        if (agentEvent.type === 'guidance_applied') {
+          pendingGuidancePayloadsRef.current.delete(agentEvent.clientMessageId)
+        }
+      }
+
+      if (agentEvent.type === 'guidance_rejected') {
+        restoreRejectedGuidance(
+          conversationId,
+          assistantMessageId,
+          agentEvent.clientMessageId,
+          agentEvent.message || t('chat.guidanceFailed'),
+          {
+            content: agentEvent.content,
+            attachments: [],
+            createdAt: agentEvent.createdAt
+          }
+        )
+        window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
+        return
+      }
+
       updateAssistantMessage(
         conversationId,
         assistantMessageId,
@@ -878,6 +1046,9 @@ export function AppShell() {
         if (agentEvent.status !== 'waiting_for_approval') {
           cleanupRunBinding(agentEvent.runId)
         }
+        if (agentEvent.status === 'completed' || agentEvent.status === 'cancelled') {
+          window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
+        }
       }
 
       if (agentEvent.type === 'error' && !agentEvent.recoverable && agentEvent.runId) {
@@ -889,7 +1060,10 @@ export function AppShell() {
       bufferMessageDelta,
       cleanupRunBinding,
       flushPendingMessageDelta,
+      removeQueuedMessageByClientId,
+      restoreRejectedGuidance,
       setConversationsWithRef,
+      t,
       updateAssistantMessage
     ]
   )
@@ -1138,18 +1312,28 @@ export function AppShell() {
     ]
   )
 
-  const submitMessage = useCallback(
-    (message: string, options: ChatSubmitOptions) => {
+  const submitMessageToConversation = useCallback(
+    (
+      targetConversationId: string | null,
+      message: string,
+      options: ChatSubmitOptions,
+      behavior: { activate: boolean; preserveComposerContent: boolean }
+    ) => {
       const now = Date.now()
-      const conversationId = activeConversation?.id ?? createId('conversation')
+      const targetConversation = targetConversationId
+        ? (conversationsRef.current.find(
+            (conversation) => conversation.id === targetConversationId
+          ) ?? null)
+        : null
+      const conversationId = targetConversation?.id ?? createId('conversation')
       const userMessage = createUserMessage(message, options.attachments ?? [])
       const assistantMessage = createAssistantMessage(THINKING_PLACEHOLDER, 'pending')
       const title = createConversationTitle(message, t('chat.newConversation'))
-      const conversationToSave: ChatConversation = activeConversation
+      const conversationToSave: ChatConversation = targetConversation
         ? {
-            ...activeConversation,
+            ...targetConversation,
             modelId: options.modelId,
-            messages: [...activeConversation.messages, userMessage, assistantMessage],
+            messages: [...targetConversation.messages, userMessage, assistantMessage],
             updatedAt: now
           }
         : {
@@ -1180,20 +1364,32 @@ export function AppShell() {
       enqueueChatMessagesUpsert(
         conversationId,
         [userMessage, assistantMessage],
-        activeConversation?.messages.length ?? 0
+        targetConversation?.messages.length ?? 0
       )
-      activeConversationIdRef.current = conversationId
-      setScrollTargetMessageId(null)
-      setActiveConversationInitialScrollTop(null)
-      setConversationScrollToBottomSignal((signal) => signal + 1)
-      setActiveConversationId(conversationId)
+      if (behavior.activate) {
+        activeConversationIdRef.current = conversationId
+        setScrollTargetMessageId(null)
+        setActiveConversationInitialScrollTop(null)
+        setConversationScrollToBottomSignal((signal) => signal + 1)
+        setActiveConversationId(conversationId)
+      }
+      const currentDraft = draftsRef.current[conversationId] ?? createComposerDraft()
       updateDraft(
         conversationId,
-        createComposerDraft({
-          modelId: options.modelId,
-          permissionMode: options.permissionMode,
-          projectId: options.projectId
-        })
+        behavior.preserveComposerContent
+          ? {
+              ...currentDraft,
+              modelId: options.modelId,
+              permissionMode: options.permissionMode,
+              projectId: options.projectId,
+              updatedAt: now
+            }
+          : createComposerDraft({
+              modelId: options.modelId,
+              permissionMode: options.permissionMode,
+              projectId: options.projectId,
+              queuedMessages: currentDraft.queuedMessages
+            })
       )
       void requestAssistantResponse(
         conversationId,
@@ -1201,15 +1397,14 @@ export function AppShell() {
         assistantMessage.id,
         message,
         options.modelId,
-        activeConversation?.projectId ?? options.projectId,
+        targetConversation?.projectId ?? options.projectId,
         options.permissionMode,
         options.attachments,
         options.skills,
-        activeConversation ? undefined : title
+        targetConversation ? undefined : title
       )
     },
     [
-      activeConversation,
       enqueueChatMessagesUpsert,
       enqueueConversationMetaSave,
       requestAssistantResponse,
@@ -1218,6 +1413,64 @@ export function AppShell() {
       updateDraft
     ]
   )
+
+  const submitMessage = useCallback(
+    (message: string, options: ChatSubmitOptions) => {
+      submitMessageToConversation(activeConversationIdRef.current, message, options, {
+        activate: true,
+        preserveComposerContent: false
+      })
+    },
+    [submitMessageToConversation]
+  )
+
+  const submitNextQueuedMessage = useCallback(
+    (conversationId: string) => {
+      const conversation = conversationsRef.current.find(
+        (candidate) => candidate.id === conversationId
+      )
+      const latestAssistant = [...(conversation?.messages ?? [])]
+        .reverse()
+        .find((message) => message.role === 'assistant')
+      if (
+        !conversation ||
+        !latestAssistant ||
+        !['completed', 'cancelled'].includes(latestAssistant.agentRun?.status ?? '')
+      ) {
+        return
+      }
+
+      const draft = draftsRef.current[conversationId]
+      const queuedMessage = draft?.queuedMessages[0]
+      if (!draft || !queuedMessage || queuedMessage.status === 'submitting') return
+
+      mutateDraft(conversationId, (currentDraft) => ({
+        ...currentDraft,
+        queuedMessages: currentDraft.queuedMessages.filter(
+          (message) => message.id !== queuedMessage.id
+        )
+      }))
+      submitMessageToConversation(
+        conversationId,
+        queuedMessage.content,
+        {
+          attachments: queuedMessage.attachments,
+          modelId: queuedMessage.modelId,
+          permissionMode: queuedMessage.permissionMode,
+          projectId: queuedMessage.projectId,
+          skills: queuedMessage.skills
+        },
+        {
+          activate: activeConversationIdRef.current === conversationId,
+          preserveComposerContent: true
+        }
+      )
+    },
+    [mutateDraft, submitMessageToConversation]
+  )
+  useEffect(() => {
+    autoSubmitQueuedMessageRef.current = submitNextQueuedMessage
+  }, [submitNextQueuedMessage])
 
   const submitEditedLastUserMessage = useCallback(
     async (messageId: string, content: string) => {
@@ -1716,6 +1969,136 @@ export function AppShell() {
       })
   }, [activeConversationId, conversations, showToast, t])
 
+  const guideQueuedMessage = useCallback(
+    (queuedMessage: ChatQueuedMessage) => {
+      const conversationId = activeConversationIdRef.current
+      if (!conversationId) return
+      const conversation = conversationsRef.current.find(
+        (candidate) => candidate.id === conversationId
+      )
+      const assistantMessage = [...(conversation?.messages ?? [])]
+        .reverse()
+        .find((message) => message.role === 'assistant' && message.status === 'pending')
+      const runId = assistantMessage?.agentRun?.runId
+      if (!assistantMessage || !runId || assistantMessage.agentRun?.status !== 'running') {
+        mutateDraft(conversationId, (draft) => ({
+          ...draft,
+          queuedMessages: draft.queuedMessages.map((message) =>
+            message.id === queuedMessage.id
+              ? {
+                  ...message,
+                  status: 'error',
+                  error: t('chat.guidanceFailed')
+                }
+              : message
+          )
+        }))
+        return
+      }
+
+      const queueIndex =
+        draftsRef.current[conversationId]?.queuedMessages.findIndex(
+          (message) => message.id === queuedMessage.id
+        ) ?? -1
+      if (queueIndex < 0 || queuedMessage.status === 'submitting') return
+
+      const submittingMessage: ChatQueuedMessage = {
+        ...queuedMessage,
+        status: 'submitting',
+        error: undefined
+      }
+      pendingGuidancePayloadsRef.current.set(queuedMessage.clientMessageId, {
+        assistantMessageId: assistantMessage.id,
+        conversationId,
+        index: queueIndex,
+        message: queuedMessage
+      })
+      mutateDraft(conversationId, (draft) => ({
+        ...draft,
+        queuedMessages: draft.queuedMessages.map((message) =>
+          message.id === queuedMessage.id ? submittingMessage : message
+        )
+      }))
+      updateAssistantMessage(
+        conversationId,
+        assistantMessage.id,
+        (message) => applyOptimisticGuidanceToChatMessage(message, queuedMessage, runId),
+        { touchConversation: true }
+      )
+
+      void steerAgentRun({
+        conversationId,
+        expectedRunId: runId,
+        clientMessageId: queuedMessage.clientMessageId,
+        content: queuedMessage.content,
+        attachments: queuedMessage.attachments
+      })
+        .then((output) => {
+          if (output.status === 'rejected') {
+            restoreRejectedGuidance(
+              conversationId,
+              assistantMessage.id,
+              queuedMessage.clientMessageId,
+              output.message || t('chat.guidanceFailed')
+            )
+            window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
+            return
+          }
+
+          removeQueuedMessageByClientId(conversationId, queuedMessage.clientMessageId)
+          const attachments = queuedMessage.attachments.map((attachment) => ({
+            id: attachment.id,
+            kind: attachment.kind,
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            sizeBytes: attachment.sizeBytes
+          }))
+          const acceptedEvent: AgentEvent =
+            output.status === 'applied'
+              ? {
+                  type: 'guidance_applied',
+                  runId,
+                  guidanceId: output.guidanceId,
+                  clientMessageId: queuedMessage.clientMessageId,
+                  content: queuedMessage.content,
+                  attachments,
+                  createdAt: queuedMessage.createdAt,
+                  sequence: 0
+                }
+              : {
+                  type: 'guidance_queued',
+                  runId,
+                  guidanceId: output.guidanceId,
+                  clientMessageId: queuedMessage.clientMessageId,
+                  content: queuedMessage.content,
+                  attachments,
+                  createdAt: queuedMessage.createdAt
+                }
+          updateAssistantMessage(
+            conversationId,
+            assistantMessage.id,
+            (message) => applyAgentEventToChatMessage(message, acceptedEvent),
+            { touchConversation: true }
+          )
+          if (output.status === 'applied') {
+            pendingGuidancePayloadsRef.current.delete(queuedMessage.clientMessageId)
+          }
+          window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error)
+          restoreRejectedGuidance(
+            conversationId,
+            assistantMessage.id,
+            queuedMessage.clientMessageId,
+            message || t('chat.guidanceFailed')
+          )
+          window.setTimeout(() => autoSubmitQueuedMessageRef.current(conversationId), 0)
+        })
+    },
+    [mutateDraft, removeQueuedMessageByClientId, restoreRejectedGuidance, t, updateAssistantMessage]
+  )
+
   const handleApproveAgentAction = useCallback(
     (messageId: string, action: AgentProposedAction) => {
       if (!activeConversationId) return
@@ -1958,6 +2341,7 @@ export function AppShell() {
                 onApproveAgentAction={handleApproveAgentAction}
                 onCancelAgentAction={handleCancelAgentAction}
                 onComposerDraftChange={(draft) => updateDraft(activeConversation.id, draft)}
+                onGuideQueuedMessage={guideQueuedMessage}
                 onEditLastUserMessage={submitEditedLastUserMessage}
                 onContinueInNewTask={(messageId) =>
                   continueInNewTask(activeConversation.id, messageId)

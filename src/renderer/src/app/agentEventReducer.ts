@@ -15,7 +15,9 @@ import type {
   ChatAgentRunView,
   ChatAgentTimelineItem,
   ChatFileWritePreview,
-  ChatMessage
+  ChatGuidanceTimelineItem,
+  ChatMessage,
+  ChatQueuedMessage
 } from '../features/chat/chatTypes'
 import { THINKING_PLACEHOLDER } from './appConstants'
 import { getAgentActionId } from './agentActionUtils'
@@ -190,6 +192,98 @@ function appendTimelineItem(
   }
 
   return [...run.timeline, item]
+}
+
+function guidanceTimelineId(clientMessageId: string) {
+  return `user-guidance-${clientMessageId}`
+}
+
+function guidanceAttachments(
+  attachments: Array<{
+    id: string
+    kind: 'file' | 'image'
+    name: string
+    mimeType?: string
+    sizeBytes: number
+  }>
+): ChatGuidanceTimelineItem['attachments'] {
+  return attachments.map((attachment) => ({
+    id: attachment.id,
+    kind: attachment.kind,
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes
+  }))
+}
+
+function upsertGuidanceTimelineItem(
+  run: ChatAgentRunView,
+  item: ChatGuidanceTimelineItem
+): ChatAgentTimelineItem[] {
+  const existing = run.timeline.find(
+    (candidate) =>
+      candidate.type === 'user_guidance' &&
+      (candidate.clientMessageId === item.clientMessageId ||
+        (item.guidanceId && candidate.guidanceId === item.guidanceId))
+  )
+  if (!existing || existing.type !== 'user_guidance') {
+    return appendTimelineItem(run, item)
+  }
+
+  const statusRank = { submitting: 0, queued: 1, applied: 2 } as const
+  const nextItem =
+    statusRank[existing.status] > statusRank[item.status]
+      ? {
+          ...item,
+          ...existing,
+          guidanceId: existing.guidanceId ?? item.guidanceId
+        }
+      : {
+          ...existing,
+          ...item,
+          guidanceId: item.guidanceId ?? existing.guidanceId
+        }
+  return run.timeline.map((candidate) => (candidate.id === existing.id ? nextItem : candidate))
+}
+
+export function applyOptimisticGuidanceToChatMessage(
+  message: ChatMessage,
+  queuedMessage: ChatQueuedMessage,
+  runId: string
+): ChatMessage {
+  const run = ensureAgentRun(message.agentRun, runId, 'running')
+  return {
+    ...message,
+    status: 'pending',
+    agentRun: {
+      ...run,
+      timeline: upsertGuidanceTimelineItem(run, {
+        id: guidanceTimelineId(queuedMessage.clientMessageId),
+        type: 'user_guidance',
+        clientMessageId: queuedMessage.clientMessageId,
+        content: queuedMessage.content,
+        attachments: guidanceAttachments(queuedMessage.attachments),
+        status: 'submitting',
+        createdAt: queuedMessage.createdAt
+      })
+    }
+  }
+}
+
+export function removeGuidanceFromChatMessage(
+  message: ChatMessage,
+  clientMessageId: string
+): ChatMessage {
+  if (!message.agentRun) return message
+  return {
+    ...message,
+    agentRun: {
+      ...message.agentRun,
+      timeline: message.agentRun.timeline.filter(
+        (item) => item.type !== 'user_guidance' || item.clientMessageId !== clientMessageId
+      )
+    }
+  }
 }
 
 function removeTransientToolTimelineItems(timeline: ChatAgentTimelineItem[]) {
@@ -827,6 +921,13 @@ function getRunResponseTimestamps(run: ChatAgentRunView, receivedAt: number) {
 export function shouldTouchConversationForAgentEvent(agentEvent: AgentEvent) {
   if (agentEvent.type === 'done') return true
   if (agentEvent.type === 'approval_required') return true
+  if (
+    agentEvent.type === 'guidance_queued' ||
+    agentEvent.type === 'guidance_applied' ||
+    agentEvent.type === 'guidance_rejected'
+  ) {
+    return true
+  }
   if (agentEvent.type === 'error' && !agentEvent.recoverable) return true
 
   if (agentEvent.type === 'state') {
@@ -1177,14 +1278,30 @@ export function applyAgentEventToChatMessage(
     return message
   }
 
-  // Guidance rendering and optimistic message reconciliation belong to the RPC/UI round.
-  // Until then, the runtime event is informational and must not be treated as terminal output.
-  if (
-    agentEvent.type === 'guidance_queued' ||
-    agentEvent.type === 'guidance_applied' ||
-    agentEvent.type === 'guidance_rejected'
-  ) {
-    return message
+  if (agentEvent.type === 'guidance_queued' || agentEvent.type === 'guidance_applied') {
+    const status = agentEvent.type === 'guidance_applied' ? 'applied' : 'queued'
+    const item: ChatGuidanceTimelineItem = {
+      id: guidanceTimelineId(agentEvent.clientMessageId),
+      type: 'user_guidance',
+      guidanceId: agentEvent.guidanceId,
+      clientMessageId: agentEvent.clientMessageId,
+      content: agentEvent.content,
+      attachments: guidanceAttachments(agentEvent.attachments),
+      status,
+      createdAt: agentEvent.createdAt,
+      sequence: agentEvent.type === 'guidance_applied' ? agentEvent.sequence : undefined
+    }
+    return {
+      ...message,
+      agentRun: {
+        ...currentRun,
+        timeline: upsertGuidanceTimelineItem(currentRun, item)
+      }
+    }
+  }
+
+  if (agentEvent.type === 'guidance_rejected') {
+    return removeGuidanceFromChatMessage(message, agentEvent.clientMessageId)
   }
 
   if (agentEvent.type === 'error') {

@@ -51,7 +51,8 @@ vi.mock('../../features/chat/chatAttachments', () => ({
   composerAttachmentFromAgentAttachment: (attachment: unknown) => attachment,
   createComposerAttachmentsFromFiles: async () => [],
   createAttachmentSummary: () => '',
-  selectComposerAttachments: async () => []
+  selectComposerAttachments: async () => [],
+  stripAttachmentSummary: (content: string) => content
 }))
 
 vi.mock('../../features/skills/skillsClient', () => ({
@@ -171,10 +172,14 @@ type ChatComposerProps = ComponentProps<typeof ChatComposer>
 
 function TestComposer({
   initialDraft = createComposerDraft({ modelId: 'model-1', projectId: 'project-a' }),
+  isGenerating = false,
+  onGuideQueuedMessage,
   skillCatalogRefreshToken = 0,
   showProjectSelector = false
 }: {
   initialDraft?: ChatComposerProps['draft']
+  isGenerating?: boolean
+  onGuideQueuedMessage?: ChatComposerProps['onGuideQueuedMessage']
   skillCatalogRefreshToken?: number
   showProjectSelector?: boolean
 }) {
@@ -182,12 +187,15 @@ function TestComposer({
   return (
     <div style={{ margin: 120, width: 620 }}>
       <ChatComposer
+        canGuideQueuedMessages={isGenerating}
         draft={draft}
+        isGenerating={isGenerating}
         onDraftChange={(nextDraft) => {
           draftChangeSpy(nextDraft)
           setDraft(nextDraft)
         }}
         onSubmitMessage={submitSpy}
+        onGuideQueuedMessage={onGuideQueuedMessage}
         skillCatalogRefreshToken={skillCatalogRefreshToken}
         showProjectSelector={showProjectSelector}
       />
@@ -315,6 +323,114 @@ describe('Skill selection invariants', () => {
       { id: 'workspace:project:submitted-b', revision: 'revision-b' },
       { id: 'workspace:project:new-draft', revision: 'revision-new' }
     ])
+  })
+})
+
+describe('running composer guidance queue', () => {
+  const queuedMessage = (id: string, content: string, createdAt: number) => ({
+    id,
+    clientMessageId: `client-${id}`,
+    content,
+    attachments: [],
+    modelId: 'model-1',
+    permissionMode: 'default' as const,
+    projectId: 'project-a',
+    skills: [],
+    status: 'pending' as const,
+    createdAt
+  })
+
+  it('allows guiding any selected row without consuming rows above it', async () => {
+    const guideSpy = vi.fn()
+    const screen = await render(
+      <TestComposer
+        initialDraft={createComposerDraft({
+          modelId: 'model-1',
+          projectId: 'project-a',
+          queuedMessages: [
+            queuedMessage('one', '123', 1),
+            queuedMessage('two', '345', 2),
+            queuedMessage('three', '890', 3)
+          ]
+        })}
+        isGenerating
+        onGuideQueuedMessage={guideSpy}
+      />
+    )
+
+    await screen.getByRole('button', { name: 'chat.guideCurrentRun' }).nth(2).click()
+
+    expect(guideSpy).toHaveBeenCalledWith(expect.objectContaining({ id: 'three', content: '890' }))
+    await expect.element(screen.getByText('123')).toBeVisible()
+    await expect.element(screen.getByText('345')).toBeVisible()
+  })
+
+  it('moves an edited row back to the composer and overwrites existing input', async () => {
+    const screen = await render(
+      <TestComposer
+        initialDraft={createComposerDraft({
+          message: 'replace me',
+          modelId: 'model-1',
+          projectId: 'project-a',
+          queuedMessages: [queuedMessage('one', 'queued content', 1)]
+        })}
+        isGenerating
+      />
+    )
+
+    await screen.getByRole('button', { name: 'chat.queuedMessageMenu' }).click()
+    await screen.getByRole('menuitem', { name: 'chat.editQueuedMessage' }).click()
+
+    await expect
+      .element(screen.getByRole('textbox', { name: 'chat.inputAria' }))
+      .toHaveValue('queued content')
+    expect(draftChangeSpy.mock.calls.at(-1)?.[0]).toEqual(
+      expect.objectContaining({
+        message: 'queued content',
+        queuedMessages: []
+      })
+    )
+  })
+
+  it('queues composer input instead of opening a new turn while a run is active', async () => {
+    const screen = await render(<TestComposer isGenerating />)
+    const input = screen.getByRole('textbox', { name: 'chat.inputAria' })
+
+    await input.fill('wait for the current run')
+    await input.click()
+    await userEvent.keyboard('{Enter}')
+
+    expect(submitSpy).not.toHaveBeenCalled()
+    await expect.element(input).toHaveValue('')
+    await expect.element(screen.getByText('wait for the current run')).toBeVisible()
+    const latestDraft = draftChangeSpy.mock.calls.at(-1)?.[0] as ChatComposerProps['draft']
+    expect(latestDraft.queuedMessages).toEqual([
+      expect.objectContaining({
+        content: 'wait for the current run',
+        status: 'pending'
+      })
+    ])
+  })
+
+  it('reorders queued rows from the hover handle with the keyboard', async () => {
+    const screen = await render(
+      <TestComposer
+        initialDraft={createComposerDraft({
+          modelId: 'model-1',
+          projectId: 'project-a',
+          queuedMessages: [queuedMessage('one', '123', 1), queuedMessage('two', '345', 2)]
+        })}
+        isGenerating
+      />
+    )
+
+    const firstHandle = screen.getByRole('button', { name: 'chat.reorderQueuedMessage' }).first()
+    ;(firstHandle.element() as HTMLButtonElement).focus()
+    await userEvent.keyboard('{ArrowDown}')
+
+    expect(
+      draftChangeSpy.mock.calls.at(-1)?.[0].queuedMessages.map((message) => message.id)
+    ).toEqual(['two', 'one'])
   })
 })
 

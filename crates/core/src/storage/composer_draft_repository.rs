@@ -4,7 +4,8 @@ use rusqlite::{params, Connection};
 pub fn list_composer_drafts(connection: &Connection) -> rusqlite::Result<Vec<ComposerDraftRecord>> {
     let mut statement = connection.prepare(
         "
-        SELECT scope_id, message, permission_mode, permission_mode_version, model_id, project_id, attachments_json, skills_json, updated_at
+        SELECT scope_id, message, permission_mode, permission_mode_version, model_id, project_id,
+               attachments_json, skills_json, queued_messages_json, updated_at
         FROM composer_drafts
         ORDER BY updated_at DESC
         ",
@@ -21,7 +22,8 @@ pub fn list_composer_drafts(connection: &Connection) -> rusqlite::Result<Vec<Com
                 project_id: row.get(5)?,
                 attachments_json: row.get(6)?,
                 skills_json: row.get(7)?,
-                updated_at: row.get(8)?,
+                queued_messages_json: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         })?
         .collect();
@@ -44,9 +46,10 @@ pub fn save_composer_draft(
             project_id,
             attachments_json,
             skills_json,
+            queued_messages_json,
             updated_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ON CONFLICT(scope_id) DO UPDATE SET
             message = excluded.message,
             permission_mode = excluded.permission_mode,
@@ -55,6 +58,7 @@ pub fn save_composer_draft(
             project_id = excluded.project_id,
             attachments_json = excluded.attachments_json,
             skills_json = excluded.skills_json,
+            queued_messages_json = excluded.queued_messages_json,
             updated_at = excluded.updated_at
         ",
         params![
@@ -66,6 +70,7 @@ pub fn save_composer_draft(
             &draft.project_id,
             &draft.attachments_json,
             &draft.skills_json,
+            &draft.queued_messages_json,
             draft.updated_at
         ],
     )?;

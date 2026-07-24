@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { X } from 'lucide-react'
 import type {
   AgentContextWindowSnapshot,
   AgentProposedAction,
@@ -12,9 +13,12 @@ import type {
   ChatAgentRunView,
   ChatComposerDraft,
   ChatConversation,
+  ChatQueuedMessage,
   ChatSubmitOptions
 } from './chatTypes'
+import { stripAttachmentSummary } from './chatAttachments'
 import { getAgentActionApprovalStatus } from '../../app/agentActionUtils'
+import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import './ChatConversationPage.css'
 
 interface AgentApprovalOptions {
@@ -37,6 +41,7 @@ interface ChatConversationPageProps {
   ) => void
   onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void
   onComposerDraftChange: (draft: ChatComposerDraft) => void
+  onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
   onScrollPositionChange?: (conversationId: string, scrollTop: number) => void
@@ -135,6 +140,7 @@ export function ChatConversationPage({
   onApproveAgentAction,
   onCancelAgentAction,
   onComposerDraftChange,
+  onGuideQueuedMessage,
   onEditLastUserMessage,
   onContinueInNewTask,
   onScrollPositionChange,
@@ -147,14 +153,22 @@ export function ChatConversationPage({
   showTokenUsageDetails,
   scrollTargetMessageId
 }: ChatConversationPageProps) {
+  const { t } = useFrontendConfig()
   const messagesRef = useRef<HTMLDivElement>(null)
   const handledScrollTargetRef = useRef<string | null>(null)
+  const [sideChatPlaceholder, setSideChatPlaceholder] = useState<ChatQueuedMessage | null>(null)
   const isGenerating = conversation.messages.some(
     (message) => message.role === 'assistant' && message.status === 'pending'
   )
   const lastAssistantMessageId = [...conversation.messages]
     .reverse()
     .find((message) => message.role === 'assistant')?.id
+  const activeAssistantRun = [...conversation.messages]
+    .reverse()
+    .find((message) => message.role === 'assistant' && message.status === 'pending')?.agentRun
+  const canGuideQueuedMessages = Boolean(
+    activeAssistantRun?.runId && activeAssistantRun.status === 'running'
+  )
   const pendingApprovalTarget = useMemo(
     () => getPendingApprovalTarget(conversation),
     [conversation]
@@ -233,6 +247,10 @@ export function ChatConversationPage({
     return rememberCurrentScrollPosition
   }, [rememberCurrentScrollPosition])
 
+  useEffect(() => {
+    setSideChatPlaceholder(null)
+  }, [conversation.id])
+
   return (
     <section
       className="chat-conversation-page"
@@ -283,12 +301,15 @@ export function ChatConversationPage({
           />
         ) : (
           <ChatComposer
+            canGuideQueuedMessages={canGuideQueuedMessages}
             contextWindowIndicatorEnabled={contextWindowIndicatorEnabled}
             contextWindowSnapshot={contextWindowSnapshot}
             defaultProjectId={conversation.projectId}
             draft={composerDraft}
             isGenerating={isGenerating}
             onDraftChange={onComposerDraftChange}
+            onGuideQueuedMessage={onGuideQueuedMessage}
+            onOpenQueuedMessageInSideChat={setSideChatPlaceholder}
             onStopGenerating={onStopGenerating}
             onSubmitMessage={onSubmitMessage}
             permissionModeAvailability={permissionModeAvailability}
@@ -297,6 +318,33 @@ export function ChatConversationPage({
           />
         )}
       </div>
+      {sideChatPlaceholder && (
+        <aside
+          className="guidance-side-chat-placeholder"
+          aria-label={t('chat.sideChatPlaceholderTitle')}
+        >
+          <header>
+            <strong>{t('chat.sideChatPlaceholderTitle')}</strong>
+            <button
+              aria-label={t('chat.closeSideChatPlaceholder')}
+              onClick={() => setSideChatPlaceholder(null)}
+              type="button"
+            >
+              <X aria-hidden="true" />
+            </button>
+          </header>
+          <div className="guidance-side-chat-placeholder__message">
+            {stripAttachmentSummary(sideChatPlaceholder.content, sideChatPlaceholder.attachments) ||
+              t('chat.attachmentOnlyMessage')}
+          </div>
+          {sideChatPlaceholder.attachments.length > 0 && (
+            <p>
+              {sideChatPlaceholder.attachments.map((attachment) => attachment.name).join(' · ')}
+            </p>
+          )}
+          <span>{t('chat.sideChatPlaceholderDescription')}</span>
+        </aside>
+      )}
     </section>
   )
 }
