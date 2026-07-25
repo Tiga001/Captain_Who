@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import type {
   AgentContextWindowSnapshot,
@@ -13,6 +13,7 @@ import type {
   ChatAgentRunView,
   ChatComposerDraft,
   ChatConversation,
+  ChatMessage,
   ChatQueuedMessage,
   ChatSubmitOptions
 } from './chatTypes'
@@ -41,6 +42,7 @@ interface ChatConversationPageProps {
   ) => void
   onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void
   onComposerDraftChange: (draft: ChatComposerDraft) => void
+  onComposerDraftMessageChange?: (draft: ChatComposerDraft) => void
   onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
@@ -129,6 +131,67 @@ function getLatestAgentTodo(conversation: ChatConversation): LatestAgentTodo | n
   return null
 }
 
+interface ChatMessageListProps {
+  conversation: ChatConversation
+  editSelectedModelAvailable: boolean
+  editSelectedModelSupportsImage: boolean
+  editableLastUserMessageId: string | null
+  lastAssistantMessageId?: string
+  onApproveAgentAction?: (
+    messageId: string,
+    action: AgentProposedAction,
+    options?: AgentApprovalOptions
+  ) => void
+  onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void
+  onContinueInNewTask?: (messageId: string) => void | Promise<void>
+  onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
+  onMessageUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
+  onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
+  onReviewLastTurn?: () => void
+  showTokenUsageDetails: boolean
+}
+
+const ChatMessageList = memo(function ChatMessageList({
+  conversation,
+  editSelectedModelAvailable,
+  editSelectedModelSupportsImage,
+  editableLastUserMessageId,
+  lastAssistantMessageId,
+  onApproveAgentAction,
+  onCancelAgentAction,
+  onContinueInNewTask,
+  onEditLastUserMessage,
+  onMessageUiStateChange,
+  onRejectAgentAction,
+  onReviewLastTurn,
+  showTokenUsageDetails
+}: ChatMessageListProps) {
+  return (
+    <>
+      {conversation.messages.map((message) => (
+        <ChatMessageItem
+          isLastAssistantMessage={message.id === lastAssistantMessageId}
+          key={message.id}
+          message={message}
+          onApprove={onApproveAgentAction}
+          onCancel={onCancelAgentAction}
+          editSelectedModelAvailable={editSelectedModelAvailable}
+          editSelectedModelSupportsImage={editSelectedModelSupportsImage}
+          onEditSubmit={
+            message.id === editableLastUserMessageId ? onEditLastUserMessage : undefined
+          }
+          onContinueInNewTask={isAssistantReplyComplete(message) ? onContinueInNewTask : undefined}
+          onReject={onRejectAgentAction}
+          onReviewLastTurn={onReviewLastTurn}
+          onUiStateChange={onMessageUiStateChange}
+          projectId={conversation.projectId}
+          showTokenUsageDetails={showTokenUsageDetails}
+        />
+      ))}
+    </>
+  )
+})
+
 export function ChatConversationPage({
   contextWindowIndicatorEnabled = false,
   contextWindowSnapshot,
@@ -141,6 +204,7 @@ export function ChatConversationPage({
   onApproveAgentAction,
   onCancelAgentAction,
   onComposerDraftChange,
+  onComposerDraftMessageChange,
   onGuideQueuedMessage,
   onEditLastUserMessage,
   onContinueInNewTask,
@@ -264,28 +328,21 @@ export function ChatConversationPage({
         onScroll={rememberCurrentScrollPosition}
         ref={messagesRef}
       >
-        {conversation.messages.map((message) => (
-          <ChatMessageItem
-            isLastAssistantMessage={message.id === lastAssistantMessageId}
-            key={message.id}
-            message={message}
-            onApprove={onApproveAgentAction}
-            onCancel={onCancelAgentAction}
-            editSelectedModelAvailable={editSelectedModelAvailable}
-            editSelectedModelSupportsImage={editSelectedModelSupportsImage}
-            onEditSubmit={
-              message.id === editableLastUserMessageId ? onEditLastUserMessage : undefined
-            }
-            onContinueInNewTask={
-              isAssistantReplyComplete(message) ? onContinueInNewTask : undefined
-            }
-            onReject={onRejectAgentAction}
-            onReviewLastTurn={onReviewLastTurn}
-            onUiStateChange={onMessageUiStateChange}
-            projectId={conversation.projectId}
-            showTokenUsageDetails={showTokenUsageDetails}
-          />
-        ))}
+        <ChatMessageList
+          conversation={conversation}
+          editSelectedModelAvailable={editSelectedModelAvailable}
+          editSelectedModelSupportsImage={editSelectedModelSupportsImage}
+          editableLastUserMessageId={editableLastUserMessageId}
+          lastAssistantMessageId={lastAssistantMessageId}
+          onApproveAgentAction={onApproveAgentAction}
+          onCancelAgentAction={onCancelAgentAction}
+          onContinueInNewTask={onContinueInNewTask}
+          onEditLastUserMessage={onEditLastUserMessage}
+          onMessageUiStateChange={onMessageUiStateChange}
+          onRejectAgentAction={onRejectAgentAction}
+          onReviewLastTurn={onReviewLastTurn}
+          showTokenUsageDetails={showTokenUsageDetails}
+        />
       </div>
 
       <div className="chat-conversation-page__composer">
@@ -311,6 +368,7 @@ export function ChatConversationPage({
             draft={composerDraft}
             isGenerating={isGenerating}
             onDraftChange={onComposerDraftChange}
+            onDraftMessageChange={onComposerDraftMessageChange}
             onGuideQueuedMessage={onGuideQueuedMessage}
             onOpenQueuedMessageInSideChat={setSideChatPlaceholder}
             onStopGenerating={onStopGenerating}

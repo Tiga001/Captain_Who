@@ -11,6 +11,7 @@ interface NewConversationPageProps {
   draft: ChatComposerDraft
   defaultProjectId?: string | null
   onDraftChange: (draft: ChatComposerDraft) => void
+  onDraftMessageChange?: (draft: ChatComposerDraft) => void
   onSubmitMessage: (message: string, options: ChatSubmitOptions) => void
   permissionModeAvailability: {
     custom: boolean
@@ -25,6 +26,7 @@ export function NewConversationPage({
   defaultProjectId = null,
   draft,
   onDraftChange,
+  onDraftMessageChange,
   onSubmitMessage,
   permissionModeAvailability,
   skillCatalogRefreshToken
@@ -47,6 +49,7 @@ export function NewConversationPage({
           defaultProjectId={defaultProjectId}
           draft={draft}
           onDraftChange={onDraftChange}
+          onDraftMessageChange={onDraftMessageChange}
           permissionModeAvailability={permissionModeAvailability}
           resetKey={`new:${defaultProjectId ?? 'root'}`}
           skillCatalogRefreshToken={skillCatalogRefreshToken}

@@ -627,6 +627,14 @@ export function AppShell() {
     [setDraftsWithRef]
   )
 
+  const persistDraftMessageOnly = useCallback((scopeId: string, draft: ChatComposerDraft) => {
+    draftsRef.current = {
+      ...draftsRef.current,
+      [scopeId]: draft
+    }
+    void saveComposerDraft(scopeId, draft)
+  }, [])
+
   const mutateDraft = useCallback(
     (scopeId: string, updater: (draft: ChatComposerDraft) => ChatComposerDraft) => {
       const currentDraft = draftsRef.current[scopeId] ?? createComposerDraft()
@@ -2448,6 +2456,9 @@ export function AppShell() {
                 onApproveAgentAction={handleApproveAgentAction}
                 onCancelAgentAction={handleCancelAgentAction}
                 onComposerDraftChange={(draft) => updateDraft(activeConversation.id, draft)}
+                onComposerDraftMessageChange={(draft) =>
+                  persistDraftMessageOnly(activeConversation.id, draft)
+                }
                 onGuideQueuedMessage={guideQueuedMessage}
                 onEditLastUserMessage={submitEditedLastUserMessage}
                 onContinueInNewTask={(messageId) =>
@@ -2491,6 +2502,9 @@ export function AppShell() {
               permissionModeAvailability={permissionModeAvailability}
               skillCatalogRefreshToken={activeSkillCatalogRefreshToken}
               onDraftChange={(draft) => updateDraft(NEW_CONVERSATION_DRAFT_ID, draft)}
+              onDraftMessageChange={(draft) =>
+                persistDraftMessageOnly(NEW_CONVERSATION_DRAFT_ID, draft)
+              }
               onSubmitMessage={submitMessage}
             />
           )}

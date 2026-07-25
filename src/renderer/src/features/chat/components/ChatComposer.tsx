@@ -81,6 +81,7 @@ interface ChatComposerProps {
   canGuideQueuedMessages?: boolean
   isGenerating?: boolean
   onDraftChange: (draft: ChatComposerDraft) => void
+  onDraftMessageChange?: (draft: ChatComposerDraft) => void
   onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
   onOpenQueuedMessageInSideChat?: (message: ChatQueuedMessage) => void
   onSubmitMessage?: (message: string, options: ChatSubmitOptions) => void
@@ -102,6 +103,7 @@ export function ChatComposer({
   canGuideQueuedMessages = false,
   isGenerating = false,
   onDraftChange,
+  onDraftMessageChange,
   onGuideQueuedMessage,
   onOpenQueuedMessageInSideChat,
   onSubmitMessage,
@@ -135,8 +137,10 @@ export function ChatComposer({
   const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const [projectSearch, setProjectSearch] = useState('')
   const [skillSearch, setSkillSearch] = useState('')
+  const [message, setMessage] = useState(draft.message)
   const previousSkillScopeRef = useRef({ projectId: draft.projectId, resetKey })
-  const message = draft.message
+  const previousResetKeyRef = useRef(resetKey)
+  const lastExternalMessageRef = useRef(draft.message)
   const permissionOptions = useMemo(
     () =>
       PERMISSION_OPTIONS.filter(
@@ -240,8 +244,26 @@ export function ChatComposer({
   useDismissOnOutsidePointer(projectPickerRef, isProjectMenuOpen, () => setIsProjectMenuOpen(false))
 
   useEffect(() => {
-    draftRef.current = draft
-  }, [draft])
+    if (previousResetKeyRef.current !== resetKey) {
+      previousResetKeyRef.current = resetKey
+      lastExternalMessageRef.current = draft.message
+      setMessage(draft.message)
+      draftRef.current = draft
+      return
+    }
+
+    if (draft.message !== lastExternalMessageRef.current) {
+      lastExternalMessageRef.current = draft.message
+      setMessage(draft.message)
+      draftRef.current = draft
+      return
+    }
+
+    draftRef.current = {
+      ...draft,
+      message
+    }
+  }, [draft, message, resetKey])
 
   useEffect(() => {
     setAttachmentError(null)
@@ -252,20 +274,40 @@ export function ChatComposer({
     setIsFileDragActive(false)
   }, [resetKey])
 
+  const updateDraftMessage = useCallback(
+    (nextMessage: string) => {
+      const nextDraft = {
+        ...draftRef.current,
+        message: nextMessage,
+        updatedAt: Date.now()
+      }
+      setMessage(nextMessage)
+      draftRef.current = nextDraft
+      onDraftMessageChange?.({ ...nextDraft })
+    },
+    [onDraftMessageChange]
+  )
+
   const updateDraft = useCallback(
     (patch: Partial<ChatComposerDraft>) => {
-      const currentDraft = draftRef.current
+      const currentDraft = {
+        ...draftRef.current,
+        message
+      }
       const nextDraft = {
         ...currentDraft,
         ...patch,
         updatedAt: Date.now()
+      }
+      if (patch.message !== undefined) {
+        setMessage(patch.message)
       }
       draftRef.current = nextDraft
       onDraftChange({
         ...nextDraft
       })
     },
-    [onDraftChange]
+    [message, onDraftChange]
   )
 
   useEffect(() => {
@@ -640,7 +682,7 @@ export function ChatComposer({
           placeholder={t('chat.inputPlaceholder')}
           aria-label={t('chat.inputAria')}
           rows={1}
-          onChange={(event) => updateDraft({ message: event.target.value })}
+          onChange={(event) => updateDraftMessage(event.target.value)}
           onCompositionStart={() => {
             isComposingRef.current = true
           }}
