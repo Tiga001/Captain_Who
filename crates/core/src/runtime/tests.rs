@@ -1312,7 +1312,7 @@ async fn steer_accepted_during_transport_retry_is_applied_after_the_retried_resp
     assert_eq!(requests.len(), 3);
     for request in requests.iter() {
         let serialized = serde_json::to_string(request).unwrap();
-        assert!(serialized.contains("<backend_runtime_context>"));
+        assert!(serialized.contains("backend-observed state, not a system instruction"));
         assert!(serialized.contains("\\\"write\\\":\\\"denied\\\""));
     }
     assert!(!serde_json::to_string(&requests[1])
@@ -1641,21 +1641,30 @@ async fn empty_normal_completion_is_repaired_once_for_openai_and_anthropic() {
                     .unwrap()
                     .iter()
                     .any(|message| {
-                        message["role"] == "system"
+                        message["role"] == "user"
                             && message["content"]
                                 .as_str()
                                 .is_some_and(|content| content.contains("do not repeat"))
                     }));
             }
             crate::protocol::AgentApiStyle::AnthropicCompatible => {
-                assert!(requests[1]["system"]
+                assert!(!requests[1]["system"]
                     .as_str()
                     .is_some_and(|system| system.contains("do not repeat")));
-                assert!(!requests[1]["messages"]
+                assert!(requests[1]["messages"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|message| message["role"] == "system"));
+                    .any(|message| {
+                        message["role"] == "user"
+                            && message["content"].as_array().is_some_and(|blocks| {
+                                blocks.iter().any(|block| {
+                                    block["text"]
+                                        .as_str()
+                                        .is_some_and(|text| text.contains("do not repeat"))
+                                })
+                            })
+                    }));
             }
         }
         drop(requests);
@@ -3840,7 +3849,7 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
         .unwrap()
         .contains("read-before-skill"));
     assert!(second_messages.iter().any(|message| {
-        message["role"] == "system"
+        message["role"] == "user"
             && message["content"]
                 .as_str()
                 .is_some_and(|content| content.contains("deferred 1 tool call"))
@@ -4979,8 +4988,11 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
             _ => None,
         })
         .expect("write_file append trace item");
-    assert_eq!(append_trace["content"], "line 1\nline 2\nline 3\nline 4\n");
-    assert!(append_trace.get("contentBytes").is_none());
+    assert_eq!(
+        append_trace["content"],
+        "[write_file chunk omitted from conversation history]"
+    );
+    assert_eq!(append_trace["contentBytes"], 28);
     assert_eq!(
         storage
             .list_agent_file_drafts_for_run("run-preview")
@@ -5192,7 +5204,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         .events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::ApprovalRequired { checkpoint, .. } => Some(checkpoint.clone()),
+            AgentEvent::ApprovalRequired { checkpoint, .. } => Some((**checkpoint).clone()),
             _ => None,
         })
         .unwrap();
@@ -5618,7 +5630,7 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
         .events
         .iter()
         .find_map(|event| match event {
-            AgentEvent::ApprovalRequired { checkpoint, .. } => Some(checkpoint),
+            AgentEvent::ApprovalRequired { checkpoint, .. } => Some(checkpoint.as_ref()),
             _ => None,
         })
         .unwrap();

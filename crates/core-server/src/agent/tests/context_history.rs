@@ -72,6 +72,16 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
     assert!(first.agent_input.world_state_records[0]
         .effective_before_message_id
         .is_none());
+    let first_projection = first_snapshot
+        .model_projection(mycopilot_core::WorldStateLifetime::Conversation)
+        .unwrap()
+        .render_sanitized_text();
+    assert!(first_projection.contains("\"id\":\"environment\""));
+    assert!(first_projection.contains("\"os\""));
+    assert!(first_projection.contains("\"cwd\""));
+    assert!(first_projection.contains("\"network\""));
+    assert!(first_projection.contains("\"runtimes\""));
+    assert!(first_projection.contains("\"executors\""));
 
     let second = prepare_conversation_turn(
         &storage,

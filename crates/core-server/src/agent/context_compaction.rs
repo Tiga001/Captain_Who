@@ -1,5 +1,25 @@
 use super::*;
 
+pub(super) struct RebuildRunningContextAfterCompactionRequest<'a> {
+    agent_input: &'a AgentChatInput,
+    run_id: &'a str,
+    conversation_id: &'a str,
+    assistant_message_id: &'a str,
+    visible_trace_item_count: usize,
+    notifications: &'a CoreServerNotificationSender,
+    tool_projection: Option<&'a AgentContextWindowToolProjection>,
+}
+
+pub(super) struct UpdateRunningConversationContextStateRequest<'a> {
+    agent_input: &'a AgentChatInput,
+    run_id: &'a str,
+    conversation_id: &'a str,
+    assistant_message_id: &'a str,
+    trace: &'a ConversationTurnTrace,
+    configuration_revision: &'a str,
+    tool_projection: Option<&'a AgentContextWindowToolProjection>,
+}
+
 impl AgentService {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn trace_observer(
@@ -168,13 +188,15 @@ impl AgentService {
                         ))),
                         None => service
                             .rebuild_running_context_after_compaction(
-                                &agent_input,
-                                &run_id,
-                                &conversation_id,
-                                &assistant_message_id,
-                                request.visible_trace_item_count,
-                                &notifications,
-                                tool_set_snapshot.projection().as_ref(),
+                                RebuildRunningContextAfterCompactionRequest {
+                                    agent_input: &agent_input,
+                                    run_id: &run_id,
+                                    conversation_id: &conversation_id,
+                                    assistant_message_id: &assistant_message_id,
+                                    visible_trace_item_count: request.visible_trace_item_count,
+                                    notifications: &notifications,
+                                    tool_projection: tool_set_snapshot.projection().as_ref(),
+                                },
                             )
                             .map(|baseline| {
                                 AgentContextCompactionPrepareOutcome::Refresh(Box::new(baseline))
@@ -233,13 +255,15 @@ impl AgentService {
                         .map_err(AgentError::new)?;
                     service.invalidate_conversation_context_state(&conversation_id);
                     let baseline = service.rebuild_running_context_after_compaction(
-                        &agent_input,
-                        &run_id,
-                        &conversation_id,
-                        &assistant_message_id,
-                        request.visible_trace_item_count,
-                        &notifications,
-                        tool_set_snapshot.projection().as_ref(),
+                        RebuildRunningContextAfterCompactionRequest {
+                            agent_input: &agent_input,
+                            run_id: &run_id,
+                            conversation_id: &conversation_id,
+                            assistant_message_id: &assistant_message_id,
+                            visible_trace_item_count: request.visible_trace_item_count,
+                            notifications: &notifications,
+                            tool_projection: tool_set_snapshot.projection().as_ref(),
+                        },
                     );
                     match (committed, baseline) {
                         (Some(summary), Ok(baseline)) => {
@@ -287,14 +311,17 @@ impl AgentService {
 
     pub(super) fn rebuild_running_context_after_compaction(
         &self,
-        agent_input: &AgentChatInput,
-        run_id: &str,
-        conversation_id: &str,
-        assistant_message_id: &str,
-        visible_trace_item_count: usize,
-        notifications: &CoreServerNotificationSender,
-        tool_projection: Option<&AgentContextWindowToolProjection>,
+        request: RebuildRunningContextAfterCompactionRequest<'_>,
     ) -> Result<AgentContextBaseline, String> {
+        let RebuildRunningContextAfterCompactionRequest {
+            agent_input,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            visible_trace_item_count,
+            notifications,
+            tool_projection,
+        } = request;
         self.invalidate_conversation_context_state(conversation_id);
         let conversation = self
             .storage
@@ -454,13 +481,15 @@ impl AgentService {
                 now_ms(),
             )?;
         let update = self.update_running_conversation_context_state(
-            agent_input,
-            run_id,
-            conversation_id,
-            assistant_message_id,
-            &context_trace,
-            configuration_revision,
-            tool_projection,
+            UpdateRunningConversationContextStateRequest {
+                agent_input,
+                run_id,
+                conversation_id,
+                assistant_message_id,
+                trace: &context_trace,
+                configuration_revision,
+                tool_projection,
+            },
         )?;
         if changed && model_context_changed {
             self.emit_derived_context_window_snapshot(
@@ -475,14 +504,17 @@ impl AgentService {
 
     pub(super) fn update_running_conversation_context_state(
         &self,
-        agent_input: &AgentChatInput,
-        run_id: &str,
-        conversation_id: &str,
-        assistant_message_id: &str,
-        trace: &ConversationTurnTrace,
-        configuration_revision: &str,
-        tool_projection: Option<&AgentContextWindowToolProjection>,
+        request: UpdateRunningConversationContextStateRequest<'_>,
     ) -> Result<ConversationContextStateUpdate, String> {
+        let UpdateRunningConversationContextStateRequest {
+            agent_input,
+            run_id,
+            conversation_id,
+            assistant_message_id,
+            trace,
+            configuration_revision,
+            tool_projection,
+        } = request;
         let access = self.next_conversation_context_state_access();
         let needs_rebuild;
         {
@@ -747,13 +779,15 @@ impl AgentService {
             .unwrap_or_else(|error| error.into_inner())
             .insert(run_id.to_string(), snapshot);
         match self.update_running_conversation_context_state(
-            &record.agent_input,
-            run_id,
-            conversation_id,
-            assistant_message_id,
-            &trace,
-            &configuration_revision,
-            Some(&tool_projection),
+            UpdateRunningConversationContextStateRequest {
+                agent_input: &record.agent_input,
+                run_id,
+                conversation_id,
+                assistant_message_id,
+                trace: &trace,
+                configuration_revision: &configuration_revision,
+                tool_projection: Some(&tool_projection),
+            },
         ) {
             Ok(update) if trace_changed => self.emit_derived_context_window_snapshot(
                 notifications,
@@ -853,13 +887,15 @@ impl AgentService {
                             return Ok(AgentPendingActionSettlementInspection::CommittedAtBoundary);
                         };
                         if let Err(error) = self.update_running_conversation_context_state(
-                            &record.agent_input,
-                            run_id,
-                            conversation_id,
-                            assistant_message_id,
-                            &trace,
-                            &configuration_revision,
-                            Some(&tool_projection),
+                            UpdateRunningConversationContextStateRequest {
+                                agent_input: &record.agent_input,
+                                run_id,
+                                conversation_id,
+                                assistant_message_id,
+                                trace: &trace,
+                                configuration_revision: &configuration_revision,
+                                tool_projection: Some(&tool_projection),
+                            },
                         ) {
                             self.invalidate_conversation_context_state(conversation_id);
                             eprintln!(

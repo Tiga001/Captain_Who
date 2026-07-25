@@ -2923,7 +2923,7 @@ fn startup_reconciliation_repairs_legacy_manual_command_target_and_trace_from_te
             ..
         }) if call_id == "legacy-recovered-command"
             && tool == "run_command"
-            && observation["stdout"] == "created workbook"
+            && observation["stdoutTail"] == "created workbook"
     ));
 }
 

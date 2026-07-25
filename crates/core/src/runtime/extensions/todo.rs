@@ -137,10 +137,12 @@ impl RuntimeExtension for TodoExtension {
                 })
             })?;
 
-        Ok(vec![RuntimeEffect::EmitEvent(AgentEvent::TodoUpdated {
-            run_id: self.run_id.clone(),
-            todo,
-        })])
+        Ok(vec![RuntimeEffect::EmitEvent(Box::new(
+            AgentEvent::TodoUpdated {
+                run_id: self.run_id.clone(),
+                todo,
+            },
+        ))])
     }
 
     fn snapshot_state(&self) -> AgentResult<Value> {
@@ -461,8 +463,8 @@ mod tests {
             .unwrap();
         assert!(matches!(
             effects.as_slice(),
-            [RuntimeEffect::EmitEvent(AgentEvent::TodoUpdated { run_id, todo })]
-                if run_id == "run-1" && todo.revision == 1
+            [RuntimeEffect::EmitEvent(event)]
+                if matches!(event.as_ref(), AgentEvent::TodoUpdated { run_id, todo } if run_id == "run-1" && todo.revision == 1)
         ));
     }
 

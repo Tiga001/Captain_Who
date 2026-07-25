@@ -2054,7 +2054,7 @@ pub enum AgentEvent {
         run_id: String,
         action: Box<AgentProposedAction>,
         #[serde(skip)]
-        checkpoint: AgentRunCheckpoint,
+        checkpoint: Box<AgentRunCheckpoint>,
     },
     Diff {
         run_id: String,

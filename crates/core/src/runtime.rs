@@ -1387,7 +1387,7 @@ impl AgentRuntime {
                         event_stream.emit(AgentEvent::ApprovalRequired {
                             run_id: run_id.clone(),
                             action: Box::new(action.clone()),
-                            checkpoint,
+                            checkpoint: Box::new(checkpoint),
                         });
                         event_stream.emit(state_event(
                             &run_id,
@@ -1581,9 +1581,9 @@ impl AgentRuntime {
                     // entered the frame, otherwise provider tool-call protocol would be invalid.
                     for effect in extension_effects {
                         match effect {
-                            RuntimeEffect::EmitEvent(event) => event_stream.emit(event),
+                            RuntimeEffect::EmitEvent(event) => event_stream.emit(*event),
                             RuntimeEffect::AppendRetainedContext(item) => {
-                                active_context.push(item)
+                                active_context.push(*item)
                             }
                         }
                     }

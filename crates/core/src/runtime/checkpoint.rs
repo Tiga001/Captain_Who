@@ -673,12 +673,8 @@ mod tests {
         checkpoint.model_capabilities = ModelCapabilities { image_input: true };
         checkpoint.run_world_state = test_run_world_state_for(true);
 
-        let restored = restore_run_checkpoint(
-            checkpoint,
-            "checkpoint-validation-run",
-            &continuation,
-        )
-        .unwrap();
+        let restored =
+            restore_run_checkpoint(checkpoint, "checkpoint-validation-run", &continuation).unwrap();
 
         assert_eq!(restored.run_context, Some(frozen_context));
         assert_eq!(

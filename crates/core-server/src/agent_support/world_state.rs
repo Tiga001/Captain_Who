@@ -9,16 +9,30 @@ use mycopilot_core::{
 ///
 /// The authoritative record may contain host-only values, but only each section's explicit
 /// `model_projection` can cross the context-rendering boundary in `mycopilot-core`.
+pub(crate) struct EnsureConversationWorldStateRequest<'a> {
+    pub(crate) storage: &'a StorageService,
+    pub(crate) conversation_id: &'a str,
+    pub(crate) effective_before_message_id: &'a str,
+    pub(crate) context: Option<&'a AgentRunContext>,
+    pub(crate) prompt_preferences: Option<&'a AgentPromptPreferences>,
+    pub(crate) model_capabilities: ModelCapabilities,
+    pub(crate) active_summary: Option<&'a mycopilot_core::ContextCompactionSummary>,
+    pub(crate) created_at: i64,
+}
+
 pub(crate) fn ensure_conversation_world_state(
-    storage: &StorageService,
-    conversation_id: &str,
-    effective_before_message_id: &str,
-    context: Option<&AgentRunContext>,
-    prompt_preferences: Option<&AgentPromptPreferences>,
-    model_capabilities: ModelCapabilities,
-    active_summary: Option<&mycopilot_core::ContextCompactionSummary>,
-    created_at: i64,
+    request: EnsureConversationWorldStateRequest<'_>,
 ) -> Result<Vec<AnchoredWorldStateRecord>, String> {
+    let EnsureConversationWorldStateRequest {
+        storage,
+        conversation_id,
+        effective_before_message_id,
+        context,
+        prompt_preferences,
+        model_capabilities,
+        active_summary,
+        created_at,
+    } = request;
     let active_summary_id = active_summary.map(|summary| summary.id.as_str());
     let desired_sections =
         conversation_world_state_sections(context, prompt_preferences, model_capabilities)?;
@@ -214,6 +228,15 @@ fn conversation_world_state_sections(
     )
     .map_err(|error| format!("无法构造交互配置 World State：{error}"))?;
 
+    let environment_state = environment_projection(context, permissions, workspace_available);
+    let environment_section = WorldStateSectionEnvelope::model_visible(
+        WorldStateSectionId::Environment,
+        WorldStateLifetime::Conversation,
+        environment_state.clone(),
+        environment_state,
+    )
+    .map_err(|error| format!("无法构造 environment World State：{error}"))?;
+
     // Model capabilities are execution authority, not prompting material. Keeping the section
     // HostOnly lets tools consult one coherent state model without teaching the model to assume a
     // capability that the runtime will still independently enforce.
@@ -230,8 +253,84 @@ fn conversation_world_state_sections(
         permission_section,
         workspace_section,
         interaction_section,
+        environment_section,
         capability_section,
     ])
+}
+
+fn environment_projection(
+    context: Option<&AgentRunContext>,
+    permissions: mycopilot_core::AgentPermissions,
+    workspace_available: bool,
+) -> serde_json::Value {
+    let shell_name = std::env::var("SHELL")
+        .ok()
+        .or_else(|| std::env::var("COMSPEC").ok())
+        .and_then(|shell| {
+            std::path::Path::new(&shell)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        });
+    let timezone = std::env::var("TZ")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let workspace = context.and_then(|context| context.workspace.as_ref());
+    let cwd = json!({
+        "kind": if workspace_available { "workspace" } else { "process" },
+        "pathConvention": if workspace_available { "workspace_relative" } else { "no_workspace" },
+        "displayName": workspace.and_then(|workspace| workspace.display_name.as_deref()),
+    });
+
+    json!({
+        "os": {
+            "family": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+        },
+        "shell": {
+            "name": shell_name,
+        },
+        "cwd": cwd,
+        "timezone": {
+            "name": timezone,
+            "source": if timezone.is_some() { "TZ" } else { "system" },
+        },
+        "network": {
+            "publicWeb": "tool_gated",
+            "note": "Use registered web tools when available; do not infer arbitrary network access.",
+        },
+        "runtimes": {
+            "nativeHost": {
+                "language": "rust",
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+            },
+            "shell": {
+                "available": true,
+                "approval": command_permission_label(permissions.command),
+                "safety": command_safety_label(permissions.command_safety),
+            },
+            "managedOffice": {
+                "available": true,
+                "version": null,
+            },
+        },
+        "executors": {
+            "shellCommand": {
+                "available": true,
+                "approval": command_permission_label(permissions.command),
+                "safety": command_safety_label(permissions.command_safety),
+            },
+            "structuredFilePatch": {
+                "available": permissions.write != mycopilot_core::AgentWritePermission::Denied,
+                "approval": patch_permission_label(permissions.patch),
+            },
+            "workspaceFileAccess": {
+                "read": read_permission_label(permissions.read),
+                "write": write_permission_label(permissions.write),
+            }
+        }
+    })
 }
 
 fn read_permission_label(permission: mycopilot_core::AgentReadPermission) -> &'static str {

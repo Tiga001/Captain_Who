@@ -272,13 +272,13 @@ impl RuntimeExtension for SkillActivationExtension {
             },
         };
         Ok(vec![
-            RuntimeEffect::EmitEvent(AgentEvent::SkillActivated {
+            RuntimeEffect::EmitEvent(Box::new(AgentEvent::SkillActivated {
                 run_id: self.run_id.clone(),
                 activation_revision,
                 activated_by: record.activated_by,
                 skill: event_skill,
-            }),
-            RuntimeEffect::AppendRetainedContext(context),
+            })),
+            RuntimeEffect::AppendRetainedContext(Box::new(context)),
         ])
     }
 
@@ -868,7 +868,7 @@ fn validate_record(record: &ActivatedSkillRecord) -> AgentResult<()> {
             skill_id.source_id()
         )));
     }
-    if record.has_resources != !record.resource_kinds.is_empty() {
+    if record.has_resources == record.resource_kinds.is_empty() {
         return Err(AgentError::new(
             "Skill extension resource metadata must bind hasResources to non-empty resourceKinds.",
         ));
@@ -1911,22 +1911,24 @@ mod tests {
         let mut context = None;
         for effect in effects {
             match effect {
-                RuntimeEffect::EmitEvent(AgentEvent::SkillActivated {
-                    run_id,
-                    activation_revision,
-                    activated_by,
-                    skill,
-                }) => {
-                    emitted_event = true;
-                    assert_eq!(run_id, "run-1");
-                    assert_eq!(skill.id, entry.id);
-                    assert_eq!(activated_by, AgentSkillActivationActor::Model);
-                    assert_eq!(activation_revision, expected_activation_revision);
-                    assert_eq!(skill.source.kind, "bundled");
-                    assert_eq!(skill.source.id, "bundled:application");
-                }
-                RuntimeEffect::AppendRetainedContext(item) => context = Some(item),
-                RuntimeEffect::EmitEvent(_) => panic!("unexpected runtime event"),
+                RuntimeEffect::EmitEvent(event) => match event.as_ref() {
+                    AgentEvent::SkillActivated {
+                        run_id,
+                        activation_revision,
+                        activated_by,
+                        skill,
+                    } => {
+                        emitted_event = true;
+                        assert_eq!(run_id, "run-1");
+                        assert_eq!(skill.id, entry.id);
+                        assert_eq!(*activated_by, AgentSkillActivationActor::Model);
+                        assert_eq!(activation_revision, &expected_activation_revision);
+                        assert_eq!(skill.source.kind, "bundled");
+                        assert_eq!(skill.source.id, "bundled:application");
+                    }
+                    _ => panic!("unexpected runtime event"),
+                },
+                RuntimeEffect::AppendRetainedContext(item) => context = Some(*item),
             }
         }
         assert!(emitted_event);
@@ -2082,12 +2084,15 @@ mod tests {
         let activated_event = effects
             .iter()
             .find_map(|effect| match effect {
-                RuntimeEffect::EmitEvent(AgentEvent::SkillActivated {
-                    activation_revision,
-                    activated_by,
-                    skill,
-                    ..
-                }) => Some((activation_revision, activated_by, skill)),
+                RuntimeEffect::EmitEvent(event) => match event.as_ref() {
+                    AgentEvent::SkillActivated {
+                        activation_revision,
+                        activated_by,
+                        skill,
+                        ..
+                    } => Some((activation_revision, activated_by, skill)),
+                    _ => None,
+                },
                 _ => None,
             })
             .expect("model activation event");

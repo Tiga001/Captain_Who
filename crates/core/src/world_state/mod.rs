@@ -50,6 +50,7 @@ pub enum WorldStateSectionId {
     SkillActivation,
     AttachmentLibrarySummary,
     ModelCapabilities,
+    Environment,
     Extension(String),
 }
 
@@ -61,6 +62,7 @@ impl WorldStateSectionId {
     pub const SKILL_ACTIVATION: &'static str = "skills.activation";
     pub const ATTACHMENT_LIBRARY_SUMMARY: &'static str = "attachments.library_summary";
     pub const MODEL_CAPABILITIES: &'static str = "model.capabilities";
+    pub const ENVIRONMENT: &'static str = "environment";
 
     pub fn as_str(&self) -> &str {
         match self {
@@ -71,6 +73,7 @@ impl WorldStateSectionId {
             Self::SkillActivation => Self::SKILL_ACTIVATION,
             Self::AttachmentLibrarySummary => Self::ATTACHMENT_LIBRARY_SUMMARY,
             Self::ModelCapabilities => Self::MODEL_CAPABILITIES,
+            Self::Environment => Self::ENVIRONMENT,
             Self::Extension(value) => value,
         }
     }
@@ -90,6 +93,7 @@ impl WorldStateSectionId {
             Self::SKILL_ACTIVATION => Self::SkillActivation,
             Self::ATTACHMENT_LIBRARY_SUMMARY => Self::AttachmentLibrarySummary,
             Self::MODEL_CAPABILITIES => Self::ModelCapabilities,
+            Self::ENVIRONMENT => Self::Environment,
             _ => Self::Extension(value),
         }
     }

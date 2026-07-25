@@ -170,16 +170,17 @@ pub(crate) fn prepare_conversation_turn(
         attachment_library: Some(attachment_library),
         permissions: input.permissions,
     };
-    let world_state_records = ensure_conversation_world_state(
-        storage,
-        &conversation_id,
-        &user_message_id,
-        Some(&run_context),
-        Some(&prompt_preferences),
-        model_capabilities,
-        context_compaction_summary.as_ref(),
-        timestamp,
-    )?;
+    let world_state_records =
+        ensure_conversation_world_state(EnsureConversationWorldStateRequest {
+            storage,
+            conversation_id: &conversation_id,
+            effective_before_message_id: &user_message_id,
+            context: Some(&run_context),
+            prompt_preferences: Some(&prompt_preferences),
+            model_capabilities,
+            active_summary: context_compaction_summary.as_ref(),
+            created_at: timestamp,
+        })?;
 
     let mut agent_messages = history_messages;
     agent_messages.push(AgentChatMessage {

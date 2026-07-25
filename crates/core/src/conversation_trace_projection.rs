@@ -998,7 +998,7 @@ fn redact_binary_text(value: &str) -> (String, bool) {
 }
 
 fn looks_like_standalone_base64(value: &str) -> bool {
-    if value.len() < 32 || value.len() % 4 != 0 {
+    if value.len() < 32 || !value.len().is_multiple_of(4) {
         return false;
     }
     let valid = value

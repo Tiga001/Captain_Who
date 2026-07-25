@@ -137,8 +137,8 @@ pub(super) enum RuntimeExtensionEvent<'a> {
 }
 
 pub(super) enum RuntimeEffect {
-    EmitEvent(AgentEvent),
-    AppendRetainedContext(ContextItem),
+    EmitEvent(Box<AgentEvent>),
+    AppendRetainedContext(Box<ContextItem>),
 }
 
 trait RuntimeExtension: Send {
@@ -744,7 +744,7 @@ mod tests {
                     reason: None,
                 },
             }),
-            checkpoint: crate::protocol::AgentRunCheckpoint {
+            checkpoint: Box::new(crate::protocol::AgentRunCheckpoint {
                 version: crate::protocol::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
                 run_id: "run-1".to_string(),
                 context_items: Vec::new(),
@@ -780,7 +780,7 @@ mod tests {
                 next_conversation_trace_sequence: 0,
                 conversation_trace_truncated: false,
                 model_visible_trace_item_count: 0,
-            },
+            }),
         };
 
         let serialized = serde_json::to_string(&event).unwrap();
