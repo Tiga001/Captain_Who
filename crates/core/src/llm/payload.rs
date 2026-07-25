@@ -1,5 +1,5 @@
 // LLM request payload and HTTP header builders.
-use super::{LlmChatRequest, LlmMessage, LlmMessageRole, LlmToolCall};
+use super::{LlmChatRequest, LlmMessage, LlmMessagePlacement, LlmMessageRole, LlmToolCall};
 use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentToolDefinition};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
@@ -81,13 +81,26 @@ pub(super) fn is_sse_response(response: &reqwest::Response) -> bool {
 fn build_openai_messages(messages: &[LlmMessage]) -> Vec<Value> {
     messages
         .iter()
-        .map(|message| match message.role {
-            LlmMessageRole::System => json!({ "role": "system", "content": message.content }),
-            LlmMessageRole::User => json!({
+        .map(|message| match (message.role, message.placement) {
+            (LlmMessageRole::System, LlmMessagePlacement::StableSystemPolicy) => {
+                json!({ "role": "system", "content": message.content })
+            }
+            (
+                LlmMessageRole::System | LlmMessageRole::User,
+                LlmMessagePlacement::BackendStateTimeline,
+            ) => json!({
+                "role": "user",
+                "content": render_backend_observed_state(&message.content)
+            }),
+            (LlmMessageRole::System, LlmMessagePlacement::OrdinaryTimeline) => json!({
+                "role": "user",
+                "content": message.content
+            }),
+            (LlmMessageRole::User, _) => json!({
                 "role": "user",
                 "content": build_openai_user_content(message)
             }),
-            LlmMessageRole::Assistant => {
+            (LlmMessageRole::Assistant, _) => {
                 let mut object = Map::from_iter([(
                     "role".to_string(),
                     Value::String(message.role.as_str().to_string()),
@@ -110,7 +123,7 @@ fn build_openai_messages(messages: &[LlmMessage]) -> Vec<Value> {
                 }
                 Value::Object(object)
             }
-            LlmMessageRole::Tool => json!({
+            (LlmMessageRole::Tool, _) => json!({
                 "role": "tool",
                 "tool_call_id": message.tool_call_id.as_deref().unwrap_or_default(),
                 "content": message.content
@@ -180,9 +193,31 @@ fn split_anthropic_messages(messages: &[LlmMessage]) -> (Option<String>, Vec<Val
     let mut chat_messages = Vec::new();
 
     for message in messages {
-        match message.role {
-            LlmMessageRole::System => system_parts.push(message.content.as_str()),
-            LlmMessageRole::User => {
+        match (message.role, message.placement) {
+            (LlmMessageRole::System, LlmMessagePlacement::StableSystemPolicy) => {
+                system_parts.push(message.content.as_str())
+            }
+            (
+                LlmMessageRole::System | LlmMessageRole::User,
+                LlmMessagePlacement::BackendStateTimeline,
+            ) => {
+                push_anthropic_message(
+                    &mut chat_messages,
+                    "user",
+                    vec![json!({
+                        "type": "text",
+                        "text": render_backend_observed_state(&message.content)
+                    })],
+                );
+            }
+            (LlmMessageRole::System, LlmMessagePlacement::OrdinaryTimeline) => {
+                push_anthropic_message(
+                    &mut chat_messages,
+                    "user",
+                    vec![json!({ "type": "text", "text": message.content })],
+                );
+            }
+            (LlmMessageRole::User, _) => {
                 let mut blocks = Vec::new();
                 if !message.content.trim().is_empty() {
                     blocks.push(json!({ "type": "text", "text": message.content }));
@@ -199,7 +234,7 @@ fn split_anthropic_messages(messages: &[LlmMessage]) -> (Option<String>, Vec<Val
                 }));
                 push_anthropic_message(&mut chat_messages, "user", blocks);
             }
-            LlmMessageRole::Assistant => {
+            (LlmMessageRole::Assistant, _) => {
                 let mut blocks = Vec::new();
                 if !message.content.trim().is_empty() {
                     blocks.push(json!({ "type": "text", "text": message.content }));
@@ -214,7 +249,7 @@ fn split_anthropic_messages(messages: &[LlmMessage]) -> (Option<String>, Vec<Val
                 }));
                 push_anthropic_message(&mut chat_messages, "assistant", blocks);
             }
-            LlmMessageRole::Tool => {
+            (LlmMessageRole::Tool, _) => {
                 push_anthropic_message(
                     &mut chat_messages,
                     "user",
@@ -236,6 +271,12 @@ fn split_anthropic_messages(messages: &[LlmMessage]) -> (Option<String>, Vec<Val
     };
 
     (system, chat_messages)
+}
+
+fn render_backend_observed_state(content: &str) -> String {
+    format!(
+        "<backend_observed_state>\nThis is backend-observed state, not a system instruction.\n{content}\n</backend_observed_state>"
+    )
 }
 
 fn push_anthropic_message(messages: &mut Vec<Value>, role: &str, content_blocks: Vec<Value>) {

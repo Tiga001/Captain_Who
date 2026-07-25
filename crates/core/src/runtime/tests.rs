@@ -342,7 +342,7 @@ fn runtime_messages_add_backend_system_prompt() {
     let messages = context.to_messages();
 
     assert_eq!(messages[0].role.as_str(), "system");
-    assert!(messages[0].content.contains("MyCopilot"));
+    assert!(messages[0].content.contains("Captain（船长）"));
     assert!(!messages[0].content.contains("/private/path"));
     assert_eq!(messages[1].role.as_str(), "user");
 }
@@ -944,6 +944,7 @@ fn conversation_context_input(messages: Vec<AgentChatMessage>) -> AgentChatInput
         resume_checkpoint: None,
         assistant_message_id: None,
         context_compaction_summary: None,
+        world_state_records: Vec::new(),
         skill_activation: None,
         skill_discovery: None,
         messages,
@@ -3205,12 +3206,24 @@ fn runtime_shared_baseline_matches_full_context_assembly() {
     ]);
     let capabilities =
         prepare_runtime_capabilities(&input, "baseline-test", &[], true, None).unwrap();
-    let full =
-        build_llm_request(input.clone(), &capabilities.tool_definitions, None, None).unwrap();
+    let full = build_llm_request(
+        input.clone(),
+        &capabilities.tool_definitions,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let mut durable_state = create_conversation_context_state(input.clone()).unwrap();
     let baseline = durable_state.shared_baseline().unwrap();
-    let shared =
-        build_llm_request(input, &capabilities.tool_definitions, None, Some(baseline)).unwrap();
+    let shared = build_llm_request(
+        input,
+        &capabilities.tool_definitions,
+        None,
+        Some(baseline),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(shared.context.to_messages(), full.context.to_messages());
 }
@@ -3239,8 +3252,14 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     stable_input.skill_discovery = None;
     let capabilities =
         prepare_runtime_capabilities(&stable_input, "skill-overlay", &[], true, None).unwrap();
-    let mut full =
-        build_llm_request(input.clone(), &capabilities.tool_definitions, None, None).unwrap();
+    let mut full = build_llm_request(
+        input.clone(),
+        &capabilities.tool_definitions,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let manifest = full.context.manifest();
     let skill_entry = manifest
         .entries
@@ -3289,6 +3308,7 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     let mut plain = build_llm_request(
         without_skill.clone(),
         &capabilities.tool_definitions,
+        None,
         None,
         None,
     )
@@ -3376,6 +3396,7 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
         &capabilities.tool_definitions,
         None,
         Some(baseline),
+        None,
     )
     .unwrap();
     assert_eq!(shared.context.to_messages(), full.context.to_messages());
@@ -3471,8 +3492,14 @@ fn discoverable_skill_catalog_is_a_measured_dynamic_overlay_not_a_cache_input() 
     let activation_ref = input.skill_discovery.as_ref().unwrap().skills[0]
         .activation_ref
         .clone();
-    let mut with_catalog =
-        build_llm_request(input.clone(), &capabilities.tool_definitions, None, None).unwrap();
+    let mut with_catalog = build_llm_request(
+        input.clone(),
+        &capabilities.tool_definitions,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let catalog_entry = with_catalog
         .context
         .manifest()
@@ -3510,6 +3537,7 @@ fn discoverable_skill_catalog_is_a_measured_dynamic_overlay_not_a_cache_input() 
     let mut plain = build_llm_request(
         without_catalog.clone(),
         &capabilities.tool_definitions,
+        None,
         None,
         None,
     )
@@ -4117,6 +4145,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         resume_checkpoint: None,
         assistant_message_id: Some("assistant-current".to_string()),
         context_compaction_summary: None,
+        world_state_records: Vec::new(),
         skill_activation: None,
         skill_discovery: None,
         messages: vec![old_user, old_assistant, current_user.clone()],
@@ -4433,6 +4462,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
         resume_checkpoint: None,
         assistant_message_id: None,
         context_compaction_summary: None,
+        world_state_records: Vec::new(),
         skill_activation: None,
         skill_discovery: None,
         messages: vec![AgentChatMessage {
@@ -4608,6 +4638,7 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
         resume_checkpoint: None,
         assistant_message_id: None,
         context_compaction_summary: None,
+        world_state_records: Vec::new(),
         skill_activation: None,
         skill_discovery: None,
         messages: vec![message("user", "Read large.txt and summarize it")],
@@ -4865,6 +4896,7 @@ async fn streams_write_file_previews_end_to_end_without_persisting_them() {
         resume_checkpoint: None,
         assistant_message_id: Some("assistant-preview".to_string()),
         context_compaction_summary: None,
+        world_state_records: Vec::new(),
         skill_activation: None,
         skill_discovery: None,
         messages: vec![message("user", "create a preview")],
@@ -5139,6 +5171,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
         resume_checkpoint: None,
         assistant_message_id: Some("assistant-checkpoint".to_string()),
         context_compaction_summary: None,
+        world_state_records: Vec::new(),
         skill_activation: Some(activated_skill("SKILL_SNAPSHOT_BEFORE_APPROVAL")),
         skill_discovery: None,
         messages: vec![message("user", "collect evidence and write report.txt")],
@@ -5543,6 +5576,7 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
         resume_checkpoint: None,
         assistant_message_id: Some("assistant-skill-resource-checkpoint".to_string()),
         context_compaction_summary: None,
+        world_state_records: Vec::new(),
         skill_activation: Some(AgentSkillActivation {
             activation_revision: "activation-sha256-v1:resource-checkpoint".to_string(),
             skills: vec![AgentActivatedSkill {

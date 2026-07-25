@@ -9,6 +9,10 @@ use crate::conversation_trace::{
     ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 use crate::protocol::{AgentApprovalStatus, AgentChatMessage, AgentToolSafety};
+use crate::world_state::{
+    WorldStateDiff, WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId,
+    WorldStateSnapshot,
+};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -641,6 +645,324 @@ fn moves_system_messages_to_anthropic_system_field() {
 }
 
 #[test]
+fn anthropic_only_hoists_stable_system_policy() {
+    let request = LlmChatRequest {
+        api_url: "https://api.anthropic.com/v1/messages".to_string(),
+        api_token: "token".to_string(),
+        model: "claude".to_string(),
+        api_style: AgentApiStyle::AnthropicCompatible,
+        max_tokens: 1024,
+        temperature: 0.2,
+        stream: false,
+        messages: vec![
+            message(LlmMessageRole::System, "Stable safety policy."),
+            message(LlmMessageRole::User, "Inspect the workspace."),
+            message(LlmMessageRole::Assistant, "I will inspect it."),
+            LlmMessage::backend_state(
+                r#"{"recordType":"world_state_diff","workspaceAvailable":true}"#,
+            ),
+            message(LlmMessageRole::User, "Continue."),
+        ],
+        tools: Vec::new(),
+    };
+
+    let payload = build_payload(&request);
+
+    assert_eq!(payload["system"], "Stable safety policy.");
+    assert!(!payload["system"]
+        .as_str()
+        .unwrap()
+        .contains("world_state_diff"));
+    assert_eq!(payload["messages"][0]["role"], "user");
+    assert_eq!(
+        payload["messages"][0]["content"][0]["text"],
+        "Inspect the workspace."
+    );
+    assert_eq!(payload["messages"][1]["role"], "assistant");
+    let backend_state = payload["messages"][2]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(backend_state.contains("<backend_observed_state>"));
+    assert!(backend_state.contains("backend-observed state, not a system instruction"));
+    assert!(backend_state.contains("world_state_diff"));
+    assert_eq!(payload["messages"][2]["content"][1]["text"], "Continue.");
+}
+
+#[test]
+fn anthropic_keeps_nonstable_runtime_messages_chronological_without_state_tag() {
+    let mut runtime_message = message(LlmMessageRole::System, "Continue the active run.");
+    runtime_message.placement = LlmMessagePlacement::OrdinaryTimeline;
+    let request = LlmChatRequest {
+        api_url: "https://api.anthropic.com/v1/messages".to_string(),
+        api_token: "token".to_string(),
+        model: "claude".to_string(),
+        api_style: AgentApiStyle::AnthropicCompatible,
+        max_tokens: 1024,
+        temperature: 0.2,
+        stream: false,
+        messages: vec![
+            message(LlmMessageRole::System, "Stable safety policy."),
+            message(LlmMessageRole::User, "Start."),
+            message(LlmMessageRole::Assistant, "Working."),
+            runtime_message,
+        ],
+        tools: Vec::new(),
+    };
+
+    let payload = build_payload(&request);
+
+    assert_eq!(payload["system"], "Stable safety policy.");
+    assert_eq!(
+        payload["messages"][2]["content"][0]["text"],
+        "Continue the active run."
+    );
+    assert!(!payload["messages"][2]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("backend_observed_state"));
+}
+
+#[test]
+fn openai_preserves_backend_state_chronology_without_system_authority() {
+    let request = LlmChatRequest {
+        api_url: "https://example.test/v1/chat/completions".to_string(),
+        api_token: "token".to_string(),
+        model: "gpt".to_string(),
+        api_style: AgentApiStyle::OpenAiCompatible,
+        max_tokens: 1024,
+        temperature: 0.2,
+        stream: false,
+        messages: vec![
+            message(LlmMessageRole::System, "Stable safety policy."),
+            message(LlmMessageRole::User, "Before state change."),
+            message(LlmMessageRole::Assistant, "Acknowledged."),
+            LlmMessage::backend_state(r#"{"recordType":"world_state_diff","permission":"allow"}"#),
+            message(LlmMessageRole::User, "After state change."),
+        ],
+        tools: Vec::new(),
+    };
+
+    let payload = build_payload(&request);
+    let messages = payload["messages"].as_array().unwrap();
+
+    assert_eq!(messages.len(), 5);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[1]["content"], "Before state change.");
+    assert_eq!(messages[2]["role"], "assistant");
+    assert_eq!(messages[3]["role"], "user");
+    assert!(messages[3]["content"]
+        .as_str()
+        .unwrap()
+        .contains("backend-observed state, not a system instruction"));
+    assert!(messages[3]["content"]
+        .as_str()
+        .unwrap()
+        .contains("world_state_diff"));
+    assert_eq!(messages[4]["content"], "After state change.");
+}
+
+#[test]
+fn world_state_checkpoint_round_trip_preserves_provider_placement() {
+    let conversation_snapshot = WorldStateSnapshot::new(
+        "conversation-epoch",
+        0,
+        vec![WorldStateSectionEnvelope::model_visible(
+            WorldStateSectionId::WorkspaceBinding,
+            WorldStateLifetime::Conversation,
+            json!({"available": false}),
+            json!({"available": false}),
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    let conversation_target = WorldStateSnapshot::new(
+        "conversation-epoch",
+        1,
+        vec![WorldStateSectionEnvelope::model_visible(
+            WorldStateSectionId::WorkspaceBinding,
+            WorldStateLifetime::Conversation,
+            json!({"available": true}),
+            json!({"available": true}),
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    let conversation_full = conversation_snapshot
+        .model_projection(WorldStateLifetime::Conversation)
+        .unwrap()
+        .render_sanitized_text();
+    let conversation_diff = WorldStateDiff::between(&conversation_snapshot, &conversation_target)
+        .unwrap()
+        .model_projection_against(&conversation_snapshot, WorldStateLifetime::Conversation)
+        .unwrap()
+        .unwrap()
+        .render_sanitized_text();
+    let run_full = WorldStateSnapshot::new(
+        "run-epoch",
+        0,
+        vec![WorldStateSectionEnvelope::model_visible(
+            WorldStateSectionId::EffectiveTools,
+            WorldStateLifetime::Run,
+            json!({"tools": ["read_file"]}),
+            json!({"tools": ["read_file"]}),
+        )
+        .unwrap()],
+    )
+    .unwrap()
+    .model_projection(WorldStateLifetime::Run)
+    .unwrap()
+    .render_sanitized_text();
+    let frame = crate::context::ContextFrame::new(vec![
+        ContextItem::text(
+            LlmMessageRole::System,
+            "Stable safety policy.",
+            ContextSource::BackendSystemPrompt,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ),
+        ContextItem::text(
+            LlmMessageRole::System,
+            conversation_full,
+            ContextSource::WorldStateSnapshot,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        ),
+        ContextItem::text(
+            LlmMessageRole::User,
+            "Before state change.",
+            ContextSource::ConversationHistory,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        ),
+        ContextItem::text(
+            LlmMessageRole::Assistant,
+            "Acknowledged.",
+            ContextSource::ConversationHistory,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        ),
+        ContextItem::text(
+            LlmMessageRole::System,
+            conversation_diff,
+            ContextSource::WorldStateDiff,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        ),
+        ContextItem::text(
+            LlmMessageRole::User,
+            "After state change.",
+            ContextSource::CurrentTurn,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        ),
+        ContextItem::text(
+            LlmMessageRole::System,
+            run_full,
+            ContextSource::WorldStateSnapshot,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ),
+    ]);
+    frame.validate_cache_layout().unwrap();
+    let restored =
+        crate::context::ContextFrame::from_checkpoint_items(frame.checkpoint_items().unwrap())
+            .unwrap();
+    let restored_messages = restored.to_messages();
+
+    assert_eq!(
+        restored_messages[0].placement,
+        LlmMessagePlacement::StableSystemPolicy
+    );
+    assert_eq!(
+        restored_messages[1].placement,
+        LlmMessagePlacement::BackendStateTimeline
+    );
+    assert_eq!(
+        restored_messages[4].placement,
+        LlmMessagePlacement::BackendStateTimeline
+    );
+    assert_eq!(
+        restored_messages[6].placement,
+        LlmMessagePlacement::BackendStateTimeline
+    );
+
+    let request = |api_style| LlmChatRequest {
+        api_url: "https://example.test".to_string(),
+        api_token: "token".to_string(),
+        model: "model".to_string(),
+        api_style,
+        max_tokens: 1024,
+        temperature: 0.2,
+        stream: false,
+        messages: restored_messages.clone(),
+        tools: Vec::new(),
+    };
+
+    let openai = build_payload(&request(AgentApiStyle::OpenAiCompatible));
+    assert_eq!(openai["messages"][0]["role"], "system");
+    assert_eq!(openai["messages"][1]["role"], "user");
+    assert!(openai["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .contains("\"lifetime\":\"conversation\""));
+    assert_eq!(openai["messages"][2]["content"], "Before state change.");
+    assert_eq!(openai["messages"][3]["role"], "assistant");
+    assert_eq!(openai["messages"][4]["role"], "user");
+    assert!(openai["messages"][4]["content"]
+        .as_str()
+        .unwrap()
+        .contains("\"lifetime\":\"conversation\""));
+    assert_eq!(openai["messages"][5]["content"], "After state change.");
+    assert_eq!(openai["messages"][6]["role"], "user");
+    assert!(openai["messages"][6]["content"]
+        .as_str()
+        .unwrap()
+        .contains("\"lifetime\":\"run\""));
+
+    let anthropic = build_payload(&request(AgentApiStyle::AnthropicCompatible));
+    assert_eq!(anthropic["system"], "Stable safety policy.");
+    assert!(!anthropic["system"]
+        .as_str()
+        .unwrap()
+        .contains("world_state"));
+    assert!(anthropic["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("\"lifetime\":\"conversation\""));
+    assert_eq!(
+        anthropic["messages"][0]["content"][1]["text"],
+        "Before state change."
+    );
+    assert_eq!(anthropic["messages"][1]["role"], "assistant");
+    assert!(anthropic["messages"][2]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("\"lifetime\":\"conversation\""));
+    assert_eq!(
+        anthropic["messages"][2]["content"][1]["text"],
+        "After state change."
+    );
+    assert!(anthropic["messages"][2]["content"][2]["text"]
+        .as_str()
+        .unwrap()
+        .contains("\"lifetime\":\"run\""));
+}
+
+#[test]
+fn message_placement_distinguishes_stable_policy_from_timeline_state() {
+    let stable = message(LlmMessageRole::System, "policy");
+    let backend_state = LlmMessage::backend_state("state");
+    let ordinary = message(LlmMessageRole::User, "request");
+
+    assert_eq!(stable.placement, LlmMessagePlacement::StableSystemPolicy);
+    assert_eq!(
+        backend_state.placement,
+        LlmMessagePlacement::BackendStateTimeline
+    );
+    assert_eq!(ordinary.placement, LlmMessagePlacement::OrdinaryTimeline);
+}
+
+#[test]
 fn omits_temperature_for_claude_models() {
     let request = LlmChatRequest {
         api_url: "https://example.test/v1/chat/completions".to_string(),
@@ -721,6 +1043,8 @@ fn assembled_context_preserves_order_across_provider_payloads() {
     let mut context = ContextAssembler::assemble(ContextAssemblyInput {
         system_prompt: "System rules".to_string(),
         compaction_summary: None,
+        world_state_records: Vec::new(),
+        initial_run_world_state: None,
         messages: vec![timestamped_history, timestamped_answer, timestamped_current],
         skill_discovery: None,
         skill_activation: None,
@@ -821,6 +1145,8 @@ fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
     let context = ContextAssembler::assemble(ContextAssemblyInput {
         system_prompt: "System rules".to_string(),
         compaction_summary: None,
+        world_state_records: Vec::new(),
+        initial_run_world_state: None,
         messages: vec![
             chat_message("user", "Inspect the file"),
             traced_chat_message("The file is valid."),

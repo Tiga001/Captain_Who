@@ -61,6 +61,7 @@ pub(crate) enum ContextCompactionProtectionReason {
     RequestOnly,
     CurrentUser,
     SkillInstructions,
+    WorldState,
     UserAttachment,
     RuntimeGuard,
     VisualInput,
@@ -481,6 +482,11 @@ fn absolute_protection_reason(
     if unit.sources.contains(&ContextSource::SkillInstructions) {
         return Some(ContextCompactionProtectionReason::SkillInstructions);
     }
+    if unit.sources.contains(&ContextSource::WorldStateSnapshot)
+        || unit.sources.contains(&ContextSource::WorldStateDiff)
+    {
+        return Some(ContextCompactionProtectionReason::WorldState);
+    }
     match unit.usage_class {
         ContextUsageClass::Fixed => return Some(ContextCompactionProtectionReason::FixedRequest),
         ContextUsageClass::RequestOnly => {
@@ -583,6 +589,14 @@ fn normalize_stable_durable_prefix(
     let mut last_valid_prefix_len = 0;
     let mut reached_selected_boundary = false;
     for unit in durable_units {
+        // Conversation World State is an exact side ledger, not part of the message/trace cursor
+        // being summarized. It remains byte-for-byte in the frame while the surrounding durable
+        // message prefix advances, then storage rebases it to the new summary epoch atomically.
+        if unit.sources.contains(&ContextSource::WorldStateSnapshot)
+            || unit.sources.contains(&ContextSource::WorldStateDiff)
+        {
+            continue;
+        }
         let Some(candidate) = candidates_by_start.get(&unit.start_index) else {
             break;
         };
@@ -636,7 +650,7 @@ fn durable_prefix_for_units<'a>(
             ContextOriginKind::ConversationMessage | ContextOriginKind::ConversationTraceItem => {
                 covered_through = origin.journal_cursor();
             }
-            ContextOriginKind::Skill => return None,
+            ContextOriginKind::WorldStateRecord | ContextOriginKind::Skill => return None,
         }
     }
     Some(ContextCompactionDurablePrefix {
@@ -681,6 +695,7 @@ fn protection_reason_name(reason: ContextCompactionProtectionReason) -> String {
         ContextCompactionProtectionReason::RequestOnly => "request_only",
         ContextCompactionProtectionReason::CurrentUser => "current_user",
         ContextCompactionProtectionReason::SkillInstructions => "skill_instructions",
+        ContextCompactionProtectionReason::WorldState => "world_state",
         ContextCompactionProtectionReason::UserAttachment => "user_attachment",
         ContextCompactionProtectionReason::RuntimeGuard => "runtime_guard",
         ContextCompactionProtectionReason::VisualInput => "visual_input",
@@ -1060,6 +1075,97 @@ mod tests {
 
         assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
         assert_eq!(plan.steps.len(), 1);
+        assert_eq!(
+            plan.steps[0]
+                .durable_prefix
+                .as_ref()
+                .map(|prefix| &prefix.covered_through),
+            Some(&ContextJournalCursor::message("assistant-old"))
+        );
+    }
+
+    #[test]
+    fn world_state_is_exactly_protected_but_does_not_block_message_prefix_compaction() {
+        let items = vec![
+            item(
+                0,
+                ContextUsageClass::Fixed,
+                500,
+                LlmMessageRole::System,
+                ContextSource::BackendSystemPrompt,
+                None,
+            ),
+            item(
+                1,
+                ContextUsageClass::Durable,
+                250,
+                LlmMessageRole::System,
+                ContextSource::WorldStateSnapshot,
+                Some(ContextOrigin::world_state_record("epoch:0")),
+            ),
+            item(
+                2,
+                ContextUsageClass::Durable,
+                3_000,
+                LlmMessageRole::User,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("user-old")),
+            ),
+            item(
+                3,
+                ContextUsageClass::Durable,
+                100,
+                LlmMessageRole::System,
+                ContextSource::WorldStateDiff,
+                Some(ContextOrigin::world_state_record("epoch:1")),
+            ),
+            item(
+                4,
+                ContextUsageClass::Durable,
+                3_000,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-old")),
+            ),
+            item(
+                5,
+                ContextUsageClass::Durable,
+                500,
+                LlmMessageRole::User,
+                ContextSource::CurrentTurn,
+                Some(ContextOrigin::conversation_message("user-current")),
+            ),
+        ];
+
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(
+                ContextBudgetStatus::WithinBudget,
+                Some(7_350),
+                500,
+                6_850,
+                0,
+                0,
+            ),
+            &items,
+            true,
+        );
+
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+        assert_eq!(plan.protected.reasons.get("world_state"), Some(&350));
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(
+            plan.steps[0].ranges,
+            vec![
+                ContextCompactionItemRange {
+                    start_index: 2,
+                    end_index_exclusive: 3,
+                },
+                ContextCompactionItemRange {
+                    start_index: 4,
+                    end_index_exclusive: 5,
+                },
+            ]
+        );
         assert_eq!(
             plan.steps[0]
                 .durable_prefix

@@ -2,6 +2,7 @@ use crate::context::ContextCompactionSummary;
 use crate::conversation_trace::{
     ConversationTraceAttachment, ConversationTurnTrace, ConversationTurnTraceItem,
 };
+use crate::world_state::{AnchoredWorldStateRecord, WorldStateSnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
@@ -52,6 +53,13 @@ pub struct AgentChatInput {
     pub assistant_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compaction_summary: Option<ContextCompactionSummary>,
+    /// Backend-owned, provider-neutral world-state journal for the active conversation epoch.
+    ///
+    /// A full snapshot establishes the epoch prelude and later diffs are anchored immediately
+    /// before the conversation message that first observed them. The runtime renders only each
+    /// record's explicitly sanitized model projection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub world_state_records: Vec<AnchoredWorldStateRecord>,
     /// Immutable Skill snapshots selected for this logical agent run. The runtime treats this as
     /// dynamic run context; it is deliberately excluded from the stable system prompt and the
     /// conversation context configuration fingerprint.
@@ -161,10 +169,11 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
-/// Version 4 additionally freezes the exact stable-prefix and Skill-dynamic Tool contract that
-/// produced a pending Tool Call batch. Earlier development checkpoints are intentionally not
-/// migrated.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 4;
+/// Version 5 additionally freezes the backend-authoritative run context, model capabilities and
+/// exact Run World State that produced a pending Tool Call batch. Approval resume must continue
+/// that same logical world instead of rebuilding authority from newer UI/settings state.
+/// Earlier development checkpoints are intentionally not migrated.
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -187,6 +196,13 @@ pub struct AgentRunCheckpoint {
     pub extension_snapshots: Vec<AgentExtensionSnapshot>,
     /// Exact model-facing and execution-authorizing Tool contract for the response being paused.
     pub tool_set: AgentRunToolSetCheckpoint,
+    /// Backend execution authority frozen at the approval boundary.
+    pub run_context: Option<AgentRunContext>,
+    /// Provider-neutral capabilities frozen for the same logical run.
+    pub model_capabilities: ModelCapabilities,
+    /// Exact authoritative Run-lifetime World State. Resume rebases this snapshot into a fresh
+    /// epoch; it never reconstructs authority from rendered model context.
+    pub run_world_state: WorldStateSnapshot,
     pub pending_tool_call_id: String,
     #[serde(default)]
     pub conversation_trace_items: Vec<ConversationTurnTraceItem>,
@@ -612,7 +628,7 @@ pub struct AgentApprovalDecision {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunContext {
     pub conversation_id: Option<String>,
@@ -624,7 +640,7 @@ pub struct AgentRunContext {
     pub permissions: AgentPermissions,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentWorkspaceContext {
     pub project_id: Option<String>,

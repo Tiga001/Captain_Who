@@ -155,6 +155,7 @@ impl ContextItem {
                     })
                     .collect(),
                 is_error: item.is_error,
+                placement: crate::llm::LlmMessagePlacement::default_for_role(role),
             },
             metadata,
         ))

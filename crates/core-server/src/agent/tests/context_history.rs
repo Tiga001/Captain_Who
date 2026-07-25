@@ -35,6 +35,107 @@ fn prepared_turn_uses_backend_model_capabilities() {
 }
 
 #[test]
+fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns() {
+    let fixture = tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    storage.save_model_settings(test_model_settings()).unwrap();
+
+    let first = prepare_conversation_turn(
+        &storage,
+        &SkillsService::new(),
+        AgentConversationTurnInput {
+            conversation_id: Some("conversation-world-state".to_string()),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            context_window_indicator_enabled: true,
+            content: "First turn".to_string(),
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            title: None,
+            user_message_id: Some("user-world-state-1".to_string()),
+            assistant_message_id: Some("assistant-world-state-1".to_string()),
+            max_tokens: None,
+            temperature: None,
+            prompt_preferences: None,
+            permissions: AgentPermissions::default(),
+        },
+        "run-world-state-1",
+    )
+    .unwrap();
+    assert_eq!(first.agent_input.world_state_records.len(), 1);
+    let mycopilot_core::WorldStateRecord::Full(first_snapshot) =
+        &first.agent_input.world_state_records[0].record
+    else {
+        panic!("first World State record must be full");
+    };
+    assert_eq!(first_snapshot.sequence, 0);
+    assert!(first.agent_input.world_state_records[0]
+        .effective_before_message_id
+        .is_none());
+
+    let second = prepare_conversation_turn(
+        &storage,
+        &SkillsService::new(),
+        AgentConversationTurnInput {
+            conversation_id: Some("conversation-world-state".to_string()),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            context_window_indicator_enabled: true,
+            content: "Second turn".to_string(),
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            title: None,
+            user_message_id: Some("user-world-state-2".to_string()),
+            assistant_message_id: Some("assistant-world-state-2".to_string()),
+            max_tokens: None,
+            temperature: None,
+            prompt_preferences: Some(mycopilot_core::AgentPromptPreferences {
+                work_mode: Some(mycopilot_core::AgentPromptWorkMode::General),
+                tone: Some(mycopilot_core::AgentPromptTone::Friendly),
+                detail_level: Some(mycopilot_core::AgentPromptDetailLevel::High),
+                custom_instructions: None,
+                updated_at: Some(42),
+            }),
+            permissions: AgentPermissions {
+                write: AgentWritePermission::All,
+                ..AgentPermissions::default()
+            },
+        },
+        "run-world-state-2",
+    )
+    .unwrap();
+
+    assert_eq!(second.agent_input.world_state_records.len(), 2);
+    assert_eq!(
+        second.agent_input.world_state_records[1]
+            .effective_before_message_id
+            .as_deref(),
+        Some("user-world-state-2")
+    );
+    let mycopilot_core::WorldStateRecord::Diff(diff) =
+        &second.agent_input.world_state_records[1].record
+    else {
+        panic!("changed World State must append a diff");
+    };
+    let rendered = diff
+        .model_projection_against(
+            first_snapshot,
+            mycopilot_core::WorldStateLifetime::Conversation,
+        )
+        .unwrap()
+        .unwrap()
+        .render_sanitized_text();
+    assert!(rendered.contains("\"write\":\"all\""));
+    assert!(rendered.contains("\"workMode\":\"general\""));
+    assert!(rendered.contains("\"tone\":\"friendly\""));
+    assert!(!rendered.contains("imageInput"));
+    assert!(!rendered.contains("updatedAt"));
+
+    let stored = load_conversation_world_state(&storage, "conversation-world-state").unwrap();
+    assert_eq!(stored, second.agent_input.world_state_records);
+}
+
+#[test]
 fn compaction_cannot_cross_the_model_visible_trace_boundary() {
     let trace = ConversationTurnTrace {
         schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,

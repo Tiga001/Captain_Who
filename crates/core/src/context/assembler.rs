@@ -9,8 +9,12 @@ use crate::protocol::{
     AgentSkillActivation,
 };
 use crate::skills::AgentSkillDiscoverySnapshot;
+use crate::world_state::{
+    AnchoredWorldStateRecord, WorldStateLifetime, WorldStateRecord, WorldStateReducer,
+    WorldStateSnapshot,
+};
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContextAttachments {
@@ -21,6 +25,8 @@ pub(crate) struct ContextAttachments {
 pub(crate) struct ContextAssemblyInput {
     pub(crate) system_prompt: String,
     pub(crate) compaction_summary: Option<ContextCompactionSummary>,
+    pub(crate) world_state_records: Vec<AnchoredWorldStateRecord>,
+    pub(crate) initial_run_world_state: Option<WorldStateSnapshot>,
     pub(crate) messages: Vec<AgentChatMessage>,
     pub(crate) skill_discovery: Option<AgentSkillDiscoverySnapshot>,
     pub(crate) skill_activation: Option<AgentSkillActivation>,
@@ -44,20 +50,25 @@ impl ContextAssembler {
     ) -> AgentResult<AssembledContext> {
         let has_compaction_summary = input.compaction_summary.is_some();
         let normalized = normalize_messages(input.messages)?;
+        let world_state = assemble_world_state_timeline(input.world_state_records, &normalized)?;
         let current_turn_index = normalized
             .iter()
             .rposition(|message| message.role == "user");
         let has_attachment_text = !input.attachments.text.trim().is_empty();
         let has_attachment_images = !input.attachments.images.is_empty();
 
-        if normalized.is_empty() && !has_compaction_summary {
+        if normalized.is_empty() && !has_compaction_summary && world_state.full.is_none() {
             return Err(AgentError::new("没有可发送的对话内容。"));
         }
-        if !has_compaction_summary && !normalized.iter().any(|message| message.role != "system") {
+        if !has_compaction_summary
+            && world_state.full.is_none()
+            && !normalized.iter().any(|message| message.role != "system")
+        {
             return Err(AgentError::new("对话里缺少用户或助手消息。"));
         }
 
-        let mut items = Vec::with_capacity(normalized.len() + 4);
+        let mut items =
+            Vec::with_capacity(normalized.len() + world_state.rendered_item_count() + 4);
         items.push(ContextItem::text(
             LlmMessageRole::System,
             input.system_prompt,
@@ -77,9 +88,17 @@ impl ContextAssembler {
                 .with_origin(ContextOrigin::compaction_summary(summary.id)),
             ));
         }
+        if let Some(full) = world_state.full {
+            items.push(full);
+        }
 
         let mut timing = ConversationTimingTracker::default();
         for (index, message) in normalized.into_iter().enumerate() {
+            if let Some(message_id) = message.message_id.as_deref() {
+                if let Some(records) = world_state.before_message.get(message_id) {
+                    items.extend(records.iter().cloned());
+                }
+            }
             let role = role_from_str(&message.role)?;
             let is_current_turn = current_turn_index == Some(index);
             let trace = message
@@ -123,6 +142,17 @@ impl ContextAssembler {
             }
         }
 
+        if let Some(snapshot) = input.initial_run_world_state {
+            let projection = snapshot
+                .model_projection(WorldStateLifetime::Run)
+                .map_err(world_state_assembly_error)?;
+            items.push(world_state_context_item(
+                &snapshot,
+                projection.render_sanitized_text(),
+                ContextSource::WorldStateSnapshot,
+                ContextScope::Run,
+            ));
+        }
         if current_turn_index.is_some() && (has_attachment_text || has_attachment_images) {
             let mut attachment_message =
                 LlmMessage::text(LlmMessageRole::User, input.attachments.text);
@@ -141,6 +171,7 @@ impl ContextAssembler {
 
         let frame = ContextFrame::new(items);
         frame.validate_complete_tool_protocol()?;
+        frame.validate_cache_layout()?;
         Ok(AssembledContext { frame, timing })
     }
 
@@ -183,6 +214,29 @@ impl ContextAssembler {
         Self::append_skill_activation(frame, activation)
     }
 
+    /// Appends the immutable full snapshot that establishes one active run's state.
+    ///
+    /// Callers that reuse a durable conversation baseline must invoke this before adding
+    /// attachments or Skill overlays so the physical cache bands remain monotonic.
+    pub(crate) fn append_initial_run_world_state(
+        frame: &mut ContextFrame,
+        snapshot: Option<&WorldStateSnapshot>,
+    ) -> AgentResult<()> {
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        let projection = snapshot
+            .model_projection(WorldStateLifetime::Run)
+            .map_err(world_state_assembly_error)?;
+        frame.push(world_state_context_item(
+            snapshot,
+            projection.render_sanitized_text(),
+            ContextSource::WorldStateSnapshot,
+            ContextScope::Run,
+        ));
+        Ok(())
+    }
+
     /// Appends the backend-authored state that is specific to the current run/request.
     ///
     /// Unlike the configuration system prompt, this item is deliberately request-only: changing
@@ -200,6 +254,163 @@ impl ContextAssembler {
             ContextRetention::RequestOnly,
         ));
     }
+}
+
+#[derive(Debug, Default)]
+struct AssembledWorldStateTimeline {
+    full: Option<ContextItem>,
+    before_message: BTreeMap<String, Vec<ContextItem>>,
+}
+
+impl AssembledWorldStateTimeline {
+    fn rendered_item_count(&self) -> usize {
+        usize::from(self.full.is_some()) + self.before_message.values().map(Vec::len).sum::<usize>()
+    }
+}
+
+fn assemble_world_state_timeline(
+    records: Vec<AnchoredWorldStateRecord>,
+    messages: &[AgentChatMessage],
+) -> AgentResult<AssembledWorldStateTimeline> {
+    if records.is_empty() {
+        return Ok(AssembledWorldStateTimeline::default());
+    }
+
+    let mut message_positions = BTreeMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        let Some(message_id) = message.message_id.as_ref() else {
+            continue;
+        };
+        if message_positions
+            .insert(message_id.as_str(), index)
+            .is_some()
+        {
+            return Err(AgentError::new(format!(
+                "Conversation World State 无法定位重复的消息 ID：`{message_id}`。"
+            )));
+        }
+    }
+
+    let mut records = records.into_iter();
+    let initial = records
+        .next()
+        .expect("non-empty world-state records have an initial record");
+    initial.validate().map_err(world_state_assembly_error)?;
+    if initial.effective_before_message_id.is_some() {
+        return Err(AgentError::new(
+            "Conversation World State 的初始 full snapshot 不能带消息 anchor。",
+        ));
+    }
+    let snapshot = match initial.record {
+        WorldStateRecord::Full(snapshot) => snapshot,
+        WorldStateRecord::Diff(_) => {
+            return Err(AgentError::new(
+                "Conversation World State 必须以 full snapshot 开始。",
+            ));
+        }
+    };
+    if snapshot.sequence != 0 {
+        return Err(AgentError::new(
+            "Conversation World State 的初始 full snapshot sequence 必须为 0。",
+        ));
+    }
+    let projection = snapshot
+        .model_projection(WorldStateLifetime::Conversation)
+        .map_err(world_state_assembly_error)?;
+    let full = Some(world_state_context_item(
+        &snapshot,
+        projection.render_sanitized_text(),
+        ContextSource::WorldStateSnapshot,
+        ContextScope::Conversation,
+    ));
+    let mut reducer = WorldStateReducer::new(snapshot).map_err(world_state_assembly_error)?;
+    let mut before_message = BTreeMap::<String, Vec<ContextItem>>::new();
+    let mut previous_anchor_position = None;
+
+    for anchored in records {
+        anchored.validate().map_err(world_state_assembly_error)?;
+        let anchor = anchored.effective_before_message_id.ok_or_else(|| {
+            AgentError::new(
+                "Conversation World State diff 必须带 effectiveBeforeMessageId anchor。",
+            )
+        })?;
+        let anchor_position = message_positions
+            .get(anchor.as_str())
+            .copied()
+            .ok_or_else(|| {
+                AgentError::new(format!(
+                    "Conversation World State diff 引用了不存在的消息 anchor：`{anchor}`。"
+                ))
+            })?;
+        if previous_anchor_position.is_some_and(|previous| anchor_position < previous) {
+            return Err(AgentError::new(
+                "Conversation World State diff 的消息 anchor 顺序发生倒退。",
+            ));
+        }
+        previous_anchor_position = Some(anchor_position);
+
+        let diff = match anchored.record {
+            WorldStateRecord::Diff(diff) => diff,
+            WorldStateRecord::Full(_) => {
+                return Err(AgentError::new(
+                    "Conversation World State 活跃 epoch 只能包含一个初始 full snapshot。",
+                ));
+            }
+        };
+        let projection = diff
+            .model_projection_against(reducer.snapshot(), WorldStateLifetime::Conversation)
+            .map_err(world_state_assembly_error)?;
+        reducer.apply(&diff).map_err(world_state_assembly_error)?;
+        if let Some(projection) = projection {
+            before_message
+                .entry(anchor)
+                .or_default()
+                .push(world_state_context_item(
+                    &diff,
+                    projection.render_sanitized_text(),
+                    ContextSource::WorldStateDiff,
+                    ContextScope::Conversation,
+                ));
+        }
+    }
+
+    Ok(AssembledWorldStateTimeline {
+        full,
+        before_message,
+    })
+}
+
+trait WorldStateContextRecord {
+    fn stable_origin_id(&self) -> String;
+}
+
+impl WorldStateContextRecord for WorldStateSnapshot {
+    fn stable_origin_id(&self) -> String {
+        format!("{}:{}", self.epoch_id, self.sequence)
+    }
+}
+
+impl WorldStateContextRecord for crate::world_state::WorldStateDiff {
+    fn stable_origin_id(&self) -> String {
+        format!("{}:{}", self.epoch_id, self.sequence)
+    }
+}
+
+fn world_state_context_item(
+    record: &impl WorldStateContextRecord,
+    content: String,
+    source: ContextSource,
+    scope: ContextScope,
+) -> ContextItem {
+    ContextItem::new(
+        LlmMessage::backend_state(content),
+        ContextMetadata::new(source, scope, ContextRetention::Retained)
+            .with_origin(ContextOrigin::world_state_record(record.stable_origin_id())),
+    )
+}
+
+fn world_state_assembly_error(error: crate::world_state::WorldStateError) -> AgentError {
+    AgentError::new(format!("Conversation World State 无效：{error}"))
 }
 
 fn append_skill_discovery(
@@ -369,6 +580,9 @@ mod tests {
     };
     use crate::llm::model_response_tool_call_id;
     use crate::protocol::AgentApprovalStatus;
+    use crate::world_state::{
+        WorldStateDiff, WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId,
+    };
     use crate::ContextJournalCursor;
     use serde_json::json;
 
@@ -415,6 +629,84 @@ mod tests {
             created_at: None,
             conversation_turn_trace: None,
         }
+    }
+
+    fn identified_message(id: &str, role: &str, content: &str) -> AgentChatMessage {
+        AgentChatMessage {
+            message_id: Some(id.to_string()),
+            role: role.to_string(),
+            content: content.to_string(),
+            created_at: None,
+            conversation_turn_trace: None,
+        }
+    }
+
+    fn conversation_world_state_records(
+        effective_before_message_id: &str,
+    ) -> Vec<AnchoredWorldStateRecord> {
+        let initial = WorldStateSnapshot::new(
+            "conversation-epoch-1",
+            0,
+            vec![
+                WorldStateSectionEnvelope::model_visible(
+                    WorldStateSectionId::WorkspaceBinding,
+                    WorldStateLifetime::Conversation,
+                    json!({
+                        "available": true,
+                        "displayName": "old-workspace",
+                        "rootPath": "/private/authoritative/root"
+                    }),
+                    json!({
+                        "available": true,
+                        "displayName": "old-workspace"
+                    }),
+                )
+                .unwrap(),
+                WorldStateSectionEnvelope::host_only(
+                    WorldStateSectionId::extension("private.credentials").unwrap(),
+                    WorldStateLifetime::Conversation,
+                    json!({"apiKey": "host-only-secret"}),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let target = WorldStateSnapshot::new(
+            "conversation-epoch-1",
+            1,
+            vec![
+                WorldStateSectionEnvelope::model_visible(
+                    WorldStateSectionId::WorkspaceBinding,
+                    WorldStateLifetime::Conversation,
+                    json!({
+                        "available": true,
+                        "displayName": "new-workspace",
+                        "rootPath": "/private/new-authoritative/root"
+                    }),
+                    json!({
+                        "available": true,
+                        "displayName": "new-workspace"
+                    }),
+                )
+                .unwrap(),
+                WorldStateSectionEnvelope::host_only(
+                    WorldStateSectionId::extension("private.credentials").unwrap(),
+                    WorldStateLifetime::Conversation,
+                    json!({"apiKey": "new-host-only-secret"}),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let diff = WorldStateDiff::between(&initial, &target).unwrap();
+        vec![
+            AnchoredWorldStateRecord::new(WorldStateRecord::Full(initial), None).unwrap(),
+            AnchoredWorldStateRecord::new(
+                WorldStateRecord::Diff(diff),
+                Some(effective_before_message_id.to_string()),
+            )
+            .unwrap(),
+        ]
     }
 
     fn traced_assistant(content: &str) -> AgentChatMessage {
@@ -475,6 +767,8 @@ mod tests {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "backend rules".to_string(),
             compaction_summary: None,
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
             messages: vec![
                 message("user", "old question"),
                 message("assistant", "old answer"),
@@ -517,6 +811,174 @@ mod tests {
     }
 
     #[test]
+    fn places_world_state_full_after_summary_and_diff_immediately_before_anchor() {
+        let frame = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "backend rules".to_string(),
+            compaction_summary: Some(compaction_summary()),
+            world_state_records: conversation_world_state_records("user-current"),
+            initial_run_world_state: None,
+            messages: vec![identified_message(
+                "user-current",
+                "user",
+                "continue in the current workspace",
+            )],
+            skill_discovery: None,
+            skill_activation: None,
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap();
+
+        let messages = frame.to_messages();
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[0].role, LlmMessageRole::System);
+        assert!(messages[1].content.contains("semantic summary is lossy"));
+        assert!(messages[2].content.contains("\"recordType\":\"full\""));
+        assert!(messages[2]
+            .content
+            .contains("\"lifetime\":\"conversation\""));
+        assert!(messages[2].content.contains("old-workspace"));
+        assert!(messages[3].content.contains("\"recordType\":\"diff\""));
+        assert!(messages[3]
+            .content
+            .contains("\"lifetime\":\"conversation\""));
+        assert!(messages[3].content.contains("new-workspace"));
+        assert_eq!(messages[4].content, "continue in the current workspace");
+
+        let rendered = messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered.contains("/private/authoritative/root"));
+        assert!(!rendered.contains("/private/new-authoritative/root"));
+        assert!(!rendered.contains("private.credentials"));
+        assert!(!rendered.contains("host-only-secret"));
+        assert!(!rendered.contains("conversation-epoch-1"));
+        assert!(!rendered.contains("world-state-sha256-v1:"));
+
+        let manifest = frame.manifest();
+        assert_eq!(manifest.entries[2].sources, vec!["world_state_snapshot"]);
+        assert_eq!(manifest.entries[2].scope, "conversation");
+        assert_eq!(manifest.entries[2].retention, "retained");
+        assert_eq!(manifest.entries[2].origin_kind, Some("world_state_record"));
+        assert_eq!(manifest.entries[3].sources, vec!["world_state_diff"]);
+        assert_eq!(manifest.entries[3].scope, "conversation");
+        assert_eq!(manifest.entries[3].retention, "retained");
+        assert_eq!(manifest.entries[4].sources, vec!["current_turn"]);
+    }
+
+    #[test]
+    fn places_initial_run_world_state_after_durable_timeline_before_attachments() {
+        let run_snapshot = WorldStateSnapshot::new(
+            "run-epoch-1",
+            0,
+            vec![
+                WorldStateSectionEnvelope::model_visible(
+                    WorldStateSectionId::EffectiveTools,
+                    WorldStateLifetime::Run,
+                    json!({"names": ["read_file"], "executionToken": "host-secret"}),
+                    json!({"names": ["read_file"]}),
+                )
+                .unwrap(),
+                WorldStateSectionEnvelope::host_only(
+                    WorldStateSectionId::ModelCapabilities,
+                    WorldStateLifetime::Run,
+                    json!({"imageInput": false, "providerSecret": "hidden"}),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let frame = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "rules".to_string(),
+            compaction_summary: None,
+            world_state_records: Vec::new(),
+            initial_run_world_state: Some(run_snapshot),
+            messages: vec![identified_message("user-1", "user", "inspect the file")],
+            skill_discovery: None,
+            skill_activation: None,
+            attachments: ContextAttachments {
+                text: "ATTACHMENT_MARKER".to_string(),
+                images: Vec::new(),
+            },
+        })
+        .unwrap();
+
+        let messages = frame.to_messages();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1].content, "inspect the file");
+        assert!(messages[2].content.contains("read_file"));
+        assert!(messages[2].content.contains("\"lifetime\":\"run\""));
+        assert!(!messages[2].content.contains("host-secret"));
+        assert!(!messages[2].content.contains("providerSecret"));
+        assert_eq!(messages[3].content, "ATTACHMENT_MARKER");
+        let manifest = frame.manifest();
+        assert_eq!(manifest.entries[2].sources, vec!["world_state_snapshot"]);
+        assert_eq!(manifest.entries[2].scope, "run");
+        assert_eq!(manifest.entries[2].retention, "retained");
+        assert_eq!(manifest.entries[3].sources, vec!["input_attachment"]);
+    }
+
+    #[test]
+    fn legacy_messages_without_world_state_keep_the_existing_shape() {
+        let frame = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "rules".to_string(),
+            compaction_summary: None,
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
+            messages: vec![identified_message("user-legacy", "user", "legacy message")],
+            skill_discovery: None,
+            skill_activation: None,
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap();
+
+        let messages = frame.to_messages();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, LlmMessageRole::System);
+        assert_eq!(messages[1].content, "legacy message");
+        assert!(frame.manifest().entries.iter().all(|entry| !entry
+            .sources
+            .iter()
+            .any(|source| source.starts_with("world_state"))));
+    }
+
+    #[test]
+    fn rejects_missing_world_state_anchor_and_broken_revision_chain() {
+        let messages = vec![identified_message("user-current", "user", "continue")];
+        let missing_anchor = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "rules".to_string(),
+            compaction_summary: None,
+            world_state_records: conversation_world_state_records("missing-message"),
+            initial_run_world_state: None,
+            messages: messages.clone(),
+            skill_discovery: None,
+            skill_activation: None,
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap_err();
+        assert!(missing_anchor.to_string().contains("不存在的消息 anchor"));
+
+        let mut broken_records = conversation_world_state_records("user-current");
+        let WorldStateRecord::Diff(diff) = &mut broken_records[1].record else {
+            unreachable!("test fixture has a diff as its second record");
+        };
+        diff.base_revision = format!("{}{}", crate::WORLD_STATE_REVISION_PREFIX, "0".repeat(64));
+        let broken_chain = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "rules".to_string(),
+            compaction_summary: None,
+            world_state_records: broken_records,
+            initial_run_world_state: None,
+            messages,
+            skill_discovery: None,
+            skill_activation: None,
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap_err();
+        assert!(broken_chain.to_string().contains("base revision mismatch"));
+    }
+
+    #[test]
     fn places_attachments_before_each_activated_skill() {
         let activation = AgentSkillActivation {
             activation_revision: "activation-sha256-v1:ordered".to_string(),
@@ -544,6 +1006,8 @@ mod tests {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
             messages: vec![message("user", "current question")],
             skill_discovery: None,
             skill_activation: Some(activation),
@@ -611,6 +1075,8 @@ mod tests {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
             messages: vec![message("user", "current question")],
             skill_discovery: Some(discovery),
             skill_activation: Some(activation),
@@ -659,6 +1125,8 @@ mod tests {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
             messages: vec![first_user, historical_assistant, current_user],
             skill_discovery: None,
             skill_activation: None,
@@ -692,6 +1160,8 @@ mod tests {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
             messages: vec![
                 message(" user ", " hello "),
                 message("assistant", " "),
@@ -710,6 +1180,8 @@ mod tests {
         let error = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
             messages: vec![message("tool", "result")],
             skill_discovery: None,
             skill_activation: None,
@@ -724,6 +1196,8 @@ mod tests {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
             messages: vec![
                 message("user", "create a file"),
                 traced_assistant("Created src/new.rs."),
@@ -783,6 +1257,8 @@ mod tests {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
             messages: vec![
                 message("user", "do the work"),
                 historical_assistant,
@@ -819,6 +1295,8 @@ mod tests {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
             compaction_summary: Some(compaction_summary()),
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
             messages: vec![message("user", "continue from the summary")],
             skill_discovery: None,
             skill_activation: None,
@@ -850,6 +1328,8 @@ mod tests {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),
             compaction_summary: Some(compaction_summary()),
+            world_state_records: Vec::new(),
+            initial_run_world_state: None,
             messages: Vec::new(),
             skill_discovery: None,
             skill_activation: None,

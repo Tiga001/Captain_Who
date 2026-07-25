@@ -4,10 +4,13 @@ use crate::context::{
     ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
     ContextJournalCursor,
 };
-use crate::storage::{context_compaction_receipt_repository, conversation_trace_repository};
+use crate::storage::{
+    context_compaction_receipt_repository, conversation_trace_repository, world_state_repository,
+};
 use crate::{ContextCompactionReceipt, ContextCompactionReceiptStatus, ModelRequestObservation};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -442,6 +445,7 @@ fn commit_prefix_replacement_in_transaction(
             source_summary_id: None,
         },
     )?;
+    rebase_active_world_state_for_summary(transaction, &summary)?;
     let current_head_revision = transaction
         .query_row(
             "SELECT revision
@@ -468,6 +472,62 @@ fn commit_prefix_replacement_in_transaction(
         ],
     )?;
     Ok(summary)
+}
+
+fn rebase_active_world_state_for_summary(
+    transaction: &Connection,
+    summary: &ContextCompactionSummary,
+) -> Result<(), ContextCompactionRepositoryError> {
+    let Some(active_snapshot) =
+        world_state_repository::fold_active_snapshot(transaction, &summary.conversation_id)
+            .map_err(map_world_state_error)?
+    else {
+        // Conversations created before the World State journal remain valid and acquire their
+        // first full snapshot lazily on the next normal turn.
+        return Ok(());
+    };
+    let new_epoch_id = world_state_epoch_id_for_summary(&summary.id);
+    world_state_repository::rebase_active_epoch_in_connection(
+        transaction,
+        &world_state_repository::ConversationWorldStateRebaseRequest {
+            conversation_id: &summary.conversation_id,
+            expected_source_epoch_id: &active_snapshot.epoch_id,
+            expected_source_revision: &active_snapshot.revision,
+            covered_through_message_id: summary.covered_through.message_id(),
+            new_epoch_id: &new_epoch_id,
+            base_summary_id: &summary.id,
+            created_at: summary.created_at,
+        },
+    )
+    .map_err(map_world_state_error)?;
+    Ok(())
+}
+
+fn world_state_epoch_id_for_summary(summary_id: &str) -> String {
+    let digest = Sha256::digest(summary_id.as_bytes());
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    format!("world-state-summary-sha256-v1:{encoded}")
+}
+
+fn map_world_state_error(
+    error: world_state_repository::ConversationWorldStateRepositoryError,
+) -> ContextCompactionRepositoryError {
+    match error {
+        world_state_repository::ConversationWorldStateRepositoryError::Database(error) => {
+            ContextCompactionRepositoryError::Database(error)
+        }
+        world_state_repository::ConversationWorldStateRepositoryError::Conflict(message) => {
+            ContextCompactionRepositoryError::Stale(message)
+        }
+        world_state_repository::ConversationWorldStateRepositoryError::Invalid(message)
+        | world_state_repository::ConversationWorldStateRepositoryError::Corrupt(message) => {
+            ContextCompactionRepositoryError::Invalid(message)
+        }
+    }
 }
 
 fn map_receipt_error(
@@ -503,6 +563,12 @@ pub fn rollback_active_summary(
         .as_deref()
         .map(|summary_id| load_summary(&transaction, summary_id))
         .transpose()?;
+    rollback_world_state_epoch_for_summary(
+        &transaction,
+        conversation_id,
+        expected_summary_id,
+        restored.as_ref().map(|summary| summary.id.as_str()),
+    )?;
     match &restored {
         Some(summary) => {
             let current_revision = transaction.query_row(
@@ -531,6 +597,79 @@ pub fn rollback_active_summary(
     }
     transaction.commit()?;
     Ok(restored)
+}
+
+fn rollback_world_state_epoch_for_summary(
+    transaction: &Connection,
+    conversation_id: &str,
+    expected_summary_id: &str,
+    restored_summary_id: Option<&str>,
+) -> Result<(), ContextCompactionRepositoryError> {
+    let epochs = {
+        let mut statement = transaction.prepare(
+            "SELECT epoch_id, base_summary_id
+             FROM conversation_world_state_epochs
+             WHERE conversation_id = ?1
+             ORDER BY generation DESC
+             LIMIT 2",
+        )?;
+        let rows = statement
+            .query_map([conversation_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let Some((active_epoch_id, active_base_summary_id)) = epochs.first() else {
+        // Legacy conversations without a World State journal keep their existing rollback
+        // behavior and establish a correctly based initial epoch on the next normal turn.
+        return Ok(());
+    };
+    if active_base_summary_id.as_deref() != Some(expected_summary_id) {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "active World State epoch 与待回滚摘要不一致。".to_string(),
+        ));
+    }
+    let Some((_, previous_base_summary_id)) = epochs.get(1) else {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "待回滚摘要没有可恢复的上一 World State epoch。".to_string(),
+        ));
+    };
+    if previous_base_summary_id.as_deref() != restored_summary_id {
+        return Err(ContextCompactionRepositoryError::Invalid(
+            "上一 World State epoch 的 summary 边界与摘要链不一致。".to_string(),
+        ));
+    }
+
+    let current = world_state_repository::fold_active_snapshot(transaction, conversation_id)
+        .map_err(map_world_state_error)?
+        .ok_or_else(|| {
+            ContextCompactionRepositoryError::Invalid(
+                "active World State epoch 无法折叠。".to_string(),
+            )
+        })?;
+    if !world_state_repository::delete_epoch(transaction, conversation_id, active_epoch_id)
+        .map_err(map_world_state_error)?
+    {
+        return Err(ContextCompactionRepositoryError::Stale(
+            "active World State epoch 在回滚期间已变化。".to_string(),
+        ));
+    }
+    let restored = world_state_repository::fold_active_snapshot(transaction, conversation_id)
+        .map_err(map_world_state_error)?
+        .ok_or_else(|| {
+            ContextCompactionRepositoryError::Invalid(
+                "上一 World State epoch 无法折叠。".to_string(),
+            )
+        })?;
+    if restored.revision != current.revision {
+        // Returning before commit rolls the epoch deletion back with the summary head. Losing
+        // state appended after compaction is never an acceptable way to roll a summary back.
+        return Err(ContextCompactionRepositoryError::Stale(
+            "摘要生成后 World State 已继续变化，无法无损回滚。".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn list_journal_entries(

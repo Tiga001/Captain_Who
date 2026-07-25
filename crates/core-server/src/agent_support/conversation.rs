@@ -156,6 +156,30 @@ pub(crate) fn prepare_conversation_turn(
     )?;
     let attachment_library = storage
         .build_attachment_library_context(&conversation_id, resolved_project_id.as_deref())?;
+    let model_capabilities = ModelCapabilities {
+        image_input: model.supports_image,
+    };
+    let run_context = AgentRunContext {
+        conversation_id: Some(conversation_id.clone()),
+        project_id: resolved_project_id.clone(),
+        workspace: project.as_ref().map(|project| AgentWorkspaceContext {
+            project_id: Some(project.id.clone()),
+            display_name: Some(project.name.clone()),
+            root_path: project.path.clone(),
+        }),
+        attachment_library: Some(attachment_library),
+        permissions: input.permissions,
+    };
+    let world_state_records = ensure_conversation_world_state(
+        storage,
+        &conversation_id,
+        &user_message_id,
+        Some(&run_context),
+        Some(&prompt_preferences),
+        model_capabilities,
+        context_compaction_summary.as_ref(),
+        timestamp,
+    )?;
 
     let mut agent_messages = history_messages;
     agent_messages.push(AgentChatMessage {
@@ -170,26 +194,14 @@ pub(crate) fn prepare_conversation_turn(
         api_url: connection.api_url,
         api_token: connection.api_token,
         model: model.id.clone(),
-        model_capabilities: ModelCapabilities {
-            image_input: model.supports_image,
-        },
+        model_capabilities,
         api_style: None,
         context_window_tokens: Some(context_window_tokens),
         context_window_indicator_enabled: input.context_window_indicator_enabled,
         max_tokens: input.max_tokens,
         temperature: input.temperature,
         stream: Some(true),
-        context: Some(AgentRunContext {
-            conversation_id: Some(conversation_id.clone()),
-            project_id: resolved_project_id.clone(),
-            workspace: project.as_ref().map(|project| AgentWorkspaceContext {
-                project_id: Some(project.id.clone()),
-                display_name: Some(project.name.clone()),
-                root_path: project.path.clone(),
-            }),
-            attachment_library: Some(attachment_library),
-            permissions: input.permissions,
-        }),
+        context: Some(run_context),
         search_config: Some(AgentSearchConfig {
             mode: search_mode_from_storage(&settings.search_mode),
             tavily_api_key: non_empty(settings.tavily_api_key),
@@ -201,6 +213,7 @@ pub(crate) fn prepare_conversation_turn(
         resume_checkpoint: None,
         assistant_message_id: Some(assistant_message_id.clone()),
         context_compaction_summary,
+        world_state_records,
         skill_activation: prepared_skills.runtime,
         skill_discovery: skill_discovery.clone(),
         messages: agent_messages,

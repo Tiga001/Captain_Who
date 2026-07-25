@@ -1217,6 +1217,137 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS conversation_world_state_epochs (
+            conversation_id TEXT NOT NULL,
+            epoch_id TEXT NOT NULL CHECK (
+                length(CAST(epoch_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            generation INTEGER NOT NULL CHECK (generation > 0),
+            base_summary_id TEXT,
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (conversation_id, epoch_id),
+            UNIQUE (conversation_id, generation),
+            UNIQUE (base_summary_id),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (base_summary_id)
+                REFERENCES context_compaction_summaries(id) ON DELETE CASCADE
+        );
+
+        CREATE TRIGGER IF NOT EXISTS validate_conversation_world_state_epoch_summary_insert
+        BEFORE INSERT ON conversation_world_state_epochs
+        WHEN NEW.base_summary_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM context_compaction_summaries
+              WHERE id = NEW.base_summary_id
+                AND conversation_id = NEW.conversation_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'world state epoch summary must belong to the same conversation'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_conversation_world_state_epoch_summary_update
+        BEFORE UPDATE OF conversation_id, base_summary_id
+        ON conversation_world_state_epochs
+        WHEN NEW.base_summary_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM context_compaction_summaries
+              WHERE id = NEW.base_summary_id
+                AND conversation_id = NEW.conversation_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'world state epoch summary must belong to the same conversation'
+            );
+        END;
+
+        CREATE TABLE IF NOT EXISTS conversation_world_state_records (
+            journal_position INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            epoch_id TEXT NOT NULL CHECK (
+                length(CAST(epoch_id AS BLOB)) BETWEEN 1 AND 256
+            ),
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            record_kind TEXT NOT NULL CHECK (record_kind IN ('full', 'diff')),
+            base_revision TEXT,
+            result_revision TEXT NOT NULL CHECK (
+                length(CAST(result_revision AS BLOB)) BETWEEN 1 AND 256
+            ),
+            effective_before_message_id TEXT,
+            record_json TEXT NOT NULL CHECK (length(trim(record_json)) > 0),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            UNIQUE (conversation_id, epoch_id, sequence),
+            CHECK (
+                (record_kind = 'full' AND base_revision IS NULL)
+                OR (
+                    record_kind = 'diff'
+                    AND length(CAST(base_revision AS BLOB)) BETWEEN 1 AND 256
+                )
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id, epoch_id)
+                REFERENCES conversation_world_state_epochs(conversation_id, epoch_id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (effective_before_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+
+        CREATE TRIGGER IF NOT EXISTS validate_conversation_world_state_anchor_insert
+        BEFORE INSERT ON conversation_world_state_records
+        WHEN NEW.effective_before_message_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM messages
+              WHERE id = NEW.effective_before_message_id
+                AND conversation_id = NEW.conversation_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'world state anchor must be a message in the same conversation'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_conversation_world_state_anchor_update
+        BEFORE UPDATE OF conversation_id, effective_before_message_id
+        ON conversation_world_state_records
+        WHEN NEW.effective_before_message_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM messages
+              WHERE id = NEW.effective_before_message_id
+                AND conversation_id = NEW.conversation_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'world state anchor must be a message in the same conversation'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS rewind_conversation_world_state_after_record_delete
+        AFTER DELETE ON conversation_world_state_records
+        BEGIN
+            DELETE FROM conversation_world_state_records
+            WHERE conversation_id = OLD.conversation_id
+              AND epoch_id = OLD.epoch_id
+              AND sequence > OLD.sequence;
+            DELETE FROM conversation_world_state_epochs
+            WHERE conversation_id = OLD.conversation_id
+              AND epoch_id = OLD.epoch_id
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM conversation_world_state_records
+                  WHERE conversation_id = OLD.conversation_id
+                    AND epoch_id = OLD.epoch_id
+              );
+        END;
+
         CREATE TABLE IF NOT EXISTS agent_run_guidances (
             guidance_id TEXT PRIMARY KEY CHECK (length(trim(guidance_id)) > 0),
             client_message_id TEXT NOT NULL CHECK (length(trim(client_message_id)) > 0),
@@ -1472,6 +1603,12 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_conversations_updated_at ON conversations(updated_at);
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id, position);
         CREATE INDEX IF NOT EXISTS idx_conversation_turn_traces_conversation_id ON conversation_turn_traces(conversation_id, completed_at);
+        CREATE INDEX IF NOT EXISTS idx_conversation_world_state_records_conversation
+            ON conversation_world_state_records(conversation_id, journal_position);
+        CREATE INDEX IF NOT EXISTS idx_conversation_world_state_records_anchor
+            ON conversation_world_state_records(effective_before_message_id);
+        CREATE INDEX IF NOT EXISTS idx_conversation_world_state_epochs_active
+            ON conversation_world_state_epochs(conversation_id, generation DESC);
         CREATE INDEX IF NOT EXISTS idx_agent_run_guidances_run_status ON agent_run_guidances(run_id, status, created_at);
         CREATE INDEX IF NOT EXISTS idx_agent_run_guidances_conversation ON agent_run_guidances(conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_agent_turn_diffs_conversation_project ON agent_turn_diffs(conversation_id, project_id, updated_at);
@@ -1648,6 +1785,92 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creates_idempotent_world_state_journal_with_cascade_anchors() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        run_migrations(&connection).unwrap();
+
+        for column in [
+            "conversation_id",
+            "schema_version",
+            "epoch_id",
+            "sequence",
+            "record_kind",
+            "base_revision",
+            "result_revision",
+            "effective_before_message_id",
+            "record_json",
+        ] {
+            assert!(
+                table_has_column(&connection, "conversation_world_state_records", column).unwrap()
+            );
+        }
+        for column in [
+            "conversation_id",
+            "epoch_id",
+            "generation",
+            "base_summary_id",
+        ] {
+            assert!(
+                table_has_column(&connection, "conversation_world_state_epochs", column).unwrap()
+            );
+        }
+
+        let record_foreign_keys = {
+            let mut statement = connection
+                .prepare("PRAGMA foreign_key_list(conversation_world_state_records)")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert!(record_foreign_keys
+            .iter()
+            .any(|(table, column, on_delete)| {
+                table == "conversations"
+                    && column == "conversation_id"
+                    && on_delete.eq_ignore_ascii_case("cascade")
+            }));
+        assert!(record_foreign_keys
+            .iter()
+            .any(|(table, column, on_delete)| {
+                table == "messages"
+                    && column == "effective_before_message_id"
+                    && on_delete.eq_ignore_ascii_case("cascade")
+            }));
+
+        let epoch_foreign_keys = {
+            let mut statement = connection
+                .prepare("PRAGMA foreign_key_list(conversation_world_state_epochs)")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert!(epoch_foreign_keys.iter().any(|(table, column, on_delete)| {
+            table == "context_compaction_summaries"
+                && column == "base_summary_id"
+                && on_delete.eq_ignore_ascii_case("cascade")
+        }));
+    }
 
     #[test]
     fn upgrades_existing_composer_drafts_without_granting_new_full_permissions() {

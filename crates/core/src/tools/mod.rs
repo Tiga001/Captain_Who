@@ -352,12 +352,11 @@ impl ToolRegistry {
         }
     }
 
-    /// Returns the durable, history-safe projection of a tool result.
+    /// Returns the tool-owned pre-projection for durable history.
     ///
-    /// Most tools retain their complete canonical result. Tools that disclose
-    /// run-scoped or sensitive payloads can override this hook so the current
-    /// model turn receives the payload while conversation history stores only
-    /// stable provenance and range metadata.
+    /// Tools can remove intrinsically non-durable payloads here. The conversation trace recorder
+    /// applies the centralized size/tool policy afterward; current-turn model, checkpoint, and
+    /// event projections do not inherit those durable limits.
     pub(crate) fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         self.tools
             .get(&result.tool)
@@ -546,7 +545,7 @@ pub(crate) trait AgentTool: Send + Sync {
     }
 
     fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
-        self.trace_projection(result)
+        canonical_tool_result_for_context(result)
     }
 }
 

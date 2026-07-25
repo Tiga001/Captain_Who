@@ -60,6 +60,10 @@ impl AgentService {
                 .get_active_context_compaction_summary(conversation_id)?,
             None => None,
         };
+        let world_state_records = match conversation_id.as_deref() {
+            Some(conversation_id) => load_conversation_world_state(&self.storage, conversation_id)?,
+            None => Vec::new(),
+        };
         let messages = match conversation.as_ref() {
             Some(conversation) => {
                 let traces = self
@@ -117,6 +121,7 @@ impl AgentService {
             resume_checkpoint: None,
             assistant_message_id: None,
             context_compaction_summary,
+            world_state_records,
             skill_activation: prepared_skills.runtime,
             skill_discovery,
             messages,
@@ -260,6 +265,8 @@ impl AgentService {
             &[],
         );
         preview_input.context_compaction_summary = context_compaction_summary;
+        preview_input.world_state_records =
+            load_conversation_world_state(&self.storage, conversation_id)?;
         preview_input.attachments.clear();
         preview_input.approval_decision = None;
         preview_input.tool_continuation = None;

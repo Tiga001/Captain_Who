@@ -5,6 +5,7 @@ mod context;
 mod context_compaction_audit;
 mod context_compaction_receipt;
 mod conversation_trace;
+mod conversation_trace_projection;
 pub mod durable_fs;
 pub mod file_input;
 pub mod file_write;
@@ -24,6 +25,7 @@ mod system_paths;
 mod tools;
 mod turn_diff;
 mod usage;
+pub mod world_state;
 
 pub use cancellation::AgentCancellationToken;
 pub use context::{
@@ -151,4 +153,12 @@ pub use turn_diff::{
     capture_agent_turn_file_content, AgentTurnDiffIdentity, AgentTurnDiffRecord,
     AgentTurnFileChange, AgentTurnFileContent, AGENT_TURN_DIFF_SCHEMA_VERSION,
     MAX_AGENT_TURN_FILE_CONTENT_BYTES,
+};
+pub use world_state::{
+    AnchoredWorldStateRecord, WorldStateDiff, WorldStateError, WorldStateLifetime,
+    WorldStateModelChange, WorldStateModelRecord, WorldStateModelSection, WorldStateOperation,
+    WorldStateRecord, WorldStateRecordKind, WorldStateReducer, WorldStateSectionEnvelope,
+    WorldStateSectionId, WorldStateSectionPrecondition, WorldStateSectionTombstone,
+    WorldStateSnapshot, WorldStateVisibility, WORLD_STATE_REVISION_PREFIX,
+    WORLD_STATE_SCHEMA_VERSION,
 };

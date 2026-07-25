@@ -547,8 +547,11 @@ pub fn create_conversation_context_state(
 ) -> AgentResult<AgentConversationContextState> {
     let prepared = prepare_conversation_context(&input)?;
     let assembled = assemble_context_preview(
-        input.context_compaction_summary.clone(),
-        input.messages,
+        DurableConversationTimeline {
+            compaction_summary: input.context_compaction_summary.clone(),
+            world_state_records: input.world_state_records.clone(),
+            messages: input.messages,
+        },
         None,
         None,
         input.context.as_ref(),

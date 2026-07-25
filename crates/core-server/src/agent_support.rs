@@ -42,6 +42,7 @@ mod conversation;
 mod helpers;
 mod types;
 mod utility;
+mod world_state;
 
 pub(super) use actions::*;
 pub(super) use conversation::*;
@@ -58,6 +59,7 @@ pub use types::{
     PendingAgentActionSnapshot,
 };
 pub(super) use utility::*;
+pub(super) use world_state::*;
 
 #[cfg(test)]
 mod tests;

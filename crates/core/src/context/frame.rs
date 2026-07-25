@@ -3,7 +3,7 @@ use super::measurement::{
     ContextRevisionHasher, ContextTokenEstimator,
 };
 use super::ContextJournalCursor;
-use crate::llm::{LlmMessage, LlmMessageRole, LlmToolCall};
+use crate::llm::{LlmMessage, LlmMessagePlacement, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
     AgentContextCheckpointGroup, AgentContextCheckpointImage, AgentContextCheckpointItem,
     AgentContextCheckpointOrigin, AgentContextCheckpointToolCall, AgentError, AgentResult,
@@ -64,6 +64,31 @@ pub(crate) enum ContextUsageClass {
     RequestOnly,
 }
 
+/// Physical cache band for one provider-neutral context item.
+///
+/// Bands are ordered from the longest-lived prefix to the most volatile suffix. A valid request
+/// may append within the same band or advance to a later band, but must never move backwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ContextCacheBand {
+    StableContract,
+    ConversationEpochPrelude,
+    DurableTimeline,
+    RunTimeline,
+    RequestTail,
+}
+
+impl ContextCacheBand {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::StableContract => "stable_contract",
+            Self::ConversationEpochPrelude => "conversation_epoch_prelude",
+            Self::DurableTimeline => "durable_timeline",
+            Self::RunTimeline => "run_timeline",
+            Self::RequestTail => "request_tail",
+        }
+    }
+}
+
 impl ContextUsageClass {
     pub(crate) fn is_persistent(self) -> bool {
         matches!(self, Self::Fixed | Self::Durable)
@@ -91,6 +116,8 @@ impl ContextRetention {
 pub(crate) enum ContextSource {
     BackendSystemPrompt,
     ConversationSummary,
+    WorldStateSnapshot,
+    WorldStateDiff,
     ConversationHistory,
     ConversationTrace,
     CurrentTurn,
@@ -112,6 +139,8 @@ impl ContextSource {
         match self {
             Self::BackendSystemPrompt => "backend_system_prompt",
             Self::ConversationSummary => "conversation_summary",
+            Self::WorldStateSnapshot => "world_state_snapshot",
+            Self::WorldStateDiff => "world_state_diff",
             Self::ConversationHistory => "conversation_history",
             Self::ConversationTrace => "conversation_trace",
             Self::CurrentTurn => "current_turn",
@@ -133,6 +162,8 @@ impl ContextSource {
         match value {
             "backend_system_prompt" => Some(Self::BackendSystemPrompt),
             "conversation_summary" => Some(Self::ConversationSummary),
+            "world_state_snapshot" => Some(Self::WorldStateSnapshot),
+            "world_state_diff" => Some(Self::WorldStateDiff),
             "conversation_history" => Some(Self::ConversationHistory),
             "conversation_trace" => Some(Self::ConversationTrace),
             "current_turn" => Some(Self::CurrentTurn),
@@ -183,6 +214,7 @@ pub(crate) enum ContextOriginKind {
     ConversationMessage,
     ConversationTraceItem,
     CompactionSummary,
+    WorldStateRecord,
     Skill,
 }
 
@@ -192,6 +224,7 @@ impl ContextOriginKind {
             Self::ConversationMessage => "conversation_message",
             Self::ConversationTraceItem => "conversation_trace_item",
             Self::CompactionSummary => "compaction_summary",
+            Self::WorldStateRecord => "world_state_record",
             Self::Skill => "skill",
         }
     }
@@ -201,6 +234,7 @@ impl ContextOriginKind {
             "conversation_message" => Some(Self::ConversationMessage),
             "conversation_trace_item" => Some(Self::ConversationTraceItem),
             "compaction_summary" => Some(Self::CompactionSummary),
+            "world_state_record" => Some(Self::WorldStateRecord),
             "skill" => Some(Self::Skill),
             _ => None,
         }
@@ -235,6 +269,13 @@ impl ContextOrigin {
         }
     }
 
+    pub(crate) fn world_state_record(id: impl Into<String>) -> Self {
+        Self {
+            kind: ContextOriginKind::WorldStateRecord,
+            id: id.into(),
+        }
+    }
+
     pub(crate) fn conversation_trace_item(
         assistant_message_id: impl Into<String>,
         sequence: u64,
@@ -261,7 +302,9 @@ impl ContextOrigin {
                 Some(ContextJournalCursor::message(self.id.clone()))
             }
             ContextOriginKind::ConversationTraceItem => serde_json::from_str(&self.id).ok(),
-            ContextOriginKind::CompactionSummary | ContextOriginKind::Skill => None,
+            ContextOriginKind::CompactionSummary
+            | ContextOriginKind::WorldStateRecord
+            | ContextOriginKind::Skill => None,
         }
     }
 }
@@ -366,6 +409,40 @@ impl ContextMetadata {
             ContextScope::Run => ContextUsageClass::RunTransient,
         }
     }
+
+    pub(crate) fn cache_band(&self) -> ContextCacheBand {
+        if self.retention == ContextRetention::RequestOnly {
+            return ContextCacheBand::RequestTail;
+        }
+        if self.sources.contains(&ContextSource::BackendSystemPrompt) {
+            return ContextCacheBand::StableContract;
+        }
+        if self.sources.contains(&ContextSource::ConversationSummary)
+            || self.sources.contains(&ContextSource::WorldStateSnapshot)
+                && matches!(
+                    self.scope,
+                    ContextScope::Conversation | ContextScope::Project
+                )
+        {
+            return ContextCacheBand::ConversationEpochPrelude;
+        }
+        match self.scope {
+            ContextScope::Conversation | ContextScope::Project => ContextCacheBand::DurableTimeline,
+            ContextScope::Run => ContextCacheBand::RunTimeline,
+        }
+    }
+
+    pub(crate) fn message_placement(&self) -> LlmMessagePlacement {
+        if self.sources.contains(&ContextSource::BackendSystemPrompt) {
+            return LlmMessagePlacement::StableSystemPolicy;
+        }
+        if self.sources.contains(&ContextSource::WorldStateSnapshot)
+            || self.sources.contains(&ContextSource::WorldStateDiff)
+        {
+            return LlmMessagePlacement::BackendStateTimeline;
+        }
+        LlmMessagePlacement::OrdinaryTimeline
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -383,7 +460,8 @@ struct ContextItemMeasurement {
 }
 
 impl ContextItem {
-    pub(crate) fn new(message: LlmMessage, metadata: ContextMetadata) -> Self {
+    pub(crate) fn new(mut message: LlmMessage, metadata: ContextMetadata) -> Self {
+        message.placement = metadata.message_placement();
         Self {
             message,
             checkpoint_message: None,

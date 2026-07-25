@@ -56,6 +56,7 @@ pub(crate) struct LlmMessage {
     pub tool_call_id: Option<String>,
     pub tool_calls: Vec<LlmToolCall>,
     pub is_error: bool,
+    pub placement: LlmMessagePlacement,
 }
 
 impl LlmMessage {
@@ -67,7 +68,16 @@ impl LlmMessage {
             tool_call_id: None,
             tool_calls: Vec::new(),
             is_error: false,
+            placement: LlmMessagePlacement::default_for_role(role),
         }
+    }
+
+    /// Creates a backend-authoritative state record that remains at its chronological
+    /// position in provider payloads. It is deliberately not a system instruction.
+    pub(crate) fn backend_state(content: impl Into<String>) -> Self {
+        let mut message = Self::text(LlmMessageRole::System, content);
+        message.placement = LlmMessagePlacement::BackendStateTimeline;
+        message
     }
 
     pub(crate) fn assistant(content: impl Into<String>, tool_calls: Vec<LlmToolCall>) -> Self {
@@ -78,6 +88,7 @@ impl LlmMessage {
             tool_call_id: None,
             tool_calls,
             is_error: false,
+            placement: LlmMessagePlacement::OrdinaryTimeline,
         }
     }
 
@@ -93,6 +104,7 @@ impl LlmMessage {
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: Vec::new(),
             is_error,
+            placement: LlmMessagePlacement::OrdinaryTimeline,
         }
     }
 }
@@ -103,6 +115,29 @@ pub(crate) enum LlmMessageRole {
     User,
     Assistant,
     Tool,
+}
+
+/// Provider-neutral placement metadata.
+///
+/// This is intentionally separate from the provider message role: backend state is trusted
+/// application data, but it is not a system instruction and therefore must remain in the
+/// chronological message timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LlmMessagePlacement {
+    StableSystemPolicy,
+    BackendStateTimeline,
+    OrdinaryTimeline,
+}
+
+impl LlmMessagePlacement {
+    pub(crate) fn default_for_role(role: LlmMessageRole) -> Self {
+        match role {
+            LlmMessageRole::System => Self::StableSystemPolicy,
+            LlmMessageRole::User | LlmMessageRole::Assistant | LlmMessageRole::Tool => {
+                Self::OrdinaryTimeline
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

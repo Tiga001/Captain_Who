@@ -15,10 +15,14 @@ use crate::conversation_trace::{
 use crate::llm::{validate_model_tool_call_id, LlmToolCall};
 use crate::protocol::{
     AgentContextCheckpointItem, AgentContextCheckpointToolCall, AgentError, AgentExtensionSnapshot,
-    AgentQueuedToolCallCheckpoint, AgentResult, AgentRunCheckpoint, AgentRunToolSetCheckpoint,
-    AgentToolContinuation, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+    AgentQueuedToolCallCheckpoint, AgentResult, AgentRunCheckpoint, AgentRunContext,
+    AgentRunToolSetCheckpoint, AgentToolContinuation, ModelCapabilities,
+    AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
 };
 use crate::tools::{validate_tool_set_checkpoint_shape, EffectiveToolSet};
+use crate::world_state::{
+    WorldStateLifetime, WorldStateSectionId, WorldStateSnapshot, WorldStateVisibility,
+};
 use std::collections::{BTreeSet, VecDeque};
 
 #[derive(Debug, Clone)]
@@ -124,6 +128,9 @@ pub(super) struct RestoredRunCheckpoint {
     pub(super) conversation_trace: ConversationTraceRecorder,
     pub(super) visible_trace_item_count: usize,
     pub(super) tool_set: AgentRunToolSetCheckpoint,
+    pub(super) run_context: Option<AgentRunContext>,
+    pub(super) model_capabilities: ModelCapabilities,
+    pub(super) run_world_state: WorldStateSnapshot,
 }
 
 pub(super) struct RunCheckpointState<'a> {
@@ -135,6 +142,9 @@ pub(super) struct RunCheckpointState<'a> {
     pub(super) pending_tool_call_id: &'a str,
     pub(super) conversation_trace: &'a ConversationTraceRecorder,
     pub(super) tool_set: &'a EffectiveToolSet,
+    pub(super) run_context: Option<&'a AgentRunContext>,
+    pub(super) model_capabilities: ModelCapabilities,
+    pub(super) run_world_state: &'a WorldStateSnapshot,
 }
 
 pub(super) fn create_run_checkpoint(
@@ -150,6 +160,9 @@ pub(super) fn create_run_checkpoint(
         pending_tool_call_id,
         conversation_trace,
         tool_set,
+        run_context,
+        model_capabilities,
+        run_world_state,
     } = state;
     validate_model_tool_call_id(pending_tool_call_id)?;
     for queued in &tool_batch.queue {
@@ -171,6 +184,7 @@ pub(super) fn create_run_checkpoint(
     }
     let context_items = context.checkpoint_items()?;
     validate_context_checkpoint_tool_call_ids(&context_items)?;
+    validate_checkpoint_world_state(run_world_state, model_capabilities)?;
     Ok(AgentRunCheckpoint {
         version: AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
         run_id: run_id.to_string(),
@@ -184,6 +198,9 @@ pub(super) fn create_run_checkpoint(
         suppressed_narration: tool_batch.suppressed_narration,
         extension_snapshots,
         tool_set: tool_set.checkpoint(),
+        run_context: run_context.cloned(),
+        model_capabilities,
+        run_world_state: run_world_state.clone(),
         pending_tool_call_id: pending_tool_call_id.to_string(),
         conversation_trace_items,
         next_conversation_trace_sequence,
@@ -211,6 +228,7 @@ pub(super) fn restore_run_checkpoint(
     }
     validate_model_tool_call_id(&checkpoint.pending_tool_call_id)?;
     validate_tool_set_checkpoint_shape(&checkpoint.tool_set)?;
+    validate_checkpoint_world_state(&checkpoint.run_world_state, checkpoint.model_capabilities)?;
     validate_model_tool_call_id(&continuation.call.id)?;
     validate_model_tool_call_id(&continuation.result.call_id)?;
     validate_context_checkpoint_tool_call_ids(&checkpoint.context_items)?;
@@ -306,7 +324,44 @@ pub(super) fn restore_run_checkpoint(
         conversation_trace,
         visible_trace_item_count,
         tool_set,
+        run_context: checkpoint.run_context,
+        model_capabilities: checkpoint.model_capabilities,
+        run_world_state: checkpoint.run_world_state,
     })
+}
+
+fn validate_checkpoint_world_state(
+    snapshot: &WorldStateSnapshot,
+    model_capabilities: ModelCapabilities,
+) -> AgentResult<()> {
+    snapshot
+        .validate()
+        .map_err(|error| AgentError::new(format!("运行检查点的 World State 无效：{error}")))?;
+    if snapshot
+        .sections
+        .iter()
+        .any(|section| section.lifetime != WorldStateLifetime::Run)
+    {
+        return Err(AgentError::new(
+            "运行检查点的 World State 只能包含 Run-lifetime section。",
+        ));
+    }
+    let capability = snapshot
+        .section(&WorldStateSectionId::ModelCapabilities)
+        .ok_or_else(|| AgentError::new("运行检查点缺少模型能力 World State。"))?;
+    if capability.visibility != WorldStateVisibility::HostOnly
+        || capability.model_projection.is_some()
+        || capability
+            .state
+            .get("imageInput")
+            .and_then(serde_json::Value::as_bool)
+            != Some(model_capabilities.image_input)
+    {
+        return Err(AgentError::new(
+            "运行检查点的模型能力与冻结的 World State 不一致。",
+        ));
+    }
+    Ok(())
 }
 
 fn restore_batch_fingerprints(
@@ -484,6 +539,24 @@ mod tests {
             .unwrap()
     }
 
+    fn test_run_world_state() -> WorldStateSnapshot {
+        test_run_world_state_for(false)
+    }
+
+    fn test_run_world_state_for(image_input: bool) -> WorldStateSnapshot {
+        WorldStateSnapshot::new(
+            "checkpoint-test-world-state",
+            0,
+            vec![crate::world_state::WorldStateSectionEnvelope::host_only(
+                WorldStateSectionId::ModelCapabilities,
+                WorldStateLifetime::Run,
+                json!({ "imageInput": image_input }),
+            )
+            .unwrap()],
+        )
+        .unwrap()
+    }
+
     fn canonical_test_call_id(tool_index: usize, provider_call_id: &str) -> String {
         model_response_tool_call_id("checkpoint-validation-run", 0, tool_index, provider_call_id)
     }
@@ -527,6 +600,9 @@ mod tests {
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
             },
         )
         .unwrap();
@@ -573,6 +649,65 @@ mod tests {
         assert!(error
             .to_string()
             .contains(&format!("当前版本为 {AGENT_RUN_CHECKPOINT_SCHEMA_VERSION}")));
+    }
+
+    #[test]
+    fn approval_restore_preserves_frozen_run_authority_and_capabilities() {
+        let (mut checkpoint, continuation) = restorable_checkpoint_fixture();
+        let frozen_context = AgentRunContext {
+            conversation_id: Some("conversation-frozen".to_string()),
+            project_id: Some("project-frozen".to_string()),
+            workspace: Some(crate::protocol::AgentWorkspaceContext {
+                project_id: Some("project-frozen".to_string()),
+                display_name: Some("Frozen workspace".to_string()),
+                root_path: Some("/frozen/workspace".to_string()),
+            }),
+            attachment_library: None,
+            permissions: crate::protocol::AgentPermissions {
+                read: crate::protocol::AgentReadPermission::All,
+                write: crate::protocol::AgentWritePermission::All,
+                ..crate::protocol::AgentPermissions::default()
+            },
+        };
+        checkpoint.run_context = Some(frozen_context.clone());
+        checkpoint.model_capabilities = ModelCapabilities { image_input: true };
+        checkpoint.run_world_state = test_run_world_state_for(true);
+
+        let restored = restore_run_checkpoint(
+            checkpoint,
+            "checkpoint-validation-run",
+            &continuation,
+        )
+        .unwrap();
+
+        assert_eq!(restored.run_context, Some(frozen_context));
+        assert_eq!(
+            restored.model_capabilities,
+            ModelCapabilities { image_input: true }
+        );
+        assert_eq!(
+            restored
+                .run_world_state
+                .section(&WorldStateSectionId::ModelCapabilities)
+                .unwrap()
+                .state["imageInput"],
+            true
+        );
+    }
+
+    #[test]
+    fn approval_restore_rejects_capability_and_world_state_mismatch() {
+        let (mut checkpoint, continuation) = restorable_checkpoint_fixture();
+        checkpoint.model_capabilities = ModelCapabilities { image_input: true };
+
+        let error = restore_error(restore_run_checkpoint(
+            checkpoint,
+            "checkpoint-validation-run",
+            &continuation,
+        ));
+
+        assert!(error.to_string().contains("模型能力"));
+        assert!(error.to_string().contains("不一致"));
     }
 
     #[test]
@@ -695,6 +830,9 @@ mod tests {
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &ConversationTraceRecorder::default(),
                 tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
             },
         )
         .unwrap();
@@ -755,6 +893,9 @@ mod tests {
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
             },
         )
         .unwrap_err();
@@ -797,6 +938,9 @@ mod tests {
                 pending_tool_call_id: &valid_pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
             },
         )
         .unwrap_err();
@@ -851,6 +995,9 @@ mod tests {
                 pending_tool_call_id: &valid_pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
             },
         )
         .unwrap_err();
@@ -875,6 +1022,9 @@ mod tests {
                 pending_tool_call_id: &valid_pending.id,
                 conversation_trace: &invalid_trace,
                 tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
             },
         )
         .unwrap_err();
@@ -1044,6 +1194,9 @@ mod tests {
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
             },
         )
         .unwrap();
@@ -1104,6 +1257,9 @@ mod tests {
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
             },
         )
         .unwrap();
@@ -1234,6 +1390,9 @@ mod tests {
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &conversation_trace,
                 tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
             },
         )
         .unwrap();
@@ -1359,6 +1518,9 @@ mod tests {
                 pending_tool_call_id: &pending_call.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
+                run_context: None,
+                model_capabilities: ModelCapabilities::default(),
+                run_world_state: &test_run_world_state(),
             },
         )
         .unwrap();

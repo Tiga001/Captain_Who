@@ -346,6 +346,8 @@ impl AgentService {
             &[],
         );
         preview_input.context_compaction_summary = summary;
+        preview_input.world_state_records =
+            load_conversation_world_state(&self.storage, conversation_id)?;
         preview_input.attachments.clear();
         preview_input.approval_decision = None;
         preview_input.tool_continuation = None;

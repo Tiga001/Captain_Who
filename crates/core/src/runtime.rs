@@ -12,12 +12,14 @@ mod tool_failure_guard;
 mod tool_flow;
 mod tool_input_stream;
 mod trace;
+mod world_state;
 
 pub use api::*;
 use command_dispatch::*;
 use events::*;
 use preparation::*;
 use trace::*;
+use world_state::*;
 
 use crate::cancellation::AgentCancellationToken;
 use crate::command::{
@@ -40,7 +42,7 @@ use crate::model_request_observation::{
     ModelRequestEstimate, ModelRequestObservation, ModelRequestObservationBuilder,
     ModelRequestPurpose, ModelRequestToolSetObservation,
 };
-use crate::prompts::{build_dynamic_tool_availability_context, build_system_prompt};
+use crate::prompts::build_system_prompt;
 use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
     AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowPhase,
@@ -228,6 +230,32 @@ impl AgentRuntime {
         } = host_services.unwrap_or_default();
         let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
         let run_id = run_id.unwrap_or_else(generate_run_id);
+        let restore_trace_conversation_id = input
+            .context
+            .as_ref()
+            .and_then(|context| context.conversation_id.clone());
+        let restore_trace_assistant_message_id = input.assistant_message_id.clone();
+        let trace_run_id = run_id.clone();
+        let setup_conversation_trace = conversation_trace_from_input_checkpoint(&input);
+        let shared_context_baseline =
+            publish_trace_recorder_snapshot(&setup_conversation_trace, trace_observer.as_ref())?;
+        let restored_checkpoint =
+            restore_input_checkpoint(&mut input, &run_id).map_err(|error| {
+                attach_failed_runtime_trace(
+                    error,
+                    &setup_conversation_trace,
+                    &trace_run_id,
+                    restore_trace_conversation_id.as_deref(),
+                    restore_trace_assistant_message_id.as_deref(),
+                )
+            })?;
+        if let Some(restored) = restored_checkpoint.as_ref() {
+            // Approval resume continues the backend authority frozen in schema-v5 checkpoint.
+            // Newer UI/settings payloads cannot silently change permissions, workspace,
+            // attachment authority or model capabilities in the middle of one logical run.
+            input.context = restored.run_context.clone();
+            input.model_capabilities = restored.model_capabilities;
+        }
         let mut run_context = input.context.clone();
         let model_capabilities = input.model_capabilities;
         let trace_conversation_id = run_context
@@ -242,20 +270,6 @@ impl AgentRuntime {
                 ),
                 _ => (None, None),
             };
-        let trace_run_id = run_id.clone();
-        let setup_conversation_trace = conversation_trace_from_input_checkpoint(&input);
-        let shared_context_baseline =
-            publish_trace_recorder_snapshot(&setup_conversation_trace, trace_observer.as_ref())?;
-        let restored_checkpoint =
-            restore_input_checkpoint(&mut input, &run_id).map_err(|error| {
-                attach_failed_runtime_trace(
-                    error,
-                    &setup_conversation_trace,
-                    &trace_run_id,
-                    trace_conversation_id.as_deref(),
-                    trace_assistant_message_id.as_deref(),
-                )
-            })?;
         let extension_snapshots = restored_checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.extension_snapshots.as_slice())
@@ -305,6 +319,21 @@ impl AgentRuntime {
         }
         let stable_tool_revision = initial_tool_set.stable_revision().to_string();
         let mut effective_tool_set = initial_tool_set;
+        let resumed_world_state_epoch = restored_checkpoint.is_some();
+        let mut run_world_state = match restored_checkpoint.as_ref() {
+            Some(restored) => RunWorldStateTracker::from_checkpoint(
+                format!("{run_id}:world-state:resume"),
+                &restored.run_world_state,
+            )?,
+            None => RunWorldStateTracker::new_with_extension_sections(
+                format!("{run_id}:world-state"),
+                &input,
+                &effective_tool_set,
+                runtime_extensions.world_state_sections()?,
+            )?,
+        };
+        let initial_run_world_state =
+            (!resumed_world_state_epoch).then(|| run_world_state.snapshot().clone());
         let mut tool_definitions = effective_tool_set.all_definitions();
         let mut event_stream = AgentEventStream::new(emitter);
         event_stream.emit(AgentEvent::Started {
@@ -339,6 +368,7 @@ impl AgentRuntime {
             effective_tool_set.stable_definitions(),
             restored_checkpoint,
             shared_context_baseline,
+            initial_run_world_state,
         )
         .map_err(|error| {
             attach_failed_runtime_trace(
@@ -349,7 +379,14 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
-        let mut tool_failure_guard = ToolFailureGuard::from_trace(&conversation_trace.snapshot());
+        if resumed_world_state_epoch {
+            // The exact checkpoint context remains an immutable prefix. Resume establishes a new
+            // run-state epoch only after the frozen pending Tool exchange has been closed, avoiding
+            // any attempt to reconstruct authority from rendered context text.
+            active_context.push(run_world_state.full_context_item()?);
+        }
+        let mut tool_failure_guard =
+            ToolFailureGuard::from_trace(&conversation_trace.checkpoint_snapshot());
         let conversation_trace = Arc::new(Mutex::new(conversation_trace));
         let mut pending_trace_baseline =
             publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
@@ -457,6 +494,13 @@ impl AgentRuntime {
                         ));
                     }
                     tool_definitions = effective_tool_set.all_definitions();
+                    if let Some(world_state_diff) = run_world_state.reconcile(
+                        &effective_tool_set,
+                        runtime_extensions.world_state_sections()?,
+                        run_context.as_ref(),
+                    )? {
+                        active_context.push(world_state_diff);
+                    }
                     if effective_tool_set.revision() != emitted_tool_set_revision {
                         event_stream.emit(AgentEvent::ToolSetChanged {
                             run_id: run_id.clone(),
@@ -476,10 +520,6 @@ impl AgentRuntime {
                     let (request_context, request_estimate) = loop {
                         let mut request_context = active_context.clone();
                         let mut request_estimate = None;
-                        ContextAssembler::append_runtime_context(
-                            &mut request_context,
-                            run_context.as_ref(),
-                        );
                         runtime_extensions.contribute_request_context(
                             &ModelRequestContext::agent_work(),
                             &mut request_context,
@@ -496,21 +536,7 @@ impl AgentRuntime {
                                 ContextRetention::RequestOnly,
                             ));
                         }
-                        if let Some(dynamic_tool_context) =
-                            build_dynamic_tool_availability_context(
-                                effective_tool_set.dynamic_definitions(),
-                                effective_tool_set.stable_revision(),
-                                effective_tool_set.dynamic_revision(),
-                            )
-                        {
-                            request_context.push(ContextItem::text(
-                                LlmMessageRole::System,
-                                dynamic_tool_context,
-                                ContextSource::RuntimeExtension,
-                                ContextScope::Run,
-                                ContextRetention::RequestOnly,
-                            ));
-                        }
+                        request_context.validate_cache_layout()?;
                         emit_context_manifest_if_enabled(
                             &run_id,
                             model_request_index + 1,
@@ -1291,11 +1317,12 @@ impl AgentRuntime {
                                 let result = failed_tool_call_result(&call, error);
                                 tool_failure_guard.observe(&call, &result);
                                 let llm_result = tool_registry.model_projection(&result);
-                                let trace_result = tool_registry.trace_projection(&result);
+                                let checkpoint_result =
+                                    tool_registry.checkpoint_projection(&result);
                                 conversation_trace
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
-                                    .record_tool_result(&call, &trace_result);
+                                    .record_tool_result(&call, &checkpoint_result);
                                 pending_trace_baseline = publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
@@ -1351,6 +1378,9 @@ impl AgentRuntime {
                                     pending_tool_call_id: &call.id,
                                     conversation_trace: &trace,
                                     tool_set: &effective_tool_set,
+                                    run_context: run_context.as_ref(),
+                                    model_capabilities,
+                                    run_world_state: run_world_state.snapshot(),
                                 },
                             )?
                         };
@@ -1469,7 +1499,7 @@ impl AgentRuntime {
                     conversation_trace
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
-                        .record_tool_result(&call, &trace_result);
+                        .record_tool_result(&call, &checkpoint_result);
                     pending_trace_baseline =
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     if cancellation_preempts_tool_result(

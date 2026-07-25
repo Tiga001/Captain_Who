@@ -25,6 +25,10 @@ impl AgentService {
                 return Err(error);
             }
         };
+        // A new turn may append a Conversation World State diff without changing the stable
+        // system/tool configuration revision. Drop the measured conversation cache so the next
+        // baseline is rebuilt with that exact durable record before the user message it governs.
+        self.invalidate_conversation_context_state(&prepared.output.conversation_id);
         let context_window_tool_projection = match self.context_window_tool_projection(
             &prepared.agent_input,
             prepared.skill_resources.as_ref().map(Arc::clone),

@@ -21,6 +21,21 @@ fn test_tool_set_checkpoint() -> mycopilot_core::AgentRunToolSetCheckpoint {
     }
 }
 
+#[cfg(test)]
+fn test_run_world_state() -> mycopilot_core::WorldStateSnapshot {
+    mycopilot_core::WorldStateSnapshot::new(
+        "core-server-checkpoint-test",
+        0,
+        vec![mycopilot_core::WorldStateSectionEnvelope::host_only(
+            mycopilot_core::WorldStateSectionId::ModelCapabilities,
+            mycopilot_core::WorldStateLifetime::Run,
+            serde_json::json!({ "imageInput": false }),
+        )
+        .expect("test ModelCapabilities World State section")],
+    )
+    .expect("test Run World State")
+}
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

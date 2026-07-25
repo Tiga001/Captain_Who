@@ -26,6 +26,7 @@ pub mod service;
 pub mod skill_enablement_repository;
 pub mod turn_diff_repository;
 pub mod usage_repository;
+pub mod world_state_repository;
 
 pub use database_snapshot::create_verified_sqlite_snapshot;
 

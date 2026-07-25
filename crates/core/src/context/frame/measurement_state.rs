@@ -367,7 +367,9 @@ impl ContextFrame {
             .into_iter()
             .map(ContextItem::from_checkpoint)
             .collect::<AgentResult<Vec<_>>>()?;
-        Ok(Self::new(items))
+        let frame = Self::new(items);
+        frame.validate_cache_layout()?;
+        Ok(frame)
     }
 
     pub(crate) fn validate_pending_tool_call(
@@ -441,6 +443,25 @@ impl ContextFrame {
                 unresolved.len()
             )))
         }
+    }
+
+    /// Validates the physical cache layout independently from token accounting.
+    ///
+    /// A request can append within one cache band or advance to a more volatile band, but it must
+    /// never insert a later-lived item ahead of an already-established prefix.
+    pub(crate) fn validate_cache_layout(&self) -> AgentResult<()> {
+        let mut previous = None;
+        for (index, item) in self.iter_items().enumerate() {
+            let band = item.metadata.cache_band();
+            if previous.is_some_and(|previous| band < previous) {
+                return Err(AgentError::new(format!(
+                    "上下文缓存分层顺序无效：第 {index} 项 `{}` 出现在更晚缓存层之后。",
+                    band.as_str()
+                )));
+            }
+            previous = Some(band);
+        }
+        Ok(())
     }
 
     pub(crate) fn contains_group_id(&self, group_id: &str) -> bool {

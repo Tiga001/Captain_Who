@@ -9,11 +9,12 @@ use crate::storage::models::{
 use crate::storage::{
     attachment_repository, chat_repository, context_compaction_repository,
     conversation_trace_repository, file_draft_repository, guidance_repository,
+    world_state_repository,
 };
-use crate::{AgentGuidanceStatus, ConversationTurnTrace};
+use crate::{AgentGuidanceStatus, ConversationTurnTrace, WorldStateRecord};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -46,6 +47,7 @@ pub(crate) struct ConversationForkPlan {
     guidances: Vec<ForkGuidance>,
     file_drafts: Vec<AgentFileDraftRecord>,
     summaries: Vec<context_compaction_repository::ContextCompactionSummaryVersion>,
+    world_state_records: Vec<world_state_repository::ConversationWorldStateJournalEntry>,
     message_id_map: HashMap<String, String>,
     run_id_map: HashMap<String, String>,
     id_replacements: HashMap<String, String>,
@@ -290,6 +292,13 @@ pub(crate) fn build_fork_plan(
         context_compaction_repository::list_active_summary_chain(connection, &source.id)
             .map_err(|error| error.to_string())?;
     let summaries = summaries_visible_at_cutoff(active_chain, &source_positions, cutoff)?;
+    let world_state_records = world_state_records_visible_at_cutoff(
+        connection,
+        &source.id,
+        &source_positions,
+        cutoff,
+        &summaries,
+    )?;
 
     Ok(ConversationForkPlan {
         request_id: input.request_id.trim().to_string(),
@@ -312,6 +321,7 @@ pub(crate) fn build_fork_plan(
         guidances,
         file_drafts,
         summaries,
+        world_state_records,
         message_id_map,
         run_id_map,
         id_replacements: replacements,
@@ -336,7 +346,8 @@ pub(crate) fn commit_fork_plan(
     for draft in &plan.file_drafts {
         file_draft_repository::insert_draft(&transaction, draft).map_err(database_error)?;
     }
-    clone_summary_chain(&transaction, plan)?;
+    let summary_id_map = clone_summary_chain(&transaction, plan)?;
+    clone_world_state_records(&transaction, plan, &summary_id_map)?;
     for attachment in &plan.attachments {
         attachment_repository::save_attachment(&transaction, &attachment.target)
             .map_err(database_error)?;
@@ -451,6 +462,97 @@ fn summaries_visible_at_cutoff(
                 return Err("摘要链跨越分叉边界后又回到了更早轮次。".to_string());
             }
             visible.push(version);
+        } else {
+            crossed_cutoff = true;
+        }
+    }
+    Ok(visible)
+}
+
+fn world_state_records_visible_at_cutoff(
+    connection: &Connection,
+    conversation_id: &str,
+    source_positions: &HashMap<String, usize>,
+    cutoff: usize,
+    visible_summaries: &[context_compaction_repository::ContextCompactionSummaryVersion],
+) -> Result<Vec<world_state_repository::ConversationWorldStateJournalEntry>, String> {
+    let epochs = {
+        let mut statement = connection
+            .prepare(
+                "SELECT epoch_id, base_summary_id
+                 FROM conversation_world_state_epochs
+                 WHERE conversation_id = ?1
+                 ORDER BY generation DESC",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([conversation_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(database_error)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(database_error)?;
+        rows
+    };
+    if epochs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let visible_summary_ids = visible_summaries
+        .iter()
+        .map(|version| version.summary.id.as_str())
+        .collect::<HashSet<_>>();
+    let (epoch_id, selected_base_summary_id) = epochs
+        .into_iter()
+        .find(|(_, base_summary_id)| {
+            base_summary_id
+                .as_deref()
+                .is_none_or(|summary_id| visible_summary_ids.contains(summary_id))
+        })
+        .ok_or_else(|| "没有任何 World State epoch 的压缩边界在分叉 cutoff 内可见。".to_string())?;
+    let entries =
+        world_state_repository::list_records_for_epoch(connection, conversation_id, &epoch_id)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(world_state_repository::ConversationWorldStateJournalEntry::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+    let Some(first) = entries.first() else {
+        return Err("选中的 World State epoch 没有 initial full snapshot。".to_string());
+    };
+    let WorldStateRecord::Full(_) = &first.record else {
+        return Err("选中的 World State epoch 没有 initial full snapshot。".to_string());
+    };
+    if first.effective_before_message_id.is_some() {
+        return Err("选中的 World State full snapshot 不能绑定消息 anchor。".to_string());
+    }
+    let base_summary_id = first.base_summary_id.as_deref();
+    if base_summary_id != selected_base_summary_id.as_deref() {
+        return Err("World State epoch 索引与记录的 summary 边界不一致。".to_string());
+    }
+    if entries
+        .iter()
+        .any(|entry| entry.base_summary_id.as_deref() != base_summary_id)
+    {
+        return Err("选中的 World State epoch 的 summary 边界不一致。".to_string());
+    }
+
+    let mut visible = Vec::new();
+    let mut crossed_cutoff = false;
+    for entry in entries {
+        let is_visible =
+            match entry.effective_before_message_id.as_deref() {
+                None => true,
+                Some(message_id) => {
+                    source_positions.get(message_id).copied().ok_or_else(|| {
+                        format!("World State anchor 不属于原任务消息：{message_id}")
+                    })? <= cutoff
+                }
+            };
+        if is_visible {
+            if crossed_cutoff {
+                return Err("World State diff 顺序跨越分叉边界后又回到可见历史。".to_string());
+            }
+            visible.push(entry);
         } else {
             crossed_cutoff = true;
         }
@@ -597,9 +699,12 @@ fn insert_conversation(
     Ok(())
 }
 
-fn clone_summary_chain(connection: &Connection, plan: &ConversationForkPlan) -> Result<(), String> {
+fn clone_summary_chain(
+    connection: &Connection,
+    plan: &ConversationForkPlan,
+) -> Result<HashMap<String, String>, String> {
     if plan.summaries.is_empty() {
-        return Ok(());
+        return Ok(HashMap::new());
     }
     let mut summary_id_map = HashMap::new();
     let mut latest_summary_id = None;
@@ -668,7 +773,54 @@ fn clone_summary_chain(connection: &Connection, plan: &ConversationForkPlan) -> 
         plan.summaries.len() as u64,
         plan.target.created_at,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(summary_id_map)
+}
+
+fn clone_world_state_records(
+    connection: &Connection,
+    plan: &ConversationForkPlan,
+    summary_id_map: &HashMap<String, String>,
+) -> Result<(), String> {
+    let Some(first) = plan.world_state_records.first() else {
+        return Ok(());
+    };
+    let source_base_summary_id = first.base_summary_id.as_deref();
+    let target_base_summary_id = source_base_summary_id
+        .map(|summary_id| mapped_id(summary_id_map, summary_id, "World State 基础摘要"))
+        .transpose()?;
+
+    for (index, entry) in plan.world_state_records.iter().enumerate() {
+        if entry.conversation_id != plan.source_conversation_id
+            || entry.epoch_generation != first.epoch_generation
+            || entry.base_summary_id.as_deref() != source_base_summary_id
+            || entry.record.epoch_id() != first.record.epoch_id()
+            || entry.record.sequence() != index as u64
+        {
+            return Err("待克隆的 active World State epoch 不是连续且一致的前缀。".to_string());
+        }
+        let target_anchor = entry
+            .effective_before_message_id
+            .as_ref()
+            .map(|message_id| mapped_id(&plan.message_id_map, message_id, "World State anchor"))
+            .transpose()?;
+        let outcome = world_state_repository::append_record_in_connection(
+            connection,
+            &world_state_repository::ConversationWorldStateRecordWrite {
+                conversation_id: &plan.target.id,
+                epoch_generation: 1,
+                base_summary_id: target_base_summary_id.as_deref(),
+                effective_before_message_id: target_anchor.as_deref(),
+                record: &entry.record,
+                created_at: entry.created_at,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        if outcome != world_state_repository::ConversationWorldStateAppendOutcome::Inserted {
+            return Err("新任务 World State 出现意外的幂等写入。".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn remap_continuity(
@@ -825,7 +977,8 @@ mod tests {
     };
     use crate::storage::migrations;
     use crate::{
-        ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+        ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus, WorldStateDiff,
+        WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSnapshot,
         CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
 
@@ -1108,6 +1261,309 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    #[test]
+    fn fork_clones_only_world_state_visible_at_cutoff_and_remaps_anchors_and_summary() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let source = source_conversation();
+        chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+
+        let initial = fork_world_state_snapshot("source-world-state", 0, "initial");
+        world_state_repository::append_record(
+            &mut connection,
+            &world_state_repository::ConversationWorldStateRecordWrite {
+                conversation_id: &source.id,
+                epoch_generation: 1,
+                base_summary_id: None,
+                effective_before_message_id: None,
+                record: &WorldStateRecord::Full(initial),
+                created_at: 9,
+            },
+        )
+        .unwrap();
+        let prefix = context_compaction_repository::prepare_prefix(
+            &connection,
+            &source.id,
+            &ContextJournalCursor::message("user-b"),
+        )
+        .unwrap();
+        context_compaction_repository::commit_prefix_replacement(
+            &mut connection,
+            &prefix,
+            summary_draft(&prefix, "summary-world-state", 20),
+            "assistant-b",
+        )
+        .unwrap();
+
+        let rebased = world_state_repository::fold_active_snapshot(&connection, &source.id)
+            .unwrap()
+            .unwrap();
+        let at_c =
+            fork_world_state_snapshot(&rebased.epoch_id, rebased.sequence + 1, "visible-at-c");
+        let diff_at_c = WorldStateDiff::between(&rebased, &at_c).unwrap();
+        world_state_repository::append_record(
+            &mut connection,
+            &world_state_repository::ConversationWorldStateRecordWrite {
+                conversation_id: &source.id,
+                epoch_generation: 2,
+                base_summary_id: Some("summary-world-state"),
+                effective_before_message_id: Some("user-c"),
+                record: &WorldStateRecord::Diff(diff_at_c),
+                created_at: 21,
+            },
+        )
+        .unwrap();
+        let after_cutoff =
+            fork_world_state_snapshot(&at_c.epoch_id, at_c.sequence + 1, "after-cutoff");
+        let diff_after_cutoff = WorldStateDiff::between(&at_c, &after_cutoff).unwrap();
+        world_state_repository::append_record(
+            &mut connection,
+            &world_state_repository::ConversationWorldStateRecordWrite {
+                conversation_id: &source.id,
+                epoch_generation: 2,
+                base_summary_id: Some("summary-world-state"),
+                effective_before_message_id: Some("user-d"),
+                record: &WorldStateRecord::Diff(diff_after_cutoff),
+                created_at: 22,
+            },
+        )
+        .unwrap();
+
+        let plan = build_fork_plan(
+            &connection,
+            &ForkConversationInput {
+                request_id: "fork-world-state-at-c".to_string(),
+                source_conversation_id: source.id.clone(),
+                through_assistant_message_id: "assistant-c".to_string(),
+            },
+            100,
+        )
+        .unwrap();
+        assert_eq!(plan.summaries.len(), 1);
+        assert_eq!(plan.world_state_records.len(), 2);
+        assert_eq!(
+            plan.world_state_records[1]
+                .effective_before_message_id
+                .as_deref(),
+            Some("user-c")
+        );
+        commit_fork_plan(&mut connection, &plan).unwrap();
+
+        let target_chain =
+            context_compaction_repository::list_active_summary_chain(&connection, &plan.target.id)
+                .unwrap();
+        assert_eq!(target_chain.len(), 1);
+        assert_eq!(
+            target_chain[0].lineage.source_summary_id.as_deref(),
+            Some("summary-world-state")
+        );
+        let target_records =
+            world_state_repository::list_active_journal_entries(&connection, &plan.target.id)
+                .unwrap();
+        assert_eq!(target_records.len(), 2);
+        assert_eq!(target_records[0].epoch_generation, 1);
+        assert_eq!(
+            target_records[0].base_summary_id.as_deref(),
+            Some(target_chain[0].summary.id.as_str())
+        );
+        assert_eq!(target_records[0].effective_before_message_id, None);
+        assert_eq!(
+            target_records[1].effective_before_message_id.as_deref(),
+            Some(plan.message_id_map["user-c"].as_str())
+        );
+        assert!(target_records
+            .iter()
+            .all(|entry| entry.effective_before_message_id.as_deref() != Some("user-d")));
+        assert_eq!(
+            world_state_repository::fold_active_snapshot(&connection, &plan.target.id)
+                .unwrap()
+                .unwrap()
+                .revision,
+            at_c.revision
+        );
+    }
+
+    #[test]
+    fn fork_selects_the_latest_world_state_epoch_whose_summary_is_visible_at_cutoff() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let source = source_conversation();
+        chat_repository::save_conversation(&mut connection, source.clone()).unwrap();
+
+        let initial = fork_world_state_snapshot("world-state-epoch-1", 0, "initial");
+        let at_b = fork_world_state_snapshot("world-state-epoch-1", 1, "at-b");
+        world_state_repository::append_record(
+            &mut connection,
+            &world_state_repository::ConversationWorldStateRecordWrite {
+                conversation_id: &source.id,
+                epoch_generation: 1,
+                base_summary_id: None,
+                effective_before_message_id: None,
+                record: &WorldStateRecord::Full(initial.clone()),
+                created_at: 9,
+            },
+        )
+        .unwrap();
+        world_state_repository::append_record(
+            &mut connection,
+            &world_state_repository::ConversationWorldStateRecordWrite {
+                conversation_id: &source.id,
+                epoch_generation: 1,
+                base_summary_id: None,
+                effective_before_message_id: Some("user-b"),
+                record: &WorldStateRecord::Diff(WorldStateDiff::between(&initial, &at_b).unwrap()),
+                created_at: 10,
+            },
+        )
+        .unwrap();
+
+        let first_prefix = context_compaction_repository::prepare_prefix(
+            &connection,
+            &source.id,
+            &ContextJournalCursor::message("user-b"),
+        )
+        .unwrap();
+        context_compaction_repository::commit_prefix_replacement(
+            &mut connection,
+            &first_prefix,
+            summary_draft(&first_prefix, "summary-world-state-1", 20),
+            "assistant-b",
+        )
+        .unwrap();
+        let epoch_two = world_state_repository::fold_active_snapshot(&connection, &source.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(epoch_two.revision, at_b.revision);
+        let at_c = fork_world_state_snapshot(&epoch_two.epoch_id, epoch_two.sequence + 1, "at-c");
+        world_state_repository::append_record(
+            &mut connection,
+            &world_state_repository::ConversationWorldStateRecordWrite {
+                conversation_id: &source.id,
+                epoch_generation: 2,
+                base_summary_id: Some("summary-world-state-1"),
+                effective_before_message_id: Some("user-c"),
+                record: &WorldStateRecord::Diff(
+                    WorldStateDiff::between(&epoch_two, &at_c).unwrap(),
+                ),
+                created_at: 21,
+            },
+        )
+        .unwrap();
+
+        let second_prefix = context_compaction_repository::prepare_prefix(
+            &connection,
+            &source.id,
+            &ContextJournalCursor::message("user-d"),
+        )
+        .unwrap();
+        context_compaction_repository::commit_prefix_replacement(
+            &mut connection,
+            &second_prefix,
+            summary_draft(&second_prefix, "summary-world-state-2", 40),
+            "assistant-d",
+        )
+        .unwrap();
+        let active =
+            world_state_repository::list_active_journal_entries(&connection, &source.id).unwrap();
+        assert_eq!(active[0].epoch_generation, 3);
+        assert_eq!(
+            active[0].base_summary_id.as_deref(),
+            Some("summary-world-state-2")
+        );
+
+        let early = build_fork_plan(
+            &connection,
+            &ForkConversationInput {
+                request_id: "fork-before-all-summaries".to_string(),
+                source_conversation_id: source.id.clone(),
+                through_assistant_message_id: "assistant-a".to_string(),
+            },
+            100,
+        )
+        .unwrap();
+        assert!(early.summaries.is_empty());
+        assert_eq!(early.world_state_records.len(), 1);
+        assert_eq!(early.world_state_records[0].epoch_generation, 1);
+        assert_eq!(early.world_state_records[0].base_summary_id, None);
+        assert_eq!(
+            early.world_state_records[0].record.revision(),
+            initial.revision
+        );
+        commit_fork_plan(&mut connection, &early).unwrap();
+        assert_eq!(
+            world_state_repository::fold_active_snapshot(&connection, &early.target.id)
+                .unwrap()
+                .unwrap()
+                .revision,
+            initial.revision
+        );
+
+        let middle = build_fork_plan(
+            &connection,
+            &ForkConversationInput {
+                request_id: "fork-between-world-state-summaries".to_string(),
+                source_conversation_id: source.id.clone(),
+                through_assistant_message_id: "assistant-c".to_string(),
+            },
+            110,
+        )
+        .unwrap();
+        assert_eq!(middle.summaries.len(), 1);
+        assert_eq!(middle.world_state_records.len(), 2);
+        assert!(middle
+            .world_state_records
+            .iter()
+            .all(|entry| entry.epoch_generation == 2));
+        assert_eq!(
+            middle.world_state_records[0].base_summary_id.as_deref(),
+            Some("summary-world-state-1")
+        );
+        assert_eq!(
+            middle.world_state_records[1]
+                .effective_before_message_id
+                .as_deref(),
+            Some("user-c")
+        );
+        commit_fork_plan(&mut connection, &middle).unwrap();
+        let middle_target =
+            world_state_repository::list_active_journal_entries(&connection, &middle.target.id)
+                .unwrap();
+        assert_eq!(middle_target.len(), 2);
+        assert_eq!(
+            middle_target[0].base_summary_id.as_deref(),
+            context_compaction_repository::get_active_summary(&connection, &middle.target.id)
+                .unwrap()
+                .as_ref()
+                .map(|summary| summary.id.as_str())
+        );
+        assert_eq!(
+            middle_target[1].effective_before_message_id.as_deref(),
+            Some(middle.message_id_map["user-c"].as_str())
+        );
+        assert_eq!(
+            world_state_repository::fold_active_snapshot(&connection, &middle.target.id)
+                .unwrap()
+                .unwrap()
+                .revision,
+            at_c.revision
+        );
+    }
+
+    fn fork_world_state_snapshot(epoch_id: &str, sequence: u64, value: &str) -> WorldStateSnapshot {
+        WorldStateSnapshot::new(
+            epoch_id,
+            sequence,
+            vec![WorldStateSectionEnvelope::model_visible(
+                WorldStateSectionId::EffectivePermissions,
+                WorldStateLifetime::Conversation,
+                json!({ "value": value }),
+                json!({ "value": value }),
+            )
+            .unwrap()],
+        )
+        .unwrap()
     }
 
     fn source_conversation() -> ChatConversationRecord {

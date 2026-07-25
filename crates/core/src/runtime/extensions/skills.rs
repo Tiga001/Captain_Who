@@ -24,6 +24,7 @@ use crate::tools::{
     OFFICE_SPREADSHEETS_CAPABILITY, SKILL_RESOURCES_MATERIALIZE_CAPABILITY,
     SKILL_RESOURCES_READ_CAPABILITY, SKILL_SCRIPTS_CAPABILITY,
 };
+use crate::world_state::{WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -279,6 +280,40 @@ impl RuntimeExtension for SkillActivationExtension {
             }),
             RuntimeEffect::AppendRetainedContext(context),
         ])
+    }
+
+    fn world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
+        let state = self.state.lock();
+        if state.order.is_empty() {
+            return Ok(Vec::new());
+        }
+        let skills = state
+            .order
+            .iter()
+            .filter_map(|id| state.active.get(id))
+            .map(|skill| {
+                json!({
+                    "id": skill.id,
+                    "name": skill.name,
+                    "revision": skill.revision,
+                })
+            })
+            .collect::<Vec<_>>();
+        let value = json!({
+            "activationRevision": state.activation_revision()?,
+            "skills": skills,
+        });
+        Ok(vec![WorldStateSectionEnvelope::model_visible(
+            WorldStateSectionId::SkillActivation,
+            WorldStateLifetime::Run,
+            value.clone(),
+            value,
+        )
+        .map_err(|error| {
+            AgentError::new(format!(
+                "cannot build Skill activation World State: {error}"
+            ))
+        })?])
     }
 
     fn snapshot_state(&self) -> AgentResult<Value> {

@@ -21,7 +21,7 @@ use crate::storage::{
     image_generation_repository, model_request_observation_repository, now_ms,
     pending_action_repository, preferences_repository, project_repository,
     skill_enablement_repository, storage_error, turn_diff_repository, usage_repository,
-    StorageState,
+    world_state_repository, StorageState,
 };
 use crate::{
     AgentAttachmentLibraryContext, AgentAttachmentReference, AgentChatInput, AgentInputAttachment,
@@ -30,7 +30,7 @@ use crate::{
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     ContextCompactionAuditBundle, ContextCompactionPrefix, ContextCompactionReceipt,
     ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
-    ConversationTurnTrace, ConversationTurnTraceItem, ModelRequestObservation,
+    ConversationTurnTrace, ConversationTurnTraceItem, ModelRequestObservation, WorldStateRecord,
 };
 use base64::Engine;
 use rusqlite::OptionalExtension;
@@ -48,6 +48,7 @@ mod pending_actions;
 mod settings;
 mod trace_reconciliation;
 mod turn_diffs;
+mod world_state;
 
 use attachments::*;
 pub use guidance::{AgentRunGuidanceStoreOutcome, AgentRunGuidanceTransitionOutcome};

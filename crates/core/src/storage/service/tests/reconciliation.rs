@@ -130,6 +130,18 @@ fn manual_command_settlement(
     terminal_audit.command_result_json = Some(serde_json::to_string(&command_result).unwrap());
     terminal_audit.tool_result_json = Some(serde_json::to_string(&tool_result).unwrap());
     terminal_audit.completed_at = Some(12);
+    let trace_operation = serde_json::json!({
+        "command": "node script.mjs",
+        "timeoutMs": 5_000,
+        "reason": "test atomic settlement",
+    });
+    let trace_call = AgentToolCall {
+        id: call_id.to_string(),
+        tool: "run_command".to_string(),
+        args: trace_operation.clone(),
+        approval_status: crate::AgentApprovalStatus::Approved,
+        reason: Some("test atomic settlement".to_string()),
+    };
     let trace = ConversationTurnTrace {
         schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
         run_id: "run-1".to_string(),
@@ -143,25 +155,15 @@ fn manual_command_settlement(
                 sequence: 0,
                 call_id: call_id.to_string(),
                 tool: "run_command".to_string(),
-                operation: serde_json::json!({
-                    "command": "node script.mjs",
-                    "timeoutMs": 5_000,
-                    "reason": "test atomic settlement",
-                }),
+                operation: trace_operation,
                 approval_status: crate::AgentApprovalStatus::Approved,
                 truncated: false,
             },
-            ConversationTurnTraceItem::ToolResult {
-                sequence: 1,
-                call_id: call_id.to_string(),
-                tool: "run_command".to_string(),
-                status: crate::ConversationTraceToolResultStatus::Succeeded,
-                success: true,
-                observation: tool_result.result.clone().unwrap(),
-                approval_status: crate::AgentApprovalStatus::Approved,
-                error: None,
-                truncated: false,
-            },
+            crate::conversation_trace::projected_tool_result_trace_item(
+                1,
+                &trace_call,
+                &tool_result,
+            ),
         ],
     };
     (pending, approved_audit, terminal_audit, trace)
@@ -1048,7 +1050,10 @@ fn attach_manual_file_effect_recovery_checkpoint(
             "nextConversationTraceSequence": 1,
             "conversationTraceTruncated": false,
             "modelVisibleTraceItemCount": 0,
-            "toolSet": test_checkpoint_tool_set()
+            "toolSet": test_checkpoint_tool_set(),
+            "runContext": null,
+            "modelCapabilities": { "imageInput": false },
+            "runWorldState": test_checkpoint_run_world_state()
         }
     })
     .to_string();
@@ -1061,6 +1066,21 @@ fn test_checkpoint_tool_set() -> serde_json::Value {
         "effectiveRevision": "effective-tool-set-test-v1",
         "exposedToolNames": []
     })
+}
+
+fn test_checkpoint_run_world_state() -> serde_json::Value {
+    let snapshot = crate::WorldStateSnapshot::new(
+        "reconciliation-test-run-world-state",
+        0,
+        vec![crate::WorldStateSectionEnvelope::host_only(
+            crate::WorldStateSectionId::ModelCapabilities,
+            crate::WorldStateLifetime::Run,
+            serde_json::json!({ "imageInput": false }),
+        )
+        .unwrap()],
+    )
+    .unwrap();
+    serde_json::to_value(snapshot).unwrap()
 }
 
 #[test]
@@ -3296,7 +3316,10 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
             "nextConversationTraceSequence": 3,
             "conversationTraceTruncated": false,
             "modelVisibleTraceItemCount": 0,
-            "toolSet": test_checkpoint_tool_set()
+            "toolSet": test_checkpoint_tool_set(),
+            "runContext": null,
+            "modelCapabilities": { "imageInput": false },
+            "runWorldState": test_checkpoint_run_world_state()
         }
     })
     .to_string();

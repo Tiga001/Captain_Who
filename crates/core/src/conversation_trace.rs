@@ -1,21 +1,24 @@
 //! Append-only, provider-neutral records of agent activity that survives into model context.
 //!
-//! The trace is the canonical record for both the active tool loop and later conversation turns.
-//! It stores the same tool arguments and textual result payload that the model receives. Only
-//! binary material that cannot safely live in text context is removed. Presentation events may
-//! derive a smaller view, but they are never used to rebuild model context.
+//! The active tool loop, approval checkpoint, durable trace, and presentation timeline are
+//! deliberately separate views of one execution. The recorder retains the complete run-scoped
+//! checkpoint, while snapshots and terminal traces pass through one bounded durable projection.
+//! Presentation events are independent and are never used to rebuild model context.
 
+use crate::conversation_trace_projection::{
+    is_repeat_failure_eligible, project_attachment_text, project_narration, project_terminal_error,
+    project_tool_call, project_tool_result, project_user_guidance, sanitize_runtime_text,
+    sanitize_runtime_value,
+};
 use crate::protocol::{
     AgentApprovalStatus, AgentInputAttachment, AgentInputAttachmentKind, AgentProposedAction,
     AgentRunCheckpoint, AgentToolCall, AgentToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const CONVERSATION_TURN_TRACE_SCHEMA_VERSION: u32 = 3;
-const BINARY_OMITTED_MARKER: &str = "[binary/base64 omitted]";
-const BINARY_OMITTED_FROM_HISTORY_KEY: &str = "binaryomittedfromhistory";
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -152,7 +155,7 @@ pub struct ConversationTurnTrace {
     pub terminal_status: ConversationTurnTraceTerminalStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_error: Option<String>,
-    /// True only when binary material was removed from otherwise canonical context data.
+    /// True when bounded durable projection omitted, summarized, or redacted run-scoped material.
     pub truncated: bool,
     pub items: Vec<ConversationTurnTraceItem>,
 }
@@ -401,7 +404,7 @@ pub(crate) fn terminalize_interrupted_conversation_trace(
         trace.terminal_status,
         ConversationTurnTraceTerminalStatus::InProgress
     );
-    ConversationTraceRecorder::from_checkpoint(trace.items, 0, trace.truncated).finish(
+    ConversationTraceRecorder::from_durable_trace(trace.items, 0, trace.truncated).finish(
         &trace.run_id,
         &trace.conversation_id,
         &trace.assistant_message_id,
@@ -442,7 +445,7 @@ pub fn conversation_trace_with_recovered_tool_result(
             .and_then(Value::as_str)
             .map(str::to_string),
     };
-    let mut recorder = ConversationTraceRecorder::from_checkpoint(
+    let mut recorder = ConversationTraceRecorder::from_durable_trace(
         trace.items.clone(),
         trace
             .items
@@ -508,7 +511,7 @@ pub fn cancelled_conversation_trace_from_snapshot(
     assistant_message_id: &str,
     reason: &str,
 ) -> ConversationTurnTrace {
-    ConversationTraceRecorder::from_checkpoint(
+    ConversationTraceRecorder::from_durable_trace(
         snapshot.items,
         snapshot.next_sequence,
         snapshot.truncated,
@@ -573,7 +576,10 @@ fn terminal_trace_without_items(
     terminal_status: ConversationTurnTraceTerminalStatus,
     terminal_error: Option<&str>,
 ) -> ConversationTurnTrace {
-    let (terminal_error, truncated) = sanitize_optional_text(terminal_error);
+    let (terminal_error, truncated) = terminal_error
+        .map(project_terminal_error)
+        .map(|(value, truncated)| (Some(value), truncated))
+        .unwrap_or((None, false));
     ConversationTurnTrace {
         schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
         run_id: run_id.to_string(),
@@ -591,6 +597,7 @@ pub(crate) struct ConversationTraceRecorder {
     items: Vec<ConversationTurnTraceItem>,
     next_sequence: u64,
     truncated: bool,
+    items_are_durable: bool,
 }
 
 impl ConversationTraceRecorder {
@@ -609,6 +616,26 @@ impl ConversationTraceRecorder {
             items,
             next_sequence: next_sequence.max(inferred_next),
             truncated,
+            items_are_durable: false,
+        }
+    }
+
+    fn from_durable_trace(
+        items: Vec<ConversationTurnTraceItem>,
+        next_sequence: u64,
+        truncated: bool,
+    ) -> Self {
+        let inferred_next = items
+            .iter()
+            .map(ConversationTurnTraceItem::sequence)
+            .max()
+            .map(|sequence| sequence.saturating_add(1))
+            .unwrap_or(0);
+        Self {
+            items,
+            next_sequence: next_sequence.max(inferred_next),
+            truncated,
+            items_are_durable: true,
         }
     }
 
@@ -616,11 +643,24 @@ impl ConversationTraceRecorder {
         (self.items.clone(), self.next_sequence, self.truncated)
     }
 
-    pub(crate) fn snapshot(&self) -> ConversationTraceSnapshot {
+    pub(crate) fn checkpoint_snapshot(&self) -> ConversationTraceSnapshot {
         ConversationTraceSnapshot {
             items: self.items.clone(),
             next_sequence: self.next_sequence,
             truncated: self.truncated,
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> ConversationTraceSnapshot {
+        let (items, projected_truncated) = if self.items_are_durable {
+            (self.items.clone(), false)
+        } else {
+            project_durable_trace_items(&self.items)
+        };
+        ConversationTraceSnapshot {
+            items,
+            next_sequence: self.next_sequence,
+            truncated: self.truncated || projected_truncated,
         }
     }
 
@@ -743,7 +783,11 @@ impl ConversationTraceRecorder {
         }
 
         let sequence = self.take_sequence();
-        let item = projected_tool_result_trace_item(sequence, call, result);
+        let item = if self.items_are_durable {
+            projected_tool_result_trace_item(sequence, call, result)
+        } else {
+            checkpoint_tool_result_trace_item(sequence, call, result)
+        };
         self.truncated |= matches!(
             &item,
             ConversationTurnTraceItem::ToolResult {
@@ -764,7 +808,16 @@ impl ConversationTraceRecorder {
     ) -> ConversationTurnTrace {
         let mut recorder = self.clone();
         recorder.close_unresolved(terminal_status, terminal_error);
-        let (terminal_error, terminal_redacted) = sanitize_optional_text(terminal_error);
+        let recorder_truncated = recorder.truncated;
+        let (items, projected_truncated) = if recorder.items_are_durable {
+            (recorder.items, false)
+        } else {
+            project_durable_trace_items(&recorder.items)
+        };
+        let (terminal_error, terminal_redacted) = terminal_error
+            .map(project_terminal_error)
+            .map(|(value, truncated)| (Some(value), truncated))
+            .unwrap_or((None, false));
         ConversationTurnTrace {
             schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
             run_id: run_id.to_string(),
@@ -772,8 +825,8 @@ impl ConversationTraceRecorder {
             assistant_message_id: assistant_message_id.to_string(),
             terminal_status,
             terminal_error,
-            truncated: recorder.truncated || terminal_redacted,
-            items: recorder.items,
+            truncated: recorder_truncated || projected_truncated || terminal_redacted,
+            items,
         }
     }
 
@@ -782,10 +835,12 @@ impl ConversationTraceRecorder {
         terminal_status: ConversationTurnTraceTerminalStatus,
         terminal_error: Option<&str>,
     ) {
-        let Some((call_id, tool, approval_status)) = self.items.iter().rev().find_map(|item| {
+        let Some((call_id, tool, operation, approval_status)) =
+            self.items.iter().rev().find_map(|item| {
             if let ConversationTurnTraceItem::ToolCall {
                 call_id,
                 tool,
+                operation,
                 approval_status,
                 ..
             } = item
@@ -793,7 +848,14 @@ impl ConversationTraceRecorder {
                 let has_result = self.items.iter().any(|candidate| {
                     matches!(candidate, ConversationTurnTraceItem::ToolResult { call_id: result_id, .. } if result_id == call_id)
                 });
-                (!has_result).then(|| (call_id.clone(), tool.clone(), *approval_status))
+                (!has_result).then(|| {
+                    (
+                        call_id.clone(),
+                        tool.clone(),
+                        operation.clone(),
+                        *approval_status,
+                    )
+                })
             } else {
                 None
             }
@@ -810,23 +872,42 @@ impl ConversationTraceRecorder {
         } else {
             "Run ended before a verifiable tool result was available."
         };
-        let (error, redacted) = sanitize_text(terminal_error.unwrap_or(fallback));
+        let (raw_error, raw_redacted) = sanitize_text(terminal_error.unwrap_or(fallback));
+        let raw_observation = json!({
+            "resultAvailable": false,
+            "terminalStatus": terminal_status,
+        });
+        let (observation, error, projection_truncated) = if self.items_are_durable {
+            let (observation, error, error_truncated) =
+                project_tool_result(&tool, Some(&operation), &raw_observation, Some(&raw_error));
+            (
+                observation.value,
+                error,
+                observation.truncated || error_truncated,
+            )
+        } else {
+            (raw_observation, Some(raw_error), false)
+        };
         let sequence = self.take_sequence();
-        self.items.push(ConversationTurnTraceItem::ToolResult {
+        let item = ConversationTurnTraceItem::ToolResult {
             sequence,
             call_id,
             tool,
             status,
             success: false,
-            observation: json!({
-                "resultAvailable": false,
-                "terminalStatus": terminal_status,
-            }),
+            observation,
             approval_status,
-            error: Some(error),
-            truncated: redacted,
-        });
-        self.truncated |= redacted;
+            error,
+            truncated: raw_redacted || projection_truncated,
+        };
+        self.truncated |= matches!(
+            item,
+            ConversationTurnTraceItem::ToolResult {
+                truncated: true,
+                ..
+            }
+        );
+        self.items.push(item);
     }
 
     fn take_sequence(&mut self) -> u64 {
@@ -885,6 +966,190 @@ pub(crate) fn render_user_guidance_content(
     format!("{content}\n\nAttachments supplied with this user guidance:\n{attachment_list}")
 }
 
+fn checkpoint_tool_result_trace_item(
+    sequence: u64,
+    call: &AgentToolCall,
+    result: &AgentToolResult,
+) -> ConversationTurnTraceItem {
+    let status = result_status(result);
+    let success = status == ConversationTraceToolResultStatus::Succeeded;
+    let (observation, result_redacted) =
+        sanitize_runtime_value(result.result.as_ref().unwrap_or(&Value::Null));
+    let (error, error_redacted) = result
+        .error
+        .as_deref()
+        .map(sanitize_runtime_text)
+        .map(|(value, redacted)| (Some(value), redacted))
+        .unwrap_or((None, false));
+    ConversationTurnTraceItem::ToolResult {
+        sequence,
+        call_id: call.id.clone(),
+        tool: call.tool.clone(),
+        status,
+        success,
+        observation,
+        approval_status: call.approval_status,
+        error,
+        truncated: result_redacted || error_redacted,
+    }
+}
+
+fn project_durable_trace_items(
+    items: &[ConversationTurnTraceItem],
+) -> (Vec<ConversationTurnTraceItem>, bool) {
+    let mut projected = Vec::with_capacity(items.len());
+    let mut operations = BTreeMap::<String, Value>::new();
+    let mut failure_signatures = BTreeMap::<String, String>::new();
+    let mut trace_truncated = false;
+
+    for item in items {
+        let projected_item = match item {
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence,
+                content,
+                truncated,
+            } => {
+                let (content, projection_truncated) = project_narration(content);
+                trace_truncated |= *truncated || projection_truncated;
+                ConversationTurnTraceItem::AssistantNarration {
+                    sequence: *sequence,
+                    content,
+                    truncated: *truncated || projection_truncated,
+                }
+            }
+            ConversationTurnTraceItem::UserGuidance {
+                sequence,
+                guidance_id,
+                client_message_id,
+                content,
+                attachments,
+                created_at,
+                truncated,
+            } => {
+                let (content, content_truncated) = project_user_guidance(content);
+                let mut attachment_truncated = false;
+                let attachments = attachments
+                    .iter()
+                    .map(|attachment| {
+                        let (name, name_truncated) = project_attachment_text(&attachment.name);
+                        let (mime_type, mime_truncated) = attachment
+                            .mime_type
+                            .as_deref()
+                            .map(project_attachment_text)
+                            .map(|(value, truncated)| (Some(value), truncated))
+                            .unwrap_or((None, false));
+                        attachment_truncated |= name_truncated || mime_truncated;
+                        ConversationTraceAttachment {
+                            id: attachment.id.clone(),
+                            kind: attachment.kind,
+                            name,
+                            mime_type,
+                            size_bytes: attachment.size_bytes,
+                        }
+                    })
+                    .collect();
+                let item_truncated = *truncated || content_truncated || attachment_truncated;
+                trace_truncated |= item_truncated;
+                ConversationTurnTraceItem::UserGuidance {
+                    sequence: *sequence,
+                    guidance_id: guidance_id.clone(),
+                    client_message_id: client_message_id.clone(),
+                    content,
+                    attachments,
+                    created_at: *created_at,
+                    truncated: item_truncated,
+                }
+            }
+            ConversationTurnTraceItem::ToolCall {
+                sequence,
+                call_id,
+                tool,
+                operation,
+                approval_status,
+                truncated,
+            } => {
+                operations.insert(call_id.clone(), operation.clone());
+                let operation = project_tool_call(tool, operation);
+                let item_truncated = *truncated || operation.truncated;
+                trace_truncated |= item_truncated;
+                ConversationTurnTraceItem::ToolCall {
+                    sequence: *sequence,
+                    call_id: call_id.clone(),
+                    tool: tool.clone(),
+                    operation: operation.value,
+                    approval_status: *approval_status,
+                    truncated: item_truncated,
+                }
+            }
+            ConversationTurnTraceItem::ToolResult {
+                sequence,
+                call_id,
+                tool,
+                status,
+                success,
+                observation,
+                approval_status,
+                error,
+                truncated,
+            } => {
+                let (observation, projected_error, error_truncated) = project_tool_result(
+                    tool,
+                    operations.get(call_id),
+                    observation,
+                    error.as_deref(),
+                );
+                let mut projected_observation = observation.value;
+                let mut projected_error = projected_error;
+                let mut projection_truncated = observation.truncated || error_truncated;
+
+                if !*success
+                    && is_repeat_failure_eligible(tool)
+                    && projected_observation
+                        .get("repeatedFailure")
+                        .and_then(Value::as_bool)
+                        != Some(true)
+                {
+                    let signature = serde_json::to_string(&json!({
+                        "tool": tool,
+                        "status": status,
+                        "observation": &projected_observation,
+                        "error": &projected_error,
+                    }))
+                    .unwrap_or_default();
+                    if let Some(first_call_id) = failure_signatures.get(&signature) {
+                        projected_observation = json!({
+                            "repeatedFailure": true,
+                            "sameAsCallId": first_call_id,
+                            "detail": "Unchanged failure omitted from conversation history."
+                        });
+                        projected_error = None;
+                        projection_truncated = true;
+                    } else {
+                        failure_signatures.insert(signature, call_id.clone());
+                    }
+                }
+
+                let item_truncated = *truncated || projection_truncated;
+                trace_truncated |= item_truncated;
+                ConversationTurnTraceItem::ToolResult {
+                    sequence: *sequence,
+                    call_id: call_id.clone(),
+                    tool: tool.clone(),
+                    status: *status,
+                    success: *success,
+                    observation: projected_observation,
+                    approval_status: *approval_status,
+                    error: projected_error,
+                    truncated: item_truncated,
+                }
+            }
+        };
+        projected.push(projected_item);
+    }
+
+    (projected, trace_truncated)
+}
+
 /// Produces the canonical persisted trace item for a ToolResult.
 ///
 /// Durable settlement verification uses this same projection so an audit receipt cannot be paired
@@ -896,30 +1161,32 @@ pub(crate) fn projected_tool_result_trace_item(
 ) -> ConversationTurnTraceItem {
     let status = result_status(result);
     let success = status == ConversationTraceToolResultStatus::Succeeded;
-    let (observation, result_redacted) =
-        sanitize_value(result.result.as_ref().unwrap_or(&Value::Null));
-    let (error, error_redacted) = sanitize_optional_text(result.error.as_deref());
-    let redacted = result_redacted || error_redacted;
+    let (observation, error, error_truncated) = project_tool_result(
+        &call.tool,
+        Some(&call.args),
+        result.result.as_ref().unwrap_or(&Value::Null),
+        result.error.as_deref(),
+    );
     ConversationTurnTraceItem::ToolResult {
         sequence,
         call_id: call.id.clone(),
         tool: call.tool.clone(),
         status,
         success,
-        observation,
+        observation: observation.value,
         approval_status: call.approval_status,
         error,
-        truncated: redacted,
+        truncated: observation.truncated || error_truncated,
     }
 }
 
 pub(crate) fn canonical_tool_result_for_context(result: &AgentToolResult) -> AgentToolResult {
     let mut canonical = result.clone();
     if let Some(value) = canonical.result.as_mut() {
-        *value = sanitize_value(value).0;
+        *value = sanitize_runtime_value(value).0;
     }
     if let Some(error) = canonical.error.as_mut() {
-        *error = sanitize_text(error).0;
+        *error = sanitize_runtime_text(error).0;
     }
     canonical
 }
@@ -982,58 +1249,11 @@ fn sanitize_optional_text(value: Option<&str>) -> (Option<String>, bool) {
 }
 
 fn sanitize_text(value: &str) -> (String, bool) {
-    if value.trim_start().to_ascii_lowercase().starts_with("data:")
-        && value.to_ascii_lowercase().contains(";base64,")
-    {
-        return (BINARY_OMITTED_MARKER.to_string(), true);
-    }
-    (value.to_string(), false)
+    sanitize_runtime_text(value)
 }
 
 fn sanitize_value(value: &Value) -> (Value, bool) {
-    match value {
-        Value::Object(object) => {
-            let mut redacted = false;
-            let mut output = serde_json::Map::with_capacity(object.len());
-            for (key, value) in object {
-                let canonical_key = key
-                    .chars()
-                    .filter(|character| character.is_ascii_alphanumeric())
-                    .flat_map(char::to_lowercase)
-                    .collect::<String>();
-                if canonical_key == BINARY_OMITTED_FROM_HISTORY_KEY && value.as_bool() == Some(true)
-                {
-                    output.insert(key.clone(), value.clone());
-                    redacted = true;
-                } else if canonical_key.contains("base64") || canonical_key.contains("dataurl") {
-                    output.insert(key.clone(), json!(BINARY_OMITTED_MARKER));
-                    redacted = true;
-                } else {
-                    let (value, item_redacted) = sanitize_value(value);
-                    output.insert(key.clone(), value);
-                    redacted |= item_redacted;
-                }
-            }
-            (Value::Object(output), redacted)
-        }
-        Value::Array(items) => {
-            let mut redacted = false;
-            let items = items
-                .iter()
-                .map(|item| {
-                    let (item, item_redacted) = sanitize_value(item);
-                    redacted |= item_redacted;
-                    item
-                })
-                .collect();
-            (Value::Array(items), redacted)
-        }
-        Value::String(value) => {
-            let (value, redacted) = sanitize_text(value);
-            (Value::String(value), redacted)
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => (value.clone(), false),
-    }
+    sanitize_runtime_value(value)
 }
 
 fn ensure_no_binary_text(label: &str, value: &str) -> Result<(), String> {
@@ -1079,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn recorder_preserves_full_textual_tool_context_without_semantic_deduplication() {
+    fn recorder_keeps_runtime_checkpoint_but_bounds_web_body_in_durable_trace() {
         let mut recorder = ConversationTraceRecorder::default();
         let first = call("call-1");
         recorder.record_narration("I will fetch the page.");
@@ -1107,6 +1327,19 @@ mod tests {
             },
         );
 
+        let (checkpoint_items, _, _) = recorder.checkpoint();
+        let ConversationTurnTraceItem::ToolResult {
+            observation: checkpoint_observation,
+            ..
+        } = &checkpoint_items[2]
+        else {
+            panic!("expected checkpoint tool result");
+        };
+        assert_eq!(
+            checkpoint_observation["content"].as_str().unwrap().len(),
+            20_000
+        );
+
         let trace = recorder.finish(
             "run-1",
             "conversation-1",
@@ -1119,7 +1352,10 @@ mod tests {
         let ConversationTurnTraceItem::ToolResult { observation, .. } = &trace.items[2] else {
             panic!("expected tool result");
         };
-        assert_eq!(observation["content"].as_str().unwrap().len(), 20_000);
+        assert!(observation.get("content").is_none());
+        assert!(observation["summary"].as_str().unwrap().chars().count() < 20_000);
+        assert_eq!(observation["bodyTruncatedInHistory"], true);
+        assert!(trace.truncated);
     }
 
     #[test]
@@ -1348,5 +1584,380 @@ mod tests {
         assert!(recorder
             .record_user_guidance("guidance-1", "client-1", "change course", &[], 42)
             .is_none());
+    }
+
+    #[test]
+    fn write_and_patch_durable_projection_keeps_effect_metadata_without_payloads() {
+        let write_call = AgentToolCall {
+            id: "write-1".into(),
+            tool: "write_file".into(),
+            args: json!({
+                "phase": "append",
+                "draftId": "draft-1",
+                "index": 0,
+                "content": "first\nsecond\nSECRET_WRITE_BODY"
+            }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let patch_call = AgentToolCall {
+            id: "patch-1".into(),
+            tool: "apply_patch".into(),
+            args: json!({
+                "operation": "update",
+                "filePath": "src/lib.rs",
+                "patch": "--- a/src/lib.rs\n+++ b/src/lib.rs\n-old\n+new\n+extra\n",
+                "summary": "Update the implementation"
+            }),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: None,
+        };
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_tool_call(&write_call);
+        recorder.record_tool_result(
+            &write_call,
+            &AgentToolResult {
+                call_id: write_call.id.clone(),
+                tool: write_call.tool.clone(),
+                ok: true,
+                result: Some(json!({
+                    "draft": {
+                        "status": "drafting",
+                        "draftId": "draft-1",
+                        "mode": "create",
+                        "filePath": "notes.txt",
+                        "additions": 2,
+                        "deletions": 0,
+                        "lineCount": 2,
+                        "byteCount": 30
+                    },
+                    "tail": "SECRET_WRITE_BODY"
+                })),
+                error: None,
+            },
+        );
+        recorder.record_tool_call(&patch_call);
+        recorder.record_tool_result(
+            &patch_call,
+            &AgentToolResult {
+                call_id: patch_call.id.clone(),
+                tool: patch_call.tool.clone(),
+                ok: true,
+                result: Some(json!({
+                    "status": "applied",
+                    "operation": "update",
+                    "filePath": "src/lib.rs",
+                    "appliedFilePaths": ["src/lib.rs"],
+                    "gitDiff": {
+                        "patch": "--- a/src/lib.rs\n+++ b/src/lib.rs\n-old\n+new\n+extra\n",
+                        "truncated": false
+                    }
+                })),
+                error: None,
+            },
+        );
+
+        let trace = recorder.finish(
+            "run",
+            "conversation",
+            "assistant",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+        trace.validate().unwrap();
+        let serialized = serde_json::to_string(&trace).unwrap();
+        assert!(!serialized.contains("SECRET_WRITE_BODY"));
+        assert!(!serialized.contains("--- a/src/lib.rs"));
+
+        let ConversationTurnTraceItem::ToolCall {
+            operation: write_operation,
+            ..
+        } = &trace.items[0]
+        else {
+            panic!("expected write call");
+        };
+        assert_eq!(write_operation["contentBytes"], 30);
+        assert_eq!(write_operation["contentLines"], 3);
+        let ConversationTurnTraceItem::ToolResult {
+            observation: write_result,
+            ..
+        } = &trace.items[1]
+        else {
+            panic!("expected write result");
+        };
+        assert_eq!(write_result["filePath"], "notes.txt");
+        assert_eq!(write_result["additions"], 2);
+
+        let ConversationTurnTraceItem::ToolCall {
+            operation: patch_operation,
+            ..
+        } = &trace.items[2]
+        else {
+            panic!("expected patch call");
+        };
+        assert_eq!(patch_operation["filePath"], "src/lib.rs");
+        assert_eq!(patch_operation["additions"], 2);
+        assert_eq!(patch_operation["deletions"], 1);
+        let ConversationTurnTraceItem::ToolResult {
+            observation: patch_result,
+            approval_status,
+            ..
+        } = &trace.items[3]
+        else {
+            panic!("expected patch result");
+        };
+        assert_eq!(*approval_status, AgentApprovalStatus::Approved);
+        assert_eq!(patch_result["status"], "applied");
+        assert_eq!(patch_result["additions"], 2);
+        assert_eq!(patch_result["deletions"], 1);
+        assert_eq!(patch_result["patchOmittedFromHistory"], true);
+    }
+
+    #[test]
+    fn command_and_read_results_keep_bounded_tail_or_summary() {
+        let command_call = AgentToolCall {
+            id: "command-1".into(),
+            tool: "run_command".into(),
+            args: json!({
+                "command": "cargo test",
+                "cwd": "workspace",
+                "reason": "verify"
+            }),
+            approval_status: AgentApprovalStatus::Approved,
+            reason: None,
+        };
+        let read_call = AgentToolCall {
+            id: "read-1".into(),
+            tool: "read_file".into(),
+            args: json!({ "path": "src/lib.rs", "startLine": 20, "maxLines": 50 }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_tool_call(&command_call);
+        recorder.record_tool_result(
+            &command_call,
+            &AgentToolResult {
+                call_id: command_call.id.clone(),
+                tool: command_call.tool.clone(),
+                ok: false,
+                result: Some(json!({
+                    "command": "cargo test",
+                    "cwd": "workspace",
+                    "exitCode": 1,
+                    "stdout": format!("BEGIN_MUST_NOT_SURVIVE{}", "x".repeat(4_000)),
+                    "stderr": "the actionable failure is at the end",
+                    "timedOut": false,
+                    "cancelled": false,
+                    "durationMs": 25,
+                    "stdoutTruncated": false,
+                    "stderrTruncated": false
+                })),
+                error: Some("command failed".into()),
+            },
+        );
+        recorder.record_tool_call(&read_call);
+        recorder.record_tool_result(
+            &read_call,
+            &AgentToolResult {
+                call_id: read_call.id.clone(),
+                tool: read_call.tool.clone(),
+                ok: true,
+                result: Some(json!({
+                    "path": "src/lib.rs",
+                    "startLine": 20,
+                    "endLine": 200,
+                    "totalLines": 500,
+                    "truncated": true,
+                    "content": format!("READ_PREFIX{}", "z".repeat(5_000))
+                })),
+                error: None,
+            },
+        );
+        let trace = recorder.finish(
+            "run",
+            "conversation",
+            "assistant",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+        let serialized = serde_json::to_string(&trace).unwrap();
+        assert!(!serialized.contains("BEGIN_MUST_NOT_SURVIVE"));
+        assert!(!serialized.contains(&"z".repeat(2_000)));
+
+        let ConversationTurnTraceItem::ToolResult {
+            observation: command,
+            ..
+        } = &trace.items[1]
+        else {
+            panic!("expected command result");
+        };
+        assert_eq!(command["command"], "cargo test");
+        assert_eq!(command["cwd"], "workspace");
+        assert_eq!(command["exitCode"], 1);
+        assert!(command["stdoutTail"]
+            .as_str()
+            .unwrap()
+            .starts_with("[earlier output omitted]"));
+        assert!(command["stderrTail"]
+            .as_str()
+            .unwrap()
+            .contains("actionable failure"));
+
+        let ConversationTurnTraceItem::ToolCall {
+            operation: read_operation,
+            ..
+        } = &trace.items[2]
+        else {
+            panic!("expected read call");
+        };
+        assert_eq!(read_operation["path"], "src/lib.rs");
+        assert_eq!(read_operation["startLine"], 20);
+        let ConversationTurnTraceItem::ToolResult {
+            observation: read, ..
+        } = &trace.items[3]
+        else {
+            panic!("expected read result");
+        };
+        assert_eq!(read["path"], "src/lib.rs");
+        assert_eq!(read["startLine"], 20);
+        assert_eq!(read["contentTruncatedInHistory"], true);
+        assert!(read["summary"].as_str().unwrap().contains("READ_PREFIX"));
+    }
+
+    #[test]
+    fn durable_projection_redacts_embedded_data_urls_and_hidden_reasoning() {
+        let call = AgentToolCall {
+            id: "unknown-1".into(),
+            tool: "extension_tool".into(),
+            args: json!({
+                "note": "prefix data:image/png;base64,U0VDUkVUX0lNQUdF suffix",
+                "nested": { "arbitraryBase64": "U0VDUkVU", "safe": "keep" }
+            }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_tool_call(&call);
+        recorder.record_tool_result(
+            &call,
+            &AgentToolResult {
+                call_id: call.id.clone(),
+                tool: call.tool.clone(),
+                ok: true,
+                result: Some(json!({
+                    "message": "before data:image/jpeg;base64,QUJDRA== after",
+                    "reasoning": "hidden chain must not persist",
+                    "safe": "visible evidence"
+                })),
+                error: None,
+            },
+        );
+        let trace = recorder.finish(
+            "run",
+            "conversation",
+            "assistant",
+            ConversationTurnTraceTerminalStatus::Completed,
+            None,
+        );
+        let serialized = serde_json::to_string(&trace).unwrap();
+        assert!(!serialized.contains("U0VDUkVUX0lNQUdF"));
+        assert!(!serialized.contains("U0VDUkVU"));
+        assert!(!serialized.contains("QUJDRA=="));
+        assert!(!serialized.contains("hidden chain must not persist"));
+        assert!(serialized.contains("visible evidence"));
+        trace.validate().unwrap();
+    }
+
+    #[test]
+    fn repeated_unchanged_read_failure_keeps_paired_reference_instead_of_duplicate_error() {
+        let mut recorder = ConversationTraceRecorder::default();
+        for id in ["read-1", "read-2"] {
+            let call = AgentToolCall {
+                id: id.into(),
+                tool: "read_file".into(),
+                args: json!({ "path": "missing.txt" }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            };
+            recorder.record_tool_call(&call);
+            recorder.record_tool_result(
+                &call,
+                &AgentToolResult {
+                    call_id: call.id.clone(),
+                    tool: call.tool.clone(),
+                    ok: false,
+                    result: Some(json!({ "path": "missing.txt", "code": "notFound" })),
+                    error: Some("file does not exist".into()),
+                },
+            );
+        }
+        let trace = recorder.finish(
+            "run",
+            "conversation",
+            "assistant",
+            ConversationTurnTraceTerminalStatus::Failed,
+            Some("unable to read the requested file"),
+        );
+        trace.validate().unwrap();
+        assert_eq!(trace.items.len(), 4);
+        let ConversationTurnTraceItem::ToolResult {
+            observation,
+            error,
+            truncated,
+            ..
+        } = &trace.items[3]
+        else {
+            panic!("expected repeated result");
+        };
+        assert_eq!(observation["repeatedFailure"], true);
+        assert_eq!(observation["sameAsCallId"], "read-1");
+        assert!(error.is_none());
+        assert!(*truncated);
+    }
+
+    #[test]
+    fn approval_checkpoint_keeps_full_patch_while_durable_snapshot_is_bounded() {
+        let call = AgentToolCall {
+            id: "patch-approval".into(),
+            tool: "apply_patch".into(),
+            args: json!({
+                "operation": "update",
+                "filePath": "src/main.rs",
+                "patch": "--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n"
+            }),
+            approval_status: AgentApprovalStatus::Required,
+            reason: None,
+        };
+        let mut recorder = ConversationTraceRecorder::default();
+        recorder.record_tool_call(&call);
+        let (checkpoint, _, _) = recorder.checkpoint();
+        let ConversationTurnTraceItem::ToolCall {
+            operation: checkpoint_operation,
+            ..
+        } = &checkpoint[0]
+        else {
+            panic!("expected checkpoint call");
+        };
+        assert!(checkpoint_operation["patch"]
+            .as_str()
+            .unwrap()
+            .contains("-old"));
+
+        let durable =
+            recorder
+                .snapshot()
+                .in_progress_audit_trace("run", "conversation", "assistant");
+        let ConversationTurnTraceItem::ToolCall {
+            operation: durable_operation,
+            ..
+        } = &durable.items[0]
+        else {
+            panic!("expected durable call");
+        };
+        assert!(durable_operation.get("patch").is_none());
+        assert_eq!(durable_operation["filePath"], "src/main.rs");
+        assert_eq!(durable_operation["additions"], 1);
+        assert_eq!(durable_operation["deletions"], 1);
     }
 }

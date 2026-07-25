@@ -25,6 +25,7 @@ use crate::protocol::{
 use crate::runtime::AgentSkillActivationResolver;
 use crate::skills::{AgentSkillDiscoverySnapshot, SkillResourceSession};
 use crate::tools::{AgentTool, EffectiveToolSet, ToolCapabilityId, ToolRegistry};
+use crate::world_state::WorldStateSectionEnvelope;
 use serde_json::Value;
 pub(in crate::runtime) use skills::checkpoint_authority_from_snapshots;
 pub(in crate::runtime) use skills::redact_discovery_from_snapshots;
@@ -152,6 +153,14 @@ trait RuntimeExtension: Send {
     }
 
     fn request_context(&self, _request: &ModelRequestContext) -> AgentResult<Vec<ContextItem>> {
+        Ok(Vec::new())
+    }
+
+    /// Exact provider-neutral Run World State contributed by this extension.
+    ///
+    /// This is distinct from request context and frontend events. The runtime folds all extension
+    /// sections through the same Run World State reducer before the next model request.
+    fn world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
         Ok(Vec::new())
     }
 
@@ -289,6 +298,14 @@ impl RuntimeExtensions {
             context.push(item);
         }
         Ok(())
+    }
+
+    pub(super) fn world_state_sections(&self) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
+        let mut sections = Vec::new();
+        for extension in &self.extensions {
+            sections.extend(extension.world_state_sections()?);
+        }
+        Ok(sections)
     }
 
     pub(super) fn update_model_input_capacity(&mut self, capacity: Option<ModelInputCapacity>) {
@@ -745,6 +762,19 @@ mod tests {
                     effective_revision: "effective-tool-set-v1:test".to_string(),
                     exposed_tool_names: Vec::new(),
                 },
+                run_context: None,
+                model_capabilities: crate::protocol::ModelCapabilities::default(),
+                run_world_state: crate::world_state::WorldStateSnapshot::new(
+                    "approval-event-test",
+                    0,
+                    vec![crate::world_state::WorldStateSectionEnvelope::host_only(
+                        crate::world_state::WorldStateSectionId::ModelCapabilities,
+                        crate::world_state::WorldStateLifetime::Run,
+                        json!({ "imageInput": false }),
+                    )
+                    .unwrap()],
+                )
+                .unwrap(),
                 pending_tool_call_id: "call-1".to_string(),
                 conversation_trace_items: Vec::new(),
                 next_conversation_trace_sequence: 0,

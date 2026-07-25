@@ -10,6 +10,12 @@ pub(super) struct RuntimeCapabilityServices {
     pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
 }
 
+pub(super) struct DurableConversationTimeline {
+    pub(super) compaction_summary: Option<crate::ContextCompactionSummary>,
+    pub(super) world_state_records: Vec<crate::AnchoredWorldStateRecord>,
+    pub(super) messages: Vec<AgentChatMessage>,
+}
+
 pub(super) fn prepare_runtime_capabilities(
     input: &AgentChatInput,
     run_id: &str,
@@ -121,15 +127,20 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
 }
 
 pub(super) fn assemble_context_preview(
-    compaction_summary: Option<crate::ContextCompactionSummary>,
-    messages: Vec<AgentChatMessage>,
+    timeline: DurableConversationTimeline,
     skill_discovery: Option<crate::skills::AgentSkillDiscoverySnapshot>,
     skill_activation: Option<AgentSkillActivation>,
     _context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<crate::context::AssembledContext> {
+    let DurableConversationTimeline {
+        compaction_summary,
+        world_state_records,
+        messages,
+    } = timeline;
     if compaction_summary.is_some()
+        || !world_state_records.is_empty()
         || messages.iter().any(|message| {
             matches!(message.role.trim(), "user" | "assistant")
                 && !message.content.trim().is_empty()
@@ -138,6 +149,8 @@ pub(super) fn assemble_context_preview(
         return ContextAssembler::assemble_with_timing(ContextAssemblyInput {
             system_prompt: build_system_prompt(prompt_preferences, tool_definitions),
             compaction_summary,
+            world_state_records,
+            initial_run_world_state: None,
             messages,
             skill_discovery,
             skill_activation,
@@ -162,6 +175,7 @@ pub(super) fn build_llm_request(
     tool_definitions: &[AgentToolDefinition],
     restored_checkpoint: Option<RestoredRunCheckpoint>,
     shared_context_baseline: Option<AgentContextBaseline>,
+    initial_run_world_state: Option<crate::WorldStateSnapshot>,
 ) -> AgentResult<PreparedLlmRequest> {
     let api_style = input
         .api_style
@@ -214,9 +228,14 @@ pub(super) fn build_llm_request(
             )?;
             let skill_activation = input.skill_activation;
             let skill_discovery = input.skill_discovery;
+            let world_state_records = input.world_state_records;
             let context = match shared_context_baseline {
                 Some(baseline) => {
                     let mut context = baseline.into_frame();
+                    ContextAssembler::append_initial_run_world_state(
+                        &mut context,
+                        initial_run_world_state.as_ref(),
+                    )?;
                     append_attachment_context(&mut context, attachment_context);
                     ContextAssembler::append_skill_overlays(
                         &mut context,
@@ -226,8 +245,12 @@ pub(super) fn build_llm_request(
                     context
                 }
                 None => assemble_initial_context_with_skill_overlays(
-                    input.context_compaction_summary,
-                    input.messages,
+                    DurableConversationTimeline {
+                        compaction_summary: input.context_compaction_summary,
+                        world_state_records,
+                        messages: input.messages,
+                    },
+                    initial_run_world_state,
                     InitialSkillOverlays {
                         discovery: skill_discovery,
                         activation: skill_activation,
@@ -401,8 +424,12 @@ pub(super) fn assemble_initial_context(
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<ContextFrame> {
     assemble_initial_context_with_skill_overlays(
-        compaction_summary,
-        messages,
+        DurableConversationTimeline {
+            compaction_summary,
+            world_state_records: Vec::new(),
+            messages,
+        },
+        None,
         InitialSkillOverlays {
             discovery: None,
             activation: skill_activation,
@@ -420,17 +447,24 @@ struct InitialSkillOverlays {
 }
 
 fn assemble_initial_context_with_skill_overlays(
-    compaction_summary: Option<crate::ContextCompactionSummary>,
-    messages: Vec<AgentChatMessage>,
+    timeline: DurableConversationTimeline,
+    initial_run_world_state: Option<crate::WorldStateSnapshot>,
     skills: InitialSkillOverlays,
     attachment_context: AttachmentContext,
     _context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<ContextFrame> {
+    let DurableConversationTimeline {
+        compaction_summary,
+        world_state_records,
+        messages,
+    } = timeline;
     ContextAssembler::assemble(ContextAssemblyInput {
         system_prompt: build_system_prompt(prompt_preferences, tool_definitions),
         compaction_summary,
+        world_state_records,
+        initial_run_world_state,
         messages,
         skill_discovery: skills.discovery,
         skill_activation: skills.activation,

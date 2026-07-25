@@ -238,3 +238,34 @@ fn persistent_replacement_keeps_run_overlay_and_discards_old_history() {
         .iter()
         .all(|message| !message.content.contains("very old history")));
 }
+
+#[test]
+fn cache_layout_rejects_a_durable_item_after_the_run_timeline() {
+    let frame = ContextFrame::new(vec![
+        ContextItem::text(
+            LlmMessageRole::System,
+            "stable contract",
+            ContextSource::BackendSystemPrompt,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ),
+        ContextItem::text(
+            LlmMessageRole::Assistant,
+            "active run output",
+            ContextSource::ModelResponse,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        ),
+        ContextItem::text(
+            LlmMessageRole::User,
+            "late durable history",
+            ContextSource::ConversationHistory,
+            ContextScope::Conversation,
+            ContextRetention::Retained,
+        ),
+    ]);
+
+    let error = frame.validate_cache_layout().unwrap_err().to_string();
+    assert!(error.contains("上下文缓存分层顺序无效"));
+    assert!(error.contains("durable_timeline"));
+}
