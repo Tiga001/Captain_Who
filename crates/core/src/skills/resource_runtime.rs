@@ -952,20 +952,20 @@ impl SkillResourceSession {
             .values()
             .next()
             .expect("one-element binding map must have one value");
-        let mut kinds = binding
-            .resources
-            .entries()
-            .iter()
-            .map(SkillResourceDescriptor::kind)
-            .collect::<Vec<_>>();
-        kinds.sort_unstable_by_key(|kind| kind.stable_name());
-        kinds.dedup();
-        kinds.shrink_to_fit();
-        Ok((
-            binding.package.clone(),
-            u64::try_from(binding.resources.len()).unwrap_or(u64::MAX),
-            kinds,
-        ))
+        let (resource_count, kinds) = binding_resource_manifest(binding);
+        Ok((binding.package.clone(), resource_count, kinds))
+    }
+
+    /// Returns canonical resource metadata for one exact package already authorized in this run.
+    ///
+    /// Runtime capability derivation uses this backend-owned manifest instead of trusting the
+    /// activation payload's resource hints. The operation reveals no resource paths or bytes.
+    pub(crate) fn binding_manifest(
+        &self,
+        package: &SkillPackageUri,
+    ) -> Result<(u64, Vec<SkillResourceKind>), SkillResourceError> {
+        let binding = self.binding(package)?;
+        Ok(binding_resource_manifest(&binding))
     }
 
     pub fn list(
@@ -1114,6 +1114,22 @@ impl SkillResourceSession {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+fn binding_resource_manifest(binding: &SessionBinding) -> (u64, Vec<SkillResourceKind>) {
+    let mut kinds = binding
+        .resources
+        .entries()
+        .iter()
+        .map(SkillResourceDescriptor::kind)
+        .collect::<Vec<_>>();
+    kinds.sort_unstable_by_key(|kind| kind.stable_name());
+    kinds.dedup();
+    kinds.shrink_to_fit();
+    (
+        u64::try_from(binding.resources.len()).unwrap_or(u64::MAX),
+        kinds,
+    )
 }
 
 impl fmt::Debug for SkillResourceSession {

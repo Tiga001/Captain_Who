@@ -30,6 +30,10 @@ const DRAFT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 pub(super) struct WriteFileTool;
 
 impl AgentTool for WriteFileTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::Stable
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "write_file".to_string(),

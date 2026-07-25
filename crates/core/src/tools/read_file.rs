@@ -12,6 +12,10 @@ const STREAM_BUFFER_BYTES: usize = 64 * 1024;
 pub(super) struct ReadFileTool;
 
 impl AgentTool for ReadFileTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::Stable
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }
@@ -19,12 +23,12 @@ impl AgentTool for ReadFileTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_file".to_string(),
-            description: "Read a UTF-8 text file from the selected workspace or an @attachments path. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
+            description: "Read an authorized UTF-8 text file. Paths may be workspace-relative, absolute, use a supported system alias, or reference @attachments; the current read permission is enforced at execution time. Without a range it returns the complete file when the model-aware output budget permits; larger files return a lossless continuation cursor instead of failing."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative file path or @attachments/... readPath." },
+                    "path": { "type": "string", "description": "Workspace-relative path, absolute local path, @home/@desktop/@documents/@downloads, or an exact @attachments/... readPath. Availability depends on the current read permission." },
                     "startLine": { "type": "integer", "minimum": 1, "description": "Optional 1-based first line. Omit to start at the beginning." },
                     "startByte": { "type": "integer", "minimum": 0, "description": "Continuation cursor. Pass nextStartByte from a previous truncated result; do not combine with startLine." },
                     "maxLines": { "type": "integer", "minimum": 1, "description": "Optional soft strategy bound. There is no fixed maximum; the output token budget still applies." }

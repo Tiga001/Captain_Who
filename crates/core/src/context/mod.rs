@@ -48,5 +48,7 @@ pub(crate) use frame::{
 };
 pub(crate) use measurement::ContextTextBudget;
 pub(crate) use message_time::{format_message_created_at, ConversationTimingTracker};
-pub use state::{AgentContextBaseline, AgentConversationContextState};
+pub use state::{
+    AgentContextBaseline, AgentContextWindowToolProjection, AgentConversationContextState,
+};
 pub(crate) use trace_renderer::ConversationTraceRenderer;

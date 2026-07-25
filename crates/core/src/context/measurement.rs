@@ -191,6 +191,14 @@ impl ContextTextBudget {
         self.estimator.estimate_message(message).total_tokens()
     }
 
+    /// Measures model-facing Tool schemas with the same estimator as the owning request.
+    ///
+    /// Dynamic Skill activation uses this to reserve only the incremental schema cost of the
+    /// projected post-activation Tool set before publishing any activation side effects.
+    pub(crate) fn estimate_tool_definitions(&self, tools: &[AgentToolDefinition]) -> u64 {
+        self.estimator.estimate_tool_definitions(tools)
+    }
+
     pub(crate) fn fits(&self, value: &str) -> bool {
         self.estimate(value) <= self.max_tokens
     }

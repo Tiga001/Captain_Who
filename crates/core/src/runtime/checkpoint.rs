@@ -15,9 +15,10 @@ use crate::conversation_trace::{
 use crate::llm::{validate_model_tool_call_id, LlmToolCall};
 use crate::protocol::{
     AgentContextCheckpointItem, AgentContextCheckpointToolCall, AgentError, AgentExtensionSnapshot,
-    AgentQueuedToolCallCheckpoint, AgentResult, AgentRunCheckpoint, AgentToolContinuation,
-    AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
+    AgentQueuedToolCallCheckpoint, AgentResult, AgentRunCheckpoint, AgentRunToolSetCheckpoint,
+    AgentToolContinuation, AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
 };
+use crate::tools::{validate_tool_set_checkpoint_shape, EffectiveToolSet};
 use std::collections::{BTreeSet, VecDeque};
 
 #[derive(Debug, Clone)]
@@ -122,6 +123,7 @@ pub(super) struct RestoredRunCheckpoint {
     pub(super) extension_snapshots: Vec<AgentExtensionSnapshot>,
     pub(super) conversation_trace: ConversationTraceRecorder,
     pub(super) visible_trace_item_count: usize,
+    pub(super) tool_set: AgentRunToolSetCheckpoint,
 }
 
 pub(super) struct RunCheckpointState<'a> {
@@ -132,6 +134,7 @@ pub(super) struct RunCheckpointState<'a> {
     pub(super) model_visible_trace_item_count: usize,
     pub(super) pending_tool_call_id: &'a str,
     pub(super) conversation_trace: &'a ConversationTraceRecorder,
+    pub(super) tool_set: &'a EffectiveToolSet,
 }
 
 pub(super) fn create_run_checkpoint(
@@ -146,6 +149,7 @@ pub(super) fn create_run_checkpoint(
         model_visible_trace_item_count,
         pending_tool_call_id,
         conversation_trace,
+        tool_set,
     } = state;
     validate_model_tool_call_id(pending_tool_call_id)?;
     for queued in &tool_batch.queue {
@@ -179,6 +183,7 @@ pub(super) fn create_run_checkpoint(
             .collect(),
         suppressed_narration: tool_batch.suppressed_narration,
         extension_snapshots,
+        tool_set: tool_set.checkpoint(),
         pending_tool_call_id: pending_tool_call_id.to_string(),
         conversation_trace_items,
         next_conversation_trace_sequence,
@@ -205,6 +210,7 @@ pub(super) fn restore_run_checkpoint(
         )));
     }
     validate_model_tool_call_id(&checkpoint.pending_tool_call_id)?;
+    validate_tool_set_checkpoint_shape(&checkpoint.tool_set)?;
     validate_model_tool_call_id(&continuation.call.id)?;
     validate_model_tool_call_id(&continuation.result.call_id)?;
     validate_context_checkpoint_tool_call_ids(&checkpoint.context_items)?;
@@ -252,6 +258,7 @@ pub(super) fn restore_run_checkpoint(
         ));
     }
     let visible_trace_item_count = checkpoint.model_visible_trace_item_count;
+    let tool_set = checkpoint.tool_set;
     let restored_batch_fingerprints =
         restore_batch_fingerprints(&checkpoint.context_items, &checkpoint.pending_tool_call_id)?;
     let mut conversation_trace = ConversationTraceRecorder::from_checkpoint(
@@ -298,6 +305,7 @@ pub(super) fn restore_run_checkpoint(
         extension_snapshots: checkpoint.extension_snapshots,
         conversation_trace,
         visible_trace_item_count,
+        tool_set,
     })
 }
 
@@ -466,7 +474,15 @@ mod tests {
     };
     use crate::llm::{model_response_tool_call_id, LlmMessageRole};
     use crate::protocol::{AgentApiStyle, AgentApprovalStatus, AgentToolCall, AgentToolResult};
+    use crate::tools::ToolRegistry;
     use serde_json::json;
+
+    fn test_tool_set() -> EffectiveToolSet {
+        let registry = ToolRegistry::defaults_with_search(None);
+        registry
+            .effective_tool_set(registry.definitions(), &std::collections::BTreeSet::new())
+            .unwrap()
+    }
 
     fn canonical_test_call_id(tool_index: usize, provider_call_id: &str) -> String {
         model_response_tool_call_id("checkpoint-validation-run", 0, tool_index, provider_call_id)
@@ -510,6 +526,7 @@ mod tests {
                 model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
+                tool_set: &test_tool_set(),
             },
         )
         .unwrap();
@@ -553,7 +570,9 @@ mod tests {
         ));
 
         assert!(error.to_string().contains("不支持版本 2"));
-        assert!(error.to_string().contains("当前版本为 3"));
+        assert!(error
+            .to_string()
+            .contains(&format!("当前版本为 {AGENT_RUN_CHECKPOINT_SCHEMA_VERSION}")));
     }
 
     #[test]
@@ -675,6 +694,7 @@ mod tests {
                 model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &ConversationTraceRecorder::default(),
+                tool_set: &test_tool_set(),
             },
         )
         .unwrap();
@@ -734,6 +754,7 @@ mod tests {
                 model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
+                tool_set: &test_tool_set(),
             },
         )
         .unwrap_err();
@@ -775,6 +796,7 @@ mod tests {
                 model_visible_trace_item_count: 0,
                 pending_tool_call_id: &valid_pending.id,
                 conversation_trace: &trace,
+                tool_set: &test_tool_set(),
             },
         )
         .unwrap_err();
@@ -828,6 +850,7 @@ mod tests {
                 model_visible_trace_item_count: 0,
                 pending_tool_call_id: &valid_pending.id,
                 conversation_trace: &trace,
+                tool_set: &test_tool_set(),
             },
         )
         .unwrap_err();
@@ -851,6 +874,7 @@ mod tests {
                 model_visible_trace_item_count: 0,
                 pending_tool_call_id: &valid_pending.id,
                 conversation_trace: &invalid_trace,
+                tool_set: &test_tool_set(),
             },
         )
         .unwrap_err();
@@ -1019,6 +1043,7 @@ mod tests {
                 model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
+                tool_set: &test_tool_set(),
             },
         )
         .unwrap();
@@ -1078,6 +1103,7 @@ mod tests {
                 model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
+                tool_set: &test_tool_set(),
             },
         )
         .unwrap();
@@ -1207,6 +1233,7 @@ mod tests {
                 model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &conversation_trace,
+                tool_set: &test_tool_set(),
             },
         )
         .unwrap();
@@ -1331,6 +1358,7 @@ mod tests {
                 model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending_call.id,
                 conversation_trace: &trace,
+                tool_set: &test_tool_set(),
             },
         )
         .unwrap();

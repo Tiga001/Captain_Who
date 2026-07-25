@@ -54,8 +54,14 @@ impl OfficePresentationTool {
 }
 
 macro_rules! impl_office_tool {
-    ($tool:ty) => {
+    ($tool:ty, $capability:expr) => {
         impl AgentTool for $tool {
+            fn exposure(&self) -> super::AgentToolExposure {
+                super::AgentToolExposure::RequiresCapability(
+                    super::ToolCapabilityId::application_owned($capability),
+                )
+            }
+
             fn definition(&self) -> AgentToolDefinition {
                 self.0.definition()
             }
@@ -91,9 +97,12 @@ macro_rules! impl_office_tool {
     };
 }
 
-impl_office_tool!(OfficeDocumentTool);
-impl_office_tool!(OfficeSpreadsheetTool);
-impl_office_tool!(OfficePresentationTool);
+impl_office_tool!(OfficeDocumentTool, super::OFFICE_DOCUMENTS_CAPABILITY);
+impl_office_tool!(OfficeSpreadsheetTool, super::OFFICE_SPREADSHEETS_CAPABILITY);
+impl_office_tool!(
+    OfficePresentationTool,
+    super::OFFICE_PRESENTATIONS_CAPABILITY
+);
 
 struct OfficeTool {
     document_kind: OfficeDocumentKind,

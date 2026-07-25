@@ -10,6 +10,12 @@ use serde_json::{json, Value};
 pub(super) struct SkillsListResourcesTool;
 
 impl AgentTool for SkillsListResourcesTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::RequiresCapability(super::ToolCapabilityId::application_owned(
+            super::SKILL_RESOURCES_READ_CAPABILITY,
+        ))
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }

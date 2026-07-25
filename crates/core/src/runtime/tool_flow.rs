@@ -836,6 +836,10 @@ mod tests {
     }
 
     impl AgentTool for AuthoritativeCancellationTool {
+        fn exposure(&self) -> crate::tools::AgentToolExposure {
+            crate::tools::AgentToolExposure::Stable
+        }
+
         fn definition(&self) -> AgentToolDefinition {
             AgentToolDefinition {
                 name: "authoritative_cancellation_test".to_string(),

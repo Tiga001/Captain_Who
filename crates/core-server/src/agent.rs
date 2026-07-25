@@ -58,16 +58,18 @@ use mycopilot_core::{
     conversation_context_configuration_revision,
     conversation_trace_snapshot_from_checkpoint_and_continuation,
     create_conversation_context_state, failed_conversation_trace_without_items,
-    inspect_context_window, next_run_id, send_chat_with_host_services, AgentApprovalDecision,
+    inspect_context_window_with_tool_projection, next_run_id,
+    prepare_context_window_tool_projection, send_chat_with_host_services, AgentApprovalDecision,
     AgentApprovalDecisionStatus, AgentApprovalStatus, AgentCancellationToken, AgentChatInput,
     AgentChatOutput, AgentContextBaseline, AgentContextCompactionCommitOutcome,
     AgentContextCompactionCommitRequest, AgentContextCompactionGenerationOutput,
     AgentContextCompactionGenerationRequest, AgentContextCompactionModelGenerator,
-    AgentContextCompactionPrepareOutcome, AgentContextCompactionServices, AgentContextWindowPhase,
-    AgentContextWindowSnapshot, AgentConversationContextState, AgentConversationTraceObserver,
-    AgentError, AgentEvent, AgentEventEmitter, AgentGuidanceStatus, AgentHostActionExecutor,
-    AgentModelRequestObserver, AgentPatchResult, AgentProposedAction, AgentResult,
-    AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentRuntimeHostServices,
+    AgentContextCompactionPrepareOutcome, AgentContextCompactionServices,
+    AgentContextWindowObserver, AgentContextWindowPhase, AgentContextWindowSnapshot,
+    AgentContextWindowToolProjection, AgentConversationContextState,
+    AgentConversationTraceObserver, AgentError, AgentEvent, AgentEventEmitter, AgentGuidanceStatus,
+    AgentHostActionExecutor, AgentModelRequestObserver, AgentPatchResult, AgentProposedAction,
+    AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentRuntimeHostServices,
     AgentSearchConfig, AgentSkillMaterializationRequest, AgentSkillMaterializationResult,
     AgentSkillMaterializationResultStatus, AgentSkillScriptRequest, AgentSkillScriptResult,
     AgentSteerEnqueueOutcome, AgentSteerInput, AgentSteerInputQueue, AgentSteerRunInput,
@@ -251,6 +253,28 @@ struct ConversationContextStateUpdate {
     snapshot: Option<AgentContextWindowSnapshot>,
 }
 
+#[derive(Clone)]
+struct RunContextToolProjection {
+    initial: Option<AgentContextWindowToolProjection>,
+}
+
+impl RunContextToolProjection {
+    fn new(initial: AgentContextWindowToolProjection) -> Self {
+        Self {
+            initial: Some(initial),
+        }
+    }
+
+    #[cfg(test)]
+    fn pending() -> Self {
+        Self { initial: None }
+    }
+
+    fn projection(&self) -> Option<AgentContextWindowToolProjection> {
+        self.initial.clone()
+    }
+}
+
 #[derive(Debug, Clone)]
 enum ActiveRunSteerState {
     Accepting,
@@ -279,6 +303,7 @@ pub struct AgentService {
     pending_actions: Arc<Mutex<HashMap<String, PendingActionRecord>>>,
     usage_contexts: Arc<Mutex<HashMap<String, AgentRunUsageState>>>,
     trace_snapshots: Arc<Mutex<HashMap<String, ConversationTraceSnapshot>>>,
+    running_context_window_snapshots: Arc<Mutex<HashMap<String, AgentContextWindowSnapshot>>>,
     conversation_context_states: Arc<Mutex<HashMap<String, ConversationContextStateEntry>>>,
     conversation_context_state_clock: Arc<AtomicU64>,
     context_compaction_summary_generator: Option<ContextCompactionSummaryGenerator>,
@@ -358,6 +383,7 @@ impl AgentService {
             pending_actions: Arc::new(Mutex::new(pending_actions)),
             usage_contexts: Arc::new(Mutex::new(HashMap::new())),
             trace_snapshots: Arc::new(Mutex::new(HashMap::new())),
+            running_context_window_snapshots: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_states: Arc::new(Mutex::new(HashMap::new())),
             conversation_context_state_clock: Arc::new(AtomicU64::new(1)),
             context_compaction_summary_generator: None,

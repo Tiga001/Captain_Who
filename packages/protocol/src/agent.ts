@@ -530,6 +530,21 @@ export type ModelRequestCapacityStatus =
   'unconfigured' | 'within_budget' | 'over_budget' | 'invalid_configuration'
 export type ModelRequestUsageNormalization =
   'open_ai_input_tokens' | 'anthropic_input_plus_cache' | 'unavailable'
+/**
+ * Provider-owned request-envelope ordering. This is not evidence of a cache hit; only provider
+ * usage counters are authoritative for actual cache reuse.
+ */
+export type ProviderCacheTopology =
+  'provider_defined_separate_fields' | 'tools_before_system_messages'
+
+export interface ModelRequestToolSetObservation {
+  stableRevision: string
+  dynamicRevision: string
+  effectiveRevision: string
+  stableToolCount: number
+  dynamicToolCount: number
+  providerCacheTopology: ProviderCacheTopology
+}
 
 export interface ModelRequestEstimate {
   estimatorId: string
@@ -568,6 +583,8 @@ export interface ModelRequestObservation {
   model: string
   apiStyle: AgentObservedApiStyle
   status: ModelRequestObservationStatus
+  /** Present only for Agent-loop requests. Context-compaction requests never expose Agent Tools. */
+  toolSet?: ModelRequestToolSetObservation
   estimate?: ModelRequestEstimate
   actualUsage?: ModelRequestActualUsage
   finishReason?: string
@@ -1416,6 +1433,14 @@ export type AgentProposedAction =
 
 export type AgentEvent =
   | { type: 'started'; runId: string; toolDefinitions: AgentToolDefinition[] }
+  | {
+      type: 'tool_set_changed'
+      runId: string
+      stableRevision: string
+      dynamicRevision: string
+      effectiveRevision: string
+      toolDefinitions: AgentToolDefinition[]
+    }
   | { type: 'state'; runId: string; state: AgentStateSnapshot }
   | { type: 'message_delta'; runId: string; streamId?: string; delta: string }
   | { type: 'message_stream_started'; runId: string; streamId: string; attempt: number }

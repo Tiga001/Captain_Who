@@ -25,6 +25,16 @@ impl AgentService {
                 return Err(error);
             }
         };
+        let context_window_tool_projection = match self.context_window_tool_projection(
+            &prepared.agent_input,
+            prepared.skill_resources.as_ref().map(Arc::clone),
+        ) {
+            Ok(projection) => RunContextToolProjection::new(projection),
+            Err(error) => {
+                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                return Err(error.into());
+            }
+        };
         self.register_usage_context(&run_id, prepared.usage_context.clone());
         if self.is_agent_input_scope_deleting(&prepared.agent_input) {
             self.discard_usage_context(&run_id);
@@ -60,6 +70,7 @@ impl AgentService {
         let worker_assistant_created_at = output.assistant_message.created_at;
         let pending_agent_input = prepared.agent_input.clone();
         let skill_resources = prepared.skill_resources.clone();
+        let context_window_tool_projection = context_window_tool_projection.clone();
 
         tokio::spawn(async move {
             let emitter_notifications = notifications.clone();
@@ -145,6 +156,7 @@ impl AgentService {
                 &worker_assistant_message_id,
                 worker_assistant_created_at,
                 pending_agent_input.clone(),
+                context_window_tool_projection.clone(),
                 notifications.clone(),
             );
             let context_compaction_services = service.context_compaction_services(
@@ -152,6 +164,7 @@ impl AgentService {
                 &worker_conversation_id,
                 &worker_assistant_message_id,
                 pending_agent_input.clone(),
+                context_window_tool_projection.clone(),
                 notifications.clone(),
             );
             let model_request_observer = service.model_request_observer(
@@ -159,12 +172,25 @@ impl AgentService {
                 &worker_conversation_id,
                 &worker_assistant_message_id,
             );
+            let context_window_observer = pending_agent_input
+                .context_window_indicator_enabled
+                .then(|| {
+                    service.context_window_observer(
+                        &worker_run_id,
+                        &worker_conversation_id,
+                        &pending_agent_input.model,
+                        notifications.clone(),
+                    )
+                });
             let mut host_services = AgentRuntimeHostServices::new()
                 .with_host_actions(host_executor, service.storage.clone())
                 .with_office_engine(service.office_engine.clone())
                 .with_trace_observer(trace_observer)
                 .with_model_request_observer(model_request_observer)
                 .with_context_compaction(context_compaction_services);
+            if let Some(context_window_observer) = context_window_observer {
+                host_services = host_services.with_context_window_observer(context_window_observer);
+            }
             if let Some(image_generation_execution) = service.image_generation_execution.clone() {
                 host_services =
                     host_services.with_image_generation_execution(image_generation_execution);
@@ -341,6 +367,7 @@ impl AgentService {
             drop(deletion_lifecycle);
             if !keep_trace_snapshot {
                 service.discard_trace_snapshot(&worker_run_id);
+                service.discard_exact_running_context_window_snapshot(&worker_run_id);
             }
             service.unregister_cancellation_if_current(&worker_run_id, &cancellation_token);
         });

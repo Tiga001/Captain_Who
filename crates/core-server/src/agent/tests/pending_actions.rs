@@ -564,7 +564,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         suppressed_narration: false,
         extension_snapshots: vec![mycopilot_core::AgentExtensionSnapshot {
             extension_id: "skills".to_string(),
-            version: 2,
+            version: 3,
             state: json!({
                 "discovery": checkpoint_discovery,
                 "skills": [{
@@ -574,10 +574,12 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
                     "source": "bundled:application",
                     "sourceBytes": MARKER.len(),
                     "hasResources": false,
+                    "resourceKinds": [],
                     "activatedBy": "user"
                 }]
             }),
         }],
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: "action-skill-redaction".to_string(),
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
@@ -788,6 +790,7 @@ fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: call.id.clone(),
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
@@ -868,6 +871,7 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: call.id.clone(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
@@ -984,6 +988,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: call.id.clone(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
@@ -1130,6 +1135,7 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: action_id.to_string(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,

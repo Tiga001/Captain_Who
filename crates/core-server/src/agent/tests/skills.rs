@@ -119,6 +119,59 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
     assert!(!serde_json::to_string(&persisted)
         .unwrap()
         .contains(BUNDLED_INSTRUCTION_MARKER));
+
+    let service = AgentService::new(Arc::clone(&storage)).with_skills_service(Arc::new(skills));
+    let tool_projection = service
+        .context_window_tool_projection(
+            &prepared.agent_input,
+            prepared.skill_resources.as_ref().map(Arc::clone),
+        )
+        .unwrap();
+    let dynamic_names = tool_projection
+        .dynamic_definitions()
+        .iter()
+        .map(|definition| definition.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(dynamic_names.contains(&"read_word"));
+    assert!(dynamic_names.contains(&"office_document"));
+
+    let expected =
+        inspect_context_window_with_tool_projection(prepared.agent_input.clone(), &tool_projection)
+            .unwrap()
+            .unwrap();
+    let mut conservative_state =
+        create_conversation_context_state(prepared.agent_input.clone()).unwrap();
+    let conservative = conservative_state
+        .snapshot_with_skill_overlays(
+            AgentContextWindowPhase::DurableCommit,
+            prepared.agent_input.skill_discovery.as_ref(),
+            prepared.agent_input.skill_activation.as_ref(),
+        )
+        .unwrap();
+    assert!(
+        expected.run_transient_input_tokens > conservative.run_transient_input_tokens,
+        "the complete Host projection must charge dynamic schemas and their availability notice"
+    );
+
+    let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let observer = service.trace_observer(
+        "run-bundled-skill",
+        &prepared.output.conversation_id,
+        &prepared.output.assistant_message_id,
+        prepared.output.assistant_message.created_at,
+        prepared.agent_input.clone(),
+        RunContextToolProjection::new(tool_projection),
+        notifications,
+    );
+    observer(ConversationTraceSnapshot::default()).unwrap();
+    let notification = receiver.try_recv().unwrap();
+    assert_eq!(
+        notification["params"]["snapshot"]["runTransientInputTokens"]
+            .as_u64()
+            .unwrap(),
+        expected.run_transient_input_tokens,
+        "active trace fallback must use the same opaque ToolProjection as idle preview"
+    );
 }
 
 #[test]
@@ -544,7 +597,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         suppressed_narration: false,
         extension_snapshots: vec![mycopilot_core::AgentExtensionSnapshot {
             extension_id: "skills".to_string(),
-            version: 2,
+            version: 3,
             state: json!({
                 "discovery": frozen_discovery,
                 "skills": [{
@@ -554,10 +607,12 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
                     "source": activation.skills[0].source.clone(),
                     "sourceBytes": activation.skills[0].source_bytes,
                     "hasResources": true,
+                    "resourceKinds": ["other", "script"],
                     "activatedBy": "model"
                 }]
             }),
         }],
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: "pending-after-dynamic-skill".to_string(),
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
@@ -590,7 +645,7 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         .unwrap_err();
     assert!(tampered_error
         .to_string()
-        .contains("absent from the frozen catalog"));
+        .contains("absent from the frozen discovery catalog"));
     let request = AgentSkillMaterializationRequest {
         id: "materialize-runtime-template".to_string(),
         source_uri: template_entry.uri().to_string(),

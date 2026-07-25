@@ -121,16 +121,95 @@ impl AgentService {
             skill_discovery,
             messages,
         };
+        let tool_projection = self.context_window_tool_projection(
+            &agent_input,
+            prepared_skills.resources.as_ref().map(Arc::clone),
+        )?;
 
         let snapshot = match conversation_id.as_deref() {
-            Some(conversation_id) => self.context_window_snapshot_with_cache(
+            Some(conversation_id) => self.context_window_snapshot_with_projection_cache(
                 &agent_input,
                 conversation_id,
                 AgentContextWindowPhase::Idle,
+                &tool_projection,
             )?,
-            None => inspect_context_window(agent_input).map_err(|error| error.to_string())?,
+            None => inspect_context_window_with_tool_projection(agent_input, &tool_projection)
+                .map_err(|error| error.to_string())?,
         };
         Ok(AgentContextWindowSnapshotOutput { snapshot })
+    }
+
+    pub(super) fn context_window_tool_projection(
+        &self,
+        agent_input: &AgentChatInput,
+        skill_resources: Option<Arc<mycopilot_core::skills::SkillResourceSession>>,
+    ) -> Result<AgentContextWindowToolProjection, String> {
+        let mut host_services =
+            AgentRuntimeHostServices::new().with_office_engine(Arc::clone(&self.office_engine));
+        if let Some(execution) = self.image_generation_execution.as_ref() {
+            host_services = host_services.with_image_generation_execution(Arc::clone(execution));
+        }
+        if let Some(resources) = skill_resources {
+            host_services = host_services.with_skill_resources(resources);
+        }
+        // AgentService always provides the real Host action executor to a started run. Passing
+        // `true` keeps preview approval schemas aligned with that production boundary without
+        // constructing an executable action closure during a read-only capacity inspection.
+        prepare_context_window_tool_projection(agent_input, &host_services, true)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Accepts the runtime's aggregate accounting for the final assembled request attempt.
+    /// Sendable and terminal over-capacity attempts share this authority; intermediate compaction
+    /// candidates are never published.
+    /// The observer is scoped by the Host closure, so neither Skill instructions nor Tool schemas
+    /// need to cross this boundary. Notification delivery is deliberately best-effort and can
+    /// never abort or replay a model request.
+    pub(super) fn context_window_observer(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+        expected_model: &str,
+        notifications: CoreServerNotificationSender,
+    ) -> AgentContextWindowObserver {
+        let service = self.clone();
+        let run_id = run_id.to_string();
+        let conversation_id = conversation_id.to_string();
+        let expected_model = expected_model.to_string();
+        Arc::new(move |snapshot| {
+            if snapshot.model != expected_model {
+                eprintln!(
+                    "ignored context-window snapshot for unexpected model `{}` (expected `{expected_model}`)",
+                    snapshot.model
+                );
+                return;
+            }
+            service
+                .running_context_window_snapshots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(run_id.clone(), snapshot.clone());
+            service.emit_context_window_snapshot(
+                &notifications,
+                &run_id,
+                &conversation_id,
+                Some(snapshot),
+            );
+        })
+    }
+
+    pub(super) fn has_exact_running_context_window_snapshot(&self, run_id: &str) -> bool {
+        self.running_context_window_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(run_id)
+    }
+
+    pub(super) fn discard_exact_running_context_window_snapshot(&self, run_id: &str) {
+        self.running_context_window_snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(run_id);
     }
 
     pub fn get_context_compaction_audit(
@@ -195,11 +274,12 @@ impl AgentService {
         Ok((preview_input, traces))
     }
 
-    pub(super) fn context_window_snapshot_with_cache(
+    pub(super) fn context_window_snapshot_with_projection_cache(
         &self,
         agent_input: &AgentChatInput,
         conversation_id: &str,
         phase: AgentContextWindowPhase,
+        tool_projection: &AgentContextWindowToolProjection,
     ) -> Result<Option<AgentContextWindowSnapshot>, String> {
         if !agent_input.context_window_indicator_enabled {
             return Ok(None);
@@ -217,10 +297,12 @@ impl AgentService {
                     entry.last_access = access;
                     return entry
                         .state
-                        .snapshot_with_skill_overlays(
+                        .snapshot_with_run_overlays_and_tool_projection(
                             phase,
+                            agent_input.context.as_ref(),
                             agent_input.skill_discovery.as_ref(),
                             agent_input.skill_activation.as_ref(),
+                            tool_projection,
                         )
                         .map(Some)
                         .map_err(|error| error.to_string());
@@ -234,6 +316,7 @@ impl AgentService {
             phase,
             None,
             agent_input.skill_activation.as_ref(),
+            Some(tool_projection),
         )
         .map(|update| update.snapshot)
     }
@@ -245,6 +328,7 @@ impl AgentService {
         phase: AgentContextWindowPhase,
         active_run_id: Option<&str>,
         snapshot_skill_activation: Option<&mycopilot_core::AgentSkillActivation>,
+        tool_projection: Option<&AgentContextWindowToolProjection>,
     ) -> Result<ConversationContextStateUpdate, String> {
         let (preview_input, traces) =
             self.persisted_conversation_context_state(agent_input, conversation_id)?;
@@ -252,15 +336,25 @@ impl AgentService {
             create_conversation_context_state(preview_input).map_err(|error| error.to_string())?;
         let baseline = state.shared_baseline().map_err(|error| error.to_string())?;
         let snapshot = if agent_input.context_window_indicator_enabled {
-            Some(
-                state
-                    .snapshot_with_skill_overlays(
+            Some(match tool_projection {
+                Some(tool_projection) => state
+                    .snapshot_with_run_overlays_and_tool_projection(
                         phase,
+                        agent_input.context.as_ref(),
+                        agent_input.skill_discovery.as_ref(),
+                        snapshot_skill_activation,
+                        tool_projection,
+                    )
+                    .map_err(|error| error.to_string())?,
+                None => state
+                    .snapshot_with_run_overlays(
+                        phase,
+                        agent_input.context.as_ref(),
                         agent_input.skill_discovery.as_ref(),
                         snapshot_skill_activation,
                     )
                     .map_err(|error| error.to_string())?,
-            )
+            })
         } else {
             None
         };
@@ -354,6 +448,7 @@ impl AgentService {
             AgentContextWindowPhase::DurableCommit,
             Some(run_id),
             None,
+            None,
         )
         .map(|update| update.snapshot)
     }
@@ -382,6 +477,25 @@ impl AgentService {
                 return;
             }
         };
+        // A terminal snapshot measures the newly committed durable baseline without run overlays.
+        // Retire the last pre-request exact snapshot before publishing that new authority.
+        self.discard_exact_running_context_window_snapshot(run_id);
+        self.emit_context_window_snapshot(notifications, run_id, conversation_id, snapshot);
+    }
+
+    pub(super) fn emit_derived_context_window_snapshot(
+        &self,
+        notifications: &CoreServerNotificationSender,
+        run_id: &str,
+        conversation_id: &str,
+        snapshot: Option<AgentContextWindowSnapshot>,
+    ) {
+        // Once the runtime has published exact request accounting, a trace-derived approximation
+        // must never become the last writer. The next sendable request or terminal commit will
+        // publish the next authoritative value.
+        if self.has_exact_running_context_window_snapshot(run_id) {
+            return;
+        }
         self.emit_context_window_snapshot(notifications, run_id, conversation_id, snapshot);
     }
 

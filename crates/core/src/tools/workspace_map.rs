@@ -19,6 +19,10 @@ const MAX_TOP_DIRECTORIES: usize = 30;
 pub(super) struct WorkspaceMapTool;
 
 impl AgentTool for WorkspaceMapTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::Stable
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }
@@ -26,13 +30,13 @@ impl AgentTool for WorkspaceMapTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "workspace_map".to_string(),
-            description: "Summarize the selected workspace structure: bounded file tree, language statistics, important files, entrypoint candidates, tests, and documentation candidates without reading file contents.".to_string(),
+            description: "Summarize an authorized directory structure: bounded file tree, language statistics, important files, entrypoint candidates, tests, and documentation candidates without reading file contents. Defaults to the workspace root when one exists; external paths require the corresponding read permission.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "focusPath": {
                         "type": "string",
-                        "description": "Optional workspace-relative directory to summarize. Defaults to the workspace root."
+                        "description": "Optional workspace-relative or absolute directory, or @home/@desktop/@documents/@downloads. Defaults to the workspace root when one exists. Availability depends on the current read permission."
                     },
                     "maxDepth": {
                         "type": "integer",

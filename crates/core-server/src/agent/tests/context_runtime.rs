@@ -111,6 +111,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
         "conversation-compaction-host",
         "assistant-current",
         agent_input,
+        RunContextToolProjection::pending(),
         notifications,
     );
     let cancellation = AgentCancellationToken::new();
@@ -393,6 +394,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
         "assistant-live",
         2,
         agent_input,
+        RunContextToolProjection::pending(),
         notifications,
     );
 
@@ -679,6 +681,7 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
         "assistant-hidden-indicator",
         2,
         agent_input.clone(),
+        RunContextToolProjection::pending(),
         notifications,
     );
 
@@ -691,11 +694,15 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .contains_key("conversation-hidden-indicator"));
+    let projection = service
+        .context_window_tool_projection(&agent_input, None)
+        .unwrap();
     assert!(service
-        .context_window_snapshot_with_cache(
+        .context_window_snapshot_with_projection_cache(
             &agent_input,
             "conversation-hidden-indicator",
             AgentContextWindowPhase::Idle,
+            &projection,
         )
         .unwrap()
         .is_none());
@@ -747,11 +754,15 @@ fn deleting_messages_invalidates_the_conversation_context_state() {
     }))
     .unwrap();
 
+    let projection = service
+        .context_window_tool_projection(&input, None)
+        .unwrap();
     assert!(service
-        .context_window_snapshot_with_cache(
+        .context_window_snapshot_with_projection_cache(
             &input,
             "conversation-delete-context",
             AgentContextWindowPhase::Idle,
+            &projection,
         )
         .unwrap()
         .is_some());

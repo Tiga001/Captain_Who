@@ -25,6 +25,7 @@ mod skills_list_resources;
 mod skills_materialize_resource;
 mod skills_read_resource;
 mod skills_script;
+mod tool_set;
 mod web_fetch;
 mod web_search;
 mod workspace_map;
@@ -67,6 +68,12 @@ pub(crate) use skills_script::validate_frozen_skill_script_trace_args;
 use skills_script::{SkillsPreflightScriptTool, SkillsRunScriptTool};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+pub(crate) use tool_set::{
+    validate_tool_set_checkpoint_shape, EffectiveToolSet, ToolCapabilityId, ToolUnavailability,
+    IMAGE_GENERATION_CAPABILITY, OFFICE_DOCUMENTS_CAPABILITY, OFFICE_PRESENTATIONS_CAPABILITY,
+    OFFICE_SPREADSHEETS_CAPABILITY, SKILL_RESOURCES_MATERIALIZE_CAPABILITY,
+    SKILL_RESOURCES_READ_CAPABILITY, SKILL_SCRIPTS_CAPABILITY,
+};
 use web_fetch::WebFetchTool;
 use web_search::WebSearchTool;
 use workspace_map::WorkspaceMapTool;
@@ -86,6 +93,13 @@ use limits::*;
 pub struct ToolRegistry {
     tools: BTreeMap<String, Box<dyn AgentTool>>,
     owners: BTreeMap<String, String>,
+    exposures: BTreeMap<String, AgentToolExposure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentToolExposure {
+    Stable,
+    RequiresCapability(ToolCapabilityId),
 }
 
 /// Declares which host permission policy authorizes a tool's state-changing
@@ -150,6 +164,7 @@ impl ToolRegistry {
         let mut registry = Self {
             tools: BTreeMap::new(),
             owners: BTreeMap::new(),
+            exposures: BTreeMap::new(),
         };
         registry.register(AttachmentsListTool);
         registry.register(AttachmentsListProjectTool);
@@ -188,6 +203,22 @@ impl ToolRegistry {
 
     pub fn definitions(&self) -> Vec<AgentToolDefinition> {
         self.tools.values().map(|tool| tool.definition()).collect()
+    }
+
+    pub(crate) fn effective_tool_set(
+        &self,
+        permitted_definitions: impl IntoIterator<Item = AgentToolDefinition>,
+        active_capabilities: &std::collections::BTreeSet<ToolCapabilityId>,
+    ) -> AgentResult<EffectiveToolSet> {
+        EffectiveToolSet::from_permitted_definitions(
+            self,
+            permitted_definitions,
+            active_capabilities,
+        )
+    }
+
+    pub(crate) fn exposure(&self, tool_name: &str) -> Option<&AgentToolExposure> {
+        self.exposures.get(tool_name)
     }
 
     #[cfg(test)]
@@ -383,6 +414,7 @@ impl ToolRegistry {
 
     fn register_boxed(&mut self, owner: String, tool: Box<dyn AgentTool>) -> AgentResult<()> {
         let definition = tool.definition();
+        let exposure = tool.exposure();
         let name = definition.name.trim();
         if name.is_empty() {
             return Err(AgentError::new(format!(
@@ -404,8 +436,23 @@ impl ToolRegistry {
 
         let name = name.to_string();
         self.tools.insert(name.clone(), tool);
-        self.owners.insert(name, owner);
+        self.owners.insert(name.clone(), owner);
+        self.exposures.insert(name, exposure);
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self {
+            tools: BTreeMap::new(),
+            owners: BTreeMap::new(),
+            exposures: BTreeMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_test_tool<T: AgentTool + 'static>(&mut self, tool: T) {
+        self.register(tool);
     }
 }
 
@@ -439,6 +486,7 @@ pub(crate) trait AgentTool: Send + Sync {
     fn definition(&self) -> AgentToolDefinition;
     fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value>;
     fn permission_policy(&self) -> AgentToolPermissionPolicy;
+    fn exposure(&self) -> AgentToolExposure;
 
     /// Projects a structured execution error into the canonical ToolResult payload.
     ///
@@ -564,6 +612,10 @@ mod tests {
     struct InvalidSchemaTool;
 
     impl AgentTool for InvalidSchemaTool {
+        fn exposure(&self) -> AgentToolExposure {
+            AgentToolExposure::Stable
+        }
+
         fn permission_policy(&self) -> AgentToolPermissionPolicy {
             AgentToolPermissionPolicy::Default
         }

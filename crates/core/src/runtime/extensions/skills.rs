@@ -15,15 +15,22 @@ use crate::runtime::{AgentResolvedSkillActivation, AgentSkillActivationResolver}
 use crate::skills::{
     activation_revision_for_identities, AgentDiscoverableSkill, AgentSkillDiscoverySnapshot,
     SkillId, SkillPackageUri, SkillResourceSession, SkillRevision, SkillSelection,
+    APPLICATION_BUNDLED_SKILL_SOURCE_ID, DOCUMENTS_LOCAL_ID, IMAGE_GENERATION_LOCAL_ID,
+    PRESENTATIONS_LOCAL_ID, SPREADSHEETS_LOCAL_ID,
 };
-use crate::tools::{AgentTool, AgentToolPermissionPolicy, ToolExecutionContext};
+use crate::tools::{
+    AgentTool, AgentToolPermissionPolicy, EffectiveToolSet, ToolCapabilityId, ToolExecutionContext,
+    IMAGE_GENERATION_CAPABILITY, OFFICE_DOCUMENTS_CAPABILITY, OFFICE_PRESENTATIONS_CAPABILITY,
+    OFFICE_SPREADSHEETS_CAPABILITY, SKILL_RESOURCES_MATERIALIZE_CAPABILITY,
+    SKILL_RESOURCES_READ_CAPABILITY, SKILL_SCRIPTS_CAPABILITY,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub(in crate::runtime) const SKILL_EXTENSION_ID: &str = "skills";
-const SKILL_EXTENSION_VERSION: u32 = 2;
+const SKILL_EXTENSION_VERSION: u32 = 3;
 const SKILL_ACTIVATE_TOOL_NAME: &str = "skills_activate";
 const SKILL_ACTIVATION_RESULT_SCHEMA_VERSION: u32 = 1;
 const MAX_ACTIVATION_REASON_CHARS: usize = 240;
@@ -59,6 +66,7 @@ struct ActivatedSkillRecord {
     source: String,
     source_bytes: u64,
     has_resources: bool,
+    resource_kinds: Vec<String>,
     activated_by: AgentSkillActivationActor,
 }
 
@@ -108,7 +116,7 @@ impl SkillActivationExtension {
             }
         }
         validate_restored_state(&active, discovery.as_ref())?;
-        validate_resource_authority(&active, resources.as_deref())?;
+        validate_initial_activation_authority(&active, resources.as_deref())?;
         Ok(Self {
             run_id,
             state: SkillActivationStateHandle {
@@ -171,6 +179,17 @@ impl RuntimeExtension for SkillActivationExtension {
         vec![Box::new(SkillsActivateTool {
             state: self.state.clone(),
         })]
+    }
+
+    fn active_tool_capabilities(&self) -> AgentResult<BTreeSet<ToolCapabilityId>> {
+        let state = self.state.lock();
+        let mut capabilities = BTreeSet::new();
+        for id in &state.order {
+            if let Some(record) = state.active.get(id) {
+                capabilities.extend(tool_capabilities_for_skill(record));
+            }
+        }
+        Ok(capabilities)
     }
 
     fn request_context(
@@ -308,7 +327,11 @@ impl RuntimeExtension for SkillActivationExtension {
         }
         let mut state = self.state.lock();
         validate_restored_state(&active, discovery.as_ref())?;
-        validate_resource_authority(&active, state.resources.as_deref())?;
+        validate_resource_authority(
+            &active,
+            state.resources.as_deref(),
+            ResourceAuthorityRequirement::Restored,
+        )?;
         state.discovery = discovery;
         state.active = active;
         state.order = order;
@@ -324,6 +347,10 @@ struct SkillsActivateTool {
 }
 
 impl AgentTool for SkillsActivateTool {
+    fn exposure(&self) -> crate::tools::AgentToolExposure {
+        crate::tools::AgentToolExposure::Stable
+    }
+
     fn permission_policy(&self) -> AgentToolPermissionPolicy {
         AgentToolPermissionPolicy::Default
     }
@@ -426,9 +453,9 @@ impl AgentTool for SkillsActivateTool {
                     &state.activation_revision()?,
                     &reason,
                 )?;
-                let retained_tokens =
-                    activation_retained_tokens(&state, context, &result, None, &entry)?;
-                consume_model_input_capacity(&mut state, retained_tokens);
+                let capacity =
+                    activation_capacity_reservation(&state, context, &result, None, None, &entry)?;
+                consume_model_input_capacity(&mut state, capacity);
                 return Ok(result);
             }
             let resolver = state.resolver.clone().ok_or_else(|| {
@@ -463,9 +490,9 @@ impl AgentTool for SkillsActivateTool {
                     &state.activation_revision()?,
                     &reason,
                 )?;
-                let retained_tokens =
-                    activation_retained_tokens(&state, context, &result, None, &entry)?;
-                consume_model_input_capacity(&mut state, retained_tokens);
+                let capacity =
+                    activation_capacity_reservation(&state, context, &result, None, None, &entry)?;
+                consume_model_input_capacity(&mut state, capacity);
                 return Ok(result);
             }
             return Err(structured_activation_error(
@@ -515,8 +542,15 @@ impl AgentTool for SkillsActivateTool {
         let activation_revision = state.activation_revision_with(&record)?;
         let pending_context = activated_skill_context_item(&activation_revision, &resolved.skill)?;
         let result = activation_result("activated", &record, &activation_revision, &reason)?;
-        let retained_tokens =
-            activation_retained_tokens(&state, context, &result, Some(&pending_context), &entry)?;
+        let additional_capabilities = tool_capabilities_for_skill(&record);
+        let capacity = activation_capacity_reservation(
+            &state,
+            context,
+            &result,
+            Some(&pending_context),
+            Some(&additional_capabilities),
+            &entry,
+        )?;
         let resources = state.resources.as_ref().ok_or_else(|| {
             structured_activation_error(
                 "skill.resourceSessionUnavailable",
@@ -535,7 +569,7 @@ impl AgentTool for SkillsActivateTool {
                 )
             })?;
         }
-        consume_model_input_capacity(&mut state, retained_tokens);
+        consume_model_input_capacity(&mut state, capacity);
         state.order.push(record.id.clone());
         state.active.insert(record.id.clone(), record.clone());
         state
@@ -568,21 +602,33 @@ fn ensure_model_input_capacity_available(
     Ok(())
 }
 
-/// Measures exactly the successful ToolResult and newly disclosed Skill context that the runtime
-/// will retain before the next model request. The check happens before resources or activation
-/// state are mutated, so a capacity failure cannot leave a half-activated Skill.
-fn activation_retained_tokens(
+struct ActivationCapacityReservation {
+    required_tokens: u64,
+    projected_tool_set: Option<EffectiveToolSet>,
+}
+
+/// Measures the exact successful ToolResult, newly disclosed Skill context, and incremental
+/// dynamic Tool contract that the next model request will contain.
+///
+/// The check happens before resources or activation state are mutated, so a capacity failure
+/// cannot leave a half-activated Skill. The projected Tool set joins the in-run reservation only
+/// after resource publication succeeds.
+fn activation_capacity_reservation(
     state: &SkillActivationState,
     context: &ToolExecutionContext,
     result: &Value,
     pending_context: Option<&crate::context::ContextItem>,
+    additional_capabilities: Option<&BTreeSet<ToolCapabilityId>>,
     entry: &AgentDiscoverableSkill,
-) -> AgentResult<u64> {
+) -> AgentResult<ActivationCapacityReservation> {
     ensure_model_input_capacity_available(state, entry)?;
     let Some(capacity) = state.model_input_capacity.as_ref() else {
         // Direct unit-level tool use does not cross a model request and therefore has no capacity
         // observation. Production runtime dispatch always records Some/None before execution.
-        return Ok(0);
+        return Ok(ActivationCapacityReservation {
+            required_tokens: 0,
+            projected_tool_set: None,
+        });
     };
     let tool_call_id = context.tool_call_id()?;
     let tool_result = AgentToolResult {
@@ -611,24 +657,59 @@ fn activation_retained_tokens(
                 })?;
         }
     }
+    let projected_tool_set = additional_capabilities
+        .map(|capabilities| {
+            capacity
+                .project_additional_tool_capabilities(capabilities)
+                .map_err(|error| {
+                    structured_activation_error(
+                        "skill.contextCapacityProjectionFailed",
+                        format!(
+                            "Cannot project the post-activation Tool contract for Skill `{}`: {error}",
+                            entry.name
+                        ),
+                        "restartRun",
+                        Some(entry),
+                    )
+                })
+        })
+        .transpose()?;
+    if let Some(projection) = &projected_tool_set {
+        required_tokens = required_tokens
+            .checked_add(projection.additional_tokens)
+            .ok_or_else(|| {
+                AgentError::new("activated Skill model-input token total overflowed.")
+            })?;
+    }
     if required_tokens > capacity.remaining_tokens {
         return Err(structured_activation_error(
             "skill.contextCapacityExceeded",
             format!(
-                "Skill `{}` needs about {required_tokens} additional input tokens for its paired result and instructions, but this run has only {} available.",
+                "Skill `{}` needs about {required_tokens} additional input tokens for its paired result, instructions, and dynamic Tool contract, but this run has only {} available.",
                 entry.name, capacity.remaining_tokens,
             ),
             "startNewRunOrReduceContext",
             Some(entry),
         ));
     }
-    Ok(required_tokens)
+    Ok(ActivationCapacityReservation {
+        required_tokens,
+        projected_tool_set: projected_tool_set.map(|projection| projection.effective_tool_set),
+    })
 }
 
-fn consume_model_input_capacity(state: &mut SkillActivationState, tokens: u64) {
+fn consume_model_input_capacity(
+    state: &mut SkillActivationState,
+    reservation: ActivationCapacityReservation,
+) {
     if let Some(capacity) = state.model_input_capacity.as_mut() {
-        debug_assert!(tokens <= capacity.remaining_tokens);
-        capacity.remaining_tokens = capacity.remaining_tokens.saturating_sub(tokens);
+        debug_assert!(reservation.required_tokens <= capacity.remaining_tokens);
+        capacity.remaining_tokens = capacity
+            .remaining_tokens
+            .saturating_sub(reservation.required_tokens);
+        if let Some(projected_tool_set) = reservation.projected_tool_set {
+            capacity.effective_tool_set = projected_tool_set;
+        }
     }
 }
 
@@ -706,6 +787,13 @@ fn record_from_skill(
     skill: &AgentActivatedSkill,
     activated_by: AgentSkillActivationActor,
 ) -> ActivatedSkillRecord {
+    let mut resource_kinds = skill
+        .resources
+        .as_ref()
+        .map(|resources| resources.kinds.clone())
+        .unwrap_or_default();
+    resource_kinds.sort();
+    resource_kinds.dedup();
     ActivatedSkillRecord {
         id: skill.id.clone(),
         name: skill.name.clone(),
@@ -715,6 +803,7 @@ fn record_from_skill(
             .source_bytes
             .max(u64::try_from(skill.instructions.len()).unwrap_or(u64::MAX)),
         has_resources: skill.resources.is_some(),
+        resource_kinds,
         activated_by,
     }
 }
@@ -730,7 +819,119 @@ fn validate_record(record: &ActivatedSkillRecord) -> AgentResult<()> {
             "Skill extension records require id, name, revision, source, and sourceBytes.",
         ));
     }
+    let skill_id = SkillId::parse(record.id.clone()).map_err(|error| {
+        AgentError::new(format!(
+            "Skill extension record `{}` has an invalid id: {error}",
+            record.id
+        ))
+    })?;
+    if record.source != skill_id.source_id().as_str() {
+        return Err(AgentError::new(format!(
+            "Skill extension record `{}` declares source `{}` instead of its exact source id `{}`.",
+            record.id,
+            record.source,
+            skill_id.source_id()
+        )));
+    }
+    if record.has_resources != !record.resource_kinds.is_empty() {
+        return Err(AgentError::new(
+            "Skill extension resource metadata must bind hasResources to non-empty resourceKinds.",
+        ));
+    }
+    if !record
+        .resource_kinds
+        .windows(2)
+        .all(|pair| pair[0] < pair[1])
+        || record
+            .resource_kinds
+            .iter()
+            .any(|kind| !matches!(kind.as_str(), "reference" | "asset" | "script" | "other"))
+    {
+        return Err(AgentError::new(
+            "Skill extension resourceKinds must be sorted, unique, and use known resource kinds.",
+        ));
+    }
     Ok(())
+}
+
+fn source_kind(source_id: &str) -> Option<&str> {
+    source_id.split_once(':').map(|(kind, _)| kind)
+}
+
+fn is_globally_managed(record: &ActivatedSkillRecord) -> bool {
+    matches!(source_kind(&record.source), Some("bundled" | "installed"))
+}
+
+fn validate_record_against_discovery(
+    record: &ActivatedSkillRecord,
+    discovery: Option<&AgentSkillDiscoverySnapshot>,
+) -> AgentResult<()> {
+    if !is_globally_managed(record) {
+        return Ok(());
+    }
+    let entry = discovery
+        .and_then(|snapshot| snapshot.skills.iter().find(|entry| entry.id == record.id))
+        .ok_or_else(|| {
+            AgentError::new(format!(
+                "activated managed Skill `{}` is absent from the frozen discovery catalog.",
+                record.id
+            ))
+        })?;
+    if entry.revision != record.revision
+        || entry.name != record.name
+        || Some(entry.source_kind.as_str()) != source_kind(&record.source)
+    {
+        return Err(AgentError::new(format!(
+            "activated managed Skill `{}` does not match the frozen discovery catalog.",
+            record.id
+        )));
+    }
+    Ok(())
+}
+
+fn tool_capabilities_for_skill(record: &ActivatedSkillRecord) -> BTreeSet<ToolCapabilityId> {
+    let mut capabilities = BTreeSet::new();
+    let bundled_id = |local_id: &str| format!("{APPLICATION_BUNDLED_SKILL_SOURCE_ID}:{local_id}");
+    if record.source == APPLICATION_BUNDLED_SKILL_SOURCE_ID {
+        if record.id == bundled_id(DOCUMENTS_LOCAL_ID) {
+            capabilities.insert(ToolCapabilityId::application_owned(
+                OFFICE_DOCUMENTS_CAPABILITY,
+            ));
+        } else if record.id == bundled_id(SPREADSHEETS_LOCAL_ID) {
+            capabilities.insert(ToolCapabilityId::application_owned(
+                OFFICE_SPREADSHEETS_CAPABILITY,
+            ));
+        } else if record.id == bundled_id(PRESENTATIONS_LOCAL_ID) {
+            capabilities.insert(ToolCapabilityId::application_owned(
+                OFFICE_PRESENTATIONS_CAPABILITY,
+            ));
+        } else if record.id == bundled_id(IMAGE_GENERATION_LOCAL_ID) {
+            capabilities.insert(ToolCapabilityId::application_owned(
+                IMAGE_GENERATION_CAPABILITY,
+            ));
+        }
+    }
+
+    if record.has_resources {
+        capabilities.insert(ToolCapabilityId::application_owned(
+            SKILL_RESOURCES_READ_CAPABILITY,
+        ));
+    }
+    if record
+        .resource_kinds
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "asset" | "other"))
+    {
+        capabilities.insert(ToolCapabilityId::application_owned(
+            SKILL_RESOURCES_MATERIALIZE_CAPABILITY,
+        ));
+    }
+    if record.resource_kinds.iter().any(|kind| kind == "script") {
+        capabilities.insert(ToolCapabilityId::application_owned(
+            SKILL_SCRIPTS_CAPABILITY,
+        ));
+    }
+    capabilities
 }
 
 fn validate_restored_state(
@@ -742,27 +943,7 @@ fn validate_restored_state(
         total_source_bytes = total_source_bytes
             .checked_add(record.source_bytes)
             .ok_or_else(|| AgentError::new("restored Skill source byte total overflowed."))?;
-        if record.activated_by == AgentSkillActivationActor::Model {
-            let entry = discovery
-                .and_then(|snapshot| snapshot.skills.iter().find(|entry| entry.id == record.id))
-                .ok_or_else(|| {
-                    AgentError::new(format!(
-                        "restored model-activated Skill `{}` is absent from the frozen catalog.",
-                        record.id
-                    ))
-                })?;
-            if entry.revision != record.revision
-                || entry.name != record.name
-                || !record
-                    .source
-                    .starts_with(&format!("{}:", entry.source_kind))
-            {
-                return Err(AgentError::new(format!(
-                    "restored model-activated Skill `{}` does not match the frozen catalog.",
-                    record.id
-                )));
-            }
-        }
+        validate_record_against_discovery(record, discovery)?;
     }
     if let Some(discovery) = discovery {
         if active.len() > discovery.max_activated_skills {
@@ -782,9 +963,23 @@ fn validate_restored_state(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum ResourceAuthorityRequirement {
+    Initial,
+    Restored,
+}
+
+fn validate_initial_activation_authority(
+    active: &BTreeMap<String, ActivatedSkillRecord>,
+    resources: Option<&SkillResourceSession>,
+) -> AgentResult<()> {
+    validate_resource_authority(active, resources, ResourceAuthorityRequirement::Initial)
+}
+
 fn validate_resource_authority(
     active: &BTreeMap<String, ActivatedSkillRecord>,
     resources: Option<&SkillResourceSession>,
+    requirement: ResourceAuthorityRequirement,
 ) -> AgentResult<()> {
     let resource_packages = resources
         .map(SkillResourceSession::package_uris)
@@ -804,15 +999,39 @@ fn validate_resource_authority(
                 record.revision
             )));
         }
+        let (resource_count, kinds) = resources
+            .expect("resource_packages can be non-empty only when a resource session exists")
+            .binding_manifest(package)
+            .map_err(|error| {
+                AgentError::new(format!(
+                    "cannot inspect run resource authority for Skill `{}`: {error}",
+                    record.id
+                ))
+            })?;
+        let actual_kinds = kinds
+            .iter()
+            .map(|kind| kind.stable_name().to_string())
+            .collect::<Vec<_>>();
+        if record.has_resources != (resource_count > 0) || record.resource_kinds != actual_kinds {
+            return Err(AgentError::new(format!(
+                "activated Skill `{}` resource capability metadata does not match exact run resource authority.",
+                record.id
+            )));
+        }
     }
-    for record in active.values().filter(|record| record.has_resources) {
+    for record in active.values().filter(|record| match requirement {
+        ResourceAuthorityRequirement::Initial => true,
+        ResourceAuthorityRequirement::Restored => {
+            record.has_resources || is_globally_managed(record)
+        }
+    }) {
         if !resource_packages.iter().any(|package| {
             package.skill_id().as_str() == record.id
                 && package.revision().as_str() == record.revision
         }) {
             return Err(AgentError::new(format!(
-                "activated Skill `{}` has resource metadata without exact run resource authority.",
-                record.id
+                "activated Skill `{}` has no exact Host package authority for revision `{}`.",
+                record.id, record.revision
             )));
         }
     }
@@ -924,9 +1143,15 @@ fn validate_resolved_candidate(
                     "The host returned undeclared resources for the activated Skill.",
                 ));
             }
-            Ok(None)
+            // Keep the zero-resource package binding in the run authority. It grants no Resource
+            // Runtime capability, but proves that the trusted Host resolved this exact immutable
+            // package before native capabilities are unlocked.
+            Ok(Some(binding))
         }
-        (None, None) => Ok(None),
+        (None, None) => Err(activation_contract_error(
+            entry,
+            "The host returned no exact package authority for the activated Skill.",
+        )),
     }
 }
 
@@ -1047,7 +1272,7 @@ pub(in crate::runtime) fn checkpoint_authority_from_snapshots(
                 skill.id
             )));
         }
-        if skill.has_resources {
+        if skill.has_resources || is_globally_managed(&skill) {
             selections.push(
                 SkillSelection::parse(skill.id.clone(), skill.revision.clone()).map_err(
                     |error| AgentError::new(format!("Invalid Skill checkpoint selection: {error}")),
@@ -1097,10 +1322,64 @@ mod tests {
     use crate::skills::{
         memory_resource_session_for_test, SkillId, SkillResourceKind, SkillRevision, SkillSourceId,
     };
+    use crate::tools::{AgentToolExposure, ToolRegistry};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const SECRET_INSTRUCTIONS: &str =
         "PRIVATE COMPLETE SKILL INSTRUCTIONS: always verify the generated artifact.";
+
+    struct CapacityDynamicTool;
+
+    impl AgentTool for CapacityDynamicTool {
+        fn exposure(&self) -> AgentToolExposure {
+            AgentToolExposure::RequiresCapability(ToolCapabilityId::application_owned(
+                OFFICE_DOCUMENTS_CAPABILITY,
+            ))
+        }
+
+        fn permission_policy(&self) -> AgentToolPermissionPolicy {
+            AgentToolPermissionPolicy::Default
+        }
+
+        fn definition(&self) -> AgentToolDefinition {
+            AgentToolDefinition {
+                name: "capacity_document_tool".to_string(),
+                description:
+                    "A deliberately non-empty document Tool contract for activation capacity tests."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "filePath": {
+                            "type": "string",
+                            "description": "Document path."
+                        }
+                    },
+                    "required": ["filePath"],
+                    "additionalProperties": false
+                }),
+                safety: AgentToolSafety::ReadOnly,
+                requires_workspace: false,
+                requires_approval: false,
+                approval_mode: AgentToolApprovalMode::Never,
+            }
+        }
+
+        fn execute(&self, _context: &ToolExecutionContext, _args: Value) -> AgentResult<Value> {
+            unreachable!("capacity tests never execute the projected Tool")
+        }
+    }
+
+    fn effective_tool_set_with_document_tool() -> EffectiveToolSet {
+        let mut registry = ToolRegistry::empty();
+        registry.register_test_tool(CapacityDynamicTool);
+        EffectiveToolSet::from_permitted_definitions(
+            &registry,
+            registry.definitions(),
+            &BTreeSet::new(),
+        )
+        .unwrap()
+    }
 
     fn revision(fill: char) -> String {
         format!("skill-package-sha256-v2:{}", fill.to_string().repeat(64))
@@ -1160,8 +1439,12 @@ mod tests {
     ) -> AgentResolvedSkillActivation {
         AgentResolvedSkillActivation {
             skill: activated_skill(entry, instructions),
-            resources: Arc::new(SkillResourceSession::empty()),
+            resources: Arc::new(candidate_resource_session(entry, Vec::new())),
         }
+    }
+
+    fn exact_empty_authority(entry: &AgentDiscoverableSkill) -> Arc<SkillResourceSession> {
+        Arc::new(candidate_resource_session(entry, Vec::new()))
     }
 
     fn candidate_resource_session(
@@ -1294,6 +1577,222 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(too_long.code(), Some("skill.activationReasonTooLong"));
+    }
+
+    #[test]
+    fn user_selection_and_model_activation_unlock_the_same_exact_bundled_capability() {
+        let entry = discoverable_skill("s1", DOCUMENTS_LOCAL_ID, "Documents", &revision('a'));
+        let initial = AgentSkillActivation {
+            activation_revision: "activation-sha256-v1:user".to_string(),
+            skills: vec![activated_skill(&entry, SECRET_INSTRUCTIONS)],
+        };
+        let user_extension = SkillActivationExtension::new(
+            "run-user".to_string(),
+            Some(discovery(vec![entry.clone()], 4, 16_384)),
+            Some(&initial),
+            None,
+            Some(exact_empty_authority(&entry)),
+        )
+        .unwrap();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let model_extension = SkillActivationExtension::new(
+            "run-model".to_string(),
+            Some(discovery(vec![entry.clone()], 4, 16_384)),
+            None,
+            Some(resolver_for(
+                vec![resolved_without_resources(&entry, SECRET_INSTRUCTIONS)],
+                calls.clone(),
+            )),
+            Some(Arc::new(SkillResourceSession::empty())),
+        )
+        .unwrap();
+        SkillsActivateTool {
+            state: model_extension.state.clone(),
+        }
+        .execute(
+            &tool_context(),
+            json!({
+                "skillRef": entry.activation_ref,
+                "reason": "Need document creation guidance"
+            }),
+        )
+        .unwrap();
+
+        let expected = BTreeSet::from([ToolCapabilityId::application_owned(
+            OFFICE_DOCUMENTS_CAPABILITY,
+        )]);
+        assert_eq!(user_extension.active_tool_capabilities().unwrap(), expected);
+        assert_eq!(
+            model_extension.active_tool_capabilities().unwrap(),
+            expected
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn initial_managed_activation_requires_frozen_catalog_and_exact_host_authority() {
+        let entry = discoverable_skill("s1", DOCUMENTS_LOCAL_ID, "Documents", &revision('a'));
+        let initial = AgentSkillActivation {
+            activation_revision: "activation-sha256-v1:user".to_string(),
+            skills: vec![activated_skill(&entry, SECRET_INSTRUCTIONS)],
+        };
+
+        let missing_package = SkillActivationExtension::new(
+            "run-forged-package".to_string(),
+            Some(discovery(vec![entry.clone()], 4, 16_384)),
+            Some(&initial),
+            None,
+            Some(Arc::new(SkillResourceSession::empty())),
+        )
+        .err()
+        .expect("an AgentChatInput cannot manufacture Host package authority");
+        assert!(missing_package
+            .to_string()
+            .contains("no exact Host package authority"));
+
+        let missing_catalog = SkillActivationExtension::new(
+            "run-forged-catalog".to_string(),
+            None,
+            Some(&initial),
+            None,
+            Some(exact_empty_authority(&entry)),
+        )
+        .err()
+        .expect("managed user selection must belong to the frozen enabled catalog");
+        assert!(missing_catalog
+            .to_string()
+            .contains("absent from the frozen discovery catalog"));
+    }
+
+    #[test]
+    fn explicit_workspace_activation_uses_exact_host_authority_without_global_discovery() {
+        let id = SkillId::parse("workspace:w:review").unwrap();
+        let revision = SkillRevision::parse(revision('a')).unwrap();
+        let source = id.source_id().clone();
+        let activation = AgentSkillActivation {
+            activation_revision: "activation-sha256-v1:workspace".to_string(),
+            skills: vec![AgentActivatedSkill {
+                id: id.to_string(),
+                name: "Workspace Review".to_string(),
+                revision: revision.to_string(),
+                source: source.to_string(),
+                instructions: SECRET_INSTRUCTIONS.to_string(),
+                source_bytes: u64::try_from(SECRET_INSTRUCTIONS.len()).unwrap(),
+                resources: None,
+            }],
+        };
+        let authority =
+            Arc::new(memory_resource_session_for_test(id, revision, source, Vec::new()).unwrap());
+
+        SkillActivationExtension::new(
+            "run-workspace".to_string(),
+            None,
+            Some(&activation),
+            None,
+            Some(authority),
+        )
+        .expect("workspace selection is authorized by its exact request-scoped Host binding");
+    }
+
+    #[test]
+    fn native_capabilities_require_exact_application_owned_skill_identity() {
+        let exact = ActivatedSkillRecord {
+            id: format!("{APPLICATION_BUNDLED_SKILL_SOURCE_ID}:{IMAGE_GENERATION_LOCAL_ID}"),
+            name: "Image Generation".to_string(),
+            revision: revision('a'),
+            source: APPLICATION_BUNDLED_SKILL_SOURCE_ID.to_string(),
+            source_bytes: 128,
+            has_resources: false,
+            resource_kinds: Vec::new(),
+            activated_by: AgentSkillActivationActor::Model,
+        };
+        let mut forged_source = exact.clone();
+        forged_source.source = "installed:user".to_string();
+        let mut forged_id = exact.clone();
+        forged_id.id = format!("{APPLICATION_BUNDLED_SKILL_SOURCE_ID}:image-generation-copy");
+
+        assert_eq!(
+            tool_capabilities_for_skill(&exact),
+            BTreeSet::from([ToolCapabilityId::application_owned(
+                IMAGE_GENERATION_CAPABILITY,
+            )])
+        );
+        assert!(tool_capabilities_for_skill(&forged_source).is_empty());
+        assert!(tool_capabilities_for_skill(&forged_id).is_empty());
+    }
+
+    #[test]
+    fn verified_resource_kinds_derive_only_the_matching_resource_capabilities() {
+        let record = |kinds: &[&str]| ActivatedSkillRecord {
+            id: "installed:user:financial-analysis".to_string(),
+            name: "Financial Analysis".to_string(),
+            revision: revision('a'),
+            source: "installed:user".to_string(),
+            source_bytes: 128,
+            has_resources: true,
+            resource_kinds: kinds.iter().map(|kind| (*kind).to_string()).collect(),
+            activated_by: AgentSkillActivationActor::Model,
+        };
+        let read = ToolCapabilityId::application_owned(SKILL_RESOURCES_READ_CAPABILITY);
+        let materialize =
+            ToolCapabilityId::application_owned(SKILL_RESOURCES_MATERIALIZE_CAPABILITY);
+        let scripts = ToolCapabilityId::application_owned(SKILL_SCRIPTS_CAPABILITY);
+
+        assert_eq!(
+            tool_capabilities_for_skill(&record(&["reference"])),
+            BTreeSet::from([read.clone()])
+        );
+        assert_eq!(
+            tool_capabilities_for_skill(&record(&["asset"])),
+            BTreeSet::from([materialize.clone(), read.clone()])
+        );
+        assert_eq!(
+            tool_capabilities_for_skill(&record(&["script"])),
+            BTreeSet::from([read.clone(), scripts.clone()])
+        );
+        assert_eq!(
+            tool_capabilities_for_skill(&record(&["other", "script"])),
+            BTreeSet::from([materialize, read, scripts])
+        );
+    }
+
+    #[test]
+    fn initial_activation_cannot_forge_resource_kinds_to_unlock_tools() {
+        let entry = discoverable_skill(
+            "s1",
+            "financial-analysis",
+            "Financial Analysis",
+            &revision('a'),
+        );
+        let resolved = resolved_with_resources(
+            &entry,
+            vec![(
+                "references/workflows.md".to_string(),
+                SkillResourceKind::Reference,
+                b"trusted workflow".to_vec(),
+            )],
+        );
+        let mut skill = resolved.skill;
+        skill.resources.as_mut().unwrap().kinds = vec!["script".to_string()];
+        let initial = AgentSkillActivation {
+            activation_revision: "activation-sha256-v1:forged".to_string(),
+            skills: vec![skill],
+        };
+
+        let error = SkillActivationExtension::new(
+            "run-forged".to_string(),
+            Some(discovery(vec![entry], 4, 16_384)),
+            Some(&initial),
+            None,
+            Some(resolved.resources),
+        )
+        .err()
+        .expect("forged resource kinds must be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("resource capability metadata does not match exact run resource authority"));
     }
 
     #[test]
@@ -1464,7 +1963,7 @@ mod tests {
             Some(discovery(vec![entry.clone()], 4, 16_384)),
             Some(&initial_activation),
             Some(resolver_for(Vec::new(), calls.clone())),
-            Some(Arc::new(SkillResourceSession::empty())),
+            Some(exact_empty_authority(&entry)),
         )
         .unwrap();
         let tool = SkillsActivateTool {
@@ -1513,7 +2012,7 @@ mod tests {
                 )],
                 calls.clone(),
             )),
-            Some(Arc::new(SkillResourceSession::empty())),
+            Some(exact_empty_authority(&user_entry)),
         )
         .unwrap();
         let tool = SkillsActivateTool {
@@ -1658,6 +2157,7 @@ mod tests {
         extension.update_model_input_capacity(Some(ModelInputCapacity {
             remaining_tokens: 1,
             text_budget: ContextTextBudget::heuristic(1),
+            effective_tool_set: effective_tool_set_with_document_tool(),
         }));
         let tool = SkillsActivateTool {
             state: extension.state.clone(),
@@ -1709,6 +2209,7 @@ mod tests {
         extension.update_model_input_capacity(Some(ModelInputCapacity {
             remaining_tokens: 257,
             text_budget: ContextTextBudget::heuristic(257),
+            effective_tool_set: effective_tool_set_with_document_tool(),
         }));
         extension.consume_model_input_capacity(256);
         let tool = SkillsActivateTool {
@@ -1741,10 +2242,11 @@ mod tests {
     }
 
     #[test]
-    fn activation_capacity_includes_the_exact_paired_tool_result() {
+    fn activation_capacity_includes_dynamic_tool_contract_before_commit() {
         let entry = discoverable_skill("s1", "documents", "Documents", &revision('a'));
         let candidate = resolved_without_resources(&entry, "x");
         let record = record_from_skill(&candidate.skill, AgentSkillActivationActor::Model);
+        let reason = "Need document guidance";
         let calls = Arc::new(AtomicUsize::new(0));
         let mut extension = SkillActivationExtension::new(
             "run-result-capacity".to_string(),
@@ -1761,14 +2263,29 @@ mod tests {
             .unwrap();
         let pending = activated_skill_context_item(&activation_revision, &candidate.skill).unwrap();
         let budget = ContextTextBudget::heuristic(64 * 1024);
-        let instruction_tokens = ContextFrame::new(vec![pending])
+        let instruction_tokens = ContextFrame::new(vec![pending.clone()])
             .into_messages()
             .iter()
             .map(|message| budget.estimate_message(message))
-            .sum();
+            .sum::<u64>();
+        let result = activation_result("activated", &record, &activation_revision, reason).unwrap();
+        let canonical = canonical_tool_result_for_context(&AgentToolResult {
+            call_id: "activate-call-1".to_string(),
+            tool: SKILL_ACTIVATE_TOOL_NAME.to_string(),
+            ok: true,
+            result: Some(result),
+            error: None,
+        });
+        let result_tokens = budget.estimate_message(&LlmMessage::tool_result(
+            &canonical.call_id,
+            render_tool_observation(&canonical),
+            false,
+        ));
+        let retained_without_dynamic_contract = instruction_tokens.saturating_add(result_tokens);
         extension.update_model_input_capacity(Some(ModelInputCapacity {
-            remaining_tokens: instruction_tokens,
+            remaining_tokens: retained_without_dynamic_contract,
             text_budget: budget,
+            effective_tool_set: effective_tool_set_with_document_tool(),
         }));
         let tool = SkillsActivateTool {
             state: extension.state.clone(),
@@ -1779,7 +2296,7 @@ mod tests {
                 &tool_context(),
                 json!({
                     "skillRef": entry.activation_ref,
-                    "reason": "验".repeat(MAX_ACTIVATION_REASON_CHARS)
+                    "reason": reason
                 }),
             )
             .unwrap_err();
@@ -1794,9 +2311,35 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .remaining_tokens,
-            instruction_tokens
+            retained_without_dynamic_contract
         );
         assert!(state.resources.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dynamic_tool_capacity_projection_charges_schema_and_availability_notice() {
+        let budget = ContextTextBudget::heuristic(64 * 1024);
+        let capacity = ModelInputCapacity {
+            remaining_tokens: 64 * 1024,
+            text_budget: budget.clone(),
+            effective_tool_set: effective_tool_set_with_document_tool(),
+        };
+        let projection = capacity
+            .project_additional_tool_capabilities(&BTreeSet::from([
+                ToolCapabilityId::application_owned(OFFICE_DOCUMENTS_CAPABILITY),
+            ]))
+            .unwrap();
+        let schema_tokens =
+            budget.estimate_tool_definitions(projection.effective_tool_set.dynamic_definitions());
+
+        assert!(schema_tokens > 0);
+        assert!(
+            projection.additional_tokens > schema_tokens,
+            "the request-only backend_dynamic_tool_availability message must be charged too"
+        );
+        assert!(projection
+            .effective_tool_set
+            .contains("capacity_document_tool"));
     }
 
     #[test]
@@ -1835,6 +2378,7 @@ mod tests {
         extension.update_model_input_capacity(Some(ModelInputCapacity {
             remaining_tokens: failed_result_tokens,
             text_budget: budget,
+            effective_tool_set: effective_tool_set_with_document_tool(),
         }));
 
         assert!(extension
@@ -1892,6 +2436,7 @@ mod tests {
         extension.update_model_input_capacity(Some(ModelInputCapacity {
             remaining_tokens: 64 * 1024,
             text_budget: ContextTextBudget::heuristic(64 * 1024),
+            effective_tool_set: effective_tool_set_with_document_tool(),
         }));
         let tool = SkillsActivateTool {
             state: extension.state.clone(),
@@ -1912,6 +2457,14 @@ mod tests {
             .as_ref()
             .unwrap()
             .remaining_tokens;
+        assert!(extension
+            .state
+            .lock()
+            .model_input_capacity
+            .as_ref()
+            .unwrap()
+            .effective_tool_set
+            .contains("capacity_document_tool"));
 
         let effects = extension
             .on_event(&RuntimeExtensionEvent::ToolCompleted {
@@ -2046,12 +2599,15 @@ mod tests {
     }
 
     #[test]
-    fn resolved_candidate_without_metadata_accepts_only_no_or_exact_empty_binding() {
+    fn resolved_candidate_without_metadata_requires_exact_empty_binding() {
         let entry = discoverable_skill("s1", "documents", "Documents", &revision('a'));
-        let no_binding = resolved_without_resources(&entry, SECRET_INSTRUCTIONS);
-        assert!(validate_resolved_candidate(&entry, &no_binding)
-            .unwrap()
-            .is_none());
+        let no_binding = AgentResolvedSkillActivation {
+            skill: activated_skill(&entry, SECRET_INSTRUCTIONS),
+            resources: Arc::new(SkillResourceSession::empty()),
+        };
+        let error = validate_resolved_candidate(&entry, &no_binding).unwrap_err();
+        assert_eq!(error.code(), Some("skill.activationContractViolation"));
+        assert!(error.to_string().contains("no exact package authority"));
 
         let exact_empty = AgentResolvedSkillActivation {
             skill: activated_skill(&entry, SECRET_INSTRUCTIONS),
@@ -2059,7 +2615,7 @@ mod tests {
         };
         assert!(validate_resolved_candidate(&entry, &exact_empty)
             .unwrap()
-            .is_none());
+            .is_some());
 
         let undeclared = AgentResolvedSkillActivation {
             skill: activated_skill(&entry, SECRET_INSTRUCTIONS),
@@ -2130,6 +2686,7 @@ mod tests {
         assert!(!serialized.contains("pendingContext"));
         assert_eq!(state["skills"][0]["id"], entry.id);
         assert_eq!(state["skills"][0]["hasResources"], true);
+        assert_eq!(state["skills"][0]["resourceKinds"], json!(["reference"]));
 
         let (_, selections) = checkpoint_authority_from_snapshots(&[AgentExtensionSnapshot {
             extension_id: SKILL_EXTENSION_ID.to_string(),
@@ -2141,6 +2698,72 @@ mod tests {
         assert_eq!(selections.len(), 1);
         assert_eq!(selections[0].skill_id().as_str(), entry.id);
         assert_eq!(selections[0].expected_revision().as_str(), entry.revision);
+    }
+
+    #[test]
+    fn checkpoint_restores_instruction_only_managed_package_authority() {
+        let entry = discoverable_skill("s1", DOCUMENTS_LOCAL_ID, "Documents", &revision('a'));
+        let extension = SkillActivationExtension::new(
+            "run-checkpoint".to_string(),
+            Some(discovery(vec![entry.clone()], 2, 16_384)),
+            None,
+            Some(resolver_for(
+                vec![resolved_without_resources(&entry, SECRET_INSTRUCTIONS)],
+                Arc::new(AtomicUsize::new(0)),
+            )),
+            Some(Arc::new(SkillResourceSession::empty())),
+        )
+        .unwrap();
+        SkillsActivateTool {
+            state: extension.state.clone(),
+        }
+        .execute(
+            &tool_context(),
+            json!({
+                "skillRef": entry.activation_ref,
+                "reason": "Need document capabilities"
+            }),
+        )
+        .unwrap();
+        let state = extension.snapshot_state().unwrap();
+        let snapshots = [AgentExtensionSnapshot {
+            extension_id: SKILL_EXTENSION_ID.to_string(),
+            version: SKILL_EXTENSION_VERSION,
+            state: state.clone(),
+        }];
+
+        let (_, selections) = checkpoint_authority_from_snapshots(&snapshots)
+            .unwrap()
+            .expect("managed checkpoint authority");
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections[0].skill_id().as_str(), entry.id);
+
+        let mut missing_authority = SkillActivationExtension::new_for_checkpoint_restore(
+            "run-checkpoint".to_string(),
+            None,
+            Some(Arc::new(SkillResourceSession::empty())),
+        );
+        let error = missing_authority
+            .restore_state(SKILL_EXTENSION_VERSION, state.clone())
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("no exact Host package authority"));
+
+        let mut restored = SkillActivationExtension::new_for_checkpoint_restore(
+            "run-checkpoint".to_string(),
+            None,
+            Some(exact_empty_authority(&entry)),
+        );
+        restored
+            .restore_state(SKILL_EXTENSION_VERSION, state)
+            .expect("exact immutable package authority restores the managed activation");
+        assert_eq!(
+            restored.active_tool_capabilities().unwrap(),
+            BTreeSet::from([ToolCapabilityId::application_owned(
+                OFFICE_DOCUMENTS_CAPABILITY,
+            )])
+        );
     }
 
     #[test]
@@ -2163,6 +2786,7 @@ mod tests {
                 source: "bundled:application".to_string(),
                 source_bytes: 128,
                 has_resources: false,
+                resource_kinds: Vec::new(),
                 activated_by: AgentSkillActivationActor::Model,
             }],
         };
@@ -2174,7 +2798,50 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(error.to_string().contains("absent from the frozen catalog"));
+        assert!(error
+            .to_string()
+            .contains("absent from the frozen discovery catalog"));
+        assert!(extension.state.lock().active.is_empty());
+    }
+
+    #[test]
+    fn restore_rejects_legacy_or_noncanonical_resource_capability_metadata() {
+        let mut extension = SkillActivationExtension::new_for_checkpoint_restore(
+            "run-restore".to_string(),
+            None,
+            Some(Arc::new(SkillResourceSession::empty())),
+        );
+        let state = SkillExtensionSnapshot {
+            discovery: None,
+            skills: vec![ActivatedSkillRecord {
+                id: "installed:user:financial-analysis".to_string(),
+                name: "Financial Analysis".to_string(),
+                revision: revision('a'),
+                source: "installed:user".to_string(),
+                source_bytes: 128,
+                has_resources: true,
+                resource_kinds: vec!["script".to_string(), "reference".to_string()],
+                activated_by: AgentSkillActivationActor::User,
+            }],
+        };
+
+        let legacy_error = extension
+            .restore_state(
+                SKILL_EXTENSION_VERSION - 1,
+                serde_json::to_value(&state).unwrap(),
+            )
+            .unwrap_err();
+        assert!(legacy_error.to_string().contains("expected 3"));
+
+        let metadata_error = extension
+            .restore_state(
+                SKILL_EXTENSION_VERSION,
+                serde_json::to_value(state).unwrap(),
+            )
+            .unwrap_err();
+        assert!(metadata_error
+            .to_string()
+            .contains("sorted, unique, and use known resource kinds"));
         assert!(extension.state.lock().active.is_empty());
     }
 
@@ -2190,6 +2857,7 @@ mod tests {
                 source: "bundled:application".to_string(),
                 source_bytes: 128,
                 has_resources: false,
+                resource_kinds: Vec::new(),
                 activated_by: AgentSkillActivationActor::Model,
             }],
         };

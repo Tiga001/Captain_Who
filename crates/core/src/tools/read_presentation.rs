@@ -9,6 +9,12 @@ use serde_json::{json, Value};
 pub(super) struct ReadPresentationTool;
 
 impl AgentTool for ReadPresentationTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::RequiresCapability(super::ToolCapabilityId::application_owned(
+            super::OFFICE_PRESENTATIONS_CAPABILITY,
+        ))
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }

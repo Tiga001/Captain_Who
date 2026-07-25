@@ -13,6 +13,10 @@ pub(super) struct AttachmentsListTool;
 pub(super) struct AttachmentsListProjectTool;
 
 impl AgentTool for AttachmentsListTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::Stable
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }
@@ -40,6 +44,10 @@ impl AgentTool for AttachmentsListTool {
 }
 
 impl AgentTool for AttachmentsListProjectTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::Stable
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }

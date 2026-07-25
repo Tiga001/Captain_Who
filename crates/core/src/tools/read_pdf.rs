@@ -9,6 +9,10 @@ use serde_json::{json, Value};
 pub(super) struct ReadPdfTool;
 
 impl AgentTool for ReadPdfTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::Stable
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }
@@ -16,13 +20,11 @@ impl AgentTool for ReadPdfTool {
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "read_pdf".to_string(),
-            description:
-                "Extract text from a PDF file in the selected workspace or an @attachments path."
-                    .to_string(),
+            description: "Extract text from an authorized PDF file. Paths may be workspace-relative, absolute, use a supported system alias, or reference @attachments; the current read permission is enforced at execution time.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Workspace-relative .pdf path or @attachments/... readPath." },
+                    "path": { "type": "string", "description": "Workspace-relative .pdf path, absolute local path, @home/@desktop/@documents/@downloads, or an exact @attachments/... readPath. Availability depends on the current read permission." },
                     "filePath": { "type": "string", "description": "Alias for path." },
                     "maxChars": { "type": "integer", "minimum": 1, "maximum": MAX_DOCUMENT_TEXT_CHARS }
                 },

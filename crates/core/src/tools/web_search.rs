@@ -24,6 +24,10 @@ impl WebSearchTool {
 }
 
 impl AgentTool for WebSearchTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::Stable
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }

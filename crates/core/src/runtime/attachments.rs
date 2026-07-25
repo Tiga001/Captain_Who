@@ -2,10 +2,11 @@
 use super::RUN_COUNTER;
 use crate::llm::LlmImage;
 use crate::protocol::{
-    AgentApprovalStatus, AgentError, AgentInputAttachment, AgentInputAttachmentEncoding,
-    AgentInputAttachmentKind, AgentResult, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
+    AgentApprovalStatus, AgentAttachmentLibraryContext, AgentError, AgentInputAttachment,
+    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentResult, AgentRunContext,
+    AgentToolCall, AgentWorkspaceContext,
 };
-use crate::tools::{ToolExecutionContext, ToolRegistry};
+use crate::tools::{AgentToolExposure, ToolExecutionContext, ToolRegistry};
 use base64::Engine;
 use serde_json::{json, Value};
 use std::fs;
@@ -19,6 +20,7 @@ pub(super) struct AttachmentContext {
 
 pub(super) fn build_attachment_context(
     attachments: &[AgentInputAttachment],
+    attachment_library: Option<&AgentAttachmentLibraryContext>,
 ) -> AgentResult<AttachmentContext> {
     if attachments.is_empty() {
         return Ok(AttachmentContext {
@@ -34,13 +36,14 @@ pub(super) fn build_attachment_context(
     fs::create_dir_all(&temp_root)
         .map_err(|error| AgentError::new(format!("创建附件临时目录失败：{error}")))?;
 
-    let result = build_attachment_context_in_workspace(attachments, &temp_root);
+    let result = build_attachment_context_in_workspace(attachments, attachment_library, &temp_root);
     let _ = fs::remove_dir_all(&temp_root);
     result
 }
 
 fn build_attachment_context_in_workspace(
     attachments: &[AgentInputAttachment],
+    attachment_library: Option<&AgentAttachmentLibraryContext>,
     temp_root: &Path,
 ) -> AgentResult<AttachmentContext> {
     let registry = ToolRegistry::defaults_with_search(None);
@@ -60,6 +63,7 @@ fn build_attachment_context_in_workspace(
 
     for attachment in attachments {
         let safe_name = sanitize_attachment_file_name(&attachment.name, &attachment.id);
+        let read_path = registered_read_path(attachment_library, attachment);
         let mime_type = attachment
             .mime_type
             .as_deref()
@@ -77,19 +81,53 @@ fn build_attachment_context_in_workspace(
                 data_base64: attachment.data.clone(),
             });
             sections.push(format!(
-                "### {}\n类型：图片\nMIME：{}\n大小：{} bytes\n状态：已作为视觉输入发送给模型。",
-                attachment.name, mime_type, attachment.size_bytes
+                "### {}\n类型：图片\nMIME：{}\n大小：{} bytes\n{}\n状态：已作为视觉输入发送给模型。",
+                attachment.name,
+                mime_type,
+                attachment.size_bytes,
+                read_path_line(read_path)
             ));
             continue;
         }
 
-        let Some(tool_name) = read_tool_for_attachment(attachment, &safe_name) else {
+        let Some(tool_name) = candidate_read_tool_for_attachment(attachment, &safe_name) else {
             sections.push(format!(
-                "### {}\nMIME：{}\n大小：{} bytes\n状态：已收到附件，但当前没有适合的只读解析工具。",
-                attachment.name, mime_type, attachment.size_bytes
+                "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：已收到附件，但当前没有适合的只读解析工具。",
+                attachment.name,
+                mime_type,
+                attachment.size_bytes,
+                read_path_line(read_path)
             ));
             continue;
         };
+
+        // Attachment preprocessing is intentionally limited to the same stable Tool surface sent
+        // to every model request. Dynamic readers must produce an ordinary, auditable Tool call
+        // after the matching Skill is activated; the private registry must not become a backdoor
+        // that silently grants preprocessing more capability than the model has.
+        match registry.exposure(tool_name) {
+            Some(AgentToolExposure::Stable) => {}
+            Some(AgentToolExposure::RequiresCapability(_)) => {
+                sections.push(format!(
+                    "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：正文未读取；先激活匹配该文件类型的 Skill，再使用激活后提供的读取工具读取上述 readPath。",
+                    attachment.name,
+                    mime_type,
+                    attachment.size_bytes,
+                    read_path_line(read_path)
+                ));
+                continue;
+            }
+            None => {
+                sections.push(format!(
+                    "### {}\nMIME：{}\n大小：{} bytes\n{}\n状态：已收到附件，但对应的只读工具未在当前运行时注册。",
+                    attachment.name,
+                    mime_type,
+                    attachment.size_bytes,
+                    read_path_line(read_path)
+                ));
+                continue;
+            }
+        }
 
         let file_path = temp_root.join(&safe_name);
         let bytes = attachment_bytes(attachment)?;
@@ -123,15 +161,22 @@ fn build_attachment_context_in_workspace(
                 .unwrap_or(false)
                 || attachment.truncated.unwrap_or(false);
             sections.push(format!(
-                "### {}\nMIME：{}\n大小：{} bytes\n读取工具：{}\n截断：{}\n\n{}",
-                attachment.name, mime_type, attachment.size_bytes, tool_name, truncated, extracted
-            ));
-        } else {
-            sections.push(format!(
-                "### {}\nMIME：{}\n大小：{} bytes\n读取工具：{}\n错误：{}",
+                "### {}\nMIME：{}\n大小：{} bytes\n{}\n读取工具：{}\n截断：{}\n\n{}",
                 attachment.name,
                 mime_type,
                 attachment.size_bytes,
+                read_path_line(read_path),
+                tool_name,
+                truncated,
+                extracted
+            ));
+        } else {
+            sections.push(format!(
+                "### {}\nMIME：{}\n大小：{} bytes\n{}\n读取工具：{}\n错误：{}",
+                attachment.name,
+                mime_type,
+                attachment.size_bytes,
+                read_path_line(read_path),
                 tool_name,
                 result.error.unwrap_or_else(|| "附件读取失败。".to_string())
             ));
@@ -150,19 +195,79 @@ fn build_attachment_context_in_workspace(
     Ok(AttachmentContext { text, images })
 }
 
-fn read_tool_for_attachment(
+fn registered_read_path<'a>(
+    attachment_library: Option<&'a AgentAttachmentLibraryContext>,
+    attachment: &AgentInputAttachment,
+) -> Option<&'a str> {
+    let attachment_library = attachment_library?;
+    attachment_library
+        .conversation_attachments
+        .iter()
+        .chain(&attachment_library.project_attachments)
+        .find(|reference| {
+            reference.id == attachment.id
+                && reference.kind == attachment.kind
+                && reference.name == attachment.name
+                && reference.mime_type == attachment.mime_type
+                && reference.size_bytes == attachment.size_bytes
+        })
+        .map(|reference| reference.read_path.as_str())
+}
+
+fn read_path_line(read_path: Option<&str>) -> String {
+    read_path
+        .map(|read_path| format!("readPath：`{read_path}`"))
+        .unwrap_or_else(|| "readPath：当前附件尚未登记到附件库。".to_string())
+}
+
+fn candidate_read_tool_for_attachment(
     attachment: &AgentInputAttachment,
     safe_name: &str,
 ) -> Option<&'static str> {
     let extension = attachment_extension(safe_name);
+    let mime_type = attachment
+        .mime_type
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     match extension.as_str() {
         "pdf" => Some("read_pdf"),
         "doc" | "docx" => Some("read_word"),
         "pptx" => Some("read_presentation"),
         "xlsx" | "csv" | "tsv" => Some("read_spreadsheet"),
+        _ if is_word_mime_type(&mime_type) => Some("read_word"),
+        _ if is_presentation_mime_type(&mime_type) => Some("read_presentation"),
+        _ if is_spreadsheet_mime_type(&mime_type) => Some("read_spreadsheet"),
         _ if is_text_attachment(attachment, safe_name) => Some("read_file"),
         _ => None,
     }
+}
+
+fn is_word_mime_type(mime_type: &str) -> bool {
+    matches!(
+        mime_type,
+        "application/msword"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+}
+
+fn is_presentation_mime_type(mime_type: &str) -> bool {
+    matches!(
+        mime_type,
+        "application/vnd.ms-powerpoint"
+            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+}
+
+fn is_spreadsheet_mime_type(mime_type: &str) -> bool {
+    matches!(
+        mime_type,
+        "application/vnd.ms-excel"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "text/csv"
+            | "text/tab-separated-values"
+    )
 }
 
 fn is_text_attachment(attachment: &AgentInputAttachment, safe_name: &str) -> bool {

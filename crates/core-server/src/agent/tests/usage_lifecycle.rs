@@ -339,6 +339,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: "call-checkpoint".to_string(),
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,

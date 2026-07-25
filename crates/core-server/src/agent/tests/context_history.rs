@@ -131,6 +131,7 @@ fn production_compaction_services_install_the_current_model_generator() {
         "conversation-production-generator",
         "assistant-production-generator",
         agent_input,
+        RunContextToolProjection::pending(),
         notifications,
     );
 }

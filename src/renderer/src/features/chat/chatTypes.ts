@@ -104,6 +104,12 @@ export interface ChatAgentRunView {
   lastResponseAt?: number
   completedAt?: number
   toolDefinitions: AgentToolDefinition[]
+  /** Backend-authoritative identity of the effective Tool contract last shown to the model. */
+  toolSetRevision?: {
+    stable: string
+    dynamic: string
+    effective: string
+  }
   todo?: AgentTodoState
   toolCalls: AgentToolCall[]
   toolResults: AgentToolResult[]

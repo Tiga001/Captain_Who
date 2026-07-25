@@ -16,13 +16,15 @@ mod skills;
 mod todo;
 
 use crate::context::{ContextFrame, ContextItem, ContextTextBudget};
+use crate::llm::{LlmMessage, LlmMessageRole};
+use crate::prompts::build_dynamic_tool_availability_context;
 use crate::protocol::{
     AgentError, AgentEvent, AgentExtensionSnapshot, AgentResult, AgentSkillActivation,
     AgentTodoState, AgentToolResult,
 };
 use crate::runtime::AgentSkillActivationResolver;
 use crate::skills::{AgentSkillDiscoverySnapshot, SkillResourceSession};
-use crate::tools::{AgentTool, ToolRegistry};
+use crate::tools::{AgentTool, EffectiveToolSet, ToolCapabilityId, ToolRegistry};
 use serde_json::Value;
 pub(in crate::runtime) use skills::checkpoint_authority_from_snapshots;
 pub(in crate::runtime) use skills::redact_discovery_from_snapshots;
@@ -58,6 +60,65 @@ pub(super) struct ModelRequestContext {
 pub(super) struct ModelInputCapacity {
     pub(super) remaining_tokens: u64,
     pub(super) text_budget: ContextTextBudget,
+    /// Exact effective Tool contract already charged to the current request.
+    ///
+    /// Skill activation projects this immutable baseline forward before committing activation
+    /// state, ensuring newly exposed schemas and their request-only availability notice fit too.
+    pub(super) effective_tool_set: EffectiveToolSet,
+}
+
+#[derive(Debug)]
+pub(super) struct DynamicToolCapacityProjection {
+    pub(super) additional_tokens: u64,
+    pub(super) effective_tool_set: EffectiveToolSet,
+}
+
+impl ModelInputCapacity {
+    /// Projects and prices the next request's Skill-gated Tool contract without mutating runtime
+    /// state.
+    ///
+    /// Existing dynamic schemas and availability context were already charged by the capacity
+    /// detector for the current request. Only positive per-category deltas are reserved here.
+    /// Avoiding cross-category offsets is intentionally conservative and keeps activation
+    /// fail-closed if a future prompt wording change happens to shrink one category.
+    fn project_additional_tool_capabilities(
+        &self,
+        additional_capabilities: &BTreeSet<ToolCapabilityId>,
+    ) -> AgentResult<DynamicToolCapacityProjection> {
+        let projected = self
+            .effective_tool_set
+            .with_additional_capabilities(additional_capabilities)?;
+
+        let current_schema_tokens = self
+            .text_budget
+            .estimate_tool_definitions(self.effective_tool_set.dynamic_definitions());
+        let projected_schema_tokens = self
+            .text_budget
+            .estimate_tool_definitions(projected.dynamic_definitions());
+        let schema_delta = projected_schema_tokens.saturating_sub(current_schema_tokens);
+
+        let current_notice_tokens = self.dynamic_tool_availability_tokens(&self.effective_tool_set);
+        let projected_notice_tokens = self.dynamic_tool_availability_tokens(&projected);
+        let notice_delta = projected_notice_tokens.saturating_sub(current_notice_tokens);
+
+        Ok(DynamicToolCapacityProjection {
+            additional_tokens: schema_delta.saturating_add(notice_delta),
+            effective_tool_set: projected,
+        })
+    }
+
+    fn dynamic_tool_availability_tokens(&self, tool_set: &EffectiveToolSet) -> u64 {
+        build_dynamic_tool_availability_context(
+            tool_set.dynamic_definitions(),
+            tool_set.stable_revision(),
+            tool_set.dynamic_revision(),
+        )
+        .map(|content| {
+            self.text_budget
+                .estimate_message(&LlmMessage::text(LlmMessageRole::System, content))
+        })
+        .unwrap_or(0)
+    }
 }
 
 impl ModelRequestContext {
@@ -84,6 +145,10 @@ trait RuntimeExtension: Send {
 
     fn tools(&self) -> Vec<Box<dyn AgentTool>> {
         Vec::new()
+    }
+
+    fn active_tool_capabilities(&self) -> AgentResult<BTreeSet<ToolCapabilityId>> {
+        Ok(BTreeSet::new())
     }
 
     fn request_context(&self, _request: &ModelRequestContext) -> AgentResult<Vec<ContextItem>> {
@@ -201,6 +266,14 @@ impl RuntimeExtensions {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn active_tool_capabilities(&self) -> AgentResult<BTreeSet<ToolCapabilityId>> {
+        let mut capabilities = BTreeSet::new();
+        for extension in &self.extensions {
+            capabilities.extend(extension.active_tool_capabilities()?);
+        }
+        Ok(capabilities)
     }
 
     pub(super) fn contribute_request_context(
@@ -335,6 +408,10 @@ mod tests {
     struct TestTool(&'static str);
 
     impl AgentTool for TestTool {
+        fn exposure(&self) -> crate::tools::AgentToolExposure {
+            crate::tools::AgentToolExposure::Stable
+        }
+
         fn permission_policy(&self) -> crate::tools::AgentToolPermissionPolicy {
             crate::tools::AgentToolPermissionPolicy::Default
         }
@@ -367,7 +444,7 @@ mod tests {
     fn resource_bound_skill_fixture(
         revision_fill: char,
     ) -> (AgentSkillActivation, Arc<SkillResourceSession>) {
-        let skill_id = SkillId::parse("bundled:application:spreadsheets").unwrap();
+        let skill_id = SkillId::parse("workspace:workspace-1:spreadsheets").unwrap();
         let revision = SkillRevision::parse(format!(
             "skill-package-sha256-v3:{}",
             revision_fill.to_string().repeat(64)
@@ -377,7 +454,7 @@ mod tests {
             memory_resource_session_for_test(
                 skill_id.clone(),
                 revision.clone(),
-                SkillSourceId::parse("bundled:application").unwrap(),
+                SkillSourceId::parse("workspace:workspace-1").unwrap(),
                 vec![(
                     "references/workflows.md".to_string(),
                     SkillResourceKind::Reference,
@@ -393,7 +470,7 @@ mod tests {
                 id: skill_id.to_string(),
                 name: "spreadsheets".to_string(),
                 revision: revision.to_string(),
-                source: "bundled:application".to_string(),
+                source: "workspace:workspace-1".to_string(),
                 instructions: "Use the trusted spreadsheet workflow.".to_string(),
                 source_bytes: 37,
                 resources: Some(AgentActivatedSkillResources {
@@ -509,7 +586,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             skill_snapshot.state["skills"][0]["id"],
-            "bundled:application:spreadsheets"
+            "workspace:workspace-1:spreadsheets"
         );
         assert_eq!(skill_snapshot.state["skills"][0]["hasResources"], true);
     }
@@ -589,7 +666,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("resource metadata without exact run resource authority"));
+            .contains("has no exact Host package authority"));
     }
 
     #[test]
@@ -607,10 +684,10 @@ mod tests {
         let snapshots = original.snapshots().unwrap();
         let foreign_resources = Arc::new(
             memory_resource_session_for_test(
-                SkillId::parse("bundled:application:documents").unwrap(),
+                SkillId::parse("workspace:workspace-1:documents").unwrap(),
                 SkillRevision::parse(format!("skill-package-sha256-v3:{}", "d".repeat(64)))
                     .unwrap(),
-                SkillSourceId::parse("bundled:application").unwrap(),
+                SkillSourceId::parse("workspace:workspace-1").unwrap(),
                 vec![(
                     "references/workflows.md".to_string(),
                     SkillResourceKind::Reference,
@@ -632,7 +709,9 @@ mod tests {
         .expect("checkpoint restore must reject authority for another Skill");
 
         assert!(error.to_string().contains("unactivated Skill"));
-        assert!(error.to_string().contains("bundled:application:documents"));
+        assert!(error
+            .to_string()
+            .contains("workspace:workspace-1:documents"));
     }
 
     #[test]
@@ -660,6 +739,12 @@ mod tests {
                     version: 1,
                     state: json!({ "secret": "internal state" }),
                 }],
+                tool_set: crate::protocol::AgentRunToolSetCheckpoint {
+                    stable_revision: "stable-tool-set-v1:test".to_string(),
+                    dynamic_revision: "dynamic-tool-set-v1:test".to_string(),
+                    effective_revision: "effective-tool-set-v1:test".to_string(),
+                    exposed_tool_names: Vec::new(),
+                },
                 pending_tool_call_id: "call-1".to_string(),
                 conversation_trace_items: Vec::new(),
                 next_conversation_trace_sequence: 0,

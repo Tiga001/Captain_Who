@@ -968,6 +968,22 @@ export function applyAgentEventToChatMessage(
     }
   }
 
+  if (agentEvent.type === 'tool_set_changed') {
+    return {
+      ...message,
+      agentRun: {
+        ...currentRun,
+        runId: agentEvent.runId,
+        toolDefinitions: agentEvent.toolDefinitions,
+        toolSetRevision: {
+          stable: agentEvent.stableRevision,
+          dynamic: agentEvent.dynamicRevision,
+          effective: agentEvent.effectiveRevision
+        }
+      }
+    }
+  }
+
   if (agentEvent.type === 'state') {
     const nextRun = settleAgentRunToolActivities(
       {

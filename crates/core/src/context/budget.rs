@@ -91,6 +91,18 @@ impl ContextTokenCategoryEstimate {
             .saturating_add(fixed.request_structure_tokens);
     }
 
+    fn add_transient_tool_costs(&mut self, transient: &FixedRequestEstimate) {
+        self.tool_definition_tokens = self
+            .tool_definition_tokens
+            .saturating_add(transient.tool_definition_tokens);
+        self.tool_definition_count = self
+            .tool_definition_count
+            .saturating_add(transient.tool_definition_count);
+        self.input_tokens = self
+            .input_tokens
+            .saturating_add(transient.tool_definition_tokens);
+    }
+
     fn merge(&mut self, other: &Self) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.context_item_count = self
@@ -128,13 +140,18 @@ pub(crate) struct ContextTokenBreakdown {
 }
 
 impl ContextTokenBreakdown {
-    fn from_frame(frame: &ContextFrameMeasurement, fixed: &FixedRequestEstimate) -> Self {
+    fn from_frame(
+        frame: &ContextFrameMeasurement,
+        fixed: &FixedRequestEstimate,
+        transient_tools: &FixedRequestEstimate,
+    ) -> Self {
         let mut fixed_category =
             ContextTokenCategoryEstimate::from_frame_bucket(frame.breakdown.fixed);
         fixed_category.add_fixed_request_costs(fixed);
         let durable = ContextTokenCategoryEstimate::from_frame_bucket(frame.breakdown.durable);
-        let run_transient =
+        let mut run_transient =
             ContextTokenCategoryEstimate::from_frame_bucket(frame.breakdown.run_transient);
+        run_transient.add_transient_tool_costs(transient_tools);
         let request_only =
             ContextTokenCategoryEstimate::from_frame_bucket(frame.breakdown.request_only);
         let mut total = ContextTokenCategoryEstimate::default();
@@ -429,12 +446,31 @@ impl ContextCapacityDetector {
         context_window_tokens: Option<u32>,
         reserved_output_tokens: u32,
     ) -> ContextBudgetReport {
+        self.inspect_with_dynamic_tools(frame, context_window_tokens, reserved_output_tokens, &[])
+    }
+
+    /// Measures a request whose Skill-gated tool schemas are appended after the run-stable
+    /// request prefix.
+    ///
+    /// Dynamic schemas consume real input capacity, but they deliberately remain outside the
+    /// persistent revision and fixed-token bucket. This keeps cache diagnostics honest: changing
+    /// an activated Skill changes the effective request revision without pretending that the
+    /// stable prefix itself changed.
+    pub(crate) fn inspect_with_dynamic_tools(
+        &self,
+        frame: &mut ContextFrame,
+        context_window_tokens: Option<u32>,
+        reserved_output_tokens: u32,
+        dynamic_tools: &[AgentToolDefinition],
+    ) -> ContextBudgetReport {
+        let transient_tools = self.transient_tool_estimate(dynamic_tools);
         let incremental = frame.measure_incrementally(self.estimator.clone());
         let mut report = self.build_report(
             incremental,
             ContextMeasurementMode::IncrementalCache,
             context_window_tokens,
             reserved_output_tokens,
+            &transient_tools,
         );
         if should_recount(self.estimator.full_recount_threshold_percent(), &report) {
             let full = frame.measure_full(self.estimator.clone());
@@ -443,6 +479,7 @@ impl ContextCapacityDetector {
                 ContextMeasurementMode::FullRecount,
                 context_window_tokens,
                 reserved_output_tokens,
+                &transient_tools,
             );
         }
         report
@@ -465,8 +502,9 @@ impl ContextCapacityDetector {
         measurement_mode: ContextMeasurementMode,
         context_window_tokens: Option<u32>,
         reserved_output_tokens: u32,
+        transient_tools: &FixedRequestEstimate,
     ) -> ContextBudgetReport {
-        let estimate = self.token_estimate(frame, measurement_mode);
+        let estimate = self.token_estimate(frame, measurement_mode, transient_tools);
         build_budget_report(
             estimate,
             context_window_tokens,
@@ -478,20 +516,27 @@ impl ContextCapacityDetector {
         &self,
         frame: ContextFrameMeasurement,
         measurement_mode: ContextMeasurementMode,
+        transient_tools: &FixedRequestEstimate,
     ) -> ContextTokenEstimate {
         let verified_total_input_tokens = frame.verified_total.map(|estimate| {
             estimate
                 .total_tokens()
                 .saturating_add(self.fixed.tool_definition_tokens)
+                .saturating_add(transient_tools.tool_definition_tokens)
                 .saturating_add(self.fixed.request_structure_tokens)
         });
-        let breakdown = ContextTokenBreakdown::from_frame(&frame, &self.fixed);
+        let breakdown = ContextTokenBreakdown::from_frame(&frame, &self.fixed, transient_tools);
+        let context_revision = if transient_tools.tool_definition_count == 0 {
+            frame.revision
+        } else {
+            combine_context_revisions(frame.revision, transient_tools.revision)
+        };
 
         ContextTokenEstimate {
             estimator_id: frame.estimator.label(),
             estimator_version: frame.estimator.version,
             measurement_mode,
-            context_revision: frame.revision,
+            context_revision,
             persistent_revision: combine_context_revisions(
                 frame.persistent_revision,
                 self.fixed.revision,
@@ -499,6 +544,23 @@ impl ContextCapacityDetector {
             breakdown,
             verified_total_input_tokens,
             image_token_reserve_per_image: self.estimator.image_token_reserve_per_image(),
+        }
+    }
+
+    fn transient_tool_estimate(&self, tools: &[AgentToolDefinition]) -> FixedRequestEstimate {
+        if tools.is_empty() {
+            return FixedRequestEstimate {
+                tool_definition_tokens: 0,
+                tool_definition_count: 0,
+                request_structure_tokens: 0,
+                revision: 0,
+            };
+        }
+        FixedRequestEstimate {
+            tool_definition_tokens: self.estimator.estimate_tool_definitions(tools),
+            tool_definition_count: tools.len(),
+            request_structure_tokens: 0,
+            revision: fixed_request_revision(&self.estimator.identity(), tools, 0),
         }
     }
 }
@@ -1029,6 +1091,43 @@ mod tests {
             original.persistent_revision,
             same_with_tool.persistent_revision
         );
+    }
+
+    #[test]
+    fn dynamic_tool_schemas_are_transient_without_changing_stable_revision() {
+        let stable_tool = read_tool();
+        let mut dynamic_tool = read_tool();
+        dynamic_tool.name = "office_document".to_string();
+        dynamic_tool.description = "Edit a Word document".to_string();
+        let detector = detector(&[stable_tool]);
+        let mut without_dynamic = frame(vec![LlmMessage::text(LlmMessageRole::User, "hello")]);
+        let mut with_dynamic = frame(vec![LlmMessage::text(LlmMessageRole::User, "hello")]);
+
+        let baseline = detector.inspect(&mut without_dynamic, Some(128_000), 30_000);
+        let activated = detector.inspect_with_dynamic_tools(
+            &mut with_dynamic,
+            Some(128_000),
+            30_000,
+            &[dynamic_tool],
+        );
+
+        assert_eq!(
+            baseline.usage.persistent_revision,
+            activated.usage.persistent_revision
+        );
+        assert_ne!(
+            baseline.usage.context_revision,
+            activated.usage.context_revision
+        );
+        assert_eq!(
+            activated
+                .usage
+                .breakdown
+                .run_transient
+                .tool_definition_count,
+            1
+        );
+        assert!(activated.usage.request_input_tokens() > baseline.usage.request_input_tokens());
     }
 
     #[derive(Debug, Default)]

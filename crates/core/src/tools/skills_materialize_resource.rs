@@ -21,6 +21,12 @@ use super::skills_list_resources::{map_resource_error, resource_error};
 pub(super) struct SkillsMaterializeResourceTool;
 
 impl AgentTool for SkillsMaterializeResourceTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::RequiresCapability(super::ToolCapabilityId::application_owned(
+            super::SKILL_RESOURCES_MATERIALIZE_CAPABILITY,
+        ))
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "skills_materialize_resource".to_string(),

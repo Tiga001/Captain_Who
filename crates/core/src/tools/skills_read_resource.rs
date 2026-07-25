@@ -14,6 +14,12 @@ use super::skills_list_resources::{map_resource_error, resource_error};
 pub(super) struct SkillsReadResourceTool;
 
 impl AgentTool for SkillsReadResourceTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::RequiresCapability(super::ToolCapabilityId::application_owned(
+            super::SKILL_RESOURCES_READ_CAPABILITY,
+        ))
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }

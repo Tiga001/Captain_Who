@@ -3,16 +3,18 @@ use super::*;
 use crate::conversation_trace::canonical_tool_result_for_context;
 use crate::llm::LlmToolCall;
 use crate::protocol::{
-    AgentActivatedSkill, AgentInputAttachment, AgentInputAttachmentEncoding,
-    AgentInputAttachmentKind, AgentPatchPermission, AgentRunContext, AgentSkillActivation,
-    AgentWorkspaceContext,
+    AgentActivatedSkill, AgentAttachmentLibraryContext, AgentAttachmentReference,
+    AgentInputAttachment, AgentInputAttachmentEncoding, AgentInputAttachmentKind,
+    AgentPatchPermission, AgentRunContext, AgentSkillActivation, AgentWorkspaceContext,
 };
 use crate::runtime::tool_flow::parse_tool_call_request;
+use crate::tools::{EffectiveToolSet, ToolCapabilityId, OFFICE_DOCUMENTS_CAPABILITY};
 use crate::{
     ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
     ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 use base64::Engine;
+use std::collections::BTreeSet;
 
 fn message(role: &str, content: &str) -> AgentChatMessage {
     AgentChatMessage {
@@ -106,13 +108,31 @@ fn activated_skill(instructions: &str) -> AgentSkillActivation {
         skills: vec![AgentActivatedSkill {
             id: "workspace:workspace-1:review".to_string(),
             name: "repository-review".to_string(),
-            revision: "skill-sha256-v1:test".to_string(),
-            source: "workspace".to_string(),
+            revision: activated_skill_revision(),
+            source: "workspace:workspace-1".to_string(),
             instructions: instructions.to_string(),
             source_bytes: u64::try_from(instructions.len()).unwrap(),
             resources: None,
         }],
     }
+}
+
+fn activated_skill_revision() -> String {
+    format!("skill-package-sha256-v3:{}", "d".repeat(64))
+}
+
+fn activated_skill_authority() -> Arc<crate::skills::SkillResourceSession> {
+    let skill_id = crate::skills::SkillId::parse("workspace:workspace-1:review").unwrap();
+    let source_id = skill_id.source_id().clone();
+    Arc::new(
+        crate::skills::memory_resource_session_for_test(
+            skill_id,
+            crate::skills::SkillRevision::parse(activated_skill_revision()).unwrap(),
+            source_id,
+            Vec::new(),
+        )
+        .unwrap(),
+    )
 }
 
 fn discoverable_skill(description: &str) -> crate::skills::AgentSkillDiscoverySnapshot {
@@ -352,16 +372,19 @@ fn runtime_messages_include_text_attachment_content() {
 
 #[test]
 fn attachment_context_reads_text_with_registered_tool() {
-    let context = build_attachment_context(&[AgentInputAttachment {
-        id: "attachment-1".to_string(),
-        kind: AgentInputAttachmentKind::File,
-        name: "notes.txt".to_string(),
-        mime_type: Some("text/plain".to_string()),
-        size_bytes: 16,
-        encoding: AgentInputAttachmentEncoding::Utf8,
-        data: "hello from file".to_string(),
-        truncated: None,
-    }])
+    let context = build_attachment_context(
+        &[AgentInputAttachment {
+            id: "attachment-1".to_string(),
+            kind: AgentInputAttachmentKind::File,
+            name: "notes.txt".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: 16,
+            encoding: AgentInputAttachmentEncoding::Utf8,
+            data: "hello from file".to_string(),
+            truncated: None,
+        }],
+        None,
+    )
     .unwrap();
 
     assert!(context.text.contains("读取工具：read_file"));
@@ -434,8 +457,58 @@ fn runtime_binary_attachment(
     }
 }
 
+fn runtime_attachment_library(
+    attachments: &[AgentInputAttachment],
+) -> AgentAttachmentLibraryContext {
+    AgentAttachmentLibraryContext {
+        root_path: None,
+        conversation_id: Some("conversation-attachments".to_string()),
+        project_id: None,
+        conversation_attachments: attachments
+            .iter()
+            .map(|attachment| AgentAttachmentReference {
+                id: attachment.id.clone(),
+                conversation_id: "conversation-attachments".to_string(),
+                message_id: "message-attachments".to_string(),
+                project_id: None,
+                kind: attachment.kind,
+                name: attachment.name.clone(),
+                mime_type: attachment.mime_type.clone(),
+                size_bytes: attachment.size_bytes,
+                read_path: format!("@attachments/{}/{}", attachment.id, attachment.name),
+                storage_rel_path: format!(
+                    "conversations/conversation-attachments/message-attachments/{}/{}",
+                    attachment.id, attachment.name
+                ),
+                created_at: 1,
+            })
+            .collect(),
+        project_attachments: Vec::new(),
+    }
+}
+
 #[test]
-fn attachment_context_extracts_pdf_office_and_delimited_guidance_files() {
+fn steer_attachment_library_updates_runtime_overlay_without_granting_conversation_identity() {
+    let attachment =
+        runtime_binary_attachment("steer-image", "steer.png", "image/png", vec![1, 2, 3]);
+    let library = runtime_attachment_library(&[attachment]);
+    let mut run_context = None;
+    let mut tool_context = ToolExecutionContext::from_run_context(None);
+
+    replace_runtime_attachment_library(&mut run_context, &mut tool_context, library.clone());
+
+    let run_context = run_context.expect("steer library should create runtime projection");
+    assert_eq!(run_context.conversation_id, None);
+    assert_eq!(run_context.project_id, None);
+    assert_eq!(run_context.attachment_library, Some(library));
+    let overlay = crate::prompts::build_runtime_context_overlay(Some(&run_context));
+    assert!(overlay.contains("\"attachmentLibraryAvailable\":true"));
+    assert!(overlay.contains("\"conversationAttachmentCount\":1"));
+    assert!(overlay.contains("\"conversationAvailable\":false"));
+}
+
+#[test]
+fn attachment_context_extracts_stable_pdf_but_defers_skill_gated_office_files() {
     let attachments = vec![
         runtime_binary_attachment(
             "attachment-pdf",
@@ -488,23 +561,188 @@ fn attachment_context_extracts_pdf_office_and_delimited_guidance_files() {
             "text/tab-separated-values",
             b"name\tvalue\nGuidance TSV\t1\n".to_vec(),
         ),
+        runtime_binary_attachment(
+            "attachment-csv-mime",
+            "renamed-table.txt",
+            "text/csv",
+            b"name,value\nGuidance MIME CSV,1\n".to_vec(),
+        ),
     ];
 
-    let context = build_attachment_context(&attachments).unwrap();
-    for expected in [
-        "Guidance PDF",
+    let library = runtime_attachment_library(&attachments);
+    let context = build_attachment_context(&attachments, Some(&library)).unwrap();
+
+    assert!(context.text.contains("Guidance PDF"));
+    for hidden_office_content in [
         "Guidance DOCX",
         "Guidance PPTX",
         "Guidance XLSX",
         "Guidance CSV",
         "Guidance TSV",
+        "Guidance MIME CSV",
     ] {
         assert!(
-            context.text.contains(expected),
-            "missing extracted text: {expected}\n{}",
+            !context.text.contains(hidden_office_content),
+            "skill-gated Office content leaked during attachment preprocessing: {hidden_office_content}\n{}",
             context.text
         );
     }
+    for attachment_id in [
+        "attachment-docx",
+        "attachment-pptx",
+        "attachment-xlsx",
+        "attachment-csv",
+        "attachment-tsv",
+        "attachment-csv-mime",
+    ] {
+        assert!(
+            context
+                .text
+                .contains(&format!("@attachments/{attachment_id}/")),
+            "missing authoritative readPath for {attachment_id}\n{}",
+            context.text
+        );
+    }
+    assert_eq!(
+        context
+            .text
+            .matches("正文未读取；先激活匹配该文件类型的 Skill")
+            .count(),
+        6
+    );
+    for hidden_contract_detail in [
+        "read_word",
+        "read_presentation",
+        "read_spreadsheet",
+        "office.documents",
+        "office.presentations",
+        "office.spreadsheets",
+    ] {
+        assert!(
+            !context.text.contains(hidden_contract_detail),
+            "dynamic Tool contract leaked before Skill activation: {hidden_contract_detail}"
+        );
+    }
+}
+
+#[test]
+fn attachment_context_keeps_image_visual_input_and_authoritative_read_path() {
+    let attachment = AgentInputAttachment {
+        id: "attachment-image".to_string(),
+        kind: AgentInputAttachmentKind::Image,
+        name: "pixel.png".to_string(),
+        mime_type: Some("image/png".to_string()),
+        size_bytes: 3,
+        encoding: AgentInputAttachmentEncoding::Base64,
+        data: base64::engine::general_purpose::STANDARD.encode(b"png"),
+        truncated: None,
+    };
+    let library = runtime_attachment_library(std::slice::from_ref(&attachment));
+
+    let context = build_attachment_context(&[attachment], Some(&library)).unwrap();
+
+    assert_eq!(context.images.len(), 1);
+    assert!(context.text.contains("已作为视觉输入发送给模型"));
+    assert!(context
+        .text
+        .contains("@attachments/attachment-image/pixel.png"));
+}
+
+#[test]
+fn attachment_context_does_not_decode_skill_gated_office_payloads() {
+    let attachment = AgentInputAttachment {
+        id: "attachment-docx-invalid-payload".to_string(),
+        kind: AgentInputAttachmentKind::File,
+        name: "document.docx".to_string(),
+        mime_type: Some(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string(),
+        ),
+        size_bytes: 10,
+        encoding: AgentInputAttachmentEncoding::Base64,
+        data: "not-base64".to_string(),
+        truncated: None,
+    };
+    let library = runtime_attachment_library(std::slice::from_ref(&attachment));
+
+    let context = build_attachment_context(&[attachment], Some(&library)).unwrap();
+
+    assert!(context.text.contains("正文未读取"));
+    assert!(context
+        .text
+        .contains("@attachments/attachment-docx-invalid-payload/document.docx"));
+}
+
+#[test]
+fn activated_document_reader_can_read_the_same_authoritative_attachment_path() {
+    let fixture = tempfile::tempdir().unwrap();
+    let storage_rel_path = "conversations/conversation-1/message-1/attachment-docx/document.docx";
+    let attachment_path = fixture.path().join(storage_rel_path);
+    std::fs::create_dir_all(attachment_path.parent().unwrap()).unwrap();
+    let bytes = runtime_test_zip(&[(
+        "word/document.xml",
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Visible after activation</w:t></w:r></w:p></w:body></w:document>"#,
+    )]);
+    std::fs::write(&attachment_path, &bytes).unwrap();
+    let read_path = "@attachments/attachment-docx/document.docx";
+    let library = AgentAttachmentLibraryContext {
+        root_path: Some(fixture.path().to_string_lossy().to_string()),
+        conversation_id: Some("conversation-1".to_string()),
+        project_id: None,
+        conversation_attachments: vec![AgentAttachmentReference {
+            id: "attachment-docx".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            message_id: "message-1".to_string(),
+            project_id: None,
+            kind: AgentInputAttachmentKind::File,
+            name: "document.docx".to_string(),
+            mime_type: Some(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    .to_string(),
+            ),
+            size_bytes: u64::try_from(bytes.len()).unwrap(),
+            read_path: read_path.to_string(),
+            storage_rel_path: storage_rel_path.to_string(),
+            created_at: 1,
+        }],
+        project_attachments: Vec::new(),
+    };
+    let registry = ToolRegistry::defaults_with_search(None);
+    let active_capabilities = BTreeSet::from([ToolCapabilityId::application_owned(
+        OFFICE_DOCUMENTS_CAPABILITY,
+    )]);
+    let effective_tool_set = EffectiveToolSet::from_permitted_definitions(
+        &registry,
+        registry.definitions(),
+        &active_capabilities,
+    )
+    .unwrap();
+    assert!(effective_tool_set.contains("read_word"));
+
+    let tool_context = ToolExecutionContext::from_run_context(Some(&AgentRunContext {
+        conversation_id: Some("conversation-1".to_string()),
+        project_id: None,
+        workspace: None,
+        attachment_library: Some(library),
+        permissions: Default::default(),
+    }));
+    let result = registry.execute(
+        &tool_context,
+        &AgentToolCall {
+            id: "call-read-word".to_string(),
+            tool: "read_word".to_string(),
+            args: json!({ "path": read_path }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: Some("读取已激活文档技能可访问的附件".to_string()),
+        },
+    );
+
+    assert!(result.ok, "{:?}", result.error);
+    assert!(result
+        .result
+        .as_ref()
+        .and_then(|value| value.get("text"))
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.contains("Visible after activation")));
 }
 
 #[test]
@@ -1071,6 +1309,11 @@ async fn steer_accepted_during_transport_retry_is_applied_after_the_retried_resp
     assert_eq!(output.content, "Final response after retry guidance.");
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
+    for request in requests.iter() {
+        let serialized = serde_json::to_string(request).unwrap();
+        assert!(serialized.contains("<backend_runtime_context>"));
+        assert!(serialized.contains("\\\"write\\\":\\\"denied\\\""));
+    }
     assert!(!serde_json::to_string(&requests[1])
         .unwrap()
         .contains("Apply this only after the retry response."));
@@ -1521,41 +1764,65 @@ async fn empty_model_action_repair_stops_after_the_second_empty_response() {
 }
 
 #[test]
-fn runtime_command_definition_advertises_effective_approval_routing() {
-    for (safety, expected_mode) in [
-        (
-            AgentCommandSafetyPolicy::Guarded,
-            crate::protocol::AgentToolApprovalMode::Dynamic,
-        ),
-        (
-            AgentCommandSafetyPolicy::FullAccess,
-            crate::protocol::AgentToolApprovalMode::Never,
-        ),
-    ] {
+fn runtime_command_definition_is_fixed_while_dispatch_uses_current_permissions() {
+    let definitions = [
+        AgentPermissions {
+            read: AgentReadPermission::WorkspaceOnly,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::Guarded,
+            patch: AgentPatchPermission::RequireApproval,
+        },
+        AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::Guarded,
+            patch: AgentPatchPermission::AutoApprove,
+        },
+        AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            patch: AgentPatchPermission::AutoApprove,
+        },
+    ]
+    .into_iter()
+    .map(|permissions| {
         let mut input = conversation_context_input(vec![message("user", "run a command")]);
         input.context = Some(AgentRunContext {
             conversation_id: None,
             project_id: None,
             workspace: None,
             attachment_library: None,
-            permissions: crate::protocol::AgentPermissions {
-                command: crate::protocol::AgentCommandPermission::AutoApprove,
-                command_safety: safety,
-                ..Default::default()
-            },
+            permissions,
         });
-
         let capabilities =
             prepare_runtime_capabilities(&input, "command-definition", &[], true, None).unwrap();
-        let definition = capabilities
-            .tool_definitions
+        capabilities
+            .initial_tool_set
+            .stable_definitions()
             .iter()
             .find(|definition| definition.name == "run_command")
-            .expect("run_command definition");
+            .cloned()
+            .expect("stable run_command definition")
+    })
+    .collect::<Vec<_>>();
 
-        assert!(!definition.requires_approval);
-        assert_eq!(definition.approval_mode, expected_mode);
-    }
+    assert!(definitions[0].requires_approval);
+    assert_eq!(
+        definitions[0].approval_mode,
+        crate::protocol::AgentToolApprovalMode::Always
+    );
+    assert_eq!(
+        serde_json::to_value(&definitions[0]).unwrap(),
+        serde_json::to_value(&definitions[1]).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&definitions[0]).unwrap(),
+        serde_json::to_value(&definitions[2]).unwrap()
+    );
 }
 
 #[test]
@@ -1585,6 +1852,338 @@ fn model_capabilities_do_not_change_tool_definitions_or_context_revision() {
         serde_json::to_value(&image_capable.tool_definitions).unwrap()
     );
     assert_eq!(text_only_revision, image_capable_revision);
+}
+
+#[test]
+fn run_context_changes_only_the_dynamic_overlay_while_prompt_preferences_change_configuration() {
+    let mut baseline = conversation_context_input(vec![message("user", "Inspect the project")]);
+    baseline.context = Some(AgentRunContext {
+        conversation_id: None,
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions {
+            read: AgentReadPermission::WorkspaceOnly,
+            write: AgentWritePermission::WorkspaceOnly,
+            command: AgentCommandPermission::RequireApproval,
+            command_safety: AgentCommandSafetyPolicy::Guarded,
+            patch: AgentPatchPermission::RequireApproval,
+        },
+    });
+    let baseline_revision = conversation_context_configuration_revision(&baseline).unwrap();
+
+    let mut changed_runtime = baseline.clone();
+    changed_runtime.context = Some(AgentRunContext {
+        conversation_id: Some("conversation-private".to_string()),
+        project_id: Some("project-private".to_string()),
+        workspace: Some(AgentWorkspaceContext {
+            project_id: Some("project-private".to_string()),
+            display_name: Some("Runtime Workspace".to_string()),
+            root_path: Some("/Users/example/runtime-workspace".to_string()),
+        }),
+        attachment_library: Some(AgentAttachmentLibraryContext {
+            root_path: Some("/Users/example/runtime-attachments".to_string()),
+            conversation_id: Some("conversation-private".to_string()),
+            project_id: Some("project-private".to_string()),
+            conversation_attachments: Vec::new(),
+            project_attachments: Vec::new(),
+        }),
+        permissions: AgentPermissions {
+            read: AgentReadPermission::All,
+            write: AgentWritePermission::All,
+            command: AgentCommandPermission::AutoApprove,
+            command_safety: AgentCommandSafetyPolicy::FullAccess,
+            patch: AgentPatchPermission::AutoApprove,
+        },
+    });
+    assert_eq!(
+        baseline_revision,
+        conversation_context_configuration_revision(&changed_runtime).unwrap()
+    );
+
+    let mut cached_state = create_conversation_context_state(baseline.clone()).unwrap();
+    let baseline_snapshot = cached_state
+        .snapshot_with_run_overlays(
+            AgentContextWindowPhase::Idle,
+            baseline.context.as_ref(),
+            None,
+            None,
+        )
+        .unwrap();
+    let changed_snapshot = cached_state
+        .snapshot_with_run_overlays(
+            AgentContextWindowPhase::Idle,
+            changed_runtime.context.as_ref(),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        baseline_snapshot.persistent_revision,
+        changed_snapshot.persistent_revision
+    );
+    assert_eq!(baseline_snapshot.run_transient_input_tokens, 0);
+    assert_eq!(changed_snapshot.run_transient_input_tokens, 0);
+    assert_ne!(
+        baseline_snapshot.request_input_tokens,
+        changed_snapshot.request_input_tokens
+    );
+
+    changed_runtime.prompt_preferences = Some(AgentPromptPreferences {
+        work_mode: Some(crate::protocol::AgentPromptWorkMode::General),
+        tone: Some(crate::protocol::AgentPromptTone::Friendly),
+        detail_level: None,
+        custom_instructions: Some("Use concise domain terminology.".to_string()),
+        updated_at: Some(10),
+    });
+    assert_ne!(
+        baseline_revision,
+        conversation_context_configuration_revision(&changed_runtime).unwrap()
+    );
+
+    let mut timestamp_only_change = changed_runtime.clone();
+    timestamp_only_change
+        .prompt_preferences
+        .as_mut()
+        .expect("prompt preferences")
+        .updated_at = Some(11);
+    assert_eq!(
+        conversation_context_configuration_revision(&changed_runtime).unwrap(),
+        conversation_context_configuration_revision(&timestamp_only_change).unwrap(),
+        "presentation-only settings timestamps must not open a new configuration epoch"
+    );
+}
+
+#[test]
+fn settings_capability_changes_open_a_stable_epoch_but_secret_rotation_does_not() {
+    let input_with_search = |mode, key: Option<&str>| {
+        let mut input = conversation_context_input(vec![message("user", "Find current evidence")]);
+        input.search_config = Some(crate::protocol::AgentSearchConfig {
+            mode,
+            tavily_api_key: key.map(str::to_string),
+        });
+        input
+    };
+    let disabled_input = input_with_search(
+        crate::protocol::AgentSearchMode::Disabled,
+        Some("tvly-disabled"),
+    );
+    let enabled_a_input = input_with_search(
+        crate::protocol::AgentSearchMode::Tavily,
+        Some("tvly-secret-a"),
+    );
+    let enabled_b_input = input_with_search(
+        crate::protocol::AgentSearchMode::Tavily,
+        Some("tvly-secret-b"),
+    );
+
+    let prepare = |input: &AgentChatInput, host_actions_available| {
+        prepare_runtime_capabilities(
+            input,
+            "settings-capability-epoch",
+            &[],
+            host_actions_available,
+            None,
+        )
+        .unwrap()
+    };
+    let disabled = prepare(&disabled_input, true);
+    let enabled_a = prepare(&enabled_a_input, true);
+    let enabled_b = prepare(&enabled_b_input, false);
+
+    assert!(!disabled.initial_tool_set.contains("web_search"));
+    assert!(!disabled.initial_tool_set.contains("web_fetch"));
+    assert!(enabled_a.initial_tool_set.contains("web_search"));
+    assert!(enabled_a.initial_tool_set.contains("web_fetch"));
+    assert_ne!(
+        disabled.initial_tool_set.stable_revision(),
+        enabled_a.initial_tool_set.stable_revision(),
+        "enabling a model-visible settings capability must open a new stable epoch"
+    );
+    assert_ne!(
+        conversation_context_configuration_revision(&disabled_input).unwrap(),
+        conversation_context_configuration_revision(&enabled_a_input).unwrap()
+    );
+
+    assert_eq!(
+        serde_json::to_vec(enabled_a.initial_tool_set.stable_definitions()).unwrap(),
+        serde_json::to_vec(enabled_b.initial_tool_set.stable_definitions()).unwrap(),
+        "rotating a ready capability secret must not rewrite the model-visible contract"
+    );
+    assert_eq!(
+        enabled_a.initial_tool_set.stable_revision(),
+        enabled_b.initial_tool_set.stable_revision(),
+        "neither secret rotation nor Host executor availability may perturb stable tools"
+    );
+    assert_eq!(
+        conversation_context_configuration_revision(&enabled_a_input).unwrap(),
+        conversation_context_configuration_revision(&enabled_b_input).unwrap()
+    );
+    let serialized_definitions =
+        serde_json::to_string(enabled_a.initial_tool_set.stable_definitions()).unwrap();
+    assert!(!serialized_definitions.contains("tvly-secret-a"));
+    assert!(!serialized_definitions.contains("tvly-secret-b"));
+}
+
+#[test]
+fn composer_permissions_do_not_change_stable_tools_but_denied_writes_still_fail() {
+    let input_with_permissions = |permissions| {
+        let mut input = conversation_context_input(vec![message("user", "edit a file")]);
+        input.context = Some(AgentRunContext {
+            conversation_id: None,
+            project_id: None,
+            workspace: Some(AgentWorkspaceContext {
+                project_id: None,
+                display_name: Some("workspace".to_string()),
+                root_path: Some("/tmp/workspace".to_string()),
+            }),
+            attachment_library: None,
+            permissions,
+        });
+        input
+    };
+    let default_permissions = AgentPermissions {
+        read: AgentReadPermission::WorkspaceOnly,
+        write: AgentWritePermission::WorkspaceOnly,
+        command: AgentCommandPermission::RequireApproval,
+        command_safety: AgentCommandSafetyPolicy::Guarded,
+        patch: AgentPatchPermission::RequireApproval,
+    };
+    let full_permissions = AgentPermissions {
+        read: AgentReadPermission::All,
+        write: AgentWritePermission::All,
+        command: AgentCommandPermission::AutoApprove,
+        command_safety: AgentCommandSafetyPolicy::FullAccess,
+        patch: AgentPatchPermission::AutoApprove,
+    };
+    let custom_permissions = AgentPermissions {
+        read: AgentReadPermission::All,
+        write: AgentWritePermission::Denied,
+        command: AgentCommandPermission::AutoApprove,
+        command_safety: AgentCommandSafetyPolicy::Guarded,
+        patch: AgentPatchPermission::AutoApprove,
+    };
+
+    let default = prepare_runtime_capabilities(
+        &input_with_permissions(default_permissions),
+        "stable-default",
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    let full = prepare_runtime_capabilities(
+        &input_with_permissions(full_permissions),
+        "stable-full",
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    let denied_input = input_with_permissions(custom_permissions);
+    let custom =
+        prepare_runtime_capabilities(&denied_input, "stable-custom", &[], true, None).unwrap();
+
+    let default_bytes = serde_json::to_vec(default.initial_tool_set.stable_definitions()).unwrap();
+    assert_eq!(
+        default_bytes,
+        serde_json::to_vec(full.initial_tool_set.stable_definitions()).unwrap()
+    );
+    assert_eq!(
+        default_bytes,
+        serde_json::to_vec(custom.initial_tool_set.stable_definitions()).unwrap()
+    );
+    assert_eq!(
+        default.initial_tool_set.stable_revision(),
+        full.initial_tool_set.stable_revision()
+    );
+    assert_eq!(
+        default.initial_tool_set.stable_revision(),
+        custom.initial_tool_set.stable_revision()
+    );
+    for name in ["apply_patch", "write_file", "run_command"] {
+        assert!(
+            custom.initial_tool_set.contains(name),
+            "{name} must remain in the stable prefix"
+        );
+    }
+
+    let error = custom
+        .tool_registry
+        .proposed_action(
+            &ToolExecutionContext::from_run_context(denied_input.context.as_ref()),
+            &AgentToolCall {
+                id: "denied-stable-write".to_string(),
+                tool: "apply_patch".to_string(),
+                args: json!({
+                    "operation": "create",
+                    "filePath": "denied.txt",
+                    "content": "must not be written"
+                }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("denied"));
+}
+
+#[test]
+fn conversation_identity_does_not_change_the_stable_history_tool() {
+    let input_with_conversation = |conversation_id: Option<&str>| {
+        let mut input = conversation_context_input(vec![message("user", "find earlier evidence")]);
+        input.context = Some(AgentRunContext {
+            conversation_id: conversation_id.map(str::to_string),
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: AgentPermissions {
+                read: AgentReadPermission::WorkspaceOnly,
+                write: AgentWritePermission::WorkspaceOnly,
+                command: AgentCommandPermission::RequireApproval,
+                command_safety: AgentCommandSafetyPolicy::Guarded,
+                patch: AgentPatchPermission::RequireApproval,
+            },
+        });
+        input
+    };
+    let without_input = input_with_conversation(None);
+    let without = prepare_runtime_capabilities(
+        &without_input,
+        "stable-without-conversation",
+        &[],
+        true,
+        None,
+    )
+    .unwrap();
+    let with_input = input_with_conversation(Some("conversation-1"));
+    let with =
+        prepare_runtime_capabilities(&with_input, "stable-with-conversation", &[], true, None)
+            .unwrap();
+
+    assert!(without.initial_tool_set.contains("conversation_history"));
+    assert!(with.initial_tool_set.contains("conversation_history"));
+    assert_eq!(
+        serde_json::to_vec(without.initial_tool_set.stable_definitions()).unwrap(),
+        serde_json::to_vec(with.initial_tool_set.stable_definitions()).unwrap()
+    );
+    assert_eq!(
+        without.initial_tool_set.stable_revision(),
+        with.initial_tool_set.stable_revision()
+    );
+
+    let result = without.tool_registry.execute(
+        &ToolExecutionContext::from_run_context(without_input.context.as_ref()),
+        &AgentToolCall {
+            id: "history-without-conversation".to_string(),
+            tool: "conversation_history".to_string(),
+            args: json!({ "action": "search", "query": "evidence" }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        },
+    );
+    assert!(!result.ok);
+    assert!(result.error.is_some());
 }
 
 #[test]
@@ -1623,9 +2222,31 @@ fn runtime_structured_writers_share_the_file_edit_approval_policy() {
     let automatic = definitions(AgentPatchPermission::AutoApprove, true);
     let without_host = definitions(AgentPatchPermission::AutoApprove, false);
 
+    for name in ["apply_patch", "write_file"] {
+        let manual = manual
+            .iter()
+            .find(|definition| definition.name == name)
+            .unwrap();
+        let automatic = automatic
+            .iter()
+            .find(|definition| definition.name == name)
+            .unwrap();
+        let without_host = without_host
+            .iter()
+            .find(|definition| definition.name == name)
+            .unwrap();
+        assert!(manual.requires_approval);
+        assert_eq!(
+            serde_json::to_value(manual).unwrap(),
+            serde_json::to_value(automatic).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(manual).unwrap(),
+            serde_json::to_value(without_host).unwrap()
+        );
+    }
+
     for name in [
-        "apply_patch",
-        "write_file",
         "skills_materialize_resource",
         "office_document",
         "office_spreadsheet",
@@ -1638,19 +2259,13 @@ fn runtime_structured_writers_share_the_file_edit_approval_policy() {
                 .unwrap()
                 .requires_approval
         );
-        assert!(
-            !automatic
-                .iter()
-                .find(|definition| definition.name == name)
-                .unwrap()
-                .requires_approval
-        );
+        let automatic = automatic
+            .iter()
+            .find(|definition| definition.name == name)
+            .unwrap();
+        assert!(!automatic.requires_approval);
         assert_eq!(
-            automatic
-                .iter()
-                .find(|definition| definition.name == name)
-                .unwrap()
-                .approval_mode,
+            automatic.approval_mode,
             crate::protocol::AgentToolApprovalMode::Never
         );
         assert!(
@@ -1664,7 +2279,7 @@ fn runtime_structured_writers_share_the_file_edit_approval_policy() {
 }
 
 #[test]
-fn write_denied_hides_write_only_tools_but_keeps_office_reads_available() {
+fn write_denied_keeps_stable_writers_but_filters_dynamic_write_only_tools() {
     let mut input = conversation_context_input(vec![message("user", "inspect a workbook")]);
     input.context = Some(AgentRunContext {
         conversation_id: None,
@@ -1687,9 +2302,12 @@ fn write_denied_hides_write_only_tools_but_keeps_office_reads_available() {
         .unwrap()
         .tool_definitions;
 
-    for name in ["apply_patch", "write_file", "skills_materialize_resource"] {
-        assert!(!definitions.iter().any(|definition| definition.name == name));
+    for name in ["apply_patch", "write_file"] {
+        assert!(definitions.iter().any(|definition| definition.name == name));
     }
+    assert!(!definitions
+        .iter()
+        .any(|definition| definition.name == "skills_materialize_resource"));
     for name in [
         "office_document",
         "office_spreadsheet",
@@ -1697,6 +2315,73 @@ fn write_denied_hides_write_only_tools_but_keeps_office_reads_available() {
     ] {
         assert!(definitions.iter().any(|definition| definition.name == name));
     }
+}
+
+#[test]
+fn unavailable_tool_errors_distinguish_activation_permissions_and_runtime_capabilities() {
+    let registry = ToolRegistry::defaults_with_search(None);
+    let definitions = registry.definitions();
+
+    let inactive = registry
+        .effective_tool_set(definitions.clone(), &BTreeSet::new())
+        .unwrap();
+    let activation_error = unavailable_tool_error(&inactive, "office_document");
+    assert_eq!(
+        activation_error.code(),
+        Some("agent.tool_requires_skill_activation")
+    );
+    assert_eq!(
+        activation_error.details().unwrap()["recovery"],
+        "activateSkill"
+    );
+
+    let document_capabilities = BTreeSet::from([ToolCapabilityId::application_owned(
+        crate::tools::OFFICE_DOCUMENTS_CAPABILITY,
+    )]);
+    let active_without_engine = registry
+        .effective_tool_set(definitions.clone(), &document_capabilities)
+        .unwrap();
+    let runtime_error = unavailable_tool_error(&active_without_engine, "office_document");
+    assert_eq!(
+        runtime_error.code(),
+        Some("agent.tool_runtime_capability_unavailable")
+    );
+    assert_eq!(
+        runtime_error.details().unwrap()["code"],
+        "toolRuntimeCapabilityUnavailable"
+    );
+    assert_eq!(
+        runtime_error.details().unwrap()["recovery"],
+        "configureCapability"
+    );
+
+    let permitted_without_script_execution = definitions
+        .into_iter()
+        .filter(|definition| definition.name != "skills_run_script")
+        .collect::<Vec<_>>();
+    let script_capabilities = BTreeSet::from([ToolCapabilityId::application_owned(
+        crate::tools::SKILL_SCRIPTS_CAPABILITY,
+    )]);
+    let permission_filtered = registry
+        .effective_tool_set(permitted_without_script_execution, &script_capabilities)
+        .unwrap();
+    let permission_error = unavailable_tool_error(&permission_filtered, "skills_run_script");
+    assert_eq!(
+        permission_error.code(),
+        Some("agent.tool_blocked_by_permissions")
+    );
+    assert_eq!(
+        permission_error.details().unwrap()["recovery"],
+        "changePermissions"
+    );
+    assert_eq!(permission_error.details().unwrap()["bypassAllowed"], false);
+
+    let unknown_error = unavailable_tool_error(&inactive, "invented_tool");
+    assert_eq!(unknown_error.code(), Some("agent.tool_not_registered"));
+    assert_eq!(
+        unknown_error.details().unwrap()["recovery"],
+        "useAvailableTool"
+    );
 }
 
 #[tokio::test]
@@ -1793,7 +2478,16 @@ async fn effective_tool_definitions_are_also_the_execution_allowlist() {
     input.api_url = format!("http://{address}/v1/chat/completions");
     input.api_token = "test-token".to_string();
     input.stream = Some(false);
-    let output = AgentRuntime::default().send_chat(input).await.unwrap();
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            None,
+            None,
+            AgentCancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
     server.await.unwrap();
 
     assert_eq!(output.content, "done");
@@ -1812,8 +2506,10 @@ async fn effective_tool_definitions_are_also_the_execution_allowlist() {
     let request = String::from_utf8(second_request.lock().unwrap().clone()).unwrap();
     assert!(request.contains(&call.id));
     assert!(!request.contains("hidden-tool-call"));
-    assert!(request.contains("agent.tool_not_available"));
-    assert!(request.contains("toolNotAvailable"));
+    assert!(request.contains("agent.tool_requires_skill_activation"));
+    assert!(request.contains("toolRequiresSkillActivation"));
+    assert!(request.contains("activateSkill"));
+    assert!(request.contains("skill.scripts"));
 }
 
 #[tokio::test]
@@ -2538,8 +3234,11 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
         conversation_context_configuration_revision(&changed_selection).unwrap()
     );
 
+    let mut stable_input = input.clone();
+    stable_input.skill_activation = None;
+    stable_input.skill_discovery = None;
     let capabilities =
-        prepare_runtime_capabilities(&input, "skill-overlay", &[], true, None).unwrap();
+        prepare_runtime_capabilities(&stable_input, "skill-overlay", &[], true, None).unwrap();
     let mut full =
         build_llm_request(input.clone(), &capabilities.tool_definitions, None, None).unwrap();
     let manifest = full.context.manifest();
@@ -2613,6 +3312,32 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     );
     assert!(skill_preview.run_transient_input_tokens > 0);
     assert!(skill_preview.request_input_tokens > plain_preview.request_input_tokens);
+    let mut dynamic_tool = capabilities
+        .tool_definitions
+        .iter()
+        .find(|definition| definition.name == "read_file")
+        .cloned()
+        .unwrap();
+    dynamic_tool.name = "skill_dynamic_test_tool".to_string();
+    dynamic_tool.description =
+        "A deliberately verbose Skill-gated Tool schema used for context capacity testing."
+            .to_string();
+    let dynamic_projection = AgentContextWindowToolProjection::new(
+        "stable-test-revision".to_string(),
+        "dynamic-test-revision".to_string(),
+        "effective-test-revision".to_string(),
+        vec![dynamic_tool.clone()],
+    );
+    let dynamic_preview =
+        inspect_context_window_with_tool_projection(input.clone(), &dynamic_projection)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        dynamic_preview.persistent_revision,
+        skill_preview.persistent_revision
+    );
+    assert!(dynamic_preview.run_transient_input_tokens > skill_preview.run_transient_input_tokens);
+    assert!(dynamic_preview.request_input_tokens > skill_preview.request_input_tokens);
 
     let mut durable_state = create_conversation_context_state(input.clone()).unwrap();
     let cached_plain = durable_state.snapshot(AgentContextWindowPhase::Idle);
@@ -2629,6 +3354,22 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
         cached_plain.persistent_revision
     );
     assert!(cached_skill.run_transient_input_tokens > cached_plain.run_transient_input_tokens);
+    let cached_dynamic_skill = durable_state
+        .snapshot_with_skill_overlays_and_tool_projection(
+            AgentContextWindowPhase::Idle,
+            input.skill_discovery.as_ref(),
+            input.skill_activation.as_ref(),
+            &dynamic_projection,
+        )
+        .unwrap();
+    assert_eq!(
+        cached_dynamic_skill.persistent_revision,
+        cached_plain.persistent_revision
+    );
+    assert!(
+        cached_dynamic_skill.run_transient_input_tokens > cached_skill.run_transient_input_tokens
+    );
+    assert!(cached_dynamic_skill.request_input_tokens > cached_skill.request_input_tokens);
     let baseline = durable_state.shared_baseline().unwrap();
     let shared = build_llm_request(
         input.clone(),
@@ -2641,6 +3382,76 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
 
     let debug = format!("{:?}", input.skill_activation);
     assert!(!debug.contains(INSTRUCTIONS));
+}
+
+#[test]
+fn context_preview_counts_only_host_verified_initial_dynamic_tools() {
+    use crate::skills::{
+        memory_resource_session_for_test, SkillId, SkillPackageUri, SkillResourceKind,
+        SkillRevision, SkillSourceId,
+    };
+
+    let skill_id = SkillId::parse("workspace:workspace-1:preview-resources").unwrap();
+    let revision =
+        SkillRevision::parse(format!("skill-package-sha256-v3:{}", "d".repeat(64))).unwrap();
+    let source_id = SkillSourceId::parse("workspace:workspace-1").unwrap();
+    let resources = Arc::new(
+        memory_resource_session_for_test(
+            skill_id.clone(),
+            revision.clone(),
+            source_id,
+            vec![(
+                "references/guide.md".to_string(),
+                SkillResourceKind::Reference,
+                b"verified reference".to_vec(),
+            )],
+        )
+        .unwrap(),
+    );
+    let package = SkillPackageUri::new(skill_id.clone(), revision.clone());
+    let instructions = "Read the verified reference before answering.";
+    let mut input = conversation_context_input(vec![message("user", "Inspect the reference")]);
+    input.skill_activation = Some(AgentSkillActivation {
+        activation_revision: "activation-sha256-v1:preview-resources".to_string(),
+        skills: vec![AgentActivatedSkill {
+            id: skill_id.to_string(),
+            name: "preview-resources".to_string(),
+            revision: revision.to_string(),
+            source: "workspace:workspace-1".to_string(),
+            instructions: instructions.to_string(),
+            source_bytes: u64::try_from(instructions.len()).unwrap(),
+            resources: Some(crate::protocol::AgentActivatedSkillResources {
+                root_uri: package.to_string(),
+                resource_count: 1,
+                kinds: vec!["reference".to_string()],
+            }),
+        }],
+    });
+
+    let without_authority =
+        prepare_context_window_tool_projection(&input, &AgentRuntimeHostServices::new(), true)
+            .unwrap_err();
+    assert!(without_authority
+        .to_string()
+        .contains("no exact Host package authority"));
+
+    let host_services =
+        AgentRuntimeHostServices::new().with_skill_resources(Arc::clone(&resources));
+    let projection = prepare_context_window_tool_projection(&input, &host_services, true).unwrap();
+    let names = projection
+        .dynamic_definitions()
+        .iter()
+        .map(|definition| definition.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["skills_list_resources", "skills_read_resource"]);
+
+    let conservative = inspect_context_window(input.clone()).unwrap().unwrap();
+    let exact = inspect_context_window_with_tool_projection(input, &projection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(exact.persistent_revision, conservative.persistent_revision);
+    assert!(exact.run_transient_input_tokens > conservative.run_transient_input_tokens);
+    assert!(exact.request_input_tokens > conservative.request_input_tokens);
 }
 
 #[test]
@@ -2771,6 +3582,19 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
         stream.write_all(&body).await.unwrap();
     }
 
+    fn open_ai_tool_names(request: &Value) -> Vec<&str> {
+        request["tools"]
+            .as_array()
+            .expect("OpenAI-compatible request tools")
+            .iter()
+            .map(|tool| {
+                tool["function"]["name"]
+                    .as_str()
+                    .expect("function tool name")
+            })
+            .collect()
+    }
+
     let discovery = discoverable_skill("Create and verify Word documents.");
     let activation_ref = discovery.skills[0].activation_ref.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2837,6 +3661,15 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
         resolver_calls_for_host.fetch_add(1, Ordering::SeqCst);
         assert_eq!(selection.skill_id().as_str(), entry.id);
         assert_eq!(selection.expected_revision().as_str(), entry.revision);
+        let skill_id = crate::skills::SkillId::parse(entry.id.clone()).unwrap();
+        let source_id = skill_id.source_id().clone();
+        let resources = crate::skills::memory_resource_session_for_test(
+            skill_id,
+            crate::skills::SkillRevision::parse(entry.revision.clone()).unwrap(),
+            source_id,
+            Vec::new(),
+        )
+        .unwrap();
         Ok(AgentResolvedSkillActivation {
             skill: AgentActivatedSkill {
                 id: entry.id.clone(),
@@ -2847,7 +3680,7 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
                 source_bytes: u64::try_from(INSTRUCTIONS.len()).unwrap(),
                 resources: None,
             },
-            resources: Arc::new(crate::skills::SkillResourceSession::empty()),
+            resources: Arc::new(resources),
         })
     });
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -2855,11 +3688,21 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
     let emitter: AgentEventEmitter = Arc::new(move |event| {
         events_for_emitter.lock().unwrap().push(event);
     });
+    let context_window_snapshots = Arc::new(Mutex::new(Vec::<AgentContextWindowSnapshot>::new()));
+    let context_window_snapshots_for_observer = Arc::clone(&context_window_snapshots);
+    let context_window_observer: AgentContextWindowObserver = Arc::new(move |snapshot| {
+        context_window_snapshots_for_observer
+            .lock()
+            .unwrap()
+            .push(snapshot);
+    });
     let mut input = conversation_context_input(vec![message("user", "Create a Word guide")]);
     input.api_url = format!("http://{address}/v1/chat/completions");
     input.api_token = "test-token".to_string();
     input.stream = Some(false);
     input.skill_discovery = Some(discovery);
+    let office_engine =
+        crate::office::resolve_office_engine(&crate::office::OfficeCliDiscoveryOptions::new());
 
     let output = AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
@@ -2870,7 +3713,9 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
             Some(
                 AgentRuntimeHostServices::new()
                     .with_skill_activation_resolver(resolver)
-                    .with_skill_resources(Arc::new(crate::skills::SkillResourceSession::empty())),
+                    .with_skill_resources(Arc::new(crate::skills::SkillResourceSession::empty()))
+                    .with_office_engine(office_engine)
+                    .with_context_window_observer(context_window_observer),
             ),
         )
         .await
@@ -2879,6 +3724,23 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
 
     assert_eq!(output.content, "Skill loaded and applied.");
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+    let context_window_snapshots = context_window_snapshots.lock().unwrap();
+    assert_eq!(
+        context_window_snapshots.len(),
+        2,
+        "the observer must receive one exact aggregate snapshot for each sendable request"
+    );
+    assert_eq!(
+        context_window_snapshots[0].persistent_revision,
+        context_window_snapshots[1].persistent_revision,
+        "model activation is a run overlay and must not mutate the cache-stable durable prefix"
+    );
+    assert!(
+        context_window_snapshots[1].run_transient_input_tokens
+            > context_window_snapshots[0].run_transient_input_tokens,
+        "the post-activation request must account for the paired ToolResult, full Skill instructions, dynamic availability notice and unlocked Tool schemas"
+    );
+    drop(context_window_snapshots);
     let activation_call_id = output
         .events
         .iter()
@@ -2896,6 +3758,27 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
     assert!(first_serialized.contains("backend_available_skills"));
     assert!(first_serialized.contains("skills_activate"));
     assert!(!first_serialized.contains(INSTRUCTIONS));
+    let first_tool_names = open_ai_tool_names(&requests[0]);
+    assert!(
+        !first_tool_names.contains(&"read_word"),
+        "documents tools must remain hidden before Skill activation"
+    );
+    assert!(
+        !first_tool_names.contains(&"office_document"),
+        "Office semantic tools must remain hidden before Skill activation"
+    );
+
+    let second_tool_names = open_ai_tool_names(&requests[1]);
+    assert!(
+        second_tool_names.starts_with(&first_tool_names),
+        "stable tools must remain an exact prefix after dynamic activation"
+    );
+    assert!(second_tool_names.contains(&"read_word"));
+    assert!(second_tool_names.contains(&"office_document"));
+    assert_eq!(
+        requests[0]["messages"][0], requests[1]["messages"][0],
+        "the backend-owned stable system prompt must not change when a Skill unlocks tools"
+    );
 
     let second_messages = requests[1]["messages"].as_array().unwrap();
     let tool_result_index = second_messages
@@ -3038,7 +3921,16 @@ async fn anthropic_payload_keeps_current_user_skill_and_attachment_compatible() 
         truncated: None,
     }];
 
-    let output = AgentRuntime::default().send_chat(input).await.unwrap();
+    let output = AgentRuntime::default()
+        .send_chat_with_events_and_cancellation(
+            input,
+            None,
+            None,
+            AgentCancellationToken::new(),
+            Some(AgentRuntimeHostServices::new().with_skill_resources(activated_skill_authority())),
+        )
+        .await
+        .unwrap();
     server.await.unwrap();
     assert_eq!(output.content, "done");
     let payload = captured.lock().unwrap().take().unwrap();
@@ -3049,11 +3941,11 @@ async fn anthropic_payload_keeps_current_user_skill_and_attachment_compatible() 
     let current = serialized.find("CURRENT_USER_MARKER").unwrap();
     let skill = serialized.find("ANTHROPIC_SKILL_MARKER").unwrap();
     let attachment = serialized.find("ATTACHMENT_MARKER").unwrap();
-    assert!(current < skill && skill < attachment);
+    assert!(current < attachment && attachment < skill);
 }
 
 #[test]
-fn conversation_history_tool_is_registered_only_for_persisted_conversation_runs() {
+fn conversation_history_tool_is_stable_even_without_a_persisted_conversation() {
     let mut input = conversation_context_input(vec![message("user", "Current question")]);
     input.context = Some(AgentRunContext {
         conversation_id: Some("conversation-1".to_string()),
@@ -3072,7 +3964,7 @@ fn conversation_history_tool_is_registered_only_for_persisted_conversation_runs(
     input.context = None;
     let capabilities =
         prepare_runtime_capabilities(&input, "no-history-capability", &[], true, None).unwrap();
-    assert!(!capabilities
+    assert!(capabilities
         .tool_definitions
         .iter()
         .any(|definition| definition.name == "conversation_history"));
@@ -4257,7 +5149,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             Some("run-checkpoint".to_string()),
             None,
             AgentCancellationToken::new(),
-            None,
+            Some(AgentRuntimeHostServices::new().with_skill_resources(activated_skill_authority())),
         )
         .await
         .unwrap();
@@ -4388,7 +5280,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             Some("run-checkpoint".to_string()),
             None,
             AgentCancellationToken::new(),
-            None,
+            Some(AgentRuntimeHostServices::new().with_skill_resources(activated_skill_authority())),
         )
         .await
         .unwrap();
@@ -4528,8 +5420,8 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
         })
     }
 
-    let source_id = SkillSourceId::parse("installed:user").unwrap();
-    let skill_id = SkillId::parse("installed:user:31234567-89ab-4def-8123-456789abcdef").unwrap();
+    let source_id = SkillSourceId::parse("workspace:workspace-1").unwrap();
+    let skill_id = SkillId::parse("workspace:workspace-1:resource-checkpoint").unwrap();
     let revision =
         SkillRevision::parse(format!("skill-package-sha256-v3:{}", "d".repeat(64))).unwrap();
     let resource_path = SkillResourcePath::parse("references/guide.md").unwrap();
@@ -4657,7 +5549,7 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
                 id: skill_id.as_str().to_string(),
                 name: "resource-checkpoint".to_string(),
                 revision: revision.as_str().to_string(),
-                source: "installed:user".to_string(),
+                source: "workspace:workspace-1".to_string(),
                 instructions: "Read references progressively.".to_string(),
                 source_bytes: 30,
                 resources: Some(AgentActivatedSkillResources {

@@ -9,6 +9,7 @@ impl AgentService {
         assistant_message_id: &str,
         created_at: i64,
         agent_input: AgentChatInput,
+        tool_set_snapshot: RunContextToolProjection,
         notifications: CoreServerNotificationSender,
     ) -> AgentConversationTraceObserver {
         let service = self.clone();
@@ -26,6 +27,7 @@ impl AgentService {
             let configuration_revision = configuration_revision
                 .as_deref()
                 .map_err(|error| AgentError::new(format!("无法准备会话上下文状态：{error}")))?;
+            let tool_projection = tool_set_snapshot.projection();
             service
                 .persist_in_progress_trace_snapshot(
                     &run_id,
@@ -36,6 +38,7 @@ impl AgentService {
                     &notifications,
                     &snapshot,
                     configuration_revision,
+                    tool_projection.as_ref(),
                 )
                 .map_err(|error| AgentError::new(format!("无法增量持久化运行中会话轨迹：{error}")))
         })
@@ -82,6 +85,7 @@ impl AgentService {
         conversation_id: &str,
         assistant_message_id: &str,
         agent_input: AgentChatInput,
+        tool_set_snapshot: RunContextToolProjection,
         notifications: CoreServerNotificationSender,
     ) -> AgentContextCompactionServices {
         let generator: ContextCompactionSummaryGenerator = self
@@ -103,6 +107,7 @@ impl AgentService {
         let prepare_conversation_id = conversation_id.clone();
         let prepare_assistant_message_id = assistant_message_id.clone();
         let prepare_agent_input = agent_input.clone();
+        let prepare_tool_set_snapshot = tool_set_snapshot.clone();
         let prepare_notifications = notifications.clone();
 
         let commit_service = self.clone();
@@ -110,6 +115,7 @@ impl AgentService {
         let commit_conversation_id = conversation_id.clone();
         let commit_assistant_message_id = assistant_message_id.clone();
         let commit_agent_input = agent_input;
+        let commit_tool_set_snapshot = tool_set_snapshot;
         let commit_notifications = notifications.clone();
 
         let receipt_storage = self.storage.clone();
@@ -124,6 +130,7 @@ impl AgentService {
                 let conversation_id = prepare_conversation_id.clone();
                 let assistant_message_id = prepare_assistant_message_id.clone();
                 let agent_input = prepare_agent_input.clone();
+                let tool_set_snapshot = prepare_tool_set_snapshot.clone();
                 let notifications = prepare_notifications.clone();
                 async move {
                     cancellation.check()?;
@@ -167,6 +174,7 @@ impl AgentService {
                                 &assistant_message_id,
                                 request.visible_trace_item_count,
                                 &notifications,
+                                tool_set_snapshot.projection().as_ref(),
                             )
                             .map(|baseline| {
                                 AgentContextCompactionPrepareOutcome::Refresh(Box::new(baseline))
@@ -182,6 +190,7 @@ impl AgentService {
                 let conversation_id = commit_conversation_id.clone();
                 let assistant_message_id = commit_assistant_message_id.clone();
                 let agent_input = commit_agent_input.clone();
+                let tool_set_snapshot = commit_tool_set_snapshot.clone();
                 let notifications = commit_notifications.clone();
                 async move {
                     cancellation.check()?;
@@ -230,6 +239,7 @@ impl AgentService {
                         &assistant_message_id,
                         request.visible_trace_item_count,
                         &notifications,
+                        tool_set_snapshot.projection().as_ref(),
                     );
                     match (committed, baseline) {
                         (Some(summary), Ok(baseline)) => {
@@ -283,6 +293,7 @@ impl AgentService {
         assistant_message_id: &str,
         visible_trace_item_count: usize,
         notifications: &CoreServerNotificationSender,
+        tool_projection: Option<&AgentContextWindowToolProjection>,
     ) -> Result<AgentContextBaseline, String> {
         self.invalidate_conversation_context_state(conversation_id);
         let conversation = self
@@ -361,15 +372,25 @@ impl AgentService {
         // Measure and freeze the appended trace chunk once for the conversation cache and circle.
         state.shared_baseline().map_err(|error| error.to_string())?;
         let snapshot = if agent_input.context_window_indicator_enabled {
-            Some(
-                state
-                    .snapshot_with_skill_overlays(
+            Some(match tool_projection {
+                Some(tool_projection) => state
+                    .snapshot_with_run_overlays_and_tool_projection(
                         AgentContextWindowPhase::DurableCommit,
+                        agent_input.context.as_ref(),
+                        agent_input.skill_discovery.as_ref(),
+                        agent_input.skill_activation.as_ref(),
+                        tool_projection,
+                    )
+                    .map_err(|error| error.to_string())?,
+                None => state
+                    .snapshot_with_run_overlays(
+                        AgentContextWindowPhase::DurableCommit,
+                        agent_input.context.as_ref(),
                         agent_input.skill_discovery.as_ref(),
                         agent_input.skill_activation.as_ref(),
                     )
                     .map_err(|error| error.to_string())?,
-            )
+            })
         } else {
             None
         };
@@ -383,7 +404,7 @@ impl AgentService {
             last_access: self.next_conversation_context_state_access(),
         };
         self.insert_conversation_context_state(conversation_id, entry);
-        self.emit_context_window_snapshot(notifications, run_id, conversation_id, snapshot);
+        self.emit_derived_context_window_snapshot(notifications, run_id, conversation_id, snapshot);
         Ok(runtime_baseline)
     }
 
@@ -398,6 +419,7 @@ impl AgentService {
         notifications: &CoreServerNotificationSender,
         snapshot: &ConversationTraceSnapshot,
         configuration_revision: &str,
+        tool_projection: Option<&AgentContextWindowToolProjection>,
     ) -> Result<Option<AgentContextBaseline>, String> {
         // Persist the complete audit view so a crash after an external side effect starts can be
         // correlated with its durable execution journal. Model context still receives only the
@@ -436,9 +458,10 @@ impl AgentService {
             assistant_message_id,
             &context_trace,
             configuration_revision,
+            tool_projection,
         )?;
         if changed && model_context_changed {
-            self.emit_context_window_snapshot(
+            self.emit_derived_context_window_snapshot(
                 notifications,
                 run_id,
                 conversation_id,
@@ -456,6 +479,7 @@ impl AgentService {
         assistant_message_id: &str,
         trace: &ConversationTurnTrace,
         configuration_revision: &str,
+        tool_projection: Option<&AgentContextWindowToolProjection>,
     ) -> Result<ConversationContextStateUpdate, String> {
         let access = self.next_conversation_context_state_access();
         let needs_rebuild;
@@ -519,16 +543,27 @@ impl AgentService {
                                 .shared_baseline()
                                 .map_err(|error| error.to_string())?;
                             let snapshot = if agent_input.context_window_indicator_enabled {
-                                Some(
-                                    entry
+                                Some(match tool_projection {
+                                    Some(tool_projection) => entry
                                         .state
-                                        .snapshot_with_skill_overlays(
+                                        .snapshot_with_run_overlays_and_tool_projection(
                                             AgentContextWindowPhase::DurableCommit,
+                                            agent_input.context.as_ref(),
+                                            agent_input.skill_discovery.as_ref(),
+                                            agent_input.skill_activation.as_ref(),
+                                            tool_projection,
+                                        )
+                                        .map_err(|error| error.to_string())?,
+                                    None => entry
+                                        .state
+                                        .snapshot_with_run_overlays(
+                                            AgentContextWindowPhase::DurableCommit,
+                                            agent_input.context.as_ref(),
                                             agent_input.skill_discovery.as_ref(),
                                             agent_input.skill_activation.as_ref(),
                                         )
                                         .map_err(|error| error.to_string())?,
-                                )
+                                })
                             } else {
                                 None
                             };
@@ -551,6 +586,7 @@ impl AgentService {
             AgentContextWindowPhase::DurableCommit,
             Some(run_id),
             agent_input.skill_activation.as_ref(),
+            tool_projection,
         )
     }
 
@@ -611,6 +647,11 @@ impl AgentService {
         let configuration_revision =
             conversation_context_configuration_revision(&record.agent_input)
                 .map_err(|error| error.to_string())?;
+        let skill_resources = self
+            .restore_skill_resource_session(&record.agent_input)
+            .map_err(|error| error.to_string())?;
+        let tool_projection =
+            self.context_window_tool_projection(&record.agent_input, skill_resources)?;
         self.persist_in_progress_trace_snapshot(
             run_id,
             conversation_id,
@@ -620,6 +661,7 @@ impl AgentService {
             notifications,
             &snapshot,
             &configuration_revision,
+            Some(&tool_projection),
         )
         .map(|_| ())
     }
@@ -683,6 +725,11 @@ impl AgentService {
         let configuration_revision =
             conversation_context_configuration_revision(&record.agent_input)
                 .map_err(|error| error.to_string())?;
+        let skill_resources = self
+            .restore_skill_resource_session(&record.agent_input)
+            .map_err(|error| error.to_string())?;
+        let tool_projection =
+            self.context_window_tool_projection(&record.agent_input, skill_resources)?;
         let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
         let trace_changed = self.persist_manual_audited_result_trace(
             record,
@@ -704,8 +751,9 @@ impl AgentService {
             assistant_message_id,
             &trace,
             &configuration_revision,
+            Some(&tool_projection),
         ) {
-            Ok(update) if trace_changed => self.emit_context_window_snapshot(
+            Ok(update) if trace_changed => self.emit_derived_context_window_snapshot(
                 notifications,
                 run_id,
                 conversation_id,
@@ -792,6 +840,16 @@ impl AgentService {
                     .insert(run_id.to_string(), snapshot);
                 match conversation_context_configuration_revision(&record.agent_input) {
                     Ok(configuration_revision) => {
+                        let tool_projection = self
+                            .restore_skill_resource_session(&record.agent_input)
+                            .map_err(|error| error.to_string())
+                            .and_then(|resources| {
+                                self.context_window_tool_projection(&record.agent_input, resources)
+                            });
+                        let Ok(tool_projection) = tool_projection else {
+                            self.invalidate_conversation_context_state(conversation_id);
+                            return Ok(AgentPendingActionSettlementInspection::CommittedAtBoundary);
+                        };
                         if let Err(error) = self.update_running_conversation_context_state(
                             &record.agent_input,
                             run_id,
@@ -799,6 +857,7 @@ impl AgentService {
                             assistant_message_id,
                             &trace,
                             &configuration_revision,
+                            Some(&tool_projection),
                         ) {
                             self.invalidate_conversation_context_state(conversation_id);
                             eprintln!(

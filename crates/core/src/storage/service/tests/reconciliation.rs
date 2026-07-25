@@ -1047,10 +1047,20 @@ fn attach_manual_file_effect_recovery_checkpoint(
             "conversationTraceItems": [checkpoint_call],
             "nextConversationTraceSequence": 1,
             "conversationTraceTruncated": false,
-            "modelVisibleTraceItemCount": 0
+            "modelVisibleTraceItemCount": 0,
+            "toolSet": test_checkpoint_tool_set()
         }
     })
     .to_string();
+}
+
+fn test_checkpoint_tool_set() -> serde_json::Value {
+    serde_json::json!({
+        "stableRevision": "stable-tool-set-test-v1",
+        "dynamicRevision": "dynamic-tool-set-test-v1",
+        "effectiveRevision": "effective-tool-set-test-v1",
+        "exposedToolNames": []
+    })
 }
 
 #[test]
@@ -3253,7 +3263,7 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
         "model": "test-model",
         "messages": [],
         "resumeCheckpoint": {
-            "version": 2,
+            "version": crate::AGENT_RUN_CHECKPOINT_SCHEMA_VERSION,
             "runId": "run-1",
             "contextItems": [],
             "nextModelRequestIndex": 1,
@@ -3285,7 +3295,8 @@ fn startup_reconciliation_preserves_a_valid_nested_pending_checkpoint() {
             ],
             "nextConversationTraceSequence": 3,
             "conversationTraceTruncated": false,
-            "modelVisibleTraceItemCount": 0
+            "modelVisibleTraceItemCount": 0,
+            "toolSet": test_checkpoint_tool_set()
         }
     })
     .to_string();

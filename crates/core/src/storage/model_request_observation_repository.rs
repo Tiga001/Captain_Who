@@ -214,6 +214,16 @@ mod tests {
             model: "model-a".to_string(),
             api_style: AgentApiStyle::OpenAiCompatible,
             status: ModelRequestObservationStatus::Completed,
+            tool_set: Some(
+                crate::model_request_observation::ModelRequestToolSetObservation::new(
+                    AgentApiStyle::OpenAiCompatible,
+                    "stable-tool-set-v1:stable",
+                    "dynamic-tool-set-v1:dynamic",
+                    "effective-tool-set-v1:effective",
+                    20,
+                    2,
+                ),
+            ),
             estimate: None,
             actual_usage: Some(ModelRequestActualUsage {
                 raw: AgentUsage {

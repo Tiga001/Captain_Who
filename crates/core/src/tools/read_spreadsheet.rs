@@ -14,6 +14,12 @@ use std::io::Read;
 pub(super) struct ReadSpreadsheetTool;
 
 impl AgentTool for ReadSpreadsheetTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::RequiresCapability(super::ToolCapabilityId::application_owned(
+            super::OFFICE_SPREADSHEETS_CAPABILITY,
+        ))
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }

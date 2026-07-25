@@ -24,10 +24,11 @@ use crate::command::{
     evaluate_command_policy_with_context, CommandAuthorizationSource, CommandPolicyDecision,
 };
 use crate::context::{
-    AgentContextBaseline, AgentConversationContextState, ContextAssembler, ContextAssemblyInput,
-    ContextAttachments, ContextBudgetReport, ContextCapacityDetector, ContextCompactionPlan,
-    ContextCompactionPlanner, ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata,
-    ContextRetention, ContextScope, ContextSource,
+    AgentContextBaseline, AgentContextWindowToolProjection, AgentConversationContextState,
+    ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextBudgetReport,
+    ContextCapacityDetector, ContextCompactionPlan, ContextCompactionPlanner,
+    ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata, ContextRetention,
+    ContextScope, ContextSource,
 };
 use crate::conversation_trace::{trace_attachments_from_input, ConversationTraceRecorder};
 use crate::file_write::{file_write_approval_route, FileWriteApprovalRoute};
@@ -37,9 +38,9 @@ use crate::llm::{
 };
 use crate::model_request_observation::{
     ModelRequestEstimate, ModelRequestObservation, ModelRequestObservationBuilder,
-    ModelRequestPurpose,
+    ModelRequestPurpose, ModelRequestToolSetObservation,
 };
-use crate::prompts::build_system_prompt;
+use crate::prompts::{build_dynamic_tool_availability_context, build_system_prompt};
 use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
     AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowPhase,
@@ -51,7 +52,7 @@ use crate::protocol::{
 };
 use crate::revision::content_revision;
 use crate::storage::service::StorageService;
-use crate::tools::{ToolExecutionContext, ToolRegistry};
+use crate::tools::{EffectiveToolSet, ToolExecutionContext, ToolRegistry, ToolUnavailability};
 use crate::usage::merge_total_usage;
 use crate::{
     ConversationTraceSnapshot, ConversationTurnTrace, ConversationTurnTraceTerminalStatus,
@@ -100,11 +101,19 @@ struct LlmRequestTemplate {
     max_tokens: u32,
     temperature: f32,
     stream: bool,
-    tools: Vec<AgentToolDefinition>,
+    stable_tools: Vec<AgentToolDefinition>,
 }
 
 impl LlmRequestTemplate {
-    fn request(&self, context: ContextFrame) -> LlmChatRequest {
+    fn request(
+        &self,
+        context: ContextFrame,
+        dynamic_tools: &[AgentToolDefinition],
+    ) -> LlmChatRequest {
+        let mut tools =
+            Vec::with_capacity(self.stable_tools.len().saturating_add(dynamic_tools.len()));
+        tools.extend(self.stable_tools.iter().cloned());
+        tools.extend(dynamic_tools.iter().cloned());
         LlmChatRequest {
             api_url: self.api_url.clone(),
             api_token: self.api_token.clone(),
@@ -114,7 +123,7 @@ impl LlmRequestTemplate {
             temperature: self.temperature,
             stream: self.stream,
             messages: context.into_messages(),
-            tools: self.tools.clone(),
+            tools,
         }
     }
 }
@@ -131,7 +140,11 @@ struct PreparedLlmRequest {
 struct PreparedRuntimeCapabilities {
     runtime_extensions: RuntimeExtensions,
     tool_registry: Arc<ToolRegistry>,
+    /// Registry definitions after dynamic-capability permission filtering. Stable definitions
+    /// are never removed or rewritten by composer permissions; authorization remains a runtime
+    /// and host concern. This superset is partitioned at every model-request boundary.
     tool_definitions: Vec<AgentToolDefinition>,
+    initial_tool_set: EffectiveToolSet,
     command_auto_approve: bool,
     command_permissions: AgentPermissions,
     command_workspace_root: Option<PathBuf>,
@@ -204,6 +217,7 @@ impl AgentRuntime {
             storage,
             trace_observer,
             model_request_observer,
+            context_window_observer,
             context_compaction_services,
             skill_resources,
             skill_activation_resolver,
@@ -214,9 +228,9 @@ impl AgentRuntime {
         } = host_services.unwrap_or_default();
         let _steer_input_close_guard = AgentSteerInputCloseGuard::new(steer_input.clone());
         let run_id = run_id.unwrap_or_else(generate_run_id);
-        let context = input.context.clone();
+        let mut run_context = input.context.clone();
         let model_capabilities = input.model_capabilities;
-        let trace_conversation_id = context
+        let trace_conversation_id = run_context
             .as_ref()
             .and_then(|context| context.conversation_id.clone());
         let trace_assistant_message_id = input.assistant_message_id.clone();
@@ -249,7 +263,8 @@ impl AgentRuntime {
         let PreparedRuntimeCapabilities {
             mut runtime_extensions,
             tool_registry,
-            tool_definitions,
+            tool_definitions: permitted_tool_definitions,
+            initial_tool_set,
             command_auto_approve,
             command_permissions,
             command_workspace_root,
@@ -275,13 +290,38 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
+        if let Some(restored) = restored_checkpoint.as_ref() {
+            initial_tool_set
+                .validate_checkpoint(&restored.tool_set)
+                .map_err(|error| {
+                    attach_failed_runtime_trace(
+                        error,
+                        &setup_conversation_trace,
+                        &trace_run_id,
+                        trace_conversation_id.as_deref(),
+                        trace_assistant_message_id.as_deref(),
+                    )
+                })?;
+        }
+        let stable_tool_revision = initial_tool_set.stable_revision().to_string();
+        let mut effective_tool_set = initial_tool_set;
+        let mut tool_definitions = effective_tool_set.all_definitions();
         let mut event_stream = AgentEventStream::new(emitter);
         event_stream.emit(AgentEvent::Started {
             run_id: run_id.clone(),
             tool_definitions: tool_definitions.clone(),
         });
+        event_stream.emit(AgentEvent::ToolSetChanged {
+            run_id: run_id.clone(),
+            stable_revision: effective_tool_set.stable_revision().to_string(),
+            dynamic_revision: effective_tool_set.dynamic_revision().to_string(),
+            effective_revision: effective_tool_set.revision().to_string(),
+            tool_definitions: tool_definitions.clone(),
+        });
+        let mut emitted_tool_set_revision = effective_tool_set.revision().to_string();
         let transaction_storage = storage.clone();
         let context_window_configured = input.context_window_tokens.is_some();
+        let context_window_indicator_enabled = input.context_window_indicator_enabled;
         let mut file_transaction_guard = FileTransactionRunGuard::new(
             transaction_storage.clone(),
             run_id.clone(),
@@ -296,7 +336,7 @@ impl AgentRuntime {
             mut visible_trace_item_count,
         } = build_llm_request(
             input,
-            &tool_definitions,
+            effective_tool_set.stable_definitions(),
             restored_checkpoint,
             shared_context_baseline,
         )
@@ -316,11 +356,11 @@ impl AgentRuntime {
         let capacity_detector = ContextCapacityDetector::for_model(
             &llm_request.model,
             llm_request.api_style,
-            &llm_request.tools,
+            &llm_request.stable_tools,
         );
         let tool_output_budget = capacity_detector
             .tool_output_text_budget(llm_request.context_window_tokens, llm_request.max_tokens);
-        let mut tool_context = ToolExecutionContext::from_run_context(context.as_ref())
+        let mut tool_context = ToolExecutionContext::from_run_context(run_context.as_ref())
             .with_cancellation(cancellation_token.clone())
             .with_model_capabilities(model_capabilities)
             .with_runtime_services(run_id.clone(), storage)
@@ -339,8 +379,6 @@ impl AgentRuntime {
         let mut empty_model_action_repair_pending = false;
         let mut can_drain_steer_input = false;
         let context_capacity_detector = context_window_configured.then_some(capacity_detector);
-        let context_compaction_planner = context_window_configured
-            .then(|| ContextCompactionPlanner::for_tools(&llm_request.tools));
         let context_compaction_executor = context_compaction_services
             .map(ContextCompactionExecutor::new)
             .filter(|_| context_window_configured);
@@ -402,12 +440,35 @@ impl AgentRuntime {
                                     trace_observer.as_ref(),
                                     &mut event_stream,
                                     &mut tool_context,
+                                    &mut run_context,
                                 )?;
                             }
                         }
                     }
                     let model_request_index = next_model_request_index;
                     next_model_request_index = next_model_request_index.saturating_add(1);
+                    effective_tool_set = tool_registry.effective_tool_set(
+                        permitted_tool_definitions.iter().cloned(),
+                        &runtime_extensions.active_tool_capabilities()?,
+                    )?;
+                    if effective_tool_set.stable_revision() != stable_tool_revision {
+                        return Err(AgentError::new(
+                            "运行期间稳定工具前缀发生变化；为防止缓存和执行契约漂移，当前运行已停止。",
+                        ));
+                    }
+                    tool_definitions = effective_tool_set.all_definitions();
+                    if effective_tool_set.revision() != emitted_tool_set_revision {
+                        event_stream.emit(AgentEvent::ToolSetChanged {
+                            run_id: run_id.clone(),
+                            stable_revision: effective_tool_set.stable_revision().to_string(),
+                            dynamic_revision: effective_tool_set.dynamic_revision().to_string(),
+                            effective_revision: effective_tool_set.revision().to_string(),
+                            tool_definitions: tool_definitions.clone(),
+                        });
+                        emitted_tool_set_revision = effective_tool_set.revision().to_string();
+                    }
+                    let context_compaction_planner =
+                        ContextCompactionPlanner::for_tools(&tool_definitions);
                     let file_transactions =
                         FileTransactionState::load(transaction_storage.as_deref(), &run_id)?;
                     let user_text_blocked = file_transactions.blocks_user_text();
@@ -415,6 +476,10 @@ impl AgentRuntime {
                     let (request_context, request_estimate) = loop {
                         let mut request_context = active_context.clone();
                         let mut request_estimate = None;
+                        ContextAssembler::append_runtime_context(
+                            &mut request_context,
+                            run_context.as_ref(),
+                        );
                         runtime_extensions.contribute_request_context(
                             &ModelRequestContext::agent_work(),
                             &mut request_context,
@@ -431,25 +496,36 @@ impl AgentRuntime {
                                 ContextRetention::RequestOnly,
                             ));
                         }
+                        if let Some(dynamic_tool_context) =
+                            build_dynamic_tool_availability_context(
+                                effective_tool_set.dynamic_definitions(),
+                                effective_tool_set.stable_revision(),
+                                effective_tool_set.dynamic_revision(),
+                            )
+                        {
+                            request_context.push(ContextItem::text(
+                                LlmMessageRole::System,
+                                dynamic_tool_context,
+                                ContextSource::RuntimeExtension,
+                                ContextScope::Run,
+                                ContextRetention::RequestOnly,
+                            ));
+                        }
                         emit_context_manifest_if_enabled(
                             &run_id,
                             model_request_index + 1,
                             &request_context,
-                            &llm_request.tools,
+                            &tool_definitions,
                         );
                         let model_input_capacity = if let Some(detector) = &context_capacity_detector {
-                            let report = detector.inspect(
+                            let report = detector.inspect_with_dynamic_tools(
                                 &mut request_context,
                                 llm_request.context_window_tokens,
                                 llm_request.max_tokens,
+                                effective_tool_set.dynamic_definitions(),
                             );
                             let compaction_query = report.compaction_query();
-                            let compaction_plan = context_compaction_planner
-                                .as_ref()
-                                .expect(
-                                    "configured capacity detector must have a compaction planner",
-                                )
-                                .plan(
+                            let compaction_plan = context_compaction_planner.plan(
                                     &compaction_query,
                                     &request_context.planning_items()?,
                                     model_request_index == 0,
@@ -565,13 +641,27 @@ impl AgentRuntime {
                             }
                             request_estimate =
                                 Some(ModelRequestEstimate::from_budget_report(&report));
+                            let context_window_snapshot = report.persistent_snapshot(
+                                &llm_request.model,
+                                AgentContextWindowPhase::DurableCommit,
+                            );
                             let remaining_tokens = report
                                 .remaining_input_tokens
                                 .map(|remaining| u64::try_from(remaining.max(0)).unwrap_or(0));
+                            if context_window_indicator_enabled {
+                                if let Some(observer) = context_window_observer.as_ref() {
+                                    observer(context_window_snapshot);
+                                }
+                            }
+                            // Publish the exact final request attempt before enforcing capacity so
+                            // the Host can display an authoritative over-capacity state as well as
+                            // sendable states. Earlier compaction attempts `continue` above and
+                            // therefore never escape as misleading intermediate snapshots.
                             detector.ensure_sendable(report)?;
                             remaining_tokens.map(|remaining_tokens| ModelInputCapacity {
                                 remaining_tokens,
                                 text_budget: detector.text_budget(remaining_tokens.max(1)),
+                                effective_tool_set: effective_tool_set.clone(),
                             })
                         } else {
                             None
@@ -591,8 +681,21 @@ impl AgentRuntime {
                         llm_request.api_style,
                         request_estimate,
                         crate::storage::now_ms(),
+                    )
+                    .with_tool_set(ModelRequestToolSetObservation::new(
+                        llm_request.api_style,
+                        effective_tool_set.stable_revision(),
+                        effective_tool_set.dynamic_revision(),
+                        effective_tool_set.revision(),
+                        u64::try_from(effective_tool_set.stable_definitions().len())
+                            .unwrap_or(u64::MAX),
+                        u64::try_from(effective_tool_set.dynamic_definitions().len())
+                            .unwrap_or(u64::MAX),
+                    ));
+                    let request = llm_request.request(
+                        request_context,
+                        effective_tool_set.dynamic_definitions(),
                     );
-                    let request = llm_request.request(request_context);
                     let mut committed_message_stream_id = None;
                     let mut committed_tool_input_preview = None;
                     let llm_response_result = if request.stream {
@@ -895,6 +998,7 @@ impl AgentRuntime {
                                         trace_observer.as_ref(),
                                         &mut event_stream,
                                         &mut tool_context,
+                                        &mut run_context,
                                     )?;
                                     continue;
                                 }
@@ -967,9 +1071,7 @@ impl AgentRuntime {
                     // The effective definitions are both the model contract and the execution
                     // allowlist. The registry may retain tools hidden by the current permission
                     // mode; a hallucinated or text-fallback call must not resurrect one.
-                    let tool_is_exposed = tool_definitions
-                        .iter()
-                        .any(|definition| definition.name == tool_request.name);
+                    let tool_is_exposed = effective_tool_set.contains(&tool_request.name);
                     let definition_requires_approval = tool_is_exposed
                         && tool_registry
                             .requires_approval_for_call(&tool_request.name, &tool_request.args);
@@ -1035,20 +1137,11 @@ impl AgentRuntime {
                     }
 
                     if policy_preflight_failure.is_none() && !tool_is_exposed {
+                        let unavailable_error =
+                            unavailable_tool_error(&effective_tool_set, &call.tool);
                         policy_preflight_failure = Some(failed_tool_call_result(
                             &call,
-                            AgentError::structured(
-                                "agent.tool_not_available",
-                                format!(
-                                    "Tool `{}` is not available under the current runtime capabilities.",
-                                    call.tool
-                                ),
-                                json!({
-                                    "type": "tool_policy",
-                                    "code": "toolNotAvailable",
-                                    "recovery": "changePermissionsOrCapabilities",
-                                }),
-                            ),
+                            unavailable_error,
                         ));
                     }
 
@@ -1257,6 +1350,7 @@ impl AgentRuntime {
                                     model_visible_trace_item_count: visible_trace_item_count,
                                     pending_tool_call_id: &call.id,
                                     conversation_trace: &trace,
+                                    tool_set: &effective_tool_set,
                                 },
                             )?
                         };
@@ -1541,6 +1635,63 @@ impl AgentRuntime {
     }
 }
 
+fn unavailable_tool_error(tool_set: &EffectiveToolSet, tool_name: &str) -> AgentError {
+    match tool_set
+        .unavailability(tool_name)
+        .unwrap_or(ToolUnavailability::NotRegistered)
+    {
+        ToolUnavailability::RequiresSkillActivation {
+            required_capability,
+        } => AgentError::structured(
+            "agent.tool_requires_skill_activation",
+            format!(
+                "Tool `{tool_name}` is unavailable until its matching Skill is activated."
+            ),
+            json!({
+                "type": "tool_policy",
+                "code": "toolRequiresSkillActivation",
+                "recovery": "activateSkill",
+                "requiredCapability": required_capability.as_str(),
+            }),
+        ),
+        ToolUnavailability::BlockedByPermissions => AgentError::structured(
+            "agent.tool_blocked_by_permissions",
+            format!("Tool `{tool_name}` is disabled by the current permission policy."),
+            json!({
+                "type": "tool_policy",
+                "code": "toolBlockedByPermissions",
+                "recovery": "changePermissions",
+                "bypassAllowed": false,
+            }),
+        ),
+        ToolUnavailability::RuntimeCapabilityUnavailable {
+            required_capability,
+        } => AgentError::structured(
+            "agent.tool_runtime_capability_unavailable",
+            format!(
+                "Tool `{tool_name}` cannot run because its required application capability is not available in this runtime."
+            ),
+            json!({
+                "type": "tool_policy",
+                "code": "toolRuntimeCapabilityUnavailable",
+                "recovery": "configureCapability",
+                "requiredCapability": required_capability.as_str(),
+                "retryable": false,
+            }),
+        ),
+        ToolUnavailability::NotRegistered => AgentError::structured(
+            "agent.tool_not_registered",
+            format!("Tool `{tool_name}` is not registered in the current application runtime."),
+            json!({
+                "type": "tool_policy",
+                "code": "toolNotRegistered",
+                "recovery": "useAvailableTool",
+                "retryable": false,
+            }),
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_steer_inputs(
     run_id: &str,
@@ -1551,6 +1702,7 @@ fn apply_steer_inputs(
     trace_observer: Option<&AgentConversationTraceObserver>,
     event_stream: &mut AgentEventStream,
     tool_context: &mut ToolExecutionContext,
+    run_context: &mut Option<AgentRunContext>,
 ) -> AgentResult<Option<AgentContextBaseline>> {
     let attachment_contexts = inputs
         .iter()
@@ -1562,7 +1714,7 @@ fn apply_steer_inputs(
                     json!({ "guidanceId": input.guidance_id }),
                 ));
             }
-            build_attachment_context(&input.attachments)
+            build_attachment_context(&input.attachments, input.attachment_library.as_ref())
         })
         .collect::<AgentResult<Vec<_>>>()?;
 
@@ -1613,7 +1765,7 @@ fn apply_steer_inputs(
         applied.into_iter().zip(attachment_contexts)
     {
         if let Some(library) = input.attachment_library {
-            tool_context.replace_attachment_library(library);
+            replace_runtime_attachment_library(run_context, tool_context, library);
         }
         let content = input.content.trim().to_string();
         let context_content = if attachment_context.text.trim().is_empty() {
@@ -1643,6 +1795,22 @@ fn apply_steer_inputs(
     }
 
     Ok(baseline)
+}
+
+fn replace_runtime_attachment_library(
+    run_context: &mut Option<AgentRunContext>,
+    tool_context: &mut ToolExecutionContext,
+    library: crate::protocol::AgentAttachmentLibraryContext,
+) {
+    let context = run_context.get_or_insert_with(|| AgentRunContext {
+        conversation_id: None,
+        project_id: None,
+        workspace: None,
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+    });
+    context.attachment_library = Some(library.clone());
+    tool_context.replace_attachment_library(library);
 }
 
 fn clear_deferred_tool_input_preview(

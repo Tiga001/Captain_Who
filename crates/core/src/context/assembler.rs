@@ -5,7 +5,8 @@ use super::{
 };
 use crate::llm::{LlmImage, LlmMessage, LlmMessageRole};
 use crate::protocol::{
-    AgentActivatedSkill, AgentChatMessage, AgentError, AgentResult, AgentSkillActivation,
+    AgentActivatedSkill, AgentChatMessage, AgentError, AgentResult, AgentRunContext,
+    AgentSkillActivation,
 };
 use crate::skills::AgentSkillDiscoverySnapshot;
 use serde_json::json;
@@ -122,8 +123,6 @@ impl ContextAssembler {
             }
         }
 
-        append_skill_discovery(&mut items, input.skill_discovery.as_ref())?;
-        append_skill_context(&mut items, input.skill_activation.as_ref())?;
         if current_turn_index.is_some() && (has_attachment_text || has_attachment_images) {
             let mut attachment_message =
                 LlmMessage::text(LlmMessageRole::User, input.attachments.text);
@@ -137,6 +136,8 @@ impl ContextAssembler {
                 ),
             ));
         }
+        append_skill_discovery(&mut items, input.skill_discovery.as_ref())?;
+        append_skill_context(&mut items, input.skill_activation.as_ref())?;
 
         let frame = ContextFrame::new(items);
         frame.validate_complete_tool_protocol()?;
@@ -180,6 +181,24 @@ impl ContextAssembler {
     ) -> AgentResult<()> {
         Self::append_skill_discovery(frame, discovery)?;
         Self::append_skill_activation(frame, activation)
+    }
+
+    /// Appends the backend-authored state that is specific to the current run/request.
+    ///
+    /// Unlike the configuration system prompt, this item is deliberately request-only: changing
+    /// input-bar permissions, workspace selection, conversation binding or attachment availability
+    /// must update the next request without invalidating or entering the durable cache prefix.
+    pub(crate) fn append_runtime_context(
+        frame: &mut ContextFrame,
+        context: Option<&AgentRunContext>,
+    ) {
+        frame.push(ContextItem::text(
+            LlmMessageRole::System,
+            crate::prompts::build_runtime_context_overlay(context),
+            ContextSource::RuntimeExtension,
+            ContextScope::Run,
+            ContextRetention::RequestOnly,
+        ));
     }
 }
 
@@ -498,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn places_each_activated_skill_after_current_user_and_before_attachments() {
+    fn places_attachments_before_each_activated_skill() {
         let activation = AgentSkillActivation {
             activation_revision: "activation-sha256-v1:ordered".to_string(),
             skills: vec![
@@ -538,14 +557,15 @@ mod tests {
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 5);
         assert_eq!(messages[1].content, "current question");
-        assert!(messages[2].content.contains("FIRST_SKILL_MARKER"));
-        assert!(messages[3].content.contains("SECOND_SKILL_MARKER"));
-        assert_eq!(messages[4].content, "ATTACHMENT_MARKER");
-        assert!(messages[2].content.contains("\"source\":\"workspace\""));
-        assert!(!messages[2].content.contains("description"));
+        assert_eq!(messages[2].content, "ATTACHMENT_MARKER");
+        assert!(messages[3].content.contains("FIRST_SKILL_MARKER"));
+        assert!(messages[4].content.contains("SECOND_SKILL_MARKER"));
+        assert!(messages[3].content.contains("\"source\":\"workspace\""));
+        assert!(!messages[3].content.contains("description"));
 
         let manifest = frame.manifest();
-        for (index, id) in [(2, "workspace:w:first"), (3, "workspace:w:second")] {
+        assert_eq!(manifest.entries[2].sources, vec!["input_attachment"]);
+        for (index, id) in [(3, "workspace:w:first"), (4, "workspace:w:second")] {
             assert_eq!(manifest.entries[index].sources, vec!["skill_instructions"]);
             assert_eq!(manifest.entries[index].scope, "run");
             assert_eq!(manifest.entries[index].retention, "retained");
@@ -594,28 +614,36 @@ mod tests {
             messages: vec![message("user", "current question")],
             skill_discovery: Some(discovery),
             skill_activation: Some(activation),
-            attachments: ContextAttachments::default(),
+            attachments: ContextAttachments {
+                text: "ATTACHMENT_BEFORE_SKILLS".to_string(),
+                images: Vec::new(),
+            },
         })
         .unwrap();
 
         let messages = frame.to_messages();
         assert_eq!(messages[1].content, "current question");
-        assert!(messages[2].content.contains("backend_available_skills"));
-        assert!(messages[2]
-            .content
-            .contains(&format!("\"ref\":\"{activation_ref}\"")));
-        assert!(!messages[2]
-            .content
-            .contains("bundled:application:documents"));
-        assert!(!messages[2]
-            .content
-            .contains("skill-package-sha256-v1:documents"));
+        assert_eq!(messages[2].content, "ATTACHMENT_BEFORE_SKILLS");
+        assert!(messages[3].content.contains("backend_available_skills"));
         assert!(messages[3]
             .content
+            .contains(&format!("\"ref\":\"{activation_ref}\"")));
+        assert!(!messages[3]
+            .content
+            .contains("bundled:application:documents"));
+        assert!(!messages[3]
+            .content
+            .contains("skill-package-sha256-v1:documents"));
+        assert!(messages[4]
+            .content
             .contains("FULL_DOCUMENT_SKILL_INSTRUCTIONS"));
-        assert_eq!(frame.manifest().entries[2].sources, vec!["skill_catalog"]);
         assert_eq!(
-            frame.manifest().entries[3].sources,
+            frame.manifest().entries[2].sources,
+            vec!["input_attachment"]
+        );
+        assert_eq!(frame.manifest().entries[3].sources, vec!["skill_catalog"]);
+        assert_eq!(
+            frame.manifest().entries[4].sources,
             vec!["skill_instructions"]
         );
     }

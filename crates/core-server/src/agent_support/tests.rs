@@ -165,6 +165,7 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: command.id.clone(),
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,

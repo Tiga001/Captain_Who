@@ -16,6 +16,12 @@ pub(super) struct SkillsPreflightScriptTool;
 pub(super) struct SkillsRunScriptTool;
 
 impl AgentTool for SkillsPreflightScriptTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::RequiresCapability(super::ToolCapabilityId::application_owned(
+            super::SKILL_SCRIPTS_CAPABILITY,
+        ))
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }
@@ -58,6 +64,12 @@ impl AgentTool for SkillsPreflightScriptTool {
 }
 
 impl AgentTool for SkillsRunScriptTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::RequiresCapability(super::ToolCapabilityId::application_owned(
+            super::SKILL_SCRIPTS_CAPABILITY,
+        ))
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }

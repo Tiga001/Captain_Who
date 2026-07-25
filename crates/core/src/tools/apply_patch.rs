@@ -23,6 +23,10 @@ const MAX_INLINE_CONTENT_BYTES: usize = 32 * 1024;
 pub(super) struct ApplyPatchTool;
 
 impl AgentTool for ApplyPatchTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::Stable
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         AgentToolDefinition {
             name: "apply_patch".to_string(),

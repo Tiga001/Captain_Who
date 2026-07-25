@@ -22,6 +22,10 @@ const MAX_THUMBNAIL_DATA_URL_BYTES: usize = 192 * 1024;
 pub(super) struct ReadImageTool;
 
 impl AgentTool for ReadImageTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::Stable
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }

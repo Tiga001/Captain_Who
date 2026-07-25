@@ -246,6 +246,7 @@ fn test_context_compaction_generator() -> ContextCompactionSummaryGenerator {
                 error_message: None,
                 started_at: 1,
                 completed_at: 2,
+                tool_set: None,
             };
             Ok(AgentContextCompactionGenerationOutput {
                 draft: ContextCompactionSummaryDraft {

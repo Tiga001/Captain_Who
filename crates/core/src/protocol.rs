@@ -161,9 +161,19 @@ pub struct AgentExtensionSnapshot {
 
 /// Current durable Agent run checkpoint schema.
 ///
-/// Version 3 is the first version whose entire Tool Call graph uses one application-owned
-/// canonical identity. Earlier development checkpoints are intentionally not migrated.
-pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 3;
+/// Version 4 additionally freezes the exact stable-prefix and Skill-dynamic Tool contract that
+/// produced a pending Tool Call batch. Earlier development checkpoints are intentionally not
+/// migrated.
+pub const AGENT_RUN_CHECKPOINT_SCHEMA_VERSION: u32 = 4;
+
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentRunToolSetCheckpoint {
+    pub stable_revision: String,
+    pub dynamic_revision: String,
+    pub effective_revision: String,
+    pub exposed_tool_names: Vec<String>,
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -175,6 +185,8 @@ pub struct AgentRunCheckpoint {
     pub queued_tool_calls: Vec<AgentQueuedToolCallCheckpoint>,
     pub suppressed_narration: bool,
     pub extension_snapshots: Vec<AgentExtensionSnapshot>,
+    /// Exact model-facing and execution-authorizing Tool contract for the response being paused.
+    pub tool_set: AgentRunToolSetCheckpoint,
     pub pending_tool_call_id: String,
     #[serde(default)]
     pub conversation_trace_items: Vec<ConversationTurnTraceItem>,
@@ -467,9 +479,12 @@ pub enum AgentReadPermission {
 
 /// Controls where file-changing tools may write.
 ///
-/// `Denied` removes file-edit tools from the agent tool set and blocks patch execution.
-/// `WorkspaceOnly` allows safe writes only inside the selected workspace. `All` also allows
-/// safe writes outside the workspace through absolute paths or supported system aliases.
+/// `Denied` blocks every file-changing call at runtime and host boundaries. Stable file-edit
+/// tools remain in the model-visible tool prefix so changing the composer permission does not
+/// invalidate that prefix; visibility never grants write authority. Dynamic capabilities may
+/// still be omitted when they have no permitted operation. `WorkspaceOnly` allows safe writes
+/// only inside the selected workspace. `All` also allows safe writes outside the workspace
+/// through absolute paths or supported system aliases.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentWritePermission {
@@ -1888,6 +1903,17 @@ pub enum AgentProposedAction {
 pub enum AgentEvent {
     Started {
         run_id: String,
+        tool_definitions: Vec<AgentToolDefinition>,
+    },
+    /// Authoritative model-facing Tool contract for the next request boundary.
+    ///
+    /// The registry may contain additional implementations, but only these definitions are both
+    /// visible to the model and executable for calls produced under this revision.
+    ToolSetChanged {
+        run_id: String,
+        stable_revision: String,
+        dynamic_revision: String,
+        effective_revision: String,
         tool_definitions: Vec<AgentToolDefinition>,
     },
     State {

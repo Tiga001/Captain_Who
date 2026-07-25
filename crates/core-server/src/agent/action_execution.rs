@@ -3181,6 +3181,35 @@ impl AgentService {
                 return;
             }
         };
+        let initial_context_window_tool_projection = match self
+            .context_window_tool_projection(&record.agent_input, skill_resources.clone())
+        {
+            Ok(projection) => projection,
+            Err(error) => {
+                let _ = self.transition_pending_status(&record, PendingActionStatus::Failed);
+                self.discard_usage_context(&run_id);
+                if let Some(steer_input) = steer_input.as_ref() {
+                    let _ = self.unregister_active_run_control(
+                        &run_id,
+                        steer_input,
+                        AgentSteerRunRejectionCode::RunNotSteerable,
+                        "The agent run has finished and no longer accepts guidance.",
+                        &notifications,
+                    );
+                }
+                self.unregister_cancellation_if_current(&run_id, &cancellation_token);
+                let _ = notifications.send(agent_event_notification(AgentEvent::Error {
+                    run_id: Some(run_id),
+                    message: error,
+                    recoverable: true,
+                    code: Some("context_window_tool_projection_unavailable".to_string()),
+                    details: None,
+                }));
+                return;
+            }
+        };
+        let context_window_tool_projection =
+            RunContextToolProjection::new(initial_context_window_tool_projection);
         let host_executor = self.host_action_executor(
             agent_input.clone(),
             run_id.clone(),
@@ -3204,6 +3233,7 @@ impl AgentService {
             trace_assistant_message_id,
             record.snapshot.created_at,
             record.agent_input.clone(),
+            context_window_tool_projection.clone(),
             notifications.clone(),
         );
         let context_compaction_services = self.context_compaction_services(
@@ -3211,16 +3241,32 @@ impl AgentService {
             trace_conversation_id,
             trace_assistant_message_id,
             record.agent_input.clone(),
+            context_window_tool_projection.clone(),
             notifications.clone(),
         );
         let model_request_observer =
             self.model_request_observer(&run_id, trace_conversation_id, trace_assistant_message_id);
+        let context_window_observer =
+            record
+                .agent_input
+                .context_window_indicator_enabled
+                .then(|| {
+                    self.context_window_observer(
+                        &run_id,
+                        trace_conversation_id,
+                        &record.agent_input.model,
+                        notifications.clone(),
+                    )
+                });
         let mut host_services = AgentRuntimeHostServices::new()
             .with_host_actions(host_executor, self.storage.clone())
             .with_office_engine(self.office_engine.clone())
             .with_trace_observer(trace_observer)
             .with_model_request_observer(model_request_observer)
             .with_context_compaction(context_compaction_services);
+        if let Some(context_window_observer) = context_window_observer {
+            host_services = host_services.with_context_window_observer(context_window_observer);
+        }
         if let Some(image_generation_execution) = self.image_generation_execution.clone() {
             host_services =
                 host_services.with_image_generation_execution(image_generation_execution);
@@ -3477,6 +3523,7 @@ impl AgentService {
         drop(deletion_lifecycle);
         if !keep_trace_snapshot {
             self.discard_trace_snapshot(&run_id);
+            self.discard_exact_running_context_window_snapshot(&run_id);
         }
         self.unregister_cancellation_if_current(&run_id, &cancellation_token);
     }

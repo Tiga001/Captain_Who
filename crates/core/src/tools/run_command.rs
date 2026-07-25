@@ -35,6 +35,10 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 pub(super) struct RunCommandTool;
 
 impl AgentTool for RunCommandTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::Stable
+    }
+
     fn permission_policy(&self) -> super::AgentToolPermissionPolicy {
         super::AgentToolPermissionPolicy::Default
     }

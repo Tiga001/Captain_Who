@@ -109,6 +109,12 @@ impl ImageGenerationTool {
 }
 
 impl AgentTool for ImageGenerationTool {
+    fn exposure(&self) -> super::AgentToolExposure {
+        super::AgentToolExposure::RequiresCapability(super::ToolCapabilityId::application_owned(
+            super::IMAGE_GENERATION_CAPABILITY,
+        ))
+    }
+
     fn definition(&self) -> AgentToolDefinition {
         image_generation_tool_definition()
     }

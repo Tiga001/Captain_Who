@@ -11,6 +11,16 @@ mod skills_installation_tests;
 #[cfg(test)]
 mod skills_test_support;
 
+#[cfg(test)]
+fn test_tool_set_checkpoint() -> mycopilot_core::AgentRunToolSetCheckpoint {
+    mycopilot_core::AgentRunToolSetCheckpoint {
+        stable_revision: "stable-tool-set-v1:test-fixture".to_string(),
+        dynamic_revision: "dynamic-tool-set-v1:test-fixture".to_string(),
+        effective_revision: "effective-tool-set-v1:test-fixture".to_string(),
+        exposed_tool_names: Vec::new(),
+    }
+}
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

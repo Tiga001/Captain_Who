@@ -183,6 +183,8 @@ pub type AgentConversationTraceObserver = Arc<
         + 'static,
 >;
 pub type AgentModelRequestObserver = Arc<dyn Fn(ModelRequestObservation) + Send + Sync + 'static>;
+pub type AgentContextWindowObserver =
+    Arc<dyn Fn(AgentContextWindowSnapshot) + Send + Sync + 'static>;
 pub type AgentHostActionExecutor = Arc<
     dyn Fn(AgentProposedAction, AgentCancellationToken) -> AgentResult<AgentToolResult>
         + Send
@@ -222,6 +224,7 @@ pub struct AgentRuntimeHostServices {
     pub(super) storage: Option<Arc<StorageService>>,
     pub(super) trace_observer: Option<AgentConversationTraceObserver>,
     pub(super) model_request_observer: Option<AgentModelRequestObserver>,
+    pub(super) context_window_observer: Option<AgentContextWindowObserver>,
     pub(super) context_compaction_services: Option<AgentContextCompactionServices>,
     pub(super) skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
     pub(super) skill_activation_resolver: Option<AgentSkillActivationResolver>,
@@ -260,6 +263,14 @@ impl AgentRuntimeHostServices {
 
     pub fn with_model_request_observer(mut self, observer: AgentModelRequestObserver) -> Self {
         self.model_request_observer = Some(observer);
+        self
+    }
+
+    /// Receives exact aggregate request-capacity accounting after runtime extensions, Skill
+    /// instructions, request-only availability context and dynamic Tool schemas are assembled.
+    /// No Skill instruction or Tool schema body crosses this observer boundary.
+    pub fn with_context_window_observer(mut self, observer: AgentContextWindowObserver) -> Self {
+        self.context_window_observer = Some(observer);
         self
     }
 
@@ -325,11 +336,12 @@ impl AgentRuntimeHostServices {
     }
 }
 
-/// Extracts exact resource-bearing Skill selections from the versioned Skill extension state in
-/// an approval checkpoint. Hosts use this before resuming so model-activated resource authority is
-/// restored from immutable package revisions rather than mutable installation receipts. The host
-/// must additionally prove that selections not present in the explicit activation belong to the
-/// same run's frozen discovery snapshot before opening package bytes.
+/// Extracts authority-bearing immutable Skill selections from the versioned Skill extension state
+/// in an approval checkpoint. Hosts use this before resuming so managed Skill identity and any
+/// model-activated resource authority are restored from exact package revisions rather than
+/// mutable installation receipts. The host must additionally prove that selections not present in
+/// the explicit activation belong to the same run's frozen discovery snapshot before opening a
+/// package.
 pub fn skill_resource_selections_from_checkpoint(
     checkpoint: &crate::protocol::AgentRunCheckpoint,
 ) -> AgentResult<Vec<crate::skills::SkillSelection>> {
@@ -451,14 +463,79 @@ pub fn inspect_context_window(
 ) -> AgentResult<Option<AgentContextWindowSnapshot>> {
     let skill_discovery = input.skill_discovery.take();
     let skill_activation = input.skill_activation.take();
+    let run_context = input.context.clone();
     let mut state = create_conversation_context_state(input)?;
     state
-        .snapshot_with_skill_overlays(
+        .snapshot_with_run_overlays(
             AgentContextWindowPhase::Idle,
+            run_context.as_ref(),
             skill_discovery.as_ref(),
             skill_activation.as_ref(),
         )
         .map(Some)
+}
+
+/// Inspects a context window with the exact Host-projected Skill-gated Tool suffix.
+///
+/// The projection is intentionally opaque: it binds dynamic schemas to the same trusted provider,
+/// permissions and revision-checked Skill resource authority used by a real run. This entry point
+/// also accounts for the backend-authored dynamic availability notice; callers must not attempt
+/// to approximate the request by passing arbitrary schema lists.
+pub fn inspect_context_window_with_tool_projection(
+    mut input: AgentChatInput,
+    projection: &AgentContextWindowToolProjection,
+) -> AgentResult<Option<AgentContextWindowSnapshot>> {
+    let skill_discovery = input.skill_discovery.take();
+    let skill_activation = input.skill_activation.take();
+    let run_context = input.context.clone();
+    let mut state = create_conversation_context_state(input)?;
+    state
+        .snapshot_with_run_overlays_and_tool_projection(
+            AgentContextWindowPhase::Idle,
+            run_context.as_ref(),
+            skill_discovery.as_ref(),
+            skill_activation.as_ref(),
+            projection,
+        )
+        .map(Some)
+}
+
+/// Projects the exact initial Skill-gated Tool contract for a context-window preview.
+///
+/// This helper performs the same permission filtering, provider registration and Host resource
+/// authority validation as a real run. It deliberately requires explicit Host services instead
+/// of treating the presentation-safe `AgentSkillActivation.resources` hints as authority.
+/// `host_actions_available` must describe the execution boundary that the eventual run will use.
+/// It can affect approval projection for dynamic Tools, but never the configuration-stable Tool
+/// prefix.
+pub fn prepare_context_window_tool_projection(
+    input: &AgentChatInput,
+    host_services: &AgentRuntimeHostServices,
+    host_actions_available: bool,
+) -> AgentResult<AgentContextWindowToolProjection> {
+    let extension_snapshots = input
+        .resume_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.extension_snapshots.as_slice())
+        .unwrap_or_default();
+    let capabilities = prepare_runtime_capabilities_with_skills(
+        input,
+        "context-window-tool-preview",
+        extension_snapshots,
+        RuntimeCapabilityServices {
+            host_actions_available,
+            office_engine: host_services.office_engine.clone(),
+            image_generation_execution: host_services.image_generation_execution.clone(),
+            skill_activation_resolver: host_services.skill_activation_resolver.clone(),
+            skill_resources: host_services.skill_resources.clone(),
+        },
+    )?;
+    Ok(AgentContextWindowToolProjection::new(
+        capabilities.initial_tool_set.stable_revision().to_string(),
+        capabilities.initial_tool_set.dynamic_revision().to_string(),
+        capabilities.initial_tool_set.revision().to_string(),
+        capabilities.initial_tool_set.dynamic_definitions().to_vec(),
+    ))
 }
 
 pub fn conversation_context_configuration_revision(input: &AgentChatInput) -> AgentResult<String> {
@@ -504,9 +581,17 @@ pub(super) fn prepare_conversation_context(
     input: &AgentChatInput,
 ) -> AgentResult<PreparedConversationContext> {
     let run_id = "conversation-context-state";
+    // Conversation configuration identifies only the stable prompt/tool prefix. Skill discovery
+    // and activation are run overlays whose Host-bound resource authority is established when a
+    // real Agent run is prepared; preview/revision calculation must neither require that authority
+    // nor let a dynamic overlay perturb the stable configuration identity.
+    let mut stable_input = input.clone();
+    stable_input.skill_discovery = None;
+    stable_input.skill_activation = None;
     let PreparedRuntimeCapabilities {
-        tool_definitions, ..
-    } = prepare_runtime_capabilities(input, run_id, &[], true, None)?;
+        initial_tool_set, ..
+    } = prepare_runtime_capabilities(&stable_input, run_id, &[], true, None)?;
+    let tool_definitions = initial_tool_set.stable_definitions().to_vec();
     let api_style = input
         .api_style
         .unwrap_or_else(|| detect_api_style(input.api_url.trim()));
@@ -527,13 +612,9 @@ pub(super) fn conversation_context_configuration_revision_from_parts(
     api_style: crate::protocol::AgentApiStyle,
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<String> {
-    let system_prompt = build_system_prompt(
-        input.context.as_ref(),
-        input.prompt_preferences.as_ref(),
-        tool_definitions,
-    );
+    let system_prompt = build_system_prompt(input.prompt_preferences.as_ref(), tool_definitions);
     let material = serde_json::to_vec(&json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "model": input.model.trim(),
         "apiStyle": api_style,
         "contextWindowTokens": input.context_window_tokens,

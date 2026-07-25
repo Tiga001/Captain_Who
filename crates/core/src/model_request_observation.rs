@@ -7,7 +7,7 @@ use crate::context::{ContextBudgetReport, ContextBudgetStatus, ContextMeasuremen
 use crate::protocol::{AgentApiStyle, AgentError, AgentResult, AgentUsage};
 use serde::{Deserialize, Serialize};
 
-pub const MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION: u32 = 1;
+pub const MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION: u32 = 2;
 const MAXIMUM_OBSERVATION_ERROR_CHARACTERS: usize = 2_000;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -94,6 +94,85 @@ impl From<ContextBudgetStatus> for ModelRequestCapacityStatus {
             ContextBudgetStatus::OverBudget => Self::OverBudget,
             ContextBudgetStatus::InvalidConfiguration => Self::InvalidConfiguration,
         }
+    }
+}
+
+/// Provider-owned ordering between native Tool schemas and conversational input.
+///
+/// This describes the request envelope only. It deliberately makes no claim that the provider
+/// accepted, stored, or reused a cache entry; provider-reported usage remains the sole authority
+/// for actual cache hits.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCacheTopology {
+    /// OpenAI-compatible APIs carry `tools` and `messages` as separate top-level fields. Their
+    /// internal cache ordering is provider-defined and cannot be inferred by this client.
+    ProviderDefinedSeparateFields,
+    /// Anthropic-compatible APIs serialize native Tools before system blocks and messages.
+    ToolsBeforeSystemMessages,
+}
+
+impl ProviderCacheTopology {
+    pub fn for_api_style(api_style: AgentApiStyle) -> Self {
+        match api_style {
+            AgentApiStyle::OpenAiCompatible => Self::ProviderDefinedSeparateFields,
+            AgentApiStyle::AnthropicCompatible => Self::ToolsBeforeSystemMessages,
+        }
+    }
+}
+
+/// Model-visible Tool partitions frozen at one Agent-loop request boundary.
+///
+/// Revisions identify contracts assembled by trusted backend code. Counts are diagnostic only;
+/// neither this record nor its cache topology is evidence of a provider cache hit.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRequestToolSetObservation {
+    pub stable_revision: String,
+    pub dynamic_revision: String,
+    pub effective_revision: String,
+    pub stable_tool_count: u64,
+    pub dynamic_tool_count: u64,
+    pub provider_cache_topology: ProviderCacheTopology,
+}
+
+impl ModelRequestToolSetObservation {
+    pub fn new(
+        api_style: AgentApiStyle,
+        stable_revision: impl Into<String>,
+        dynamic_revision: impl Into<String>,
+        effective_revision: impl Into<String>,
+        stable_tool_count: u64,
+        dynamic_tool_count: u64,
+    ) -> Self {
+        Self {
+            stable_revision: stable_revision.into(),
+            dynamic_revision: dynamic_revision.into(),
+            effective_revision: effective_revision.into(),
+            stable_tool_count,
+            dynamic_tool_count,
+            provider_cache_topology: ProviderCacheTopology::for_api_style(api_style),
+        }
+    }
+
+    fn validate(&self, api_style: AgentApiStyle) -> AgentResult<()> {
+        for (label, revision) in [
+            ("稳定工具集", self.stable_revision.as_str()),
+            ("动态工具集", self.dynamic_revision.as_str()),
+            ("有效工具集", self.effective_revision.as_str()),
+        ] {
+            if revision.trim().is_empty() || revision.trim() != revision {
+                return Err(AgentError::new(format!(
+                    "模型请求观测的{label} revision 无效。"
+                )));
+            }
+        }
+        if self.provider_cache_topology != ProviderCacheTopology::for_api_style(api_style) {
+            return Err(AgentError::new(
+                "模型请求观测的 provider cache topology 与 API 类型不一致。",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -247,6 +326,8 @@ pub struct ModelRequestObservation {
     pub api_style: AgentApiStyle,
     pub status: ModelRequestObservationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_set: Option<ModelRequestToolSetObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub estimate: Option<ModelRequestEstimate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_usage: Option<ModelRequestActualUsage>,
@@ -304,6 +385,14 @@ impl ModelRequestObservation {
             }
             _ => {}
         }
+        if self.purpose == ModelRequestPurpose::ContextCompaction && self.tool_set.is_some() {
+            return Err(AgentError::new(
+                "上下文压缩模型请求不能携带 Agent 工具集观测。",
+            ));
+        }
+        if let Some(tool_set) = &self.tool_set {
+            tool_set.validate(self.api_style)?;
+        }
         if let Some(estimate) = &self.estimate {
             estimate.validate()?;
         }
@@ -343,6 +432,7 @@ pub(crate) struct ModelRequestObservationBuilder {
     purpose: ModelRequestPurpose,
     model: String,
     api_style: AgentApiStyle,
+    tool_set: Option<ModelRequestToolSetObservation>,
     estimate: Option<ModelRequestEstimate>,
     started_at: i64,
 }
@@ -372,9 +462,15 @@ impl ModelRequestObservationBuilder {
             purpose,
             model: model.into(),
             api_style,
+            tool_set: None,
             estimate,
             started_at,
         }
+    }
+
+    pub(crate) fn with_tool_set(mut self, tool_set: ModelRequestToolSetObservation) -> Self {
+        self.tool_set = Some(tool_set);
+        self
     }
 
     pub(crate) fn completed(
@@ -436,6 +532,7 @@ impl ModelRequestObservationBuilder {
             model: self.model,
             api_style: self.api_style,
             status,
+            tool_set: self.tool_set,
             estimate: self.estimate,
             actual_usage: usage
                 .map(|usage| ModelRequestActualUsage::from_usage(self.api_style, usage)),
@@ -497,5 +594,93 @@ mod tests {
             actual.normalization,
             ModelRequestUsageNormalization::AnthropicInputPlusCache
         );
+    }
+
+    fn tool_set(api_style: AgentApiStyle) -> ModelRequestToolSetObservation {
+        ModelRequestToolSetObservation::new(
+            api_style,
+            "stable-tool-set-v1:stable",
+            "dynamic-tool-set-v1:dynamic",
+            "effective-tool-set-v1:effective",
+            20,
+            2,
+        )
+    }
+
+    fn observation_builder(
+        purpose: ModelRequestPurpose,
+        api_style: AgentApiStyle,
+    ) -> ModelRequestObservationBuilder {
+        ModelRequestObservationBuilder::new(
+            "request-1",
+            "run-1",
+            Some("conversation-1".to_string()),
+            Some("assistant-1".to_string()),
+            (purpose == ModelRequestPurpose::ContextCompaction).then(|| "operation-1".to_string()),
+            1,
+            purpose,
+            "model-a",
+            api_style,
+            None,
+            1,
+        )
+    }
+
+    #[test]
+    fn records_provider_cache_topology_without_claiming_a_cache_hit() {
+        let open_ai = observation_builder(
+            ModelRequestPurpose::AgentLoop,
+            AgentApiStyle::OpenAiCompatible,
+        )
+        .with_tool_set(tool_set(AgentApiStyle::OpenAiCompatible))
+        .completed(None, Some("stop".to_string()), 2)
+        .unwrap();
+        assert_eq!(
+            open_ai.tool_set.as_ref().unwrap().provider_cache_topology,
+            ProviderCacheTopology::ProviderDefinedSeparateFields
+        );
+
+        let anthropic = observation_builder(
+            ModelRequestPurpose::AgentLoop,
+            AgentApiStyle::AnthropicCompatible,
+        )
+        .with_tool_set(tool_set(AgentApiStyle::AnthropicCompatible))
+        .completed(None, Some("end_turn".to_string()), 2)
+        .unwrap();
+        assert_eq!(
+            anthropic.tool_set.as_ref().unwrap().provider_cache_topology,
+            ProviderCacheTopology::ToolsBeforeSystemMessages
+        );
+
+        let serialized = serde_json::to_value(open_ai).unwrap();
+        assert_eq!(
+            serialized["toolSet"]["providerCacheTopology"],
+            "provider_defined_separate_fields"
+        );
+        assert!(serialized["toolSet"].get("cacheHit").is_none());
+    }
+
+    #[test]
+    fn rejects_tool_set_topology_that_disagrees_with_api_style() {
+        let mut mismatched = tool_set(AgentApiStyle::AnthropicCompatible);
+        mismatched.provider_cache_topology = ProviderCacheTopology::ProviderDefinedSeparateFields;
+        let result = observation_builder(
+            ModelRequestPurpose::AgentLoop,
+            AgentApiStyle::AnthropicCompatible,
+        )
+        .with_tool_set(mismatched)
+        .completed(None, Some("end_turn".to_string()), 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn context_compaction_cannot_carry_agent_tool_set_observation() {
+        let result = observation_builder(
+            ModelRequestPurpose::ContextCompaction,
+            AgentApiStyle::OpenAiCompatible,
+        )
+        .with_tool_set(tool_set(AgentApiStyle::OpenAiCompatible))
+        .completed(None, Some("stop".to_string()), 2);
+        assert!(result.is_err());
     }
 }

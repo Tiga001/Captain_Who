@@ -1223,6 +1223,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: call.id.clone(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,

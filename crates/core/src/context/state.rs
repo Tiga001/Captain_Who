@@ -10,11 +10,52 @@ use super::{
     ConversationTraceRenderer, MeasuredContextBaseline,
 };
 use crate::llm::LlmMessageRole;
+use crate::prompts::build_dynamic_tool_availability_context;
 use crate::protocol::{
-    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentError, AgentResult,
-    AgentSkillActivation,
+    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentError, AgentResult, AgentRunContext,
+    AgentSkillActivation, AgentToolDefinition,
 };
 use crate::{ConversationTurnTrace, ConversationTurnTraceTerminalStatus};
+
+#[derive(Debug, Clone)]
+pub struct AgentContextWindowToolProjection {
+    stable_revision: String,
+    dynamic_revision: String,
+    effective_revision: String,
+    dynamic_definitions: Vec<AgentToolDefinition>,
+}
+
+impl AgentContextWindowToolProjection {
+    pub(crate) fn new(
+        stable_revision: String,
+        dynamic_revision: String,
+        effective_revision: String,
+        dynamic_definitions: Vec<AgentToolDefinition>,
+    ) -> Self {
+        Self {
+            stable_revision,
+            dynamic_revision,
+            effective_revision,
+            dynamic_definitions,
+        }
+    }
+
+    pub fn stable_revision(&self) -> &str {
+        &self.stable_revision
+    }
+
+    pub fn dynamic_revision(&self) -> &str {
+        &self.dynamic_revision
+    }
+
+    pub fn effective_revision(&self) -> &str {
+        &self.effective_revision
+    }
+
+    pub fn dynamic_definitions(&self) -> &[AgentToolDefinition] {
+        &self.dynamic_definitions
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AgentContextBaseline {
@@ -232,6 +273,104 @@ impl AgentConversationContextState {
                 &mut preview,
                 self.context_window_tokens,
                 self.reserved_output_tokens,
+            )
+            .persistent_snapshot(&self.model, phase))
+    }
+
+    /// Measures request-specific runtime bindings in addition to Skill overlays without admitting
+    /// any of them into the durable conversation baseline.
+    pub fn snapshot_with_run_overlays(
+        &mut self,
+        phase: AgentContextWindowPhase,
+        run_context: Option<&AgentRunContext>,
+        discovery: Option<&crate::skills::AgentSkillDiscoverySnapshot>,
+        activation: Option<&AgentSkillActivation>,
+    ) -> AgentResult<AgentContextWindowSnapshot> {
+        let baseline = self.shared_baseline()?;
+        let mut preview = baseline.into_frame();
+        ContextAssembler::append_skill_overlays(&mut preview, discovery, activation)?;
+        ContextAssembler::append_runtime_context(&mut preview, run_context);
+        Ok(self
+            .detector
+            .inspect(
+                &mut preview,
+                self.context_window_tokens,
+                self.reserved_output_tokens,
+            )
+            .persistent_snapshot(&self.model, phase))
+    }
+
+    /// Measures the complete run-transient Tool projection used by production requests: both the
+    /// provider Tool schemas and the backend-authored availability message rendered from the same
+    /// stable/dynamic revisions.
+    pub fn snapshot_with_skill_overlays_and_tool_projection(
+        &mut self,
+        phase: AgentContextWindowPhase,
+        discovery: Option<&crate::skills::AgentSkillDiscoverySnapshot>,
+        activation: Option<&AgentSkillActivation>,
+        projection: &AgentContextWindowToolProjection,
+    ) -> AgentResult<AgentContextWindowSnapshot> {
+        let baseline = self.shared_baseline()?;
+        let mut preview = baseline.into_frame();
+        ContextAssembler::append_skill_overlays(&mut preview, discovery, activation)?;
+        if let Some(context) = build_dynamic_tool_availability_context(
+            projection.dynamic_definitions(),
+            projection.stable_revision(),
+            projection.dynamic_revision(),
+        ) {
+            preview.push(ContextItem::text(
+                LlmMessageRole::System,
+                context,
+                ContextSource::RuntimeExtension,
+                ContextScope::Run,
+                ContextRetention::RequestOnly,
+            ));
+        }
+        Ok(self
+            .detector
+            .inspect_with_dynamic_tools(
+                &mut preview,
+                self.context_window_tokens,
+                self.reserved_output_tokens,
+                projection.dynamic_definitions(),
+            )
+            .persistent_snapshot(&self.model, phase))
+    }
+
+    /// Measures the exact run-specific context and Tool suffix used by a production request while
+    /// preserving the cached configuration/durable prefix.
+    pub fn snapshot_with_run_overlays_and_tool_projection(
+        &mut self,
+        phase: AgentContextWindowPhase,
+        run_context: Option<&AgentRunContext>,
+        discovery: Option<&crate::skills::AgentSkillDiscoverySnapshot>,
+        activation: Option<&AgentSkillActivation>,
+        projection: &AgentContextWindowToolProjection,
+    ) -> AgentResult<AgentContextWindowSnapshot> {
+        let baseline = self.shared_baseline()?;
+        let mut preview = baseline.into_frame();
+        ContextAssembler::append_skill_overlays(&mut preview, discovery, activation)?;
+        ContextAssembler::append_runtime_context(&mut preview, run_context);
+        if let Some(context) = build_dynamic_tool_availability_context(
+            projection.dynamic_definitions(),
+            projection.stable_revision(),
+            projection.dynamic_revision(),
+        ) {
+            preview.push(ContextItem::text(
+                LlmMessageRole::System,
+                context,
+                ContextSource::RuntimeExtension,
+                ContextScope::Run,
+                ContextRetention::RequestOnly,
+            ));
+        }
+        Ok(self
+            .detector
+            .inspect_with_dynamic_tools(
+                &mut preview,
+                self.context_window_tokens,
+                self.reserved_output_tokens,
+                projection.dynamic_definitions(),
             )
             .persistent_snapshot(&self.model, phase))
     }

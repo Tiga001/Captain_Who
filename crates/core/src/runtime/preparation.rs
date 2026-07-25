@@ -1,4 +1,5 @@
 use super::*;
+use crate::tools::AgentToolExposure;
 
 pub(super) struct RuntimeCapabilityServices {
     pub(super) host_actions_available: bool,
@@ -57,12 +58,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         image_generation_execution,
     );
     let context = input.context.as_ref();
-    if context
-        .and_then(|context| context.conversation_id.as_deref())
-        .is_some_and(|conversation_id| !conversation_id.trim().is_empty())
-    {
-        tool_registry.register_conversation_history();
-    }
+    tool_registry.register_conversation_history();
     runtime_extensions.register_tools(&mut tool_registry)?;
 
     let command_permission = context
@@ -78,7 +74,6 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         .and_then(|workspace| workspace.root_path.as_deref())
         .filter(|root| !root.trim().is_empty())
         .map(PathBuf::from);
-    let command_safety = command_permissions.command_safety;
     let patch_auto_approve = context
         .map(|context| {
             file_write_approval_route(context.permissions) == FileWriteApprovalRoute::AutoApprove
@@ -86,27 +81,18 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         .unwrap_or(false)
         && host_actions_available;
 
-    let mut tool_definitions = tool_registry.definitions();
-    apply_permission_policy_to_tool_definitions(&mut tool_definitions, context, &tool_registry);
-    if command_auto_approve {
-        if let Some(definition) = tool_definitions
-            .iter_mut()
-            .find(|definition| definition.name == "run_command")
-        {
-            definition.requires_approval = false;
-            definition.approval_mode = match command_safety {
-                AgentCommandSafetyPolicy::Guarded => AgentToolApprovalMode::Dynamic,
-                AgentCommandSafetyPolicy::FullAccess => AgentToolApprovalMode::Never,
-            };
-            definition.description = match command_safety {
-                AgentCommandSafetyPolicy::Guarded => "Run a validated shell command through the host execution layer. Low-risk commands are automatically authorized; high-impact commands are routed to explicit user approval.".to_string(),
-                AgentCommandSafetyPolicy::FullAccess => "Run a validated shell command through the host execution layer. Commands are automatically authorized except operations that are always denied or unsupported.".to_string(),
-            };
-        }
-    }
+    let mut permitted_tool_definitions = tool_registry.definitions();
+    apply_permission_policy_to_tool_definitions(
+        &mut permitted_tool_definitions,
+        context,
+        &tool_registry,
+    );
     if patch_auto_approve {
-        for definition in tool_definitions.iter_mut().filter(|definition| {
-            tool_registry
+        for definition in permitted_tool_definitions.iter_mut().filter(|definition| {
+            !matches!(
+                tool_registry.exposure(&definition.name),
+                Some(AgentToolExposure::Stable)
+            ) && tool_registry
                 .permission_policy(&definition.name)
                 .uses_file_write_approval()
         }) {
@@ -117,11 +103,16 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
             );
         }
     }
+    let initial_tool_set = tool_registry.effective_tool_set(
+        permitted_tool_definitions.iter().cloned(),
+        &runtime_extensions.active_tool_capabilities()?,
+    )?;
 
     Ok(PreparedRuntimeCapabilities {
         runtime_extensions,
         tool_registry: Arc::new(tool_registry),
-        tool_definitions,
+        tool_definitions: permitted_tool_definitions,
+        initial_tool_set,
         command_auto_approve,
         command_permissions,
         command_workspace_root,
@@ -134,7 +125,7 @@ pub(super) fn assemble_context_preview(
     messages: Vec<AgentChatMessage>,
     skill_discovery: Option<crate::skills::AgentSkillDiscoverySnapshot>,
     skill_activation: Option<AgentSkillActivation>,
-    context: Option<&AgentRunContext>,
+    _context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<crate::context::AssembledContext> {
@@ -145,7 +136,7 @@ pub(super) fn assemble_context_preview(
         })
     {
         return ContextAssembler::assemble_with_timing(ContextAssemblyInput {
-            system_prompt: build_system_prompt(context, prompt_preferences, tool_definitions),
+            system_prompt: build_system_prompt(prompt_preferences, tool_definitions),
             compaction_summary,
             messages,
             skill_discovery,
@@ -157,7 +148,7 @@ pub(super) fn assemble_context_preview(
     Ok(crate::context::AssembledContext {
         frame: ContextFrame::new(vec![ContextItem::text(
             LlmMessageRole::System,
-            build_system_prompt(context, prompt_preferences, tool_definitions),
+            build_system_prompt(prompt_preferences, tool_definitions),
             ContextSource::BackendSystemPrompt,
             ContextScope::Run,
             ContextRetention::Retained,
@@ -184,7 +175,7 @@ pub(super) fn build_llm_request(
         max_tokens: sanitize_max_tokens(input.max_tokens),
         temperature: sanitize_temperature(input.temperature),
         stream: input.stream.unwrap_or(false),
-        tools: tool_definitions.to_vec(),
+        stable_tools: tool_definitions.to_vec(),
     };
     let configuration_revision = conversation_context_configuration_revision_from_parts(
         &input,
@@ -214,12 +205,19 @@ pub(super) fn build_llm_request(
             )
         }
         None => {
-            let attachment_context = build_attachment_context(&input.attachments)?;
+            let attachment_context = build_attachment_context(
+                &input.attachments,
+                input
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.attachment_library.as_ref()),
+            )?;
             let skill_activation = input.skill_activation;
             let skill_discovery = input.skill_discovery;
-            let mut context = match shared_context_baseline {
+            let context = match shared_context_baseline {
                 Some(baseline) => {
                     let mut context = baseline.into_frame();
+                    append_attachment_context(&mut context, attachment_context);
                     ContextAssembler::append_skill_overlays(
                         &mut context,
                         skill_discovery.as_ref(),
@@ -234,16 +232,12 @@ pub(super) fn build_llm_request(
                         discovery: skill_discovery,
                         activation: skill_activation,
                     },
-                    AttachmentContext {
-                        text: String::new(),
-                        images: Vec::new(),
-                    },
+                    attachment_context,
                     input.context.as_ref(),
                     input.prompt_preferences.as_ref(),
                     tool_definitions,
                 )?,
             };
-            append_attachment_context(&mut context, attachment_context);
             (
                 context,
                 0,
@@ -338,10 +332,13 @@ pub(super) fn apply_permission_policy_to_tool_definitions(
 
     if permissions.write == crate::protocol::AgentWritePermission::Denied {
         definitions.retain(|definition| {
-            tool_registry
+            matches!(
+                tool_registry.exposure(&definition.name),
+                Some(AgentToolExposure::Stable)
+            ) || (tool_registry
                 .permission_policy(&definition.name)
                 .is_available_when_write_denied()
-                && definition.name != "skills_run_script"
+                && definition.name != "skills_run_script")
         });
     }
 
@@ -358,60 +355,22 @@ pub(super) fn apply_permission_policy_to_tool_definitions(
     }
 
     if permissions.read == crate::protocol::AgentReadPermission::All {
-        for definition in definitions.iter_mut() {
+        for definition in definitions.iter_mut().filter(|definition| {
+            !matches!(
+                tool_registry.exposure(&definition.name),
+                Some(AgentToolExposure::Stable)
+            )
+        }) {
             match definition.name.as_str() {
-                "read_file" | "read_image" | "read_pdf" | "read_word" | "read_presentation"
-                | "read_spreadsheet" => {
+                "read_word" | "read_presentation" | "read_spreadsheet" => {
                     set_schema_property_description(
                         &mut definition.input_schema,
                         "path",
                         "Workspace-relative path, absolute local path, @home/@desktop/@documents/@downloads, or @attachments readPath.",
                     );
                 }
-                "search_code" => set_schema_property_description(
-                    &mut definition.input_schema,
-                    "path",
-                    "Optional workspace-relative or absolute directory/file path, or @home/@desktop/@documents/@downloads. Required when no workspace exists.",
-                ),
-                "search_files" => set_schema_property_description(
-                    &mut definition.input_schema,
-                    "path",
-                    "Optional workspace-relative or absolute directory, or @home/@desktop/@documents/@downloads. Required when no workspace exists.",
-                ),
-                "workspace_map" => set_schema_property_description(
-                    &mut definition.input_schema,
-                    "focusPath",
-                    "Optional workspace-relative or absolute directory, or @home/@desktop/@documents/@downloads. Required when no workspace exists.",
-                ),
                 _ => {}
             }
-        }
-    }
-
-    if permissions.write == crate::protocol::AgentWritePermission::All {
-        for definition in definitions.iter_mut().filter(|definition| {
-            definition.name == "apply_patch" || definition.name == "write_file"
-        }) {
-            if definition.name == "apply_patch" {
-                definition.description = "Create, update, or delete one text/code/config file through structured content or edits; Rust generates the unified diff. The target may be workspace-relative, absolute, or use @home/@desktop/@documents/@downloads. This works without a workspace when write access allows all locations. Do not use run_command to bypass structured edits of text, code, or configuration files; an activated Skill may separately define a saved-script workflow for generated artifacts. Applying the generated diff still requires host approval.".to_string();
-            } else {
-                definition.description.push_str(" Targets may be workspace-relative, absolute, or use @home/@desktop/@documents/@downloads when write access allows all locations.");
-            }
-            set_schema_property_description(
-                &mut definition.input_schema,
-                "filePath",
-                "Workspace-relative or absolute local file path, or @home/@desktop/@documents/@downloads.",
-            );
-        }
-        if let Some(definition) = definitions
-            .iter_mut()
-            .find(|definition| definition.name == "run_command")
-        {
-            set_schema_property_description(
-                &mut definition.input_schema,
-                "cwd",
-                "Workspace-relative or absolute working directory, or @home/@desktop/@documents/@downloads. Required when no workspace exists.",
-            );
         }
     }
 }
@@ -465,12 +424,12 @@ fn assemble_initial_context_with_skill_overlays(
     messages: Vec<AgentChatMessage>,
     skills: InitialSkillOverlays,
     attachment_context: AttachmentContext,
-    context: Option<&AgentRunContext>,
+    _context: Option<&AgentRunContext>,
     prompt_preferences: Option<&AgentPromptPreferences>,
     tool_definitions: &[AgentToolDefinition],
 ) -> AgentResult<ContextFrame> {
     ContextAssembler::assemble(ContextAssemblyInput {
-        system_prompt: build_system_prompt(context, prompt_preferences, tool_definitions),
+        system_prompt: build_system_prompt(prompt_preferences, tool_definitions),
         compaction_summary,
         messages,
         skill_discovery: skills.discovery,

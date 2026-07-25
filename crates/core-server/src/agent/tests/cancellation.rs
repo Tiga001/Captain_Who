@@ -64,6 +64,7 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: call.id.clone(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
@@ -167,6 +168,7 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: "pending-command".to_string(),
         conversation_trace_items: vec![
             ConversationTurnTraceItem::ToolCall {
@@ -334,6 +336,7 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: call.id.clone(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
@@ -463,6 +466,7 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: call.id.clone(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
@@ -647,6 +651,7 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         queued_tool_calls: Vec::new(),
         suppressed_narration: false,
         extension_snapshots: Vec::new(),
+        tool_set: crate::test_tool_set_checkpoint(),
         pending_tool_call_id: call.id.clone(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
