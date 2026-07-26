@@ -68,12 +68,25 @@ it('derives one navigation item per settled user turn and excludes the pending f
 
   expect(items).toEqual([
     {
+      favorited: false,
       id: 'user-1',
       userMessageId: 'user-1',
       userPreview: 'First request',
       assistantPreview: 'First answer'
     }
   ])
+})
+
+it('carries the user message favorite state into its navigation item', () => {
+  const favoriteMessage = userMessage('user-1', 'Keep this turn')
+  favoriteMessage.uiState = { favorited: true }
+
+  const items = getConversationTurnNavigationItems([
+    favoriteMessage,
+    assistantMessage('assistant-1', 'Saved', { runStatus: 'completed' })
+  ])
+
+  expect(items[0]?.favorited).toBe(true)
 })
 
 it('does not create a key for a final user message that has no assistant reply', () => {

@@ -7,7 +7,8 @@ import {
   Database,
   LoaderCircle,
   Pencil,
-  Split
+  Split,
+  Star
 } from 'lucide-react'
 import type { AgentProposedAction, AgentUsage } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
@@ -167,7 +168,9 @@ function UsageAction({ usage }: { usage: AgentUsage | undefined }) {
 function ChatMessageActions({
   canEdit = false,
   content,
+  favorited = false,
   onEdit,
+  onFavoriteChange,
   onContinueInNewTask,
   showTokenUsageDetails,
   timestamp,
@@ -175,7 +178,9 @@ function ChatMessageActions({
 }: {
   canEdit?: boolean
   content: string
+  favorited?: boolean
   onEdit?: () => void
+  onFavoriteChange?: (favorited: boolean) => void
   onContinueInNewTask?: () => void | Promise<void>
   showTokenUsageDetails: boolean
   timestamp: number | undefined
@@ -221,6 +226,21 @@ function ChatMessageActions({
           {copied ? t('chat.copied') : t('chat.copy')}
         </span>
       </button>
+      {onFavoriteChange && (
+        <button
+          aria-label={favorited ? t('chat.unfavoriteMessage') : t('chat.favoriteMessage')}
+          aria-pressed={favorited}
+          data-favorited={favorited ? 'true' : undefined}
+          onClick={() => onFavoriteChange(!favorited)}
+          title={favorited ? t('chat.unfavoriteMessage') : t('chat.favoriteMessage')}
+          type="button"
+        >
+          <Star aria-hidden="true" fill={favorited ? 'currentColor' : 'none'} />
+          <span className="chat-message__action-tooltip" role="tooltip">
+            {favorited ? t('chat.unfavorite') : t('chat.favorite')}
+          </span>
+        </button>
+      )}
       {canEdit && (
         <button
           aria-label={t('chat.editMessage')}
@@ -803,6 +823,19 @@ export function ChatMessageItem({
   const pinCopyAction =
     message.role === 'assistant' && isLastAssistantMessage && isAssistantActionsVisible
   const showBody = message.role === 'assistant' || Boolean(userVisibleContent.trim())
+  const isFavorited = message.role === 'user' && message.uiState?.favorited === true
+
+  const updateFavorite = (favorited: boolean) => {
+    if (message.role !== 'user' || !onUiStateChange) return
+
+    const nextUiState = { ...message.uiState }
+    if (favorited) {
+      nextUiState.favorited = true
+    } else {
+      delete nextUiState.favorited
+    }
+    onUiStateChange(message.id, Object.keys(nextUiState).length > 0 ? nextUiState : undefined)
+  }
 
   useEffect(() => {
     setIsEditing(false)
@@ -852,7 +885,9 @@ export function ChatMessageItem({
         <ChatMessageActions
           canEdit={canEdit}
           content={actionContent}
+          favorited={isFavorited}
           onEdit={() => setIsEditing(true)}
+          onFavoriteChange={message.role === 'user' && onUiStateChange ? updateFavorite : undefined}
           onContinueInNewTask={
             message.role === 'assistant' && onContinueInNewTask
               ? () => onContinueInNewTask(message.id)

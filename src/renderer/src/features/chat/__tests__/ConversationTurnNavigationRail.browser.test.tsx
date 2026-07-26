@@ -13,6 +13,7 @@ vi.mock('../../../config/FrontendConfigProvider', () => ({
 }))
 
 const items: ConversationTurnNavigationItem[] = Array.from({ length: 4 }, (_, index) => ({
+  favorited: index === 1,
   id: `user-${index + 1}`,
   userMessageId: `user-${index + 1}`,
   userPreview: `User ${index + 1}`,
@@ -156,6 +157,8 @@ it('darkens turns for visible user or assistant messages, previews, and jumps by
       name: 'chat.turnNavigationJumpToTurn 3'
     })
 
+    await expect.element(secondButton).toHaveAttribute('data-favorited', 'true')
+    expect(firstButton.element()).not.toHaveAttribute('data-favorited')
     await expect.element(firstButton).toHaveAttribute('aria-current', 'location')
     await expect.element(thirdButton).toHaveAttribute('aria-current', 'location')
     expect(secondButton.element()).not.toHaveAttribute('aria-current')

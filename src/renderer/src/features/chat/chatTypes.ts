@@ -132,6 +132,7 @@ export interface ChatAgentRunView {
 }
 
 export interface ChatMessageUiState {
+  favorited?: boolean
   timelineCollapsed?: boolean
 }
 

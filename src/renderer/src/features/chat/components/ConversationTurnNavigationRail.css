@@ -68,6 +68,13 @@
   opacity: 1;
 }
 
+.conversation-turn-navigation__row[data-favorited='true'] > span,
+.conversation-turn-navigation__row[data-favorited='true']:hover > span,
+.conversation-turn-navigation__row[data-favorited='true']:focus-visible > span {
+  background: var(--mc-color-text-accent);
+  opacity: 1;
+}
+
 .conversation-turn-navigation__row:focus-visible {
   border-radius: 3px;
   outline: 2px solid var(--mc-color-text-accent);

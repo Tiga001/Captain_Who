@@ -3,6 +3,7 @@ import type { ChatMessage } from './chatTypes'
 import { getAssistantFinalContent, getUserVisibleContent } from './components/chatMessageItemUtils'
 
 export interface ConversationTurnNavigationItem {
+  favorited: boolean
   id: string
   userMessageId: string
   userPreview: string
@@ -78,6 +79,7 @@ export function getConversationTurnNavigationItems(
     if (!finalAssistant || !isAssistantReplySettled(finalAssistant)) continue
 
     items.push({
+      favorited: userMessage.uiState?.favorited === true,
       id: userMessage.id,
       userMessageId: userMessage.id,
       userPreview: getUserPreview(userMessage),

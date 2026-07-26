@@ -497,6 +497,12 @@ button.chat-message-attachment:focus-visible {
   background: var(--mc-color-state-hover);
 }
 
+.chat-message__actions button[data-favorited='true'],
+.chat-message__actions button[data-favorited='true']:hover,
+.chat-message__actions button[data-favorited='true']:focus-visible {
+  color: var(--mc-color-text-accent);
+}
+
 .chat-message__actions button:focus-visible {
   outline: 2px solid var(--mc-color-focus-ring);
   outline-offset: 1px;
