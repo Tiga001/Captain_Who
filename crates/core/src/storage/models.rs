@@ -322,6 +322,23 @@ pub struct ChatConversationRecord {
     pub unread_at: Option<i64>,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationContinuationOriginRecord {
+    pub source_conversation_id: String,
+    pub source_message_id: String,
+    pub boundary_message_id: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatConversationViewRecord {
+    #[serde(flatten)]
+    pub conversation: ChatConversationRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_origin: Option<ConversationContinuationOriginRecord>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ForkConversationInput {

@@ -47,6 +47,55 @@
   overflow-y: hidden;
 }
 
+.conversation-continuation-divider {
+  display: grid;
+  grid-template-columns: minmax(24px, 1fr) auto minmax(24px, 1fr);
+  width: 100%;
+  align-items: center;
+  gap: 14px;
+}
+
+.conversation-continuation-divider > span {
+  height: 1px;
+  background: var(--mc-color-border-default);
+}
+
+.conversation-continuation-divider button {
+  display: inline-flex;
+  min-width: 0;
+  padding: 2px 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--mc-color-text-accent);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  font-weight: var(--mc-font-weight-semibold);
+}
+
+.conversation-continuation-divider button:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.conversation-continuation-divider button:not(:disabled):hover > span {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.conversation-continuation-divider button:focus-visible {
+  border-radius: var(--mc-radius-sm);
+  outline: 2px solid var(--mc-color-text-accent);
+  outline-offset: 4px;
+}
+
+.conversation-continuation-divider svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
 .chat-message {
   position: relative;
   display: grid;

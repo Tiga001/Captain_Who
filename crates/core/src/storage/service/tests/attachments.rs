@@ -1,4 +1,5 @@
 use super::*;
+use crate::storage::models::ConversationContinuationOriginRecord;
 
 #[test]
 fn input_attachments_are_persisted_and_rehydrated() {
@@ -101,16 +102,31 @@ fn forked_conversation_owns_independent_attachment_files_and_is_idempotent() {
     let forked = service.fork_conversation(input.clone()).unwrap();
     assert_eq!(forked.project_id.as_deref(), Some("project-1"));
     assert_eq!(forked.messages.len(), 2);
+    let forked_boundary_message_id = forked.messages[1].id.clone();
     let forked_attachment = forked.messages[0].attachments.as_slice();
     assert_eq!(forked_attachment.len(), 1);
     assert_ne!(forked_attachment[0].id, "attachment-source");
+    let forked_view = service.load_conversation_view(&forked.id).unwrap().unwrap();
+    assert_eq!(
+        forked_view.continuation_origin,
+        Some(ConversationContinuationOriginRecord {
+            source_conversation_id: "conversation-source".to_string(),
+            source_message_id: "message-assistant".to_string(),
+            boundary_message_id: forked_boundary_message_id,
+        })
+    );
 
     let retry = service.fork_conversation(input).unwrap();
     assert_eq!(retry.id, forked.id);
     assert_eq!(service.load_conversations().unwrap().len(), 2);
 
     service.delete_conversation("conversation-source").unwrap();
-    let retained = service.load_conversation(&forked.id).unwrap().unwrap();
+    let retained_view = service.load_conversation_view(&forked.id).unwrap().unwrap();
+    assert!(
+        retained_view.continuation_origin.is_some(),
+        "deleting the source keeps the broken lineage so the renderer can report it"
+    );
+    let retained = retained_view.conversation;
     let retained_attachment_id = retained.messages[0].attachments[0].id.clone();
     let retained_payload = service
         .load_input_attachments(&[retained_attachment_id])

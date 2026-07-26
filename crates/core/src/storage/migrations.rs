@@ -1774,8 +1774,10 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             target_conversation_id TEXT NOT NULL UNIQUE,
             source_conversation_id TEXT NOT NULL,
             source_message_id TEXT NOT NULL,
+            target_message_id TEXT,
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
-            FOREIGN KEY (target_conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            FOREIGN KEY (target_conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_message_id) REFERENCES messages(id) ON DELETE CASCADE
         );
 
         CREATE INDEX IF NOT EXISTS idx_models_position ON models(position);
@@ -1918,6 +1920,31 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     add_column_if_missing(connection, "messages", "agent_run_json", "TEXT")?;
     add_column_if_missing(connection, "messages", "ui_state_json", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "conversation_forks",
+        "target_message_id",
+        "TEXT REFERENCES messages(id) ON DELETE CASCADE",
+    )?;
+    // A fork preserves message order while replacing identities. Existing development rows can
+    // therefore recover the cloned boundary by matching the source cutoff's position. If the
+    // source task was already deleted, leave the legacy row unprojected rather than guessing.
+    connection.execute(
+        "
+        UPDATE conversation_forks
+        SET target_message_id = (
+            SELECT target_message.id
+            FROM messages AS source_message
+            INNER JOIN messages AS target_message
+                ON target_message.conversation_id = conversation_forks.target_conversation_id
+               AND target_message.position = source_message.position
+            WHERE source_message.id = conversation_forks.source_message_id
+              AND source_message.conversation_id = conversation_forks.source_conversation_id
+        )
+        WHERE target_message_id IS NULL
+        ",
+        [],
+    )?;
     add_column_if_missing(connection, "agent_usage_records", "started_at", "INTEGER")?;
     add_column_if_missing(connection, "agent_usage_records", "completed_at", "INTEGER")?;
     add_column_if_missing(connection, "agent_usage_records", "status", "TEXT")?;

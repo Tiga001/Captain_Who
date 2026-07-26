@@ -57,6 +57,28 @@ impl StorageService {
         Ok(conversations)
     }
 
+    /// Loads complete conversations for the renderer and decorates only forked tasks with their
+    /// backend-owned continuation boundary. Internal Agent callers continue to use the plain
+    /// conversation record and never consume presentation lineage.
+    pub fn load_conversation_views(&self) -> Result<Vec<ChatConversationViewRecord>, String> {
+        let conversations = self.load_conversations()?;
+        let connection = self.state.connection()?;
+        conversations
+            .into_iter()
+            .map(|conversation| {
+                let continuation_origin = conversation_fork_repository::get_continuation_origin(
+                    &connection,
+                    &conversation.id,
+                )
+                .map_err(storage_error)?;
+                Ok(ChatConversationViewRecord {
+                    conversation,
+                    continuation_origin,
+                })
+            })
+            .collect()
+    }
+
     pub fn load_conversation_metas(&self) -> Result<Vec<ChatConversationMetaRecord>, String> {
         let connection = self.state.connection()?;
         chat_repository::list_conversation_metas(&connection).map_err(storage_error)
@@ -74,6 +96,23 @@ impl StorageService {
             attach_message_guidance_timelines(&connection, std::slice::from_mut(conversation))?;
         }
         Ok(conversation)
+    }
+
+    pub fn load_conversation_view(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ChatConversationViewRecord>, String> {
+        let Some(conversation) = self.load_conversation(conversation_id)? else {
+            return Ok(None);
+        };
+        let connection = self.state.connection()?;
+        let continuation_origin =
+            conversation_fork_repository::get_continuation_origin(&connection, conversation_id)
+                .map_err(storage_error)?;
+        Ok(Some(ChatConversationViewRecord {
+            conversation,
+            continuation_origin,
+        }))
     }
 
     pub fn fork_conversation(
@@ -167,6 +206,21 @@ impl StorageService {
         self.attach_message_attachments(&connection, std::slice::from_mut(&mut conversation))?;
         attach_message_guidance_timelines(&connection, std::slice::from_mut(&mut conversation))?;
         Ok(conversation)
+    }
+
+    pub fn fork_conversation_view(
+        &self,
+        input: ForkConversationInput,
+    ) -> Result<ChatConversationViewRecord, String> {
+        let conversation = self.fork_conversation(input)?;
+        let connection = self.state.connection()?;
+        let continuation_origin =
+            conversation_fork_repository::get_continuation_origin(&connection, &conversation.id)
+                .map_err(storage_error)?;
+        Ok(ChatConversationViewRecord {
+            conversation,
+            continuation_origin,
+        })
     }
 
     pub fn search_chats(&self, input: &ChatSearchInput) -> Result<Vec<ChatSearchResult>, String> {

@@ -194,6 +194,12 @@ export interface ChatSubmitOptions {
   skills: SkillSelection[]
 }
 
+export interface ChatConversationContinuationOrigin {
+  sourceConversationId: string
+  sourceMessageId: string
+  boundaryMessageId: string
+}
+
 export interface ChatConversation {
   id: string
   projectId: string | null
@@ -207,4 +213,5 @@ export interface ChatConversation {
   pinnedAt?: number | null
   archivedAt?: number | null
   unreadAt?: number | null
+  continuationOrigin?: ChatConversationContinuationOrigin | null
 }

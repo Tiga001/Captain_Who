@@ -1,5 +1,14 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { X } from 'lucide-react'
+import {
+  Fragment,
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react'
+import { Split, X } from 'lucide-react'
 import type {
   AgentContextWindowSnapshot,
   AgentProposedAction,
@@ -13,6 +22,7 @@ import type {
   ChatAgentRunView,
   ChatComposerDraft,
   ChatConversation,
+  ChatConversationContinuationOrigin,
   ChatMessage,
   ChatQueuedMessage,
   ChatSubmitOptions
@@ -46,6 +56,7 @@ interface ChatConversationPageProps {
   onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
+  onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
   onScrollPositionChange?: (conversationId: string, scrollTop: number) => void
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onReviewLastTurn?: () => void
@@ -145,13 +156,14 @@ interface ChatMessageListProps {
   onCancelAgentAction?: (messageId: string, action: AgentProposedAction) => void
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
   onEditLastUserMessage?: (messageId: string, content: string) => void | Promise<void>
+  onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
   onMessageUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onReviewLastTurn?: () => void
   showTokenUsageDetails: boolean
 }
 
-const ChatMessageList = memo(function ChatMessageList({
+export const ChatMessageList = memo(function ChatMessageList({
   conversation,
   editSelectedModelAvailable,
   editSelectedModelSupportsImage,
@@ -161,36 +173,85 @@ const ChatMessageList = memo(function ChatMessageList({
   onCancelAgentAction,
   onContinueInNewTask,
   onEditLastUserMessage,
+  onOpenContinuationOrigin,
   onMessageUiStateChange,
   onRejectAgentAction,
   onReviewLastTurn,
   showTokenUsageDetails
 }: ChatMessageListProps) {
+  const continuationOrigin = conversation.continuationOrigin
+
   return (
     <>
       {conversation.messages.map((message) => (
-        <ChatMessageItem
-          isLastAssistantMessage={message.id === lastAssistantMessageId}
-          key={message.id}
-          message={message}
-          onApprove={onApproveAgentAction}
-          onCancel={onCancelAgentAction}
-          editSelectedModelAvailable={editSelectedModelAvailable}
-          editSelectedModelSupportsImage={editSelectedModelSupportsImage}
-          onEditSubmit={
-            message.id === editableLastUserMessageId ? onEditLastUserMessage : undefined
-          }
-          onContinueInNewTask={isAssistantReplyComplete(message) ? onContinueInNewTask : undefined}
-          onReject={onRejectAgentAction}
-          onReviewLastTurn={onReviewLastTurn}
-          onUiStateChange={onMessageUiStateChange}
-          projectId={conversation.projectId}
-          showTokenUsageDetails={showTokenUsageDetails}
-        />
+        <Fragment key={message.id}>
+          <ChatMessageItem
+            isLastAssistantMessage={message.id === lastAssistantMessageId}
+            message={message}
+            onApprove={onApproveAgentAction}
+            onCancel={onCancelAgentAction}
+            editSelectedModelAvailable={editSelectedModelAvailable}
+            editSelectedModelSupportsImage={editSelectedModelSupportsImage}
+            onEditSubmit={
+              message.id === editableLastUserMessageId ? onEditLastUserMessage : undefined
+            }
+            onContinueInNewTask={
+              isAssistantReplyComplete(message) ? onContinueInNewTask : undefined
+            }
+            onReject={onRejectAgentAction}
+            onReviewLastTurn={onReviewLastTurn}
+            onUiStateChange={onMessageUiStateChange}
+            projectId={conversation.projectId}
+            showTokenUsageDetails={showTokenUsageDetails}
+          />
+          {continuationOrigin?.boundaryMessageId === message.id && (
+            <ConversationContinuationDivider
+              onOpen={
+                onOpenContinuationOrigin
+                  ? () => onOpenContinuationOrigin(continuationOrigin)
+                  : undefined
+              }
+            />
+          )}
+        </Fragment>
       ))}
     </>
   )
 })
+
+export function ConversationContinuationDivider({
+  onOpen
+}: {
+  onOpen?: () => void | Promise<void>
+}) {
+  const { t } = useFrontendConfig()
+  const [isOpening, setIsOpening] = useState(false)
+  const isOpeningRef = useRef(false)
+
+  return (
+    <div className="conversation-continuation-divider" data-testid="continuation-divider">
+      <span aria-hidden="true" />
+      <button
+        aria-label={t('chat.continuationOrigin')}
+        disabled={!onOpen || isOpening}
+        onClick={() => {
+          if (!onOpen || isOpeningRef.current) return
+          isOpeningRef.current = true
+          setIsOpening(true)
+          void Promise.resolve(onOpen()).finally(() => {
+            isOpeningRef.current = false
+            setIsOpening(false)
+          })
+        }}
+        type="button"
+      >
+        <Split aria-hidden="true" />
+        <span>{t('chat.continuationOrigin')}</span>
+      </button>
+      <span aria-hidden="true" />
+    </div>
+  )
+}
 
 export function ChatConversationPage({
   contextWindowIndicatorEnabled = false,
@@ -208,6 +269,7 @@ export function ChatConversationPage({
   onGuideQueuedMessage,
   onEditLastUserMessage,
   onContinueInNewTask,
+  onOpenContinuationOrigin,
   onScrollPositionChange,
   onRejectAgentAction,
   onReviewLastTurn,
@@ -338,6 +400,7 @@ export function ChatConversationPage({
           onCancelAgentAction={onCancelAgentAction}
           onContinueInNewTask={onContinueInNewTask}
           onEditLastUserMessage={onEditLastUserMessage}
+          onOpenContinuationOrigin={onOpenContinuationOrigin}
           onMessageUiStateChange={onMessageUiStateChange}
           onRejectAgentAction={onRejectAgentAction}
           onReviewLastTurn={onReviewLastTurn}

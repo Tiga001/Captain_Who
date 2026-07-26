@@ -359,7 +359,14 @@ function mapConversationFromStorage(conversation: StorageChatConversationRecord)
     updatedAt: conversation.updatedAt,
     pinnedAt: conversation.pinnedAt ?? null,
     archivedAt: conversation.archivedAt ?? null,
-    unreadAt: conversation.unreadAt ?? null
+    unreadAt: conversation.unreadAt ?? null,
+    continuationOrigin: conversation.continuationOrigin
+      ? {
+          sourceConversationId: conversation.continuationOrigin.sourceConversationId,
+          sourceMessageId: conversation.continuationOrigin.sourceMessageId,
+          boundaryMessageId: conversation.continuationOrigin.boundaryMessageId
+        }
+      : null
   }
 }
 

@@ -142,7 +142,7 @@ pub(crate) fn handle_request(
             )
         }
         STORAGE_LOAD_CONVERSATIONS_METHOD => {
-            storage_response(request.id, storage.load_conversations())
+            storage_response(request.id, storage.load_conversation_views())
         }
         STORAGE_LOAD_CONVERSATION_METAS_METHOD => {
             storage_response(request.id, storage.load_conversation_metas())
@@ -154,7 +154,7 @@ pub(crate) fn handle_request(
             };
             storage_response(
                 request.id,
-                storage.load_conversation(&input.conversation_id),
+                storage.load_conversation_view(&input.conversation_id),
             )
         }
         STORAGE_FORK_CONVERSATION_METHOD => {
@@ -162,7 +162,7 @@ pub(crate) fn handle_request(
                 Ok(input) => input,
                 Err(message) => return response_error(Some(request.id), -32602, message),
             };
-            storage_response(request.id, storage.fork_conversation(input))
+            storage_response(request.id, storage.fork_conversation_view(input))
         }
         STORAGE_LOAD_ATTACHMENT_IMAGE_METHOD => {
             let input = match parse_params::<AttachmentIdRequest>(request.params) {

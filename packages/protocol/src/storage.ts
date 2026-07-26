@@ -88,8 +88,15 @@ export interface StorageChatConversationMetaRecord {
   unreadAt?: number | null
 }
 
+export interface StorageConversationContinuationOriginRecord {
+  sourceConversationId: string
+  sourceMessageId: string
+  boundaryMessageId: string
+}
+
 export interface StorageChatConversationRecord extends StorageChatConversationMetaRecord {
   messages: StorageChatMessageRecord[]
+  continuationOrigin?: StorageConversationContinuationOriginRecord | null
 }
 
 export interface StorageForkConversationRequest {

@@ -73,6 +73,7 @@ export default defineConfig({
           },
           include: [
             `${appTests}/**/*.browser.test.tsx`,
+            `${chatTests}/**/*.browser.test.tsx`,
             `${skillsTests}/**/*.browser.test.tsx`,
             `${gitReviewTests}/**/*.browser.test.tsx`,
             `${rightSidebarTests}/**/*.browser.test.tsx`,

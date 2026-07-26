@@ -11,6 +11,7 @@ import { render } from 'vitest-browser-react'
 import type {
   ChatComposerDraft,
   ChatConversation,
+  ChatConversationContinuationOrigin,
   ChatQueuedMessage,
   ChatSubmitOptions
 } from '../../features/chat/chatTypes'
@@ -171,6 +172,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     onContinueInNewTask,
     onEditLastUserMessage,
     onGuideQueuedMessage,
+    onOpenContinuationOrigin,
     onStopGenerating,
     onSubmitMessage,
     skillCatalogRefreshToken
@@ -181,6 +183,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
     onContinueInNewTask?: (messageId: string) => void
     onEditLastUserMessage: (messageId: string, content: string) => Promise<void>
     onGuideQueuedMessage?: (message: ChatQueuedMessage) => void
+    onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void
     onStopGenerating: () => void
     onSubmitMessage: (message: string, options: ChatSubmitOptions) => void
     skillCatalogRefreshToken?: number
@@ -193,6 +196,7 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       <output data-testid="last-assistant-status">
         {conversation.messages.at(-1)?.status ?? ''}
       </output>
+      <output data-testid="active-conversation-id">{conversation.id}</output>
       <output data-testid="activated-skill-ids">
         {conversation.messages
           .at(-1)
@@ -224,6 +228,14 @@ vi.mock('../../features/chat/ChatConversationPage', () => ({
       >
         continue-in-new-task
       </button>
+      {conversation.continuationOrigin && (
+        <button
+          type="button"
+          onClick={() => onOpenContinuationOrigin?.(conversation.continuationOrigin!)}
+        >
+          open-continuation-origin
+        </button>
+      )}
       <button
         type="button"
         onClick={() => {
@@ -1029,6 +1041,94 @@ describe('authoritative run cancellation and conversation forking', () => {
       content: ''
     })
     await expect.element(screen.getByTestId('last-assistant-status')).toHaveTextContent('sent')
+  })
+
+  it('opens an existing continuation source at the original reply', async () => {
+    const forked = {
+      ...storedConversation(),
+      continuationOrigin: {
+        sourceConversationId: 'conversation-source',
+        sourceMessageId: 'assistant-old',
+        boundaryMessageId: 'assistant-old'
+      }
+    }
+    const source = {
+      ...storedConversation(),
+      id: 'conversation-source',
+      title: 'Source'
+    }
+    testState.loadConversationMetas.mockResolvedValueOnce([
+      { ...forked, messages: [], messagesLoaded: false }
+    ])
+    testState.loadConversation
+      .mockReset()
+      .mockResolvedValueOnce(forked)
+      .mockResolvedValueOnce(source)
+
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'open-continuation-origin' }).click()
+
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('conversation-source')
+    expect(testState.loadConversation.mock.calls).toEqual([
+      ['conversation-a'],
+      ['conversation-source']
+    ])
+    expect(testState.showToast).not.toHaveBeenCalled()
+  })
+
+  it('keeps the current task when the continuation source is archived', async () => {
+    const forked = {
+      ...storedConversation(),
+      continuationOrigin: {
+        sourceConversationId: 'conversation-source',
+        sourceMessageId: 'assistant-old',
+        boundaryMessageId: 'assistant-old'
+      }
+    }
+    testState.loadConversationMetas.mockResolvedValueOnce([
+      { ...forked, messages: [], messagesLoaded: false }
+    ])
+    testState.loadConversation
+      .mockReset()
+      .mockResolvedValueOnce(forked)
+      .mockResolvedValueOnce({
+        ...storedConversation(),
+        id: 'conversation-source',
+        archivedAt: 10
+      })
+
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'open-continuation-origin' }).click()
+
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('conversation-a')
+    expect(testState.showToast).toHaveBeenCalledWith('chat.continuationOriginArchived')
+  })
+
+  it('keeps the current task when the continuation source was deleted', async () => {
+    const forked = {
+      ...storedConversation(),
+      continuationOrigin: {
+        sourceConversationId: 'conversation-source',
+        sourceMessageId: 'assistant-old',
+        boundaryMessageId: 'assistant-old'
+      }
+    }
+    testState.loadConversationMetas.mockResolvedValueOnce([
+      { ...forked, messages: [], messagesLoaded: false }
+    ])
+    testState.loadConversation.mockReset().mockResolvedValueOnce(forked).mockResolvedValueOnce(null)
+
+    const screen = await renderSelectedConversation()
+    await screen.getByRole('button', { name: 'open-continuation-origin' }).click()
+
+    await expect
+      .element(screen.getByTestId('active-conversation-id'))
+      .toHaveTextContent('conversation-a')
+    expect(testState.showToast).toHaveBeenCalledWith('chat.continuationOriginMissing')
   })
 
   it('shows the backend fork rejection instead of replacing it with a generic toast', async () => {

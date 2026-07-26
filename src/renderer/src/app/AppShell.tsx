@@ -36,6 +36,7 @@ import type { SettingsPageId } from '../features/settings/SettingsPage'
 import type {
   ChatComposerDraft,
   ChatConversation,
+  ChatConversationContinuationOrigin,
   ChatGuidanceTimelineItem,
   ChatPermissionMode,
   ChatMessage,
@@ -1774,11 +1775,11 @@ export function AppShell() {
   )
 
   const selectConversation = useCallback(
-    (conversationId: string, messageId?: string | null) => {
+    (conversationId: string, messageId?: string | null, loadedConversation?: ChatConversation) => {
       activeConversationIdRef.current = conversationId
-      const selectedConversation = conversationsRef.current.find(
-        (conversation) => conversation.id === conversationId
-      )
+      const selectedConversation =
+        loadedConversation ??
+        conversationsRef.current.find((conversation) => conversation.id === conversationId)
       const shouldRestoreRememberedPosition = !messageId && !selectedConversation?.unreadAt
 
       setScrollTargetMessageId(messageId ?? null)
@@ -1789,23 +1790,38 @@ export function AppShell() {
       )
 
       let conversationToSave: ChatConversation | null = null
+      let loadedConversationFound = false
       const nextConversations = conversationsRef.current.map((conversation) => {
-        if (conversation.id !== conversationId || !conversation.unreadAt) return conversation
+        if (conversation.id !== conversationId) return conversation
+        loadedConversationFound = true
+        const selected = loadedConversation ?? conversation
+        if (!selected.unreadAt) return selected
 
         conversationToSave = {
-          ...conversation,
+          ...selected,
           unreadAt: null
         }
         return conversationToSave
       })
+      if (loadedConversation && !loadedConversationFound) {
+        const selected = loadedConversation.unreadAt
+          ? { ...loadedConversation, unreadAt: null }
+          : loadedConversation
+        if (loadedConversation.unreadAt) conversationToSave = selected
+        nextConversations.unshift(selected)
+      }
 
-      if (conversationToSave) {
+      if (loadedConversation || conversationToSave) {
         setConversationsWithRef(nextConversations)
+      }
+      if (conversationToSave) {
         void saveConversationMeta(conversationToSave)
       }
 
       setActiveConversationId(conversationId)
-      void hydrateConversation(conversationId)
+      if (!loadedConversation) {
+        void hydrateConversation(conversationId)
+      }
     },
     [hydrateConversation, setConversationsWithRef]
   )
@@ -1853,6 +1869,27 @@ export function AppShell() {
       }
     },
     [drafts, setConversationsWithRef, setDraftsWithRef, showToast, t]
+  )
+
+  const openContinuationOrigin = useCallback(
+    async (origin: ChatConversationContinuationOrigin) => {
+      try {
+        const sourceConversation = await loadConversation(origin.sourceConversationId)
+        if (!sourceConversation) {
+          showToast(t('chat.continuationOriginMissing'))
+          return
+        }
+        if (sourceConversation.archivedAt !== null && sourceConversation.archivedAt !== undefined) {
+          showToast(t('chat.continuationOriginArchived'))
+          return
+        }
+        selectConversation(origin.sourceConversationId, origin.sourceMessageId, sourceConversation)
+      } catch (error) {
+        console.error('Failed to open continuation origin', error)
+        showToast(t('chat.continuationOriginOpenFailed'))
+      }
+    },
+    [selectConversation, showToast, t]
   )
 
   const rememberConversationScrollPosition = useCallback(
@@ -2482,6 +2519,7 @@ export function AppShell() {
                 onContinueInNewTask={(messageId) =>
                   continueInNewTask(activeConversation.id, messageId)
                 }
+                onOpenContinuationOrigin={openContinuationOrigin}
                 onMessageUiStateChange={(messageId, uiState: ChatMessageUiState | undefined) => {
                   const currentMessage = activeConversation.messages.find(
                     (message) => message.id === messageId

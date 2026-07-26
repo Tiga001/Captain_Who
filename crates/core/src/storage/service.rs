@@ -8,9 +8,10 @@ use crate::storage::models::{
     AgentFileDraftRecord, AgentPendingActionRecord, AgentPromptPreferencesRecord,
     AgentRunGuidanceRecord, AgentUnsettledFileEffect, AgentUsageRecordInsert,
     AttachmentImageRecord, AttachmentRecord, ChatConversationMetaRecord, ChatConversationRecord,
-    ChatMessageAttachmentRecord, ChatMessageRecord, ChatMessageStateRecord, ChatSearchInput,
-    ChatSearchResult, ComposerDraftRecord, ForkConversationInput, ImageGenerationProfileRecord,
-    ModelSettingsRecord, ProjectRecord, UiPreferencesRecord,
+    ChatConversationViewRecord, ChatMessageAttachmentRecord, ChatMessageRecord,
+    ChatMessageStateRecord, ChatSearchInput, ChatSearchResult, ComposerDraftRecord,
+    ForkConversationInput, ImageGenerationProfileRecord, ModelSettingsRecord, ProjectRecord,
+    UiPreferencesRecord,
 };
 use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,

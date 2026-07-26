@@ -4,7 +4,7 @@ use crate::context::{
 };
 use crate::storage::models::{
     AgentFileDraftRecord, AgentRunGuidanceRecord, AttachmentRecord, ChatConversationRecord,
-    ChatMessageRecord, ForkConversationInput,
+    ChatMessageRecord, ConversationContinuationOriginRecord, ForkConversationInput,
 };
 use crate::storage::{
     attachment_repository, chat_repository, context_compaction_repository,
@@ -75,6 +75,28 @@ pub(crate) fn find_existing_fork(
                     target_conversation_id: row.get(0)?,
                     source_conversation_id: row.get(1)?,
                     source_message_id: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+}
+
+pub(crate) fn get_continuation_origin(
+    connection: &Connection,
+    target_conversation_id: &str,
+) -> rusqlite::Result<Option<ConversationContinuationOriginRecord>> {
+    connection
+        .query_row(
+            "SELECT source_conversation_id, source_message_id, target_message_id
+             FROM conversation_forks
+             WHERE target_conversation_id = ?1
+               AND target_message_id IS NOT NULL",
+            [target_conversation_id],
+            |row| {
+                Ok(ConversationContinuationOriginRecord {
+                    source_conversation_id: row.get(0)?,
+                    source_message_id: row.get(1)?,
+                    boundary_message_id: row.get(2)?,
                 })
             },
         )
@@ -332,6 +354,11 @@ pub(crate) fn commit_fork_plan(
     connection: &mut Connection,
     plan: &ConversationForkPlan,
 ) -> Result<(), String> {
+    let target_message_id = mapped_id(
+        &plan.message_id_map,
+        &plan.source_message_id,
+        "新任务接续边界消息",
+    )?;
     let transaction = connection.transaction().map_err(database_error)?;
     insert_conversation(&transaction, &plan.target)?;
     for trace in &plan.traces {
@@ -381,13 +408,14 @@ pub(crate) fn commit_fork_plan(
         .execute(
             "INSERT INTO conversation_forks (
                 request_id, target_conversation_id, source_conversation_id,
-                source_message_id, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                source_message_id, target_message_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 &plan.request_id,
                 &plan.target.id,
                 &plan.source_conversation_id,
                 &plan.source_message_id,
+                &target_message_id,
                 plan.target.created_at,
             ],
         )
