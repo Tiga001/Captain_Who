@@ -15,10 +15,20 @@ pub const CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS: u64 = 256;
 ///
 /// This value is never accepted from model-authored tool arguments. Today production writes use
 /// `Model`; `User` reserves the same validated backend boundary for a future explicit UI action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ConversationGoalMutationActor {
     Model,
     User,
+}
+
+impl ConversationGoalMutationActor {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::User => "user",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -57,6 +67,60 @@ pub struct ConversationGoal {
     pub stopped_reason: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+pub const CONVERSATION_GOAL_REVISION_SCHEMA_VERSION: u32 = 1;
+
+/// One immutable semantic change in the durable Goal journal.
+///
+/// `Initial` is the only full snapshot. Later records contain only the values required to apply
+/// and verify one semantic change. The folded `ConversationGoal` remains the only projection sent
+/// to the model.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ConversationGoalRevisionEvent {
+    Initial {
+        goal: ConversationGoal,
+    },
+    ObjectiveChanged {
+        previous_objective: String,
+        objective: String,
+        updated_at: i64,
+    },
+    StatusChanged {
+        previous_status: ConversationGoalStatus,
+        status: ConversationGoalStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_stopped_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stopped_reason: Option<String>,
+        updated_at: i64,
+    },
+}
+
+impl ConversationGoalRevisionEvent {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Initial { .. } => "initial",
+            Self::ObjectiveChanged { .. } => "objective_changed",
+            Self::StatusChanged { .. } => "status_changed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationGoalRevision {
+    pub schema_version: u32,
+    pub conversation_id: String,
+    pub goal_id: String,
+    pub sequence: u64,
+    /// Legacy rows imported from the pre-journal current-state table have no attributable actor.
+    /// All new semantic writes must identify either the model or the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<ConversationGoalMutationActor>,
+    pub event: ConversationGoalRevisionEvent,
+    pub created_at: i64,
 }
 
 impl ConversationGoal {
@@ -121,6 +185,101 @@ impl ConversationGoal {
         }
         Ok(rendered)
     }
+}
+
+pub fn fold_conversation_goal_revisions(
+    revisions: &[ConversationGoalRevision],
+) -> AgentResult<ConversationGoal> {
+    let Some(first) = revisions.first() else {
+        return Err(AgentError::new("Goal revision journal 为空。"));
+    };
+    let ConversationGoalRevisionEvent::Initial { goal } = &first.event else {
+        return Err(AgentError::new(
+            "Goal revision journal 必须从完整 initial snapshot 开始。",
+        ));
+    };
+    if first.sequence != 1
+        || first.schema_version != CONVERSATION_GOAL_REVISION_SCHEMA_VERSION
+        || first.conversation_id != goal.conversation_id
+        || first.goal_id != goal.goal_id
+        || first.created_at != goal.created_at
+    {
+        return Err(AgentError::new("Goal initial revision 身份或版本无效。"));
+    }
+    goal.validate()?;
+    let mut folded = goal.clone();
+    let mut expected_sequence = 2_u64;
+    for revision in &revisions[1..] {
+        if revision.schema_version != CONVERSATION_GOAL_REVISION_SCHEMA_VERSION
+            || revision.conversation_id != folded.conversation_id
+            || revision.goal_id != folded.goal_id
+            || revision.sequence != expected_sequence
+            || revision.actor.is_none()
+        {
+            return Err(AgentError::new(
+                "Goal revision journal 的身份、顺序、版本或 actor 无效。",
+            ));
+        }
+        match &revision.event {
+            ConversationGoalRevisionEvent::Initial { .. } => {
+                return Err(AgentError::new(
+                    "一个 Goal revision journal 只能包含一个 initial snapshot。",
+                ));
+            }
+            ConversationGoalRevisionEvent::ObjectiveChanged {
+                previous_objective,
+                objective,
+                updated_at,
+            } => {
+                if !folded.status.is_visible_in_context()
+                    || previous_objective != &folded.objective
+                    || *updated_at < folded.updated_at
+                    || revision.created_at != *updated_at
+                {
+                    return Err(AgentError::new(
+                        "Goal objective diff 的前置状态或时间无效。",
+                    ));
+                }
+                validate_objective(objective)?;
+                folded.objective = objective.clone();
+                folded.updated_at = *updated_at;
+            }
+            ConversationGoalRevisionEvent::StatusChanged {
+                previous_status,
+                status,
+                previous_stopped_reason,
+                stopped_reason,
+                updated_at,
+            } => {
+                let allowed_transition = matches!(
+                    (folded.status, *status),
+                    (
+                        ConversationGoalStatus::Active,
+                        ConversationGoalStatus::Blocked
+                            | ConversationGoalStatus::Completed
+                            | ConversationGoalStatus::Cancelled
+                    ) | (
+                        ConversationGoalStatus::Blocked,
+                        ConversationGoalStatus::Active | ConversationGoalStatus::Cancelled
+                    )
+                );
+                if !allowed_transition
+                    || *previous_status != folded.status
+                    || previous_stopped_reason != &folded.stopped_reason
+                    || *updated_at < folded.updated_at
+                    || revision.created_at != *updated_at
+                {
+                    return Err(AgentError::new("Goal status diff 的前置状态或时间无效。"));
+                }
+                folded.status = *status;
+                folded.stopped_reason = stopped_reason.clone();
+                folded.updated_at = *updated_at;
+            }
+        }
+        folded.validate()?;
+        expected_sequence = expected_sequence.saturating_add(1);
+    }
+    Ok(folded)
 }
 
 pub(crate) fn validate_objective(objective: &str) -> AgentResult<()> {

@@ -22,7 +22,7 @@ impl StorageService {
     /// Callers must supply a trusted host-side actor; lifecycle code must never call this method.
     pub fn create_conversation_goal(
         &self,
-        _actor: ConversationGoalMutationActor,
+        actor: ConversationGoalMutationActor,
         conversation_id: &str,
         objective: &str,
         created_at: i64,
@@ -31,6 +31,7 @@ impl StorageService {
         let connection = self.state.connection()?;
         let goal = conversation_goal_repository::create_goal(
             &connection,
+            actor,
             conversation_id,
             objective.trim(),
             created_at,
@@ -46,7 +47,7 @@ impl StorageService {
     /// Changes Goal status only through an explicit model or user action.
     pub fn update_conversation_goal_status(
         &self,
-        _actor: ConversationGoalMutationActor,
+        actor: ConversationGoalMutationActor,
         conversation_id: &str,
         status: ConversationGoalStatus,
         stopped_reason: Option<&str>,
@@ -55,6 +56,7 @@ impl StorageService {
         let connection = self.state.connection()?;
         let goal = conversation_goal_repository::update_goal_status(
             &connection,
+            actor,
             conversation_id,
             status,
             stopped_reason,
@@ -64,5 +66,48 @@ impl StorageService {
         .ok_or_else(|| "当前对话没有允许执行该状态转换的 Goal。".to_string())?;
         goal.validate().map_err(|error| error.to_string())?;
         Ok(goal)
+    }
+
+    /// Reserved for an explicit model or user edit. The renderer RPC is intentionally not exposed
+    /// yet, but it will share this journaled write path when added.
+    pub fn update_conversation_goal_objective(
+        &self,
+        actor: ConversationGoalMutationActor,
+        conversation_id: &str,
+        objective: &str,
+        updated_at: i64,
+    ) -> Result<ConversationGoal, String> {
+        crate::goal::validate_objective(objective).map_err(|error| error.to_string())?;
+        let connection = self.state.connection()?;
+        let goal = conversation_goal_repository::update_goal_objective(
+            &connection,
+            actor,
+            conversation_id,
+            objective.trim(),
+            updated_at,
+        )
+        .map_err(storage_error)?
+        .ok_or_else(|| "当前对话没有允许编辑的 active 或 blocked Goal。".to_string())?;
+        goal.validate().map_err(|error| error.to_string())?;
+        Ok(goal)
+    }
+
+    pub fn load_conversation_goal_revisions(
+        &self,
+        conversation_id: &str,
+        goal_id: &str,
+    ) -> Result<Vec<ConversationGoalRevision>, String> {
+        let connection = self.state.connection()?;
+        let revisions = conversation_goal_repository::list_goal_revisions(
+            &connection,
+            conversation_id,
+            goal_id,
+        )
+        .map_err(storage_error)?;
+        if !revisions.is_empty() {
+            crate::fold_conversation_goal_revisions(&revisions)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(revisions)
     }
 }

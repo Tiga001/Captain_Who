@@ -32,8 +32,9 @@ use crate::{
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     ContextCompactionAuditBundle, ContextCompactionPrefix, ContextCompactionReceipt,
     ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
-    ConversationGoal, ConversationGoalMutationActor, ConversationGoalStatus, ConversationTurnTrace,
-    ConversationTurnTraceItem, ModelRequestObservation, WorldStateRecord,
+    ConversationGoal, ConversationGoalMutationActor, ConversationGoalRevision,
+    ConversationGoalStatus, ConversationTurnTrace, ConversationTurnTraceItem,
+    ModelRequestObservation, WorldStateRecord,
 };
 use base64::Engine;
 use rusqlite::OptionalExtension;

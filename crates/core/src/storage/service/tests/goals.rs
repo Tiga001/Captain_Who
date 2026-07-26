@@ -1,5 +1,8 @@
 use super::*;
-use crate::{ConversationGoalMutationActor, ConversationGoalStatus};
+use crate::{
+    fold_conversation_goal_revisions, ConversationGoalMutationActor, ConversationGoalRevisionEvent,
+    ConversationGoalStatus,
+};
 
 #[test]
 fn ordinary_conversation_has_no_goal_until_explicit_creation() {
@@ -86,6 +89,84 @@ fn blocked_goal_changes_only_through_an_explicit_actor() {
 }
 
 #[test]
+fn goal_journal_stores_one_full_snapshot_then_actor_attributed_semantic_diffs() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_conversation(conversation("conversation-goal", None, "message-goal"))
+        .unwrap();
+    let created = service
+        .create_conversation_goal(
+            ConversationGoalMutationActor::Model,
+            "conversation-goal",
+            "Finish the migration.",
+            2,
+        )
+        .unwrap();
+    let edited = service
+        .update_conversation_goal_objective(
+            ConversationGoalMutationActor::User,
+            "conversation-goal",
+            "Finish the migration and publish the report.",
+            3,
+        )
+        .unwrap();
+    let blocked = service
+        .update_conversation_goal_status(
+            ConversationGoalMutationActor::Model,
+            "conversation-goal",
+            ConversationGoalStatus::Blocked,
+            Some("Waiting for credentials."),
+            4,
+        )
+        .unwrap();
+
+    let revisions = service
+        .load_conversation_goal_revisions("conversation-goal", &created.goal_id)
+        .unwrap();
+    assert_eq!(revisions.len(), 3);
+    assert_eq!(revisions[0].sequence, 1);
+    assert_eq!(
+        revisions[0].actor,
+        Some(ConversationGoalMutationActor::Model)
+    );
+    assert!(matches!(
+        &revisions[0].event,
+        ConversationGoalRevisionEvent::Initial { goal } if goal == &created
+    ));
+    assert_eq!(
+        revisions[1].actor,
+        Some(ConversationGoalMutationActor::User)
+    );
+    assert!(matches!(
+        &revisions[1].event,
+        ConversationGoalRevisionEvent::ObjectiveChanged {
+            previous_objective,
+            objective,
+            ..
+        } if previous_objective == "Finish the migration."
+            && objective == "Finish the migration and publish the report."
+    ));
+    assert_eq!(
+        revisions[2].actor,
+        Some(ConversationGoalMutationActor::Model)
+    );
+    assert!(matches!(
+        &revisions[2].event,
+        ConversationGoalRevisionEvent::StatusChanged {
+            previous_status: ConversationGoalStatus::Active,
+            status: ConversationGoalStatus::Blocked,
+            ..
+        }
+    ));
+    assert_eq!(
+        fold_conversation_goal_revisions(&revisions).unwrap(),
+        blocked
+    );
+    assert_eq!(edited.objective, blocked.objective);
+}
+
+#[test]
 fn restart_preserves_goal_status_without_reinterpreting_it() {
     let fixture = StorageFixture::new();
     let database_path = fixture.root.join("storage.sqlite");
@@ -130,13 +211,74 @@ fn restart_preserves_goal_status_without_reinterpreting_it() {
 }
 
 #[test]
+fn a_new_goal_replaces_only_the_current_projection_and_keeps_prior_revisions() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_conversation(conversation("conversation-goal", None, "message-goal"))
+        .unwrap();
+    let first = service
+        .create_conversation_goal(
+            ConversationGoalMutationActor::Model,
+            "conversation-goal",
+            "Finish the first objective.",
+            2,
+        )
+        .unwrap();
+    service
+        .update_conversation_goal_status(
+            ConversationGoalMutationActor::Model,
+            "conversation-goal",
+            ConversationGoalStatus::Completed,
+            None,
+            3,
+        )
+        .unwrap();
+    let second = service
+        .create_conversation_goal(
+            ConversationGoalMutationActor::User,
+            "conversation-goal",
+            "Start the second objective.",
+            4,
+        )
+        .unwrap();
+
+    assert_ne!(first.goal_id, second.goal_id);
+    assert_eq!(
+        service
+            .load_conversation_goal("conversation-goal")
+            .unwrap()
+            .unwrap(),
+        second
+    );
+    let first_revisions = service
+        .load_conversation_goal_revisions("conversation-goal", &first.goal_id)
+        .unwrap();
+    assert_eq!(first_revisions.len(), 2);
+    assert_eq!(
+        fold_conversation_goal_revisions(&first_revisions)
+            .unwrap()
+            .status,
+        ConversationGoalStatus::Completed
+    );
+    let second_revisions = service
+        .load_conversation_goal_revisions("conversation-goal", &second.goal_id)
+        .unwrap();
+    assert_eq!(second_revisions.len(), 1);
+    assert_eq!(
+        second_revisions[0].actor,
+        Some(ConversationGoalMutationActor::User)
+    );
+}
+
+#[test]
 fn completed_goal_leaves_model_context_and_is_deleted_with_conversation() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     service
         .save_conversation(conversation("conversation-goal", None, "message-goal"))
         .unwrap();
-    service
+    let created = service
         .create_conversation_goal(
             ConversationGoalMutationActor::User,
             "conversation-goal",
@@ -144,6 +286,7 @@ fn completed_goal_leaves_model_context_and_is_deleted_with_conversation() {
             2,
         )
         .unwrap();
+    let goal_id = created.goal_id;
     service
         .update_conversation_goal_status(
             ConversationGoalMutationActor::Model,
@@ -172,6 +315,10 @@ fn completed_goal_leaves_model_context_and_is_deleted_with_conversation() {
         .load_conversation_goal("conversation-goal")
         .unwrap()
         .is_none());
+    assert!(service
+        .load_conversation_goal_revisions("conversation-goal", &goal_id)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

@@ -53,8 +53,9 @@ pub struct AgentChatInput {
     pub assistant_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compaction_summary: Option<ContextCompactionSummary>,
-    /// Optional user-owned long-running objective. Ordinary conversations have no goal. The goal
-    /// is hidden backend context and never causes automatic continuation.
+    /// Optional latest folded projection of the user-owned long-running objective. The append-only
+    /// revision journal never crosses this context boundary. Ordinary conversations have no goal,
+    /// and a goal never causes automatic continuation by itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<crate::ConversationGoal>,
     /// Backend-owned, provider-neutral world-state journal for the active conversation epoch.

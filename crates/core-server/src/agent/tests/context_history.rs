@@ -81,6 +81,14 @@ fn ordinary_turn_preserves_a_blocked_goal_without_implicit_resume() {
             3,
         )
         .unwrap();
+    storage
+        .update_conversation_goal_objective(
+            mycopilot_core::ConversationGoalMutationActor::User,
+            "conversation-explicit-goal",
+            "Track the revised objective across user turns.",
+            4,
+        )
+        .unwrap();
 
     let second = prepare_conversation_turn(
         &storage,
@@ -106,7 +114,10 @@ fn ordinary_turn_preserves_a_blocked_goal_without_implicit_resume() {
     .unwrap();
 
     let goal = second.agent_input.goal.unwrap();
-    assert_eq!(goal.objective, "Track this objective across user turns.");
+    assert_eq!(
+        goal.objective,
+        "Track the revised objective across user turns."
+    );
     assert_eq!(goal.status, mycopilot_core::ConversationGoalStatus::Blocked);
     assert_eq!(
         goal.stopped_reason.as_deref(),

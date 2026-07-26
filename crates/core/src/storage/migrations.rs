@@ -172,6 +172,70 @@ fn ensure_conversation_goal_schema(connection: &Connection) -> rusqlite::Result<
                 'goal source must be a user message in the same conversation'
             );
         END;
+
+        CREATE TABLE IF NOT EXISTS conversation_goal_revisions (
+            conversation_id TEXT NOT NULL,
+            goal_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence > 0),
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            actor TEXT CHECK (actor IS NULL OR actor IN ('model', 'user')),
+            event_kind TEXT NOT NULL CHECK (
+                event_kind IN ('initial', 'objective_changed', 'status_changed')
+            ),
+            event_json TEXT NOT NULL CHECK (json_valid(event_json)),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            PRIMARY KEY (goal_id, sequence),
+            CHECK (
+                (sequence = 1 AND event_kind = 'initial')
+                OR (sequence > 1 AND event_kind != 'initial' AND actor IS NOT NULL)
+            ),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS conversation_goal_revisions_conversation
+        ON conversation_goal_revisions(conversation_id, created_at, goal_id, sequence);
+
+        CREATE TRIGGER IF NOT EXISTS prevent_conversation_goal_revision_update
+        BEFORE UPDATE ON conversation_goal_revisions
+        BEGIN
+            SELECT RAISE(ABORT, 'goal revisions are append-only');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS prevent_conversation_goal_revision_delete
+        BEFORE DELETE ON conversation_goal_revisions
+        WHEN EXISTS (
+            SELECT 1 FROM conversations WHERE id = OLD.conversation_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'goal revisions are append-only');
+        END;
+
+        INSERT OR IGNORE INTO conversation_goal_revisions (
+            conversation_id, goal_id, sequence, schema_version, actor,
+            event_kind, event_json, created_at
+        )
+        SELECT
+            goal.conversation_id,
+            goal.goal_id,
+            1,
+            1,
+            NULL,
+            'initial',
+            json_object(
+                'type', 'initial',
+                'goal', json_object(
+                    'goalId', goal.goal_id,
+                    'conversationId', goal.conversation_id,
+                    'objective', goal.objective,
+                    'sourceMessageId', goal.source_message_id,
+                    'status', goal.status,
+                    'stoppedReason', goal.stopped_reason,
+                    'createdAt', goal.created_at,
+                    'updatedAt', goal.updated_at
+                )
+            ),
+            goal.created_at
+        FROM conversation_goals AS goal;
         ",
     )
 }
@@ -2456,6 +2520,93 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backfills_pre_journal_goals_as_unattributed_initial_snapshots() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversations (
+                    id, project_id, model_id, title, created_at, updated_at,
+                    pinned_at, archived_at, unread_at
+                 ) VALUES ('conversation-goal', NULL, NULL, 'goal', 1, 1, NULL, NULL, NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages (
+                    id, conversation_id, role, content, status,
+                    agent_run_json, ui_state_json, created_at, position
+                 ) VALUES (
+                    'message-goal', 'conversation-goal', 'user', 'track it', 'sent',
+                    NULL, NULL, 1, 0
+                 )",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO conversation_goals (
+                    conversation_id, goal_id, objective, source_message_id, status,
+                    stopped_reason, created_at, updated_at
+                 ) VALUES (
+                    'conversation-goal', 'goal-legacy', 'Finish the migration.',
+                    'message-goal', 'blocked', 'Waiting for input.', 2, 3
+                 )",
+                [],
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        let (actor, event_kind, event_json) = connection
+            .query_row(
+                "SELECT actor, event_kind, event_json
+                 FROM conversation_goal_revisions
+                 WHERE goal_id = 'goal-legacy' AND sequence = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(actor, None);
+        assert_eq!(event_kind, "initial");
+        let event: crate::ConversationGoalRevisionEvent =
+            serde_json::from_str(&event_json).unwrap();
+        assert!(matches!(
+            event,
+            crate::ConversationGoalRevisionEvent::Initial { goal }
+                if goal.goal_id == "goal-legacy"
+                    && goal.status == crate::ConversationGoalStatus::Blocked
+                    && goal.stopped_reason.as_deref() == Some("Waiting for input.")
+        ));
+        assert!(connection
+            .execute(
+                "UPDATE conversation_goal_revisions
+                 SET created_at = 4
+                 WHERE goal_id = 'goal-legacy'",
+                [],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("append-only"));
+        assert!(connection
+            .execute(
+                "DELETE FROM conversation_goal_revisions
+                 WHERE goal_id = 'goal-legacy'",
+                [],
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("append-only"));
+    }
 
     #[test]
     fn repairs_usage_rows_to_match_live_messages_and_zero_default() {
