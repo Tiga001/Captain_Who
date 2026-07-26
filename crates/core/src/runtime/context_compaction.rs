@@ -30,6 +30,7 @@ pub struct AgentContextCompactionPrepareRequest {
     /// in the uncommitted overlay and cannot be promoted by a compaction rebuild.
     pub visible_trace_item_count: usize,
     pub source_input_tokens: u64,
+    pub uncovered_tail_input_tokens: u64,
     pub target_replacement_tokens: u64,
 }
 
@@ -50,6 +51,7 @@ pub struct AgentContextCompactionGenerationRequest {
     pub prefix: Arc<ContextCompactionPrefix>,
     pub continuity: crate::ContextContinuitySnapshot,
     pub source_input_tokens: u64,
+    pub uncovered_tail_input_tokens: u64,
     pub target_replacement_tokens: u64,
 }
 
@@ -343,6 +345,7 @@ impl ContextCompactionExecutor {
             prefix: prefix.clone(),
             continuity: continuity.clone(),
             source_input_tokens: attempt.request.source_input_tokens,
+            uncovered_tail_input_tokens: attempt.request.uncovered_tail_input_tokens,
             target_replacement_tokens: attempt.request.target_replacement_tokens,
         };
         let generated = match cancellable(
@@ -514,6 +517,10 @@ fn prepare_request_from_plan(
         covered_through: prefix.covered_through.clone(),
         visible_trace_item_count,
         source_input_tokens: step.source_input_tokens,
+        uncovered_tail_input_tokens: plan
+            .projected_durable_input_tokens
+            .saturating_add(plan.planned_reclaimed_tokens)
+            .saturating_sub(step.source_input_tokens),
         target_replacement_tokens: step.target_replacement_tokens,
     })
 }
@@ -557,6 +564,7 @@ fn validate_generated_draft(
     draft.validate()?;
     if draft.source_revision != prefix.source_revision
         || draft.source_input_tokens != request.source_input_tokens
+        || draft.uncovered_tail_input_tokens != request.uncovered_tail_input_tokens
     {
         return Err(contract_error(
             "摘要生成结果没有绑定当前 durable 前缀及其计量。",
@@ -844,6 +852,7 @@ mod tests {
                         source_input_tokens: request.source_input_tokens,
                         summary_input_tokens: 10,
                         continuity_input_tokens: 20,
+                        uncovered_tail_input_tokens: request.uncovered_tail_input_tokens,
                         replacement_input_tokens: request.source_input_tokens,
                         created_at: 1,
                     },

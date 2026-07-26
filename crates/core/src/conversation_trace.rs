@@ -107,7 +107,37 @@ pub enum ConversationTurnTraceItem {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         truncated: bool,
+        #[serde(flatten)]
+        archive: ConversationHistoryArchiveTraceMetadata,
     },
+}
+
+/// Exact-history metadata is flattened into a tool-result trace item so older readers can ignore
+/// it while current readers can jump directly from the bounded durable record to the lossless
+/// archive. The archive itself never enters normal model context.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationHistoryArchiveTraceMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_completely: Option<bool>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated_at_source: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub model_projection_truncated: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub history_projection_truncated: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub archive_projection_truncated: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -277,6 +307,7 @@ impl ConversationTurnTrace {
                     success,
                     observation,
                     error,
+                    archive,
                     ..
                 } => {
                     let Some((expected_id, expected_tool)) = pending_call.take() else {
@@ -299,6 +330,7 @@ impl ConversationTurnTrace {
                     if let Some(error) = error {
                         ensure_no_binary_text("tool error", error)?;
                     }
+                    archive.validate()?;
                 }
             }
         }
@@ -323,6 +355,42 @@ impl ConversationTurnTrace {
         } else {
             self.items.len()
         }
+    }
+}
+
+impl ConversationHistoryArchiveTraceMetadata {
+    fn validate(&self) -> Result<(), String> {
+        let has_archive_identity = self.archive_ref.is_some()
+            || self.content_hash.is_some()
+            || self.archived_bytes.is_some()
+            || self.archived_completely.is_some();
+        if !has_archive_identity {
+            return Ok(());
+        }
+        let archive_ref = self
+            .archive_ref
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "conversation trace history archive ref is invalid".to_string())?;
+        let content_hash = self
+            .content_hash
+            .as_deref()
+            .filter(|value| {
+                value.len() == 71
+                    && value.starts_with("sha256:")
+                    && value[7..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+            .ok_or_else(|| "conversation trace history archive hash is invalid".to_string())?;
+        if archive_ref.len() > 256
+            || content_hash.is_empty()
+            || self.archived_bytes.is_none()
+            || self.archived_completely != Some(true)
+        {
+            return Err("conversation trace history archive metadata is incomplete".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -765,6 +833,25 @@ impl ConversationTraceRecorder {
     }
 
     pub(crate) fn record_tool_result(&mut self, call: &AgentToolCall, result: &AgentToolResult) {
+        self.record_tool_result_with_archive(call, result, Default::default());
+    }
+
+    pub(crate) fn pending_tool_result_sequence(&self, call_id: &str) -> Option<u64> {
+        let has_call = self.items.iter().any(
+            |item| matches!(item, ConversationTurnTraceItem::ToolCall { call_id: candidate, .. } if candidate == call_id),
+        );
+        let has_result = self.items.iter().any(
+            |item| matches!(item, ConversationTurnTraceItem::ToolResult { call_id: candidate, .. } if candidate == call_id),
+        );
+        (has_call && !has_result).then_some(self.next_sequence)
+    }
+
+    pub(crate) fn record_tool_result_with_archive(
+        &mut self,
+        call: &AgentToolCall,
+        result: &AgentToolResult,
+        archive: ConversationHistoryArchiveTraceMetadata,
+    ) {
         let Some(call_index) = self.items.iter().rposition(
             |item| matches!(item, ConversationTurnTraceItem::ToolCall { call_id, .. } if call_id == &call.id),
         ) else {
@@ -783,11 +870,18 @@ impl ConversationTraceRecorder {
         }
 
         let sequence = self.take_sequence();
-        let item = if self.items_are_durable {
+        let mut item = if self.items_are_durable {
             projected_tool_result_trace_item(sequence, call, result)
         } else {
             checkpoint_tool_result_trace_item(sequence, call, result)
         };
+        if let ConversationTurnTraceItem::ToolResult {
+            archive: item_archive,
+            ..
+        } = &mut item
+        {
+            *item_archive = archive;
+        }
         self.truncated |= matches!(
             &item,
             ConversationTurnTraceItem::ToolResult {
@@ -899,6 +993,7 @@ impl ConversationTraceRecorder {
             approval_status,
             error,
             truncated: raw_redacted || projection_truncated,
+            archive: Default::default(),
         };
         self.truncated |= matches!(
             item,
@@ -991,6 +1086,7 @@ fn checkpoint_tool_result_trace_item(
         approval_status: call.approval_status,
         error,
         truncated: result_redacted || error_redacted,
+        archive: Default::default(),
     }
 }
 
@@ -1091,6 +1187,7 @@ fn project_durable_trace_items(
                 approval_status,
                 error,
                 truncated,
+                archive,
             } => {
                 let (observation, projected_error, error_truncated) = project_tool_result(
                     tool,
@@ -1130,6 +1227,8 @@ fn project_durable_trace_items(
                 }
 
                 let item_truncated = *truncated || projection_truncated;
+                let mut archive = archive.clone();
+                archive.history_projection_truncated |= projection_truncated;
                 trace_truncated |= item_truncated;
                 ConversationTurnTraceItem::ToolResult {
                     sequence: *sequence,
@@ -1141,6 +1240,7 @@ fn project_durable_trace_items(
                     approval_status: *approval_status,
                     error: projected_error,
                     truncated: item_truncated,
+                    archive,
                 }
             }
         };
@@ -1177,6 +1277,7 @@ pub(crate) fn projected_tool_result_trace_item(
         approval_status: call.approval_status,
         error,
         truncated: observation.truncated || error_truncated,
+        archive: Default::default(),
     }
 }
 

@@ -235,6 +235,10 @@ impl AgentTool for ImageGenerationTool {
         image_generation_history_projection(result)
     }
 
+    fn archive_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        image_generation_history_projection(result)
+    }
+
     fn event_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         image_generation_event_projection(result)
     }

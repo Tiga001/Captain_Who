@@ -15,12 +15,12 @@
 - 主模型看到“系统提示词 + 当前摘要 + 摘要游标后的原始日志 + 本次请求临时内容”。
 - 压缩器读取“上一版摘要 + 游标之后待压缩的原始日志前缀”。
 - 容量保护和上下文圆环读取同一个 `ContextFrame` 分类计量结果。
-- 精确旧记录查询直接读取同一份 SQLite 消息和 trace，不从摘要或前端事件反推。
+- 精确旧记录查询读取同一份 SQLite 消息、trace 与其无损 Exact History Archive，不从摘要或前端事件反推。
 - 前端 timeline 使用展示事件，但展示事件不是模型上下文的事实来源。
 
 压缩不会删除原始消息或 Agent 轨迹，只会生成一版摘要并向后移动一个稳定游标。删除消息、回退或删除会话才会改变原始日志。
 
-系统明确不实现第二套工具正文仓库、向量索引或 run-overlay 专用压缩路径。`conversation_history` 只是同一原始日志上的只读查询入口，不复制记录。`ModelRequestObservation` 是例外但不属于内容仓库：它只记录发送边界的分类 token 估算、provider usage 和请求终态，不保存 prompt、消息正文、工具结果或密钥。
+Exact History Archive 是原始工具结果的无损安全投影，不是模型上下文镜像；SQLite FTS5 是可重建的检索索引，不是另一份权威日志。系统不实现 run-overlay 专用压缩路径。`ModelRequestObservation` 也不属于内容仓库：它只记录发送边界的分类 token 估算、provider usage 和请求终态，不保存 prompt、消息正文、工具结果或密钥。
 
 ## 总体数据流
 
@@ -33,8 +33,8 @@ SQLite messages + ConversationTurnTrace
           +---------+-------------------+
           |                             |
           v                             v
-summary + continuity cursor       conversation_history
-          |                     (search/read raw journal)
+summary + ContinuityIndexV2       conversation_history
+          |                     (FTS/read/around/range)
           v
 raw suffix after cursor
           |
@@ -159,7 +159,7 @@ Trace 保存主模型实际使用的文本上下文：
 - 完整原始前缀的 `sourceRevision`；
 - 模型生成的语义摘要；
 - 后端确定性生成的 `ContextContinuitySnapshot`；
-- 摘要、骨架和最终替换块各自的 token 诊断值；
+- `summaryInputTokens`、`continuityInputTokens`、`uncoveredTailInputTokens` 和 `replacementInputTokens` 四项 token 诊断值；
 - 生成模型和创建时间。
 
 SQLite 使用三张职责单一的摘要状态表：
@@ -196,22 +196,46 @@ SQLite 使用三张职责单一的摘要状态表：
 
 分叉后的任务可以继续分叉。每一层都只读取自己的消息、trace 和摘要 lineage；删除原任务后，后代任务的附件、文件预览与摘要链仍然可用。原任务 ID 只作为不可解析的 provenance 文本保留，不能通过外键或运行时查询影响新任务。
 
-### 确定性连续性骨架
+### Exact History Archive
 
-语义摘要擅长浓缩意义，但不能可靠保留每个精确时间、message ID、工具 ref、revision、路径或失败状态。因此后端从同一个安全前缀生成 `ContextContinuitySnapshot`，不让模型填写这些字段。
+工具结果存在三种相互独立的投影：
 
-骨架按原始日志顺序保留：
+- Runtime Model Projection：当前工具闭环交给模型的结果；
+- Durable Trace Projection：经过工具级和集中式限长后进入长期 trace 的审计投影；
+- Exact History Archive Projection：经过必要的安全/二进制清洗、但不做文本长度截断的精确历史投影。
 
-- 消息/trace 的稳定游标和带时区时间；
-- 小型用户消息正文或有界预览、总字符数和内容 revision；
-- 助手最终回复与公开 narration 的有界预览；
-- 闭合工具调用的工具名、call ID、审批状态、成功/失败状态；
-- path、revision、行号、计数等有界结构化元数据；
-- 指向 SQLite 原始记录的 `messageId` 或 `assistantMessageId + sequence`。
+Exact History Archive 在 Durable Trace 限长之前提交。`conversation_history_blobs` 保存会话、assistant 消息、trace sequence、call ID、tool、内容类型、原始字节/字符数、SHA-256 和截断语义；`conversation_history_blob_chunks` 使用独立 zstd UTF-8 分块保存正文。Trace ToolResult 只保留 `archiveRef`、`contentHash`、`archivedBytes` 以及 source/model/history/archive 四个不同阶段的截断状态。
 
-文件正文、网页正文、命令完整输出、patch、diff、Base64 和图片不会重复进入骨架。递归压缩复用上一版骨架并只追加新覆盖记录；提交前验证所有 ref 唯一、工具调用与结果成对、末尾 ref 等于 `coveredThrough`。模型生成器只能提供语义摘要，不能替换后端生成的骨架。
+`truncatedAtSource=true` 表示工具在生成结果时已经只返回了部分外部资源；Archive 可以精确恢复“当时实际返回的结果”，但不能恢复工具从未取得的剩余资源。`archivedCompletely=true` 表示安全清洗后的工具结果已经完整写入 Archive。历史读取支持字符或 UTF-8 字节分页，始终在 SQL 边界校验当前 `conversationId`。
 
-摘要和骨架被包装为一个不可拆分的 assistant `ContextItem`。其后未压缩的消息和工具记录更新、权威；发生冲突时后面的原始记录覆盖摘要中的旧状态。
+`conversation_history` 自身不归档取回的正文，其 Durable Trace Projection 只保留 query/ref、页范围、hash、状态和返回字符数，防止历史回忆再次复制到历史仓库或长期上下文。会话删除通过外键级联清理 Archive；会话分叉复制可见边界内的压缩块并重写目标 Trace 的 archive ref，因此删除原会话不会破坏分叉后的精确历史。
+
+### Continuity Index V2
+
+语义摘要负责保留任务语义；`ContinuityIndexV2` 只负责提供固定上限的精确历史入口。它由后端根据原始事件类型和终态生成，模型不能填写或修改：
+
+```ts
+interface ContinuityIndexV2 {
+  schemaVersion: 2
+  coveredThrough: JournalCursor
+  taskEvidenceRefs: HistoryRef[]
+  unresolvedFailureRefs: HistoryRef[]
+  approvalRefs: HistoryRef[]
+  importantDecisionRefs: HistoryRef[]
+  recentRefs: HistoryRef[]
+  archivedCounts: Record<string, number>
+}
+```
+
+V2 不保存消息正文/预览、narration、成功工具调用的 operation/outcome，也不复制 Archive 正文。`HistoryRef` 只能指向同一会话中仍存在的 Message、Trace Item 或 Archive Blob。后端采用固定配额：任务证据 6、失败 6、审批 4、重要决定 4、最近记录 8；跨分类去重后最多 28 个引用。`archivedCounts` 只允许固定的受控计数键，因此不会随工具类型或历史长度扩展字段集合。
+
+选择规则是确定性的：用户消息进入任务证据；显式修正/决定和运行中用户引导进入重要决定；失败、拒绝、冲突和取消结果进入失败引用；需要审批的调用/结果进入审批引用；少量最近消息或非历史工具结果进入最近引用。`conversation_history` 调用和结果默认完全不进入 Continuity。普通 narration 与成功工具的 operation/outcome 只由语义摘要按需要概括。
+
+递归压缩只继承上一版仍有效且仍在配额内的关键 ref，再与新覆盖段生成 V2，不复制上一版全部历史条目。V1 可以继续读取；下一次成功 compaction 会按 V1 的稳定游标选择有限 ref 并提交 V2，不需要批量重写旧会话。
+
+提交和加载 active summary 时，存储层验证每个 V2 ref 的 conversation 归属和存在性。覆盖范围内的编辑、删除会通过 `sourceRevision` 使派生摘要失效；回滚恢复对应祖先摘要；fork 重写 Message/Trace/Archive ref 并复制所需不可变 Blob。
+
+常规目标不超过 800 tokens，提交硬上限为 1,500 tokens。摘要和 V2 索引被包装为一个不可拆分的 assistant `ContextItem`；其后未压缩的消息和工具记录更新、权威。
 
 ### 摘要模型输入输出契约
 
@@ -242,7 +266,7 @@ JSON 信封被明确标记为不可信历史数据。`newItems` 比 `previousSum
   -> 创建 planned ContextCompactionReceipt
   -> prepare 从 SQLite 读取前缀并计算 sourceRevision
   -> receipt 进入 generating
-  -> 后端从该前缀生成确定性 continuity
+  -> 后端从该前缀生成固定配额 ContinuityIndexV2
   -> generate 在事务外调用当前 run 固定模型
   -> 生成 ModelRequestObservation，但成功路径暂不单独提交
   -> receipt 进入 committing
@@ -314,15 +338,19 @@ Receipt 保存计划快照、触发压力、软目标、稳定前缀身份、阶
 
 调用规则：
 
-- 连续性骨架已经给出目标 ref 时，直接用 `action=read`；
-- 没有 ref 时，先用 `action=search` 按关键词搜索原始 message content 和 trace JSON，再读取一个返回的 ref；
-- `action=read` 按字符分页返回该原始记录的序列化 JSON 片段，单页最多 50,000 字符；分页片段不保证自身是完整 JSON 文档。
+- Continuity V2 已经给出目标 ref 时，直接用 `action=read`，不再重复搜索；
+- 没有 ref 时，使用 SQLite FTS5 `action=search` 搜索 message、trace 和 Exact Archive；支持 `tool`、`status`、`runId`、记录类型和 Unix 毫秒时间范围过滤；
+- `action=around` 返回一个 ref 前后的有界消息/工具活动，`action=range` 返回两个 ref 之间的有界日志序列；
+- `action=get_tool_exchange` 通过 Trace/Archive ref 或 call ID 返回成对的工具调用和结果；
+- `action=read` 对普通记录按字符/UTF-8 字节分页，对工具结果优先读取 Archive；单页最多 50,000 字符或 256 KiB。
 
-所有 SQL 都强制带当前 `conversation_id`。即使模型提供其他会话的 message ID，也不会返回记录。读取结果明确标记为不可信历史数据，不能覆盖系统规则或被当作新指令执行。
+FTS 表是由消息/trace 触发器和 Archive 写入事务维护的派生索引；启动迁移会补齐缺失 Archive 索引，并在回填时验证解压后字节数和 SHA-256。所有 SQL 都强制带当前 `conversation_id`。即使模型提供其他会话的 message、trace 或 archive ID，也不会返回记录。读取结果明确标记为不可信历史数据，不能覆盖系统规则或被当作新指令执行。
+
+`conversation_history` 自身不进入 Archive 或 Continuity。它的 Durable Trace Projection 只保存 query、filter、ref、范围、hash、返回数量和状态；搜索 preview、around/range preview、工具交换正文及 read 正文不会再次写入长期 Trace。
 
 ### 前端活动状态
 
-`conversation_history` 仍按普通工具调用持久化。前端把没有模型文字隔开的连续 search/read 调用合并为一条静态活动记录，运行时显示“正在回忆”，结束后显示“回忆了一下”。模型输出文字后再次调用会自然形成新记录。
+`conversation_history` 仍按普通工具调用持久化。前端把没有模型文字隔开的连续 search/read/around/range/get_tool_exchange 调用合并为一条静态活动记录，运行时显示“正在回忆”，结束后显示“回忆了一下”。模型输出文字后再次调用会自然形成新记录。
 
 自动压缩不是工具。Runtime 为每次压缩生成稳定 `operationId`，并通过 started/finished 事件报告 `applied`、`skipped`、`failed` 或 `cancelled` 的真实结果。前端据此持久化一条不可展开的 timeline 记录；顶部耗时栏不再切换成压缩状态。
 
@@ -457,7 +485,7 @@ Runtime Extension 可以注册工具、贡献 request-only 上下文、处理 ru
 
 ## 当前限制
 
-- 原始文本日志不会因压缩删除，长会话会增加 SQLite 占用；这是审计完整性与运行简单性的明确取舍。
+- 原始消息和安全清洗后的工具文本 Archive 不会因上下文压缩删除，长会话会增加 SQLite 占用；Archive 使用 zstd 分块降低该成本。
 - 连续性骨架为每条已压缩日志保留一条有界索引记录，因此极长会话仍存在一个随事件数量增长的最低上下文成本；大正文不进入骨架，精确详情通过 SQLite 按需读取。
 - 尚无项目级记忆和语义/向量检索。
 - 尚未接入 provider 精确 tokenizer。
@@ -483,6 +511,8 @@ Runtime Extension 可以注册工具、贡献 request-only 上下文、处理 ru
 | 真实摘要生成器      | `crates/core/src/runtime/context_compaction_model.rs`                  |
 | 审批检查点          | `crates/core/src/runtime/checkpoint.rs`                                |
 | Trace 持久化        | `crates/core/src/storage/conversation_trace_repository.rs`             |
+| 精确历史 Archive    | `crates/core/src/storage/conversation_history_archive_repository.rs`   |
+| 历史检索工具        | `crates/core/src/tools/conversation_history.rs`                        |
 | 原始历史查询        | `crates/core/src/storage/conversation_history_repository.rs`           |
 | 历史查询工具        | `crates/core/src/tools/conversation_history.rs`                        |
 | 文本文件分页读取    | `crates/core/src/tools/read_file.rs`                                   |

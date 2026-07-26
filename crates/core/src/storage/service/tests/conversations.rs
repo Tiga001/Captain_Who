@@ -86,6 +86,161 @@ fn deleting_conversation_and_project_removes_composer_drafts() {
 }
 
 #[test]
+fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    service
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-archive-source".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "archive source".to_string(),
+            messages: vec![
+                ChatMessageRecord {
+                    id: "user-archive-source".to_string(),
+                    role: "user".to_string(),
+                    content: "read it".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: "assistant-archive-source".to_string(),
+                    role: "assistant".to_string(),
+                    content: "done".to_string(),
+                    created_at: 2,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+            ],
+            created_at: 1,
+            updated_at: 2,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let exact = "{\"content\":\"fork exact history\"}".repeat(20_000);
+    let archive = service
+        .archive_conversation_tool_result(
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput {
+                conversation_id: "conversation-archive-source".to_string(),
+                assistant_message_id: "assistant-archive-source".to_string(),
+                sequence: 1,
+                call_id: "call-archive-source".to_string(),
+                tool: "read_file".to_string(),
+                content_type: "application/json".to_string(),
+                content: exact.clone(),
+                truncated_at_source: false,
+                model_projection_truncated: false,
+                archive_projection_truncated: false,
+                created_at: 3,
+            },
+        )
+        .unwrap();
+    let trace = ConversationTurnTrace {
+        schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-archive-source".to_string(),
+        conversation_id: "conversation-archive-source".to_string(),
+        assistant_message_id: "assistant-archive-source".to_string(),
+        terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
+        terminal_error: None,
+        truncated: true,
+        items: vec![
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 0,
+                call_id: "call-archive-source".to_string(),
+                tool: "read_file".to_string(),
+                operation: serde_json::json!({ "path": "large.txt" }),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 1,
+                call_id: "call-archive-source".to_string(),
+                tool: "read_file".to_string(),
+                status: crate::ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: serde_json::json!({ "path": "large.txt", "summary": "bounded" }),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                error: None,
+                truncated: true,
+                archive: crate::conversation_trace::ConversationHistoryArchiveTraceMetadata {
+                    archive_ref: Some(archive.archive_ref.clone()),
+                    content_hash: Some(archive.content_hash.clone()),
+                    archived_bytes: Some(archive.total_bytes),
+                    archived_completely: Some(true),
+                    history_projection_truncated: true,
+                    ..Default::default()
+                },
+            },
+        ],
+    };
+    service
+        .replace_conversation_turn_trace(&trace, 2, 3)
+        .unwrap();
+
+    let forked = service
+        .fork_conversation(ForkConversationInput {
+            request_id: "fork-archive-request".to_string(),
+            source_conversation_id: "conversation-archive-source".to_string(),
+            through_assistant_message_id: "assistant-archive-source".to_string(),
+        })
+        .unwrap();
+    let forked_assistant = forked.messages.last().unwrap();
+    let forked_trace = service
+        .get_conversation_turn_trace(&forked_assistant.id)
+        .unwrap()
+        .unwrap();
+    let ConversationTurnTraceItem::ToolResult {
+        archive: forked_archive,
+        ..
+    } = &forked_trace.items[1]
+    else {
+        panic!("forked trace must retain the result");
+    };
+    assert_ne!(forked_archive.archive_ref, Some(archive.archive_ref));
+    assert_eq!(
+        forked_archive.content_hash.as_deref(),
+        Some(archive.content_hash.as_str())
+    );
+    let page = service
+        .read_conversation_history_archive_page(
+            &forked.id,
+            forked_archive.archive_ref.as_deref().unwrap(),
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Char,
+            0,
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.content, exact);
+    let hits = service
+        .search_conversation_history(
+            &forked.id,
+            "fork exact history",
+            &crate::storage::conversation_history_repository::ConversationHistorySearchFilter {
+                include_archives: true,
+                tool: Some("read_file".to_string()),
+                ..Default::default()
+            },
+            10,
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(matches!(
+        &hits[0].reference,
+        crate::storage::conversation_history_repository::ConversationHistoryRecordRef::Archive {
+            archive_ref
+        } if Some(archive_ref.as_str()) == forked_archive.archive_ref.as_deref()
+    ));
+}
+
+#[test]
 fn composer_drafts_only_preserve_full_for_current_permission_semantics() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

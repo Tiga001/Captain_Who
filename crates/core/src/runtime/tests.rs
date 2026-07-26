@@ -28,6 +28,112 @@ fn message(role: &str, content: &str) -> AgentChatMessage {
     }
 }
 
+#[test]
+fn exact_history_archive_precedes_bounded_trace_projection() {
+    use crate::conversation_trace::ConversationTraceRecorder;
+    use crate::protocol::{AgentApprovalStatus, AgentToolCall, AgentToolResult};
+    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use crate::storage::service::StorageService;
+    use crate::{ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    let fixture = tempdir().unwrap();
+    let storage =
+        Arc::new(StorageService::open(&fixture.path().join("exact-history.sqlite")).unwrap());
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-archive".to_string(),
+            project_id: None,
+            model_id: None,
+            title: "archive".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "assistant-archive".to_string(),
+                role: "assistant".to_string(),
+                content: String::new(),
+                created_at: 1,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let call = AgentToolCall {
+        id: "call-archive".to_string(),
+        tool: "web_fetch".to_string(),
+        args: json!({ "url": "https://example.com" }),
+        approval_status: AgentApprovalStatus::NotRequired,
+        reason: None,
+    };
+    let raw = AgentToolResult {
+        call_id: call.id.clone(),
+        tool: call.tool.clone(),
+        ok: true,
+        result: Some(json!({
+            "url": "https://example.com",
+            "content": "精确正文".repeat(10_000),
+            "truncated": true
+        })),
+        error: None,
+    };
+    let mut recorder = ConversationTraceRecorder::default();
+    recorder.record_tool_call(&call);
+    let sequence = recorder.pending_tool_result_sequence(&call.id).unwrap();
+    let metadata = super::archive_tool_result(
+        Some(&storage),
+        Some("conversation-archive"),
+        Some("assistant-archive"),
+        Some(sequence),
+        &raw,
+        &raw,
+        &raw,
+    );
+    assert_eq!(metadata.archived_completely, Some(true));
+    assert!(metadata.truncated_at_source);
+    recorder.record_tool_result_with_archive(&call, &raw, metadata.clone());
+    let trace = recorder.finish(
+        "run-archive",
+        "conversation-archive",
+        "assistant-archive",
+        ConversationTurnTraceTerminalStatus::Completed,
+        None,
+    );
+    trace.validate().unwrap();
+    let ConversationTurnTraceItem::ToolResult {
+        observation,
+        archive,
+        ..
+    } = &trace.items[1]
+    else {
+        panic!("expected durable tool result");
+    };
+    assert!(observation["summary"].as_str().unwrap().chars().count() <= 4_100);
+    assert!(archive.history_projection_truncated);
+    assert_eq!(archive.content_hash, metadata.content_hash);
+
+    let page = storage
+        .read_conversation_history_archive_page(
+            "conversation-archive",
+            archive.archive_ref.as_deref().unwrap(),
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Char,
+            0,
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
+    let restored: AgentToolResult = serde_json::from_str(&page.content).unwrap();
+    assert_eq!(
+        restored.result.unwrap()["content"],
+        raw.result.unwrap()["content"]
+    );
+}
+
 fn empty_attachment_context() -> AttachmentContext {
     AttachmentContext {
         text: String::new(),
@@ -3266,6 +3372,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
         approval_status: AgentApprovalStatus::NotRequired,
         error: None,
         truncated: false,
+        archive: Default::default(),
     };
     let closed_trace = conversation_context_trace(
         ConversationTurnTraceTerminalStatus::InProgress,
@@ -4324,6 +4431,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         source_input_tokens: 40_000,
         summary_input_tokens: 32,
         continuity_input_tokens: 64,
+        uncovered_tail_input_tokens: 0,
         replacement_input_tokens: 96,
         created_at: 1,
     };
@@ -4436,6 +4544,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
                         source_input_tokens: request.source_input_tokens,
                         summary_input_tokens: 32,
                         continuity_input_tokens: 64,
+                        uncovered_tail_input_tokens: request.uncovered_tail_input_tokens,
                         replacement_input_tokens: 96,
                         created_at: 1,
                     },

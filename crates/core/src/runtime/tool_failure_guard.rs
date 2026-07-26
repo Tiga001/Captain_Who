@@ -454,6 +454,7 @@ mod tests {
                     approval_status: AgentApprovalStatus::NotRequired,
                     error: Some("failed".to_string()),
                     truncated: false,
+                    archive: Default::default(),
                 },
                 ConversationTurnTraceItem::ToolCall {
                     sequence: 2,
@@ -473,6 +474,7 @@ mod tests {
                     approval_status: AgentApprovalStatus::NotRequired,
                     error: Some("failed".to_string()),
                     truncated: false,
+                    archive: Default::default(),
                 },
             ],
             next_sequence: 4,
@@ -519,6 +521,7 @@ mod tests {
                     approval_status: AgentApprovalStatus::NotRequired,
                     error: Some("duplicate was not executed".to_string()),
                     truncated: false,
+                    archive: Default::default(),
                 },
             ],
             next_sequence: 2,

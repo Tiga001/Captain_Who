@@ -200,6 +200,7 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
                 approval_status: AgentApprovalStatus::Approved,
                 error: None,
                 truncated: false,
+                archive: Default::default(),
             },
         ],
         next_conversation_trace_sequence: 2,

@@ -110,6 +110,17 @@ impl AgentContextCompactionModelGenerator {
             self.api_style,
             &request.continuity.render_json()?,
         )?;
+        if continuity_input_tokens > crate::CONTEXT_CONTINUITY_HARD_MAX_TOKENS {
+            return Err(AgentError::structured(
+                "context_compaction_continuity_too_large",
+                "Continuity V2 超过固定 token 上限，摘要未提交。",
+                json!({
+                    "continuityInputTokens": continuity_input_tokens,
+                    "targetTokens": crate::CONTEXT_CONTINUITY_TARGET_TOKENS,
+                    "hardMaximumTokens": crate::CONTEXT_CONTINUITY_HARD_MAX_TOKENS,
+                }),
+            ));
+        }
         let minimum_replacement_input_tokens = estimate_minimum_replacement_input_tokens(
             &self.model,
             self.api_style,
@@ -270,6 +281,7 @@ impl AgentContextCompactionModelGenerator {
             source_input_tokens: request.source_input_tokens,
             summary_input_tokens,
             continuity_input_tokens,
+            uncovered_tail_input_tokens: request.uncovered_tail_input_tokens,
             replacement_input_tokens,
             created_at: crate::storage::now_ms(),
         };
@@ -508,6 +520,7 @@ mod tests {
             source_input_tokens: 4_000,
             summary_input_tokens: 80,
             continuity_input_tokens: 100,
+            uncovered_tail_input_tokens: 0,
             replacement_input_tokens: 180,
             created_at: 1,
         };
@@ -547,6 +560,7 @@ mod tests {
             prefix,
             continuity,
             source_input_tokens: 8_000,
+            uncovered_tail_input_tokens: 1_500,
             target_replacement_tokens: 2_000,
         }
     }

@@ -5,16 +5,13 @@
 //! this repository. Every query is scoped by `conversation_id` at the SQL boundary.
 
 use crate::context::format_message_created_at;
-use crate::conversation_trace::ConversationTurnTraceItem;
 use rusqlite::types::Type;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{Error as IoError, ErrorKind};
 
-const SEARCH_CANDIDATE_MULTIPLIER: usize = 2;
-const SEARCH_PREVIEW_CHARS: usize = 320;
-const SEARCH_PREVIEW_CONTEXT_BEFORE: usize = 80;
+const MAX_TIMELINE_RECORDS: usize = 100;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(
@@ -29,6 +26,9 @@ pub enum ConversationHistoryRecordRef {
     TraceItem {
         assistant_message_id: String,
         sequence: u64,
+    },
+    Archive {
+        archive_ref: String,
     },
 }
 
@@ -45,6 +45,41 @@ pub struct ConversationHistorySearchHit {
     pub item_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub preview: String,
+    pub preview_truncated: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConversationHistorySearchFilter {
+    pub include_messages: bool,
+    pub include_trace_items: bool,
+    pub include_archives: bool,
+    pub tool: Option<String>,
+    pub status: Option<String>,
+    pub run_id: Option<String>,
+    pub created_at_from: Option<i64>,
+    pub created_at_to: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationHistoryTimelineRecord {
+    #[serde(rename = "ref")]
+    pub reference: ConversationHistoryRecordRef,
+    pub created_at: String,
+    pub record_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub preview: String,
     pub preview_truncated: bool,
 }
@@ -58,125 +93,130 @@ pub struct ConversationHistoryRecord {
     pub serialized_json: String,
 }
 
-struct OrderedHit {
-    position: i64,
-    within_message_order: u64,
-    hit: ConversationHistorySearchHit,
-}
-
 pub fn search_records(
     connection: &Connection,
     conversation_id: &str,
     query: &str,
-    include_messages: bool,
-    include_trace_items: bool,
+    filter: &ConversationHistorySearchFilter,
     limit: usize,
 ) -> rusqlite::Result<Vec<ConversationHistorySearchHit>> {
-    let candidate_limit = limit.saturating_mul(SEARCH_CANDIDATE_MULTIPLIER).max(limit);
-    let pattern = like_contains_pattern(query);
-    let mut hits = Vec::with_capacity(candidate_limit);
-
-    if include_messages {
-        let mut statement = connection.prepare(
-            "SELECT id, role, content, created_at, position
-             FROM messages
-             WHERE conversation_id = ?1
-               AND content <> ''
-               AND lower(content) LIKE ?2 ESCAPE '\\'
-             ORDER BY position ASC, created_at ASC, id ASC
-             LIMIT ?3",
-        )?;
-        let rows = statement.query_map(
-            params![conversation_id, &pattern, candidate_limit as i64],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )?;
-        for row in rows {
-            let (message_id, role, content, created_at, position) = row?;
-            let (preview, preview_truncated) = make_preview(&content, query);
-            hits.push(OrderedHit {
-                position,
-                within_message_order: if role == "assistant" { u64::MAX } else { 0 },
-                hit: ConversationHistorySearchHit {
-                    reference: ConversationHistoryRecordRef::Message { message_id },
-                    created_at: format_created_at(created_at)?,
-                    record_type: "message".to_string(),
-                    role: Some(role),
-                    item_kind: None,
-                    tool: None,
-                    preview,
-                    preview_truncated,
-                },
-            });
-        }
+    let query = query.trim();
+    let use_match = query.chars().count() >= 3;
+    let mut sql = String::from(
+        "SELECT
+            record_type, item_kind, message_id, assistant_message_id, sequence,
+            archive_ref, tool, status, run_id, created_at,
+            snippet(conversation_history_fts, 15, '', '', '…', 64),
+            length(content)
+         FROM conversation_history_fts
+         WHERE conversation_id = ?",
+    );
+    let mut values = Vec::<rusqlite::types::Value>::new();
+    values.push(conversation_id.to_string().into());
+    if use_match {
+        sql.push_str(" AND conversation_history_fts MATCH ?");
+        values.push(fts_phrase(query).into());
+    } else {
+        sql.push_str(" AND content LIKE ? ESCAPE '\\'");
+        values.push(like_contains_pattern(query).into());
     }
-
-    if include_trace_items {
-        let mut statement = connection.prepare(
-            "SELECT i.assistant_message_id, i.sequence, i.item_kind, i.item_json,
-                    t.created_at, m.position
-             FROM conversation_turn_trace_items i
-             JOIN conversation_turn_traces t
-               ON t.assistant_message_id = i.assistant_message_id
-             JOIN messages m
-               ON m.id = i.assistant_message_id
-             WHERE t.conversation_id = ?1
-               AND lower(i.item_json) LIKE ?2 ESCAPE '\\'
-             ORDER BY m.position ASC, i.sequence ASC
-             LIMIT ?3",
-        )?;
-        let rows = statement.query_map(
-            params![conversation_id, &pattern, candidate_limit as i64],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            },
-        )?;
-        for row in rows {
-            let (assistant_message_id, sequence, item_kind, item_json, created_at, position) = row?;
-            let item = parse_trace_item(&item_json)?;
-            let created_at = trace_item_created_at(&item, created_at);
-            let (preview, preview_truncated) = make_preview(&item_json, query);
-            hits.push(OrderedHit {
-                position,
-                within_message_order: sequence,
-                hit: ConversationHistorySearchHit {
-                    reference: ConversationHistoryRecordRef::TraceItem {
-                        assistant_message_id,
-                        sequence,
-                    },
-                    created_at: format_created_at(created_at)?,
-                    record_type: "trace_item".to_string(),
-                    role: None,
-                    item_kind: Some(item_kind),
-                    tool: trace_item_tool(&item).map(str::to_string),
-                    preview,
-                    preview_truncated,
-                },
-            });
-        }
+    append_record_type_filter(&mut sql, &mut values, filter);
+    append_optional_filter(&mut sql, &mut values, "tool", filter.tool.as_deref());
+    append_optional_filter(&mut sql, &mut values, "status", filter.status.as_deref());
+    append_optional_filter(&mut sql, &mut values, "run_id", filter.run_id.as_deref());
+    if let Some(from) = filter.created_at_from {
+        sql.push_str(" AND created_at >= ?");
+        values.push(from.into());
     }
+    if let Some(to) = filter.created_at_to {
+        sql.push_str(" AND created_at <= ?");
+        values.push(to.into());
+    }
+    sql.push_str(
+        " ORDER BY bm25(conversation_history_fts), position, within_message_order LIMIT ?",
+    );
+    values.push(i64::try_from(limit).unwrap_or(i64::MAX).into());
 
-    hits.sort_by(|left, right| {
-        left.position
-            .cmp(&right.position)
-            .then_with(|| left.within_message_order.cmp(&right.within_message_order))
-    });
-    hits.truncate(limit);
-    Ok(hits.into_iter().map(|ordered| ordered.hit).collect())
+    let mut statement = connection.prepare(&sql)?;
+    let hits = statement
+        .query_map(params_from_iter(values), |row| {
+            let record_type = row.get::<_, String>(0)?;
+            let message_id = row.get::<_, Option<String>>(2)?;
+            let assistant_message_id = row.get::<_, Option<String>>(3)?;
+            let sequence = row.get::<_, Option<u64>>(4)?;
+            let archive_ref = row.get::<_, Option<String>>(5)?;
+            let reference = reference_from_columns(
+                &record_type,
+                message_id,
+                assistant_message_id,
+                sequence,
+                archive_ref,
+            )?;
+            let preview = row.get::<_, String>(10)?;
+            let content_length = row.get::<_, usize>(11)?;
+            let role = match &reference {
+                ConversationHistoryRecordRef::Message { message_id } => connection
+                    .query_row(
+                        "SELECT role FROM messages WHERE conversation_id = ?1 AND id = ?2",
+                        params![conversation_id, message_id],
+                        |role_row| role_row.get::<_, String>(0),
+                    )
+                    .optional()?,
+                _ => None,
+            };
+            Ok(ConversationHistorySearchHit {
+                reference,
+                created_at: format_created_at(row.get(9)?)?,
+                record_type,
+                role,
+                item_kind: row.get(1)?,
+                tool: row.get(6)?,
+                status: row.get(7)?,
+                run_id: row.get(8)?,
+                preview_truncated: preview.chars().count() < content_length,
+                preview,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(hits)
+}
+
+fn append_record_type_filter(
+    sql: &mut String,
+    values: &mut Vec<rusqlite::types::Value>,
+    filter: &ConversationHistorySearchFilter,
+) {
+    let kinds = [
+        (filter.include_messages, "message"),
+        (filter.include_trace_items, "trace_item"),
+        (filter.include_archives, "archive"),
+    ]
+    .into_iter()
+    .filter_map(|(included, kind)| included.then_some(kind))
+    .collect::<Vec<_>>();
+    sql.push_str(" AND record_type IN (");
+    for (index, kind) in kinds.iter().enumerate() {
+        if index > 0 {
+            sql.push(',');
+        }
+        sql.push('?');
+        values.push((*kind).to_string().into());
+    }
+    sql.push(')');
+}
+
+fn append_optional_filter(
+    sql: &mut String,
+    values: &mut Vec<rusqlite::types::Value>,
+    column: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        sql.push_str(" AND ");
+        sql.push_str(column);
+        sql.push_str(" = ?");
+        values.push(value.to_string().into());
+    }
 }
 
 pub fn read_record(
@@ -264,28 +304,327 @@ pub fn read_record(
                 },
             )
             .optional(),
+        ConversationHistoryRecordRef::Archive { archive_ref } => connection
+            .query_row(
+                "SELECT archive_ref, assistant_message_id, sequence, call_id, tool,
+                        content_type, content_hash, uncompressed_bytes, uncompressed_chars,
+                        truncated_at_source, archived_completely, created_at
+                 FROM conversation_history_blobs
+                 WHERE conversation_id = ?1 AND archive_ref = ?2",
+                params![conversation_id, archive_ref],
+                |row| {
+                    let created_at = row.get::<_, i64>(11)?;
+                    let created_at_text = format_created_at(created_at)?;
+                    let serialized_json = serialize_record(json!({
+                        "kind": "archive",
+                        "archiveRef": row.get::<_, String>(0)?,
+                        "assistantMessageId": row.get::<_, String>(1)?,
+                        "sequence": row.get::<_, u64>(2)?,
+                        "callId": row.get::<_, String>(3)?,
+                        "tool": row.get::<_, String>(4)?,
+                        "contentType": row.get::<_, String>(5)?,
+                        "contentHash": row.get::<_, String>(6)?,
+                        "totalBytes": row.get::<_, u64>(7)?,
+                        "totalChars": row.get::<_, u64>(8)?,
+                        "truncatedAtSource": row.get::<_, bool>(9)?,
+                        "archivedCompletely": row.get::<_, bool>(10)?,
+                        "createdAt": created_at_text,
+                        "createdAtUnixMs": created_at,
+                    }))?;
+                    Ok(ConversationHistoryRecord {
+                        reference: reference.clone(),
+                        created_at: created_at_text,
+                        serialized_json,
+                    })
+                },
+            )
+            .optional(),
     }
 }
 
-fn trace_item_tool(item: &ConversationTurnTraceItem) -> Option<&str> {
-    match item {
-        ConversationTurnTraceItem::ToolCall { tool, .. }
-        | ConversationTurnTraceItem::ToolResult { tool, .. } => Some(tool),
-        ConversationTurnTraceItem::AssistantNarration { .. }
-        | ConversationTurnTraceItem::UserGuidance { .. } => None,
+pub fn records_around(
+    connection: &Connection,
+    conversation_id: &str,
+    reference: &ConversationHistoryRecordRef,
+    before: usize,
+    after: usize,
+) -> rusqlite::Result<Option<Vec<ConversationHistoryTimelineRecord>>> {
+    let Some((position, within)) = reference_order(connection, conversation_id, reference)? else {
+        return Ok(None);
+    };
+    let before = before.min(MAX_TIMELINE_RECORDS);
+    let after = after.min(MAX_TIMELINE_RECORDS);
+    let mut records = query_timeline(
+        connection,
+        conversation_id,
+        Some((position, within)),
+        None,
+        before,
+        true,
+    )?;
+    records.reverse();
+    let mut tail = query_timeline(
+        connection,
+        conversation_id,
+        Some((position, within)),
+        None,
+        after.saturating_add(1),
+        false,
+    )?;
+    records.append(&mut tail);
+    Ok(Some(records))
+}
+
+pub fn records_in_range(
+    connection: &Connection,
+    conversation_id: &str,
+    start: &ConversationHistoryRecordRef,
+    end: &ConversationHistoryRecordRef,
+    limit: usize,
+) -> rusqlite::Result<Option<Vec<ConversationHistoryTimelineRecord>>> {
+    let Some(start_order) = reference_order(connection, conversation_id, start)? else {
+        return Ok(None);
+    };
+    let Some(end_order) = reference_order(connection, conversation_id, end)? else {
+        return Ok(None);
+    };
+    let (start_order, end_order) = if start_order <= end_order {
+        (start_order, end_order)
+    } else {
+        (end_order, start_order)
+    };
+    query_timeline(
+        connection,
+        conversation_id,
+        Some(start_order),
+        Some(end_order),
+        limit.min(MAX_TIMELINE_RECORDS),
+        false,
+    )
+    .map(Some)
+}
+
+pub fn get_tool_exchange(
+    connection: &Connection,
+    conversation_id: &str,
+    reference: Option<&ConversationHistoryRecordRef>,
+    call_id: Option<&str>,
+    run_id: Option<&str>,
+) -> rusqlite::Result<Option<Vec<ConversationHistoryRecord>>> {
+    let identity = match reference {
+        Some(ConversationHistoryRecordRef::TraceItem {
+            assistant_message_id,
+            sequence,
+        }) => connection
+            .query_row(
+                "SELECT json_extract(item_json, '$.callId')
+                 FROM conversation_turn_trace_items AS item
+                 INNER JOIN conversation_turn_traces AS trace
+                    ON trace.assistant_message_id = item.assistant_message_id
+                 WHERE trace.conversation_id = ?1
+                   AND item.assistant_message_id = ?2
+                   AND item.sequence = ?3",
+                params![conversation_id, assistant_message_id, sequence],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .map(|call_id| (assistant_message_id.clone(), call_id)),
+        Some(ConversationHistoryRecordRef::Archive { archive_ref }) => connection
+            .query_row(
+                "SELECT assistant_message_id, call_id
+                 FROM conversation_history_blobs
+                 WHERE conversation_id = ?1 AND archive_ref = ?2",
+                params![conversation_id, archive_ref],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?,
+        Some(ConversationHistoryRecordRef::Message { .. }) => None,
+        None => {
+            let Some(call_id) = call_id else {
+                return Ok(None);
+            };
+            connection
+                .query_row(
+                    "SELECT item.assistant_message_id, json_extract(item.item_json, '$.callId')
+                     FROM conversation_turn_trace_items AS item
+                     INNER JOIN conversation_turn_traces AS trace
+                        ON trace.assistant_message_id = item.assistant_message_id
+                     WHERE trace.conversation_id = ?1
+                       AND json_extract(item.item_json, '$.callId') = ?2
+                       AND (?3 IS NULL OR trace.run_id = ?3)
+                     ORDER BY trace.created_at DESC, item.sequence DESC
+                     LIMIT 1",
+                    params![conversation_id, call_id, run_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?
+        }
+    };
+    let Some((assistant_message_id, call_id)) = identity else {
+        return Ok(None);
+    };
+    let refs = {
+        let mut statement = connection.prepare(
+            "SELECT item.sequence
+             FROM conversation_turn_trace_items AS item
+             INNER JOIN conversation_turn_traces AS trace
+                ON trace.assistant_message_id = item.assistant_message_id
+             WHERE trace.conversation_id = ?1
+               AND item.assistant_message_id = ?2
+               AND json_extract(item.item_json, '$.callId') = ?3
+             ORDER BY item.sequence ASC",
+        )?;
+        let refs = statement
+            .query_map(
+                params![conversation_id, &assistant_message_id, &call_id],
+                |row| {
+                    Ok(ConversationHistoryRecordRef::TraceItem {
+                        assistant_message_id: assistant_message_id.clone(),
+                        sequence: row.get(0)?,
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        refs
+    };
+    let mut records = Vec::with_capacity(refs.len());
+    for reference in refs {
+        let record = read_record(connection, conversation_id, &reference)?
+            .ok_or_else(|| invalid_history_data("tool exchange record disappeared"))?;
+        records.push(record);
+    }
+    Ok(Some(records))
+}
+
+fn reference_order(
+    connection: &Connection,
+    conversation_id: &str,
+    reference: &ConversationHistoryRecordRef,
+) -> rusqlite::Result<Option<(i64, i64)>> {
+    let ref_key = reference_key(reference);
+    connection
+        .query_row(
+            "SELECT position, within_message_order
+             FROM conversation_history_fts
+             WHERE conversation_id = ?1 AND ref_key = ?2",
+            params![conversation_id, ref_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+}
+
+fn query_timeline(
+    connection: &Connection,
+    conversation_id: &str,
+    start: Option<(i64, i64)>,
+    end: Option<(i64, i64)>,
+    limit: usize,
+    backwards: bool,
+) -> rusqlite::Result<Vec<ConversationHistoryTimelineRecord>> {
+    let mut sql = String::from(
+        "SELECT
+            record_type, item_kind, message_id, assistant_message_id, sequence,
+            archive_ref, tool, status, run_id, created_at,
+            substr(content, 1, 321), length(content)
+         FROM conversation_history_fts
+         WHERE conversation_id = ? AND record_type != 'archive'",
+    );
+    let mut values = vec![rusqlite::types::Value::from(conversation_id.to_string())];
+    if let Some((position, within)) = start {
+        if backwards {
+            sql.push_str(" AND (position < ? OR (position = ? AND within_message_order < ?))");
+        } else {
+            sql.push_str(" AND (position > ? OR (position = ? AND within_message_order >= ?))");
+        }
+        values.extend([position.into(), position.into(), within.into()]);
+    }
+    if let Some((position, within)) = end {
+        sql.push_str(" AND (position < ? OR (position = ? AND within_message_order <= ?))");
+        values.extend([position.into(), position.into(), within.into()]);
+    }
+    if backwards {
+        sql.push_str(" ORDER BY position DESC, within_message_order DESC");
+    } else {
+        sql.push_str(" ORDER BY position ASC, within_message_order ASC");
+    }
+    sql.push_str(" LIMIT ?");
+    values.push(i64::try_from(limit).unwrap_or(i64::MAX).into());
+
+    let mut statement = connection.prepare(&sql)?;
+    let records = statement
+        .query_map(params_from_iter(values), |row| {
+            let record_type = row.get::<_, String>(0)?;
+            let preview = row.get::<_, String>(10)?;
+            let content_length = row.get::<_, usize>(11)?;
+            Ok(ConversationHistoryTimelineRecord {
+                reference: reference_from_columns(
+                    &record_type,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                )?,
+                created_at: format_created_at(row.get(9)?)?,
+                record_type,
+                item_kind: row.get(1)?,
+                tool: row.get(6)?,
+                status: row.get(7)?,
+                run_id: row.get(8)?,
+                preview_truncated: content_length > preview.chars().count(),
+                preview,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(records)
+}
+
+fn reference_from_columns(
+    record_type: &str,
+    message_id: Option<String>,
+    assistant_message_id: Option<String>,
+    sequence: Option<u64>,
+    archive_ref: Option<String>,
+) -> rusqlite::Result<ConversationHistoryRecordRef> {
+    match record_type {
+        "message" => Ok(ConversationHistoryRecordRef::Message {
+            message_id: message_id
+                .ok_or_else(|| invalid_history_data("FTS message is missing message_id"))?,
+        }),
+        "trace_item" => Ok(ConversationHistoryRecordRef::TraceItem {
+            assistant_message_id: assistant_message_id.ok_or_else(|| {
+                invalid_history_data("FTS trace item is missing message identity")
+            })?,
+            sequence: sequence
+                .ok_or_else(|| invalid_history_data("FTS trace item is missing sequence"))?,
+        }),
+        "archive" => Ok(ConversationHistoryRecordRef::Archive {
+            archive_ref: archive_ref
+                .ok_or_else(|| invalid_history_data("FTS archive is missing archive_ref"))?,
+        }),
+        _ => Err(invalid_history_data("FTS record has unknown type")),
     }
 }
 
-fn trace_item_created_at(item: &ConversationTurnTraceItem, fallback: i64) -> i64 {
-    match item {
-        ConversationTurnTraceItem::UserGuidance { created_at, .. } => *created_at,
-        _ => fallback,
+fn reference_key(reference: &ConversationHistoryRecordRef) -> String {
+    match reference {
+        ConversationHistoryRecordRef::Message { message_id } => format!("message:{message_id}"),
+        ConversationHistoryRecordRef::TraceItem {
+            assistant_message_id,
+            sequence,
+        } => format!("trace:{assistant_message_id}:{sequence}"),
+        ConversationHistoryRecordRef::Archive { archive_ref } => {
+            format!("archive:{archive_ref}")
+        }
     }
 }
 
-fn parse_trace_item(value: &str) -> rusqlite::Result<ConversationTurnTraceItem> {
-    serde_json::from_str(value)
-        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error)))
+fn invalid_history_data(message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        Type::Text,
+        Box::new(IoError::new(ErrorKind::InvalidData, message.into())),
+    )
 }
 
 fn parse_trace_item_value(value: &str) -> rusqlite::Result<Value> {
@@ -324,41 +663,20 @@ fn like_contains_pattern(query: &str) -> String {
     pattern
 }
 
-fn make_preview(content: &str, query: &str) -> (String, bool) {
-    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    let characters = normalized.chars().collect::<Vec<_>>();
-    if characters.len() <= SEARCH_PREVIEW_CHARS {
-        return (normalized, false);
-    }
-    let lowercase = normalized.to_lowercase().chars().collect::<Vec<_>>();
-    let lowercase_query = query.to_lowercase().chars().collect::<Vec<_>>();
-    let match_character = if lowercase_query.is_empty() {
-        0
-    } else {
-        lowercase
-            .windows(lowercase_query.len())
-            .position(|window| window == lowercase_query)
-            .unwrap_or(0)
-    };
-    let start = match_character.saturating_sub(SEARCH_PREVIEW_CONTEXT_BEFORE);
-    let end = (start + SEARCH_PREVIEW_CHARS).min(characters.len());
-    let mut preview = characters[start..end].iter().collect::<String>();
-    if start > 0 {
-        preview.insert(0, '…');
-    }
-    if end < characters.len() {
-        preview.push('…');
-    }
-    (preview, true)
+fn fts_phrase(query: &str) -> String {
+    format!("\"{}\"", query.replace('"', "\"\""))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{conversation_trace_repository, migrations};
+    use crate::storage::{
+        conversation_history_archive_repository, conversation_trace_repository, migrations,
+    };
     use crate::{
         AgentApprovalStatus, ConversationTraceToolResultStatus, ConversationTurnTrace,
-        ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+        CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
 
     fn setup() -> Connection {
@@ -408,6 +726,7 @@ mod tests {
                     approval_status: AgentApprovalStatus::NotRequired,
                     error: None,
                     truncated: false,
+                    archive: Default::default(),
                 },
             ],
         };
@@ -424,16 +743,20 @@ mod tests {
     #[test]
     fn search_is_scoped_and_returns_message_and_trace_references() {
         let connection = setup();
-        let messages =
-            search_records(&connection, "conversation-1", "09:02", true, true, 20).unwrap();
+        let filter = ConversationHistorySearchFilter {
+            include_messages: true,
+            include_trace_items: true,
+            include_archives: true,
+            ..Default::default()
+        };
+        let messages = search_records(&connection, "conversation-1", "09:02", &filter, 20).unwrap();
         assert_eq!(messages.len(), 1);
         assert!(matches!(
             messages[0].reference,
             ConversationHistoryRecordRef::Message { ref message_id } if message_id == "user-1"
         ));
 
-        let trace =
-            search_records(&connection, "conversation-1", "v1-exact", true, true, 20).unwrap();
+        let trace = search_records(&connection, "conversation-1", "v1-exact", &filter, 20).unwrap();
         assert_eq!(trace.len(), 1);
         assert_eq!(trace[0].tool.as_deref(), Some("read_file"));
     }
@@ -457,5 +780,115 @@ mod tests {
         assert!(read_record(&connection, "conversation-1", &other)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn fts_finds_exact_archive_phrase_with_structured_filters() {
+        let mut connection = setup();
+        let archived = conversation_history_archive_repository::store_archive(
+            &mut connection,
+            &conversation_history_archive_repository::ConversationHistoryArchiveInput {
+                conversation_id: "conversation-1".to_string(),
+                assistant_message_id: "assistant-1".to_string(),
+                sequence: 1,
+                call_id: "call-1".to_string(),
+                tool: "read_file".to_string(),
+                content_type: "application/json".to_string(),
+                content: r#"{"content":"压缩后仍可检索的精确短语 exact-archive-needle"}"#
+                    .to_string(),
+                truncated_at_source: false,
+                model_projection_truncated: true,
+                archive_projection_truncated: false,
+                created_at: 2_000,
+            },
+        )
+        .unwrap();
+        connection
+            .execute(
+                "DELETE FROM conversation_history_fts WHERE archive_ref = ?1",
+                [&archived.archive_ref],
+            )
+            .unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        let filter = ConversationHistorySearchFilter {
+            include_archives: true,
+            tool: Some("read_file".to_string()),
+            status: Some("succeeded".to_string()),
+            run_id: Some("run-1".to_string()),
+            created_at_from: Some(1_500),
+            created_at_to: Some(2_500),
+            ..Default::default()
+        };
+
+        let hits = search_records(
+            &connection,
+            "conversation-1",
+            "exact-archive-needle",
+            &filter,
+            20,
+        )
+        .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].reference,
+            ConversationHistoryRecordRef::Archive {
+                archive_ref: archived.archive_ref
+            }
+        );
+        assert!(search_records(
+            &connection,
+            "conversation-2",
+            "exact-archive-needle",
+            &filter,
+            20
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    #[test]
+    fn around_range_and_tool_exchange_restore_order_without_archive_duplicates() {
+        let connection = setup();
+        let result_ref = ConversationHistoryRecordRef::TraceItem {
+            assistant_message_id: "assistant-1".to_string(),
+            sequence: 1,
+        };
+
+        let around = records_around(&connection, "conversation-1", &result_ref, 2, 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(around.len(), 4);
+        assert_eq!(around[2].reference, result_ref);
+        assert_eq!(around[0].record_type, "message");
+        assert_eq!(around[1].item_kind.as_deref(), Some("tool_call"));
+        assert_eq!(around[3].record_type, "message");
+
+        let range = records_in_range(
+            &connection,
+            "conversation-1",
+            &ConversationHistoryRecordRef::Message {
+                message_id: "user-1".to_string(),
+            },
+            &ConversationHistoryRecordRef::Message {
+                message_id: "assistant-1".to_string(),
+            },
+            20,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(range.len(), 4);
+
+        let exchange =
+            get_tool_exchange(&connection, "conversation-1", Some(&result_ref), None, None)
+                .unwrap()
+                .unwrap();
+        assert_eq!(exchange.len(), 2);
+        assert!(exchange[0]
+            .serialized_json
+            .contains("\"type\":\"tool_call\""));
+        assert!(exchange[1]
+            .serialized_json
+            .contains("\"type\":\"tool_result\""));
     }
 }

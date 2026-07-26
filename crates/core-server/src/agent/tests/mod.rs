@@ -132,6 +132,7 @@ fn completed_trace(conversation_id: &str, assistant_message_id: &str) -> Convers
                 approval_status: AgentApprovalStatus::Approved,
                 error: None,
                 truncated: false,
+                archive: Default::default(),
             },
         ],
     }
@@ -154,6 +155,7 @@ fn test_compaction_draft(
         source_input_tokens,
         summary_input_tokens: 10,
         continuity_input_tokens: 10,
+        uncovered_tail_input_tokens: 0,
         replacement_input_tokens: 20,
         created_at,
     }
@@ -261,6 +263,7 @@ fn test_context_compaction_generator() -> ContextCompactionSummaryGenerator {
                     source_input_tokens: request.source_input_tokens,
                     summary_input_tokens: 10,
                     continuity_input_tokens: 10,
+                    uncovered_tail_input_tokens: request.uncovered_tail_input_tokens,
                     replacement_input_tokens: 20,
                     created_at: now_ms(),
                 },

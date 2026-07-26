@@ -32,8 +32,10 @@ pub use context::{
     AgentContextBaseline, AgentContextWindowToolProjection, AgentConversationContextState,
     ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionPrefix,
     ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,
-    ContextContinuityEntry, ContextContinuitySnapshot, ContextContinuityText, ContextJournalCursor,
-    CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION, CONTEXT_CONTINUITY_SCHEMA_VERSION,
+    ContextContinuityEntry, ContextContinuitySnapshot, ContextContinuityText, ContextHistoryRef,
+    ContextJournalCursor, ContinuityIndexV2, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+    CONTEXT_CONTINUITY_HARD_MAX_TOKENS, CONTEXT_CONTINUITY_SCHEMA_VERSION,
+    CONTEXT_CONTINUITY_TARGET_TOKENS, CONTEXT_CONTINUITY_V1_SCHEMA_VERSION,
 };
 pub use context_compaction_audit::{
     ContextCompactionAuditBundle, ContextCompactionAuditCheck, ContextCompactionAuditCheckStatus,
@@ -50,8 +52,9 @@ pub use conversation_trace::{
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
     conversation_trace_snapshot_from_checkpoint_and_continuation,
     conversation_trace_with_recovered_tool_result, failed_conversation_trace_without_items,
-    ConversationTraceAttachment, ConversationTraceSnapshot, ConversationTraceToolResultStatus,
-    ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    ConversationHistoryArchiveTraceMetadata, ConversationTraceAttachment,
+    ConversationTraceSnapshot, ConversationTraceToolResultStatus, ConversationTurnTrace,
+    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
     CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 pub use model_request_observation::{

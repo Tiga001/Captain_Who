@@ -207,6 +207,8 @@ pub struct ContextCompactionReceiptResult {
     pub source_input_tokens: u64,
     pub summary_input_tokens: u64,
     pub continuity_input_tokens: u64,
+    #[serde(default)]
+    pub uncovered_tail_input_tokens: u64,
     pub replacement_input_tokens: u64,
     pub reclaimed_input_tokens: u64,
 }
@@ -453,6 +455,7 @@ impl ContextCompactionReceipt {
             source_input_tokens: draft.source_input_tokens,
             summary_input_tokens: draft.summary_input_tokens,
             continuity_input_tokens: draft.continuity_input_tokens,
+            uncovered_tail_input_tokens: draft.uncovered_tail_input_tokens,
             replacement_input_tokens: draft.replacement_input_tokens,
             reclaimed_input_tokens: draft
                 .source_input_tokens

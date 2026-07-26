@@ -178,6 +178,7 @@ fn compaction_cannot_cross_the_model_visible_trace_boundary() {
                 approval_status: AgentApprovalStatus::NotRequired,
                 error: None,
                 truncated: false,
+                archive: Default::default(),
             },
         ],
     };
@@ -609,6 +610,7 @@ fn compaction_projection_hides_covered_prefix_but_keeps_raw_conversation_intact(
         source_input_tokens: 100,
         summary_input_tokens: 10,
         continuity_input_tokens: 10,
+        uncovered_tail_input_tokens: 0,
         replacement_input_tokens: 20,
         created_at: 4,
     };

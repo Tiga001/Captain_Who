@@ -597,6 +597,7 @@ mod tests {
             source_input_tokens: 100,
             summary_input_tokens: 20,
             continuity_input_tokens: 30,
+            uncovered_tail_input_tokens: 0,
             replacement_input_tokens: 50,
             created_at: 1,
         }
@@ -737,6 +738,7 @@ mod tests {
                         approval_status: AgentApprovalStatus::Approved,
                         error: None,
                         truncated: false,
+                        archive: Default::default(),
                     },
                 ],
             }),

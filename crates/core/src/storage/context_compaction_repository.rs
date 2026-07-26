@@ -240,7 +240,9 @@ pub fn get_active_summary(
             "active head 指向了其他会话的摘要。".to_string(),
         ));
     }
-    if !summary_matches_current_raw_prefix(connection, &summary)? {
+    if !summary_matches_current_raw_prefix(connection, &summary)?
+        || !continuity_refs_exist(connection, &summary)?
+    {
         // Raw history remains authoritative. An edit, delete or rollback invalidates only the
         // derived summaries; later requests immediately fall back to the remaining raw log.
         connection.execute(
@@ -813,6 +815,11 @@ pub(crate) fn insert_summary(
     summary
         .validate()
         .map_err(|error| ContextCompactionRepositoryError::Invalid(error.to_string()))?;
+    if !continuity_refs_exist(transaction, summary)? {
+        return Err(ContextCompactionRepositoryError::Invalid(
+            "Continuity V2 包含已失效或跨会话的历史引用。".to_string(),
+        ));
+    }
     let (cursor_kind, message_id, trace_sequence) = cursor_columns(&summary.covered_through);
     let continuity_json = serde_json::to_string(&summary.continuity).map_err(|error| {
         ContextCompactionRepositoryError::Invalid(format!("无法序列化上下文连续性骨架：{error}"))
@@ -823,10 +830,11 @@ pub(crate) fn insert_summary(
             covered_through_kind, covered_through_message_id,
             covered_through_trace_sequence, content, continuity_schema_version,
             continuity_json, generation_kind, generation_model, source_input_tokens,
-            summary_input_tokens, continuity_input_tokens, replacement_input_tokens, created_at
+            summary_input_tokens, continuity_input_tokens, uncovered_tail_input_tokens,
+            replacement_input_tokens, created_at
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-            ?16, ?17, ?18
+            ?16, ?17, ?18, ?19
          )",
         params![
             &summary.id,
@@ -845,11 +853,64 @@ pub(crate) fn insert_summary(
             summary.source_input_tokens,
             summary.summary_input_tokens,
             summary.continuity_input_tokens,
+            summary.uncovered_tail_input_tokens,
             summary.replacement_input_tokens,
             summary.created_at,
         ],
     )?;
     Ok(())
+}
+
+fn continuity_refs_exist(
+    connection: &Connection,
+    summary: &ContextCompactionSummary,
+) -> Result<bool, ContextCompactionRepositoryError> {
+    if !summary.continuity.is_v2() {
+        return Ok(true);
+    }
+    for reference in summary.continuity.all_refs() {
+        let exists = match reference {
+            crate::ContextHistoryRef::Message { message_id } => connection
+                .query_row(
+                    "SELECT 1 FROM messages WHERE conversation_id = ?1 AND id = ?2",
+                    params![&summary.conversation_id, message_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some(),
+            crate::ContextHistoryRef::TraceItem {
+                assistant_message_id,
+                sequence,
+            } => connection
+                .query_row(
+                    "SELECT 1
+                     FROM conversation_turn_trace_items AS item
+                     INNER JOIN conversation_turn_traces AS trace
+                        ON trace.assistant_message_id = item.assistant_message_id
+                     WHERE trace.conversation_id = ?1
+                       AND item.assistant_message_id = ?2
+                       AND item.sequence = ?3",
+                    params![&summary.conversation_id, assistant_message_id, sequence],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some(),
+            crate::ContextHistoryRef::Archive { archive_ref } => connection
+                .query_row(
+                    "SELECT 1
+                     FROM conversation_history_blobs
+                     WHERE conversation_id = ?1 AND archive_ref = ?2",
+                    params![&summary.conversation_id, archive_ref],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some(),
+        };
+        if !exists {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub(crate) fn insert_summary_lineage(
@@ -970,7 +1031,8 @@ pub(crate) fn load_summary(
                 covered_through_kind, covered_through_message_id,
                 covered_through_trace_sequence, content, continuity_schema_version,
                 continuity_json, generation_kind, generation_model, source_input_tokens,
-                summary_input_tokens, continuity_input_tokens, replacement_input_tokens, created_at
+                summary_input_tokens, continuity_input_tokens, uncovered_tail_input_tokens,
+                replacement_input_tokens, created_at
              FROM context_compaction_summaries
              WHERE id = ?1",
             [summary_id],
@@ -993,7 +1055,8 @@ pub(crate) fn load_summary(
                     row.get::<_, u64>(14)?,
                     row.get::<_, u64>(15)?,
                     row.get::<_, u64>(16)?,
-                    row.get::<_, i64>(17)?,
+                    row.get::<_, u64>(17)?,
+                    row.get::<_, i64>(18)?,
                 ))
             },
         )
@@ -1029,8 +1092,9 @@ pub(crate) fn load_summary(
         source_input_tokens: row.13,
         summary_input_tokens: row.14,
         continuity_input_tokens: row.15,
-        replacement_input_tokens: row.16,
-        created_at: row.17,
+        uncovered_tail_input_tokens: row.16,
+        replacement_input_tokens: row.17,
+        created_at: row.18,
     };
     summary
         .validate()

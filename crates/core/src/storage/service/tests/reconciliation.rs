@@ -31,6 +31,7 @@ fn in_progress_result_trace(
                 approval_status: crate::AgentApprovalStatus::Approved,
                 error: None,
                 truncated: false,
+                archive: Default::default(),
             },
         ],
     }
@@ -479,6 +480,7 @@ fn manual_non_command_file_effect_settlement(
                 approval_status: crate::AgentApprovalStatus::Approved,
                 error: None,
                 truncated: false,
+                archive: Default::default(),
             },
         ],
     };

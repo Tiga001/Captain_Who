@@ -233,6 +233,8 @@ pub struct ContextCompactionSummary {
     pub source_input_tokens: u64,
     pub summary_input_tokens: u64,
     pub continuity_input_tokens: u64,
+    #[serde(default)]
+    pub uncovered_tail_input_tokens: u64,
     pub replacement_input_tokens: u64,
     pub created_at: i64,
 }
@@ -272,6 +274,11 @@ impl ContextCompactionSummary {
             || self.replacement_input_tokens >= self.source_input_tokens
         {
             return Err(AgentError::new("上下文压缩替换内容的 token 计量无效。"));
+        }
+        if self.continuity.is_v2()
+            && self.continuity_input_tokens > super::CONTEXT_CONTINUITY_HARD_MAX_TOKENS
+        {
+            return Err(AgentError::new("Continuity V2 超过 1,500 token 硬上限。"));
         }
         if self.created_at < 0 {
             return Err(AgentError::new("摘要创建时间无效。"));
@@ -363,6 +370,8 @@ pub struct ContextCompactionSummaryDraft {
     pub source_input_tokens: u64,
     pub summary_input_tokens: u64,
     pub continuity_input_tokens: u64,
+    #[serde(default)]
+    pub uncovered_tail_input_tokens: u64,
     pub replacement_input_tokens: u64,
     pub created_at: i64,
 }
@@ -387,6 +396,13 @@ impl ContextCompactionSummaryDraft {
             || self.replacement_input_tokens >= self.source_input_tokens
         {
             return Err(AgentError::new("上下文压缩草稿的 token 计量无效。"));
+        }
+        if self.continuity.is_v2()
+            && self.continuity_input_tokens > super::CONTEXT_CONTINUITY_HARD_MAX_TOKENS
+        {
+            return Err(AgentError::new(
+                "Continuity V2 草稿超过 1,500 token 硬上限。",
+            ));
         }
         if self.created_at < 0 {
             return Err(AgentError::new("摘要草稿创建时间无效。"));
@@ -427,6 +443,7 @@ impl ContextCompactionSummaryDraft {
             source_input_tokens: self.source_input_tokens,
             summary_input_tokens: self.summary_input_tokens,
             continuity_input_tokens: self.continuity_input_tokens,
+            uncovered_tail_input_tokens: self.uncovered_tail_input_tokens,
             replacement_input_tokens: self.replacement_input_tokens,
             created_at: self.created_at,
         };
@@ -475,6 +492,7 @@ mod tests {
                         approval_status: crate::AgentApprovalStatus::NotRequired,
                         error: None,
                         truncated: false,
+                        archive: Default::default(),
                     },
                 },
             ],
@@ -489,6 +507,7 @@ mod tests {
             source_input_tokens: 100,
             summary_input_tokens: 20,
             continuity_input_tokens: 30,
+            uncovered_tail_input_tokens: 0,
             replacement_input_tokens: 50,
             created_at: 1,
         }

@@ -1,5 +1,5 @@
 use crate::context::{
-    ContextCompactionSummary, ContextContinuityEntry, ContextContinuitySnapshot,
+    ContextCompactionSummary, ContextContinuityEntry, ContextContinuitySnapshot, ContextHistoryRef,
     ContextJournalCursor,
 };
 use crate::storage::models::{
@@ -8,8 +8,8 @@ use crate::storage::models::{
 };
 use crate::storage::{
     attachment_repository, chat_repository, context_compaction_repository,
-    conversation_trace_repository, file_draft_repository, guidance_repository,
-    world_state_repository,
+    conversation_history_archive_repository, conversation_trace_repository, file_draft_repository,
+    guidance_repository, world_state_repository,
 };
 use crate::{AgentGuidanceStatus, ConversationTurnTrace, WorldStateRecord};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -43,6 +43,7 @@ pub(crate) struct ConversationForkPlan {
     pub source_message_id: String,
     pub target: ChatConversationRecord,
     pub attachments: Vec<ForkAttachmentCopy>,
+    archives: Vec<conversation_history_archive_repository::ConversationHistoryArchiveForkCopy>,
     traces: Vec<ForkTrace>,
     guidances: Vec<ForkGuidance>,
     file_drafts: Vec<AgentFileDraftRecord>,
@@ -268,11 +269,45 @@ pub(crate) fn build_fork_plan(
         }
     }
 
+    let mut archive_id_map = HashMap::new();
+    let mut archives = Vec::new();
+    for trace in &traces {
+        for item in &trace.trace.items {
+            let crate::ConversationTurnTraceItem::ToolResult {
+                call_id, archive, ..
+            } = item
+            else {
+                continue;
+            };
+            let Some(source_archive_ref) = archive.archive_ref.as_deref() else {
+                continue;
+            };
+            if archive_id_map.contains_key(source_archive_ref) {
+                continue;
+            }
+            let copy = conversation_history_archive_repository::load_fork_copy(
+                connection,
+                &source.id,
+                source_archive_ref,
+                &target_conversation_id,
+                &trace.trace.assistant_message_id,
+                call_id,
+            )
+            .map_err(database_error)?;
+            archive_id_map.insert(
+                source_archive_ref.to_string(),
+                copy.target_archive_ref.clone(),
+            );
+            archives.push(copy);
+        }
+    }
+
     let mut replacements = message_id_map.clone();
     replacements.extend(run_id_map.clone());
     replacements.extend(attachment_id_map.clone());
     replacements.extend(guidance_id_map);
     replacements.extend(draft_id_map);
+    replacements.extend(archive_id_map);
     replacements.insert(source.id.clone(), target_conversation_id.clone());
     for fork_trace in &mut traces {
         rewrite_trace_items(&mut fork_trace.trace, &replacements)?;
@@ -339,6 +374,7 @@ pub(crate) fn build_fork_plan(
             unread_at: None,
         },
         attachments,
+        archives,
         traces,
         guidances,
         file_drafts,
@@ -361,6 +397,10 @@ pub(crate) fn commit_fork_plan(
     )?;
     let transaction = connection.transaction().map_err(database_error)?;
     insert_conversation(&transaction, &plan.target)?;
+    for archive in &plan.archives {
+        conversation_history_archive_repository::clone_archive_in_connection(&transaction, archive)
+            .map_err(database_error)?;
+    }
     for trace in &plan.traces {
         conversation_trace_repository::commit_trace_in_connection(
             &transaction,
@@ -770,6 +810,7 @@ fn clone_summary_chain(
             source_input_tokens: source.source_input_tokens,
             summary_input_tokens: source.summary_input_tokens,
             continuity_input_tokens: source.continuity_input_tokens,
+            uncovered_tail_input_tokens: source.uncovered_tail_input_tokens,
             replacement_input_tokens: source.replacement_input_tokens,
             created_at: source.created_at,
         };
@@ -857,6 +898,11 @@ fn remap_continuity(
     run_id_map: &HashMap<String, String>,
     replacements: &HashMap<String, String>,
 ) -> Result<ContextContinuitySnapshot, String> {
+    let remap_refs = |refs: &[ContextHistoryRef]| {
+        refs.iter()
+            .map(|reference| remap_history_ref(reference, message_id_map, replacements))
+            .collect::<Result<Vec<_>, String>>()
+    };
     let entries = source
         .entries
         .iter()
@@ -936,10 +982,46 @@ fn remap_continuity(
     let snapshot = ContextContinuitySnapshot {
         schema_version: source.schema_version,
         covered_through: remap_cursor(&source.covered_through, message_id_map)?,
+        task_evidence_refs: remap_refs(&source.task_evidence_refs)?,
+        unresolved_failure_refs: remap_refs(&source.unresolved_failure_refs)?,
+        approval_refs: remap_refs(&source.approval_refs)?,
+        important_decision_refs: remap_refs(&source.important_decision_refs)?,
+        recent_refs: remap_refs(&source.recent_refs)?,
+        archived_counts: source.archived_counts.clone(),
         entries,
     };
     snapshot.validate().map_err(|error| error.to_string())?;
     Ok(snapshot)
+}
+
+fn remap_history_ref(
+    reference: &ContextHistoryRef,
+    message_id_map: &HashMap<String, String>,
+    replacements: &HashMap<String, String>,
+) -> Result<ContextHistoryRef, String> {
+    match reference {
+        ContextHistoryRef::Message { message_id } => Ok(ContextHistoryRef::message(mapped_id(
+            message_id_map,
+            message_id,
+            "Continuity 消息引用",
+        )?)),
+        ContextHistoryRef::TraceItem {
+            assistant_message_id,
+            sequence,
+        } => Ok(ContextHistoryRef::trace_item(
+            mapped_id(
+                message_id_map,
+                assistant_message_id,
+                "Continuity trace 引用",
+            )?,
+            *sequence,
+        )),
+        ContextHistoryRef::Archive { archive_ref } => Ok(ContextHistoryRef::archive(mapped_id(
+            replacements,
+            archive_ref,
+            "Continuity Archive 引用",
+        )?)),
+    }
 }
 
 fn rewrite_trace_items(
@@ -1666,6 +1748,7 @@ mod tests {
             source_input_tokens: 1_000,
             summary_input_tokens: 100,
             continuity_input_tokens: 100,
+            uncovered_tail_input_tokens: 0,
             replacement_input_tokens: 200,
             created_at,
         }

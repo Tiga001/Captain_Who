@@ -123,6 +123,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
         covered_through: ContextJournalCursor::message("assistant-old"),
         visible_trace_item_count: 0,
         source_input_tokens: 5_000,
+        uncovered_tail_input_tokens: 1_000,
         target_replacement_tokens: 750,
     };
     let receipt_plan = mycopilot_core::ContextCompactionReceiptPlan {
@@ -199,6 +200,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
                 continuity: mycopilot_core::ContextContinuitySnapshot::from_prefix(&prefix)
                     .unwrap(),
                 source_input_tokens: prepare_request.source_input_tokens,
+                uncovered_tail_input_tokens: prepare_request.uncovered_tail_input_tokens,
                 target_replacement_tokens: prepare_request.target_replacement_tokens,
             },
             cancellation.clone(),
@@ -227,6 +229,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
             source_input_tokens: generated.draft.source_input_tokens,
             summary_input_tokens: generated.draft.summary_input_tokens,
             continuity_input_tokens: generated.draft.continuity_input_tokens,
+            uncovered_tail_input_tokens: generated.draft.uncovered_tail_input_tokens,
             replacement_input_tokens: generated.draft.replacement_input_tokens,
             reclaimed_input_tokens: generated
                 .draft
@@ -272,6 +275,8 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
         active.covered_through,
         ContextJournalCursor::message("assistant-old")
     );
+    assert_eq!(active.uncovered_tail_input_tokens, 1_000);
+    assert_eq!(active.continuity.schema_version, 2);
     let audit = service
         .get_context_compaction_audit(AgentContextCompactionAuditInput {
             conversation_id: "conversation-compaction-host".to_string(),
@@ -291,6 +296,13 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
             .as_ref()
             .map(|summary| summary.relation),
         Some(mycopilot_core::ContextCompactionSummaryRelation::Active)
+    );
+    assert_eq!(
+        audit.reports[0]
+            .summary
+            .as_ref()
+            .and_then(|summary| summary.uncovered_tail_input_tokens),
+        Some(1_000)
     );
     assert!(audit.reports[0].generation_observation.is_some());
     assert_eq!(audit.estimation_error_groups.len(), 1);
@@ -488,6 +500,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
         approval_status: AgentApprovalStatus::NotRequired,
         error: None,
         truncated: false,
+        archive: Default::default(),
     };
     observer(ConversationTraceSnapshot {
         items: vec![narration, call, result],

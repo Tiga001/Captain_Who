@@ -174,6 +174,7 @@ pub(crate) fn project_tool_result(
         "write_file" => project_write_file_result(observation),
         "apply_patch" => project_apply_patch_result(operation, observation),
         "run_command" => project_run_command_result(observation),
+        "conversation_history" => project_conversation_history_result(observation),
         "skills_read_resource" => project_skill_resource_result(observation),
         tool if is_read_tool(tool) => project_read_result(observation),
         _ => project_generic_value(observation),
@@ -189,6 +190,62 @@ pub(crate) fn project_tool_result(
         error,
         error_truncated,
     )
+}
+
+pub(crate) fn project_conversation_history_result(value: &Value) -> (Value, bool) {
+    let Some(input) = value.as_object() else {
+        return project_generic_value(value);
+    };
+    let mut metadata = input.clone();
+    let returned_chars = metadata.remove("content").and_then(|content| {
+        content
+            .as_str()
+            .map(|content| content.chars().count() as u64)
+    });
+    if let Some(returned_chars) = returned_chars {
+        metadata.insert("returnedChars".to_string(), json!(returned_chars));
+        metadata.insert(
+            "contentOmittedFromConversationTrace".to_string(),
+            json!(true),
+        );
+    }
+    let mut historical_payload_omitted = returned_chars.is_some();
+    if let Some(hits) = metadata.get_mut("hits").and_then(Value::as_array_mut) {
+        for hit in hits {
+            if let Some(hit) = hit.as_object_mut() {
+                historical_payload_omitted |= hit.remove("preview").is_some();
+            }
+        }
+    }
+    if let Some(records) = metadata.get_mut("records").and_then(Value::as_array_mut) {
+        let timeline_records = records.iter().all(|record| {
+            record
+                .as_object()
+                .is_some_and(|record| record.contains_key("ref"))
+        });
+        if timeline_records {
+            for record in records {
+                if let Some(record) = record.as_object_mut() {
+                    historical_payload_omitted |= record.remove("preview").is_some();
+                    historical_payload_omitted |= record.remove("content").is_some();
+                    historical_payload_omitted |= record.remove("item").is_some();
+                }
+            }
+        } else {
+            let returned_records = records.len() as u64;
+            metadata.remove("records");
+            metadata.insert("returnedRecords".to_string(), json!(returned_records));
+            historical_payload_omitted |= returned_records > 0;
+        }
+    }
+    if historical_payload_omitted {
+        metadata.insert(
+            "historicalPayloadOmittedFromConversationTrace".to_string(),
+            json!(true),
+        );
+    }
+    let (value, projected_truncated) = project_generic_value(&Value::Object(metadata));
+    (value, historical_payload_omitted || projected_truncated)
 }
 
 pub(crate) fn is_repeat_failure_eligible(tool: &str) -> bool {

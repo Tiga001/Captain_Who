@@ -9,6 +9,7 @@ pub mod context_compaction_audit_repository;
 pub mod context_compaction_receipt_repository;
 pub mod context_compaction_repository;
 pub mod conversation_fork_repository;
+pub mod conversation_history_archive_repository;
 pub mod conversation_history_repository;
 pub mod conversation_trace_repository;
 mod database_snapshot;

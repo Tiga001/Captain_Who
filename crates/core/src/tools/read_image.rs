@@ -143,6 +143,10 @@ impl AgentTool for ReadImageTool {
         read_image_history_projection(result)
     }
 
+    fn archive_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        read_image_history_projection(result)
+    }
+
     fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         read_image_model_projection(result)
     }

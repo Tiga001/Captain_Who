@@ -676,6 +676,7 @@ mod tests {
                     approval_status: AgentApprovalStatus::NotRequired,
                     error: None,
                     truncated: false,
+                    archive: Default::default(),
                 },
             ],
         }

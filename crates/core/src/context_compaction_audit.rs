@@ -51,6 +51,8 @@ pub struct ContextCompactionSummaryEvidence {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continuity_input_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub uncovered_tail_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub replacement_input_tokens: Option<u64>,
 }
 
@@ -242,6 +244,8 @@ pub(crate) fn build_compaction_audit_report(
                         && evidence.source_input_tokens == Some(result.source_input_tokens)
                         && evidence.summary_input_tokens == Some(result.summary_input_tokens)
                         && evidence.continuity_input_tokens == Some(result.continuity_input_tokens)
+                        && evidence.uncovered_tail_input_tokens
+                            == Some(result.uncovered_tail_input_tokens)
                         && evidence.replacement_input_tokens
                             == Some(result.replacement_input_tokens);
                     push_check(
@@ -724,6 +728,7 @@ mod tests {
                 source_input_tokens: 100,
                 summary_input_tokens: 20,
                 continuity_input_tokens: 20,
+                uncovered_tail_input_tokens: 10,
                 replacement_input_tokens: 40,
                 reclaimed_input_tokens: 60,
             }),
@@ -777,6 +782,7 @@ mod tests {
                 source_input_tokens: None,
                 summary_input_tokens: None,
                 continuity_input_tokens: None,
+                uncovered_tail_input_tokens: None,
                 replacement_input_tokens: None,
             }),
         );

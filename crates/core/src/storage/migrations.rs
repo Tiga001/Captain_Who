@@ -1,5 +1,5 @@
 use crate::context::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION;
-use crate::storage::usage_repository;
+use crate::storage::{conversation_history_archive_repository, usage_repository};
 use crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION;
 use rusqlite::Connection;
 
@@ -35,6 +35,238 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> rusql
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(columns.iter().any(|candidate| candidate == column))
+}
+
+fn ensure_conversation_history_fts_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "
+        CREATE VIRTUAL TABLE IF NOT EXISTS conversation_history_fts USING fts5(
+            ref_key UNINDEXED,
+            conversation_id UNINDEXED,
+            record_type UNINDEXED,
+            item_kind UNINDEXED,
+            message_id UNINDEXED,
+            assistant_message_id UNINDEXED,
+            sequence UNINDEXED,
+            archive_ref UNINDEXED,
+            call_id UNINDEXED,
+            tool UNINDEXED,
+            status UNINDEXED,
+            run_id UNINDEXED,
+            created_at UNINDEXED,
+            position UNINDEXED,
+            within_message_order UNINDEXED,
+            content,
+            tokenize = 'trigram'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS conversation_history_fts_message_insert
+        AFTER INSERT ON messages
+        BEGIN
+            INSERT INTO conversation_history_fts (
+                ref_key, conversation_id, record_type, item_kind, message_id,
+                assistant_message_id, sequence, archive_ref, call_id, tool,
+                status, run_id, created_at, position, within_message_order, content
+            ) VALUES (
+                'message:' || NEW.id, NEW.conversation_id, 'message', NULL, NEW.id,
+                NULL, NULL, NULL, NULL, NULL, NEW.status, NULL, NEW.created_at,
+                NEW.position, CASE WHEN NEW.role = 'assistant' THEN 9223372036854775807 ELSE 0 END,
+                NEW.content
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS conversation_history_fts_message_update
+        AFTER UPDATE OF conversation_id, role, content, status, created_at, position ON messages
+        BEGIN
+            DELETE FROM conversation_history_fts WHERE ref_key = 'message:' || OLD.id;
+            INSERT INTO conversation_history_fts (
+                ref_key, conversation_id, record_type, item_kind, message_id,
+                assistant_message_id, sequence, archive_ref, call_id, tool,
+                status, run_id, created_at, position, within_message_order, content
+            ) VALUES (
+                'message:' || NEW.id, NEW.conversation_id, 'message', NULL, NEW.id,
+                NULL, NULL, NULL, NULL, NULL, NEW.status, NULL, NEW.created_at,
+                NEW.position, CASE WHEN NEW.role = 'assistant' THEN 9223372036854775807 ELSE 0 END,
+                NEW.content
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS conversation_history_fts_message_delete
+        AFTER DELETE ON messages
+        BEGIN
+            DELETE FROM conversation_history_fts WHERE ref_key = 'message:' || OLD.id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS conversation_history_fts_trace_insert
+        AFTER INSERT ON conversation_turn_trace_items
+        BEGIN
+            INSERT INTO conversation_history_fts (
+                ref_key, conversation_id, record_type, item_kind, message_id,
+                assistant_message_id, sequence, archive_ref, call_id, tool,
+                status, run_id, created_at, position, within_message_order, content
+            )
+            SELECT
+                'trace:' || NEW.assistant_message_id || ':' || NEW.sequence,
+                trace.conversation_id,
+                'trace_item',
+                NEW.item_kind,
+                NULL,
+                NEW.assistant_message_id,
+                NEW.sequence,
+                json_extract(NEW.item_json, '$.archiveRef'),
+                json_extract(NEW.item_json, '$.callId'),
+                json_extract(NEW.item_json, '$.tool'),
+                COALESCE(
+                    json_extract(NEW.item_json, '$.status'),
+                    json_extract(NEW.item_json, '$.approvalStatus')
+                ),
+                trace.run_id,
+                COALESCE(json_extract(NEW.item_json, '$.createdAt'), trace.created_at),
+                message.position,
+                NEW.sequence + 1,
+                NEW.item_json
+            FROM conversation_turn_traces AS trace
+            INNER JOIN messages AS message
+                ON message.id = trace.assistant_message_id
+            WHERE trace.assistant_message_id = NEW.assistant_message_id;
+            UPDATE conversation_history_fts
+            SET
+                status = COALESCE(
+                    json_extract(NEW.item_json, '$.status'),
+                    json_extract(NEW.item_json, '$.approvalStatus')
+                ),
+                run_id = (
+                    SELECT run_id FROM conversation_turn_traces
+                    WHERE assistant_message_id = NEW.assistant_message_id
+                )
+            WHERE archive_ref = json_extract(NEW.item_json, '$.archiveRef');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS conversation_history_fts_trace_update
+        AFTER UPDATE OF item_kind, item_json ON conversation_turn_trace_items
+        BEGIN
+            DELETE FROM conversation_history_fts
+            WHERE ref_key = 'trace:' || OLD.assistant_message_id || ':' || OLD.sequence;
+            INSERT INTO conversation_history_fts (
+                ref_key, conversation_id, record_type, item_kind, message_id,
+                assistant_message_id, sequence, archive_ref, call_id, tool,
+                status, run_id, created_at, position, within_message_order, content
+            )
+            SELECT
+                'trace:' || NEW.assistant_message_id || ':' || NEW.sequence,
+                trace.conversation_id,
+                'trace_item',
+                NEW.item_kind,
+                NULL,
+                NEW.assistant_message_id,
+                NEW.sequence,
+                json_extract(NEW.item_json, '$.archiveRef'),
+                json_extract(NEW.item_json, '$.callId'),
+                json_extract(NEW.item_json, '$.tool'),
+                COALESCE(
+                    json_extract(NEW.item_json, '$.status'),
+                    json_extract(NEW.item_json, '$.approvalStatus')
+                ),
+                trace.run_id,
+                COALESCE(json_extract(NEW.item_json, '$.createdAt'), trace.created_at),
+                message.position,
+                NEW.sequence + 1,
+                NEW.item_json
+            FROM conversation_turn_traces AS trace
+            INNER JOIN messages AS message
+                ON message.id = trace.assistant_message_id
+            WHERE trace.assistant_message_id = NEW.assistant_message_id;
+            UPDATE conversation_history_fts
+            SET
+                status = COALESCE(
+                    json_extract(NEW.item_json, '$.status'),
+                    json_extract(NEW.item_json, '$.approvalStatus')
+                ),
+                run_id = (
+                    SELECT run_id FROM conversation_turn_traces
+                    WHERE assistant_message_id = NEW.assistant_message_id
+                )
+            WHERE archive_ref = json_extract(NEW.item_json, '$.archiveRef');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS conversation_history_fts_trace_delete
+        AFTER DELETE ON conversation_turn_trace_items
+        BEGIN
+            DELETE FROM conversation_history_fts
+            WHERE ref_key = 'trace:' || OLD.assistant_message_id || ':' || OLD.sequence;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS conversation_history_fts_archive_delete
+        AFTER DELETE ON conversation_history_blobs
+        BEGIN
+            DELETE FROM conversation_history_fts WHERE ref_key = 'archive:' || OLD.archive_ref;
+        END;
+
+        INSERT INTO conversation_history_fts (
+            ref_key, conversation_id, record_type, item_kind, message_id,
+            assistant_message_id, sequence, archive_ref, call_id, tool,
+            status, run_id, created_at, position, within_message_order, content
+        )
+        SELECT
+            'message:' || message.id,
+            message.conversation_id,
+            'message',
+            NULL,
+            message.id,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            message.status,
+            NULL,
+            message.created_at,
+            message.position,
+            CASE WHEN message.role = 'assistant' THEN 9223372036854775807 ELSE 0 END,
+            message.content
+        FROM messages AS message
+        WHERE NOT EXISTS (
+            SELECT 1 FROM conversation_history_fts
+            WHERE ref_key = 'message:' || message.id
+        );
+
+        INSERT INTO conversation_history_fts (
+            ref_key, conversation_id, record_type, item_kind, message_id,
+            assistant_message_id, sequence, archive_ref, call_id, tool,
+            status, run_id, created_at, position, within_message_order, content
+        )
+        SELECT
+            'trace:' || item.assistant_message_id || ':' || item.sequence,
+            trace.conversation_id,
+            'trace_item',
+            item.item_kind,
+            NULL,
+            item.assistant_message_id,
+            item.sequence,
+            json_extract(item.item_json, '$.archiveRef'),
+            json_extract(item.item_json, '$.callId'),
+            json_extract(item.item_json, '$.tool'),
+            COALESCE(
+                json_extract(item.item_json, '$.status'),
+                json_extract(item.item_json, '$.approvalStatus')
+            ),
+            trace.run_id,
+            COALESCE(json_extract(item.item_json, '$.createdAt'), trace.created_at),
+            message.position,
+            item.sequence + 1,
+            item.item_json
+        FROM conversation_turn_trace_items AS item
+        INNER JOIN conversation_turn_traces AS trace
+            ON trace.assistant_message_id = item.assistant_message_id
+        INNER JOIN messages AS message
+            ON message.id = trace.assistant_message_id
+        WHERE NOT EXISTS (
+            SELECT 1 FROM conversation_history_fts
+            WHERE ref_key = 'trace:' || item.assistant_message_id || ':' || item.sequence
+        );
+        ",
+    )?;
+    conversation_history_archive_repository::backfill_history_search_index(connection)
 }
 
 fn usage_billable_default_is_zero(connection: &Connection) -> rusqlite::Result<bool> {
@@ -1401,6 +1633,82 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS conversation_history_blobs (
+            archive_ref TEXT PRIMARY KEY CHECK (
+                typeof(archive_ref) = 'text'
+                AND length(CAST(archive_ref AS BLOB)) BETWEEN 1 AND 256
+            ),
+            conversation_id TEXT NOT NULL,
+            assistant_message_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            call_id TEXT NOT NULL CHECK (
+                length(CAST(call_id AS BLOB)) BETWEEN 1 AND 1024
+            ),
+            tool TEXT NOT NULL CHECK (
+                length(CAST(tool AS BLOB)) BETWEEN 1 AND 256
+            ),
+            content_type TEXT NOT NULL CHECK (
+                length(CAST(content_type AS BLOB)) BETWEEN 1 AND 256
+            ),
+            content_hash TEXT NOT NULL CHECK (
+                length(content_hash) = 71
+                AND substr(content_hash, 1, 7) = 'sha256:'
+                AND substr(content_hash, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            uncompressed_bytes INTEGER NOT NULL CHECK (uncompressed_bytes >= 0),
+            uncompressed_chars INTEGER NOT NULL CHECK (uncompressed_chars >= 0),
+            chunk_count INTEGER NOT NULL CHECK (chunk_count > 0),
+            compression TEXT NOT NULL CHECK (compression = 'zstd'),
+            truncated_at_source INTEGER NOT NULL CHECK (truncated_at_source IN (0, 1)),
+            archived_completely INTEGER NOT NULL CHECK (archived_completely IN (0, 1)),
+            model_projection_truncated INTEGER NOT NULL
+                CHECK (model_projection_truncated IN (0, 1)),
+            archive_projection_truncated INTEGER NOT NULL
+                CHECK (archive_projection_truncated IN (0, 1)),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            UNIQUE (conversation_id, assistant_message_id, sequence),
+            UNIQUE (conversation_id, call_id),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (assistant_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS conversation_history_blob_chunks (
+            archive_ref TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
+            uncompressed_start_byte INTEGER NOT NULL
+                CHECK (uncompressed_start_byte >= 0),
+            uncompressed_start_char INTEGER NOT NULL
+                CHECK (uncompressed_start_char >= 0),
+            uncompressed_bytes INTEGER NOT NULL CHECK (uncompressed_bytes >= 0),
+            uncompressed_chars INTEGER NOT NULL CHECK (uncompressed_chars >= 0),
+            compressed_bytes INTEGER NOT NULL CHECK (compressed_bytes > 0),
+            payload BLOB NOT NULL CHECK (length(payload) = compressed_bytes),
+            PRIMARY KEY (archive_ref, chunk_index),
+            FOREIGN KEY (archive_ref)
+                REFERENCES conversation_history_blobs(archive_ref) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS conversation_history_blobs_trace_item_idx
+            ON conversation_history_blobs (
+                conversation_id, assistant_message_id, sequence
+            );
+
+        CREATE TRIGGER IF NOT EXISTS validate_conversation_history_blob_message_insert
+        BEFORE INSERT ON conversation_history_blobs
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.assistant_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'assistant'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'history archive message must be an assistant message in the same conversation'
+            );
+        END;
+
         CREATE TABLE IF NOT EXISTS conversation_world_state_epochs (
             conversation_id TEXT NOT NULL,
             epoch_id TEXT NOT NULL CHECK (
@@ -1635,6 +1943,9 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
                 summary_input_tokens > 0
             ),
             continuity_input_tokens INTEGER NOT NULL CHECK (continuity_input_tokens > 0),
+            uncovered_tail_input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (
+                uncovered_tail_input_tokens >= 0
+            ),
             replacement_input_tokens INTEGER NOT NULL CHECK (
                 replacement_input_tokens > 0
                 AND replacement_input_tokens < source_input_tokens
@@ -1987,9 +2298,16 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "agent_action_audit", "blocked_reason", "TEXT")?;
     add_column_if_missing(connection, "agent_action_audit", "decision_source", "TEXT")?;
     add_column_if_missing(connection, "agent_pending_actions", "target_status", "TEXT")?;
+    add_column_if_missing(
+        connection,
+        "context_compaction_summaries",
+        "uncovered_tail_input_tokens",
+        "INTEGER NOT NULL DEFAULT 0 CHECK (uncovered_tail_input_tokens >= 0)",
+    )?;
 
     upgrade_canonical_model_identity_schema(connection)?;
     upgrade_usage_consistency_schema(connection)?;
+    ensure_conversation_history_fts_schema(connection)?;
 
     Ok(())
 }

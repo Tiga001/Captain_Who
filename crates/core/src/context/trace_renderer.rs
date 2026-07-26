@@ -240,6 +240,7 @@ mod tests {
                     approval_status: AgentApprovalStatus::NotRequired,
                     error: None,
                     truncated: false,
+                    archive: Default::default(),
                 },
             ],
         }
@@ -320,6 +321,7 @@ mod tests {
             approval_status: AgentApprovalStatus::NotRequired,
             error: Some("command failed".to_string()),
             truncated: false,
+            archive: Default::default(),
         };
 
         let rendered = ConversationTraceRenderer::render(&trace).unwrap();

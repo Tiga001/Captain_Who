@@ -232,8 +232,7 @@ impl StorageService {
         &self,
         conversation_id: &str,
         query: &str,
-        include_messages: bool,
-        include_trace_items: bool,
+        filter: &conversation_history_repository::ConversationHistorySearchFilter,
         limit: usize,
     ) -> Result<Vec<conversation_history_repository::ConversationHistorySearchHit>, String> {
         let connection = self.state.connection()?;
@@ -241,9 +240,69 @@ impl StorageService {
             &connection,
             conversation_id,
             query,
-            include_messages,
-            include_trace_items,
+            filter,
             limit,
+        )
+        .map_err(storage_error)
+    }
+
+    pub fn conversation_history_around(
+        &self,
+        conversation_id: &str,
+        reference: &conversation_history_repository::ConversationHistoryRecordRef,
+        before: usize,
+        after: usize,
+    ) -> Result<
+        Option<Vec<conversation_history_repository::ConversationHistoryTimelineRecord>>,
+        String,
+    > {
+        let connection = self.state.connection()?;
+        conversation_history_repository::records_around(
+            &connection,
+            conversation_id,
+            reference,
+            before,
+            after,
+        )
+        .map_err(storage_error)
+    }
+
+    pub fn conversation_history_range(
+        &self,
+        conversation_id: &str,
+        start: &conversation_history_repository::ConversationHistoryRecordRef,
+        end: &conversation_history_repository::ConversationHistoryRecordRef,
+        limit: usize,
+    ) -> Result<
+        Option<Vec<conversation_history_repository::ConversationHistoryTimelineRecord>>,
+        String,
+    > {
+        let connection = self.state.connection()?;
+        conversation_history_repository::records_in_range(
+            &connection,
+            conversation_id,
+            start,
+            end,
+            limit,
+        )
+        .map_err(storage_error)
+    }
+
+    pub fn conversation_history_tool_exchange(
+        &self,
+        conversation_id: &str,
+        reference: Option<&conversation_history_repository::ConversationHistoryRecordRef>,
+        call_id: Option<&str>,
+        run_id: Option<&str>,
+    ) -> Result<Option<Vec<conversation_history_repository::ConversationHistoryRecord>>, String>
+    {
+        let connection = self.state.connection()?;
+        conversation_history_repository::get_tool_exchange(
+            &connection,
+            conversation_id,
+            reference,
+            call_id,
+            run_id,
         )
         .map_err(storage_error)
     }
@@ -256,6 +315,58 @@ impl StorageService {
         let connection = self.state.connection()?;
         conversation_history_repository::read_record(&connection, conversation_id, reference)
             .map_err(storage_error)
+    }
+
+    pub fn archive_conversation_tool_result(
+        &self,
+        input: conversation_history_archive_repository::ConversationHistoryArchiveInput,
+    ) -> Result<conversation_history_archive_repository::ConversationHistoryArchiveDescriptor, String>
+    {
+        let mut connection = self.state.connection()?;
+        conversation_history_archive_repository::store_archive(&mut connection, &input)
+            .map_err(storage_error)
+    }
+
+    pub fn find_conversation_history_archive_for_trace_item(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        sequence: u64,
+    ) -> Result<
+        Option<conversation_history_archive_repository::ConversationHistoryArchiveDescriptor>,
+        String,
+    > {
+        let connection = self.state.connection()?;
+        conversation_history_archive_repository::find_archive_for_trace_item(
+            &connection,
+            conversation_id,
+            assistant_message_id,
+            sequence,
+        )
+        .map_err(storage_error)
+    }
+
+    pub fn read_conversation_history_archive_page(
+        &self,
+        conversation_id: &str,
+        archive_ref: &str,
+        unit: conversation_history_archive_repository::ConversationHistoryArchivePageUnit,
+        start: u64,
+        maximum: u64,
+    ) -> Result<
+        Option<conversation_history_archive_repository::ConversationHistoryArchivePage>,
+        String,
+    > {
+        let connection = self.state.connection()?;
+        conversation_history_archive_repository::read_archive_page(
+            &connection,
+            conversation_id,
+            archive_ref,
+            unit,
+            start,
+            maximum,
+        )
+        .map_err(storage_error)
     }
 
     pub fn save_conversation(

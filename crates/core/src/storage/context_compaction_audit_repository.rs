@@ -110,7 +110,8 @@ fn load_summary_evidence(
     let row = connection
         .query_row(
             "SELECT source_revision, source_input_tokens, summary_input_tokens,
-                    continuity_input_tokens, replacement_input_tokens
+                    continuity_input_tokens, uncovered_tail_input_tokens,
+                    replacement_input_tokens
              FROM context_compaction_summaries
              WHERE id = ?1 AND conversation_id = ?2",
             [summary_id, conversation_id],
@@ -121,11 +122,13 @@ fn load_summary_evidence(
                     row.get::<_, u64>(2)?,
                     row.get::<_, u64>(3)?,
                     row.get::<_, u64>(4)?,
+                    row.get::<_, u64>(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((source_revision, source, summary, continuity, replacement)) = row else {
+    let Some((source_revision, source, summary, continuity, uncovered_tail, replacement)) = row
+    else {
         return Ok(ContextCompactionSummaryEvidence {
             summary_id: summary_id.to_string(),
             relation: ContextCompactionSummaryRelation::Missing,
@@ -133,6 +136,7 @@ fn load_summary_evidence(
             source_input_tokens: None,
             summary_input_tokens: None,
             continuity_input_tokens: None,
+            uncovered_tail_input_tokens: None,
             replacement_input_tokens: None,
         });
     };
@@ -143,6 +147,7 @@ fn load_summary_evidence(
         source_input_tokens: Some(source),
         summary_input_tokens: Some(summary),
         continuity_input_tokens: Some(continuity),
+        uncovered_tail_input_tokens: Some(uncovered_tail),
         replacement_input_tokens: Some(replacement),
     })
 }

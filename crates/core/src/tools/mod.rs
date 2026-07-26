@@ -364,6 +364,23 @@ impl ToolRegistry {
             .unwrap_or_else(|| canonical_tool_result_for_context(result))
     }
 
+    /// Returns the security-sanitized, non-length-bounded textual result stored in exact history.
+    ///
+    /// This projection is evaluated before the bounded durable trace projection. Binary/runtime
+    /// delivery fields may still be omitted by the owning tool.
+    pub(crate) fn archive_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        self.tools
+            .get(&result.tool)
+            .map(|tool| tool.archive_projection(result))
+            .unwrap_or_else(|| canonical_tool_result_for_context(result))
+    }
+
+    pub(crate) fn archives_result(&self, tool_name: &str) -> bool {
+        self.tools
+            .get(tool_name)
+            .is_none_or(|tool| tool.archives_result())
+    }
+
     /// Returns the textual projection supplied to the current model tool-result message.
     ///
     /// This is intentionally distinct from the raw result: a tool may carry transient binary
@@ -534,6 +551,14 @@ pub(crate) trait AgentTool: Send + Sync {
 
     fn trace_projection(&self, result: &AgentToolResult) -> AgentToolResult {
         canonical_tool_result_for_context(result)
+    }
+
+    fn archive_projection(&self, result: &AgentToolResult) -> AgentToolResult {
+        canonical_tool_result_for_context(result)
+    }
+
+    fn archives_result(&self) -> bool {
+        true
     }
 
     fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {

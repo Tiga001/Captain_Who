@@ -32,7 +32,10 @@ use crate::context::{
     ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata, ContextRetention,
     ContextScope, ContextSource,
 };
-use crate::conversation_trace::{trace_attachments_from_input, ConversationTraceRecorder};
+use crate::conversation_trace::{
+    trace_attachments_from_input, ConversationHistoryArchiveTraceMetadata,
+    ConversationTraceRecorder,
+};
 use crate::file_write::{file_write_approval_route, FileWriteApprovalRoute};
 use crate::llm::{
     complete_chat, complete_chat_streaming, detect_api_style, is_repairable_empty_model_action,
@@ -53,6 +56,8 @@ use crate::protocol::{
     AgentWritePermission,
 };
 use crate::revision::content_revision;
+use crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput;
+use crate::storage::now_ms;
 use crate::storage::service::StorageService;
 use crate::tools::{EffectiveToolSet, ToolExecutionContext, ToolRegistry, ToolUnavailability};
 use crate::usage::merge_total_usage;
@@ -397,6 +402,7 @@ impl AgentRuntime {
         );
         let tool_output_budget = capacity_detector
             .tool_output_text_budget(llm_request.context_window_tokens, llm_request.max_tokens);
+        let exact_history_storage = storage.clone();
         let mut tool_context = ToolExecutionContext::from_run_context(run_context.as_ref())
             .with_cancellation(cancellation_token.clone())
             .with_model_capabilities(model_capabilities)
@@ -1493,13 +1499,38 @@ impl AgentRuntime {
                     if !duplicate_in_batch {
                         tool_failure_guard.observe(&call, &result);
                     }
+                    // Exact history is derived from the security-sanitized result before the
+                    // bounded durable trace projection. This keeps model context compact without
+                    // making historical recall lossy.
+                    let archive_result = tool_registry.archive_projection(&result);
                     let llm_result = tool_registry.model_projection(&result);
+                    let archive_metadata = if tool_registry.archives_result(&call.tool) {
+                        let sequence = conversation_trace
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .pending_tool_result_sequence(&call.id);
+                        archive_tool_result(
+                            exact_history_storage.as_ref(),
+                            trace_conversation_id.as_deref(),
+                            trace_assistant_message_id.as_deref(),
+                            sequence,
+                            &result,
+                            &archive_result,
+                            &llm_result,
+                        )
+                    } else {
+                        ConversationHistoryArchiveTraceMetadata::default()
+                    };
                     let trace_result = tool_registry.trace_projection(&result);
                     let checkpoint_result = tool_registry.checkpoint_projection(&result);
                     conversation_trace
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
-                        .record_tool_result(&call, &checkpoint_result);
+                        .record_tool_result_with_archive(
+                            &call,
+                            &checkpoint_result,
+                            archive_metadata,
+                        );
                     pending_trace_baseline =
                         publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     if cancellation_preempts_tool_result(
@@ -1863,6 +1894,93 @@ fn clear_deferred_tool_input_preview(
         stream_id,
         attempt,
     });
+}
+
+fn archive_tool_result(
+    storage: Option<&Arc<StorageService>>,
+    conversation_id: Option<&str>,
+    assistant_message_id: Option<&str>,
+    sequence: Option<u64>,
+    raw_result: &AgentToolResult,
+    archive_result: &AgentToolResult,
+    model_result: &AgentToolResult,
+) -> ConversationHistoryArchiveTraceMetadata {
+    let mut metadata = ConversationHistoryArchiveTraceMetadata {
+        truncated_at_source: tool_result_truncated_at_source(raw_result),
+        model_projection_truncated: projection_differs(archive_result, model_result),
+        archive_projection_truncated: projection_differs(raw_result, archive_result),
+        ..Default::default()
+    };
+    let (Some(storage), Some(conversation_id), Some(assistant_message_id), Some(sequence)) =
+        (storage, conversation_id, assistant_message_id, sequence)
+    else {
+        return metadata;
+    };
+    let content = match serde_json::to_string(archive_result) {
+        Ok(content) => content,
+        Err(error) => {
+            eprintln!("failed to serialize exact history tool result: {error}");
+            return metadata;
+        }
+    };
+    let input = ConversationHistoryArchiveInput {
+        conversation_id: conversation_id.to_string(),
+        assistant_message_id: assistant_message_id.to_string(),
+        sequence,
+        call_id: archive_result.call_id.clone(),
+        tool: archive_result.tool.clone(),
+        content_type: "application/vnd.mycopilot.agent-tool-result+json".to_string(),
+        content,
+        truncated_at_source: metadata.truncated_at_source,
+        model_projection_truncated: metadata.model_projection_truncated,
+        archive_projection_truncated: metadata.archive_projection_truncated,
+        created_at: now_ms(),
+    };
+    match storage.archive_conversation_tool_result(input) {
+        Ok(archive) => {
+            metadata.archive_ref = Some(archive.archive_ref);
+            metadata.content_hash = Some(archive.content_hash);
+            metadata.archived_bytes = Some(archive.total_bytes);
+            metadata.archived_completely = Some(archive.archived_completely);
+        }
+        Err(error) => {
+            // Tool settlement remains authoritative even if the auxiliary archive cannot commit.
+            // The missing archive identity makes the loss explicit instead of pretending exact
+            // recovery is possible.
+            eprintln!("failed to store exact history tool result: {error}");
+        }
+    }
+    metadata
+}
+
+fn projection_differs(left: &AgentToolResult, right: &AgentToolResult) -> bool {
+    match (serde_json::to_vec(left), serde_json::to_vec(right)) {
+        (Ok(left), Ok(right)) => left != right,
+        _ => true,
+    }
+}
+
+fn tool_result_truncated_at_source(result: &AgentToolResult) -> bool {
+    result
+        .result
+        .as_ref()
+        .is_some_and(value_contains_source_truncation)
+}
+
+fn value_contains_source_truncation(value: &Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter().any(value_contains_source_truncation),
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            let canonical_key = key
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
+            (canonical_key.contains("truncated") && value.as_bool() == Some(true))
+                || value_contains_source_truncation(value)
+        }),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

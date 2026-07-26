@@ -118,6 +118,7 @@ fn in_progress_trace(
                 approval_status: crate::AgentApprovalStatus::NotRequired,
                 error: None,
                 truncated: false,
+                archive: Default::default(),
             },
         ],
     }

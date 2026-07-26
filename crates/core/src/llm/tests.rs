@@ -161,6 +161,7 @@ fn traced_chat_message(content: &str) -> AgentChatMessage {
                     approval_status: AgentApprovalStatus::NotRequired,
                     error: None,
                     truncated: false,
+                    archive: Default::default(),
                 },
             ],
         }),

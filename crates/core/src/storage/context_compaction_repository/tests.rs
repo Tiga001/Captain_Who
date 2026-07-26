@@ -62,6 +62,7 @@ fn setup() -> Connection {
                 approval_status: AgentApprovalStatus::NotRequired,
                 error: None,
                 truncated: false,
+                archive: Default::default(),
             },
         ],
     };
@@ -79,6 +80,7 @@ fn draft(prefix: &ContextCompactionPrefix, id: &str) -> ContextCompactionSummary
         source_input_tokens: 100,
         summary_input_tokens: 10,
         continuity_input_tokens: 20,
+        uncovered_tail_input_tokens: 0,
         replacement_input_tokens: 30,
         created_at: 10,
     }
@@ -808,12 +810,7 @@ fn rejects_a_structurally_valid_but_tampered_continuity_snapshot() {
     let cursor = ContextJournalCursor::message("assistant-1");
     let prefix = prepare_prefix(&connection, "conversation-1", &cursor).unwrap();
     let mut tampered = draft(&prefix, "summary-tampered");
-    let crate::ContextContinuityEntry::UserMessage { created_at, .. } =
-        &mut tampered.continuity.entries[0]
-    else {
-        panic!("the first deterministic continuity entry should be a user message");
-    };
-    *created_at = "2099-01-01T00:00:00+00:00".to_string();
+    tampered.continuity.task_evidence_refs[0] = crate::ContextHistoryRef::message("assistant-1");
     tampered.continuity.validate().unwrap();
 
     let error =
