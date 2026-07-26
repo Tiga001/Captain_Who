@@ -9,13 +9,12 @@ use super::context_compaction::{
 };
 use crate::cancellation::AgentCancellationToken;
 use crate::context::{
-    format_message_created_at, render_compaction_summary_content_for_context,
-    ContextCapacityDetector, ContextFrame, ContextItem, ContextRetention, ContextScope,
-    ContextSource,
+    format_message_created_at, ContextCapacityDetector, ContextFrame, ContextItem, ContextMetadata,
+    ContextRetention, ContextScope, ContextSource,
 };
 use crate::llm::{
     complete_chat_allow_empty, complete_chat_streaming_allow_empty, detect_api_style,
-    LlmChatRequest, LlmChatResponse, LlmMessageRole,
+    LlmChatRequest, LlmChatResponse, LlmMessage, LlmMessageRole,
 };
 use crate::model_request_observation::ModelRequestObservationBuilder;
 use crate::protocol::{AgentApiStyle, AgentChatInput, AgentError, AgentResult, AgentUsage};
@@ -109,11 +108,8 @@ impl AgentContextCompactionModelGenerator {
                 json!({}),
             ));
         }
-        let continuity_input_tokens = estimate_assistant_context_tokens(
-            &self.model,
-            self.api_style,
-            &request.continuity.render_json()?,
-        )?;
+        let continuity_input_tokens =
+            estimate_continuity_context_tokens(&self.model, self.api_style, &request.continuity)?;
         if continuity_input_tokens > crate::CONTEXT_CONTINUITY_HARD_MAX_TOKENS {
             return Err(AgentError::structured(
                 "context_compaction_continuity_too_large",
@@ -259,12 +255,19 @@ impl AgentContextCompactionModelGenerator {
                 usage,
             ));
         }
-        let summary_input_tokens =
-            estimate_assistant_context_tokens(&self.model, self.api_style, &content)?;
-        let replacement_content =
-            render_compaction_summary_content_for_context(&content, &request.continuity)?;
-        let replacement_input_tokens =
-            estimate_assistant_context_tokens(&self.model, self.api_style, &replacement_content)?;
+        let (summary_input_tokens, measured_continuity_tokens, replacement_input_tokens) =
+            estimate_replacement_context_tokens(
+                &self.model,
+                self.api_style,
+                &request.prefix.covered_through,
+                &content,
+                &request.continuity,
+            )?;
+        if measured_continuity_tokens != continuity_input_tokens {
+            return Err(AgentError::new(
+                "上下文压缩 Continuity 计量在同一次生成中不一致。",
+            ));
+        }
         if replacement_input_tokens >= request.source_input_tokens {
             return Err(generation_error(
                 "context_compaction_not_smaller",
@@ -408,25 +411,84 @@ fn build_compaction_request_context(
     ]))
 }
 
-fn estimate_assistant_context_tokens(
+fn estimate_continuity_context_tokens(
     model: &str,
     api_style: AgentApiStyle,
-    content: &str,
+    continuity: &crate::ContextContinuitySnapshot,
 ) -> AgentResult<u64> {
-    let mut frame = ContextFrame::new(vec![ContextItem::text(
-        LlmMessageRole::Assistant,
-        content,
-        ContextSource::ConversationSummary,
-        ContextScope::Conversation,
-        ContextRetention::Retained,
-    )]);
+    let content = crate::context::render_compaction_continuity_for_context(continuity)?;
+    estimate_context_items(
+        model,
+        api_style,
+        vec![ContextItem::new(
+            LlmMessage::backend_state(content),
+            ContextMetadata::new(
+                ContextSource::ContinuityIndex,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+        )],
+    )
+    .map(|tokens| tokens[0])
+}
+
+fn estimate_replacement_context_tokens(
+    model: &str,
+    api_style: AgentApiStyle,
+    covered_through: &crate::ContextJournalCursor,
+    content: &str,
+    continuity: &crate::ContextContinuitySnapshot,
+) -> AgentResult<(u64, u64, u64)> {
+    let summary =
+        crate::context::render_compaction_semantic_summary_for_context(covered_through, content)?;
+    let continuity = crate::context::render_compaction_continuity_for_context(continuity)?;
+    let tokens = estimate_context_items(
+        model,
+        api_style,
+        vec![
+            ContextItem::text(
+                LlmMessageRole::Assistant,
+                summary,
+                ContextSource::ConversationSummary,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::new(
+                LlmMessage::backend_state(continuity),
+                ContextMetadata::new(
+                    ContextSource::ContinuityIndex,
+                    ContextScope::Conversation,
+                    ContextRetention::Retained,
+                ),
+            ),
+        ],
+    )?;
+    let summary_tokens = tokens[0];
+    let continuity_tokens = tokens[1];
+    Ok((
+        summary_tokens,
+        continuity_tokens,
+        summary_tokens.saturating_add(continuity_tokens),
+    ))
+}
+
+fn estimate_context_items(
+    model: &str,
+    api_style: AgentApiStyle,
+    items: Vec<ContextItem>,
+) -> AgentResult<Vec<u64>> {
+    let mut frame = ContextFrame::new(items);
     let detector = ContextCapacityDetector::for_model(model, api_style, &[]);
     detector.prepare_frame(&mut frame);
-    frame
+    let estimates = frame
         .planning_items()?
-        .first()
+        .into_iter()
         .map(|item| item.estimated_tokens)
-        .ok_or_else(|| AgentError::new("无法计量上下文压缩摘要。"))
+        .collect::<Vec<_>>();
+    if estimates.is_empty() {
+        return Err(AgentError::new("无法计量上下文压缩替换内容。"));
+    }
+    Ok(estimates)
 }
 
 fn estimate_minimum_replacement_input_tokens(
@@ -434,8 +496,14 @@ fn estimate_minimum_replacement_input_tokens(
     api_style: AgentApiStyle,
     continuity: &crate::ContextContinuitySnapshot,
 ) -> AgentResult<u64> {
-    let content = render_compaction_summary_content_for_context(MINIMAL_SUMMARY_PROBE, continuity)?;
-    estimate_assistant_context_tokens(model, api_style, &content)
+    estimate_replacement_context_tokens(
+        model,
+        api_style,
+        &continuity.covered_through,
+        MINIMAL_SUMMARY_PROBE,
+        continuity,
+    )
+    .map(|(_, _, total)| total)
 }
 
 fn is_truncated_finish_reason(reason: &str) -> bool {
@@ -495,7 +563,6 @@ mod tests {
             assistant_message_id: None,
             context_compaction_summary: None,
             goal: None,
-            task_state: None,
             world_state_records: Vec::new(),
             skill_activation: None,
             skill_discovery: None,
@@ -960,10 +1027,10 @@ mod tests {
         ));
         let request = generation_request();
         let observation = request_observation(&request, AgentApiStyle::OpenAiCompatible);
-        let continuity_tokens = estimate_assistant_context_tokens(
+        let continuity_tokens = estimate_continuity_context_tokens(
             "summary-model",
             AgentApiStyle::OpenAiCompatible,
-            &request.continuity.render_json().unwrap(),
+            &request.continuity,
         )
         .unwrap();
         let error = generator
@@ -1004,10 +1071,10 @@ mod tests {
         let content = "## Objective and constraints\n\n- Update `src/main.rs`.\n\n## Open work and next action\n\n- Run the focused test.";
         let request = generation_request();
         let observation = request_observation(&request, AgentApiStyle::OpenAiCompatible);
-        let continuity_tokens = estimate_assistant_context_tokens(
+        let continuity_tokens = estimate_continuity_context_tokens(
             "summary-model",
             AgentApiStyle::OpenAiCompatible,
-            &request.continuity.render_json().unwrap(),
+            &request.continuity,
         )
         .unwrap();
         let output = generator
@@ -1026,5 +1093,12 @@ mod tests {
 
         assert_eq!(output.draft.content, content);
         assert!(output.draft.summary_input_tokens > 0);
+        assert_eq!(
+            output.draft.replacement_input_tokens,
+            output
+                .draft
+                .summary_input_tokens
+                .saturating_add(output.draft.continuity_input_tokens)
+        );
     }
 }

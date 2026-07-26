@@ -331,6 +331,19 @@ export type AgentContextWindowStatus =
 
 export type AgentContextWindowPhase = 'idle' | 'durable_commit'
 
+export interface AgentContextCostBreakdown {
+  systemTokens: number
+  toolSchemaTokens: number
+  summaryTokens: number
+  continuityTokens: number
+  worldStateTokens: number
+  goalTokens: number
+  todoTokens: number
+  /** Uncovered history and remaining current-run context. */
+  recentHistoryTokens: number
+  totalInputTokens: number
+}
+
 export interface AgentContextWindowSnapshot {
   model: string
   status: AgentContextWindowStatus
@@ -346,6 +359,7 @@ export interface AgentContextWindowSnapshot {
   runTransientInputTokens: number
   /** Total estimated input for the current preview request. */
   requestInputTokens: number
+  costBreakdown: AgentContextCostBreakdown
   remainingDurableTokens?: number
   /** Opaque fingerprint that changes with fixed or durable context. */
   persistentRevision: string
@@ -560,6 +574,15 @@ export interface ModelRequestEstimate {
   additiveInputTokens: number
   verifiedTotalInputTokens?: number
   estimatedInputTokens: number
+  systemTokens: number
+  toolSchemaTokens: number
+  summaryTokens: number
+  continuityTokens: number
+  worldStateTokens: number
+  goalTokens: number
+  todoTokens: number
+  recentHistoryTokens: number
+  totalInputTokens: number
   contextWindowTokens?: number
   reservedOutputTokens: number
   safetyMarginTokens: number

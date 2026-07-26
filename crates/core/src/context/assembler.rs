@@ -1,6 +1,6 @@
 use super::{
-    ContextCompactionSummary, ContextFrame, ContextItem, ContextMetadata, ContextOrigin,
-    ContextRetention, ContextScope, ContextSource, ConversationTimingTracker,
+    ContextCompactionSummary, ContextFrame, ContextGroup, ContextItem, ContextMetadata,
+    ContextOrigin, ContextRetention, ContextScope, ContextSource, ConversationTimingTracker,
     ConversationTraceRenderer,
 };
 use crate::llm::{LlmImage, LlmMessage, LlmMessageRole};
@@ -26,7 +26,6 @@ pub(crate) struct ContextAssemblyInput {
     pub(crate) compaction_summary: Option<ContextCompactionSummary>,
     pub(crate) world_state_records: Vec<AnchoredWorldStateRecord>,
     pub(crate) goal: Option<crate::ConversationGoal>,
-    pub(crate) task_state: Option<crate::TaskStateSnapshot>,
     pub(crate) initial_run_world_state: Option<WorldStateSnapshot>,
     pub(crate) messages: Vec<AgentChatMessage>,
     pub(crate) skill_discovery: Option<AgentSkillDiscoverySnapshot>,
@@ -73,7 +72,7 @@ impl ContextAssembler {
         }
 
         let mut items =
-            Vec::with_capacity(normalized.len() + world_state.rendered_item_count() + 4);
+            Vec::with_capacity(normalized.len() + world_state.rendered_item_count() + 5);
         items.push(ContextItem::text(
             LlmMessageRole::System,
             input.system_prompt,
@@ -83,14 +82,30 @@ impl ContextAssembler {
         ));
         if let Some(summary) = input.compaction_summary {
             summary.validate()?;
+            let group = ContextGroup::compaction_replacement(format!("summary:{}", summary.id));
+            let origin = ContextOrigin::compaction_summary(&summary.id);
             items.push(ContextItem::new(
-                LlmMessage::text(LlmMessageRole::Assistant, summary.render_for_context()?),
+                LlmMessage::text(
+                    LlmMessageRole::Assistant,
+                    summary.render_summary_for_context()?,
+                ),
                 ContextMetadata::new(
                     ContextSource::ConversationSummary,
                     ContextScope::Conversation,
                     ContextRetention::Retained,
                 )
-                .with_origin(ContextOrigin::compaction_summary(summary.id)),
+                .with_origin(origin.clone())
+                .with_group(group.clone()),
+            ));
+            items.push(ContextItem::new(
+                LlmMessage::backend_state(summary.render_continuity_for_context()?),
+                ContextMetadata::new(
+                    ContextSource::ContinuityIndex,
+                    ContextScope::Conversation,
+                    ContextRetention::Retained,
+                )
+                .with_origin(origin)
+                .with_group(group),
             ));
         }
         if let Some(full) = world_state.full {
@@ -107,18 +122,6 @@ impl ContextAssembler {
                 ),
             ));
         }
-        if let Some(task_state) = input.task_state {
-            task_state.validate()?;
-            items.push(ContextItem::new(
-                LlmMessage::backend_state(task_state.render_for_context()?),
-                ContextMetadata::new(
-                    ContextSource::TaskContinuationState,
-                    ContextScope::Conversation,
-                    ContextRetention::Retained,
-                ),
-            ));
-        }
-
         let mut timing = ConversationTimingTracker::default();
         for (index, message) in normalized.into_iter().enumerate() {
             if let Some(message_id) = message.message_id.as_deref() {
@@ -651,29 +654,6 @@ mod tests {
         }
     }
 
-    fn task_state() -> crate::TaskStateSnapshot {
-        crate::TaskStateSnapshot {
-            control: crate::TaskControlState {
-                schema_version: crate::TASK_CONTROL_STATE_SCHEMA_VERSION,
-                task_id: "task-1".to_string(),
-                conversation_id: "conversation-1".to_string(),
-                objective: "Continue the durable task".to_string(),
-                source_message_id: "user-current".to_string(),
-                status: crate::TaskControlStatus::Active,
-                revision: 3,
-                current_run_id: Some("run-current".to_string()),
-                stopped_reason: None,
-                created_at: 1,
-                updated_at: 3,
-            },
-            checkpoint: crate::TaskContinuationCheckpoint {
-                current_phase: Some("Verification".to_string()),
-                next_actions: vec!["Run the focused tests".to_string()],
-                ..Default::default()
-            },
-        }
-    }
-
     fn conversation_goal() -> crate::ConversationGoal {
         crate::ConversationGoal {
             goal_id: "goal-1".to_string(),
@@ -816,7 +796,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![
                 message("user", "old question"),
@@ -866,7 +845,6 @@ mod tests {
             compaction_summary: Some(compaction_summary()),
             world_state_records: conversation_world_state_records("user-current"),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![identified_message(
                 "user-current",
@@ -880,20 +858,23 @@ mod tests {
         .unwrap();
 
         let messages = frame.to_messages();
-        assert_eq!(messages.len(), 5);
+        assert_eq!(messages.len(), 6);
         assert_eq!(messages[0].role, LlmMessageRole::System);
         assert!(messages[1].content.contains("semantic summary is lossy"));
-        assert!(messages[2].content.contains("\"recordType\":\"full\""));
         assert!(messages[2]
             .content
-            .contains("\"lifetime\":\"conversation\""));
-        assert!(messages[2].content.contains("old-workspace"));
-        assert!(messages[3].content.contains("\"recordType\":\"diff\""));
+            .contains("BEGIN_UNTRUSTED_CONTINUITY_RECORDS_JSON"));
+        assert!(messages[3].content.contains("\"recordType\":\"full\""));
         assert!(messages[3]
             .content
             .contains("\"lifetime\":\"conversation\""));
-        assert!(messages[3].content.contains("new-workspace"));
-        assert_eq!(messages[4].content, "continue in the current workspace");
+        assert!(messages[3].content.contains("old-workspace"));
+        assert!(messages[4].content.contains("\"recordType\":\"diff\""));
+        assert!(messages[4]
+            .content
+            .contains("\"lifetime\":\"conversation\""));
+        assert!(messages[4].content.contains("new-workspace"));
+        assert_eq!(messages[5].content, "continue in the current workspace");
 
         let rendered = messages
             .iter()
@@ -908,52 +889,14 @@ mod tests {
         assert!(!rendered.contains("world-state-sha256-v1:"));
 
         let manifest = frame.manifest();
-        assert_eq!(manifest.entries[2].sources, vec!["world_state_snapshot"]);
-        assert_eq!(manifest.entries[2].scope, "conversation");
-        assert_eq!(manifest.entries[2].retention, "retained");
-        assert_eq!(manifest.entries[2].origin_kind, Some("world_state_record"));
-        assert_eq!(manifest.entries[3].sources, vec!["world_state_diff"]);
+        assert_eq!(manifest.entries[3].sources, vec!["world_state_snapshot"]);
         assert_eq!(manifest.entries[3].scope, "conversation");
         assert_eq!(manifest.entries[3].retention, "retained");
-        assert_eq!(manifest.entries[4].sources, vec!["current_turn"]);
-    }
-
-    #[test]
-    fn task_state_is_hidden_backend_state_between_world_prelude_and_history_tail() {
-        let frame = ContextAssembler::assemble(ContextAssemblyInput {
-            system_prompt: "backend rules".to_string(),
-            compaction_summary: Some(compaction_summary()),
-            world_state_records: conversation_world_state_records("user-current"),
-            goal: None,
-            task_state: Some(task_state()),
-            initial_run_world_state: None,
-            messages: vec![identified_message(
-                "user-current",
-                "user",
-                "latest user correction",
-            )],
-            skill_discovery: None,
-            skill_activation: None,
-            attachments: ContextAttachments::default(),
-        })
-        .unwrap();
-
-        let messages = frame.to_messages();
-        assert_eq!(messages.len(), 6);
-        assert!(messages[1].content.contains("semantic summary is lossy"));
-        assert!(messages[2].content.contains("\"recordType\":\"full\""));
-        assert_eq!(messages[3].role, LlmMessageRole::System);
-        assert_eq!(
-            messages[3].placement,
-            LlmMessagePlacement::BackendStateTimeline
-        );
-        assert!(messages[3].content.contains("Task Continuation State"));
-        assert!(messages[4].content.contains("\"recordType\":\"diff\""));
-        assert_eq!(messages[5].content, "latest user correction");
-        assert_eq!(
-            frame.manifest().entries[3].sources,
-            vec!["task_continuation_state"]
-        );
+        assert_eq!(manifest.entries[3].origin_kind, Some("world_state_record"));
+        assert_eq!(manifest.entries[4].sources, vec!["world_state_diff"]);
+        assert_eq!(manifest.entries[4].scope, "conversation");
+        assert_eq!(manifest.entries[4].retention, "retained");
+        assert_eq!(manifest.entries[5].sources, vec!["current_turn"]);
     }
 
     #[test]
@@ -963,7 +906,6 @@ mod tests {
             compaction_summary: Some(compaction_summary()),
             world_state_records: Vec::new(),
             goal: Some(conversation_goal()),
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![identified_message(
                 "user-current",
@@ -977,18 +919,18 @@ mod tests {
         .unwrap();
 
         let messages = frame.to_messages();
-        assert_eq!(messages[2].role, LlmMessageRole::System);
+        assert_eq!(messages[3].role, LlmMessageRole::System);
         assert_eq!(
-            messages[2].placement,
+            messages[3].placement,
             LlmMessagePlacement::BackendStateTimeline
         );
-        assert!(messages[2].content.contains("## Active Goal"));
-        assert!(messages[2]
+        assert!(messages[3].content.contains("## Explicit Goal"));
+        assert!(messages[3]
             .content
-            .contains("latest user message has priority"));
-        assert_eq!(messages[3].content, "change one detail before continuing");
+            .contains("Latest user instructions override"));
+        assert_eq!(messages[4].content, "change one detail before continuing");
         assert_eq!(
-            frame.manifest().entries[2].sources,
+            frame.manifest().entries[3].sources,
             vec!["conversation_goal"]
         );
     }
@@ -1020,7 +962,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: Some(run_snapshot),
             messages: vec![identified_message("user-1", "user", "inspect the file")],
             skill_discovery: None,
@@ -1054,7 +995,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![identified_message("user-legacy", "user", "legacy message")],
             skill_discovery: None,
@@ -1081,7 +1021,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: conversation_world_state_records("missing-message"),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: messages.clone(),
             skill_discovery: None,
@@ -1101,7 +1040,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: broken_records,
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages,
             skill_discovery: None,
@@ -1142,7 +1080,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![message("user", "current question")],
             skill_discovery: None,
@@ -1213,7 +1150,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![message("user", "current question")],
             skill_discovery: Some(discovery),
@@ -1265,7 +1201,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![first_user, historical_assistant, current_user],
             skill_discovery: None,
@@ -1302,7 +1237,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![
                 message(" user ", " hello "),
@@ -1324,7 +1258,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![message("tool", "result")],
             skill_discovery: None,
@@ -1342,7 +1275,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![
                 message("user", "create a file"),
@@ -1405,7 +1337,6 @@ mod tests {
             compaction_summary: None,
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![
                 message("user", "do the work"),
@@ -1445,7 +1376,6 @@ mod tests {
             compaction_summary: Some(compaction_summary()),
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: vec![message("user", "continue from the summary")],
             skill_discovery: None,
@@ -1455,21 +1385,25 @@ mod tests {
         .unwrap();
 
         let messages = frame.to_messages();
-        assert_eq!(messages.len(), 3);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[0].role, LlmMessageRole::System);
         assert_eq!(messages[1].role, LlmMessageRole::Assistant);
         assert!(messages[1].content.contains("old task"));
         assert!(messages[1].content.contains("semantic summary is lossy"));
         assert!(messages[1]
             .content
-            .contains("follow this block are newer and authoritative"));
-        assert!(messages[1]
+            .contains("Newer messages are authoritative"));
+        assert!(messages[2]
             .content
             .contains("BEGIN_UNTRUSTED_CONTINUITY_RECORDS_JSON"));
-        assert_eq!(messages[2].content, "continue from the summary");
+        assert_eq!(messages[3].content, "continue from the summary");
         assert_eq!(
             frame.manifest().entries[1].sources,
             vec!["conversation_summary"]
+        );
+        assert_eq!(
+            frame.manifest().entries[2].sources,
+            vec!["continuity_index"]
         );
     }
 
@@ -1480,7 +1414,6 @@ mod tests {
             compaction_summary: Some(compaction_summary()),
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             initial_run_world_state: None,
             messages: Vec::new(),
             skill_discovery: None,
@@ -1489,6 +1422,6 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(frame.to_messages().len(), 2);
+        assert_eq!(frame.to_messages().len(), 3);
     }
 }

@@ -3,12 +3,10 @@ import { useState, type JSX } from 'react'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../config/translationFormat'
 import type { ChatAgentRunView } from '../chatTypes'
-import { revealStoredProjectFile } from '../../storage/storageClient'
-import { getApplyPatchItemView, isAbsoluteLocalPath } from './toolActivities/ApplyPatchToolActivity'
+import { getApplyPatchItemView } from './toolActivities/ApplyPatchToolActivity'
 
 interface EditSummaryCardProps {
-  onReview?: () => void
-  projectId?: string | null
+  onReview?: (filePath?: string) => void
   run: ChatAgentRunView
 }
 
@@ -84,14 +82,13 @@ function getAppliedEditEntries(run: ChatAgentRunView): EditSummaryEntry[] {
 
 function EditSummaryPath({
   entry,
-  projectId
+  onReview
 }: {
   entry: EditSummaryEntry
-  projectId?: string | null
+  onReview?: (filePath?: string) => void
 }): JSX.Element {
   const { t } = useFrontendConfig()
   const { directory, fileName } = splitFilePath(entry.filePath)
-  const canReveal = Boolean(projectId || isAbsoluteLocalPath(entry.filePath))
   const content = (
     <>
       {directory && <span className="edit-summary-card__file-directory">{directory}</span>}
@@ -99,7 +96,7 @@ function EditSummaryPath({
     </>
   )
 
-  if (!canReveal) {
+  if (!onReview) {
     return (
       <span className="edit-summary-card__file-path" title={entry.filePath}>
         {content}
@@ -109,16 +106,12 @@ function EditSummaryPath({
 
   return (
     <button
-      aria-label={formatTranslation(t, 'agent.patch.revealFile', {
+      aria-label={formatTranslation(t, 'agent.editSummary.reviewFile', {
         filePath: entry.filePath
       })}
       className="edit-summary-card__file-path edit-summary-card__file-button"
-      onClick={() => {
-        void revealStoredProjectFile(projectId, entry.filePath).catch((error) => {
-          console.error('Failed to reveal edited file', error)
-        })
-      }}
-      title={formatTranslation(t, 'agent.patch.revealFile', {
+      onClick={() => onReview(entry.filePath)}
+      title={formatTranslation(t, 'agent.editSummary.reviewFile', {
         filePath: entry.filePath
       })}
       type="button"
@@ -128,11 +121,7 @@ function EditSummaryPath({
   )
 }
 
-export function EditSummaryCard({
-  onReview,
-  projectId,
-  run
-}: EditSummaryCardProps): JSX.Element | null {
+export function EditSummaryCard({ onReview, run }: EditSummaryCardProps): JSX.Element | null {
   const { t } = useFrontendConfig()
   const [expanded, setExpanded] = useState(false)
   const entries = getAppliedEditEntries(run)
@@ -184,7 +173,7 @@ export function EditSummaryCard({
       <div className="edit-summary-card__files">
         {visibleEntries.map((entry) => (
           <div className="edit-summary-card__file-row" key={entry.id}>
-            <EditSummaryPath entry={entry} projectId={projectId} />
+            <EditSummaryPath entry={entry} onReview={onReview} />
             <span
               className="edit-summary-card__file-stats"
               aria-label={t('agent.editSummary.lineStats')}

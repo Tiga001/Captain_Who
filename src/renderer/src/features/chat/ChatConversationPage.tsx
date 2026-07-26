@@ -57,7 +57,7 @@ interface ChatConversationPageProps {
   onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
   onScrollPositionChange?: (conversationId: string, scrollTop: number) => void
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
-  onReviewLastTurn?: () => void
+  onReviewLastTurn?: (filePath?: string) => void
   onStopGenerating?: () => void
   onSubmitMessage: (message: string, options: ChatSubmitOptions) => void
   onMessageUiStateChange?: (
@@ -134,7 +134,7 @@ interface ChatMessageListProps {
   onOpenContinuationOrigin?: (origin: ChatConversationContinuationOrigin) => void | Promise<void>
   onMessageUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
-  onReviewLastTurn?: () => void
+  onReviewLastTurn?: (filePath?: string) => void
   showTokenUsageDetails: boolean
 }
 

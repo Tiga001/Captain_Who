@@ -9,6 +9,7 @@ mod attachments;
 mod conversations;
 mod goals;
 mod guidance;
+mod legacy_task_states;
 mod message_deletion;
 mod reconciliation;
 mod settings;

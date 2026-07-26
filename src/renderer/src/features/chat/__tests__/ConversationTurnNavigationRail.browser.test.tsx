@@ -220,6 +220,12 @@ it('darkens turns for visible user or assistant messages, previews, and jumps by
       behavior: 'smooth',
       block: 'start'
     })
+    await expect
+      .element(screen.getByRole('navigation', { name: 'chat.turnNavigationLabel' }))
+      .toHaveAttribute('data-pointer-preview-suppressed', 'true')
+    await expect
+      .poll(() => document.querySelector('.conversation-turn-navigation__tooltip'))
+      .toBeNull()
 
     const scrollRoot = getRequiredElement('.scroll-root')
     const farUser = getRequiredElement('[data-message-id="user-4"]')
@@ -242,7 +248,7 @@ it('darkens turns for visible user or assistant messages, previews, and jumps by
   }
 })
 
-it('scrubs between turns while dragging and suppresses the release click', async () => {
+it('jumps once, continuously scrolls while dragging, and clears the preview on release', async () => {
   const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
   const scrollIntoView = vi.fn()
   HTMLElement.prototype.scrollIntoView = scrollIntoView
@@ -261,6 +267,25 @@ it('scrubs between turns while dragging and suppresses the release click', async
     )
     expect(buttons).toHaveLength(4)
 
+    const scrollRoot = getRequiredElement('.scroll-root')
+    const scrollTo = vi.spyOn(scrollRoot, 'scrollTo').mockImplementation(() => undefined)
+    Object.defineProperties(scrollRoot, {
+      clientHeight: {
+        configurable: true,
+        value: 600
+      },
+      scrollHeight: {
+        configurable: true,
+        value: 2200
+      }
+    })
+    vi.spyOn(scrollRoot, 'getBoundingClientRect').mockReturnValue(createRect(0, 600))
+    items.forEach((item, index) => {
+      vi.spyOn(
+        getRequiredElement(`[data-message-id="${item.userMessageId}"]`),
+        'getBoundingClientRect'
+      ).mockReturnValue(createRect(index * 500, 40))
+    })
     vi.spyOn(list, 'getBoundingClientRect').mockReturnValue({
       ...createRect(95, 45),
       left: 0,
@@ -280,31 +305,43 @@ it('scrubs between turns while dragging and suppresses the release click', async
     vi.spyOn(list, 'releasePointerCapture').mockImplementation(() => undefined)
 
     dispatchPointerEvent(buttons[0], 'pointerdown', 105)
-    dispatchPointerEvent(list, 'pointermove', 125)
+    dispatchPointerEvent(list, 'pointermove', 110)
 
     await expect.element(navigation).toHaveAttribute('data-scrubbing', 'true')
     const tooltip = screen.getByRole('tooltip')
-    await expect.element(tooltip).toHaveTextContent('User 3')
-    await expect.element(tooltip).toHaveTextContent('Assistant 3')
+    await expect.element(tooltip).toHaveTextContent('User 1')
     expect(scrollIntoView).toHaveBeenCalledTimes(1)
     expect(scrollIntoView).toHaveBeenLastCalledWith({
       behavior: 'auto',
       block: 'start'
     })
 
-    dispatchPointerEvent(list, 'pointermove', 135)
-    await expect.element(tooltip).toHaveTextContent('User 4')
-    expect(scrollIntoView).toHaveBeenCalledTimes(2)
-    expect(scrollIntoView).toHaveBeenLastCalledWith({
+    dispatchPointerEvent(list, 'pointermove', 121)
+    await expect.element(tooltip).toHaveTextContent('User 3')
+    expect(scrollTo).toHaveBeenLastCalledWith({
       behavior: 'auto',
-      block: 'start'
+      top: 800
     })
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
 
-    dispatchPointerEvent(list, 'pointerup', 135)
+    dispatchPointerEvent(list, 'pointermove', 131)
+    await expect.element(tooltip).toHaveTextContent('User 4')
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      behavior: 'auto',
+      top: 1300
+    })
+    expect(scrollTo).toHaveBeenCalledTimes(2)
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+
+    dispatchPointerEvent(list, 'pointerup', 131)
     buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }))
 
     await expect.element(navigation).not.toHaveAttribute('data-scrubbing')
-    expect(scrollIntoView).toHaveBeenCalledTimes(2)
+    await expect.element(navigation).toHaveAttribute('data-pointer-preview-suppressed', 'true')
+    await expect
+      .poll(() => document.querySelector('.conversation-turn-navigation__tooltip'))
+      .toBeNull()
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
   } finally {
     HTMLElement.prototype.scrollIntoView = originalScrollIntoView
   }

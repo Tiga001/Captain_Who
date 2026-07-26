@@ -16,6 +16,16 @@ use std::time::Duration;
 const MODEL_IMAGE_DELIVERY_BUDGET_BYTES_PER_RUN: u64 = 16 * 1024 * 1024;
 const MAX_CONCURRENT_MODEL_IMAGE_PREPARATIONS: usize = 2;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GoalRuntimeState {
+    pub(crate) unfinished_todo_items: usize,
+    pub(crate) blocked_reason: Option<String>,
+}
+
+pub(crate) trait GoalRuntimeStateReader: Send + Sync {
+    fn goal_runtime_state(&self) -> GoalRuntimeState;
+}
+
 struct ModelImagePreparationAdmission {
     available: Mutex<usize>,
     changed: Condvar,
@@ -80,6 +90,7 @@ pub struct ToolExecutionContext {
     skill_resources: Option<Arc<crate::skills::SkillResourceSession>>,
     command_runtime_profile_resolver:
         Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
+    goal_runtime_state_reader: Option<Arc<dyn GoalRuntimeStateReader>>,
 }
 
 impl ToolExecutionContext {
@@ -110,6 +121,7 @@ impl ToolExecutionContext {
             text_output_budget: ContextTextBudget::heuristic_default(),
             skill_resources: None,
             command_runtime_profile_resolver: None,
+            goal_runtime_state_reader: None,
         }
     }
 
@@ -165,6 +177,14 @@ impl ToolExecutionContext {
         resolver: Option<Arc<dyn crate::command::CommandRuntimeProfileResolver>>,
     ) -> Self {
         self.command_runtime_profile_resolver = resolver;
+        self
+    }
+
+    pub(crate) fn with_goal_runtime_state_reader(
+        mut self,
+        reader: Option<Arc<dyn GoalRuntimeStateReader>>,
+    ) -> Self {
+        self.goal_runtime_state_reader = reader;
         self
     }
 
@@ -305,6 +325,16 @@ impl ToolExecutionContext {
         self.run_id
             .as_deref()
             .ok_or_else(|| AgentError::new("当前运行缺少 runId，不能创建文件草稿。"))
+    }
+
+    pub(crate) fn goal_runtime_state(&self) -> AgentResult<GoalRuntimeState> {
+        self.check_cancelled()?;
+        self.run_id()?;
+        self.conversation_id()?;
+        self.goal_runtime_state_reader
+            .as_ref()
+            .map(|reader| reader.goal_runtime_state())
+            .ok_or_else(|| AgentError::new("当前运行缺少 Goal 完成校验状态。"))
     }
 
     pub(crate) fn tool_call_id(&self) -> AgentResult<&str> {

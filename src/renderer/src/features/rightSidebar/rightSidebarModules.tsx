@@ -209,6 +209,7 @@ function GitReviewModuleSurface({
   const scopeNavigation =
     pageState?.kind === 'git-review' && pageState.projectId === projectId
       ? {
+          filePath: pageState.filePath,
           requestId: pageState.requestId,
           scope: pageState.scope
         }

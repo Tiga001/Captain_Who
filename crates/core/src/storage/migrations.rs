@@ -37,7 +37,7 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> rusql
     Ok(columns.iter().any(|candidate| candidate == column))
 }
 
-fn ensure_task_state_schema(connection: &Connection) -> rusqlite::Result<()> {
+fn ensure_legacy_task_state_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS task_control_states (
@@ -2446,7 +2446,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     upgrade_canonical_model_identity_schema(connection)?;
     upgrade_usage_consistency_schema(connection)?;
-    ensure_task_state_schema(connection)?;
+    ensure_legacy_task_state_schema(connection)?;
     ensure_conversation_goal_schema(connection)?;
     ensure_conversation_history_fts_schema(connection)?;
 

@@ -198,12 +198,7 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
     }
     if has_tool(tool_definitions, "create_goal") {
         rules.push("- Goal 只用于用户明确要求长期、跨轮追踪的目标；普通请求、临时计划或仅仅复杂的任务都不能推断为 Goal。只有明确请求时才调用 create_goal；未完成 Goal 存在时不要创建第二个。".to_string());
-        rules.push("- Goal 只保存目标和 active/blocked/completed 粗状态，不保存步骤、Todo、工具结果或聊天摘要。最新用户消息始终优先，Goal 不授权自动继续运行。只有真正完成或确实阻塞时才调用 update_goal；普通进度变化不更新 Goal。".to_string());
-    }
-    if has_tool(tool_definitions, "task_state_patch") {
-        rules.push("- Task Continuation State 是后端持久化的跨轮任务事实；最新用户消息优先级更高。目标、阶段、验收条件、下一步、阻塞、决策、产物、未解决问题或任务状态发生实质变化后，使用 task_state_patch 按当前 taskId/revision 做 CAS 更新；revision 冲突时必须基于返回的当前状态重新判断，不能盲目重放旧 patch。".to_string());
-        rules.push("- Task State 只保存短语义状态和 conversation 内的历史 ref，不复制消息正文或工具输出。需要精确内容时使用 conversation_history。completed 状态和 completed 工作项必须引用真实存在且成功的历史证据；失败、取消、拒绝或冲突结果不能作为完成证据。用户修正同一目标时用 set_objective；明确替换旧目标时，supersede 必须作为唯一 operation。".to_string());
-        rules.push("- 工具 observation 顶层的 historyRef 是后端生成、可直接写入 evidenceRefs 的当前 conversation 证据定位符；不要自行猜测 assistantMessageId、sequence 或 archiveRef。historyRef 只证明历史记录存在，能否作为完成证据仍以工具结果成功状态和服务端校验为准。".to_string());
+        rules.push("- Goal 只保存目标和 active/blocked/completed 粗状态，不保存步骤、Todo、工具结果或聊天摘要。最新用户消息始终优先，Goal 不授权自动继续运行。只有真正完成或确实阻塞时才调用 update_goal；普通进度变化不更新 Goal。标记 completed 前必须先通过 todo_update 清空或完成当前 Run 的全部 Todo；blocked 原因由宿主从 blocked Todo 提取。".to_string());
     }
     if has_tool(tool_definitions, "web_search") {
         rules.push("- 对当前状态、近期变化、陌生实体或需要来源核实的信息使用 web_search；用它定位和比较来源，查询应围绕明确的信息缺口，并优先官方或一手来源。已有结果足以回答时停止搜索；追加搜索应补充具体缺口，不要重复高度重叠的查询。本地项目问题不能用网页搜索替代 workspace 检查。".to_string());
@@ -214,9 +209,6 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
     if has_tool(tool_definitions, "todo_update") {
         rules.push("- 多步骤任务或当前执行过程中目标发生变化时，使用 todo_update 维护本次 Run 的结构化计划。首次创建计划时可以一次性列出多步；后续更新应保留已有 id，并一次性更新所有实际发生变化的步骤。开始某项前标记 in_progress，完成后标记 completed；并行推进时可以有多项 in_progress，但不要把尚未真正开始的事项提前标记为进行中。".to_string());
         rules.push("- Todo 的生命周期严格限制在当前一次 Run：它不会进入下一轮用户消息，不是聊天摘要、Goal 或跨轮任务状态。新的 Run 必须从空 Todo 开始；不得依据上一轮 Todo 自动续建。审批暂停后恢复同一逻辑 Run 时，宿主可恢复其快照。".to_string());
-        if has_tool(tool_definitions, "task_state_patch") {
-            rules.push("- Todo 是 Task State workItems 的当前 Run/UI 投影，并非第二份事实来源。workItems 只能通过 todo_update 修改；completed 工作项必须在 evidenceRefs 中提供当前 conversation 内已成功执行的 message、trace_item 或 archive ref。目标、阶段、决策等非 workItems 字段使用 task_state_patch。".to_string());
-        }
         rules.push("- 当 todo 全部 completed 且没有明确失败或缺口时，停止继续调用工具，直接向用户总结已完成内容。".to_string());
         rules.push("- todo 状态只能通过 todo_update 改变；不要在正文里伪造计划状态，也不要声称计划已更新，除非 todo_update 的 tool result 明确成功。".to_string());
     }
@@ -521,27 +513,6 @@ mod tests {
         assert!(prompt.contains("Goal 不授权自动继续运行"));
         assert!(prompt.contains("生命周期严格限制在当前一次 Run"));
         assert!(prompt.contains("新的 Run 必须从空 Todo 开始"));
-    }
-
-    #[test]
-    fn describes_task_state_cas_evidence_and_todo_projection_contracts() {
-        let prompt = build_system_prompt(
-            None,
-            &[
-                tool_definition("task_state_patch"),
-                tool_definition("todo_update"),
-                tool_definition("conversation_history"),
-            ],
-        );
-
-        assert!(prompt.contains("Task Continuation State 是后端持久化"));
-        assert!(prompt.contains("最新用户消息优先级更高"));
-        assert!(prompt.contains("按当前 taskId/revision 做 CAS 更新"));
-        assert!(prompt.contains("失败、取消、拒绝或冲突结果不能作为完成证据"));
-        assert!(prompt.contains("Todo 是 Task State workItems"));
-        assert!(prompt.contains("workItems 只能通过 todo_update 修改"));
-        assert!(prompt.contains("精确内容时使用 conversation_history"));
-        assert!(prompt.contains("observation 顶层的 historyRef"));
     }
 
     #[test]

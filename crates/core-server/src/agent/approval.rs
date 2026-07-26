@@ -158,6 +158,10 @@ impl AgentService {
                     Some(now_ms()),
                     None,
                 );
+                if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+                    self.storage
+                        .cancel_conversation_goal(conversation_id, now_ms())?;
+                }
             }
             return Ok(cancelled);
         }
@@ -213,6 +217,10 @@ impl AgentService {
             return Err(error);
         }
         self.transition_pending_status(&record, PendingActionStatus::Cancelled)?;
+        if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
+            self.storage
+                .cancel_conversation_goal(conversation_id, now_ms())?;
+        }
         Ok(true)
     }
 
@@ -621,20 +629,6 @@ impl AgentService {
             agent_input
         };
         let run_id = record.snapshot.run_id.clone();
-        let mut agent_input = agent_input;
-        if let (Some(conversation_id), Some(task_state)) = (
-            record.snapshot.conversation_id.as_deref(),
-            agent_input.task_state.as_ref(),
-        ) {
-            if let Some(resumed) = self.storage.resume_task_state_after_approval(
-                conversation_id,
-                &task_state.control.task_id,
-                &run_id,
-                now_ms(),
-            )? {
-                agent_input.task_state = Some(resumed);
-            }
-        }
         let inline_continuation_guard = inline_continuation_guard
             .expect("every synchronous approval decision owns a pre-spawn continuation lease");
         let continuation_cancel_flag = inline_continuation_guard.cancel_flag();

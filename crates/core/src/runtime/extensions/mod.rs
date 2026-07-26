@@ -22,7 +22,9 @@ use crate::protocol::{
 };
 use crate::runtime::AgentSkillActivationResolver;
 use crate::skills::{AgentSkillDiscoverySnapshot, SkillResourceSession};
-use crate::tools::{AgentTool, EffectiveToolSet, ToolCapabilityId, ToolRegistry};
+use crate::tools::{
+    AgentTool, EffectiveToolSet, GoalRuntimeStateReader, ToolCapabilityId, ToolRegistry,
+};
 use crate::world_state::WorldStateSectionEnvelope;
 use serde_json::Value;
 pub(in crate::runtime) use skills::checkpoint_authority_from_snapshots;
@@ -336,6 +338,12 @@ impl RuntimeExtensions {
 
     pub(super) fn todo_state(&self) -> Option<AgentTodoState> {
         self.todo.as_ref().map(TodoStateHandle::state)
+    }
+
+    pub(super) fn goal_runtime_state_reader(&self) -> Option<Arc<dyn GoalRuntimeStateReader>> {
+        self.todo
+            .as_ref()
+            .map(|todo| Arc::new(todo.clone()) as Arc<dyn GoalRuntimeStateReader>)
     }
 }
 

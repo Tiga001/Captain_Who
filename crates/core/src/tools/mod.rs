@@ -81,7 +81,7 @@ use web_search::WebSearchTool;
 use workspace_map::WorkspaceMapTool;
 use write_file::WriteFileTool;
 
-pub(super) use context::ToolExecutionContext;
+pub(super) use context::{GoalRuntimeState, GoalRuntimeStateReader, ToolExecutionContext};
 use document_text::{
     extract_with_textutil, join_named_text, normalize_text_output, read_zip_xml_text_parts,
     reserve_zip_xml_entry, resolve_document_path, sanitize_document_max_chars, NamedText,

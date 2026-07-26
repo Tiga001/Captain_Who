@@ -21,7 +21,7 @@ vi.mock('../../host/hostClient', () => ({
 }))
 
 describe('edit summary review navigation', () => {
-  it('routes every diff card through the same workspace last-turn callback', async () => {
+  it('routes every review button through the same workspace last-turn callback', async () => {
     const onReviewLastTurn = vi.fn()
     const screen = await render(
       <div>
@@ -48,6 +48,26 @@ describe('edit summary review navigation', () => {
     buttons[1]?.click()
 
     expect(onReviewLastTurn.mock.calls).toEqual([[], []])
+  })
+
+  it('passes a clicked file path through the last-turn review callback', async () => {
+    const onReviewLastTurn = vi.fn()
+    const screen = await render(
+      <ChatMessageItem
+        message={assistantMessage('assistant-1', 'run-1', 'src/edited.ts')}
+        onReviewLastTurn={onReviewLastTurn}
+        projectId="project-1"
+        showTokenUsageDetails={false}
+      />
+    )
+
+    const fileButton = screen.container.querySelector<HTMLButtonElement>(
+      '.edit-summary-card__file-button'
+    )
+    if (!fileButton) throw new Error('Edited-file review button did not render')
+    fileButton.click()
+
+    expect(onReviewLastTurn).toHaveBeenCalledWith('src/edited.ts')
   })
 })
 

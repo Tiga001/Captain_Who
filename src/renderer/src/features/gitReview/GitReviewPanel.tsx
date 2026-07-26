@@ -35,6 +35,7 @@ interface GitReviewPanelProps {
   onOpenFile: (path: string) => void
   projectId: string
   scopeNavigation?: {
+    filePath?: string
     requestId: number
     scope: GitReviewScope
   }
@@ -47,6 +48,12 @@ interface PendingFileAlignment {
   token: number
 }
 
+interface PendingReviewFileNavigation {
+  filePath: string
+  requestId: number
+  scope: GitReviewScope
+}
+
 interface GitReviewFileVisibility {
   near: Set<string>
   visible: Set<string>
@@ -54,6 +61,28 @@ interface GitReviewFileVisibility {
 
 function emptyFileVisibility(): GitReviewFileVisibility {
   return { near: new Set(), visible: new Set() }
+}
+
+function normalizeReviewFilePath(path: string): string {
+  return path
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\/+/, '')
+}
+
+function findReviewFileByPath(
+  files: readonly GitReviewFile[],
+  requestedPath: string
+): GitReviewFile | undefined {
+  const normalizedRequestedPath = normalizeReviewFilePath(requestedPath)
+  if (!normalizedRequestedPath) return undefined
+
+  return files.find(
+    (file) =>
+      normalizeReviewFilePath(file.path) === normalizedRequestedPath ||
+      (file.previousPath !== undefined &&
+        normalizeReviewFilePath(file.previousPath) === normalizedRequestedPath)
+  )
 }
 
 export function GitReviewPanel({
@@ -83,9 +112,11 @@ export function GitReviewPanel({
     setScope,
     summaryState
   } = useGitReview(projectId, isActive, conversationId, scopeNavigation?.scope)
-  const handledScopeNavigationRequestRef = useRef(scopeNavigation?.requestId ?? null)
+  const handledScopeNavigationRequestRef = useRef<number | null>(null)
   const [expandedFileIds, setExpandedFileIds] = useState<Set<string>>(() => new Set())
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
+  const [pendingReviewFileNavigation, setPendingReviewFileNavigation] =
+    useState<PendingReviewFileNavigation | null>(null)
   const [viewMode, setViewMode] = useState<GitReviewViewMode>('unified')
   const [wrapLines, setWrapLines] = useState(false)
   const [reviewPreferences, setReviewPreferences] = useState(loadGitReviewPreferences)
@@ -118,6 +149,16 @@ export function GitReviewPanel({
       return
     }
     handledScopeNavigationRequestRef.current = scopeNavigation.requestId
+    const filePath = scopeNavigation.filePath?.trim()
+    setPendingReviewFileNavigation(
+      filePath
+        ? {
+            filePath,
+            requestId: scopeNavigation.requestId,
+            scope: scopeNavigation.scope
+          }
+        : null
+    )
     if (scope !== scopeNavigation.scope) setScope(scopeNavigation.scope)
   }, [scope, scopeNavigation, setScope])
 
@@ -433,6 +474,29 @@ export function GitReviewPanel({
     [alignFileHeader]
   )
 
+  useEffect(() => {
+    const pending = pendingReviewFileNavigation
+    if (
+      !pending ||
+      !isActive ||
+      summaryState.status !== 'ready' ||
+      summaryState.value.scope !== pending.scope
+    ) {
+      return
+    }
+
+    // The last-turn summary is the sole authority for whether a chat-card path can be focused.
+    // Missing paths deliberately fall back to the ordinary review-page state.
+    const targetFile = findReviewFileByPath(summaryState.value.files, pending.filePath)
+    setPendingReviewFileNavigation((current) =>
+      current?.requestId === pending.requestId ? null : current
+    )
+    if (!targetFile) return
+
+    setSearchQuery('')
+    selectFile(targetFile.id)
+  }, [isActive, pendingReviewFileNavigation, selectFile, summaryState])
+
   const handleMutateFile = useCallback(
     (fileId: string, action: Parameters<typeof mutateFile>[1]) => {
       void mutateFile(fileId, action).catch(() => undefined)
@@ -457,6 +521,7 @@ export function GitReviewPanel({
 
   const handleScopeChange = useCallback(
     (nextScope: GitReviewScope) => {
+      setPendingReviewFileNavigation(null)
       if (nextScope !== scope) setScope(nextScope)
       setOpenMenu(null)
     },

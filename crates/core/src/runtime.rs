@@ -410,6 +410,7 @@ impl AgentRuntime {
             .with_runtime_services(run_id.clone(), storage)
             .with_skill_resources(skill_resources)
             .with_command_runtime_profile_resolver(command_runtime_profile_resolver)
+            .with_goal_runtime_state_reader(runtime_extensions.goal_runtime_state_reader())
             .with_text_output_budget(tool_output_budget);
         event_stream.emit(state_event(
             &run_id,

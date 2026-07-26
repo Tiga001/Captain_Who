@@ -23,7 +23,6 @@ mod runtime;
 pub mod skills;
 pub mod storage;
 mod system_paths;
-mod task_state;
 mod tools;
 mod turn_diff;
 mod usage;
@@ -59,7 +58,10 @@ pub use conversation_trace::{
     ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
     CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
-pub use goal::{ConversationGoal, ConversationGoalStatus, MAX_CONVERSATION_GOAL_OBJECTIVE_CHARS};
+pub use goal::{
+    ConversationGoal, ConversationGoalStatus, CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS,
+    CONVERSATION_GOAL_CONTEXT_TARGET_TOKENS, MAX_CONVERSATION_GOAL_OBJECTIVE_CHARS,
+};
 pub use model_request_observation::{
     ModelRequestActualUsage, ModelRequestCapacityStatus, ModelRequestEstimate,
     ModelRequestMeasurementMode, ModelRequestObservation, ModelRequestObservationStatus,
@@ -67,13 +69,6 @@ pub use model_request_observation::{
     ProviderCacheTopology, MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
 };
 pub use protocol::is_valid_agent_office_reason;
-pub use task_state::{
-    TaskArtifactRef, TaskContinuationCheckpoint, TaskControlState, TaskControlStatus, TaskDecision,
-    TaskInterruptionState, TaskStatePatchOperation, TaskStateSnapshot, TaskWorkItem,
-    TaskWorkItemStatus, TASK_CONTROL_STATE_SCHEMA_VERSION, TASK_STATE_HARD_MAX_TOKENS,
-    TASK_STATE_TARGET_TOKENS,
-};
-
 /// Re-parse and recompile a frozen Office semantic request, proving that it
 /// still matches the canonical request authorized by the Host.
 pub fn validate_frozen_agent_office_semantic_args(

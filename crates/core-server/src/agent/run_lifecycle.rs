@@ -292,6 +292,24 @@ fn take_project_deletion_failure(project_id: &str) -> Option<String> {
 
 impl AgentService {
     pub fn cancel_run(&self, run_id: &str) -> bool {
+        self.cancel_run_internal(run_id, true)
+    }
+
+    fn cancel_run_internal(&self, run_id: &str, cancel_goal: bool) -> bool {
+        let conversation_id = cancel_goal.then(|| {
+            self.active_runs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(run_id)
+                .map(|control| control.conversation_id.clone())
+                .or_else(|| {
+                    self.usage_contexts
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .get(run_id)
+                        .map(|state| state.context.conversation_id.clone())
+                })
+        });
         let cancellations = self
             .cancellations
             .lock()
@@ -303,7 +321,20 @@ impl AgentService {
             false
         };
         let cancelled_processes = self.process_runs.cancel_run(run_id);
-        cancelled_run || cancelled_processes > 0
+        let cancelled = cancelled_run || cancelled_processes > 0;
+        if cancelled {
+            if let Some(Some(conversation_id)) = conversation_id {
+                if let Err(error) = self
+                    .storage
+                    .cancel_conversation_goal(&conversation_id, now_ms())
+                {
+                    eprintln!(
+                        "failed to cancel explicit goal for user-cancelled run {run_id}: {error}"
+                    );
+                }
+            }
+        }
+        cancelled
     }
 
     pub fn delete_project(&self, project_id: &str) -> Result<(), String> {
@@ -337,7 +368,7 @@ impl AgentService {
         run_ids.sort();
         run_ids.dedup();
         for run_id in &run_ids {
-            self.cancel_run(run_id);
+            self.cancel_run_internal(run_id, false);
         }
 
         if !self
@@ -464,7 +495,7 @@ impl AgentService {
         run_ids.sort();
         run_ids.dedup();
         for run_id in &run_ids {
-            self.cancel_run(run_id);
+            self.cancel_run_internal(run_id, false);
         }
 
         if !self
@@ -579,7 +610,7 @@ impl AgentService {
         run_ids.sort();
         run_ids.dedup();
         for run_id in &run_ids {
-            self.cancel_run(run_id);
+            self.cancel_run_internal(run_id, false);
         }
 
         if !self

@@ -4,15 +4,18 @@
 //! costs (tool definitions and protocol structure), applies the configured model window, and
 //! decides whether a whole-frame verification pass is required near capacity.
 
-use super::frame::{ContextFrame, ContextFrameEstimateBucket, ContextFrameMeasurement};
+use super::frame::{
+    ContextFrame, ContextFrameEstimateBucket, ContextFrameMeasurement,
+    ContextFrameSemanticBreakdown,
+};
 use super::measurement::{
     combine_context_revisions, ContextMessageEstimate, ContextRevisionHasher, ContextTextBudget,
     ContextTokenEstimator, HeuristicTokenEstimator,
 };
 use crate::llm::{LlmMessage, LlmToolCall};
 use crate::protocol::{
-    AgentApiStyle, AgentContextWindowPhase, AgentContextWindowSnapshot, AgentContextWindowStatus,
-    AgentError, AgentResult, AgentToolDefinition,
+    AgentApiStyle, AgentContextCostBreakdown, AgentContextWindowPhase, AgentContextWindowSnapshot,
+    AgentContextWindowStatus, AgentError, AgentResult, AgentToolDefinition,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -137,6 +140,7 @@ pub(crate) struct ContextTokenBreakdown {
     pub(crate) run_transient: ContextTokenCategoryEstimate,
     pub(crate) request_only: ContextTokenCategoryEstimate,
     pub(crate) total: ContextTokenCategoryEstimate,
+    pub(crate) semantic: ContextFrameSemanticBreakdown,
 }
 
 impl ContextTokenBreakdown {
@@ -145,6 +149,17 @@ impl ContextTokenBreakdown {
         fixed: &FixedRequestEstimate,
         transient_tools: &FixedRequestEstimate,
     ) -> Self {
+        debug_assert_eq!(
+            frame.breakdown.semantic.total_tokens(),
+            frame
+                .breakdown
+                .fixed
+                .estimate
+                .total_tokens()
+                .saturating_add(frame.breakdown.durable.estimate.total_tokens())
+                .saturating_add(frame.breakdown.run_transient.estimate.total_tokens())
+                .saturating_add(frame.breakdown.request_only.estimate.total_tokens())
+        );
         let mut fixed_category =
             ContextTokenCategoryEstimate::from_frame_bucket(frame.breakdown.fixed);
         fixed_category.add_fixed_request_costs(fixed);
@@ -164,6 +179,7 @@ impl ContextTokenBreakdown {
             run_transient,
             request_only,
             total,
+            semantic: frame.breakdown.semantic,
         }
     }
 
@@ -251,8 +267,31 @@ impl ContextBudgetReport {
             durable_input_tokens,
             run_transient_input_tokens: self.usage.breakdown.run_transient.input_tokens,
             request_input_tokens: self.usage.request_input_tokens(),
+            cost_breakdown: self.context_cost_breakdown(),
             remaining_durable_tokens,
             persistent_revision: format!("{:016x}", self.usage.persistent_revision),
+        }
+    }
+
+    pub(crate) fn context_cost_breakdown(&self) -> AgentContextCostBreakdown {
+        let semantic = self.usage.breakdown.semantic;
+        AgentContextCostBreakdown {
+            system_tokens: semantic
+                .system_tokens
+                .saturating_add(self.usage.breakdown.fixed.request_structure_tokens),
+            tool_schema_tokens: self
+                .usage
+                .breakdown
+                .fixed
+                .tool_definition_tokens
+                .saturating_add(self.usage.breakdown.run_transient.tool_definition_tokens),
+            summary_tokens: semantic.summary_tokens,
+            continuity_tokens: semantic.continuity_tokens,
+            world_state_tokens: semantic.world_state_tokens,
+            goal_tokens: semantic.goal_tokens,
+            todo_tokens: semantic.todo_tokens,
+            recent_history_tokens: semantic.recent_history_tokens,
+            total_input_tokens: self.usage.request_input_tokens(),
         }
     }
 
@@ -1026,7 +1065,7 @@ mod tests {
             ContextItem::text(
                 LlmMessageRole::System,
                 "current todo state",
-                ContextSource::RuntimeExtension,
+                ContextSource::RuntimeTodo,
                 ContextScope::Run,
                 ContextRetention::RequestOnly,
             ),
@@ -1066,6 +1105,110 @@ mod tests {
             compaction.persistent_input_tokens,
             report.usage.persistent_input_tokens()
         );
+    }
+
+    #[test]
+    fn reports_bounded_context_costs_by_semantic_owner() {
+        let mut frame = ContextFrame::new(vec![
+            ContextItem::text(
+                LlmMessageRole::System,
+                "system contract",
+                ContextSource::BackendSystemPrompt,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::Assistant,
+                "historical summary",
+                ContextSource::ConversationSummary,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "bounded continuity refs",
+                ContextSource::ContinuityIndex,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "workspace state",
+                ContextSource::WorldStateSnapshot,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "explicit objective",
+                ContextSource::ConversationGoal,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "recent conversation tail",
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "run todo",
+                ContextSource::RuntimeTodo,
+                ContextScope::Run,
+                ContextRetention::RequestOnly,
+            ),
+        ]);
+        let report = detector(&[read_tool()]).inspect(&mut frame, None, 1_000);
+        let costs = report.context_cost_breakdown();
+
+        assert!(costs.system_tokens > 0);
+        assert!(costs.tool_schema_tokens > 0);
+        assert!(costs.summary_tokens > 0);
+        assert!(costs.continuity_tokens > 0);
+        assert!(costs.world_state_tokens > 0);
+        assert!(costs.goal_tokens > 0);
+        assert!(costs.todo_tokens > 0);
+        assert!(costs.recent_history_tokens > 0);
+        assert_eq!(
+            costs.total_input_tokens,
+            costs
+                .system_tokens
+                .saturating_add(costs.tool_schema_tokens)
+                .saturating_add(costs.summary_tokens)
+                .saturating_add(costs.continuity_tokens)
+                .saturating_add(costs.world_state_tokens)
+                .saturating_add(costs.goal_tokens)
+                .saturating_add(costs.todo_tokens)
+                .saturating_add(costs.recent_history_tokens)
+        );
+    }
+
+    #[test]
+    fn ordinary_conversation_has_zero_goal_and_todo_context_cost() {
+        let mut frame = ContextFrame::new(vec![
+            ContextItem::text(
+                LlmMessageRole::System,
+                "system contract",
+                ContextSource::BackendSystemPrompt,
+                ContextScope::Run,
+                ContextRetention::Retained,
+            ),
+            ContextItem::text(
+                LlmMessageRole::User,
+                "an ordinary user message",
+                ContextSource::ConversationHistory,
+                ContextScope::Conversation,
+                ContextRetention::Retained,
+            ),
+        ]);
+        let report = detector(&[]).inspect(&mut frame, None, 1_000);
+        let costs = report.context_cost_breakdown();
+
+        assert_eq!(costs.goal_tokens, 0);
+        assert_eq!(costs.todo_tokens, 0);
+        assert!(costs.recent_history_tokens > 0);
     }
 
     #[test]

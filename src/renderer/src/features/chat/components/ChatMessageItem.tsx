@@ -91,7 +91,7 @@ interface ChatMessageItemProps {
   onEditSubmit?: (messageId: string, content: string) => void | Promise<void>
   onContinueInNewTask?: (messageId: string) => void | Promise<void>
   onReject?: (messageId: string, action: AgentProposedAction, message?: string) => void
-  onReviewLastTurn?: () => void
+  onReviewLastTurn?: (filePath?: string) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   showTokenUsageDetails: boolean
 }
@@ -446,7 +446,7 @@ function AgentRunView({
   projectId
 }: {
   message: ChatMessage
-  onReviewLastTurn?: () => void
+  onReviewLastTurn?: (filePath?: string) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   projectId?: string | null
 }) {
@@ -561,9 +561,7 @@ function AgentRunView({
         <ImageGenerationArtifactsCard resolver={hostImageArtifactResolver} run={run} />
       )}
       {isRunSettled(run) && <OfficeArtifactsCard projectId={projectId} run={run} />}
-      {isRunSettled(run) && (
-        <EditSummaryCard onReview={onReviewLastTurn} projectId={projectId} run={run} />
-      )}
+      {isRunSettled(run) && <EditSummaryCard onReview={onReviewLastTurn} run={run} />}
       {isRunSettled(run) && <AssistantSources sources={webSearchSources} />}
       {showTokenLimitNotice && (
         <div className="agent-run__notice" role="status">

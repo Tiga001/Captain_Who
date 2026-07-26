@@ -57,11 +57,6 @@ pub struct AgentChatInput {
     /// is hidden backend context and never causes automatic continuation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<crate::ConversationGoal>,
-    /// Backend-owned task-control snapshot. It is rendered as hidden backend state, never as a
-    /// timeline message. Retained only for backward-compatible checkpoint deserialization; new
-    /// turns no longer create or inject Task State.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_state: Option<crate::TaskStateSnapshot>,
     /// Backend-owned, provider-neutral world-state journal for the active conversation epoch.
     ///
     /// A full snapshot establishes the epoch prelude and later diffs are anchored immediately
@@ -779,6 +774,22 @@ pub enum AgentContextWindowPhase {
     DurableCommit,
 }
 
+#[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextCostBreakdown {
+    pub system_tokens: u64,
+    pub tool_schema_tokens: u64,
+    pub summary_tokens: u64,
+    pub continuity_tokens: u64,
+    pub world_state_tokens: u64,
+    pub goal_tokens: u64,
+    pub todo_tokens: u64,
+    /// Uncovered history plus current-run messages, attachments, Skills, guards, and tool
+    /// protocol that are not represented by the dedicated categories above.
+    pub recent_history_tokens: u64,
+    pub total_input_tokens: u64,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentContextWindowSnapshot {
@@ -799,6 +810,8 @@ pub struct AgentContextWindowSnapshot {
     pub run_transient_input_tokens: u64,
     /// Fully assembled input estimate, including fixed, durable and run-scoped context.
     pub request_input_tokens: u64,
+    #[serde(default)]
+    pub cost_breakdown: AgentContextCostBreakdown,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_durable_tokens: Option<i64>,
     /// Opaque fingerprint that changes when the fixed or durable assembled context changes.

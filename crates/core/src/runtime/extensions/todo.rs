@@ -9,6 +9,7 @@ use crate::protocol::{
     AgentToolApprovalMode, AgentToolDefinition, AgentToolSafety,
 };
 use crate::tools::{AgentTool, ToolExecutionContext};
+use crate::tools::{GoalRuntimeState, GoalRuntimeStateReader};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,9 +19,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const TODO_EXTENSION_ID: &str = "todo";
 const TODO_EXTENSION_VERSION: u32 = 1;
 const TODO_TOOL_NAME: &str = "todo_update";
-const MAX_TODO_ITEMS: usize = 30;
-const MAX_TODO_TITLE_CHARS: usize = 240;
-const MAX_TODO_NOTE_CHARS: usize = 1_000;
+const MAX_TODO_ITEMS: usize = 12;
+const MAX_TODO_ID_CHARS: usize = 64;
+const MAX_TODO_TITLE_CHARS: usize = 120;
+const MAX_TODO_NOTE_CHARS: usize = 240;
+const MAX_TODO_EXPLANATION_CHARS: usize = 400;
+const TODO_CONTEXT_HARD_MAX_TOKENS: u64 = 500;
 
 pub(super) struct TodoExtension {
     run_id: String,
@@ -59,41 +63,10 @@ impl TodoExtension {
             return None;
         }
 
-        let items = state
-            .items
-            .iter()
-            .map(|item| {
-                let mut line = format!("- [{}] {} ({})", item.status.as_str(), item.title, item.id);
-                if let Some(note) = item.note.as_deref() {
-                    line.push_str(": ");
-                    line.push_str(note);
-                }
-                line
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let total = state.items.len();
-        let completed = state
-            .items
-            .iter()
-            .filter(|item| item.status == AgentTodoStatus::Completed)
-            .count();
-        let completion_instruction = if total > 0 && completed == total {
-            "\nAll todo items are completed. The user's planned work appears complete. Do not call more tools unless there is a clear missing requirement or a failed result. Respond to the user with a concise final summary."
-        } else {
-            ""
-        };
-        let content = format!(
-            "## Runtime todo state\n\
-            The host is maintaining this structured todo state only for the current logical run. It never carries into a later user turn. Use `todo_update` when the plan or progress changes. Preserve existing item ids and update all steps whose state has actually changed. Do not claim the todo state changed unless a tool result confirms it.\n\n\
-            revision: {}\nprogress: {}/{} completed\n{}{}",
-            state.revision, completed, total, items, completion_instruction
-        );
-
         Some(ContextItem::text(
             LlmMessageRole::User,
-            content,
-            ContextSource::RuntimeExtension,
+            render_todo_state(&state),
+            ContextSource::RuntimeTodo,
             ContextScope::Run,
             ContextRetention::RequestOnly,
         ))
@@ -178,6 +151,31 @@ impl TodoStateHandle {
     }
 }
 
+impl GoalRuntimeStateReader for TodoStateHandle {
+    fn goal_runtime_state(&self) -> GoalRuntimeState {
+        let state = self.state();
+        let unfinished_todo_items = state
+            .items
+            .iter()
+            .filter(|item| item.status != AgentTodoStatus::Completed)
+            .count();
+        let blocked_reason = state
+            .items
+            .iter()
+            .find(|item| item.status == AgentTodoStatus::Blocked)
+            .map(|item| {
+                item.note.as_deref().map_or_else(
+                    || item.title.clone(),
+                    |note| format!("{}: {note}", item.title),
+                )
+            });
+        GoalRuntimeState {
+            unfinished_todo_items,
+            blocked_reason,
+        }
+    }
+}
+
 impl TodoStateStore {
     fn new() -> Self {
         Self {
@@ -193,6 +191,15 @@ impl TodoStateStore {
     fn update(&mut self, args: Value) -> AgentResult<AgentTodoState> {
         let args: TodoUpdateArgs = serde_json::from_value(args)
             .map_err(|error| AgentError::new(format!("todo_update invalid args: {error}")))?;
+        if args
+            ._explanation
+            .as_deref()
+            .is_some_and(|value| value.chars().count() > MAX_TODO_EXPLANATION_CHARS)
+        {
+            return Err(AgentError::new(format!(
+                "todo_update explanation cannot exceed {MAX_TODO_EXPLANATION_CHARS} characters."
+            )));
+        }
         if args.items.len() > MAX_TODO_ITEMS {
             return Err(AgentError::new(format!(
                 "todo_update accepts at most {MAX_TODO_ITEMS} items."
@@ -212,7 +219,12 @@ impl TodoStateStore {
         for item in args.items {
             let title = normalize_required_text(&item.title, "todo_update.items[].title")?;
             let id = match item.id.and_then(|id| normalize_optional_text(&id)) {
-                Some(id) => id,
+                Some(id) if id.chars().count() <= MAX_TODO_ID_CHARS => id,
+                Some(_) => {
+                    return Err(AgentError::new(format!(
+                        "todo_update item id cannot exceed {MAX_TODO_ID_CHARS} characters."
+                    )))
+                }
                 None => self.allocate_item_id(&used_ids, &previous),
             };
             if !used_ids.insert(id.clone()) {
@@ -238,11 +250,13 @@ impl TodoStateStore {
             });
         }
 
-        self.state = AgentTodoState {
+        let next_state = AgentTodoState {
             revision: self.state.revision + 1,
             items: next_items,
             updated_at: now,
         };
+        validate_todo_context_budget(&next_state)?;
+        self.state = next_state;
         Ok(self.state.clone())
     }
 
@@ -279,6 +293,7 @@ impl TodoStateStore {
             }
         }
         self.next_item_id = self.next_item_id.max(inferred_next_id).max(1);
+        validate_todo_context_budget(&self.state)?;
         Ok(())
     }
 }
@@ -325,11 +340,13 @@ fn todo_tool_definition() -> AgentToolDefinition {
                         "properties": {
                             "id": {
                                 "type": "string",
-                                "description": "Optional stable id from the previous todo state. Omit for new items."
+                                "description": "Optional stable id from the previous todo state. Omit for new items.",
+                                "maxLength": MAX_TODO_ID_CHARS
                             },
                             "title": {
                                 "type": "string",
-                                "description": "Short action-oriented task title."
+                                "description": "Short action-oriented task title.",
+                                "maxLength": MAX_TODO_TITLE_CHARS
                             },
                             "status": {
                                 "type": "string",
@@ -337,18 +354,22 @@ fn todo_tool_definition() -> AgentToolDefinition {
                             },
                             "note": {
                                 "type": "string",
-                                "description": "Optional compact blocker, evidence, or progress note."
+                                "description": "Optional compact blocker or progress note.",
+                                "maxLength": MAX_TODO_NOTE_CHARS
                             }
                         },
-                        "required": ["title", "status"]
+                        "required": ["title", "status"],
+                        "additionalProperties": false
                     }
                 },
                 "explanation": {
                     "type": "string",
-                    "description": "Optional short reason for the plan/progress update."
+                    "description": "Optional short reason for the plan/progress update.",
+                    "maxLength": MAX_TODO_EXPLANATION_CHARS
                 }
             },
-            "required": ["items"]
+            "required": ["items"],
+            "additionalProperties": false
         }),
         safety: AgentToolSafety::ReadOnly,
         requires_workspace: false,
@@ -394,6 +415,50 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         output.push_str("...");
     }
     output
+}
+
+fn render_todo_state(state: &AgentTodoState) -> String {
+    let items = state
+        .items
+        .iter()
+        .map(|item| {
+            let mut line = format!("- [{}] {} ({})", item.status.as_str(), item.title, item.id);
+            if let Some(note) = item.note.as_deref() {
+                line.push_str(": ");
+                line.push_str(note);
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let total = state.items.len();
+    let completed = state
+        .items
+        .iter()
+        .filter(|item| item.status == AgentTodoStatus::Completed)
+        .count();
+    let completion_instruction = if total > 0 && completed == total {
+        "\nAll todo items are completed. Do not call more tools unless a requirement is missing or a result failed; otherwise summarize the outcome."
+    } else {
+        ""
+    };
+    format!(
+        "## Runtime todo\n\
+         This is the only plan state for the current logical run and never crosses a new user turn. `in_progress` is the current phase; the first pending items are next. Use `todo_update` to replace it and preserve existing ids.\n\n\
+         revision: {}\nprogress: {}/{} completed\n{}{}",
+        state.revision, completed, total, items, completion_instruction
+    )
+}
+
+fn validate_todo_context_budget(state: &AgentTodoState) -> AgentResult<()> {
+    let budget = crate::context::ContextTextBudget::heuristic(TODO_CONTEXT_HARD_MAX_TOKENS);
+    let rendered = render_todo_state(state);
+    if !budget.fits(&rendered) {
+        return Err(AgentError::new(format!(
+            "todo_update would exceed the fixed {TODO_CONTEXT_HARD_MAX_TOKENS}-token Todo context budget; shorten or consolidate the items."
+        )));
+    }
+    Ok(())
 }
 
 fn now_ms() -> u64 {
@@ -526,10 +591,10 @@ mod tests {
         let context = ContextFrame::new(items);
         let messages = context.to_messages();
         assert_eq!(messages.len(), 1);
-        assert!(messages[0].content.contains("Runtime todo state"));
+        assert!(messages[0].content.contains("Runtime todo"));
         assert!(messages[0].content.contains("Read files"));
         let manifest = context.manifest();
-        assert_eq!(manifest.entries[0].sources, vec!["runtime_extension"]);
+        assert_eq!(manifest.entries[0].sources, vec!["runtime_todo"]);
         assert_eq!(manifest.entries[0].scope, "run");
         assert_eq!(manifest.entries[0].retention, "request_only");
 
@@ -609,5 +674,70 @@ mod tests {
         let schema = definition.input_schema.to_string();
         assert!(!schema.contains("evidenceRefs"));
         assert!(definition.description.contains("this logical run only"));
+    }
+
+    #[test]
+    fn todo_has_fixed_item_and_context_cost_limits() {
+        let (_extension, handle) = TodoExtension::new("run-1".to_string());
+        let tool = TodoTool {
+            state: handle.clone(),
+        };
+        let too_many = (0..=MAX_TODO_ITEMS)
+            .map(|index| {
+                json!({
+                    "title": format!("item-{index}"),
+                    "status": "pending"
+                })
+            })
+            .collect::<Vec<_>>();
+        let too_many = execute(&tool, json!({ "items": too_many }));
+        assert!(!too_many.ok);
+        assert!(too_many
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("at most 12 items")));
+
+        let oversized = (0..MAX_TODO_ITEMS)
+            .map(|index| {
+                json!({
+                    "title": format!("{index}-{}", "long todo item ".repeat(20)),
+                    "status": "pending",
+                    "note": "long progress note ".repeat(20)
+                })
+            })
+            .collect::<Vec<_>>();
+        let oversized = execute(&tool, json!({ "items": oversized }));
+        assert!(!oversized.ok);
+        assert!(oversized
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("500-token Todo context budget")));
+        assert!(handle.state().items.is_empty());
+    }
+
+    #[test]
+    fn todo_is_the_only_source_for_goal_completion_and_blocker_checks() {
+        let (_extension, handle) = TodoExtension::new("run-1".to_string());
+        let tool = TodoTool {
+            state: handle.clone(),
+        };
+        assert!(execute(
+            &tool,
+            json!({
+                "items": [
+                    { "title": "Finished", "status": "completed" },
+                    { "title": "Need credentials", "status": "blocked", "note": "token missing" },
+                    { "title": "Continue work", "status": "pending" }
+                ]
+            })
+        )
+        .ok);
+
+        let runtime = handle.goal_runtime_state();
+        assert_eq!(runtime.unfinished_todo_items, 2);
+        assert_eq!(
+            runtime.blocked_reason.as_deref(),
+            Some("Need credentials: token missing")
+        );
     }
 }

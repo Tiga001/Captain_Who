@@ -80,4 +80,14 @@ impl StorageService {
         )
         .map_err(storage_error)
     }
+
+    pub fn cancel_conversation_goal(
+        &self,
+        conversation_id: &str,
+        updated_at: i64,
+    ) -> Result<Option<ConversationGoal>, String> {
+        let connection = self.state.connection()?;
+        conversation_goal_repository::cancel_goal(&connection, conversation_id, updated_at)
+            .map_err(storage_error)
+    }
 }

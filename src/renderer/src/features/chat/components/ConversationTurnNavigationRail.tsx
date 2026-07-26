@@ -33,9 +33,15 @@ interface TooltipPosition {
 
 interface PointerScrubState {
   hasMoved: boolean
-  lastRevealedTurnId: string | null
+  initialTurnId: string
   pointerId: number
   startY: number
+  stops: PointerScrubStop[]
+}
+
+interface PointerScrubStop {
+  clientY: number
+  scrollTop: number
 }
 
 interface NearestTurnTarget {
@@ -70,17 +76,71 @@ function findNearestTurnTarget(list: HTMLDivElement, clientY: number): NearestTu
   return nearestTarget
 }
 
-function findTurnAnchor(list: HTMLDivElement, turnId: string) {
-  return Array.from(
-    list.querySelectorAll<HTMLButtonElement>('.conversation-turn-navigation__row[data-turn-id]')
-  ).find((anchor) => anchor.dataset.turnId === turnId)
+function createPointerScrubStops(
+  list: HTMLDivElement,
+  root: HTMLDivElement,
+  items: ConversationTurnNavigationItem[]
+) {
+  const itemById = new Map(items.map((item) => [item.id, item]))
+  const rootRect = root.getBoundingClientRect()
+  const maximumScrollTop = Math.max(0, root.scrollHeight - root.clientHeight)
+  const stops: PointerScrubStop[] = []
+
+  for (const anchor of list.querySelectorAll<HTMLButtonElement>(
+    '.conversation-turn-navigation__row[data-turn-id]'
+  )) {
+    const turnId = anchor.dataset.turnId
+    const item = turnId ? itemById.get(turnId) : undefined
+    if (!item) continue
+
+    const target = findUserMessageElement(root, item.userMessageId)
+    if (!target) continue
+
+    const anchorRect = anchor.getBoundingClientRect()
+    const targetRect = target.getBoundingClientRect()
+    stops.push({
+      clientY: anchorRect.top + anchorRect.height / 2,
+      scrollTop: Math.min(
+        maximumScrollTop,
+        Math.max(0, root.scrollTop + targetRect.top - rootRect.top)
+      )
+    })
+  }
+
+  return stops.sort((left, right) => left.clientY - right.clientY)
 }
 
-function isPointInsideElement(element: HTMLElement, clientX: number, clientY: number) {
-  const rect = element.getBoundingClientRect()
-  return (
-    clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom
-  )
+function scrollConversationToPointer(
+  root: HTMLDivElement,
+  stops: PointerScrubStop[],
+  clientY: number
+) {
+  const first = stops[0]
+  const last = stops.at(-1)
+  if (!first || !last) return
+
+  if (clientY <= first.clientY) {
+    root.scrollTo({ behavior: 'auto', top: first.scrollTop })
+    return
+  }
+  if (clientY >= last.clientY) {
+    root.scrollTo({ behavior: 'auto', top: last.scrollTop })
+    return
+  }
+
+  for (let index = 1; index < stops.length; index += 1) {
+    const next = stops[index]
+    const previous = stops[index - 1]
+    if (!next || !previous || clientY > next.clientY) continue
+
+    const distance = next.clientY - previous.clientY
+    const progress = distance <= 0 ? 0 : (clientY - previous.clientY) / distance
+    root.scrollTo({
+      behavior: 'auto',
+      top: previous.scrollTop + (next.scrollTop - previous.scrollTop) * progress
+    })
+    return
+  }
 }
 
 function sameStringSet(left: Set<string>, right: Set<string>) {
@@ -103,6 +163,7 @@ export function ConversationTurnNavigationRail({
   const [hoveredTurnId, setHoveredTurnId] = useState<string | null>(null)
   const [focusedTurnId, setFocusedTurnId] = useState<string | null>(null)
   const [scrubbedTurnId, setScrubbedTurnId] = useState<string | null>(null)
+  const [pointerPreviewSuppressed, setPointerPreviewSuppressed] = useState(false)
   const [tooltipAnchor, setTooltipAnchor] = useState<HTMLButtonElement | null>(null)
   const [tooltipPosition, setTooltipPosition] = useState<TooltipPosition>({
     left: 0,
@@ -111,6 +172,7 @@ export function ConversationTurnNavigationRail({
   })
   const tooltipRef = useRef<HTMLDivElement>(null)
   const pointerScrubRef = useRef<PointerScrubState | null>(null)
+  const pointerPreviewSuppressedRef = useRef(false)
   const suppressClickRef = useRef(false)
   const previewTurnId = scrubbedTurnId ?? hoveredTurnId ?? focusedTurnId
   const previewItem = items.find((item) => item.id === previewTurnId) ?? null
@@ -253,11 +315,14 @@ export function ConversationTurnNavigationRail({
     const nearestTarget = findNearestTurnTarget(event.currentTarget, event.clientY)
     if (!nearestTarget) return
 
+    pointerPreviewSuppressedRef.current = false
+    setPointerPreviewSuppressed(false)
     pointerScrubRef.current = {
       hasMoved: false,
-      lastRevealedTurnId: null,
+      initialTurnId: nearestTarget.turnId,
       pointerId: event.pointerId,
-      startY: event.clientY
+      startY: event.clientY,
+      stops: []
     }
     setHoveredTurnId(nearestTarget.turnId)
     setTooltipAnchor(nearestTarget.anchor)
@@ -274,8 +339,13 @@ export function ConversationTurnNavigationRail({
       return
     }
 
-    if (!scrubState.hasMoved) {
+    const isFirstScrubMove = !scrubState.hasMoved
+    if (isFirstScrubMove) {
       scrubState.hasMoved = true
+      const root = scrollContainerRef.current
+      if (root) {
+        scrubState.stops = createPointerScrubStops(event.currentTarget, root, items)
+      }
       try {
         event.currentTarget.setPointerCapture(event.pointerId)
       } catch {
@@ -290,33 +360,32 @@ export function ConversationTurnNavigationRail({
     setScrubbedTurnId(nearestTarget.turnId)
     setTooltipAnchor(nearestTarget.anchor)
 
-    if (scrubState.lastRevealedTurnId !== nearestTarget.turnId) {
-      const item = items.find((candidate) => candidate.id === nearestTarget.turnId)
-      if (item) {
-        scrubState.lastRevealedTurnId = nearestTarget.turnId
-        revealTurn(item, 'scrub')
-      }
+    if (isFirstScrubMove) {
+      const initialItem = items.find((candidate) => candidate.id === scrubState.initialTurnId)
+      if (initialItem) revealTurn(initialItem, 'scrub')
+    } else {
+      const root = scrollContainerRef.current
+      if (root) scrollConversationToPointer(root, scrubState.stops, event.clientY)
     }
 
     event.preventDefault()
   }
 
-  const finishPointerScrub = (event: ReactPointerEvent<HTMLDivElement>, preserveHover: boolean) => {
+  const finishPointerScrub = (event: ReactPointerEvent<HTMLDivElement>) => {
     const scrubState = pointerScrubRef.current
     if (!scrubState || scrubState.pointerId !== event.pointerId) return
 
     pointerScrubRef.current = null
+    pointerPreviewSuppressedRef.current = true
+    setPointerPreviewSuppressed(true)
+    setHoveredTurnId(null)
+    setFocusedTurnId(null)
     setScrubbedTurnId(null)
+    setTooltipAnchor(null)
 
-    if (preserveHover && isPointInsideElement(event.currentTarget, event.clientX, event.clientY)) {
-      const nearestTarget = findNearestTurnTarget(event.currentTarget, event.clientY)
-      setHoveredTurnId(nearestTarget?.turnId ?? null)
-      setTooltipAnchor(nearestTarget?.anchor ?? null)
-    } else {
-      setHoveredTurnId(null)
-      setTooltipAnchor(
-        focusedTurnId ? (findTurnAnchor(event.currentTarget, focusedTurnId) ?? null) : null
-      )
+    const activeElement = document.activeElement
+    if (activeElement instanceof HTMLElement && event.currentTarget.contains(activeElement)) {
+      activeElement.blur()
     }
 
     if (scrubState.hasMoved) {
@@ -363,15 +432,16 @@ export function ConversationTurnNavigationRail({
       <nav
         aria-label={t('chat.turnNavigationLabel')}
         className="conversation-turn-navigation"
+        data-pointer-preview-suppressed={pointerPreviewSuppressed ? 'true' : undefined}
         data-scrubbing={scrubbedTurnId ? 'true' : undefined}
       >
         <div
           className="conversation-turn-navigation__list"
-          onLostPointerCapture={(event) => finishPointerScrub(event, false)}
-          onPointerCancel={(event) => finishPointerScrub(event, false)}
+          onLostPointerCapture={finishPointerScrub}
+          onPointerCancel={finishPointerScrub}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
-          onPointerUp={(event) => finishPointerScrub(event, true)}
+          onPointerUp={finishPointerScrub}
         >
           {items.map((item, index) => {
             const distance = waveIndex < 0 ? -1 : Math.abs(index - waveIndex)
@@ -411,11 +481,16 @@ export function ConversationTurnNavigationRail({
                   event.currentTarget.blur()
                 }}
                 onPointerEnter={(event) => {
+                  if (pointerPreviewSuppressedRef.current) return
                   setHoveredTurnId(item.id)
                   setTooltipAnchor(event.currentTarget)
                 }}
                 onPointerLeave={() => {
                   setHoveredTurnId((current) => (current === item.id ? null : current))
+                  if (!pointerScrubRef.current) {
+                    pointerPreviewSuppressedRef.current = false
+                    setPointerPreviewSuppressed(false)
+                  }
                 }}
                 style={
                   {

@@ -713,6 +713,7 @@ export const zhCNTranslations = {
   'agent.editSummary.actions': '编辑操作',
   'agent.editSummary.undo': '撤销',
   'agent.editSummary.review': '审核',
+  'agent.editSummary.reviewFile': '在上一轮审阅中查看 {filePath}',
   'agent.editSummary.showMore': '再显示 {count} 个文件',
   'agent.editSummary.showLess': '收起文件',
   'agent.skill.loaded': '已加载工具',

@@ -217,7 +217,6 @@ pub(crate) fn prepare_conversation_turn(
         assistant_message_id: Some(assistant_message_id.clone()),
         context_compaction_summary,
         goal,
-        task_state: None,
         world_state_records,
         skill_activation: prepared_skills.runtime,
         skill_discovery: skill_discovery.clone(),

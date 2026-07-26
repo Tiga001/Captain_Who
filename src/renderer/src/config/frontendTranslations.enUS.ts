@@ -744,6 +744,7 @@ export const enUSTranslations = {
   'agent.editSummary.actions': 'Edit actions',
   'agent.editSummary.undo': 'Undo',
   'agent.editSummary.review': 'Review',
+  'agent.editSummary.reviewFile': 'Review {filePath} in the last turn',
   'agent.editSummary.showMore': 'Show {count} more files',
   'agent.editSummary.showLess': 'Show fewer files',
   'agent.skill.loaded': 'Loaded tool',

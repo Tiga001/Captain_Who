@@ -47,16 +47,70 @@ pub(crate) struct ContextFrameEstimateBreakdown {
     pub(crate) durable: ContextFrameEstimateBucket,
     pub(crate) run_transient: ContextFrameEstimateBucket,
     pub(crate) request_only: ContextFrameEstimateBucket,
+    pub(crate) semantic: ContextFrameSemanticBreakdown,
 }
 
 impl ContextFrameEstimateBreakdown {
-    fn merge(&mut self, class: ContextUsageClass, estimate: ContextMessageEstimate) {
+    fn merge(
+        &mut self,
+        class: ContextUsageClass,
+        sources: &[ContextSource],
+        estimate: ContextMessageEstimate,
+    ) {
         match class {
             ContextUsageClass::Fixed => self.fixed.merge(estimate),
             ContextUsageClass::Durable => self.durable.merge(estimate),
             ContextUsageClass::RunTransient => self.run_transient.merge(estimate),
             ContextUsageClass::RequestOnly => self.request_only.merge(estimate),
         }
+        self.semantic.merge(sources, estimate.total_tokens());
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ContextFrameSemanticBreakdown {
+    pub(crate) system_tokens: u64,
+    pub(crate) summary_tokens: u64,
+    pub(crate) continuity_tokens: u64,
+    pub(crate) world_state_tokens: u64,
+    pub(crate) goal_tokens: u64,
+    pub(crate) todo_tokens: u64,
+    pub(crate) recent_history_tokens: u64,
+}
+
+impl ContextFrameSemanticBreakdown {
+    fn merge(&mut self, sources: &[ContextSource], tokens: u64) {
+        let target = if sources.contains(&ContextSource::BackendSystemPrompt) {
+            &mut self.system_tokens
+        } else if sources.contains(&ContextSource::ConversationSummary) {
+            &mut self.summary_tokens
+        } else if sources.contains(&ContextSource::ContinuityIndex) {
+            &mut self.continuity_tokens
+        } else if sources.contains(&ContextSource::WorldStateSnapshot)
+            || sources.contains(&ContextSource::WorldStateDiff)
+        {
+            &mut self.world_state_tokens
+        } else if sources.contains(&ContextSource::ConversationGoal) {
+            &mut self.goal_tokens
+        } else if sources.contains(&ContextSource::RuntimeTodo) {
+            &mut self.todo_tokens
+        } else {
+            // Recent history is the residual model-visible frame: uncovered conversation tail,
+            // current-turn activity, attachments, Skills, runtime guards, and tool protocol.
+            &mut self.recent_history_tokens
+        };
+        *target = target.saturating_add(tokens);
+    }
+
+    pub(crate) fn total_tokens(self) -> u64 {
+        self.system_tokens
+            .saturating_add(self.summary_tokens)
+            .saturating_add(self.continuity_tokens)
+            .saturating_add(self.world_state_tokens)
+            .saturating_add(self.goal_tokens)
+            .saturating_add(self.todo_tokens)
+            .saturating_add(self.recent_history_tokens)
     }
 }
 
@@ -222,7 +276,9 @@ impl ContextFrame {
         }
         if let Some(measurement) = &mut self.measurement {
             let estimate = item.measure(measurement.estimator.as_ref());
-            measurement.breakdown.merge(usage_class, estimate);
+            measurement
+                .breakdown
+                .merge(usage_class, item.metadata.sources(), estimate);
             measurement.full_recount = None;
         }
         self.items.push(item);
@@ -254,7 +310,8 @@ impl ContextFrame {
             let mut breakdown = ContextFrameEstimateBreakdown::default();
             for item in &mut self.items {
                 let usage_class = item.metadata.usage_class();
-                breakdown.merge(usage_class, item.measure(estimator.as_ref()));
+                let estimate = item.measure(estimator.as_ref());
+                breakdown.merge(usage_class, item.metadata.sources(), estimate);
             }
             self.measurement = Some(ContextFrameMeasurementState {
                 estimator,
@@ -655,7 +712,11 @@ impl MeasuredContextBaseline {
                     .as_ref()
                     .filter(|measurement| measurement.estimator == self.measurement.identity)
                     .map(|measurement| measurement.estimate)?;
-                breakdown.merge(item.metadata.usage_class(), estimate);
+                breakdown.merge(
+                    item.metadata.usage_class(),
+                    item.metadata.sources(),
+                    estimate,
+                );
             }
             matching_chunks.push(chunk.clone());
             item_offset = end;

@@ -188,7 +188,7 @@ describe('RightSidebar workspace lifecycle', () => {
 
   it('opens and reactivates last-turn review without resetting its mounted page state', async () => {
     const workspace = workspaceProps('project-a', 'Project A', '/repo/a')
-    const renderSidebar = (requestId?: number) => (
+    const renderSidebar = (requestId?: number, filePath?: string) => (
       <RightSidebar
         {...workspace}
         capabilities={gitCapability(workspace, 'available')}
@@ -203,7 +203,8 @@ describe('RightSidebar workspace lifecycle', () => {
                 kind: 'git-review',
                 projectId: workspace.workspaceKey,
                 requestId,
-                scope: 'lastTurn'
+                scope: 'lastTurn',
+                ...(filePath ? { filePath } : {})
               }
         }
       />
@@ -227,11 +228,12 @@ describe('RightSidebar workspace lifecycle', () => {
       .poll(() => getSurface(screen.container, 'git-review').dataset.activity)
       .toBe('background')
 
-    await screen.rerender(renderSidebar(2))
+    await screen.rerender(renderSidebar(2, 'src/target.ts'))
     await expect
       .poll(() => getSurface(screen.container, 'git-review').dataset.activity)
       .toBe('foreground')
     expect(getSurface(screen.container, 'git-review').dataset.reviewRequestId).toBe('2')
+    expect(getSurface(screen.container, 'git-review').dataset.reviewFilePath).toBe('src/target.ts')
     await expect.poll(() => localStateButton.textContent).toBe('1')
     expect(lifecycleCount('mount', 'git-review')).toBe(1)
     expect(lifecycleCount('unmount', 'git-review')).toBe(0)
@@ -572,6 +574,7 @@ function TrackedSurface({
       data-review-request-id={
         moduleState?.kind === 'git-review' ? String(moduleState.requestId) : undefined
       }
+      data-review-file-path={moduleState?.kind === 'git-review' ? moduleState.filePath : undefined}
       data-review-scope={moduleState?.kind === 'git-review' ? moduleState.scope : undefined}
       data-selected={isSelected ? 'true' : 'false'}
       data-testid={`${moduleId}-surface`}

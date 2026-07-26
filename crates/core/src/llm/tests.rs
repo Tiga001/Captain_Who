@@ -1046,7 +1046,6 @@ fn assembled_context_preserves_order_across_provider_payloads() {
         compaction_summary: None,
         world_state_records: Vec::new(),
         goal: None,
-        task_state: None,
         initial_run_world_state: None,
         messages: vec![timestamped_history, timestamped_answer, timestamped_current],
         skill_discovery: None,
@@ -1150,7 +1149,6 @@ fn conversation_trace_builds_legal_ordered_tool_history_for_both_providers() {
         compaction_summary: None,
         world_state_records: Vec::new(),
         goal: None,
-        task_state: None,
         initial_run_world_state: None,
         messages: vec![
             chat_message("user", "Inspect the file"),

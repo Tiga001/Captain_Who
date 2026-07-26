@@ -73,6 +73,7 @@ export type RightSidebarModulePageState =
     }
   | {
       kind: 'git-review'
+      filePath?: string
       projectId: string
       requestId: number
       scope: 'lastTurn'

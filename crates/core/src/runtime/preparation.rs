@@ -14,7 +14,6 @@ pub(super) struct DurableConversationTimeline {
     pub(super) compaction_summary: Option<crate::ContextCompactionSummary>,
     pub(super) world_state_records: Vec<crate::AnchoredWorldStateRecord>,
     pub(super) goal: Option<crate::ConversationGoal>,
-    pub(super) task_state: Option<crate::TaskStateSnapshot>,
     pub(super) messages: Vec<AgentChatMessage>,
 }
 
@@ -141,13 +140,11 @@ pub(super) fn assemble_context_preview(
         compaction_summary,
         world_state_records,
         goal,
-        task_state,
         messages,
     } = timeline;
     if compaction_summary.is_some()
         || !world_state_records.is_empty()
         || goal.is_some()
-        || task_state.is_some()
         || messages.iter().any(|message| {
             matches!(message.role.trim(), "user" | "assistant")
                 && !message.content.trim().is_empty()
@@ -158,7 +155,6 @@ pub(super) fn assemble_context_preview(
             compaction_summary,
             world_state_records,
             goal,
-            task_state,
             initial_run_world_state: None,
             messages,
             skill_discovery,
@@ -258,7 +254,6 @@ pub(super) fn build_llm_request(
                         compaction_summary: input.context_compaction_summary,
                         world_state_records,
                         goal: input.goal,
-                        task_state: input.task_state,
                         messages: input.messages,
                     },
                     initial_run_world_state,
@@ -445,7 +440,6 @@ pub(super) fn assemble_initial_context(
             compaction_summary,
             world_state_records: Vec::new(),
             goal: None,
-            task_state: None,
             messages,
         },
         None,
@@ -478,7 +472,6 @@ fn assemble_initial_context_with_skill_overlays(
         compaction_summary,
         world_state_records,
         goal,
-        task_state,
         messages,
     } = timeline;
     ContextAssembler::assemble(ContextAssemblyInput {
@@ -486,7 +479,6 @@ fn assemble_initial_context_with_skill_overlays(
         compaction_summary,
         world_state_records,
         goal,
-        task_state,
         initial_run_world_state,
         messages,
         skill_discovery: skills.discovery,

@@ -69,7 +69,9 @@
   opacity: 0.66;
 }
 
-.conversation-turn-navigation__row:hover > span,
+.conversation-turn-navigation:not([data-pointer-preview-suppressed='true'])
+  .conversation-turn-navigation__row:hover
+  > span,
 .conversation-turn-navigation__row:focus-visible > span {
   background: var(--mc-color-text-primary);
   opacity: 1;

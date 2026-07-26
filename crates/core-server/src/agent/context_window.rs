@@ -127,7 +127,6 @@ impl AgentService {
             assistant_message_id: None,
             context_compaction_summary,
             goal,
-            task_state: None,
             world_state_records,
             skill_activation: prepared_skills.runtime,
             skill_discovery,

@@ -63,7 +63,6 @@ pub(crate) enum ContextCompactionProtectionReason {
     SkillInstructions,
     WorldState,
     Goal,
-    TaskState,
     UserAttachment,
     RuntimeGuard,
     VisualInput,
@@ -492,9 +491,6 @@ fn absolute_protection_reason(
     if unit.sources.contains(&ContextSource::ConversationGoal) {
         return Some(ContextCompactionProtectionReason::Goal);
     }
-    if unit.sources.contains(&ContextSource::TaskContinuationState) {
-        return Some(ContextCompactionProtectionReason::TaskState);
-    }
     match unit.usage_class {
         ContextUsageClass::Fixed => return Some(ContextCompactionProtectionReason::FixedRequest),
         ContextUsageClass::RequestOnly => {
@@ -705,7 +701,6 @@ fn protection_reason_name(reason: ContextCompactionProtectionReason) -> String {
         ContextCompactionProtectionReason::SkillInstructions => "skill_instructions",
         ContextCompactionProtectionReason::WorldState => "world_state",
         ContextCompactionProtectionReason::Goal => "goal",
-        ContextCompactionProtectionReason::TaskState => "task_state",
         ContextCompactionProtectionReason::UserAttachment => "user_attachment",
         ContextCompactionProtectionReason::RuntimeGuard => "runtime_guard",
         ContextCompactionProtectionReason::VisualInput => "visual_input",
@@ -807,6 +802,7 @@ mod tests {
                 run_transient: category(run_transient),
                 request_only: category(request_only),
                 total: category(total),
+                semantic: Default::default(),
             },
         }
     }
@@ -1310,31 +1306,6 @@ mod tests {
             plan.protected.reasons.get("skill_instructions"),
             Some(&2_000)
         );
-    }
-
-    #[test]
-    fn task_continuation_state_is_never_a_compaction_candidate() {
-        let items = vec![item(
-            0,
-            ContextUsageClass::Durable,
-            2_000,
-            LlmMessageRole::System,
-            ContextSource::TaskContinuationState,
-            None,
-        )];
-
-        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
-            &query(ContextBudgetStatus::OverBudget, Some(1_000), 0, 2_000, 0, 0),
-            &items,
-            false,
-        );
-
-        assert_eq!(
-            plan.status,
-            ContextCompactionPlanStatus::InsufficientCompactableContext
-        );
-        assert_eq!(plan.compactable_input_tokens, 0);
-        assert_eq!(plan.protected.reasons.get("task_state"), Some(&2_000));
     }
 
     #[test]

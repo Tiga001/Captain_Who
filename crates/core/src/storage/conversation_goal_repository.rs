@@ -93,6 +93,25 @@ pub(crate) fn update_goal_status(
         .optional()
 }
 
+pub(crate) fn cancel_goal(
+    connection: &Connection,
+    conversation_id: &str,
+    now: i64,
+) -> rusqlite::Result<Option<ConversationGoal>> {
+    connection
+        .query_row(
+            "UPDATE conversation_goals
+             SET status = 'cancelled', stopped_reason = NULL, updated_at = ?2
+             WHERE conversation_id = ?1
+               AND status IN ('active', 'blocked')
+             RETURNING goal_id, conversation_id, objective, source_message_id, status,
+                       stopped_reason, created_at, updated_at",
+            params![conversation_id, now],
+            goal_from_row,
+        )
+        .optional()
+}
+
 /// A new user turn is an explicit opportunity to continue a previously blocked goal. This only
 /// reactivates the persistent objective; it never starts a model run on its own.
 pub(crate) fn resume_blocked_goal_for_user_turn(
@@ -117,18 +136,14 @@ pub(crate) fn clone_visible_goal_for_fork(
     message_id_map: &HashMap<String, String>,
     created_at: i64,
 ) -> Result<(), String> {
-    let Some(source) =
-        get_visible_goal(connection, source_conversation_id).map_err(database_error)?
-    else {
+    let Some(source) = get_goal(connection, source_conversation_id).map_err(database_error)? else {
         return Ok(());
     };
+    if source.status != ConversationGoalStatus::Active {
+        return Ok(());
+    }
     let Some(target_source_message_id) = message_id_map.get(&source.source_message_id) else {
         return Ok(());
-    };
-    let status = if source.status == ConversationGoalStatus::Blocked {
-        ConversationGoalStatus::Active
-    } else {
-        source.status
     };
     connection
         .execute(
@@ -141,7 +156,7 @@ pub(crate) fn clone_visible_goal_for_fork(
                 format!("goal-{}", Uuid::new_v4()),
                 source.objective,
                 target_source_message_id,
-                status.as_str(),
+                ConversationGoalStatus::Active.as_str(),
                 created_at,
             ],
         )

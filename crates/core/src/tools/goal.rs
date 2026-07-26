@@ -132,7 +132,7 @@ impl AgentTool for UpdateGoalTool {
     fn definition(&self) -> AgentToolDefinition {
         definition(
             "update_goal",
-            "Mark the current explicit goal completed or genuinely blocked. Do not use this for ordinary turn progress, objective edits, pause, resume, or cancellation.",
+            "Mark the current explicit goal completed or genuinely blocked. Completion is rejected while this run has unfinished Todo items. Do not use this for ordinary progress, edits, pause, resume, or cancellation.",
             json!({
                 "type": "object",
                 "properties": {
@@ -151,12 +151,24 @@ impl AgentTool for UpdateGoalTool {
         let args = serde_json::from_value::<UpdateGoalArgs>(args)
             .map_err(|error| AgentError::new(format!("update_goal 参数无效：{error}")))?;
         context.check_cancelled()?;
+        let runtime = context.goal_runtime_state()?;
+        if args.status == ConversationGoalStatus::Completed && runtime.unfinished_todo_items > 0 {
+            return Err(AgentError::new(format!(
+                "当前 Run 仍有 {} 个未完成 Todo，Goal 不能标记为 completed。",
+                runtime.unfinished_todo_items
+            )));
+        }
+        let stopped_reason = (args.status == ConversationGoalStatus::Blocked).then(|| {
+            runtime
+                .blocked_reason
+                .unwrap_or_else(|| "The current run reported a genuine blocker.".to_string())
+        });
         let goal = context
             .storage()?
             .update_conversation_goal_status(
                 context.conversation_id()?,
                 args.status,
-                None,
+                stopped_reason.as_deref(),
                 crate::storage::now_ms(),
             )
             .map_err(AgentError::new)?;
@@ -227,6 +239,69 @@ struct UpdateGoalArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{AgentPermissions, AgentRunContext};
+    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use crate::storage::service::StorageService;
+    use crate::tools::{GoalRuntimeState, GoalRuntimeStateReader};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[derive(Debug)]
+    struct FixedGoalRuntimeState(GoalRuntimeState);
+
+    impl GoalRuntimeStateReader for FixedGoalRuntimeState {
+        fn goal_runtime_state(&self) -> GoalRuntimeState {
+            self.0.clone()
+        }
+    }
+
+    fn goal_test_context(
+        storage: Arc<StorageService>,
+        runtime: GoalRuntimeState,
+    ) -> ToolExecutionContext {
+        let run_context = AgentRunContext {
+            conversation_id: Some("conversation-goal-tool".to_string()),
+            project_id: None,
+            workspace: None,
+            attachment_library: None,
+            permissions: AgentPermissions::default(),
+        };
+        ToolExecutionContext::from_run_context(Some(&run_context))
+            .with_runtime_services("run-goal-tool".to_string(), Some(storage))
+            .with_goal_runtime_state_reader(Some(Arc::new(FixedGoalRuntimeState(runtime))))
+    }
+
+    fn goal_test_storage() -> (tempfile::TempDir, Arc<StorageService>) {
+        let root = tempdir().unwrap();
+        let storage = Arc::new(StorageService::open(&root.path().join("storage.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-goal-tool".to_string(),
+                project_id: None,
+                model_id: None,
+                title: "Goal tool test".to_string(),
+                messages: vec![ChatMessageRecord {
+                    id: "goal-source".to_string(),
+                    role: "user".to_string(),
+                    content: "Track this goal.".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                }],
+                created_at: 1,
+                updated_at: 1,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        storage
+            .create_conversation_goal("conversation-goal-tool", "Finish the goal.", 2)
+            .unwrap();
+        (root, storage)
+    }
 
     #[test]
     fn goal_tool_schemas_are_small_and_provider_portable() {
@@ -261,5 +336,62 @@ mod tests {
 
         let projected = project_goal_result(&result);
         assert!(!projected.result.unwrap().to_string().contains("Sensitive"));
+    }
+
+    #[test]
+    fn completion_is_rejected_until_current_run_todo_is_finished() {
+        let (_root, storage) = goal_test_storage();
+        let pending_context = goal_test_context(
+            Arc::clone(&storage),
+            GoalRuntimeState {
+                unfinished_todo_items: 1,
+                blocked_reason: None,
+            },
+        );
+
+        let error = UpdateGoalTool
+            .execute(&pending_context, json!({ "status": "completed" }))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("仍有 1 个未完成 Todo"));
+        assert_eq!(
+            storage
+                .load_conversation_goal("conversation-goal-tool")
+                .unwrap()
+                .unwrap()
+                .status,
+            ConversationGoalStatus::Active
+        );
+
+        let complete_context = goal_test_context(storage.clone(), GoalRuntimeState::default());
+        let result = UpdateGoalTool
+            .execute(&complete_context, json!({ "status": "completed" }))
+            .unwrap();
+        assert_eq!(result["status"], "completed");
+    }
+
+    #[test]
+    fn blocked_reason_is_derived_from_run_todo_instead_of_model_arguments() {
+        let (_root, storage) = goal_test_storage();
+        let context = goal_test_context(
+            Arc::clone(&storage),
+            GoalRuntimeState {
+                unfinished_todo_items: 1,
+                blocked_reason: Some("Need credentials: token missing".to_string()),
+            },
+        );
+
+        let result = UpdateGoalTool
+            .execute(&context, json!({ "status": "blocked" }))
+            .unwrap();
+        assert_eq!(result["status"], "blocked");
+        let goal = storage
+            .load_conversation_goal("conversation-goal-tool")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            goal.stopped_reason.as_deref(),
+            Some("Need credentials: token missing")
+        );
     }
 }

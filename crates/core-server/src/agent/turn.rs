@@ -273,38 +273,6 @@ impl AgentService {
                         &worker_assistant_message_id,
                         &mut agent_output,
                     );
-                    if persisted.is_ok() {
-                        if let Some(task_state) = pending_agent_input.task_state.as_ref() {
-                            if let Err(error) = service.storage.settle_task_state_run(
-                                &worker_conversation_id,
-                                &task_state.control.task_id,
-                                &worker_run_id,
-                                agent_output.status == AgentRunStatus::WaitingForApproval,
-                                match agent_output.status {
-                                    AgentRunStatus::WaitingForApproval => {
-                                        Some("waiting_for_approval")
-                                    }
-                                    AgentRunStatus::Cancelled => Some("run_cancelled"),
-                                    _ => None,
-                                },
-                                now_ms(),
-                            ) {
-                                let _ = notifications.send(agent_event_notification(
-                                    AgentEvent::Error {
-                                        run_id: Some(worker_run_id.clone()),
-                                        message: format!(
-                                            "assistant 已持久化，但 Task State 运行终态写入失败：{error}"
-                                        ),
-                                        recoverable: true,
-                                        code: Some(
-                                            "task_state_settlement_failed".to_string(),
-                                        ),
-                                        details: None,
-                                    },
-                                ));
-                            }
-                        }
-                    }
                     if persisted.is_ok() && committed_durable_context {
                         service.emit_terminal_context_window_snapshot(
                             &notifications,
@@ -358,32 +326,6 @@ impl AgentService {
                         usage.clone(),
                         &conversation_turn_trace,
                     );
-                    if persisted.is_ok() {
-                        if let Some(task_state) = pending_agent_input.task_state.as_ref() {
-                            if let Err(error) = service.storage.settle_task_state_run(
-                                &worker_conversation_id,
-                                &task_state.control.task_id,
-                                &worker_run_id,
-                                false,
-                                Some("run_failed"),
-                                now_ms(),
-                            ) {
-                                let _ = notifications.send(agent_event_notification(
-                                    AgentEvent::Error {
-                                        run_id: Some(worker_run_id.clone()),
-                                        message: format!(
-                                            "assistant 失败终态已持久化，但 Task State 写入失败：{error}"
-                                        ),
-                                        recoverable: true,
-                                        code: Some(
-                                            "task_state_settlement_failed".to_string(),
-                                        ),
-                                        details: None,
-                                    },
-                                ));
-                            }
-                        }
-                    }
                     let cumulative_usage = persisted.as_ref().ok().cloned().flatten();
                     if persisted.is_ok() {
                         service.emit_terminal_context_window_snapshot(

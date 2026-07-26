@@ -7,7 +7,9 @@
 use crate::{AgentError, AgentResult};
 use serde::{Deserialize, Serialize};
 
-pub const MAX_CONVERSATION_GOAL_OBJECTIVE_CHARS: usize = 4_000;
+pub const MAX_CONVERSATION_GOAL_OBJECTIVE_CHARS: usize = 1_000;
+pub const CONVERSATION_GOAL_CONTEXT_TARGET_TOKENS: u64 = 200;
+pub const CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS: u64 = 256;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -69,7 +71,7 @@ impl ConversationGoal {
     pub fn render_for_context(&self) -> AgentResult<String> {
         self.validate()?;
         let mut rendered = format!(
-            "## Active Goal\n\nObjective:\n{}\n\nStatus:\n{}",
+            "## Explicit Goal\nobjective: {}\nstatus: {}",
             self.objective,
             self.status.as_str()
         );
@@ -79,14 +81,34 @@ impl ConversationGoal {
             .map(str::trim)
             .filter(|reason| !reason.is_empty())
         {
-            rendered.push_str("\n\nStopped reason:\n");
-            rendered.push_str(reason);
+            let prefix = "\nstoppedReason: ";
+            let budget = crate::context::ContextTextBudget::heuristic(
+                CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS,
+            );
+            let instruction =
+                "\nLatest user instructions override this goal. It never authorizes automatic continuation.";
+            let used = budget
+                .estimate(&rendered)
+                .saturating_add(budget.estimate(prefix))
+                .saturating_add(budget.estimate(instruction));
+            let remaining = CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS.saturating_sub(used);
+            if remaining > 0 {
+                let reason_budget = crate::context::ContextTextBudget::heuristic(remaining);
+                let prefix_len = reason_budget.fitting_prefix_len(reason);
+                rendered.push_str(prefix);
+                rendered.push_str(&reason[..prefix_len]);
+            }
         }
         rendered.push_str(
-            "\n\nThis goal exists only because the user explicitly requested persistent \
-             tracking. The latest user message has priority. The goal does not authorize \
-             automatic continuation.",
+            "\nLatest user instructions override this goal. It never authorizes automatic continuation.",
         );
+        let budget =
+            crate::context::ContextTextBudget::heuristic(CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS);
+        if !budget.fits(&rendered) {
+            return Err(AgentError::new(format!(
+                "Goal 上下文超过 {CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS} token 硬上限。"
+            )));
+        }
         Ok(rendered)
     }
 }
@@ -99,6 +121,16 @@ pub(crate) fn validate_objective(objective: &str) -> AgentResult<()> {
     if objective.chars().count() > MAX_CONVERSATION_GOAL_OBJECTIVE_CHARS {
         return Err(AgentError::new(format!(
             "Goal objective 不能超过 {MAX_CONVERSATION_GOAL_OBJECTIVE_CHARS} 个字符。"
+        )));
+    }
+    let rendered = format!(
+        "## Explicit Goal\nobjective: {objective}\nstatus: active\nLatest user instructions override this goal. It never authorizes automatic continuation."
+    );
+    if !crate::context::ContextTextBudget::heuristic(CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS)
+        .fits(&rendered)
+    {
+        return Err(AgentError::new(format!(
+            "Goal objective 过长，无法放入 {CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS} token 上下文预算。"
         )));
     }
     Ok(())
@@ -131,8 +163,12 @@ mod tests {
 
         let rendered = goal.render_for_context().unwrap();
         assert!(rendered.contains("Finish the migration"));
-        assert!(rendered.contains("latest user message has priority"));
-        assert!(rendered.contains("does not authorize automatic continuation"));
+        assert!(rendered.contains("Latest user instructions override"));
+        assert!(rendered.contains("never authorizes automatic continuation"));
         assert!(!rendered.contains("revision"));
+        assert!(crate::context::ContextTextBudget::heuristic(
+            CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS
+        )
+        .fits(&rendered));
     }
 }

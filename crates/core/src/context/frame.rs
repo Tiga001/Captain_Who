@@ -116,10 +116,10 @@ impl ContextRetention {
 pub(crate) enum ContextSource {
     BackendSystemPrompt,
     ConversationSummary,
+    ContinuityIndex,
     WorldStateSnapshot,
     WorldStateDiff,
     ConversationGoal,
-    TaskContinuationState,
     ConversationHistory,
     ConversationTrace,
     CurrentTurn,
@@ -130,6 +130,7 @@ pub(crate) enum ContextSource {
     ToolContinuation,
     ModelResponse,
     ToolResult,
+    RuntimeTodo,
     RuntimeExtension,
     FileTransaction,
     RuntimeGuard,
@@ -141,10 +142,10 @@ impl ContextSource {
         match self {
             Self::BackendSystemPrompt => "backend_system_prompt",
             Self::ConversationSummary => "conversation_summary",
+            Self::ContinuityIndex => "continuity_index",
             Self::WorldStateSnapshot => "world_state_snapshot",
             Self::WorldStateDiff => "world_state_diff",
             Self::ConversationGoal => "conversation_goal",
-            Self::TaskContinuationState => "task_continuation_state",
             Self::ConversationHistory => "conversation_history",
             Self::ConversationTrace => "conversation_trace",
             Self::CurrentTurn => "current_turn",
@@ -155,6 +156,7 @@ impl ContextSource {
             Self::ToolContinuation => "tool_continuation",
             Self::ModelResponse => "model_response",
             Self::ToolResult => "tool_result",
+            Self::RuntimeTodo => "runtime_todo",
             Self::RuntimeExtension => "runtime_extension",
             Self::FileTransaction => "file_transaction",
             Self::RuntimeGuard => "runtime_guard",
@@ -166,10 +168,10 @@ impl ContextSource {
         match value {
             "backend_system_prompt" => Some(Self::BackendSystemPrompt),
             "conversation_summary" => Some(Self::ConversationSummary),
+            "continuity_index" => Some(Self::ContinuityIndex),
             "world_state_snapshot" => Some(Self::WorldStateSnapshot),
             "world_state_diff" => Some(Self::WorldStateDiff),
             "conversation_goal" => Some(Self::ConversationGoal),
-            "task_continuation_state" => Some(Self::TaskContinuationState),
             "conversation_history" => Some(Self::ConversationHistory),
             "conversation_trace" => Some(Self::ConversationTrace),
             "current_turn" => Some(Self::CurrentTurn),
@@ -180,6 +182,7 @@ impl ContextSource {
             "tool_continuation" => Some(Self::ToolContinuation),
             "model_response" => Some(Self::ModelResponse),
             "tool_result" => Some(Self::ToolResult),
+            "runtime_todo" => Some(Self::RuntimeTodo),
             "runtime_extension" => Some(Self::RuntimeExtension),
             "file_transaction" => Some(Self::FileTransaction),
             "runtime_guard" => Some(Self::RuntimeGuard),
@@ -192,18 +195,21 @@ impl ContextSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContextGroupKind {
     ToolExchange,
+    CompactionReplacement,
 }
 
 impl ContextGroupKind {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::ToolExchange => "tool_exchange",
+            Self::CompactionReplacement => "compaction_replacement",
         }
     }
 
     fn from_str(value: &str) -> Option<Self> {
         match value {
             "tool_exchange" => Some(Self::ToolExchange),
+            "compaction_replacement" => Some(Self::CompactionReplacement),
             _ => None,
         }
     }
@@ -323,6 +329,13 @@ impl ContextGroup {
         }
     }
 
+    pub(crate) fn compaction_replacement(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            kind: ContextGroupKind::CompactionReplacement,
+        }
+    }
+
     pub(crate) fn id(&self) -> &str {
         &self.id
     }
@@ -424,12 +437,12 @@ impl ContextMetadata {
             return ContextCacheBand::StableContract;
         }
         if self.sources.contains(&ContextSource::ConversationSummary)
+            || self.sources.contains(&ContextSource::ContinuityIndex)
             || self.sources.contains(&ContextSource::WorldStateSnapshot)
                 && matches!(
                     self.scope,
                     ContextScope::Conversation | ContextScope::Project
                 )
-            || self.sources.contains(&ContextSource::TaskContinuationState)
             || self.sources.contains(&ContextSource::ConversationGoal)
         {
             return ContextCacheBand::ConversationEpochPrelude;
@@ -446,8 +459,8 @@ impl ContextMetadata {
         }
         if self.sources.contains(&ContextSource::WorldStateSnapshot)
             || self.sources.contains(&ContextSource::WorldStateDiff)
+            || self.sources.contains(&ContextSource::ContinuityIndex)
             || self.sources.contains(&ContextSource::ConversationGoal)
-            || self.sources.contains(&ContextSource::TaskContinuationState)
         {
             return LlmMessagePlacement::BackendStateTimeline;
         }

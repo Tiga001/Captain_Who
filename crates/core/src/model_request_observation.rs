@@ -193,6 +193,24 @@ pub struct ModelRequestEstimate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_total_input_tokens: Option<u64>,
     pub estimated_input_tokens: u64,
+    #[serde(default)]
+    pub system_tokens: u64,
+    #[serde(default)]
+    pub tool_schema_tokens: u64,
+    #[serde(default)]
+    pub summary_tokens: u64,
+    #[serde(default)]
+    pub continuity_tokens: u64,
+    #[serde(default)]
+    pub world_state_tokens: u64,
+    #[serde(default)]
+    pub goal_tokens: u64,
+    #[serde(default)]
+    pub todo_tokens: u64,
+    #[serde(default)]
+    pub recent_history_tokens: u64,
+    #[serde(default)]
+    pub total_input_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<u64>,
     pub reserved_output_tokens: u64,
@@ -202,6 +220,7 @@ pub struct ModelRequestEstimate {
 impl ModelRequestEstimate {
     pub(crate) fn from_budget_report(report: &ContextBudgetReport) -> Self {
         let breakdown = &report.usage.breakdown;
+        let costs = report.context_cost_breakdown();
         Self {
             estimator_id: report.usage.estimator_id.clone(),
             estimator_version: report.usage.estimator_version,
@@ -216,6 +235,15 @@ impl ModelRequestEstimate {
             additive_input_tokens: breakdown.total.input_tokens,
             verified_total_input_tokens: report.usage.verified_total_input_tokens,
             estimated_input_tokens: report.usage.request_input_tokens(),
+            system_tokens: costs.system_tokens,
+            tool_schema_tokens: costs.tool_schema_tokens,
+            summary_tokens: costs.summary_tokens,
+            continuity_tokens: costs.continuity_tokens,
+            world_state_tokens: costs.world_state_tokens,
+            goal_tokens: costs.goal_tokens,
+            todo_tokens: costs.todo_tokens,
+            recent_history_tokens: costs.recent_history_tokens,
+            total_input_tokens: costs.total_input_tokens,
             context_window_tokens: report.context_window_tokens,
             reserved_output_tokens: report.reserved_output_tokens,
             safety_margin_tokens: report.safety_margin_tokens,
@@ -242,6 +270,22 @@ impl ModelRequestEstimate {
             .unwrap_or(self.additive_input_tokens);
         if expected_total != self.estimated_input_tokens {
             return Err(AgentError::new("模型请求观测的总 token 估算不一致。"));
+        }
+        if self.total_input_tokens > 0 {
+            let semantic_total = self
+                .system_tokens
+                .saturating_add(self.tool_schema_tokens)
+                .saturating_add(self.summary_tokens)
+                .saturating_add(self.continuity_tokens)
+                .saturating_add(self.world_state_tokens)
+                .saturating_add(self.goal_tokens)
+                .saturating_add(self.todo_tokens)
+                .saturating_add(self.recent_history_tokens);
+            if semantic_total != self.additive_input_tokens
+                || self.total_input_tokens != self.estimated_input_tokens
+            {
+                return Err(AgentError::new("模型请求观测的语义 token 成本汇总不一致。"));
+            }
         }
         Ok(())
     }

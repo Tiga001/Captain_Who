@@ -297,18 +297,22 @@ export function AppShell() {
     () => ({ 'git-repository': gitRepositoryCapability }),
     [gitRepositoryCapability]
   )
-  const openLastTurnReview = useCallback(() => {
-    const projectId = rightSidebarWorkspaceProject?.id
-    if (!projectId) return
-    rightSidebarReviewNavigationRequestIdRef.current += 1
-    setRightSidebarReviewNavigationRequest({
-      kind: 'git-review',
-      projectId,
-      requestId: rightSidebarReviewNavigationRequestIdRef.current,
-      scope: 'lastTurn'
-    })
-    openRightSidebar()
-  }, [openRightSidebar, rightSidebarWorkspaceProject?.id])
+  const openLastTurnReview = useCallback(
+    (filePath?: string) => {
+      const projectId = rightSidebarWorkspaceProject?.id
+      if (!projectId) return
+      rightSidebarReviewNavigationRequestIdRef.current += 1
+      setRightSidebarReviewNavigationRequest({
+        kind: 'git-review',
+        projectId,
+        requestId: rightSidebarReviewNavigationRequestIdRef.current,
+        scope: 'lastTurn',
+        ...(filePath ? { filePath } : {})
+      })
+      openRightSidebar()
+    },
+    [openRightSidebar, rightSidebarWorkspaceProject?.id]
+  )
   const rightSidebarMaximizedToolbarControls = useMemo(
     () =>
       rightMaximized ? (
