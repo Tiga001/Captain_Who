@@ -3359,6 +3359,37 @@ impl AgentService {
                         ),
                     _ => Err("审批续跑缺少 assistant 持久化身份。".to_string()),
                 };
+                if persisted.is_ok() {
+                    if let (Some(conversation_id), Some(task_state)) = (
+                        record.snapshot.conversation_id.as_deref(),
+                        record.agent_input.task_state.as_ref(),
+                    ) {
+                        if let Err(error) = self.storage.settle_task_state_run(
+                            conversation_id,
+                            &task_state.control.task_id,
+                            &run_id,
+                            agent_output.status == AgentRunStatus::WaitingForApproval,
+                            match agent_output.status {
+                                AgentRunStatus::WaitingForApproval => Some("waiting_for_approval"),
+                                AgentRunStatus::Cancelled => Some("run_cancelled"),
+                                _ => None,
+                            },
+                            now_ms(),
+                        ) {
+                            terminal_event_gate.discard();
+                            let _ =
+                                notifications.send(agent_event_notification(AgentEvent::Error {
+                                    run_id: Some(run_id.clone()),
+                                    message: format!(
+                                        "审批续跑已持久化，但 Task State 终态写入失败：{error}"
+                                    ),
+                                    recoverable: true,
+                                    code: Some("task_state_settlement_failed".to_string()),
+                                    details: None,
+                                }));
+                        }
+                    }
+                }
                 let pending_transition = if persisted.is_ok() {
                     self.transition_pending_status(&record, final_pending_status)
                 } else {
@@ -3465,6 +3496,32 @@ impl AgentService {
                     Err("审批续跑缺少 assistant 持久化身份。".to_string())
                 };
                 let cumulative_usage = persisted.as_ref().ok().cloned().flatten();
+                if persisted.is_ok() {
+                    if let (Some(conversation_id), Some(task_state)) = (
+                        record.snapshot.conversation_id.as_deref(),
+                        record.agent_input.task_state.as_ref(),
+                    ) {
+                        if let Err(error) = self.storage.settle_task_state_run(
+                            conversation_id,
+                            &task_state.control.task_id,
+                            &run_id,
+                            false,
+                            Some("run_failed"),
+                            now_ms(),
+                        ) {
+                            let _ =
+                                notifications.send(agent_event_notification(AgentEvent::Error {
+                                    run_id: Some(run_id.clone()),
+                                    message: format!(
+                                        "审批续跑失败已持久化，但 Task State 写入失败：{error}"
+                                    ),
+                                    recoverable: true,
+                                    code: Some("task_state_settlement_failed".to_string()),
+                                    details: None,
+                                }));
+                        }
+                    }
+                }
                 let pending_transition = if persisted.is_ok() {
                     self.transition_pending_status(&record, final_pending_status)
                 } else {

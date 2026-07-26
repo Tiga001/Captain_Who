@@ -311,7 +311,7 @@ fn read(context: &ToolExecutionContext, args: ConversationHistoryArgs) -> AgentR
 
     match reference.into_read_ref()? {
         ConversationHistoryReadRef::Archive { archive_ref } => {
-            return read_archive(context, &archive_ref, page_request);
+            read_archive(context, &archive_ref, page_request)
         }
         ConversationHistoryReadRef::Record(reference) => {
             if let ConversationHistoryRecordRef::TraceItem {
@@ -331,7 +331,7 @@ fn read(context: &ToolExecutionContext, args: ConversationHistoryArgs) -> AgentR
                     return read_archive_descriptor(context, archive, page_request);
                 }
             }
-            return read_projected_record(context, reference, page_request);
+            read_projected_record(context, reference, page_request)
         }
     }
 }

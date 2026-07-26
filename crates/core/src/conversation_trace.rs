@@ -1293,7 +1293,14 @@ pub(crate) fn canonical_tool_result_for_context(result: &AgentToolResult) -> Age
 }
 
 pub(crate) fn render_tool_observation(result: &AgentToolResult) -> String {
-    let payload = if result.ok {
+    render_tool_observation_with_history_ref(result, None)
+}
+
+pub(crate) fn render_tool_observation_with_history_ref(
+    result: &AgentToolResult,
+    history_ref: Option<&crate::ContextHistoryRef>,
+) -> String {
+    let mut payload = if result.ok {
         json!({
             "type": "tool_result",
             "tool": result.tool,
@@ -1311,6 +1318,12 @@ pub(crate) fn render_tool_observation(result: &AgentToolResult) -> String {
             "error": result.error,
         })
     };
+    if let (Some(history_ref), Some(object)) = (history_ref, payload.as_object_mut()) {
+        object.insert(
+            "historyRef".to_string(),
+            serde_json::to_value(history_ref).unwrap_or(Value::Null),
+        );
+    }
     let payload = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string());
     format!(
         "Tool result observation. Use this result to continue. Do not repeat the same tool call unless more information is needed.\n```json\n{payload}\n```"
@@ -1397,6 +1410,24 @@ mod tests {
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,
         }
+    }
+
+    #[test]
+    fn model_observation_exposes_backend_generated_history_ref_outside_tool_result() {
+        let result = AgentToolResult {
+            call_id: "call-1".to_string(),
+            tool: "read_file".to_string(),
+            ok: true,
+            result: Some(json!({ "content": "bounded body" })),
+            error: None,
+        };
+        let history_ref = crate::ContextHistoryRef::trace_item("assistant-1", 7);
+        let rendered = render_tool_observation_with_history_ref(&result, Some(&history_ref));
+
+        assert!(rendered.contains("\"historyRef\""));
+        assert!(rendered.contains("\"assistantMessageId\": \"assistant-1\""));
+        assert!(rendered.contains("\"sequence\": 7"));
+        assert!(rendered.contains("\"result\""));
     }
 
     #[test]

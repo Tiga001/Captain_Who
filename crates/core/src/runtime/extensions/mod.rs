@@ -337,6 +337,12 @@ impl RuntimeExtensions {
     pub(super) fn todo_state(&self) -> Option<AgentTodoState> {
         self.todo.as_ref().map(TodoStateHandle::state)
     }
+
+    pub(super) fn synchronize_task_state(&self, snapshot: Option<&crate::TaskStateSnapshot>) {
+        if let (Some(todo), Some(snapshot)) = (&self.todo, snapshot) {
+            todo.synchronize_task_state(snapshot);
+        }
+    }
 }
 
 fn validate_extensions(extensions: &[Box<dyn RuntimeExtension>]) -> AgentResult<()> {

@@ -9,7 +9,7 @@ use crate::storage::models::{
 use crate::storage::{
     attachment_repository, chat_repository, context_compaction_repository,
     conversation_history_archive_repository, conversation_trace_repository, file_draft_repository,
-    guidance_repository, world_state_repository,
+    guidance_repository, task_state_repository, world_state_repository,
 };
 use crate::{AgentGuidanceStatus, ConversationTurnTrace, WorldStateRecord};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -410,6 +410,14 @@ pub(crate) fn commit_fork_plan(
         )
         .map_err(database_error)?;
     }
+    task_state_repository::clone_latest_for_fork(
+        &transaction,
+        &plan.source_conversation_id,
+        &plan.target.id,
+        &plan.message_id_map,
+        &plan.id_replacements,
+        plan.target.created_at,
+    )?;
     for draft in &plan.file_drafts {
         file_draft_repository::insert_draft(&transaction, draft).map_err(database_error)?;
     }

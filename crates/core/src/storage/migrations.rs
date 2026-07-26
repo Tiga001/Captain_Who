@@ -37,6 +37,91 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> rusql
     Ok(columns.iter().any(|candidate| candidate == column))
 }
 
+fn ensure_task_state_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS task_control_states (
+            task_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+            objective TEXT NOT NULL,
+            source_message_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN (
+                    'active', 'waiting_user', 'blocked', 'completed',
+                    'superseded', 'cancelled'
+                )
+            ),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            current_run_id TEXT,
+            stopped_reason TEXT,
+            checkpoint_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS task_control_states_one_open_task
+        ON task_control_states(conversation_id)
+        WHERE status IN ('active', 'waiting_user', 'blocked');
+
+        CREATE INDEX IF NOT EXISTS task_control_states_conversation_updated
+        ON task_control_states(conversation_id, updated_at DESC);
+
+        CREATE TRIGGER IF NOT EXISTS validate_task_control_state_source_insert
+        BEFORE INSERT ON task_control_states
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.source_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'user'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'task state source must be a user message in the same conversation'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_task_control_state_source_update
+        BEFORE UPDATE OF conversation_id, source_message_id
+        ON task_control_states
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.source_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'user'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'task state source must be a user message in the same conversation'
+            );
+        END;
+
+        CREATE TABLE IF NOT EXISTS task_control_state_revisions (
+            task_id TEXT NOT NULL,
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            conversation_id TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL,
+            mutation_kind TEXT NOT NULL,
+            mutation_id TEXT,
+            result_task_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (task_id, revision),
+            FOREIGN KEY (task_id) REFERENCES task_control_states(task_id) ON DELETE CASCADE,
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS task_control_state_revisions_mutation
+        ON task_control_state_revisions(task_id, mutation_id)
+        WHERE mutation_id IS NOT NULL;
+        ",
+    )
+}
+
 fn ensure_conversation_history_fts_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
         "
@@ -2307,6 +2392,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
     upgrade_canonical_model_identity_schema(connection)?;
     upgrade_usage_consistency_schema(connection)?;
+    ensure_task_state_schema(connection)?;
     ensure_conversation_history_fts_schema(connection)?;
 
     Ok(())

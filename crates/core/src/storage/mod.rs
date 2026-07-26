@@ -25,6 +25,7 @@ pub mod preferences_repository;
 pub mod project_repository;
 pub mod service;
 pub mod skill_enablement_repository;
+pub mod task_state_repository;
 pub mod turn_diff_repository;
 pub mod usage_repository;
 pub mod world_state_repository;

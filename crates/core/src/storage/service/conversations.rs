@@ -470,6 +470,11 @@ impl StorageService {
         .map_err(storage_error)?;
         chat_repository::delete_messages_in_transaction(&transaction, conversation_id, message_ids)
             .map_err(storage_error)?;
+        task_state_repository::repair_after_history_mutation(
+            &transaction,
+            conversation_id,
+            now_ms(),
+        )?;
         transaction.commit().map_err(storage_error)?;
         if let Err(error) = self.cleanup_attachment_files(attachments) {
             eprintln!("failed to remove deleted message attachment files: {error}");

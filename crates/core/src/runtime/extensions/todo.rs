@@ -9,6 +9,7 @@ use crate::protocol::{
     AgentToolApprovalMode, AgentToolDefinition, AgentToolSafety,
 };
 use crate::tools::{AgentTool, ToolExecutionContext};
+use crate::{ContextHistoryRef, TaskStateSnapshot, TaskWorkItem, TaskWorkItemStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,11 +33,17 @@ pub(super) struct TodoStateHandle {
     inner: Arc<Mutex<TodoStateStore>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TodoStateStore {
     state: AgentTodoState,
     next_item_id: u64,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    task_revision: Option<u64>,
+    #[serde(default)]
+    task_work_items: Vec<TaskWorkItem>,
 }
 
 impl TodoExtension {
@@ -171,6 +178,10 @@ impl TodoStateHandle {
         self.lock().state.clone()
     }
 
+    pub(super) fn synchronize_task_state(&self, snapshot: &TaskStateSnapshot) {
+        self.lock().synchronize_task_state(snapshot);
+    }
+
     fn lock(&self) -> MutexGuard<'_, TodoStateStore> {
         self.inner
             .lock()
@@ -187,6 +198,9 @@ impl TodoStateStore {
                 updated_at: now_ms(),
             },
             next_item_id: 1,
+            task_id: None,
+            task_revision: None,
+            task_work_items: Vec::new(),
         }
     }
 
@@ -209,6 +223,12 @@ impl TodoStateStore {
         let mut used_ids = BTreeSet::new();
         let mut next_items = Vec::with_capacity(args.items.len());
 
+        let previous_task_items = self
+            .task_work_items
+            .iter()
+            .map(|item| (item.id.clone(), item.evidence_refs.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut next_task_items = Vec::with_capacity(args.items.len());
         for item in args.items {
             let title = normalize_required_text(&item.title, "todo_update.items[].title")?;
             let id = match item.id.and_then(|id| normalize_optional_text(&id)) {
@@ -225,7 +245,7 @@ impl TodoStateStore {
                 .map(|existing| existing.created_at)
                 .unwrap_or(now);
             next_items.push(AgentTodoItem {
-                id,
+                id: id.clone(),
                 title: truncate_chars(&title, MAX_TODO_TITLE_CHARS),
                 status: item.status,
                 note: item
@@ -236,6 +256,22 @@ impl TodoStateStore {
                 created_at,
                 updated_at: now,
             });
+            let evidence_refs = if item.evidence_refs.is_empty() {
+                previous_task_items.get(&id).cloned().unwrap_or_default()
+            } else {
+                item.evidence_refs
+            };
+            next_task_items.push(TaskWorkItem {
+                id,
+                title: truncate_chars(&title, MAX_TODO_TITLE_CHARS),
+                status: task_status_from_todo(item.status),
+                note: item
+                    .note
+                    .as_deref()
+                    .and_then(normalize_optional_text)
+                    .map(|note| truncate_chars(&note, MAX_TODO_NOTE_CHARS)),
+                evidence_refs,
+            });
         }
 
         self.state = AgentTodoState {
@@ -243,6 +279,7 @@ impl TodoStateStore {
             items: next_items,
             updated_at: now,
         };
+        self.task_work_items = next_task_items;
         Ok(self.state.clone())
     }
 
@@ -281,6 +318,32 @@ impl TodoStateStore {
         self.next_item_id = self.next_item_id.max(inferred_next_id).max(1);
         Ok(())
     }
+
+    fn synchronize_task_state(&mut self, snapshot: &TaskStateSnapshot) {
+        self.task_id = Some(snapshot.control.task_id.clone());
+        self.task_revision = Some(snapshot.control.revision);
+        self.task_work_items = snapshot.checkpoint.work_items.clone();
+        let updated_at = u64::try_from(snapshot.control.updated_at).unwrap_or_default();
+        self.state = AgentTodoState {
+            revision: snapshot.control.revision,
+            items: snapshot
+                .checkpoint
+                .work_items
+                .iter()
+                .filter(|item| item.status != TaskWorkItemStatus::Cancelled)
+                .map(|item| AgentTodoItem {
+                    id: item.id.clone(),
+                    title: item.title.clone(),
+                    status: todo_status_from_task(item.status),
+                    note: item.note.clone(),
+                    created_at: updated_at,
+                    updated_at,
+                })
+                .collect(),
+            updated_at,
+        };
+        let _ = self.validate_and_normalize();
+    }
 }
 
 struct TodoTool {
@@ -301,7 +364,39 @@ impl AgentTool for TodoTool {
     }
 
     fn execute(&self, _context: &ToolExecutionContext, args: Value) -> AgentResult<Value> {
-        let state = self.state.lock().update(args)?;
+        let context = _context;
+        let mut store = self.state.lock();
+        if let (Some(task_id), Some(_)) = (store.task_id.clone(), store.task_revision) {
+            let current = context
+                .storage()?
+                .load_task_state(context.conversation_id()?, &task_id)
+                .map_err(AgentError::new)?
+                .ok_or_else(|| AgentError::new("Todo 绑定的 Task State 已不存在。"))?;
+            store.synchronize_task_state(&current);
+        }
+        let previous = store.clone();
+        store.update(args)?;
+        if let (Some(task_id), Some(expected_revision)) =
+            (store.task_id.clone(), store.task_revision)
+        {
+            let snapshot = match context.storage()?.replace_task_work_items(
+                context.conversation_id()?,
+                &task_id,
+                expected_revision,
+                store.task_work_items.clone(),
+                context.run_id()?,
+                context.tool_call_id()?,
+                crate::storage::now_ms(),
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    *store = previous;
+                    return Err(AgentError::new(error));
+                }
+            };
+            store.synchronize_task_state(&snapshot);
+        }
+        let state = store.state.clone();
         serde_json::to_value(state)
             .map_err(|error| AgentError::new(format!("无法序列化 todo_update 结果：{error}")))
     }
@@ -336,6 +431,25 @@ fn todo_tool_definition() -> AgentToolDefinition {
                             "note": {
                                 "type": "string",
                                 "description": "Optional compact blocker, evidence, or progress note."
+                            },
+                            "evidenceRefs": {
+                                "type": "array",
+                                "maxItems": 20,
+                                "description": "Authoritative message, trace-item, or archive refs. Required when setting an item to completed unless valid evidence was already attached.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": {
+                                            "type": "string",
+                                            "enum": ["message", "trace_item", "archive"]
+                                        },
+                                        "messageId": { "type": "string" },
+                                        "assistantMessageId": { "type": "string" },
+                                        "sequence": { "type": "integer", "minimum": 0 },
+                                        "archiveRef": { "type": "string" }
+                                    },
+                                    "required": ["kind"]
+                                }
                             }
                         },
                         "required": ["title", "status"]
@@ -370,6 +484,26 @@ struct TodoUpdateItem {
     title: String,
     status: AgentTodoStatus,
     note: Option<String>,
+    #[serde(default)]
+    evidence_refs: Vec<ContextHistoryRef>,
+}
+
+fn task_status_from_todo(status: AgentTodoStatus) -> TaskWorkItemStatus {
+    match status {
+        AgentTodoStatus::Pending => TaskWorkItemStatus::Pending,
+        AgentTodoStatus::InProgress => TaskWorkItemStatus::InProgress,
+        AgentTodoStatus::Completed => TaskWorkItemStatus::Completed,
+        AgentTodoStatus::Blocked => TaskWorkItemStatus::Blocked,
+    }
+}
+
+fn todo_status_from_task(status: TaskWorkItemStatus) -> AgentTodoStatus {
+    match status {
+        TaskWorkItemStatus::Pending | TaskWorkItemStatus::Cancelled => AgentTodoStatus::Pending,
+        TaskWorkItemStatus::InProgress => AgentTodoStatus::InProgress,
+        TaskWorkItemStatus::Completed => AgentTodoStatus::Completed,
+        TaskWorkItemStatus::Blocked => AgentTodoStatus::Blocked,
+    }
 }
 
 fn normalize_required_text(value: &str, field: &str) -> AgentResult<String> {

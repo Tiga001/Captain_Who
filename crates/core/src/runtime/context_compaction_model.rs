@@ -483,6 +483,7 @@ mod tests {
             resume_checkpoint: None,
             assistant_message_id: None,
             context_compaction_summary: None,
+            task_state: None,
             world_state_records: Vec::new(),
             skill_activation: None,
             skill_discovery: None,

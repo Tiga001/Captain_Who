@@ -291,7 +291,7 @@ impl ToolExecutionContext {
         self.attachment_library.as_ref()
     }
 
-    pub(super) fn conversation_id(&self) -> AgentResult<&str> {
+    pub(crate) fn conversation_id(&self) -> AgentResult<&str> {
         self.conversation_id
             .as_deref()
             .ok_or_else(|| AgentError::new("当前运行缺少 conversationId，无法访问会话级能力。"))
@@ -301,7 +301,7 @@ impl ToolExecutionContext {
         self.project_id.as_deref()
     }
 
-    pub(super) fn run_id(&self) -> AgentResult<&str> {
+    pub(crate) fn run_id(&self) -> AgentResult<&str> {
         self.run_id
             .as_deref()
             .ok_or_else(|| AgentError::new("当前运行缺少 runId，不能创建文件草稿。"))
@@ -313,7 +313,7 @@ impl ToolExecutionContext {
             .ok_or_else(|| AgentError::new("当前工具执行缺少可信 tool call id。"))
     }
 
-    pub(super) fn storage(&self) -> AgentResult<&Arc<StorageService>> {
+    pub(crate) fn storage(&self) -> AgentResult<&Arc<StorageService>> {
         self.storage
             .as_ref()
             .ok_or_else(|| AgentError::new("当前 host 未提供会话存储服务。"))

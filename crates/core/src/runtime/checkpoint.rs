@@ -6,7 +6,9 @@
 //! result closes the pending exchange before queued calls continue.
 
 use super::tool_failure_guard::semantic_tool_call_fingerprint;
+#[cfg(test)]
 use super::tool_flow::build_tool_observation_message;
+use super::tool_flow::build_tool_observation_message_with_history_ref;
 use crate::context::{ContextFrame, ContextGroup};
 use crate::conversation_trace::{
     canonical_tool_result_for_context, ConversationTraceRecorder, ConversationTraceSnapshot,
@@ -209,10 +211,20 @@ pub(super) fn create_run_checkpoint(
     })
 }
 
+#[cfg(test)]
 pub(super) fn restore_run_checkpoint(
     checkpoint: AgentRunCheckpoint,
     run_id: &str,
     continuation: &AgentToolContinuation,
+) -> AgentResult<RestoredRunCheckpoint> {
+    restore_run_checkpoint_with_history_ref(checkpoint, run_id, continuation, None)
+}
+
+pub(super) fn restore_run_checkpoint_with_history_ref(
+    checkpoint: AgentRunCheckpoint,
+    run_id: &str,
+    continuation: &AgentToolContinuation,
+    assistant_message_id: Option<&str>,
 ) -> AgentResult<RestoredRunCheckpoint> {
     if checkpoint.version != AGENT_RUN_CHECKPOINT_SCHEMA_VERSION {
         return Err(AgentError::new(format!(
@@ -276,6 +288,18 @@ pub(super) fn restore_run_checkpoint(
         ));
     }
     let visible_trace_item_count = checkpoint.model_visible_trace_item_count;
+    let continuation_result_sequence =
+        checkpoint
+            .next_conversation_trace_sequence
+            .saturating_add(u64::from(!checkpoint.conversation_trace_items.iter().any(
+                |item| {
+                    matches!(
+                        item,
+                        ConversationTurnTraceItem::ToolCall { call_id, .. }
+                            if call_id == &continuation.call.id
+                    )
+                },
+            )));
     let tool_set = checkpoint.tool_set;
     let restored_batch_fingerprints =
         restore_batch_fingerprints(&checkpoint.context_items, &checkpoint.pending_tool_call_id)?;
@@ -299,9 +323,12 @@ pub(super) fn restore_run_checkpoint(
         args: continuation.call.args.clone(),
     };
     let llm_result = canonical_tool_result_for_context(&continuation.result);
+    let history_ref = assistant_message_id.map(|assistant_message_id| {
+        crate::ContextHistoryRef::trace_item(assistant_message_id, continuation_result_sequence)
+    });
     context.append_tool_continuation(
         &continuation_call,
-        build_tool_observation_message(&llm_result),
+        build_tool_observation_message_with_history_ref(&llm_result, history_ref.as_ref()),
         !continuation.result.ok,
     )?;
     conversation_trace.record_tool_call(&continuation.call);
@@ -689,6 +716,24 @@ mod tests {
                 .state["imageInput"],
             true
         );
+    }
+
+    #[test]
+    fn approval_restore_exposes_the_durable_result_history_ref_to_the_model() {
+        let (checkpoint, continuation) = restorable_checkpoint_fixture();
+        let restored = restore_run_checkpoint_with_history_ref(
+            checkpoint,
+            "checkpoint-validation-run",
+            &continuation,
+            Some("assistant-approval"),
+        )
+        .unwrap();
+        let messages = restored.context.to_messages();
+        let observation = &messages.last().unwrap().content;
+
+        assert!(observation.contains("\"historyRef\""));
+        assert!(observation.contains("\"assistantMessageId\": \"assistant-approval\""));
+        assert!(observation.contains("\"sequence\": 1"));
     }
 
     #[test]

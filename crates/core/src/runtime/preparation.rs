@@ -13,6 +13,7 @@ pub(super) struct RuntimeCapabilityServices {
 pub(super) struct DurableConversationTimeline {
     pub(super) compaction_summary: Option<crate::ContextCompactionSummary>,
     pub(super) world_state_records: Vec<crate::AnchoredWorldStateRecord>,
+    pub(super) task_state: Option<crate::TaskStateSnapshot>,
     pub(super) messages: Vec<AgentChatMessage>,
 }
 
@@ -58,6 +59,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         skill_resources,
         extension_snapshots,
     )?;
+    runtime_extensions.synchronize_task_state(input.task_state.as_ref());
     let mut tool_registry = ToolRegistry::defaults_with_search_office_and_image(
         input.search_config.as_ref(),
         office_engine,
@@ -65,6 +67,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
     );
     let context = input.context.as_ref();
     tool_registry.register_conversation_history();
+    tool_registry.register_task_state_patch();
     runtime_extensions.register_tools(&mut tool_registry)?;
 
     let command_permission = context
@@ -137,10 +140,12 @@ pub(super) fn assemble_context_preview(
     let DurableConversationTimeline {
         compaction_summary,
         world_state_records,
+        task_state,
         messages,
     } = timeline;
     if compaction_summary.is_some()
         || !world_state_records.is_empty()
+        || task_state.is_some()
         || messages.iter().any(|message| {
             matches!(message.role.trim(), "user" | "assistant")
                 && !message.content.trim().is_empty()
@@ -150,6 +155,7 @@ pub(super) fn assemble_context_preview(
             system_prompt: build_system_prompt(prompt_preferences, tool_definitions),
             compaction_summary,
             world_state_records,
+            task_state,
             initial_run_world_state: None,
             messages,
             skill_discovery,
@@ -248,6 +254,7 @@ pub(super) fn build_llm_request(
                     DurableConversationTimeline {
                         compaction_summary: input.context_compaction_summary,
                         world_state_records,
+                        task_state: input.task_state,
                         messages: input.messages,
                     },
                     initial_run_world_state,
@@ -316,7 +323,13 @@ pub(super) fn restore_input_checkpoint(
                     decision.action_id, continuation.call.id
                 )));
             }
-            restore_run_checkpoint(checkpoint, run_id, &continuation).map(Some)
+            restore_run_checkpoint_with_history_ref(
+                checkpoint,
+                run_id,
+                &continuation,
+                input.assistant_message_id.as_deref(),
+            )
+            .map(Some)
         }
         _ => Err(AgentError::new(
             "审批续跑必须同时提供完整运行检查点、审批决定和工具结果。",
@@ -427,6 +440,7 @@ pub(super) fn assemble_initial_context(
         DurableConversationTimeline {
             compaction_summary,
             world_state_records: Vec::new(),
+            task_state: None,
             messages,
         },
         None,
@@ -458,12 +472,14 @@ fn assemble_initial_context_with_skill_overlays(
     let DurableConversationTimeline {
         compaction_summary,
         world_state_records,
+        task_state,
         messages,
     } = timeline;
     ContextAssembler::assemble(ContextAssemblyInput {
         system_prompt: build_system_prompt(prompt_preferences, tool_definitions),
         compaction_summary,
         world_state_records,
+        task_state,
         initial_run_world_state,
         messages,
         skill_discovery: skills.discovery,

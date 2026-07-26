@@ -238,7 +238,7 @@ impl ContextContinuitySnapshot {
         }
         let mut unique = BTreeSet::new();
         for reference in self.all_refs() {
-            reference.validate()?;
+            reference.validate_identity()?;
             if !unique.insert(reference.key()) {
                 return Err(AgentError::new("Continuity V2 包含重复历史引用。"));
             }
@@ -310,7 +310,7 @@ impl ContextHistoryRef {
         }
     }
 
-    fn validate(&self) -> AgentResult<()> {
+    pub(crate) fn validate_identity(&self) -> AgentResult<()> {
         let value = match self {
             Self::Message { message_id } => message_id,
             Self::TraceItem {

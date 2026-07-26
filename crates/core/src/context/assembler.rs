@@ -25,6 +25,7 @@ pub(crate) struct ContextAssemblyInput {
     pub(crate) system_prompt: String,
     pub(crate) compaction_summary: Option<ContextCompactionSummary>,
     pub(crate) world_state_records: Vec<AnchoredWorldStateRecord>,
+    pub(crate) task_state: Option<crate::TaskStateSnapshot>,
     pub(crate) initial_run_world_state: Option<WorldStateSnapshot>,
     pub(crate) messages: Vec<AgentChatMessage>,
     pub(crate) skill_discovery: Option<AgentSkillDiscoverySnapshot>,
@@ -89,6 +90,17 @@ impl ContextAssembler {
         }
         if let Some(full) = world_state.full {
             items.push(full);
+        }
+        if let Some(task_state) = input.task_state {
+            task_state.validate()?;
+            items.push(ContextItem::new(
+                LlmMessage::backend_state(task_state.render_for_context()?),
+                ContextMetadata::new(
+                    ContextSource::TaskContinuationState,
+                    ContextScope::Conversation,
+                    ContextRetention::Retained,
+                ),
+            ));
         }
 
         let mut timing = ConversationTimingTracker::default();
@@ -559,7 +571,7 @@ mod tests {
         ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
         ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
-    use crate::llm::model_response_tool_call_id;
+    use crate::llm::{model_response_tool_call_id, LlmMessagePlacement};
     use crate::protocol::AgentApprovalStatus;
     use crate::world_state::{
         WorldStateDiff, WorldStateLifetime, WorldStateSectionEnvelope, WorldStateSectionId,
@@ -620,6 +632,29 @@ mod tests {
             content: content.to_string(),
             created_at: None,
             conversation_turn_trace: None,
+        }
+    }
+
+    fn task_state() -> crate::TaskStateSnapshot {
+        crate::TaskStateSnapshot {
+            control: crate::TaskControlState {
+                schema_version: crate::TASK_CONTROL_STATE_SCHEMA_VERSION,
+                task_id: "task-1".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                objective: "Continue the durable task".to_string(),
+                source_message_id: "user-current".to_string(),
+                status: crate::TaskControlStatus::Active,
+                revision: 3,
+                current_run_id: Some("run-current".to_string()),
+                stopped_reason: None,
+                created_at: 1,
+                updated_at: 3,
+            },
+            checkpoint: crate::TaskContinuationCheckpoint {
+                current_phase: Some("Verification".to_string()),
+                next_actions: vec!["Run the focused tests".to_string()],
+                ..Default::default()
+            },
         }
     }
 
@@ -751,6 +786,7 @@ mod tests {
             system_prompt: "backend rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: None,
             messages: vec![
                 message("user", "old question"),
@@ -799,6 +835,7 @@ mod tests {
             system_prompt: "backend rules".to_string(),
             compaction_summary: Some(compaction_summary()),
             world_state_records: conversation_world_state_records("user-current"),
+            task_state: None,
             initial_run_world_state: None,
             messages: vec![identified_message(
                 "user-current",
@@ -851,6 +888,43 @@ mod tests {
     }
 
     #[test]
+    fn task_state_is_hidden_backend_state_between_world_prelude_and_history_tail() {
+        let frame = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "backend rules".to_string(),
+            compaction_summary: Some(compaction_summary()),
+            world_state_records: conversation_world_state_records("user-current"),
+            task_state: Some(task_state()),
+            initial_run_world_state: None,
+            messages: vec![identified_message(
+                "user-current",
+                "user",
+                "latest user correction",
+            )],
+            skill_discovery: None,
+            skill_activation: None,
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap();
+
+        let messages = frame.to_messages();
+        assert_eq!(messages.len(), 6);
+        assert!(messages[1].content.contains("semantic summary is lossy"));
+        assert!(messages[2].content.contains("\"recordType\":\"full\""));
+        assert_eq!(messages[3].role, LlmMessageRole::System);
+        assert_eq!(
+            messages[3].placement,
+            LlmMessagePlacement::BackendStateTimeline
+        );
+        assert!(messages[3].content.contains("Task Continuation State"));
+        assert!(messages[4].content.contains("\"recordType\":\"diff\""));
+        assert_eq!(messages[5].content, "latest user correction");
+        assert_eq!(
+            frame.manifest().entries[3].sources,
+            vec!["task_continuation_state"]
+        );
+    }
+
+    #[test]
     fn places_initial_run_world_state_after_durable_timeline_before_attachments() {
         let run_snapshot = WorldStateSnapshot::new(
             "run-epoch-1",
@@ -876,6 +950,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: Some(run_snapshot),
             messages: vec![identified_message("user-1", "user", "inspect the file")],
             skill_discovery: None,
@@ -908,6 +983,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: None,
             messages: vec![identified_message("user-legacy", "user", "legacy message")],
             skill_discovery: None,
@@ -933,6 +1009,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: conversation_world_state_records("missing-message"),
+            task_state: None,
             initial_run_world_state: None,
             messages: messages.clone(),
             skill_discovery: None,
@@ -951,6 +1028,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: broken_records,
+            task_state: None,
             initial_run_world_state: None,
             messages,
             skill_discovery: None,
@@ -990,6 +1068,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: None,
             messages: vec![message("user", "current question")],
             skill_discovery: None,
@@ -1059,6 +1138,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: None,
             messages: vec![message("user", "current question")],
             skill_discovery: Some(discovery),
@@ -1109,6 +1189,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: None,
             messages: vec![first_user, historical_assistant, current_user],
             skill_discovery: None,
@@ -1144,6 +1225,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: None,
             messages: vec![
                 message(" user ", " hello "),
@@ -1164,6 +1246,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: None,
             messages: vec![message("tool", "result")],
             skill_discovery: None,
@@ -1180,6 +1263,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: None,
             messages: vec![
                 message("user", "create a file"),
@@ -1241,6 +1325,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: None,
             messages: vec![
                 message("user", "do the work"),
@@ -1279,6 +1364,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: Some(compaction_summary()),
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: None,
             messages: vec![message("user", "continue from the summary")],
             skill_discovery: None,
@@ -1312,6 +1398,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: Some(compaction_summary()),
             world_state_records: Vec::new(),
+            task_state: None,
             initial_run_world_state: None,
             messages: Vec::new(),
             skill_discovery: None,

@@ -22,6 +22,7 @@ mod runtime;
 pub mod skills;
 pub mod storage;
 mod system_paths;
+mod task_state;
 mod tools;
 mod turn_diff;
 mod usage;
@@ -64,6 +65,12 @@ pub use model_request_observation::{
     ProviderCacheTopology, MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
 };
 pub use protocol::is_valid_agent_office_reason;
+pub use task_state::{
+    TaskArtifactRef, TaskContinuationCheckpoint, TaskControlState, TaskControlStatus, TaskDecision,
+    TaskInterruptionState, TaskStatePatchOperation, TaskStateSnapshot, TaskWorkItem,
+    TaskWorkItemStatus, TASK_CONTROL_STATE_SCHEMA_VERSION, TASK_STATE_HARD_MAX_TOKENS,
+    TASK_STATE_TARGET_TOKENS,
+};
 
 /// Re-parse and recompile a frozen Office semantic request, proving that it
 /// still matches the canonical request authorized by the Host.

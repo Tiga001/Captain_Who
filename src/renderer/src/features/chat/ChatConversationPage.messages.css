@@ -10,10 +10,18 @@
   background: var(--main-panel);
 }
 
+.chat-conversation-page__messages-region {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .chat-conversation-page__messages {
   display: flex;
   flex-direction: column;
   width: 100%;
+  height: 100%;
   max-width: 960px;
   min-width: 0;
   min-height: 0;

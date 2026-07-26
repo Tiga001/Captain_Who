@@ -53,6 +53,10 @@ pub struct AgentChatInput {
     pub assistant_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compaction_summary: Option<ContextCompactionSummary>,
+    /// Backend-owned task-control snapshot. It is rendered as hidden backend state, never as a
+    /// timeline message, and is protected from conversation compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_state: Option<crate::TaskStateSnapshot>,
     /// Backend-owned, provider-neutral world-state journal for the active conversation epoch.
     ///
     /// A full snapshot establishes the epoch prelude and later diffs are anchored immediately

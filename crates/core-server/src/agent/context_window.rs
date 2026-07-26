@@ -84,6 +84,11 @@ impl AgentService {
                 agent_prompt_preferences_from_record(self.storage.load_agent_prompt_preferences()?)
             }
         };
+        let task_state = conversation_id
+            .as_deref()
+            .map(|conversation_id| self.storage.load_latest_task_state(conversation_id))
+            .transpose()?
+            .flatten();
         let agent_input = AgentChatInput {
             api_url: connection.api_url,
             api_token: String::new(),
@@ -121,6 +126,7 @@ impl AgentService {
             resume_checkpoint: None,
             assistant_message_id: None,
             context_compaction_summary,
+            task_state,
             world_state_records,
             skill_activation: prepared_skills.runtime,
             skill_discovery,

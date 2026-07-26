@@ -66,8 +66,8 @@ use crate::{
 };
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
-    create_run_checkpoint, restore_run_checkpoint, RestoredRunCheckpoint, RunCheckpointState,
-    ToolCallBatch, ToolCallBatchClaim,
+    create_run_checkpoint, restore_run_checkpoint_with_history_ref, RestoredRunCheckpoint,
+    RunCheckpointState, ToolCallBatch, ToolCallBatchClaim,
 };
 use context_compaction::{ContextCompactionExecution, ContextCompactionExecutor};
 use extensions::{
@@ -84,7 +84,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tool_failure_guard::ToolFailureGuard;
 use tool_flow::{
-    approve_proposed_action, build_tool_observation_message, cancellation_preempts_tool_result,
+    approve_proposed_action, build_tool_observation_message,
+    build_tool_observation_message_with_history_ref, cancellation_preempts_tool_result,
     cancelled_output, done_event, enforce_skill_activation_barrier,
     execute_host_action_on_blocking_thread, execute_tool_on_blocking_thread,
     extract_reason_from_args, failed_tool_call_result, file_draft_from_tool_result,
@@ -1502,18 +1503,18 @@ impl AgentRuntime {
                     // Exact history is derived from the security-sanitized result before the
                     // bounded durable trace projection. This keeps model context compact without
                     // making historical recall lossy.
+                    let result_sequence = conversation_trace
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .pending_tool_result_sequence(&call.id);
                     let archive_result = tool_registry.archive_projection(&result);
                     let llm_result = tool_registry.model_projection(&result);
                     let archive_metadata = if tool_registry.archives_result(&call.tool) {
-                        let sequence = conversation_trace
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .pending_tool_result_sequence(&call.id);
                         archive_tool_result(
                             exact_history_storage.as_ref(),
                             trace_conversation_id.as_deref(),
                             trace_assistant_message_id.as_deref(),
-                            sequence,
+                            result_sequence,
                             &result,
                             &archive_result,
                             &llm_result,
@@ -1565,10 +1566,19 @@ impl AgentRuntime {
                         });
                     }
 
+                    let history_ref = trace_assistant_message_id
+                        .as_deref()
+                        .zip(result_sequence)
+                        .map(|(assistant_message_id, sequence)| {
+                            crate::ContextHistoryRef::trace_item(assistant_message_id, sequence)
+                        });
                     active_context.push(
                         ContextItem::tool_result(
                             call.id.clone(),
-                            build_tool_observation_message(&llm_result),
+                            build_tool_observation_message_with_history_ref(
+                                &llm_result,
+                                history_ref.as_ref(),
+                            ),
                             !result.ok,
                             ContextMetadata::new(
                                 ContextSource::ToolResult,
@@ -1579,7 +1589,10 @@ impl AgentRuntime {
                         )
                         .with_checkpoint_tool_result(
                             call.id.clone(),
-                            build_tool_observation_message(&checkpoint_result),
+                            build_tool_observation_message_with_history_ref(
+                                &checkpoint_result,
+                                history_ref.as_ref(),
+                            ),
                             !result.ok,
                         ),
                     );

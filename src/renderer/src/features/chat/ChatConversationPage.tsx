@@ -18,6 +18,7 @@ import { ChatComposer } from './components/ChatComposer'
 import { AgentApprovalDialog } from './components/AgentApprovalDialog'
 import { AgentTodoProgress } from './components/AgentTodoProgress'
 import { ChatMessageItem } from './components/ChatMessageItem'
+import { ConversationTurnNavigationRail } from './components/ConversationTurnNavigationRail'
 import type {
   ChatAgentRunView,
   ChatComposerDraft,
@@ -28,6 +29,7 @@ import type {
   ChatSubmitOptions
 } from './chatTypes'
 import { stripAttachmentSummary } from './chatAttachments'
+import { getConversationTurnNavigationItems } from './conversationTurnNavigation'
 import { getAgentActionApprovalStatus } from '../../app/agentActionUtils'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import './ChatConversationPage.css'
@@ -301,6 +303,10 @@ export function ChatConversationPage({
     () => getPendingApprovalTarget(conversation),
     [conversation]
   )
+  const turnNavigationItems = useMemo(
+    () => getConversationTurnNavigationItems(conversation.messages),
+    [conversation.messages]
+  )
   const activeTodo = useMemo(() => getLatestAgentTodo(conversation), [conversation])
   const hasPendingApproval = Boolean(pendingApprovalTarget)
   const editableLastUserMessageId = hasPendingApproval
@@ -385,26 +391,32 @@ export function ChatConversationPage({
       aria-label={conversation.title}
       data-approval-pending={hasPendingApproval ? 'true' : undefined}
     >
-      <div
-        className="chat-conversation-page__messages"
-        onScroll={rememberCurrentScrollPosition}
-        ref={messagesRef}
-      >
-        <ChatMessageList
-          conversation={conversation}
-          editSelectedModelAvailable={editSelectedModelAvailable}
-          editSelectedModelSupportsImage={editSelectedModelSupportsImage}
-          editableLastUserMessageId={editableLastUserMessageId}
-          lastAssistantMessageId={lastAssistantMessageId}
-          onApproveAgentAction={onApproveAgentAction}
-          onCancelAgentAction={onCancelAgentAction}
-          onContinueInNewTask={onContinueInNewTask}
-          onEditLastUserMessage={onEditLastUserMessage}
-          onOpenContinuationOrigin={onOpenContinuationOrigin}
-          onMessageUiStateChange={onMessageUiStateChange}
-          onRejectAgentAction={onRejectAgentAction}
-          onReviewLastTurn={onReviewLastTurn}
-          showTokenUsageDetails={showTokenUsageDetails}
+      <div className="chat-conversation-page__messages-region">
+        <div
+          className="chat-conversation-page__messages"
+          onScroll={rememberCurrentScrollPosition}
+          ref={messagesRef}
+        >
+          <ChatMessageList
+            conversation={conversation}
+            editSelectedModelAvailable={editSelectedModelAvailable}
+            editSelectedModelSupportsImage={editSelectedModelSupportsImage}
+            editableLastUserMessageId={editableLastUserMessageId}
+            lastAssistantMessageId={lastAssistantMessageId}
+            onApproveAgentAction={onApproveAgentAction}
+            onCancelAgentAction={onCancelAgentAction}
+            onContinueInNewTask={onContinueInNewTask}
+            onEditLastUserMessage={onEditLastUserMessage}
+            onOpenContinuationOrigin={onOpenContinuationOrigin}
+            onMessageUiStateChange={onMessageUiStateChange}
+            onRejectAgentAction={onRejectAgentAction}
+            onReviewLastTurn={onReviewLastTurn}
+            showTokenUsageDetails={showTokenUsageDetails}
+          />
+        </div>
+        <ConversationTurnNavigationRail
+          items={turnNavigationItems}
+          scrollContainerRef={messagesRef}
         />
       </div>
 
