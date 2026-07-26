@@ -13,6 +13,7 @@ pub(super) struct RuntimeCapabilityServices {
 pub(super) struct DurableConversationTimeline {
     pub(super) compaction_summary: Option<crate::ContextCompactionSummary>,
     pub(super) world_state_records: Vec<crate::AnchoredWorldStateRecord>,
+    pub(super) goal: Option<crate::ConversationGoal>,
     pub(super) task_state: Option<crate::TaskStateSnapshot>,
     pub(super) messages: Vec<AgentChatMessage>,
 }
@@ -59,7 +60,6 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
         skill_resources,
         extension_snapshots,
     )?;
-    runtime_extensions.synchronize_task_state(input.task_state.as_ref());
     let mut tool_registry = ToolRegistry::defaults_with_search_office_and_image(
         input.search_config.as_ref(),
         office_engine,
@@ -67,7 +67,7 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
     );
     let context = input.context.as_ref();
     tool_registry.register_conversation_history();
-    tool_registry.register_task_state_patch();
+    tool_registry.register_goal_tools();
     runtime_extensions.register_tools(&mut tool_registry)?;
 
     let command_permission = context
@@ -140,11 +140,13 @@ pub(super) fn assemble_context_preview(
     let DurableConversationTimeline {
         compaction_summary,
         world_state_records,
+        goal,
         task_state,
         messages,
     } = timeline;
     if compaction_summary.is_some()
         || !world_state_records.is_empty()
+        || goal.is_some()
         || task_state.is_some()
         || messages.iter().any(|message| {
             matches!(message.role.trim(), "user" | "assistant")
@@ -155,6 +157,7 @@ pub(super) fn assemble_context_preview(
             system_prompt: build_system_prompt(prompt_preferences, tool_definitions),
             compaction_summary,
             world_state_records,
+            goal,
             task_state,
             initial_run_world_state: None,
             messages,
@@ -254,6 +257,7 @@ pub(super) fn build_llm_request(
                     DurableConversationTimeline {
                         compaction_summary: input.context_compaction_summary,
                         world_state_records,
+                        goal: input.goal,
                         task_state: input.task_state,
                         messages: input.messages,
                     },
@@ -440,6 +444,7 @@ pub(super) fn assemble_initial_context(
         DurableConversationTimeline {
             compaction_summary,
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             messages,
         },
@@ -472,6 +477,7 @@ fn assemble_initial_context_with_skill_overlays(
     let DurableConversationTimeline {
         compaction_summary,
         world_state_records,
+        goal,
         task_state,
         messages,
     } = timeline;
@@ -479,6 +485,7 @@ fn assemble_initial_context_with_skill_overlays(
         system_prompt: build_system_prompt(prompt_preferences, tool_definitions),
         compaction_summary,
         world_state_records,
+        goal,
         task_state,
         initial_run_world_state,
         messages,

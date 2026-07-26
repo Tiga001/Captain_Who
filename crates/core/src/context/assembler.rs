@@ -25,6 +25,7 @@ pub(crate) struct ContextAssemblyInput {
     pub(crate) system_prompt: String,
     pub(crate) compaction_summary: Option<ContextCompactionSummary>,
     pub(crate) world_state_records: Vec<AnchoredWorldStateRecord>,
+    pub(crate) goal: Option<crate::ConversationGoal>,
     pub(crate) task_state: Option<crate::TaskStateSnapshot>,
     pub(crate) initial_run_world_state: Option<WorldStateSnapshot>,
     pub(crate) messages: Vec<AgentChatMessage>,
@@ -57,7 +58,11 @@ impl ContextAssembler {
         let has_attachment_text = !input.attachments.text.trim().is_empty();
         let has_attachment_images = !input.attachments.images.is_empty();
 
-        if normalized.is_empty() && !has_compaction_summary && world_state.full.is_none() {
+        if normalized.is_empty()
+            && !has_compaction_summary
+            && world_state.full.is_none()
+            && input.goal.is_none()
+        {
             return Err(AgentError::new("没有可发送的对话内容。"));
         }
         if !has_compaction_summary
@@ -90,6 +95,17 @@ impl ContextAssembler {
         }
         if let Some(full) = world_state.full {
             items.push(full);
+        }
+        if let Some(goal) = input.goal {
+            goal.validate()?;
+            items.push(ContextItem::new(
+                LlmMessage::backend_state(goal.render_for_context()?),
+                ContextMetadata::new(
+                    ContextSource::ConversationGoal,
+                    ContextScope::Conversation,
+                    ContextRetention::Retained,
+                ),
+            ));
         }
         if let Some(task_state) = input.task_state {
             task_state.validate()?;
@@ -658,6 +674,19 @@ mod tests {
         }
     }
 
+    fn conversation_goal() -> crate::ConversationGoal {
+        crate::ConversationGoal {
+            goal_id: "goal-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            objective: "Finish the explicitly tracked migration".to_string(),
+            source_message_id: "user-current".to_string(),
+            status: crate::ConversationGoalStatus::Active,
+            stopped_reason: None,
+            created_at: 1,
+            updated_at: 2,
+        }
+    }
+
     fn conversation_world_state_records(
         effective_before_message_id: &str,
     ) -> Vec<AnchoredWorldStateRecord> {
@@ -786,6 +815,7 @@ mod tests {
             system_prompt: "backend rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: vec![
@@ -835,6 +865,7 @@ mod tests {
             system_prompt: "backend rules".to_string(),
             compaction_summary: Some(compaction_summary()),
             world_state_records: conversation_world_state_records("user-current"),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: vec![identified_message(
@@ -893,6 +924,7 @@ mod tests {
             system_prompt: "backend rules".to_string(),
             compaction_summary: Some(compaction_summary()),
             world_state_records: conversation_world_state_records("user-current"),
+            goal: None,
             task_state: Some(task_state()),
             initial_run_world_state: None,
             messages: vec![identified_message(
@@ -925,6 +957,43 @@ mod tests {
     }
 
     #[test]
+    fn explicit_goal_is_hidden_backend_state_and_latest_user_remains_after_it() {
+        let frame = ContextAssembler::assemble(ContextAssemblyInput {
+            system_prompt: "backend rules".to_string(),
+            compaction_summary: Some(compaction_summary()),
+            world_state_records: Vec::new(),
+            goal: Some(conversation_goal()),
+            task_state: None,
+            initial_run_world_state: None,
+            messages: vec![identified_message(
+                "user-current",
+                "user",
+                "change one detail before continuing",
+            )],
+            skill_discovery: None,
+            skill_activation: None,
+            attachments: ContextAttachments::default(),
+        })
+        .unwrap();
+
+        let messages = frame.to_messages();
+        assert_eq!(messages[2].role, LlmMessageRole::System);
+        assert_eq!(
+            messages[2].placement,
+            LlmMessagePlacement::BackendStateTimeline
+        );
+        assert!(messages[2].content.contains("## Active Goal"));
+        assert!(messages[2]
+            .content
+            .contains("latest user message has priority"));
+        assert_eq!(messages[3].content, "change one detail before continuing");
+        assert_eq!(
+            frame.manifest().entries[2].sources,
+            vec!["conversation_goal"]
+        );
+    }
+
+    #[test]
     fn places_initial_run_world_state_after_durable_timeline_before_attachments() {
         let run_snapshot = WorldStateSnapshot::new(
             "run-epoch-1",
@@ -950,6 +1019,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: Some(run_snapshot),
             messages: vec![identified_message("user-1", "user", "inspect the file")],
@@ -983,6 +1053,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: vec![identified_message("user-legacy", "user", "legacy message")],
@@ -1009,6 +1080,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: conversation_world_state_records("missing-message"),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: messages.clone(),
@@ -1028,6 +1100,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: broken_records,
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages,
@@ -1068,6 +1141,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: vec![message("user", "current question")],
@@ -1138,6 +1212,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: vec![message("user", "current question")],
@@ -1189,6 +1264,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: vec![first_user, historical_assistant, current_user],
@@ -1225,6 +1301,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: vec![
@@ -1246,6 +1323,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: vec![message("tool", "result")],
@@ -1263,6 +1341,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: vec![
@@ -1325,6 +1404,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: None,
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: vec![
@@ -1364,6 +1444,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: Some(compaction_summary()),
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: vec![message("user", "continue from the summary")],
@@ -1398,6 +1479,7 @@ mod tests {
             system_prompt: "rules".to_string(),
             compaction_summary: Some(compaction_summary()),
             world_state_records: Vec::new(),
+            goal: None,
             task_state: None,
             initial_run_world_state: None,
             messages: Vec::new(),

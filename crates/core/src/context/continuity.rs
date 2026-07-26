@@ -420,7 +420,7 @@ impl ContinuitySelector {
                     approval_status,
                     ..
                 } => {
-                    if tool == "conversation_history" {
+                    if is_continuity_excluded_tool(tool) {
                         continue;
                     }
                     increment(&mut self.archived_counts, COUNT_TOOL_CALLS);
@@ -494,7 +494,7 @@ impl ContinuitySelector {
                     item,
                     ConversationTurnTraceItem::ToolCall { tool, .. }
                         | ConversationTurnTraceItem::ToolResult { tool, .. }
-                        if tool == "conversation_history"
+                        if is_continuity_excluded_tool(tool)
                 ) {
                     return;
                 }
@@ -633,6 +633,10 @@ fn history_ref_from_cursor(cursor: &ContextJournalCursor) -> ContextHistoryRef {
             sequence,
         } => ContextHistoryRef::trace_item(assistant_message_id, *sequence),
     }
+}
+
+fn is_continuity_excluded_tool(tool: &str) -> bool {
+    matches!(tool, "conversation_history" | "todo_update")
 }
 
 fn increment(counts: &mut BTreeMap<String, u64>, key: &str) {
@@ -993,49 +997,51 @@ mod tests {
     }
 
     #[test]
-    fn conversation_history_calls_do_not_enter_v2_or_its_counts() {
-        let cursor = ContextJournalCursor::trace_item("assistant-1", 1);
-        let snapshot = ContextContinuitySnapshot::from_prefix(&ContextCompactionPrefix {
-            conversation_id: "conversation-1".to_string(),
-            source_revision: "source-history".to_string(),
-            covered_through: cursor.clone(),
-            previous_summary: None,
-            source_items: vec![
-                ContextCompactionSourceItem::TraceItem {
-                    cursor: ContextJournalCursor::trace_item("assistant-1", 0),
-                    run_id: "run-1".to_string(),
-                    created_at: 1,
-                    item: ConversationTurnTraceItem::ToolCall {
-                        sequence: 0,
-                        call_id: "history-call".to_string(),
-                        tool: "conversation_history".to_string(),
-                        operation: json!({ "action": "read" }),
-                        approval_status: AgentApprovalStatus::NotRequired,
-                        truncated: false,
+    fn history_reads_and_run_scoped_todos_do_not_enter_v2_or_its_counts() {
+        for tool in ["conversation_history", "todo_update"] {
+            let cursor = ContextJournalCursor::trace_item("assistant-1", 1);
+            let snapshot = ContextContinuitySnapshot::from_prefix(&ContextCompactionPrefix {
+                conversation_id: "conversation-1".to_string(),
+                source_revision: format!("source-{tool}"),
+                covered_through: cursor.clone(),
+                previous_summary: None,
+                source_items: vec![
+                    ContextCompactionSourceItem::TraceItem {
+                        cursor: ContextJournalCursor::trace_item("assistant-1", 0),
+                        run_id: "run-1".to_string(),
+                        created_at: 1,
+                        item: ConversationTurnTraceItem::ToolCall {
+                            sequence: 0,
+                            call_id: "transient-call".to_string(),
+                            tool: tool.to_string(),
+                            operation: json!({}),
+                            approval_status: AgentApprovalStatus::NotRequired,
+                            truncated: false,
+                        },
                     },
-                },
-                ContextCompactionSourceItem::TraceItem {
-                    cursor,
-                    run_id: "run-1".to_string(),
-                    created_at: 1,
-                    item: ConversationTurnTraceItem::ToolResult {
-                        sequence: 1,
-                        call_id: "history-call".to_string(),
-                        tool: "conversation_history".to_string(),
-                        status: ConversationTraceToolResultStatus::Succeeded,
-                        success: true,
-                        observation: json!({ "returnedChars": 100 }),
-                        approval_status: AgentApprovalStatus::NotRequired,
-                        error: None,
-                        truncated: true,
-                        archive: Default::default(),
+                    ContextCompactionSourceItem::TraceItem {
+                        cursor,
+                        run_id: "run-1".to_string(),
+                        created_at: 1,
+                        item: ConversationTurnTraceItem::ToolResult {
+                            sequence: 1,
+                            call_id: "transient-call".to_string(),
+                            tool: tool.to_string(),
+                            status: ConversationTraceToolResultStatus::Succeeded,
+                            success: true,
+                            observation: json!({}),
+                            approval_status: AgentApprovalStatus::NotRequired,
+                            error: None,
+                            truncated: false,
+                            archive: Default::default(),
+                        },
                     },
-                },
-            ],
-        })
-        .unwrap();
+                ],
+            })
+            .unwrap();
 
-        assert_eq!(snapshot.all_refs().count(), 0);
-        assert!(snapshot.archived_counts.is_empty());
+            assert_eq!(snapshot.all_refs().count(), 0, "{tool}");
+            assert!(snapshot.archived_counts.is_empty(), "{tool}");
+        }
     }
 }

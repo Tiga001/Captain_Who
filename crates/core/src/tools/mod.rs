@@ -7,6 +7,7 @@ mod conversation_history;
 mod document_text;
 mod filesystem;
 mod git_diff;
+mod goal;
 mod image_generation;
 mod input_stream;
 mod limits;
@@ -25,7 +26,6 @@ mod skills_list_resources;
 mod skills_materialize_resource;
 mod skills_read_resource;
 mod skills_script;
-mod task_state_patch;
 mod tool_set;
 mod web_fetch;
 mod web_search;
@@ -42,6 +42,7 @@ use apply_patch::ApplyPatchTool;
 use attachments::{AttachmentsListProjectTool, AttachmentsListTool};
 use conversation_history::ConversationHistoryTool;
 use git_diff::GitDiffTool;
+use goal::{CreateGoalTool, GetGoalTool, UpdateGoalTool};
 use image_generation::ImageGenerationTool;
 pub use image_generation::{
     agent_image_generation_execution_id, agent_image_generation_tool_result_from_execution,
@@ -69,7 +70,6 @@ pub(crate) use skills_script::validate_frozen_skill_script_trace_args;
 use skills_script::{SkillsPreflightScriptTool, SkillsRunScriptTool};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use task_state_patch::TaskStatePatchTool;
 pub(crate) use tool_set::{
     validate_tool_set_checkpoint_shape, EffectiveToolSet, ToolCapabilityId, ToolUnavailability,
     IMAGE_GENERATION_CAPABILITY, OFFICE_DOCUMENTS_CAPABILITY, OFFICE_PRESENTATIONS_CAPABILITY,
@@ -425,9 +425,16 @@ impl ToolRegistry {
         }
     }
 
-    pub(crate) fn register_task_state_patch(&mut self) {
-        if !self.contains_tool("task_state_patch") {
-            self.register(TaskStatePatchTool);
+    pub(crate) fn register_goal_tools(&mut self) {
+        for tool in [
+            Box::new(GetGoalTool) as Box<dyn AgentTool>,
+            Box::new(CreateGoalTool),
+            Box::new(UpdateGoalTool),
+        ] {
+            if !self.contains_tool(&tool.definition().name) {
+                self.register_boxed("core".to_string(), tool)
+                    .expect("goal tool definitions must be valid");
+            }
         }
     }
 

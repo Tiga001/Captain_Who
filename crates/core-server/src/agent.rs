@@ -336,9 +336,6 @@ impl AgentService {
         storage
             .reconcile_interrupted_pending_agent_actions(now_ms())
             .map_err(|error| format!("failed to reconcile interrupted pending actions: {error}"))?;
-        storage
-            .reconcile_interrupted_task_states(now_ms())
-            .map_err(|error| format!("failed to reconcile interrupted task states: {error}"))?;
         if reconcile_orphaned_traces {
             storage
                 .reconcile_orphaned_in_progress_conversation_turn_traces(&HashSet::new(), now_ms())

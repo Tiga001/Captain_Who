@@ -9,18 +9,13 @@ import {
   useState
 } from 'react'
 import { Split, X } from 'lucide-react'
-import type {
-  AgentContextWindowSnapshot,
-  AgentProposedAction,
-  AgentTodoState
-} from '@mycopilot/protocol'
+import type { AgentContextWindowSnapshot, AgentProposedAction } from '@mycopilot/protocol'
 import { ChatComposer } from './components/ChatComposer'
 import { AgentApprovalDialog } from './components/AgentApprovalDialog'
 import { AgentTodoProgress } from './components/AgentTodoProgress'
 import { ChatMessageItem } from './components/ChatMessageItem'
 import { ConversationTurnNavigationRail } from './components/ConversationTurnNavigationRail'
 import type {
-  ChatAgentRunView,
   ChatComposerDraft,
   ChatConversation,
   ChatConversationContinuationOrigin,
@@ -30,6 +25,7 @@ import type {
 } from './chatTypes'
 import { stripAttachmentSummary } from './chatAttachments'
 import { getConversationTurnNavigationItems } from './conversationTurnNavigation'
+import { getLatestAgentTodo } from './todoLifetime'
 import { getAgentActionApprovalStatus } from '../../app/agentActionUtils'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import './ChatConversationPage.css'
@@ -119,29 +115,6 @@ function getEditableLastUserMessageId(conversation: ChatConversation) {
   if (!isAssistantReplyComplete(assistantMessage)) return null
 
   return userMessage.id
-}
-
-interface LatestAgentTodo {
-  completedAt?: number
-  runStatus?: ChatAgentRunView['status']
-  todo: AgentTodoState
-}
-
-function getLatestAgentTodo(conversation: ChatConversation): LatestAgentTodo | null {
-  for (let messageIndex = conversation.messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
-    const message = conversation.messages[messageIndex]
-    if (message.role !== 'assistant') continue
-    const run = message.agentRun
-    if (!run?.todo?.items.length) continue
-
-    return {
-      completedAt: run.completedAt,
-      runStatus: run.status,
-      todo: run.todo
-    }
-  }
-
-  return null
 }
 
 interface ChatMessageListProps {

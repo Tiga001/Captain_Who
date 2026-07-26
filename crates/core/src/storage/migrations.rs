@@ -122,6 +122,60 @@ fn ensure_task_state_schema(connection: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+fn ensure_conversation_goal_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS conversation_goals (
+            conversation_id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL UNIQUE,
+            objective TEXT NOT NULL,
+            source_message_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN ('active', 'blocked', 'completed', 'cancelled')
+            ),
+            stopped_reason TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE
+        );
+
+        CREATE TRIGGER IF NOT EXISTS validate_conversation_goal_source_insert
+        BEFORE INSERT ON conversation_goals
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.source_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'user'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'goal source must be a user message in the same conversation'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_conversation_goal_source_update
+        BEFORE UPDATE OF conversation_id, source_message_id
+        ON conversation_goals
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.source_message_id
+              AND conversation_id = NEW.conversation_id
+              AND role = 'user'
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'goal source must be a user message in the same conversation'
+            );
+        END;
+        ",
+    )
+}
+
 fn ensure_conversation_history_fts_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
         "
@@ -2393,6 +2447,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     upgrade_canonical_model_identity_schema(connection)?;
     upgrade_usage_consistency_schema(connection)?;
     ensure_task_state_schema(connection)?;
+    ensure_conversation_goal_schema(connection)?;
     ensure_conversation_history_fts_schema(connection)?;
 
     Ok(())

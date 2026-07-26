@@ -118,6 +118,7 @@ pub(crate) enum ContextSource {
     ConversationSummary,
     WorldStateSnapshot,
     WorldStateDiff,
+    ConversationGoal,
     TaskContinuationState,
     ConversationHistory,
     ConversationTrace,
@@ -142,6 +143,7 @@ impl ContextSource {
             Self::ConversationSummary => "conversation_summary",
             Self::WorldStateSnapshot => "world_state_snapshot",
             Self::WorldStateDiff => "world_state_diff",
+            Self::ConversationGoal => "conversation_goal",
             Self::TaskContinuationState => "task_continuation_state",
             Self::ConversationHistory => "conversation_history",
             Self::ConversationTrace => "conversation_trace",
@@ -166,6 +168,7 @@ impl ContextSource {
             "conversation_summary" => Some(Self::ConversationSummary),
             "world_state_snapshot" => Some(Self::WorldStateSnapshot),
             "world_state_diff" => Some(Self::WorldStateDiff),
+            "conversation_goal" => Some(Self::ConversationGoal),
             "task_continuation_state" => Some(Self::TaskContinuationState),
             "conversation_history" => Some(Self::ConversationHistory),
             "conversation_trace" => Some(Self::ConversationTrace),
@@ -427,6 +430,7 @@ impl ContextMetadata {
                     ContextScope::Conversation | ContextScope::Project
                 )
             || self.sources.contains(&ContextSource::TaskContinuationState)
+            || self.sources.contains(&ContextSource::ConversationGoal)
         {
             return ContextCacheBand::ConversationEpochPrelude;
         }
@@ -442,6 +446,7 @@ impl ContextMetadata {
         }
         if self.sources.contains(&ContextSource::WorldStateSnapshot)
             || self.sources.contains(&ContextSource::WorldStateDiff)
+            || self.sources.contains(&ContextSource::ConversationGoal)
             || self.sources.contains(&ContextSource::TaskContinuationState)
         {
             return LlmMessagePlacement::BackendStateTimeline;

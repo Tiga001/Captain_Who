@@ -17,6 +17,8 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: none;
+  touch-action: none;
+  user-select: none;
   mask-image: linear-gradient(
     to bottom,
     transparent,
@@ -24,6 +26,11 @@
     black calc(100% - 18px),
     transparent
   );
+}
+
+.conversation-turn-navigation[data-scrubbing='true'],
+.conversation-turn-navigation[data-scrubbing='true'] .conversation-turn-navigation__row {
+  cursor: ns-resize;
 }
 
 .conversation-turn-navigation__list::-webkit-scrollbar {

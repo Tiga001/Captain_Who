@@ -17,7 +17,7 @@ use crate::storage::{
     agent_action_audit_repository, agent_prompt_preferences_repository, attachment_repository,
     chat_repository, chat_search_repository, composer_draft_repository, config_repository,
     context_compaction_audit_repository, context_compaction_receipt_repository,
-    context_compaction_repository, conversation_fork_repository,
+    context_compaction_repository, conversation_fork_repository, conversation_goal_repository,
     conversation_history_archive_repository, conversation_history_repository,
     conversation_trace_repository, file_draft_repository, guidance_repository,
     image_generation_repository, model_request_observation_repository, now_ms,
@@ -32,8 +32,9 @@ use crate::{
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageSummaryInput, AgentUsageSummaryOutput,
     ContextCompactionAuditBundle, ContextCompactionPrefix, ContextCompactionReceipt,
     ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
-    ConversationTurnTrace, ConversationTurnTraceItem, ModelRequestObservation,
-    TaskStatePatchOperation, TaskStateSnapshot, TaskWorkItem, WorldStateRecord,
+    ConversationGoal, ConversationGoalStatus, ConversationTurnTrace, ConversationTurnTraceItem,
+    ModelRequestObservation, TaskStatePatchOperation, TaskStateSnapshot, TaskWorkItem,
+    WorldStateRecord,
 };
 use base64::Engine;
 use rusqlite::OptionalExtension;
@@ -43,6 +44,7 @@ mod attachments;
 mod compaction;
 mod conversations;
 mod file_drafts;
+mod goals;
 mod guidance;
 mod image_generation;
 mod lifecycle;

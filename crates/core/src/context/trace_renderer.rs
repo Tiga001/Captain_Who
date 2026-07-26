@@ -88,6 +88,13 @@ impl ConversationTraceRenderer {
                     // would split execution, audit, and model-visible protocol into separate ID
                     // domains.
                     validate_model_tool_call_id(call_id)?;
+                    if tool == "todo_update" {
+                        pending_exchange = Some(PendingExchange {
+                            call_id: call_id.clone(),
+                            group: None,
+                        });
+                        continue;
+                    }
                     let group =
                         ContextGroup::tool_exchange(format!("conversation-trace:{call_id}"));
                     activity_items.push(ContextItem::assistant(
@@ -102,7 +109,7 @@ impl ConversationTraceRenderer {
                     ));
                     pending_exchange = Some(PendingExchange {
                         call_id: call_id.clone(),
-                        group,
+                        group: Some(group),
                     });
                 }
                 ConversationTurnTraceItem::ToolResult {
@@ -116,6 +123,9 @@ impl ConversationTraceRenderer {
                     let exchange = pending_exchange.take().ok_or_else(|| {
                         AgentError::new("ConversationTurnTrace 工具结果缺少对应的历史工具调用。")
                     })?;
+                    let Some(group) = exchange.group else {
+                        continue;
+                    };
                     let result = AgentToolResult {
                         call_id: exchange.call_id.clone(),
                         tool: tool.clone(),
@@ -134,7 +144,7 @@ impl ConversationTraceRenderer {
                                 | ConversationTraceToolResultStatus::Cancelled
                         ),
                         trace_item_metadata(&trace.assistant_message_id, item.sequence())
-                            .with_group(exchange.group),
+                            .with_group(group),
                     ));
                 }
             }
@@ -176,7 +186,7 @@ impl ConversationTraceRenderer {
 #[derive(Debug)]
 struct PendingExchange {
     call_id: String,
-    group: ContextGroup,
+    group: Option<ContextGroup>,
 }
 
 fn trace_metadata(assistant_message_id: &str) -> ContextMetadata {
@@ -286,6 +296,45 @@ mod tests {
                 && entry.retention == "retained"
         }));
         assert_eq!(manifest.entries[1].group_id, manifest.entries[2].group_id);
+    }
+
+    #[test]
+    fn run_scoped_todo_exchange_is_not_replayed_into_later_model_context() {
+        let mut trace = trace();
+        let ConversationTurnTraceItem::ToolCall {
+            tool, operation, ..
+        } = &mut trace.items[1]
+        else {
+            panic!("expected tool call");
+        };
+        *tool = "todo_update".to_string();
+        *operation = json!({
+            "items": [{ "id": "todo-1", "title": "Do not carry me", "status": "pending" }]
+        });
+        let ConversationTurnTraceItem::ToolResult {
+            tool, observation, ..
+        } = &mut trace.items[2]
+        else {
+            panic!("expected tool result");
+        };
+        *tool = "todo_update".to_string();
+        *observation = json!({
+            "revision": 1,
+            "items": [{ "id": "todo-1", "title": "Do not carry me", "status": "pending" }]
+        });
+
+        let rendered = ConversationTraceRenderer::render(&trace).unwrap();
+        assert_eq!(rendered.activity_items.len(), 1);
+        let mut items = rendered.activity_items;
+        items.extend(rendered.terminal_item);
+        let context = ContextFrame::new(items)
+            .to_messages()
+            .into_iter()
+            .map(|message| message.content)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!context.contains("todo_update"));
+        assert!(!context.contains("Do not carry me"));
     }
 
     #[test]

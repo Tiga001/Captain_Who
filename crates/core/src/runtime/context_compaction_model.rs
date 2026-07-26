@@ -46,8 +46,12 @@ Preserve information needed to continue the work correctly:
 - exact numbers, URLs, identifiers, commands, file paths, error codes, and other literals needed for later work;
 - chronology and source-message timestamps when they affect deadlines, sequencing, recency, or later decisions;
 - meaningful tool outcomes, approvals, rejections, failures, conflicts, and their causes;
-- current plan or todo state, unresolved questions, unfinished work, and the next useful action;
+- unresolved user requirements, unfinished work established by the durable history, and the next useful action;
 - uncertainty and source limitations without turning them into established facts.
+
+Runtime todo state is scoped to one model run. Never copy todo ids, item statuses, notes, or the
+todo list itself into the durable summary. Preserve only independently supported user requirements
+and execution facts that remain useful after that run.
 
 The previousSummary is an older generated summary. The ordered newItems are newer raw records and are authoritative when they correct or supersede it. Merge them into one current account without duplicating old and new versions. Keep failed attempts when they explain a constraint or prevent repeating the same mistake. Omit routine transition narration, repeated status updates, and superseded alternatives unless they remain operationally useful.
 
@@ -462,6 +466,13 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
+    #[test]
+    fn durable_summary_explicitly_excludes_run_scoped_todo_state() {
+        assert!(COMPACTION_SYSTEM_PROMPT.contains("Runtime todo state is scoped to one model run"));
+        assert!(COMPACTION_SYSTEM_PROMPT.contains("Never copy todo ids"));
+        assert!(!COMPACTION_SYSTEM_PROMPT.contains("current plan or todo state"));
+    }
+
     fn chat_input(api_url: String, api_style: AgentApiStyle) -> AgentChatInput {
         AgentChatInput {
             api_url,
@@ -483,6 +494,7 @@ mod tests {
             resume_checkpoint: None,
             assistant_message_id: None,
             context_compaction_summary: None,
+            goal: None,
             task_state: None,
             world_state_records: Vec::new(),
             skill_activation: None,

@@ -35,6 +35,82 @@ fn prepared_turn_uses_backend_model_capabilities() {
 }
 
 #[test]
+fn ordinary_turn_has_no_task_state_and_only_an_explicit_goal_crosses_turns() {
+    let fixture = tempdir().unwrap();
+    let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
+    storage.save_model_settings(test_model_settings()).unwrap();
+
+    let first = prepare_conversation_turn(
+        &storage,
+        &SkillsService::new(),
+        AgentConversationTurnInput {
+            conversation_id: Some("conversation-explicit-goal".to_string()),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            context_window_indicator_enabled: true,
+            content: "An ordinary request".to_string(),
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            title: None,
+            user_message_id: Some("user-explicit-goal-1".to_string()),
+            assistant_message_id: Some("assistant-explicit-goal-1".to_string()),
+            max_tokens: None,
+            temperature: None,
+            prompt_preferences: None,
+            permissions: AgentPermissions::default(),
+        },
+        "run-explicit-goal-1",
+    )
+    .unwrap();
+
+    assert!(first.agent_input.goal.is_none());
+    assert!(first.agent_input.task_state.is_none());
+    storage
+        .create_conversation_goal(
+            "conversation-explicit-goal",
+            "Track this objective across user turns.",
+            2,
+        )
+        .unwrap();
+    storage
+        .update_conversation_goal_status(
+            "conversation-explicit-goal",
+            mycopilot_core::ConversationGoalStatus::Blocked,
+            Some("Waiting for the next user turn."),
+            3,
+        )
+        .unwrap();
+
+    let second = prepare_conversation_turn(
+        &storage,
+        &SkillsService::new(),
+        AgentConversationTurnInput {
+            conversation_id: Some("conversation-explicit-goal".to_string()),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            context_window_indicator_enabled: true,
+            content: "Continue now".to_string(),
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            title: None,
+            user_message_id: Some("user-explicit-goal-2".to_string()),
+            assistant_message_id: Some("assistant-explicit-goal-2".to_string()),
+            max_tokens: None,
+            temperature: None,
+            prompt_preferences: None,
+            permissions: AgentPermissions::default(),
+        },
+        "run-explicit-goal-2",
+    )
+    .unwrap();
+
+    assert!(second.agent_input.task_state.is_none());
+    let goal = second.agent_input.goal.unwrap();
+    assert_eq!(goal.objective, "Track this objective across user turns.");
+    assert_eq!(goal.status, mycopilot_core::ConversationGoalStatus::Active);
+}
+
+#[test]
 fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns() {
     let fixture = tempdir().unwrap();
     let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();

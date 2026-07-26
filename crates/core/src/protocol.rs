@@ -53,8 +53,13 @@ pub struct AgentChatInput {
     pub assistant_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compaction_summary: Option<ContextCompactionSummary>,
+    /// Optional user-owned long-running objective. Ordinary conversations have no goal. The goal
+    /// is hidden backend context and never causes automatic continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<crate::ConversationGoal>,
     /// Backend-owned task-control snapshot. It is rendered as hidden backend state, never as a
-    /// timeline message, and is protected from conversation compaction.
+    /// timeline message. Retained only for backward-compatible checkpoint deserialization; new
+    /// turns no longer create or inject Task State.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_state: Option<crate::TaskStateSnapshot>,
     /// Backend-owned, provider-neutral world-state journal for the active conversation epoch.

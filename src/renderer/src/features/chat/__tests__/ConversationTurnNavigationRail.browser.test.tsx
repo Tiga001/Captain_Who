@@ -87,6 +87,25 @@ function createIntersectionEntry(
   }
 }
 
+function dispatchPointerEvent(
+  target: Element,
+  type: 'pointerdown' | 'pointermove' | 'pointerup',
+  clientY: number
+) {
+  target.dispatchEvent(
+    new PointerEvent(type, {
+      bubbles: true,
+      button: 0,
+      buttons: type === 'pointerup' ? 0 : 1,
+      clientX: 12,
+      clientY,
+      isPrimary: true,
+      pointerId: 41,
+      pointerType: 'mouse'
+    })
+  )
+}
+
 it('darkens turns for visible user or assistant messages, previews, and jumps by distance', async () => {
   const originalIntersectionObserver = window.IntersectionObserver
   const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
@@ -219,6 +238,74 @@ it('darkens turns for visible user or assistant messages, previews, and jumps by
     })
   } finally {
     window.IntersectionObserver = originalIntersectionObserver
+    HTMLElement.prototype.scrollIntoView = originalScrollIntoView
+  }
+})
+
+it('scrubs between turns while dragging and suppresses the release click', async () => {
+  const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+  const scrollIntoView = vi.fn()
+  HTMLElement.prototype.scrollIntoView = scrollIntoView
+
+  try {
+    await page.viewport(1024, 768)
+    const screen = await render(<RailHarness />)
+    const navigation = screen.getByRole('navigation', {
+      name: 'chat.turnNavigationLabel'
+    })
+    await expect.element(navigation).toBeVisible()
+
+    const list = getRequiredElement('.conversation-turn-navigation__list') as HTMLDivElement
+    const buttons = Array.from(
+      list.querySelectorAll<HTMLButtonElement>('.conversation-turn-navigation__row')
+    )
+    expect(buttons).toHaveLength(4)
+
+    vi.spyOn(list, 'getBoundingClientRect').mockReturnValue({
+      ...createRect(95, 45),
+      left: 0,
+      right: 36,
+      width: 36
+    })
+    buttons.forEach((button, index) => {
+      vi.spyOn(button, 'getBoundingClientRect').mockReturnValue({
+        ...createRect(100 + index * 10, 10),
+        left: 0,
+        right: 36,
+        width: 36
+      })
+    })
+    vi.spyOn(list, 'setPointerCapture').mockImplementation(() => undefined)
+    vi.spyOn(list, 'hasPointerCapture').mockReturnValue(true)
+    vi.spyOn(list, 'releasePointerCapture').mockImplementation(() => undefined)
+
+    dispatchPointerEvent(buttons[0], 'pointerdown', 105)
+    dispatchPointerEvent(list, 'pointermove', 125)
+
+    await expect.element(navigation).toHaveAttribute('data-scrubbing', 'true')
+    const tooltip = screen.getByRole('tooltip')
+    await expect.element(tooltip).toHaveTextContent('User 3')
+    await expect.element(tooltip).toHaveTextContent('Assistant 3')
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(scrollIntoView).toHaveBeenLastCalledWith({
+      behavior: 'auto',
+      block: 'start'
+    })
+
+    dispatchPointerEvent(list, 'pointermove', 135)
+    await expect.element(tooltip).toHaveTextContent('User 4')
+    expect(scrollIntoView).toHaveBeenCalledTimes(2)
+    expect(scrollIntoView).toHaveBeenLastCalledWith({
+      behavior: 'auto',
+      block: 'start'
+    })
+
+    dispatchPointerEvent(list, 'pointerup', 135)
+    buttons[0].dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }))
+
+    await expect.element(navigation).not.toHaveAttribute('data-scrubbing')
+    expect(scrollIntoView).toHaveBeenCalledTimes(2)
+  } finally {
     HTMLElement.prototype.scrollIntoView = originalScrollIntoView
   }
 })

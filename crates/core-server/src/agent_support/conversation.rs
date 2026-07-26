@@ -190,13 +190,8 @@ pub(crate) fn prepare_conversation_turn(
         created_at: Some(timestamp),
         conversation_turn_trace: None,
     });
-    let task_state = storage.begin_or_resume_task_state(
-        &conversation_id,
-        &user_message_id,
-        &user_message.content,
-        run_id,
-        timestamp,
-    )?;
+    let goal =
+        storage.resume_blocked_conversation_goal_for_user_turn(&conversation_id, timestamp)?;
 
     let agent_input = AgentChatInput {
         api_url: connection.api_url,
@@ -221,7 +216,8 @@ pub(crate) fn prepare_conversation_turn(
         resume_checkpoint: None,
         assistant_message_id: Some(assistant_message_id.clone()),
         context_compaction_summary,
-        task_state: Some(task_state),
+        goal,
+        task_state: None,
         world_state_records,
         skill_activation: prepared_skills.runtime,
         skill_discovery: skill_discovery.clone(),

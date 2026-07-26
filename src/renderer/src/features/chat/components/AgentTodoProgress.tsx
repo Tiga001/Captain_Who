@@ -63,12 +63,11 @@ export function AgentTodoProgress({
   )
   const hasItems = items.length > 0
   const displayStatus = getTodoDisplayStatus(counts)
-  const allCompleted = hasItems && counts.completed === counts.total
   const hideAt =
     runStatus === 'cancelled' || runStatus === 'failed'
       ? (completedAt ?? todo.updatedAt) + INTERRUPTED_TODO_HIDE_DELAY_MS
-      : runStatus === 'completed' && allCompleted
-        ? todo.updatedAt + COMPLETED_TODO_HIDE_DELAY_MS
+      : runStatus === 'completed'
+        ? (completedAt ?? todo.updatedAt) + COMPLETED_TODO_HIDE_DELAY_MS
         : null
   const hideDeadlineKey = hideAt === null ? null : `${todo.revision}:${runStatus}:${hideAt}`
   const isHidden = hideDeadlineKey !== null && hiddenDeadlineKey === hideDeadlineKey

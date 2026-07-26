@@ -10,6 +10,7 @@ pub mod durable_fs;
 pub mod file_input;
 pub mod file_write;
 pub mod git_review;
+mod goal;
 pub mod image_generation;
 mod llm;
 mod model_request_observation;
@@ -58,6 +59,7 @@ pub use conversation_trace::{
     ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
     CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
+pub use goal::{ConversationGoal, ConversationGoalStatus, MAX_CONVERSATION_GOAL_OBJECTIVE_CHARS};
 pub use model_request_observation::{
     ModelRequestActualUsage, ModelRequestCapacityStatus, ModelRequestEstimate,
     ModelRequestMeasurementMode, ModelRequestObservation, ModelRequestObservationStatus,

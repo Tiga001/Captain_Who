@@ -62,6 +62,7 @@ pub(crate) enum ContextCompactionProtectionReason {
     CurrentUser,
     SkillInstructions,
     WorldState,
+    Goal,
     TaskState,
     UserAttachment,
     RuntimeGuard,
@@ -488,6 +489,9 @@ fn absolute_protection_reason(
     {
         return Some(ContextCompactionProtectionReason::WorldState);
     }
+    if unit.sources.contains(&ContextSource::ConversationGoal) {
+        return Some(ContextCompactionProtectionReason::Goal);
+    }
     if unit.sources.contains(&ContextSource::TaskContinuationState) {
         return Some(ContextCompactionProtectionReason::TaskState);
     }
@@ -700,6 +704,7 @@ fn protection_reason_name(reason: ContextCompactionProtectionReason) -> String {
         ContextCompactionProtectionReason::CurrentUser => "current_user",
         ContextCompactionProtectionReason::SkillInstructions => "skill_instructions",
         ContextCompactionProtectionReason::WorldState => "world_state",
+        ContextCompactionProtectionReason::Goal => "goal",
         ContextCompactionProtectionReason::TaskState => "task_state",
         ContextCompactionProtectionReason::UserAttachment => "user_attachment",
         ContextCompactionProtectionReason::RuntimeGuard => "runtime_guard",
@@ -1330,6 +1335,31 @@ mod tests {
         );
         assert_eq!(plan.compactable_input_tokens, 0);
         assert_eq!(plan.protected.reasons.get("task_state"), Some(&2_000));
+    }
+
+    #[test]
+    fn active_goal_is_never_a_compaction_candidate() {
+        let items = vec![item(
+            0,
+            ContextUsageClass::Durable,
+            400,
+            LlmMessageRole::System,
+            ContextSource::ConversationGoal,
+            None,
+        )];
+
+        let plan = ContextCompactionPlanner::for_tools(&[]).plan(
+            &query(ContextBudgetStatus::OverBudget, Some(100), 0, 400, 0, 0),
+            &items,
+            false,
+        );
+
+        assert_eq!(
+            plan.status,
+            ContextCompactionPlanStatus::InsufficientCompactableContext
+        );
+        assert_eq!(plan.compactable_input_tokens, 0);
+        assert_eq!(plan.protected.reasons.get("goal"), Some(&400));
     }
 
     #[test]
