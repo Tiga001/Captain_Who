@@ -108,11 +108,15 @@ pub(super) fn clean_relative_path(input_path: &str) -> AgentResult<PathBuf> {
         }
     }
 
-    if cleaned.as_os_str().is_empty() {
+    if cleaned.as_os_str().is_empty() && trimmed != "." && trimmed != "./" {
         return Err(AgentError::new("路径不能为空。"));
     }
 
-    Ok(cleaned)
+    Ok(if cleaned.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        cleaned
+    })
 }
 
 pub(super) fn sanitize_limit(limit: Option<usize>) -> usize {

@@ -78,10 +78,9 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
         .render_sanitized_text();
     assert!(first_projection.contains("\"id\":\"environment\""));
     assert!(first_projection.contains("\"os\""));
-    assert!(first_projection.contains("\"cwd\""));
     assert!(first_projection.contains("\"network\""));
-    assert!(first_projection.contains("\"runtimes\""));
-    assert!(first_projection.contains("\"executors\""));
+    assert!(!first_projection.contains("\"managedOffice\""));
+    assert!(!first_projection.contains("\"shellCommand\""));
 
     let second = prepare_conversation_turn(
         &storage,

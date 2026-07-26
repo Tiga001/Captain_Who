@@ -1,4 +1,5 @@
 use crate::context::CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION;
+use crate::storage::usage_repository;
 use crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION;
 use rusqlite::Connection;
 
@@ -34,6 +35,185 @@ fn table_has_column(connection: &Connection, table: &str, column: &str) -> rusql
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(columns.iter().any(|candidate| candidate == column))
+}
+
+fn usage_billable_default_is_zero(connection: &Connection) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare("PRAGMA table_info(agent_usage_records)")?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, Option<String>>(4)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(columns.iter().any(|(name, default)| {
+        name == "billable_request_count"
+            && default
+                .as_deref()
+                .map(|value| value.trim_matches(['(', ')', '\'', '"']).trim() == "0")
+                .unwrap_or(false)
+    }))
+}
+
+fn usage_has_message_cascade(connection: &Connection) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare("PRAGMA foreign_key_list(agent_usage_records)")?;
+    let foreign_keys = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(foreign_keys.iter().any(|(table, from, to, on_delete)| {
+        table == "messages"
+            && from == "message_id"
+            && to == "id"
+            && on_delete.eq_ignore_ascii_case("CASCADE")
+    }))
+}
+
+fn upgrade_usage_consistency_schema(connection: &Connection) -> rusqlite::Result<()> {
+    if !usage_billable_default_is_zero(connection)? || !usage_has_message_cascade(connection)? {
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE agent_usage_records
+             SET billable_request_count = 0
+             WHERE billable_request_count < 0",
+            [],
+        )?;
+        usage_repository::roll_up_orphaned_usage(&transaction)?;
+        transaction.execute_batch(
+            "
+            CREATE TABLE agent_usage_records_consistent (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                project_id TEXT,
+                model_id TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER,
+                status TEXT,
+                error TEXT,
+                created_at INTEGER NOT NULL,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                output_thinking_tokens INTEGER,
+                total_tokens INTEGER,
+                cached_input_tokens INTEGER,
+                cache_creation_input_tokens INTEGER,
+                billable_request_count INTEGER NOT NULL DEFAULT 0
+                    CHECK (billable_request_count >= 0),
+                input_price TEXT,
+                output_price TEXT,
+                estimated_cost REAL,
+                UNIQUE(conversation_id, message_id),
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+                FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+            );
+
+            INSERT INTO agent_usage_records_consistent (
+                id,
+                conversation_id,
+                message_id,
+                run_id,
+                project_id,
+                model_id,
+                model_name,
+                started_at,
+                completed_at,
+                status,
+                error,
+                created_at,
+                input_tokens,
+                output_tokens,
+                output_thinking_tokens,
+                total_tokens,
+                cached_input_tokens,
+                cache_creation_input_tokens,
+                billable_request_count,
+                input_price,
+                output_price,
+                estimated_cost
+            )
+            SELECT
+                usage.id,
+                usage.conversation_id,
+                usage.message_id,
+                usage.run_id,
+                usage.project_id,
+                usage.model_id,
+                usage.model_name,
+                usage.started_at,
+                usage.completed_at,
+                usage.status,
+                usage.error,
+                usage.created_at,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.output_thinking_tokens,
+                usage.total_tokens,
+                usage.cached_input_tokens,
+                usage.cache_creation_input_tokens,
+                MAX(usage.billable_request_count, 0),
+                usage.input_price,
+                usage.output_price,
+                usage.estimated_cost
+            FROM agent_usage_records AS usage
+            JOIN messages AS message
+              ON message.id = usage.message_id
+             AND message.conversation_id = usage.conversation_id;
+
+            DROP TABLE agent_usage_records;
+            ALTER TABLE agent_usage_records_consistent RENAME TO agent_usage_records;
+
+            CREATE INDEX idx_agent_usage_records_created_at
+                ON agent_usage_records(created_at);
+            CREATE INDEX idx_agent_usage_records_model_id
+                ON agent_usage_records(model_id);
+            CREATE INDEX idx_agent_usage_records_project_id
+                ON agent_usage_records(project_id);
+            ",
+        )?;
+        transaction.commit()?;
+    }
+
+    connection.execute_batch(
+        "
+        CREATE TRIGGER IF NOT EXISTS validate_agent_usage_message_insert
+        BEFORE INSERT ON agent_usage_records
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.message_id
+              AND conversation_id = NEW.conversation_id
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'agent usage message must belong to the same conversation'
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS validate_agent_usage_message_update
+        BEFORE UPDATE OF conversation_id, message_id ON agent_usage_records
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE id = NEW.message_id
+              AND conversation_id = NEW.conversation_id
+        )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'agent usage message must belong to the same conversation'
+            );
+        END;
+        ",
+    )?;
+    Ok(())
 }
 
 fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite::Result<()> {
@@ -187,12 +367,14 @@ fn upgrade_canonical_model_identity_schema(connection: &Connection) -> rusqlite:
             total_tokens INTEGER,
             cached_input_tokens INTEGER,
             cache_creation_input_tokens INTEGER,
-            billable_request_count INTEGER NOT NULL DEFAULT 1,
+            billable_request_count INTEGER NOT NULL DEFAULT 0
+                CHECK (billable_request_count >= 0),
             input_price TEXT,
             output_price TEXT,
             estimated_cost REAL,
             UNIQUE(conversation_id, message_id),
-            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
         );
 
         INSERT INTO agent_usage_records_canonical_identity (
@@ -927,12 +1109,14 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             total_tokens INTEGER,
             cached_input_tokens INTEGER,
             cache_creation_input_tokens INTEGER,
-            billable_request_count INTEGER NOT NULL DEFAULT 1,
+            billable_request_count INTEGER NOT NULL DEFAULT 0
+                CHECK (billable_request_count >= 0),
             input_price TEXT,
             output_price TEXT,
             estimated_cost REAL,
             UNIQUE(conversation_id, message_id),
-            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS agent_deleted_usage_daily_rollups (
@@ -1778,6 +1962,7 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(connection, "agent_pending_actions", "target_status", "TEXT")?;
 
     upgrade_canonical_model_identity_schema(connection)?;
+    upgrade_usage_consistency_schema(connection)?;
 
     Ok(())
 }
@@ -1785,6 +1970,198 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repairs_usage_rows_to_match_live_messages_and_zero_default() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+
+                CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT,
+                    model_id TEXT,
+                    title TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    pinned_at INTEGER,
+                    archived_at INTEGER,
+                    unread_at INTEGER
+                );
+                CREATE TABLE messages (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    status TEXT,
+                    agent_run_json TEXT,
+                    ui_state_json TEXT,
+                    created_at INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(id) ON DELETE CASCADE
+                );
+                CREATE TABLE agent_usage_records (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    project_id TEXT,
+                    model_id TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    started_at INTEGER,
+                    completed_at INTEGER,
+                    status TEXT,
+                    error TEXT,
+                    created_at INTEGER NOT NULL,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    output_thinking_tokens INTEGER,
+                    total_tokens INTEGER,
+                    cached_input_tokens INTEGER,
+                    cache_creation_input_tokens INTEGER,
+                    billable_request_count INTEGER NOT NULL DEFAULT 1,
+                    input_price TEXT,
+                    output_price TEXT,
+                    estimated_cost REAL,
+                    UNIQUE(conversation_id, message_id),
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(id) ON DELETE CASCADE
+                );
+
+                INSERT INTO conversations (
+                    id, project_id, model_id, title, created_at, updated_at,
+                    pinned_at, archived_at, unread_at
+                ) VALUES
+                    ('conversation-1', NULL, NULL, 'one', 1, 1, NULL, NULL, NULL),
+                    ('conversation-2', NULL, NULL, 'two', 1, 1, NULL, NULL, NULL);
+                INSERT INTO messages (
+                    id, conversation_id, role, content, status,
+                    agent_run_json, ui_state_json, created_at, position
+                ) VALUES (
+                    'message-1', 'conversation-1', 'assistant', 'done', 'sent',
+                    NULL, NULL, 1, 0
+                );
+                INSERT INTO agent_usage_records (
+                    id, conversation_id, message_id, run_id,
+                    model_id, model_name, created_at, billable_request_count
+                ) VALUES
+                    ('usage-valid', 'conversation-1', 'message-1', 'run-valid',
+                     'model', 'Model', 1, 2),
+                    ('usage-orphan', 'conversation-1', 'missing-message', 'run-orphan',
+                     'model', 'Model', 1, 1),
+                    ('usage-mismatch', 'conversation-2', 'message-1', 'run-mismatch',
+                     'model', 'Model', 1, 1);
+                ",
+            )
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        assert!(usage_billable_default_is_zero(&connection).unwrap());
+        assert!(usage_has_message_cascade(&connection).unwrap());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT id || ':' || billable_request_count
+                     FROM agent_usage_records",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "usage-valid:2"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT request_count || ':' || message_count
+                     FROM agent_deleted_usage_daily_rollups",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "2:2"
+        );
+        let preserved_request_count: i64 = connection
+            .query_row(
+                "SELECT
+                    (SELECT COALESCE(SUM(billable_request_count), 0)
+                     FROM agent_usage_records)
+                    +
+                    (SELECT COALESCE(SUM(request_count), 0)
+                     FROM agent_deleted_usage_daily_rollups)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preserved_request_count, 4);
+
+        let mismatch = connection.execute(
+            "INSERT INTO agent_usage_records (
+                id, conversation_id, message_id, run_id,
+                model_id, model_name, created_at
+             ) VALUES (
+                'usage-invalid', 'conversation-2', 'message-1', 'run-invalid',
+                'model', 'Model', 2
+             )",
+            [],
+        );
+        assert!(mismatch
+            .unwrap_err()
+            .to_string()
+            .contains("agent usage message must belong to the same conversation"));
+
+        connection
+            .execute("DELETE FROM messages WHERE id = 'message-1'", [])
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM agent_usage_records", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+
+        connection
+            .execute(
+                "INSERT INTO messages (
+                    id, conversation_id, role, content, status,
+                    agent_run_json, ui_state_json, created_at, position
+                 ) VALUES (
+                    'message-2', 'conversation-1', 'assistant', 'done', 'sent',
+                    NULL, NULL, 2, 0
+                 )",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_usage_records (
+                    id, conversation_id, message_id, run_id,
+                    model_id, model_name, created_at
+                 ) VALUES (
+                    'usage-default', 'conversation-1', 'message-2', 'run-default',
+                    'model', 'Model', 2
+                 )",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT billable_request_count
+                     FROM agent_usage_records
+                     WHERE id = 'usage-default'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
 
     #[test]
     fn creates_idempotent_world_state_journal_with_cascade_anchors() {
@@ -1991,6 +2368,14 @@ mod tests {
                 INSERT INTO conversations (
                     id, model_id, title, created_at, updated_at
                 ) VALUES ('conversation-1', 'model-a', 'Conversation', 1, 1);
+
+                INSERT INTO messages (
+                    id, conversation_id, role, content, status,
+                    agent_run_json, ui_state_json, created_at, position
+                ) VALUES (
+                    'message-1', 'conversation-1', 'assistant', 'done', 'sent',
+                    NULL, NULL, 1, 0
+                );
 
                 INSERT INTO composer_drafts (
                     scope_id, message, permission_mode, permission_mode_version, model_id,

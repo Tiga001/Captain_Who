@@ -266,8 +266,8 @@ impl AgentRuntimeHostServices {
         self
     }
 
-    /// Receives exact aggregate request-capacity accounting after runtime extensions, Skill
-    /// instructions, request-only availability context and dynamic Tool schemas are assembled.
+    /// Receives exact aggregate request-capacity accounting after runtime extensions, Run World
+    /// State, Skill instructions and dynamic Tool schemas are assembled.
     /// No Skill instruction or Tool schema body crosses this observer boundary.
     pub fn with_context_window_observer(mut self, observer: AgentContextWindowObserver) -> Self {
         self.context_window_observer = Some(observer);
@@ -463,12 +463,10 @@ pub fn inspect_context_window(
 ) -> AgentResult<Option<AgentContextWindowSnapshot>> {
     let skill_discovery = input.skill_discovery.take();
     let skill_activation = input.skill_activation.take();
-    let run_context = input.context.clone();
     let mut state = create_conversation_context_state(input)?;
     state
-        .snapshot_with_run_overlays(
+        .snapshot_with_skill_overlays(
             AgentContextWindowPhase::Idle,
-            run_context.as_ref(),
             skill_discovery.as_ref(),
             skill_activation.as_ref(),
         )
@@ -479,20 +477,18 @@ pub fn inspect_context_window(
 ///
 /// The projection is intentionally opaque: it binds dynamic schemas to the same trusted provider,
 /// permissions and revision-checked Skill resource authority used by a real run. This entry point
-/// also accounts for the backend-authored dynamic availability notice; callers must not attempt
-/// to approximate the request by passing arbitrary schema lists.
+/// also accounts for the backend-authored Run World State snapshot; callers must not attempt to
+/// approximate the request by passing arbitrary schema lists.
 pub fn inspect_context_window_with_tool_projection(
     mut input: AgentChatInput,
     projection: &AgentContextWindowToolProjection,
 ) -> AgentResult<Option<AgentContextWindowSnapshot>> {
     let skill_discovery = input.skill_discovery.take();
     let skill_activation = input.skill_activation.take();
-    let run_context = input.context.clone();
     let mut state = create_conversation_context_state(input)?;
     state
-        .snapshot_with_run_overlays_and_tool_projection(
+        .snapshot_with_skill_overlays_and_tool_projection(
             AgentContextWindowPhase::Idle,
-            run_context.as_ref(),
             skill_discovery.as_ref(),
             skill_activation.as_ref(),
             projection,
@@ -530,10 +526,19 @@ pub fn prepare_context_window_tool_projection(
             skill_resources: host_services.skill_resources.clone(),
         },
     )?;
+    let initial_run_world_state = RunWorldStateTracker::new_with_extension_sections(
+        "context-window-tool-preview:world-state",
+        input,
+        &capabilities.initial_tool_set,
+        capabilities.runtime_extensions.world_state_sections()?,
+    )?
+    .snapshot()
+    .clone();
     Ok(AgentContextWindowToolProjection::new(
         capabilities.initial_tool_set.stable_revision().to_string(),
         capabilities.initial_tool_set.dynamic_revision().to_string(),
         capabilities.initial_tool_set.revision().to_string(),
+        initial_run_world_state,
         capabilities.initial_tool_set.dynamic_definitions().to_vec(),
     ))
 }

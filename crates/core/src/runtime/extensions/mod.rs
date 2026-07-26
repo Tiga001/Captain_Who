@@ -16,8 +16,6 @@ mod skills;
 mod todo;
 
 use crate::context::{ContextFrame, ContextItem, ContextTextBudget};
-use crate::llm::{LlmMessage, LlmMessageRole};
-use crate::prompts::build_dynamic_tool_availability_context;
 use crate::protocol::{
     AgentError, AgentEvent, AgentExtensionSnapshot, AgentResult, AgentSkillActivation,
     AgentTodoState, AgentToolResult,
@@ -64,7 +62,7 @@ pub(super) struct ModelInputCapacity {
     /// Exact effective Tool contract already charged to the current request.
     ///
     /// Skill activation projects this immutable baseline forward before committing activation
-    /// state, ensuring newly exposed schemas and their request-only availability notice fit too.
+    /// state, ensuring newly exposed schemas and their retained World State diff fit too.
     pub(super) effective_tool_set: EffectiveToolSet,
 }
 
@@ -78,7 +76,7 @@ impl ModelInputCapacity {
     /// Projects and prices the next request's Skill-gated Tool contract without mutating runtime
     /// state.
     ///
-    /// Existing dynamic schemas and availability context were already charged by the capacity
+    /// Existing dynamic schemas and the current Run World State were already charged by the capacity
     /// detector for the current request. Only positive per-category deltas are reserved here.
     /// Avoiding cross-category offsets is intentionally conservative and keeps activation
     /// fail-closed if a future prompt wording change happens to shrink one category.
@@ -98,27 +96,18 @@ impl ModelInputCapacity {
             .estimate_tool_definitions(projected.dynamic_definitions());
         let schema_delta = projected_schema_tokens.saturating_sub(current_schema_tokens);
 
-        let current_notice_tokens = self.dynamic_tool_availability_tokens(&self.effective_tool_set);
-        let projected_notice_tokens = self.dynamic_tool_availability_tokens(&projected);
-        let notice_delta = projected_notice_tokens.saturating_sub(current_notice_tokens);
+        let state_transition_tokens =
+            crate::runtime::world_state::effective_tools_transition_message(
+                &self.effective_tool_set,
+                &projected,
+            )?
+            .map(|message| self.text_budget.estimate_message(&message))
+            .unwrap_or(0);
 
         Ok(DynamicToolCapacityProjection {
-            additional_tokens: schema_delta.saturating_add(notice_delta),
+            additional_tokens: schema_delta.saturating_add(state_transition_tokens),
             effective_tool_set: projected,
         })
-    }
-
-    fn dynamic_tool_availability_tokens(&self, tool_set: &EffectiveToolSet) -> u64 {
-        build_dynamic_tool_availability_context(
-            tool_set.dynamic_definitions(),
-            tool_set.stable_revision(),
-            tool_set.dynamic_revision(),
-        )
-        .map(|content| {
-            self.text_budget
-                .estimate_message(&LlmMessage::text(LlmMessageRole::System, content))
-        })
-        .unwrap_or(0)
     }
 }
 

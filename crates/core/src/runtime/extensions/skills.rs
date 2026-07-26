@@ -2357,7 +2357,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_tool_capacity_projection_charges_schema_and_availability_notice() {
+    fn dynamic_tool_capacity_projection_charges_schema_and_world_state_diff() {
         let budget = ContextTextBudget::heuristic(64 * 1024);
         let capacity = ModelInputCapacity {
             remaining_tokens: 64 * 1024,
@@ -2375,7 +2375,7 @@ mod tests {
         assert!(schema_tokens > 0);
         assert!(
             projection.additional_tokens > schema_tokens,
-            "the request-only backend_dynamic_tool_availability message must be charged too"
+            "the retained tools.effective World State diff must be charged too"
         );
         assert!(projection
             .effective_tool_set

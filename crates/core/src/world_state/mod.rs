@@ -265,6 +265,116 @@ impl WorldStateSectionEnvelope {
     }
 }
 
+/// Builds the canonical model-visible projection of the permissions currently enforced by the
+/// trusted Host. Runtime execution must continue to use the typed permission value directly; this
+/// section is only the provider-neutral state presented to the model.
+pub fn effective_permissions_section(
+    permissions: crate::protocol::AgentPermissions,
+    lifetime: WorldStateLifetime,
+) -> Result<WorldStateSectionEnvelope, WorldStateError> {
+    let state = serde_json::json!({
+        "read": match permissions.read {
+            crate::protocol::AgentReadPermission::WorkspaceOnly => "workspace_only",
+            crate::protocol::AgentReadPermission::All => "all",
+        },
+        "write": match permissions.write {
+            crate::protocol::AgentWritePermission::Denied => "denied",
+            crate::protocol::AgentWritePermission::WorkspaceOnly => "workspace_only",
+            crate::protocol::AgentWritePermission::All => "all",
+        },
+        "command": match permissions.command {
+            crate::protocol::AgentCommandPermission::RequireApproval => "require_approval",
+            crate::protocol::AgentCommandPermission::AutoApprove => "auto_approve",
+        },
+        "commandSafety": match permissions.command_safety {
+            crate::protocol::AgentCommandSafetyPolicy::Guarded => "guarded",
+            crate::protocol::AgentCommandSafetyPolicy::FullAccess => "full_access",
+        },
+        "patch": match permissions.patch {
+            crate::protocol::AgentPatchPermission::RequireApproval => "require_approval",
+            crate::protocol::AgentPatchPermission::AutoApprove => "auto_approve",
+        },
+    });
+    WorldStateSectionEnvelope::model_visible(
+        WorldStateSectionId::EffectivePermissions,
+        lifetime,
+        state.clone(),
+        state,
+    )
+}
+
+/// Builds the canonical workspace binding. The authoritative root remains Host-visible while the
+/// model receives only the selected scope and the path convention it should use.
+pub fn workspace_binding_section(
+    workspace: Option<&crate::protocol::AgentWorkspaceContext>,
+    lifetime: WorldStateLifetime,
+) -> Result<WorldStateSectionEnvelope, WorldStateError> {
+    let available = workspace
+        .and_then(|workspace| workspace.root_path.as_deref())
+        .map(str::trim)
+        .is_some_and(|root| !root.is_empty());
+    let state = serde_json::json!({
+        "available": available,
+        "projectId": workspace.and_then(|workspace| workspace.project_id.as_deref()),
+        "displayName": workspace.and_then(|workspace| workspace.display_name.as_deref()),
+        "rootPath": workspace.and_then(|workspace| workspace.root_path.as_deref()),
+    });
+    let projection = serde_json::json!({
+        "available": available,
+        "displayName": workspace.and_then(|workspace| workspace.display_name.as_deref()),
+        "pathConvention": if available { "workspace_relative" } else { "no_workspace" },
+    });
+    WorldStateSectionEnvelope::model_visible(
+        WorldStateSectionId::WorkspaceBinding,
+        lifetime,
+        state,
+        projection,
+    )
+}
+
+/// Builds the canonical interaction profile independently of its conversation/run placement.
+pub fn interaction_profile_section(
+    preferences: Option<&crate::protocol::AgentPromptPreferences>,
+    lifetime: WorldStateLifetime,
+) -> Result<WorldStateSectionEnvelope, WorldStateError> {
+    let state = serde_json::json!({
+        "workMode": match preferences.and_then(|value| value.work_mode) {
+            Some(crate::protocol::AgentPromptWorkMode::General) => "general",
+            Some(crate::protocol::AgentPromptWorkMode::Coding) | None => "coding",
+        },
+        "tone": match preferences.and_then(|value| value.tone) {
+            Some(crate::protocol::AgentPromptTone::Friendly) => "friendly",
+            Some(crate::protocol::AgentPromptTone::Pragmatic) | None => "pragmatic",
+        },
+        "detailLevel": match preferences.and_then(|value| value.detail_level) {
+            Some(crate::protocol::AgentPromptDetailLevel::Low) => "low",
+            Some(crate::protocol::AgentPromptDetailLevel::High) => "high",
+            Some(crate::protocol::AgentPromptDetailLevel::Medium) | None => "medium",
+        },
+    });
+    WorldStateSectionEnvelope::model_visible(
+        WorldStateSectionId::InteractionProfile,
+        lifetime,
+        state.clone(),
+        state,
+    )
+}
+
+/// Model capabilities remain Host-only execution authority even though they participate in the
+/// same versioned World State ledger.
+pub fn model_capabilities_section(
+    capabilities: crate::protocol::ModelCapabilities,
+    lifetime: WorldStateLifetime,
+) -> Result<WorldStateSectionEnvelope, WorldStateError> {
+    WorldStateSectionEnvelope::host_only(
+        WorldStateSectionId::ModelCapabilities,
+        lifetime,
+        serde_json::json!({
+            "imageInput": capabilities.image_input,
+        }),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorldStateSnapshot {

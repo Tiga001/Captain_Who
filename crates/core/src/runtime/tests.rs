@@ -10,8 +10,10 @@ use crate::protocol::{
 use crate::runtime::tool_flow::parse_tool_call_request;
 use crate::tools::{EffectiveToolSet, ToolCapabilityId, OFFICE_DOCUMENTS_CAPABILITY};
 use crate::{
-    ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
-    ConversationTurnTraceTerminalStatus, CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+    AnchoredWorldStateRecord, ConversationTraceToolResultStatus, ConversationTurnTrace,
+    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus, WorldStateLifetime,
+    WorldStateRecord, WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSnapshot,
+    CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 use base64::Engine;
 use std::collections::BTreeSet;
@@ -488,7 +490,7 @@ fn runtime_attachment_library(
 }
 
 #[test]
-fn steer_attachment_library_updates_runtime_overlay_without_granting_conversation_identity() {
+fn steer_attachment_library_updates_run_world_state_without_granting_conversation_identity() {
     let attachment =
         runtime_binary_attachment("steer-image", "steer.png", "image/png", vec![1, 2, 3]);
     let library = runtime_attachment_library(&[attachment]);
@@ -501,10 +503,25 @@ fn steer_attachment_library_updates_runtime_overlay_without_granting_conversatio
     assert_eq!(run_context.conversation_id, None);
     assert_eq!(run_context.project_id, None);
     assert_eq!(run_context.attachment_library, Some(library));
-    let overlay = crate::prompts::build_runtime_context_overlay(Some(&run_context));
-    assert!(overlay.contains("\"attachmentLibraryAvailable\":true"));
-    assert!(overlay.contains("\"conversationAttachmentCount\":1"));
-    assert!(overlay.contains("\"conversationAvailable\":false"));
+    let mut input = conversation_context_input(vec![message("user", "inspect attachment")]);
+    input.context = Some(run_context);
+    let capabilities =
+        prepare_runtime_capabilities(&input, "steer-attachment-world-state", &[], true, None)
+            .unwrap();
+    let tracker = RunWorldStateTracker::new(
+        "steer-attachment-world-state",
+        &input,
+        &capabilities.initial_tool_set,
+    )
+    .unwrap();
+    let rendered = tracker
+        .snapshot()
+        .model_projection(WorldStateLifetime::Run)
+        .unwrap()
+        .render_sanitized_text();
+    assert!(rendered.contains("\"conversationAttachmentCount\":1"));
+    assert!(rendered.contains("\"projectAttachmentCount\":0"));
+    assert!(!rendered.contains("conversationAvailable"));
 }
 
 #[test]
@@ -1865,7 +1882,7 @@ fn model_capabilities_do_not_change_tool_definitions_or_context_revision() {
 }
 
 #[test]
-fn run_context_changes_only_the_dynamic_overlay_while_prompt_preferences_change_configuration() {
+fn run_context_changes_only_world_state_while_prompt_preferences_change_configuration() {
     let mut baseline = conversation_context_input(vec![message("user", "Inspect the project")]);
     baseline.context = Some(AgentRunContext {
         conversation_id: None,
@@ -1911,29 +1928,53 @@ fn run_context_changes_only_the_dynamic_overlay_while_prompt_preferences_change_
         conversation_context_configuration_revision(&changed_runtime).unwrap()
     );
 
-    let mut cached_state = create_conversation_context_state(baseline.clone()).unwrap();
-    let baseline_snapshot = cached_state
-        .snapshot_with_run_overlays(
-            AgentContextWindowPhase::Idle,
-            baseline.context.as_ref(),
-            None,
-            None,
-        )
-        .unwrap();
-    let changed_snapshot = cached_state
-        .snapshot_with_run_overlays(
-            AgentContextWindowPhase::Idle,
-            changed_runtime.context.as_ref(),
-            None,
-            None,
-        )
-        .unwrap();
+    let host_services = AgentRuntimeHostServices::new();
+    let baseline_projection =
+        prepare_context_window_tool_projection(&baseline, &host_services, true).unwrap();
+    let changed_projection =
+        prepare_context_window_tool_projection(&changed_runtime, &host_services, true).unwrap();
+    let baseline_world_state = baseline_projection
+        .initial_run_world_state()
+        .model_projection(WorldStateLifetime::Run)
+        .unwrap()
+        .render_sanitized_text();
+    let changed_world_state = changed_projection
+        .initial_run_world_state()
+        .model_projection(WorldStateLifetime::Run)
+        .unwrap()
+        .render_sanitized_text();
+    assert_ne!(baseline_world_state, changed_world_state);
+    assert!(changed_world_state.contains("\"read\":\"all\""));
+    assert!(changed_world_state.contains("\"displayName\":\"Runtime Workspace\""));
+    assert_eq!(
+        changed_world_state.matches("permissions.effective").count(),
+        1
+    );
+    assert_eq!(changed_world_state.matches("workspace.binding").count(), 1);
+    assert!(!changed_world_state.contains("<backend_runtime_context>"));
+    assert!(!changed_world_state.contains("<backend_dynamic_tool_availability>"));
+    assert!(!changed_world_state.contains("/Users/example/runtime-workspace"));
+    assert!(!changed_world_state.contains("/Users/example/runtime-attachments"));
+    assert!(!changed_world_state.contains("conversation-private"));
+    assert!(!changed_world_state.contains("project-private"));
+    let projection_debug = format!("{changed_projection:?}");
+    assert!(!projection_debug.contains("/Users/example/runtime-workspace"));
+    assert!(!projection_debug.contains("/Users/example/runtime-attachments"));
+
+    let baseline_snapshot =
+        inspect_context_window_with_tool_projection(baseline.clone(), &baseline_projection)
+            .unwrap()
+            .unwrap();
+    let changed_snapshot =
+        inspect_context_window_with_tool_projection(changed_runtime.clone(), &changed_projection)
+            .unwrap()
+            .unwrap();
     assert_eq!(
         baseline_snapshot.persistent_revision,
         changed_snapshot.persistent_revision
     );
-    assert_eq!(baseline_snapshot.run_transient_input_tokens, 0);
-    assert_eq!(changed_snapshot.run_transient_input_tokens, 0);
+    assert!(baseline_snapshot.run_transient_input_tokens > 0);
+    assert!(changed_snapshot.run_transient_input_tokens > 0);
     assert_ne!(
         baseline_snapshot.request_input_tokens,
         changed_snapshot.request_input_tokens
@@ -1962,6 +2003,72 @@ fn run_context_changes_only_the_dynamic_overlay_while_prompt_preferences_change_
         conversation_context_configuration_revision(&timestamp_only_change).unwrap(),
         "presentation-only settings timestamps must not open a new configuration epoch"
     );
+}
+
+#[test]
+fn durable_conversation_sections_are_not_duplicated_in_run_world_state() {
+    let mut input = conversation_context_input(vec![message("user", "Inspect the workspace")]);
+    input.context = Some(AgentRunContext {
+        conversation_id: Some("conversation-1".to_string()),
+        project_id: Some("project-1".to_string()),
+        workspace: Some(AgentWorkspaceContext {
+            project_id: Some("project-1".to_string()),
+            display_name: Some("Workspace".to_string()),
+            root_path: Some("/private/workspace".to_string()),
+        }),
+        attachment_library: None,
+        permissions: AgentPermissions::default(),
+    });
+    let conversation_snapshot = WorldStateSnapshot::new(
+        "conversation-world-state",
+        0,
+        vec![
+            crate::world_state::effective_permissions_section(
+                AgentPermissions::default(),
+                WorldStateLifetime::Conversation,
+            )
+            .unwrap(),
+            crate::world_state::workspace_binding_section(
+                input
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.workspace.as_ref()),
+                WorldStateLifetime::Conversation,
+            )
+            .unwrap(),
+            crate::world_state::interaction_profile_section(
+                input.prompt_preferences.as_ref(),
+                WorldStateLifetime::Conversation,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    input.world_state_records =
+        vec![
+            AnchoredWorldStateRecord::new(WorldStateRecord::Full(conversation_snapshot), None)
+                .unwrap(),
+        ];
+
+    let capabilities =
+        prepare_runtime_capabilities(&input, "no-duplicate-world-state", &[], true, None).unwrap();
+    let tracker = RunWorldStateTracker::new(
+        "no-duplicate-world-state",
+        &input,
+        &capabilities.initial_tool_set,
+    )
+    .unwrap();
+    let section_ids = tracker
+        .snapshot()
+        .sections
+        .iter()
+        .map(|section| section.id.clone())
+        .collect::<Vec<_>>();
+    assert!(section_ids.contains(&WorldStateSectionId::EffectiveTools));
+    assert!(section_ids.contains(&WorldStateSectionId::ModelCapabilities));
+    assert!(!section_ids.contains(&WorldStateSectionId::EffectivePermissions));
+    assert!(!section_ids.contains(&WorldStateSectionId::WorkspaceBinding));
+    assert!(!section_ids.contains(&WorldStateSectionId::InteractionProfile));
 }
 
 #[test]
@@ -3351,10 +3458,27 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
     dynamic_tool.description =
         "A deliberately verbose Skill-gated Tool schema used for context capacity testing."
             .to_string();
+    let tool_state = json!({
+        "stableTools": ["read_file"],
+        "dynamicTools": ["skill_dynamic_test_tool"],
+    });
+    let dynamic_run_world_state = WorldStateSnapshot::new(
+        "dynamic-context-preview",
+        0,
+        vec![WorldStateSectionEnvelope::model_visible(
+            WorldStateSectionId::EffectiveTools,
+            WorldStateLifetime::Run,
+            tool_state.clone(),
+            tool_state,
+        )
+        .unwrap()],
+    )
+    .unwrap();
     let dynamic_projection = AgentContextWindowToolProjection::new(
         "stable-test-revision".to_string(),
         "dynamic-test-revision".to_string(),
         "effective-test-revision".to_string(),
+        dynamic_run_world_state,
         vec![dynamic_tool.clone()],
     );
     let dynamic_preview =
@@ -3775,7 +3899,7 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
     assert!(
         context_window_snapshots[1].run_transient_input_tokens
             > context_window_snapshots[0].run_transient_input_tokens,
-        "the post-activation request must account for the paired ToolResult, full Skill instructions, dynamic availability notice and unlocked Tool schemas"
+        "the post-activation request must account for the paired ToolResult, full Skill instructions, tools.effective World State diff and unlocked Tool schemas"
     );
     drop(context_window_snapshots);
     let activation_call_id = output
@@ -5395,7 +5519,7 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
 }
 
 #[tokio::test]
-async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_checkpoints() {
+async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_durable_history() {
     use crate::protocol::{
         AgentActivatedSkillResources, AgentApprovalDecision, AgentApprovalDecisionStatus,
         AgentCommandPermission, AgentPatchPermission, AgentPermissions, AgentReadPermission,
@@ -5652,8 +5776,7 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
     assert!(model_request_messages.contains(&resource_read_call_id));
     assert!(!model_request_messages.contains("read-skill-resource"));
     let checkpoint_json = serde_json::to_string(checkpoint).unwrap();
-    assert!(!checkpoint_json.contains(RESOURCE_MARKER));
-    assert!(checkpoint_json.contains("contentOmittedFromHistory"));
+    assert!(checkpoint_json.contains(RESOURCE_MARKER));
     assert!(!serde_json::to_string(&output.events)
         .unwrap()
         .contains(RESOURCE_MARKER));
@@ -5709,11 +5832,14 @@ async fn skill_resource_text_is_live_for_the_model_but_omitted_from_approval_che
     assert!(!resumed_messages.contains("read-skill-resource"));
     assert!(!resumed_messages.contains("materialize-after-read"));
     assert!(resumed_messages.contains("applied"));
-    assert!(!resumed_messages.contains(RESOURCE_MARKER));
+    assert!(resumed_messages.contains(RESOURCE_MARKER));
     let trace = completed
         .conversation_turn_trace
         .as_ref()
         .expect("terminal conversation trace");
+    assert!(!serde_json::to_string(trace)
+        .unwrap()
+        .contains(RESOURCE_MARKER));
     for call_id in [&resource_read_call_id, &pending_call_id] {
         assert!(trace.items.iter().any(|item| matches!(
             item,

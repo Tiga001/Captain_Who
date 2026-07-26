@@ -150,7 +150,7 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
         .unwrap();
     assert!(
         expected.run_transient_input_tokens > conservative.run_transient_input_tokens,
-        "the complete Host projection must charge dynamic schemas and their availability notice"
+        "the complete Host projection must charge dynamic schemas and its Run World State snapshot"
     );
 
     let (notifications, mut receiver) = tokio::sync::mpsc::unbounded_channel();

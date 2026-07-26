@@ -248,3 +248,69 @@ fn deleting_conversation_removes_agent_rows_and_keeps_usage_rollup() {
     assert_eq!(pending_count, 0);
     assert_eq!(audit_count, 0);
 }
+
+#[test]
+fn deleting_messages_keeps_usage_totals_via_rollup() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let mut record = conversation("conversation-usage-delete", Some("project-1"), "message-1");
+    record.messages.push(ChatMessageRecord {
+        id: "message-2".to_string(),
+        role: "assistant".to_string(),
+        content: "done".to_string(),
+        created_at: 2,
+        status: Some("sent".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: None,
+        ui_state_json: None,
+    });
+    record.updated_at = 2;
+    service.save_conversation(record).unwrap();
+    let mut first_usage = agent_usage_record("conversation-usage-delete", "message-1");
+    first_usage.estimated_cost = Some(0.25);
+    service.upsert_agent_usage(first_usage).unwrap();
+    let mut second_usage = agent_usage_record("conversation-usage-delete", "message-2");
+    second_usage.estimated_cost = Some(0.25);
+    service.upsert_agent_usage(second_usage).unwrap();
+
+    service
+        .delete_chat_messages("conversation-usage-delete", &["message-1".to_string()])
+        .unwrap();
+
+    let summary = service
+        .get_usage_summary(
+            &crate::AgentUsageSummaryInput {
+                range: crate::AgentUsageSummaryRange::All,
+                from: None,
+                to: None,
+            },
+            200_000,
+        )
+        .unwrap();
+    assert_eq!(summary.request_count, 2);
+    assert_eq!(summary.message_count, 2);
+    assert_eq!(summary.input_tokens, Some(24));
+    assert_eq!(summary.output_tokens, Some(16));
+    assert_eq!(summary.total_tokens, Some(40));
+    assert_eq!(summary.estimated_cost, Some(0.5));
+
+    let connection = service.state.connection().unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM agent_usage_records", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM agent_deleted_usage_daily_rollups",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}

@@ -654,6 +654,21 @@ mod tests {
     }
 
     #[test]
+    fn resolves_dot_as_workspace_root() {
+        let fixture = TestWorkspace::new();
+        let context = fixture.context();
+
+        assert_eq!(
+            context.resolve_existing_path(".").unwrap(),
+            fixture.root.canonicalize().unwrap()
+        );
+        assert_eq!(
+            context.resolve_existing_path("./").unwrap(),
+            fixture.root.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
     fn registers_tavily_tools_when_configured() {
         let registry = ToolRegistry::defaults_with_search(Some(&AgentSearchConfig {
             mode: AgentSearchMode::Tavily,

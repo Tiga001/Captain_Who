@@ -403,18 +403,16 @@ impl AgentService {
         let snapshot = if agent_input.context_window_indicator_enabled {
             Some(match tool_projection {
                 Some(tool_projection) => state
-                    .snapshot_with_run_overlays_and_tool_projection(
+                    .snapshot_with_skill_overlays_and_tool_projection(
                         AgentContextWindowPhase::DurableCommit,
-                        agent_input.context.as_ref(),
                         agent_input.skill_discovery.as_ref(),
                         agent_input.skill_activation.as_ref(),
                         tool_projection,
                     )
                     .map_err(|error| error.to_string())?,
                 None => state
-                    .snapshot_with_run_overlays(
+                    .snapshot_with_skill_overlays(
                         AgentContextWindowPhase::DurableCommit,
-                        agent_input.context.as_ref(),
                         agent_input.skill_discovery.as_ref(),
                         agent_input.skill_activation.as_ref(),
                     )
@@ -580,9 +578,8 @@ impl AgentService {
                                 Some(match tool_projection {
                                     Some(tool_projection) => entry
                                         .state
-                                        .snapshot_with_run_overlays_and_tool_projection(
+                                        .snapshot_with_skill_overlays_and_tool_projection(
                                             AgentContextWindowPhase::DurableCommit,
-                                            agent_input.context.as_ref(),
                                             agent_input.skill_discovery.as_ref(),
                                             agent_input.skill_activation.as_ref(),
                                             tool_projection,
@@ -590,9 +587,8 @@ impl AgentService {
                                         .map_err(|error| error.to_string())?,
                                     None => entry
                                         .state
-                                        .snapshot_with_run_overlays(
+                                        .snapshot_with_skill_overlays(
                                             AgentContextWindowPhase::DurableCommit,
-                                            agent_input.context.as_ref(),
                                             agent_input.skill_discovery.as_ref(),
                                             agent_input.skill_activation.as_ref(),
                                         )

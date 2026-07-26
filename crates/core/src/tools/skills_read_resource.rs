@@ -92,7 +92,7 @@ impl AgentTool for SkillsReadResourceTool {
     }
 
     fn checkpoint_projection(&self, result: &AgentToolResult) -> AgentToolResult {
-        without_resource_content(result)
+        canonical_tool_result_for_context(result)
     }
 }
 
@@ -146,12 +146,10 @@ mod tests {
 
         let checkpoint = SkillsReadResourceTool.checkpoint_projection(&canonical);
         let checkpoint_result = checkpoint.result.as_ref().unwrap();
-        assert!(checkpoint_result.get("content").is_none());
         assert_eq!(
-            checkpoint_result
-                .get("contentOmittedFromHistory")
-                .and_then(Value::as_bool),
-            Some(true)
+            checkpoint_result.get("content").and_then(Value::as_str),
+            Some("private run-scoped instructions")
         );
+        assert!(checkpoint_result.get("contentOmittedFromHistory").is_none());
     }
 }

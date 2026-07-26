@@ -1,5 +1,9 @@
 use super::*;
 use mycopilot_core::{
+    world_state::{
+        effective_permissions_section, interaction_profile_section, model_capabilities_section,
+        workspace_binding_section,
+    },
     AnchoredWorldStateRecord, WorldStateDiff, WorldStateLifetime, WorldStateRecord,
     WorldStateReducer, WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSnapshot,
 };
@@ -163,72 +167,22 @@ fn conversation_world_state_sections(
     let permissions = context
         .map(|context| context.permissions)
         .unwrap_or_default();
-    let permission_state = json!({
-        "read": read_permission_label(permissions.read),
-        "write": write_permission_label(permissions.write),
-        "command": command_permission_label(permissions.command),
-        "commandSafety": command_safety_label(permissions.command_safety),
-        "patch": patch_permission_label(permissions.patch),
-    });
-    let permission_section = WorldStateSectionEnvelope::model_visible(
-        WorldStateSectionId::EffectivePermissions,
-        WorldStateLifetime::Conversation,
-        permission_state.clone(),
-        permission_state,
-    )
-    .map_err(|error| format!("无法构造权限 World State：{error}"))?;
+    let permission_section =
+        effective_permissions_section(permissions, WorldStateLifetime::Conversation)
+            .map_err(|error| format!("无法构造权限 World State：{error}"))?;
 
     let workspace = context.and_then(|context| context.workspace.as_ref());
-    let workspace_available = workspace
-        .and_then(|workspace| workspace.root_path.as_deref())
-        .map(str::trim)
-        .is_some_and(|root| !root.is_empty());
-    let workspace_state = json!({
-        "available": workspace_available,
-        "projectId": workspace.and_then(|workspace| workspace.project_id.as_deref()),
-        "displayName": workspace.and_then(|workspace| workspace.display_name.as_deref()),
-        "rootPath": workspace.and_then(|workspace| workspace.root_path.as_deref()),
-    });
-    let workspace_projection = json!({
-        "available": workspace_available,
-        "displayName": workspace.and_then(|workspace| workspace.display_name.as_deref()),
-        "pathConvention": if workspace_available { "workspace_relative" } else { "no_workspace" },
-    });
-    let workspace_section = WorldStateSectionEnvelope::model_visible(
-        WorldStateSectionId::WorkspaceBinding,
-        WorldStateLifetime::Conversation,
-        workspace_state,
-        workspace_projection,
-    )
-    .map_err(|error| format!("无法构造 workspace World State：{error}"))?;
+    let workspace_section = workspace_binding_section(workspace, WorldStateLifetime::Conversation)
+        .map_err(|error| format!("无法构造 workspace World State：{error}"))?;
 
-    let work_mode = match prompt_preferences.and_then(|preferences| preferences.work_mode) {
-        Some(AgentPromptWorkMode::General) => "general",
-        Some(AgentPromptWorkMode::Coding) | None => "coding",
-    };
-    let tone = match prompt_preferences.and_then(|preferences| preferences.tone) {
-        Some(AgentPromptTone::Friendly) => "friendly",
-        Some(AgentPromptTone::Pragmatic) | None => "pragmatic",
-    };
-    let detail_level = match prompt_preferences.and_then(|preferences| preferences.detail_level) {
-        Some(AgentPromptDetailLevel::Low) => "low",
-        Some(AgentPromptDetailLevel::High) => "high",
-        Some(AgentPromptDetailLevel::Medium) | None => "medium",
-    };
-    let interaction_state = json!({
-        "workMode": work_mode,
-        "tone": tone,
-        "detailLevel": detail_level,
-    });
-    let interaction_section = WorldStateSectionEnvelope::model_visible(
-        WorldStateSectionId::InteractionProfile,
-        WorldStateLifetime::Conversation,
-        interaction_state.clone(),
-        interaction_state,
-    )
-    .map_err(|error| format!("无法构造交互配置 World State：{error}"))?;
+    let interaction_section =
+        interaction_profile_section(prompt_preferences, WorldStateLifetime::Conversation)
+            .map_err(|error| format!("无法构造交互配置 World State：{error}"))?;
 
-    let environment_state = environment_projection(context, permissions, workspace_available);
+    // Conversation environment contains only facts observed independently of tool execution.
+    // Operational availability (including Office) belongs to the run-scoped EffectiveTools
+    // section, so this durable section must not guess or duplicate that authority.
+    let environment_state = environment_projection();
     let environment_section = WorldStateSectionEnvelope::model_visible(
         WorldStateSectionId::Environment,
         WorldStateLifetime::Conversation,
@@ -240,14 +194,9 @@ fn conversation_world_state_sections(
     // Model capabilities are execution authority, not prompting material. Keeping the section
     // HostOnly lets tools consult one coherent state model without teaching the model to assume a
     // capability that the runtime will still independently enforce.
-    let capability_section = WorldStateSectionEnvelope::host_only(
-        WorldStateSectionId::ModelCapabilities,
-        WorldStateLifetime::Conversation,
-        json!({
-            "imageInput": model_capabilities.image_input,
-        }),
-    )
-    .map_err(|error| format!("无法构造模型能力 World State：{error}"))?;
+    let capability_section =
+        model_capabilities_section(model_capabilities, WorldStateLifetime::Conversation)
+            .map_err(|error| format!("无法构造模型能力 World State：{error}"))?;
 
     Ok(vec![
         permission_section,
@@ -258,11 +207,7 @@ fn conversation_world_state_sections(
     ])
 }
 
-fn environment_projection(
-    context: Option<&AgentRunContext>,
-    permissions: mycopilot_core::AgentPermissions,
-    workspace_available: bool,
-) -> serde_json::Value {
+fn environment_projection() -> serde_json::Value {
     let shell_name = std::env::var("SHELL")
         .ok()
         .or_else(|| std::env::var("COMSPEC").ok())
@@ -275,13 +220,6 @@ fn environment_projection(
     let timezone = std::env::var("TZ")
         .ok()
         .filter(|value| !value.trim().is_empty());
-    let workspace = context.and_then(|context| context.workspace.as_ref());
-    let cwd = json!({
-        "kind": if workspace_available { "workspace" } else { "process" },
-        "pathConvention": if workspace_available { "workspace_relative" } else { "no_workspace" },
-        "displayName": workspace.and_then(|workspace| workspace.display_name.as_deref()),
-    });
-
     json!({
         "os": {
             "family": std::env::consts::OS,
@@ -290,7 +228,6 @@ fn environment_projection(
         "shell": {
             "name": shell_name,
         },
-        "cwd": cwd,
         "timezone": {
             "name": timezone,
             "source": if timezone.is_some() { "TZ" } else { "system" },
@@ -298,73 +235,6 @@ fn environment_projection(
         "network": {
             "publicWeb": "tool_gated",
             "note": "Use registered web tools when available; do not infer arbitrary network access.",
-        },
-        "runtimes": {
-            "nativeHost": {
-                "language": "rust",
-                "os": std::env::consts::OS,
-                "arch": std::env::consts::ARCH,
-            },
-            "shell": {
-                "available": true,
-                "approval": command_permission_label(permissions.command),
-                "safety": command_safety_label(permissions.command_safety),
-            },
-            "managedOffice": {
-                "available": true,
-                "version": null,
-            },
-        },
-        "executors": {
-            "shellCommand": {
-                "available": true,
-                "approval": command_permission_label(permissions.command),
-                "safety": command_safety_label(permissions.command_safety),
-            },
-            "structuredFilePatch": {
-                "available": permissions.write != mycopilot_core::AgentWritePermission::Denied,
-                "approval": patch_permission_label(permissions.patch),
-            },
-            "workspaceFileAccess": {
-                "read": read_permission_label(permissions.read),
-                "write": write_permission_label(permissions.write),
-            }
         }
     })
-}
-
-fn read_permission_label(permission: mycopilot_core::AgentReadPermission) -> &'static str {
-    match permission {
-        mycopilot_core::AgentReadPermission::WorkspaceOnly => "workspace_only",
-        mycopilot_core::AgentReadPermission::All => "all",
-    }
-}
-
-fn write_permission_label(permission: mycopilot_core::AgentWritePermission) -> &'static str {
-    match permission {
-        mycopilot_core::AgentWritePermission::Denied => "denied",
-        mycopilot_core::AgentWritePermission::WorkspaceOnly => "workspace_only",
-        mycopilot_core::AgentWritePermission::All => "all",
-    }
-}
-
-fn command_permission_label(permission: mycopilot_core::AgentCommandPermission) -> &'static str {
-    match permission {
-        mycopilot_core::AgentCommandPermission::RequireApproval => "require_approval",
-        mycopilot_core::AgentCommandPermission::AutoApprove => "auto_approve",
-    }
-}
-
-fn command_safety_label(permission: mycopilot_core::AgentCommandSafetyPolicy) -> &'static str {
-    match permission {
-        mycopilot_core::AgentCommandSafetyPolicy::Guarded => "guarded",
-        mycopilot_core::AgentCommandSafetyPolicy::FullAccess => "full_access",
-    }
-}
-
-fn patch_permission_label(permission: mycopilot_core::AgentPatchPermission) -> &'static str {
-    match permission {
-        mycopilot_core::AgentPatchPermission::RequireApproval => "require_approval",
-        mycopilot_core::AgentPatchPermission::AutoApprove => "auto_approve",
-    }
 }

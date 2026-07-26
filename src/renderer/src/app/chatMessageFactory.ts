@@ -81,6 +81,21 @@ export function createComposerDraft(overrides: Partial<ChatComposerDraft> = {}):
   }
 }
 
+export function synchronizeComposerDraftForScope(
+  renderedDrafts: Record<string, ChatComposerDraft>,
+  authoritativeDrafts: Record<string, ChatComposerDraft>,
+  scopeId: string
+): Record<string, ChatComposerDraft> {
+  const authoritativeDraft = authoritativeDrafts[scopeId]
+  if (!authoritativeDraft || renderedDrafts[scopeId] === authoritativeDraft) {
+    return renderedDrafts
+  }
+  return {
+    ...renderedDrafts,
+    [scopeId]: authoritativeDraft
+  }
+}
+
 function getChatMessageStatusFromConversationMessage(
   status: AgentConversationMessage['status']
 ): ChatMessage['status'] {

@@ -10,19 +10,35 @@ use super::{
     ConversationTraceRenderer, MeasuredContextBaseline,
 };
 use crate::llm::LlmMessageRole;
-use crate::prompts::build_dynamic_tool_availability_context;
 use crate::protocol::{
-    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentError, AgentResult, AgentRunContext,
+    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentError, AgentResult,
     AgentSkillActivation, AgentToolDefinition,
 };
-use crate::{ConversationTurnTrace, ConversationTurnTraceTerminalStatus};
+use crate::{ConversationTurnTrace, ConversationTurnTraceTerminalStatus, WorldStateSnapshot};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentContextWindowToolProjection {
     stable_revision: String,
     dynamic_revision: String,
     effective_revision: String,
+    initial_run_world_state: WorldStateSnapshot,
     dynamic_definitions: Vec<AgentToolDefinition>,
+}
+
+impl std::fmt::Debug for AgentContextWindowToolProjection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentContextWindowToolProjection")
+            .field("stable_revision", &self.stable_revision)
+            .field("dynamic_revision", &self.dynamic_revision)
+            .field("effective_revision", &self.effective_revision)
+            .field(
+                "run_world_state_revision",
+                &self.initial_run_world_state.revision,
+            )
+            .field("dynamic_definition_count", &self.dynamic_definitions.len())
+            .finish()
+    }
 }
 
 impl AgentContextWindowToolProjection {
@@ -30,12 +46,14 @@ impl AgentContextWindowToolProjection {
         stable_revision: String,
         dynamic_revision: String,
         effective_revision: String,
+        initial_run_world_state: WorldStateSnapshot,
         dynamic_definitions: Vec<AgentToolDefinition>,
     ) -> Self {
         Self {
             stable_revision,
             dynamic_revision,
             effective_revision,
+            initial_run_world_state,
             dynamic_definitions,
         }
     }
@@ -50,6 +68,10 @@ impl AgentContextWindowToolProjection {
 
     pub fn effective_revision(&self) -> &str {
         &self.effective_revision
+    }
+
+    pub(crate) fn initial_run_world_state(&self) -> &WorldStateSnapshot {
+        &self.initial_run_world_state
     }
 
     pub fn dynamic_definitions(&self) -> &[AgentToolDefinition] {
@@ -277,32 +299,8 @@ impl AgentConversationContextState {
             .persistent_snapshot(&self.model, phase))
     }
 
-    /// Measures request-specific runtime bindings in addition to Skill overlays without admitting
-    /// any of them into the durable conversation baseline.
-    pub fn snapshot_with_run_overlays(
-        &mut self,
-        phase: AgentContextWindowPhase,
-        run_context: Option<&AgentRunContext>,
-        discovery: Option<&crate::skills::AgentSkillDiscoverySnapshot>,
-        activation: Option<&AgentSkillActivation>,
-    ) -> AgentResult<AgentContextWindowSnapshot> {
-        let baseline = self.shared_baseline()?;
-        let mut preview = baseline.into_frame();
-        ContextAssembler::append_skill_overlays(&mut preview, discovery, activation)?;
-        ContextAssembler::append_runtime_context(&mut preview, run_context);
-        Ok(self
-            .detector
-            .inspect(
-                &mut preview,
-                self.context_window_tokens,
-                self.reserved_output_tokens,
-            )
-            .persistent_snapshot(&self.model, phase))
-    }
-
-    /// Measures the complete run-transient Tool projection used by production requests: both the
-    /// provider Tool schemas and the backend-authored availability message rendered from the same
-    /// stable/dynamic revisions.
+    /// Measures the complete run-transient projection used by production requests: the exact
+    /// backend-owned Run World State snapshot, Skill overlays and provider Tool schemas.
     pub fn snapshot_with_skill_overlays_and_tool_projection(
         &mut self,
         phase: AgentContextWindowPhase,
@@ -312,58 +310,11 @@ impl AgentConversationContextState {
     ) -> AgentResult<AgentContextWindowSnapshot> {
         let baseline = self.shared_baseline()?;
         let mut preview = baseline.into_frame();
+        ContextAssembler::append_initial_run_world_state(
+            &mut preview,
+            Some(projection.initial_run_world_state()),
+        )?;
         ContextAssembler::append_skill_overlays(&mut preview, discovery, activation)?;
-        if let Some(context) = build_dynamic_tool_availability_context(
-            projection.dynamic_definitions(),
-            projection.stable_revision(),
-            projection.dynamic_revision(),
-        ) {
-            preview.push(ContextItem::text(
-                LlmMessageRole::System,
-                context,
-                ContextSource::RuntimeExtension,
-                ContextScope::Run,
-                ContextRetention::RequestOnly,
-            ));
-        }
-        Ok(self
-            .detector
-            .inspect_with_dynamic_tools(
-                &mut preview,
-                self.context_window_tokens,
-                self.reserved_output_tokens,
-                projection.dynamic_definitions(),
-            )
-            .persistent_snapshot(&self.model, phase))
-    }
-
-    /// Measures the exact run-specific context and Tool suffix used by a production request while
-    /// preserving the cached configuration/durable prefix.
-    pub fn snapshot_with_run_overlays_and_tool_projection(
-        &mut self,
-        phase: AgentContextWindowPhase,
-        run_context: Option<&AgentRunContext>,
-        discovery: Option<&crate::skills::AgentSkillDiscoverySnapshot>,
-        activation: Option<&AgentSkillActivation>,
-        projection: &AgentContextWindowToolProjection,
-    ) -> AgentResult<AgentContextWindowSnapshot> {
-        let baseline = self.shared_baseline()?;
-        let mut preview = baseline.into_frame();
-        ContextAssembler::append_skill_overlays(&mut preview, discovery, activation)?;
-        ContextAssembler::append_runtime_context(&mut preview, run_context);
-        if let Some(context) = build_dynamic_tool_availability_context(
-            projection.dynamic_definitions(),
-            projection.stable_revision(),
-            projection.dynamic_revision(),
-        ) {
-            preview.push(ContextItem::text(
-                LlmMessageRole::System,
-                context,
-                ContextSource::RuntimeExtension,
-                ContextScope::Run,
-                ContextRetention::RequestOnly,
-            ));
-        }
         Ok(self
             .detector
             .inspect_with_dynamic_tools(

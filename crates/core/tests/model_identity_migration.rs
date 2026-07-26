@@ -27,6 +27,14 @@ fn migrates_legacy_provider_path_into_the_canonical_model_id() {
             INSERT INTO conversations (id, model_id, title, created_at, updated_at)
             VALUES ('conversation-1', 'model-a', 'Conversation', 1, 1);
 
+            INSERT INTO messages (
+                id, conversation_id, role, content, status, agent_run_json,
+                ui_state_json, created_at, position
+            ) VALUES (
+                'message-1', 'conversation-1', 'assistant', 'done', 'sent',
+                NULL, NULL, 1, 0
+            );
+
             INSERT INTO composer_drafts (
                 scope_id, message, permission_mode, permission_mode_version, model_id,
                 project_id, attachments_json, skills_json, updated_at

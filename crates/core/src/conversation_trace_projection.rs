@@ -174,6 +174,7 @@ pub(crate) fn project_tool_result(
         "write_file" => project_write_file_result(observation),
         "apply_patch" => project_apply_patch_result(operation, observation),
         "run_command" => project_run_command_result(observation),
+        "skills_read_resource" => project_skill_resource_result(observation),
         tool if is_read_tool(tool) => project_read_result(observation),
         _ => project_generic_value(observation),
     };
@@ -797,6 +798,56 @@ fn project_read_result(value: &Value) -> (Value, bool) {
     (Value::Object(output), truncated)
 }
 
+fn project_skill_resource_result(value: &Value) -> (Value, bool) {
+    let Some(input) = value.as_object() else {
+        return project_generic_value(value);
+    };
+    let (mut projected, mut truncated) = project_selected_map(
+        input,
+        &[
+            ("uri", DurableTraceProjectionLimits::PATH_CHARS),
+            ("resourceUri", DurableTraceProjectionLimits::PATH_CHARS),
+            (
+                "startByte",
+                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+            ),
+            (
+                "endByteExclusive",
+                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+            ),
+            (
+                "totalBytes",
+                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+            ),
+            (
+                "returnedBytes",
+                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+            ),
+            (
+                "nextStartByte",
+                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+            ),
+            ("status", DurableTraceProjectionLimits::TITLE_CHARS),
+            ("code", DurableTraceProjectionLimits::TITLE_CHARS),
+            ("errorCode", DurableTraceProjectionLimits::TITLE_CHARS),
+            ("message", DurableTraceProjectionLimits::TOOL_ERROR_CHARS),
+            ("error", DurableTraceProjectionLimits::TOOL_ERROR_CHARS),
+            ("recovery", DurableTraceProjectionLimits::TITLE_CHARS),
+            (
+                "contentOmittedFromHistory",
+                DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+            ),
+        ],
+    );
+    if input.contains_key("content") || input.contains_key("text") {
+        if let Some(output) = projected.as_object_mut() {
+            output.insert("contentOmittedFromHistory".to_string(), Value::Bool(true));
+            truncated = true;
+        }
+    }
+    (projected, truncated)
+}
+
 fn project_selected_object(value: &Value, fields: &[(&str, usize)]) -> (Value, bool) {
     let Some(input) = value.as_object() else {
         return project_generic_value(value);
@@ -1149,5 +1200,32 @@ mod tests {
             .unwrap()
             .starts_with(EARLIER_OUTPUT_OMITTED_PREFIX));
         assert_eq!(projected["stderrTail"], "important failure at the end");
+    }
+
+    #[test]
+    fn skill_resource_body_is_checkpoint_only_and_never_enters_durable_projection() {
+        let result = json!({
+            "uri": "skill://package/example/revision/references/guide.md",
+            "startByte": 0,
+            "endByteExclusive": 26,
+            "totalBytes": 26,
+            "returnedBytes": 26,
+            "content": "private run-scoped content"
+        });
+
+        let (projected, error, error_truncated) =
+            project_tool_result("skills_read_resource", None, &result, None);
+        assert!(projected.truncated);
+        assert!(!error_truncated);
+        assert!(error.is_none());
+        assert_eq!(
+            projected.value["uri"],
+            "skill://package/example/revision/references/guide.md"
+        );
+        assert_eq!(projected.value["contentOmittedFromHistory"], true);
+        assert!(projected.value.get("content").is_none());
+        assert!(!serde_json::to_string(&projected.value)
+            .unwrap()
+            .contains("private run-scoped content"));
     }
 }

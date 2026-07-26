@@ -1,8 +1,9 @@
 use super::*;
 use crate::context::ContextOrigin;
 use crate::world_state::{
-    WorldStateDiff, WorldStateLifetime, WorldStateRecord, WorldStateSectionEnvelope,
-    WorldStateSectionId, WorldStateSnapshot,
+    effective_permissions_section, interaction_profile_section, model_capabilities_section,
+    workspace_binding_section, WorldStateDiff, WorldStateLifetime, WorldStateRecord,
+    WorldStateSectionEnvelope, WorldStateSectionId, WorldStateSnapshot,
 };
 
 /// Exact run-scoped World State ledger used by the active tool loop.
@@ -160,14 +161,8 @@ fn run_world_state_sections(
 ) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
     let mut sections = vec![
         effective_tools_section(tool_set)?,
-        WorldStateSectionEnvelope::host_only(
-            WorldStateSectionId::ModelCapabilities,
-            WorldStateLifetime::Run,
-            json!({
-                "imageInput": input.model_capabilities.image_input,
-            }),
-        )
-        .map_err(world_state_error)?,
+        model_capabilities_section(input.model_capabilities, WorldStateLifetime::Run)
+            .map_err(world_state_error)?,
     ];
 
     let extension_owns_skill_state = extension_sections
@@ -274,6 +269,37 @@ fn effective_tools_section(tool_set: &EffectiveToolSet) -> AgentResult<WorldStat
     .map_err(world_state_error)
 }
 
+/// Renders the same provider-neutral World State diff that the runtime will append after a dynamic
+/// Tool capability change. Capacity reservation must price this message rather than a parallel
+/// availability notice with independent wording.
+pub(super) fn effective_tools_transition_message(
+    current_tool_set: &EffectiveToolSet,
+    projected_tool_set: &EffectiveToolSet,
+) -> AgentResult<Option<LlmMessage>> {
+    let current = WorldStateSnapshot::new(
+        "tool-capacity-projection",
+        0,
+        vec![effective_tools_section(current_tool_set)?],
+    )
+    .map_err(world_state_error)?;
+    let target = WorldStateSnapshot::new(
+        current.epoch_id.clone(),
+        1,
+        vec![effective_tools_section(projected_tool_set)?],
+    )
+    .map_err(world_state_error)?;
+    if current.revision == target.revision {
+        return Ok(None);
+    }
+    let diff = WorldStateDiff::between(&current, &target).map_err(world_state_error)?;
+    diff.model_projection_against(&current, WorldStateLifetime::Run)
+        .map_err(world_state_error)
+        .map(|projection| {
+            projection
+                .map(|projection| LlmMessage::backend_state(projection.render_sanitized_text()))
+        })
+}
+
 fn fallback_conversation_sections(
     input: &AgentChatInput,
 ) -> AgentResult<Vec<WorldStateSectionEnvelope>> {
@@ -282,71 +308,17 @@ fn fallback_conversation_sections(
         .as_ref()
         .map(|context| context.permissions)
         .unwrap_or_default();
-    let permission_state = json!({
-        "read": read_permission_label(permissions.read),
-        "write": write_permission_label(permissions.write),
-        "command": command_permission_label(permissions.command),
-        "commandSafety": command_safety_label(permissions.command_safety),
-        "patch": patch_permission_label(permissions.patch),
-    });
     let workspace = input
         .context
         .as_ref()
         .and_then(|context| context.workspace.as_ref());
-    let workspace_available = workspace
-        .and_then(|workspace| workspace.root_path.as_deref())
-        .map(str::trim)
-        .is_some_and(|root| !root.is_empty());
-    let workspace_state = json!({
-        "available": workspace_available,
-        "projectId": workspace.and_then(|workspace| workspace.project_id.as_deref()),
-        "displayName": workspace.and_then(|workspace| workspace.display_name.as_deref()),
-        "rootPath": workspace.and_then(|workspace| workspace.root_path.as_deref()),
-    });
-    let workspace_projection = json!({
-        "available": workspace_available,
-        "displayName": workspace.and_then(|workspace| workspace.display_name.as_deref()),
-        "pathConvention": if workspace_available { "workspace_relative" } else { "no_workspace" },
-    });
-    let preferences = input.prompt_preferences.as_ref();
-    let interaction_state = json!({
-        "workMode": match preferences.and_then(|value| value.work_mode) {
-            Some(crate::AgentPromptWorkMode::General) => "general",
-            Some(crate::AgentPromptWorkMode::Coding) | None => "coding",
-        },
-        "tone": match preferences.and_then(|value| value.tone) {
-            Some(crate::AgentPromptTone::Friendly) => "friendly",
-            Some(crate::AgentPromptTone::Pragmatic) | None => "pragmatic",
-        },
-        "detailLevel": match preferences.and_then(|value| value.detail_level) {
-            Some(crate::AgentPromptDetailLevel::Low) => "low",
-            Some(crate::AgentPromptDetailLevel::High) => "high",
-            Some(crate::AgentPromptDetailLevel::Medium) | None => "medium",
-        },
-    });
 
     Ok(vec![
-        WorldStateSectionEnvelope::model_visible(
-            WorldStateSectionId::EffectivePermissions,
-            WorldStateLifetime::Run,
-            permission_state.clone(),
-            permission_state,
-        )
-        .map_err(world_state_error)?,
-        WorldStateSectionEnvelope::model_visible(
-            WorldStateSectionId::WorkspaceBinding,
-            WorldStateLifetime::Run,
-            workspace_state,
-            workspace_projection,
-        )
-        .map_err(world_state_error)?,
-        WorldStateSectionEnvelope::model_visible(
-            WorldStateSectionId::InteractionProfile,
-            WorldStateLifetime::Run,
-            interaction_state.clone(),
-            interaction_state,
-        )
-        .map_err(world_state_error)?,
+        effective_permissions_section(permissions, WorldStateLifetime::Run)
+            .map_err(world_state_error)?,
+        workspace_binding_section(workspace, WorldStateLifetime::Run).map_err(world_state_error)?,
+        interaction_profile_section(input.prompt_preferences.as_ref(), WorldStateLifetime::Run)
+            .map_err(world_state_error)?,
     ])
 }
 
@@ -388,42 +360,6 @@ fn world_state_diff_context_item(
             diff.epoch_id, diff.sequence
         ))),
     )
-}
-
-fn read_permission_label(permission: AgentReadPermission) -> &'static str {
-    match permission {
-        AgentReadPermission::WorkspaceOnly => "workspace_only",
-        AgentReadPermission::All => "all",
-    }
-}
-
-fn write_permission_label(permission: AgentWritePermission) -> &'static str {
-    match permission {
-        AgentWritePermission::Denied => "denied",
-        AgentWritePermission::WorkspaceOnly => "workspace_only",
-        AgentWritePermission::All => "all",
-    }
-}
-
-fn command_permission_label(permission: AgentCommandPermission) -> &'static str {
-    match permission {
-        AgentCommandPermission::RequireApproval => "require_approval",
-        AgentCommandPermission::AutoApprove => "auto_approve",
-    }
-}
-
-fn command_safety_label(permission: AgentCommandSafetyPolicy) -> &'static str {
-    match permission {
-        AgentCommandSafetyPolicy::Guarded => "guarded",
-        AgentCommandSafetyPolicy::FullAccess => "full_access",
-    }
-}
-
-fn patch_permission_label(permission: crate::AgentPatchPermission) -> &'static str {
-    match permission {
-        crate::AgentPatchPermission::RequireApproval => "require_approval",
-        crate::AgentPatchPermission::AutoApprove => "auto_approve",
-    }
 }
 
 fn world_state_error(error: crate::world_state::WorldStateError) -> AgentError {

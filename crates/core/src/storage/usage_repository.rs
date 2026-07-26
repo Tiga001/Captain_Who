@@ -3,7 +3,7 @@ use crate::{
     AgentUsageClearInput, AgentUsageClearOutput, AgentUsageModelSummary, AgentUsageSummaryInput,
     AgentUsageSummaryOutput, AgentUsageSummaryRange,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection};
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -127,7 +127,12 @@ pub fn roll_up_deleted_usage_for_conversation(
     conversation_id: &str,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
-    roll_up_deleted_usage(connection, "conversation_id = ?1", conversation_id, now_ms)
+    roll_up_deleted_usage(
+        connection,
+        "conversation_id = ?1",
+        vec![SqlValue::Text(conversation_id.to_string())],
+        now_ms,
+    )
 }
 
 pub fn roll_up_deleted_usage_for_project(
@@ -144,7 +149,62 @@ pub fn roll_up_deleted_usage_for_project(
             WHERE project_id = ?1
         )
         ",
-        project_id,
+        vec![SqlValue::Text(project_id.to_string())],
+        now_ms,
+    )
+}
+
+pub fn roll_up_deleted_usage_for_messages(
+    connection: &Connection,
+    conversation_id: &str,
+    message_ids: &[String],
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    if message_ids.is_empty() {
+        return Ok(());
+    }
+    let message_ids_json = serde_json::to_string(message_ids)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    roll_up_deleted_usage(
+        connection,
+        "
+        conversation_id = ?1
+        AND message_id IN (SELECT value FROM json_each(?2))
+        ",
+        vec![
+            SqlValue::Text(conversation_id.to_string()),
+            SqlValue::Text(message_ids_json),
+        ],
+        now_ms,
+    )
+}
+
+pub(super) fn roll_up_orphaned_usage(connection: &Connection) -> rusqlite::Result<()> {
+    let now_ms = connection.query_row(
+        "
+        SELECT COALESCE(MAX(created_at), 0)
+        FROM agent_usage_records
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE messages.id = agent_usage_records.message_id
+              AND messages.conversation_id = agent_usage_records.conversation_id
+        )
+        ",
+        [],
+        |row| row.get(0),
+    )?;
+    roll_up_deleted_usage(
+        connection,
+        "
+        NOT EXISTS (
+            SELECT 1
+            FROM messages
+            WHERE messages.id = agent_usage_records.message_id
+              AND messages.conversation_id = agent_usage_records.conversation_id
+        )
+        ",
+        Vec::new(),
         now_ms,
     )
 }
@@ -152,9 +212,11 @@ pub fn roll_up_deleted_usage_for_project(
 fn roll_up_deleted_usage(
     connection: &Connection,
     usage_filter_sql: &str,
-    usage_filter_value: &str,
+    mut usage_filter_values: Vec<SqlValue>,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
+    let day_parameter = usage_filter_values.len() + 1;
+    let now_parameter = usage_filter_values.len() + 2;
     let statement = format!(
         "
         INSERT INTO agent_deleted_usage_daily_rollups (
@@ -175,7 +237,7 @@ fn roll_up_deleted_usage(
             updated_at
         )
         SELECT
-            CAST(created_at / ?2 AS INTEGER) * ?2,
+            CAST(created_at / ?{day_parameter} AS INTEGER) * ?{day_parameter},
             model_id,
             model_name,
             COALESCE(SUM(billable_request_count), 0),
@@ -191,19 +253,21 @@ fn roll_up_deleted_usage(
             SUM(cached_input_tokens),
             SUM(cache_creation_input_tokens),
             SUM(estimated_cost),
-            ?3,
-            ?3
+            ?{now_parameter},
+            ?{now_parameter}
         FROM agent_usage_records
         WHERE {usage_filter_sql}
         GROUP BY
-            CAST(created_at / ?2 AS INTEGER) * ?2,
+            CAST(created_at / ?{day_parameter} AS INTEGER) * ?{day_parameter},
             model_id,
             model_name
         ON CONFLICT(usage_day, model_id, model_name) DO UPDATE SET
             {DELETED_USAGE_ROLLUP_UPDATE_SQL}
         "
     );
-    connection.execute(&statement, params![usage_filter_value, DAY_MS, now_ms])?;
+    usage_filter_values.push(SqlValue::Integer(DAY_MS));
+    usage_filter_values.push(SqlValue::Integer(now_ms));
+    connection.execute(&statement, params_from_iter(usage_filter_values))?;
     Ok(())
 }
 
@@ -578,6 +642,22 @@ mod tests {
             .unwrap();
     }
 
+    fn upsert_test_usage_record(
+        connection: &Connection,
+        record: &AgentUsageRecordInsert,
+    ) -> rusqlite::Result<()> {
+        connection.execute(
+            "
+            INSERT OR IGNORE INTO messages (
+                id, conversation_id, role, content, status,
+                agent_run_json, ui_state_json, created_at, position
+            ) VALUES (?1, ?2, 'assistant', 'done', 'sent', NULL, NULL, ?3, 0)
+            ",
+            params![record.message_id, record.conversation_id, record.created_at],
+        )?;
+        upsert_usage_record(connection, record)
+    }
+
     fn usage_record(
         conversation_id: &str,
         message_id: &str,
@@ -617,7 +697,7 @@ mod tests {
         let connection = in_memory_connection();
         insert_conversation(&connection, "conversation-1");
         insert_conversation(&connection, "conversation-2");
-        upsert_usage_record(
+        upsert_test_usage_record(
             &connection,
             &AgentUsageRecordInsert {
                 id: "usage-1".to_string(),
@@ -645,7 +725,7 @@ mod tests {
             },
         )
         .unwrap();
-        upsert_usage_record(
+        upsert_test_usage_record(
             &connection,
             &AgentUsageRecordInsert {
                 id: "usage-2".to_string(),
@@ -714,7 +794,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        upsert_usage_record(
+        upsert_test_usage_record(
             &connection,
             &usage_record(
                 "conversation-1",
@@ -726,7 +806,7 @@ mod tests {
             ),
         )
         .unwrap();
-        upsert_usage_record(
+        upsert_test_usage_record(
             &connection,
             &usage_record(
                 "conversation-2",
@@ -793,7 +873,7 @@ mod tests {
     fn rolls_up_deleted_conversation_usage_into_summary_and_clear() {
         let connection = in_memory_connection();
         insert_conversation(&connection, "conversation-1");
-        upsert_usage_record(
+        upsert_test_usage_record(
             &connection,
             &AgentUsageRecordInsert {
                 id: "usage-1".to_string(),
@@ -821,7 +901,7 @@ mod tests {
             },
         )
         .unwrap();
-        upsert_usage_record(
+        upsert_test_usage_record(
             &connection,
             &AgentUsageRecordInsert {
                 id: "usage-2".to_string(),
@@ -906,6 +986,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(summary.message_count, 0);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM messages", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -976,7 +1064,7 @@ mod tests {
     fn clears_usage_records_without_touching_messages() {
         let connection = in_memory_connection();
         insert_conversation(&connection, "conversation-1");
-        upsert_usage_record(
+        upsert_test_usage_record(
             &connection,
             &AgentUsageRecordInsert {
                 id: "usage-1".to_string(),
@@ -1026,6 +1114,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(summary.message_count, 0);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM messages", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type SetStateAction
+} from 'react'
 import { createPortal } from 'react-dom'
 import type { AppWindowState } from '@mycopilot/host-api'
 import type {
@@ -88,7 +96,8 @@ import {
   createConversationTitle,
   createId,
   createUserMessage,
-  mergeConversationMessageFromBackend
+  mergeConversationMessageFromBackend,
+  synchronizeComposerDraftForScope
 } from './chatMessageFactory'
 import {
   buildMessageContentWithAttachments,
@@ -352,6 +361,12 @@ export function AppShell() {
     },
     []
   )
+
+  useLayoutEffect(() => {
+    setDrafts((renderedDrafts) =>
+      synchronizeComposerDraftForScope(renderedDrafts, draftsRef.current, activeDraftId)
+    )
+  }, [activeDraftId])
 
   const hydrateConversation = useCallback(
     (conversationId: string): Promise<ChatConversation | null> => {
@@ -782,12 +797,15 @@ export function AppShell() {
     [setDraftsWithRef]
   )
 
-  const requestSkillCatalogRefresh = useCallback((scopeId: string) => {
-    setSkillCatalogRefreshTokens((currentTokens) => ({
-      ...currentTokens,
-      [scopeId]: (currentTokens[scopeId] ?? 0) + 1
-    }))
-  }, [])
+  const requestSkillCatalogRefresh = useCallback(
+    (scopeId: string) => {
+      setSkillCatalogRefreshTokens((currentTokens) => ({
+        ...currentTokens,
+        [scopeId]: (currentTokens[scopeId] ?? 0) + 1
+      }))
+    },
+    [setSkillCatalogRefreshTokens]
+  )
 
   const clearPendingMessageDelta = useCallback((runId: string) => {
     const pendingDelta = pendingMessageDeltasRef.current.get(runId)

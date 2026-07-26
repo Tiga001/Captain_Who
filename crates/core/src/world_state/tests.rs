@@ -33,6 +33,55 @@ fn host_section(id: WorldStateSectionId, value: &str) -> WorldStateSectionEnvelo
 }
 
 #[test]
+fn canonical_domain_sections_keep_authority_projection_and_lifetime_separate() {
+    let permissions = crate::protocol::AgentPermissions {
+        read: crate::protocol::AgentReadPermission::All,
+        write: crate::protocol::AgentWritePermission::WorkspaceOnly,
+        command: crate::protocol::AgentCommandPermission::AutoApprove,
+        command_safety: crate::protocol::AgentCommandSafetyPolicy::Guarded,
+        patch: crate::protocol::AgentPatchPermission::RequireApproval,
+    };
+    let conversation_permissions =
+        effective_permissions_section(permissions, WorldStateLifetime::Conversation).unwrap();
+    let run_permissions =
+        effective_permissions_section(permissions, WorldStateLifetime::Run).unwrap();
+    assert_eq!(
+        conversation_permissions.model_projection,
+        run_permissions.model_projection
+    );
+    assert_eq!(
+        conversation_permissions.id,
+        WorldStateSectionId::EffectivePermissions
+    );
+    assert_ne!(
+        conversation_permissions.revision, run_permissions.revision,
+        "lifetime remains part of the authoritative section identity"
+    );
+
+    let workspace = crate::protocol::AgentWorkspaceContext {
+        project_id: Some("project-secret".to_string()),
+        display_name: Some("Visible workspace".to_string()),
+        root_path: Some("/private/authoritative/root".to_string()),
+    };
+    let workspace =
+        workspace_binding_section(Some(&workspace), WorldStateLifetime::Conversation).unwrap();
+    assert_eq!(workspace.state["rootPath"], "/private/authoritative/root");
+    let rendered_projection = serde_json::to_string(&workspace.model_projection).unwrap();
+    assert!(rendered_projection.contains("Visible workspace"));
+    assert!(rendered_projection.contains("workspace_relative"));
+    assert!(!rendered_projection.contains("/private/authoritative/root"));
+    assert!(!rendered_projection.contains("project-secret"));
+
+    let capabilities = model_capabilities_section(
+        crate::protocol::ModelCapabilities { image_input: true },
+        WorldStateLifetime::Run,
+    )
+    .unwrap();
+    assert_eq!(capabilities.visibility, WorldStateVisibility::HostOnly);
+    assert!(capabilities.model_projection.is_none());
+}
+
+#[test]
 fn snapshot_order_and_sha256_revision_are_deterministic() {
     let workspace = visible_section(WorldStateSectionId::WorkspaceBinding, "workspace");
     let permissions = visible_section(WorldStateSectionId::EffectivePermissions, "permissions");

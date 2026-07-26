@@ -272,6 +272,13 @@ impl StorageService {
 
         let mut connection = self.state.connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
+        usage_repository::roll_up_deleted_usage_for_messages(
+            &transaction,
+            conversation_id,
+            message_ids,
+            now_ms(),
+        )
+        .map_err(storage_error)?;
         let attachments = attachment_repository::list_message_attachments(
             &transaction,
             conversation_id,

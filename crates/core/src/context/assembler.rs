@@ -5,8 +5,7 @@ use super::{
 };
 use crate::llm::{LlmImage, LlmMessage, LlmMessageRole};
 use crate::protocol::{
-    AgentActivatedSkill, AgentChatMessage, AgentError, AgentResult, AgentRunContext,
-    AgentSkillActivation,
+    AgentActivatedSkill, AgentChatMessage, AgentError, AgentResult, AgentSkillActivation,
 };
 use crate::skills::AgentSkillDiscoverySnapshot;
 use crate::world_state::{
@@ -235,24 +234,6 @@ impl ContextAssembler {
             ContextScope::Run,
         ));
         Ok(())
-    }
-
-    /// Appends the backend-authored state that is specific to the current run/request.
-    ///
-    /// Unlike the configuration system prompt, this item is deliberately request-only: changing
-    /// input-bar permissions, workspace selection, conversation binding or attachment availability
-    /// must update the next request without invalidating or entering the durable cache prefix.
-    pub(crate) fn append_runtime_context(
-        frame: &mut ContextFrame,
-        context: Option<&AgentRunContext>,
-    ) {
-        frame.push(ContextItem::text(
-            LlmMessageRole::System,
-            crate::prompts::build_runtime_context_overlay(context),
-            ContextSource::RuntimeExtension,
-            ContextScope::Run,
-            ContextRetention::RequestOnly,
-        ));
     }
 }
 
