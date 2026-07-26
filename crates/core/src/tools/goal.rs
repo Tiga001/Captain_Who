@@ -97,6 +97,7 @@ impl AgentTool for CreateGoalTool {
         let goal = context
             .storage()?
             .create_conversation_goal(
+                crate::ConversationGoalMutationActor::Model,
                 context.conversation_id()?,
                 &args.objective,
                 crate::storage::now_ms(),
@@ -132,13 +133,13 @@ impl AgentTool for UpdateGoalTool {
     fn definition(&self) -> AgentToolDefinition {
         definition(
             "update_goal",
-            "Mark the current explicit goal completed or genuinely blocked. Completion is rejected while this run has unfinished Todo items. Do not use this for ordinary progress, edits, pause, resume, or cancellation.",
+            "Explicitly change the current Goal to active, completed, blocked, or cancelled. Use active only when the user resumes a blocked Goal; use cancelled only when the user explicitly abandons it. Never infer either from run or approval lifecycle. Completion is rejected while this run has unfinished Todo items.",
             json!({
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
-                        "enum": ["completed", "blocked"]
+                        "enum": ["active", "completed", "blocked", "cancelled"]
                     }
                 },
                 "required": ["status"],
@@ -158,14 +159,20 @@ impl AgentTool for UpdateGoalTool {
                 runtime.unfinished_todo_items
             )));
         }
-        let stopped_reason = (args.status == ConversationGoalStatus::Blocked).then(|| {
-            runtime
-                .blocked_reason
-                .unwrap_or_else(|| "The current run reported a genuine blocker.".to_string())
-        });
+        let stopped_reason = match args.status {
+            ConversationGoalStatus::Blocked => Some(
+                runtime
+                    .blocked_reason
+                    .unwrap_or_else(|| "The current run reported a genuine blocker.".to_string()),
+            ),
+            ConversationGoalStatus::Active
+            | ConversationGoalStatus::Completed
+            | ConversationGoalStatus::Cancelled => None,
+        };
         let goal = context
             .storage()?
             .update_conversation_goal_status(
+                crate::ConversationGoalMutationActor::Model,
                 context.conversation_id()?,
                 args.status,
                 stopped_reason.as_deref(),
@@ -298,7 +305,12 @@ mod tests {
             })
             .unwrap();
         storage
-            .create_conversation_goal("conversation-goal-tool", "Finish the goal.", 2)
+            .create_conversation_goal(
+                crate::ConversationGoalMutationActor::User,
+                "conversation-goal-tool",
+                "Finish the goal.",
+                2,
+            )
             .unwrap();
         (root, storage)
     }
@@ -393,5 +405,33 @@ mod tests {
             goal.stopped_reason.as_deref(),
             Some("Need credentials: token missing")
         );
+
+        let resumed = UpdateGoalTool
+            .execute(&context, json!({ "status": "active" }))
+            .unwrap();
+        assert_eq!(resumed["status"], "active");
+        let goal = storage
+            .load_conversation_goal("conversation-goal-tool")
+            .unwrap()
+            .unwrap();
+        assert_eq!(goal.status, ConversationGoalStatus::Active);
+        assert_eq!(goal.stopped_reason, None);
+    }
+
+    #[test]
+    fn model_can_cancel_only_through_the_explicit_goal_tool_status() {
+        let (_root, storage) = goal_test_storage();
+        let context = goal_test_context(Arc::clone(&storage), GoalRuntimeState::default());
+
+        let result = UpdateGoalTool
+            .execute(&context, json!({ "status": "cancelled" }))
+            .unwrap();
+        assert_eq!(result["status"], "cancelled");
+        let goal = storage
+            .load_conversation_goal("conversation-goal-tool")
+            .unwrap()
+            .unwrap();
+        assert_eq!(goal.status, ConversationGoalStatus::Cancelled);
+        assert_eq!(goal.stopped_reason, None);
     }
 }

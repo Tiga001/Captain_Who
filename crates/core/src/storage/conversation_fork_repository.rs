@@ -8,9 +8,8 @@ use crate::storage::models::{
 };
 use crate::storage::{
     attachment_repository, chat_repository, context_compaction_repository,
-    conversation_goal_repository, conversation_history_archive_repository,
-    conversation_trace_repository, file_draft_repository, guidance_repository,
-    world_state_repository,
+    conversation_history_archive_repository, conversation_trace_repository, file_draft_repository,
+    guidance_repository, turn_diff_repository, world_state_repository,
 };
 use crate::{AgentGuidanceStatus, ConversationTurnTrace, WorldStateRecord};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -46,6 +45,7 @@ pub(crate) struct ConversationForkPlan {
     pub attachments: Vec<ForkAttachmentCopy>,
     archives: Vec<conversation_history_archive_repository::ConversationHistoryArchiveForkCopy>,
     traces: Vec<ForkTrace>,
+    turn_diffs: Vec<turn_diff_repository::AgentTurnDiffForkCopy>,
     guidances: Vec<ForkGuidance>,
     file_drafts: Vec<AgentFileDraftRecord>,
     summaries: Vec<context_compaction_repository::ContextCompactionSummaryVersion>,
@@ -184,6 +184,32 @@ pub(crate) fn build_fork_plan(
         } else if let Some(run_id) = agent_run_id(message.agent_run_json.as_deref()) {
             run_id_map.entry(run_id).or_insert_with(|| new_id("run"));
         }
+    }
+
+    // A recursive fork needs every visible turn diff, not only the boundary turn.
+    let mut turn_diffs = turn_diff_repository::list_fork_copies_through_message(
+        connection,
+        &source.id,
+        &input.through_assistant_message_id,
+    )
+    .map_err(database_error)?;
+    for turn_diff in &mut turn_diffs {
+        if turn_diff.record.identity.conversation_id != source.id
+            || source.project_id.as_deref() != Some(turn_diff.record.identity.project_id.as_str())
+        {
+            return Err("历史文件变更证据的任务或项目归属不一致。".to_string());
+        }
+        turn_diff.record.identity.conversation_id = target_conversation_id.clone();
+        turn_diff.record.identity.assistant_message_id = mapped_id(
+            &message_id_map,
+            &turn_diff.record.identity.assistant_message_id,
+            "文件变更证据所属消息",
+        )?;
+        turn_diff.record.identity.run_id = mapped_id(
+            &run_id_map,
+            &turn_diff.record.identity.run_id,
+            "文件变更证据所属运行",
+        )?;
     }
 
     let mut file_drafts = Vec::new();
@@ -377,6 +403,7 @@ pub(crate) fn build_fork_plan(
         attachments,
         archives,
         traces,
+        turn_diffs,
         guidances,
         file_drafts,
         summaries,
@@ -411,13 +438,9 @@ pub(crate) fn commit_fork_plan(
         )
         .map_err(database_error)?;
     }
-    conversation_goal_repository::clone_visible_goal_for_fork(
-        &transaction,
-        &plan.source_conversation_id,
-        &plan.target.id,
-        &plan.message_id_map,
-        plan.target.created_at,
-    )?;
+    for turn_diff in &plan.turn_diffs {
+        turn_diff_repository::insert_fork_copy(&transaction, turn_diff).map_err(database_error)?;
+    }
     for draft in &plan.file_drafts {
         file_draft_repository::insert_draft(&transaction, draft).map_err(database_error)?;
     }

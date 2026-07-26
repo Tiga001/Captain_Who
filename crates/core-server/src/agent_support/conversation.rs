@@ -190,8 +190,7 @@ pub(crate) fn prepare_conversation_turn(
         created_at: Some(timestamp),
         conversation_turn_trace: None,
     });
-    let goal =
-        storage.resume_blocked_conversation_goal_for_user_turn(&conversation_id, timestamp)?;
+    let goal = storage.load_visible_conversation_goal(&conversation_id)?;
 
     let agent_input = AgentChatInput {
         api_url: connection.api_url,

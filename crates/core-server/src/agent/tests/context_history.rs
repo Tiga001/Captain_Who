@@ -35,7 +35,7 @@ fn prepared_turn_uses_backend_model_capabilities() {
 }
 
 #[test]
-fn ordinary_turn_only_carries_an_explicit_goal_across_turns() {
+fn ordinary_turn_preserves_a_blocked_goal_without_implicit_resume() {
     let fixture = tempdir().unwrap();
     let storage = StorageService::open(&fixture.path().join("storage.sqlite")).unwrap();
     storage.save_model_settings(test_model_settings()).unwrap();
@@ -66,6 +66,7 @@ fn ordinary_turn_only_carries_an_explicit_goal_across_turns() {
     assert!(first.agent_input.goal.is_none());
     storage
         .create_conversation_goal(
+            mycopilot_core::ConversationGoalMutationActor::User,
             "conversation-explicit-goal",
             "Track this objective across user turns.",
             2,
@@ -73,6 +74,7 @@ fn ordinary_turn_only_carries_an_explicit_goal_across_turns() {
         .unwrap();
     storage
         .update_conversation_goal_status(
+            mycopilot_core::ConversationGoalMutationActor::Model,
             "conversation-explicit-goal",
             mycopilot_core::ConversationGoalStatus::Blocked,
             Some("Waiting for the next user turn."),
@@ -105,7 +107,11 @@ fn ordinary_turn_only_carries_an_explicit_goal_across_turns() {
 
     let goal = second.agent_input.goal.unwrap();
     assert_eq!(goal.objective, "Track this objective across user turns.");
-    assert_eq!(goal.status, mycopilot_core::ConversationGoalStatus::Active);
+    assert_eq!(goal.status, mycopilot_core::ConversationGoalStatus::Blocked);
+    assert_eq!(
+        goal.stopped_reason.as_deref(),
+        Some("Waiting for the next user turn.")
+    );
 }
 
 #[test]

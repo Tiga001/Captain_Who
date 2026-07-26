@@ -18,8 +18,11 @@ impl StorageService {
             .map_err(storage_error)
     }
 
+    /// Validated semantic write boundary shared by model tools and a future explicit user UI.
+    /// Callers must supply a trusted host-side actor; lifecycle code must never call this method.
     pub fn create_conversation_goal(
         &self,
+        _actor: ConversationGoalMutationActor,
         conversation_id: &str,
         objective: &str,
         created_at: i64,
@@ -40,19 +43,15 @@ impl StorageService {
         Ok(goal)
     }
 
+    /// Changes Goal status only through an explicit model or user action.
     pub fn update_conversation_goal_status(
         &self,
+        _actor: ConversationGoalMutationActor,
         conversation_id: &str,
         status: ConversationGoalStatus,
         stopped_reason: Option<&str>,
         updated_at: i64,
     ) -> Result<ConversationGoal, String> {
-        if !matches!(
-            status,
-            ConversationGoalStatus::Completed | ConversationGoalStatus::Blocked
-        ) {
-            return Err("模型只能将 Goal 标记为 completed 或 blocked。".to_string());
-        }
         let connection = self.state.connection()?;
         let goal = conversation_goal_repository::update_goal_status(
             &connection,
@@ -62,32 +61,8 @@ impl StorageService {
             updated_at,
         )
         .map_err(storage_error)?
-        .ok_or_else(|| "当前对话没有可更新的 active Goal。".to_string())?;
+        .ok_or_else(|| "当前对话没有允许执行该状态转换的 Goal。".to_string())?;
         goal.validate().map_err(|error| error.to_string())?;
         Ok(goal)
-    }
-
-    pub fn resume_blocked_conversation_goal_for_user_turn(
-        &self,
-        conversation_id: &str,
-        updated_at: i64,
-    ) -> Result<Option<ConversationGoal>, String> {
-        let connection = self.state.connection()?;
-        conversation_goal_repository::resume_blocked_goal_for_user_turn(
-            &connection,
-            conversation_id,
-            updated_at,
-        )
-        .map_err(storage_error)
-    }
-
-    pub fn cancel_conversation_goal(
-        &self,
-        conversation_id: &str,
-        updated_at: i64,
-    ) -> Result<Option<ConversationGoal>, String> {
-        let connection = self.state.connection()?;
-        conversation_goal_repository::cancel_goal(&connection, conversation_id, updated_at)
-            .map_err(storage_error)
     }
 }

@@ -241,6 +241,196 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
 }
 
 #[test]
+fn conversation_fork_clones_all_visible_turn_diffs_and_supports_recursive_forks() {
+    let fixture = StorageFixture::new();
+    let service = fixture.service();
+    let source_conversation_id = "conversation-turn-diff-source";
+    let messages = [
+        ("user-turn-1", "user", 1, None),
+        ("assistant-turn-1", "assistant", 2, Some("run-turn-1")),
+        ("user-turn-2", "user", 3, None),
+        ("assistant-turn-2", "assistant", 4, Some("run-turn-2")),
+        ("user-turn-3", "user", 5, None),
+        ("assistant-turn-3", "assistant", 6, Some("run-turn-3")),
+    ]
+    .into_iter()
+    .map(|(id, role, created_at, run_id)| ChatMessageRecord {
+        id: id.to_string(),
+        role: role.to_string(),
+        content: format!("content {id}"),
+        created_at,
+        status: Some("sent".to_string()),
+        attachments: Vec::new(),
+        agent_run_json: run_id.map(|run_id| {
+            serde_json::json!({
+                "runId": run_id,
+                "status": "completed"
+            })
+            .to_string()
+        }),
+        ui_state_json: None,
+    })
+    .collect::<Vec<_>>();
+    service
+        .save_conversation(ChatConversationRecord {
+            id: source_conversation_id.to_string(),
+            project_id: Some("project-1".to_string()),
+            model_id: Some("model-1".to_string()),
+            title: "turn diff source".to_string(),
+            messages,
+            created_at: 1,
+            updated_at: 6,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+
+    let workspace_root = fixture.root.join("project-1").to_string_lossy().to_string();
+    let source_turns = [
+        (
+            "run-turn-1",
+            "assistant-turn-1",
+            "action-turn-1",
+            AgentTurnFileChange {
+                path: "src/first.rs".to_string(),
+                before: crate::AgentTurnFileContent::Missing,
+                after: crate::AgentTurnFileContent::Text("first\n".to_string()),
+            },
+        ),
+        (
+            "run-turn-2",
+            "assistant-turn-2",
+            "action-turn-2",
+            AgentTurnFileChange {
+                path: "src/second.rs".to_string(),
+                before: crate::AgentTurnFileContent::Text("before\n".to_string()),
+                after: crate::AgentTurnFileContent::Text("after\n".to_string()),
+            },
+        ),
+        (
+            "run-turn-3",
+            "assistant-turn-3",
+            "action-turn-3",
+            AgentTurnFileChange {
+                path: "src/after-cutoff.rs".to_string(),
+                before: crate::AgentTurnFileContent::Missing,
+                after: crate::AgentTurnFileContent::Text("excluded\n".to_string()),
+            },
+        ),
+    ];
+    for (run_id, assistant_message_id, action_id, change) in &source_turns {
+        service
+            .replace_conversation_turn_trace(
+                &ConversationTurnTrace {
+                    schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                    run_id: (*run_id).to_string(),
+                    conversation_id: source_conversation_id.to_string(),
+                    assistant_message_id: (*assistant_message_id).to_string(),
+                    terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
+                    terminal_error: None,
+                    truncated: false,
+                    items: Vec::new(),
+                },
+                1,
+                2,
+            )
+            .unwrap();
+        let identity = AgentTurnDiffIdentity {
+            run_id: (*run_id).to_string(),
+            conversation_id: source_conversation_id.to_string(),
+            assistant_message_id: (*assistant_message_id).to_string(),
+            project_id: "project-1".to_string(),
+            workspace_root: workspace_root.clone(),
+        };
+        service.initialize_agent_turn_diff(&identity).unwrap();
+        assert!(service
+            .record_agent_turn_file_change(&identity, action_id, change)
+            .unwrap());
+    }
+
+    let first_fork = service
+        .fork_conversation(ForkConversationInput {
+            request_id: "fork-turn-diffs-through-second".to_string(),
+            source_conversation_id: source_conversation_id.to_string(),
+            through_assistant_message_id: "assistant-turn-2".to_string(),
+        })
+        .unwrap();
+    assert_eq!(first_fork.messages.len(), 4);
+    let forked_assistants = first_fork
+        .messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .collect::<Vec<_>>();
+    let forked_run_id = |message: &ChatMessageRecord| {
+        serde_json::from_str::<serde_json::Value>(
+            message.agent_run_json.as_deref().expect("agent run"),
+        )
+        .unwrap()["runId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    let latest = service
+        .load_latest_agent_turn_diff(&first_fork.id, "project-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        latest.identity.assistant_message_id,
+        forked_assistants[1].id
+    );
+    assert_eq!(
+        latest.files,
+        vec![AgentTurnFileChange {
+            path: "src/second.rs".to_string(),
+            before: crate::AgentTurnFileContent::Text("before\n".to_string()),
+            after: crate::AgentTurnFileContent::Text("after\n".to_string()),
+        }]
+    );
+
+    for (message, action_id, change) in [
+        (forked_assistants[0], "action-turn-1", &source_turns[0].3),
+        (forked_assistants[1], "action-turn-2", &source_turns[1].3),
+    ] {
+        let identity = AgentTurnDiffIdentity {
+            run_id: forked_run_id(message),
+            conversation_id: first_fork.id.clone(),
+            assistant_message_id: message.id.clone(),
+            project_id: "project-1".to_string(),
+            workspace_root: workspace_root.clone(),
+        };
+        assert!(
+            !service
+                .record_agent_turn_file_change(&identity, action_id, change)
+                .unwrap(),
+            "forked action ids must retain their idempotency evidence"
+        );
+    }
+
+    let recursive_fork = service
+        .fork_conversation(ForkConversationInput {
+            request_id: "fork-turn-diffs-recursively".to_string(),
+            source_conversation_id: first_fork.id.clone(),
+            through_assistant_message_id: forked_assistants[0].id.clone(),
+        })
+        .unwrap();
+    assert_eq!(recursive_fork.messages.len(), 2);
+    let recursive_latest = service
+        .load_latest_agent_turn_diff(&recursive_fork.id, "project-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        recursive_latest.files,
+        vec![AgentTurnFileChange {
+            path: "src/first.rs".to_string(),
+            before: crate::AgentTurnFileContent::Missing,
+            after: crate::AgentTurnFileContent::Text("first\n".to_string()),
+        }]
+    );
+}
+
+#[test]
 fn composer_drafts_only_preserve_full_for_current_permission_semantics() {
     let fixture = StorageFixture::new();
     let service = fixture.service();

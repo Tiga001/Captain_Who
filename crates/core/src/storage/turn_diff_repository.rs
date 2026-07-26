@@ -3,10 +3,27 @@ use crate::{
     AGENT_TURN_DIFF_SCHEMA_VERSION,
 };
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashMap;
 use std::path::{Component, Path};
 
 const MAX_TURN_DIFF_FILES: i64 = 500;
 const MAX_TURN_DIFF_TEXT_BYTES: i64 = 32 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+pub(crate) struct AgentTurnDiffForkAction {
+    pub action_id: String,
+    pub created_at: i64,
+}
+
+/// Exact durable evidence for one visible turn. Forks preserve it verbatim so a forked
+/// conversation can itself be forked without losing review history or action idempotency.
+#[derive(Debug, Clone)]
+pub(crate) struct AgentTurnDiffForkCopy {
+    pub record: AgentTurnDiffRecord,
+    pub actions: Vec<AgentTurnDiffForkAction>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
 
 pub fn initialize_turn(
     connection: &Connection,
@@ -233,6 +250,275 @@ pub fn load_latest_turn(
         files,
         truncated,
     }))
+}
+
+pub(crate) fn list_fork_copies_through_message(
+    connection: &Connection,
+    conversation_id: &str,
+    through_assistant_message_id: &str,
+) -> rusqlite::Result<Vec<AgentTurnDiffForkCopy>> {
+    let cutoff_position = connection
+        .query_row(
+            "
+            SELECT position
+            FROM messages
+            WHERE id = ?1 AND conversation_id = ?2
+            ",
+            params![through_assistant_message_id, conversation_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .ok_or_else(|| invalid_input("fork turn diff cutoff message does not exist"))?;
+
+    let mut statement = connection.prepare(
+        "
+        SELECT
+            turn.run_id,
+            turn.conversation_id,
+            turn.assistant_message_id,
+            turn.project_id,
+            turn.workspace_root,
+            turn.truncated,
+            turn.created_at,
+            turn.updated_at
+        FROM agent_turn_diffs AS turn
+        INNER JOIN messages AS message
+            ON message.id = turn.assistant_message_id
+        WHERE turn.conversation_id = ?1
+          AND message.conversation_id = ?1
+          AND message.position <= ?2
+          AND turn.schema_version = ?3
+        ORDER BY
+            message.position ASC,
+            message.created_at ASC,
+            turn.assistant_message_id ASC
+        ",
+    )?;
+    let mut copies = statement
+        .query_map(
+            params![
+                conversation_id,
+                cutoff_position,
+                i64::from(AGENT_TURN_DIFF_SCHEMA_VERSION)
+            ],
+            |row| {
+                Ok(AgentTurnDiffForkCopy {
+                    record: AgentTurnDiffRecord {
+                        identity: AgentTurnDiffIdentity {
+                            run_id: row.get(0)?,
+                            conversation_id: row.get(1)?,
+                            assistant_message_id: row.get(2)?,
+                            project_id: row.get(3)?,
+                            workspace_root: row.get(4)?,
+                        },
+                        files: Vec::new(),
+                        truncated: row.get(5)?,
+                    },
+                    actions: Vec::new(),
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let copy_indexes = copies
+        .iter()
+        .enumerate()
+        .map(|(index, copy)| (copy.record.identity.assistant_message_id.clone(), index))
+        .collect::<HashMap<_, _>>();
+
+    let mut files_statement = connection.prepare(
+        "
+        SELECT
+            file.assistant_message_id,
+            file.path,
+            file.before_kind,
+            file.before_text,
+            file.after_kind,
+            file.after_text
+        FROM agent_turn_diff_files AS file
+        INNER JOIN agent_turn_diffs AS turn
+            ON turn.assistant_message_id = file.assistant_message_id
+        INNER JOIN messages AS message
+            ON message.id = turn.assistant_message_id
+        WHERE turn.conversation_id = ?1
+          AND message.conversation_id = ?1
+          AND message.position <= ?2
+          AND turn.schema_version = ?3
+        ORDER BY
+            message.position ASC,
+            file.path COLLATE NOCASE ASC,
+            file.path ASC
+        ",
+    )?;
+    let files = files_statement
+        .query_map(
+            params![
+                conversation_id,
+                cutoff_position,
+                i64::from(AGENT_TURN_DIFF_SCHEMA_VERSION)
+            ],
+            |row| {
+                let before_kind = row.get::<_, String>(2)?;
+                let before_text = row.get::<_, Option<String>>(3)?;
+                let after_kind = row.get::<_, String>(4)?;
+                let after_text = row.get::<_, Option<String>>(5)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    AgentTurnFileChange {
+                        path: row.get(1)?,
+                        before: AgentTurnFileContent::from_storage(&before_kind, before_text)
+                            .map_err(invalid_input)?,
+                        after: AgentTurnFileContent::from_storage(&after_kind, after_text)
+                            .map_err(invalid_input)?,
+                    },
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (assistant_message_id, file) in files {
+        let index = copy_indexes
+            .get(&assistant_message_id)
+            .copied()
+            .ok_or_else(|| invalid_input("fork turn diff file is missing its parent turn"))?;
+        copies[index].record.files.push(file);
+    }
+
+    let mut actions_statement = connection.prepare(
+        "
+        SELECT
+            action.assistant_message_id,
+            action.action_id,
+            action.created_at
+        FROM agent_turn_diff_actions AS action
+        INNER JOIN agent_turn_diffs AS turn
+            ON turn.assistant_message_id = action.assistant_message_id
+        INNER JOIN messages AS message
+            ON message.id = turn.assistant_message_id
+        WHERE turn.conversation_id = ?1
+          AND message.conversation_id = ?1
+          AND message.position <= ?2
+          AND turn.schema_version = ?3
+        ORDER BY
+            message.position ASC,
+            action.created_at ASC,
+            action.action_id ASC
+        ",
+    )?;
+    let actions = actions_statement
+        .query_map(
+            params![
+                conversation_id,
+                cutoff_position,
+                i64::from(AGENT_TURN_DIFF_SCHEMA_VERSION)
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    AgentTurnDiffForkAction {
+                        action_id: row.get(1)?,
+                        created_at: row.get(2)?,
+                    },
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (assistant_message_id, action) in actions {
+        let index = copy_indexes
+            .get(&assistant_message_id)
+            .copied()
+            .ok_or_else(|| invalid_input("fork turn diff action is missing its parent turn"))?;
+        copies[index].actions.push(action);
+    }
+
+    Ok(copies)
+}
+
+pub(crate) fn insert_fork_copy(
+    connection: &Connection,
+    copy: &AgentTurnDiffForkCopy,
+) -> rusqlite::Result<()> {
+    validate_identity(&copy.record.identity)?;
+    validate_assistant_message(connection, &copy.record.identity)?;
+    if copy.created_at < 0 || copy.updated_at < copy.created_at {
+        return Err(invalid_input("fork turn diff timestamps are invalid"));
+    }
+
+    connection.execute(
+        "
+        INSERT INTO agent_turn_diffs (
+            assistant_message_id,
+            conversation_id,
+            run_id,
+            project_id,
+            workspace_root,
+            schema_version,
+            truncated,
+            created_at,
+            updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ",
+        params![
+            copy.record.identity.assistant_message_id,
+            copy.record.identity.conversation_id,
+            copy.record.identity.run_id,
+            copy.record.identity.project_id,
+            copy.record.identity.workspace_root,
+            i64::from(AGENT_TURN_DIFF_SCHEMA_VERSION),
+            copy.record.truncated,
+            copy.created_at,
+            copy.updated_at,
+        ],
+    )?;
+
+    for file in &copy.record.files {
+        validate_change(file)?;
+        connection.execute(
+            "
+            INSERT INTO agent_turn_diff_files (
+                assistant_message_id,
+                path,
+                before_kind,
+                before_text,
+                after_kind,
+                after_text
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ",
+            params![
+                copy.record.identity.assistant_message_id,
+                file.path,
+                file.before.kind(),
+                file.before.text(),
+                file.after.kind(),
+                file.after.text(),
+            ],
+        )?;
+    }
+
+    for action in &copy.actions {
+        if action.action_id.trim().is_empty() || action.created_at < 0 {
+            return Err(invalid_input("fork turn diff action is invalid"));
+        }
+        connection.execute(
+            "
+            INSERT INTO agent_turn_diff_actions (
+                assistant_message_id,
+                action_id,
+                created_at
+            )
+            VALUES (?1, ?2, ?3)
+            ",
+            params![
+                copy.record.identity.assistant_message_id,
+                action.action_id,
+                action.created_at,
+            ],
+        )?;
+    }
+
+    Ok(())
 }
 
 fn insert_turn_if_absent(

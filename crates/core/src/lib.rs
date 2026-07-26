@@ -59,8 +59,9 @@ pub use conversation_trace::{
     CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
 };
 pub use goal::{
-    ConversationGoal, ConversationGoalStatus, CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS,
-    CONVERSATION_GOAL_CONTEXT_TARGET_TOKENS, MAX_CONVERSATION_GOAL_OBJECTIVE_CHARS,
+    ConversationGoal, ConversationGoalMutationActor, ConversationGoalStatus,
+    CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS, CONVERSATION_GOAL_CONTEXT_TARGET_TOKENS,
+    MAX_CONVERSATION_GOAL_OBJECTIVE_CHARS,
 };
 pub use model_request_observation::{
     ModelRequestActualUsage, ModelRequestCapacityStatus, ModelRequestEstimate,

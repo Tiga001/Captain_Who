@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn user_run_cancellation_cancels_the_explicit_goal_without_task_state_settlement() {
+fn user_run_cancellation_leaves_the_explicit_goal_active() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
@@ -29,6 +29,7 @@ fn user_run_cancellation_cancels_the_explicit_goal_without_task_state_settlement
         .unwrap();
     storage
         .create_conversation_goal(
+            mycopilot_core::ConversationGoalMutationActor::User,
             "conversation-goal-cancel",
             "Keep working until the user cancels.",
             2,
@@ -61,7 +62,7 @@ fn user_run_cancellation_cancels_the_explicit_goal_without_task_state_settlement
             .unwrap()
             .unwrap()
             .status,
-        mycopilot_core::ConversationGoalStatus::Cancelled
+        mycopilot_core::ConversationGoalStatus::Active
     );
 }
 
@@ -75,22 +76,42 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
             project_id: None,
             model_id: Some("model-1".to_string()),
             title: "Cancel trace".to_string(),
-            messages: vec![ChatMessageRecord {
-                id: "assistant-cancel".to_string(),
-                role: "assistant".to_string(),
-                content: THINKING_PLACEHOLDER.to_string(),
-                created_at: 1,
-                status: Some("pending".to_string()),
-                attachments: Vec::new(),
-                agent_run_json: None,
-                ui_state_json: None,
-            }],
+            messages: vec![
+                ChatMessageRecord {
+                    id: "user-cancel".to_string(),
+                    role: "user".to_string(),
+                    content: "Keep tracking this objective.".to_string(),
+                    created_at: 1,
+                    status: Some("sent".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+                ChatMessageRecord {
+                    id: "assistant-cancel".to_string(),
+                    role: "assistant".to_string(),
+                    content: THINKING_PLACEHOLDER.to_string(),
+                    created_at: 2,
+                    status: Some("pending".to_string()),
+                    attachments: Vec::new(),
+                    agent_run_json: None,
+                    ui_state_json: None,
+                },
+            ],
             created_at: 1,
-            updated_at: 1,
+            updated_at: 2,
             pinned_at: None,
             archived_at: None,
             unread_at: None,
         })
+        .unwrap();
+    storage
+        .create_conversation_goal(
+            mycopilot_core::ConversationGoalMutationActor::User,
+            "conversation-cancel",
+            "Keep tracking the explicit objective.",
+            3,
+        )
         .unwrap();
     let service = AgentService::new(storage.clone());
     service.register_usage_context(
@@ -182,8 +203,16 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         .into_iter()
         .find(|conversation| conversation.id == "conversation-cancel")
         .unwrap();
-    assert_eq!(conversation.messages[0].content, "");
-    assert_eq!(conversation.messages[0].status.as_deref(), Some("sent"));
+    assert_eq!(conversation.messages[1].content, "");
+    assert_eq!(conversation.messages[1].status.as_deref(), Some("sent"));
+    assert_eq!(
+        storage
+            .load_conversation_goal("conversation-cancel")
+            .unwrap()
+            .unwrap()
+            .status,
+        mycopilot_core::ConversationGoalStatus::Active
+    );
 }
 
 #[test]

@@ -158,10 +158,6 @@ impl AgentService {
                     Some(now_ms()),
                     None,
                 );
-                if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
-                    self.storage
-                        .cancel_conversation_goal(conversation_id, now_ms())?;
-                }
             }
             return Ok(cancelled);
         }
@@ -217,10 +213,6 @@ impl AgentService {
             return Err(error);
         }
         self.transition_pending_status(&record, PendingActionStatus::Cancelled)?;
-        if let Some(conversation_id) = record.snapshot.conversation_id.as_deref() {
-            self.storage
-                .cancel_conversation_goal(conversation_id, now_ms())?;
-        }
         Ok(true)
     }
 

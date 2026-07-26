@@ -198,7 +198,7 @@ fn tool_routing_section(tool_definitions: &[AgentToolDefinition]) -> String {
     }
     if has_tool(tool_definitions, "create_goal") {
         rules.push("- Goal 只用于用户明确要求长期、跨轮追踪的目标；普通请求、临时计划或仅仅复杂的任务都不能推断为 Goal。只有明确请求时才调用 create_goal；未完成 Goal 存在时不要创建第二个。".to_string());
-        rules.push("- Goal 只保存目标和 active/blocked/completed 粗状态，不保存步骤、Todo、工具结果或聊天摘要。最新用户消息始终优先，Goal 不授权自动继续运行。只有真正完成或确实阻塞时才调用 update_goal；普通进度变化不更新 Goal。标记 completed 前必须先通过 todo_update 清空或完成当前 Run 的全部 Todo；blocked 原因由宿主从 blocked Todo 提取。".to_string());
+        rules.push("- Goal 只保存目标和 active/blocked/completed/cancelled 粗状态，不保存步骤、Todo、工具结果或聊天摘要。最新用户消息始终优先，Goal 不授权自动继续运行。Goal 不会因停止 Run、取消审批、新用户轮次、重启或 fork 自动变化：只有用户明确恢复 blocked Goal 时才写 active，真正完成时才写 completed，确实阻塞时才写 blocked，用户明确放弃时才写 cancelled。标记 completed 前必须先通过 todo_update 清空或完成当前 Run 的全部 Todo；blocked 原因由宿主从 blocked Todo 提取。".to_string());
     }
     if has_tool(tool_definitions, "web_search") {
         rules.push("- 对当前状态、近期变化、陌生实体或需要来源核实的信息使用 web_search；用它定位和比较来源，查询应围绕明确的信息缺口，并优先官方或一手来源。已有结果足以回答时停止搜索；追加搜索应补充具体缺口，不要重复高度重叠的查询。本地项目问题不能用网页搜索替代 workspace 检查。".to_string());

@@ -11,6 +11,16 @@ pub const MAX_CONVERSATION_GOAL_OBJECTIVE_CHARS: usize = 1_000;
 pub const CONVERSATION_GOAL_CONTEXT_TARGET_TOKENS: u64 = 200;
 pub const CONVERSATION_GOAL_CONTEXT_HARD_MAX_TOKENS: u64 = 256;
 
+/// Trusted host-side origin for a semantic Goal mutation.
+///
+/// This value is never accepted from model-authored tool arguments. Today production writes use
+/// `Model`; `User` reserves the same validated backend boundary for a future explicit UI action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationGoalMutationActor {
+    Model,
+    User,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationGoalStatus {

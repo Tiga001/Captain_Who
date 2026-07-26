@@ -1,5 +1,5 @@
 use super::*;
-use crate::ConversationGoalStatus;
+use crate::{ConversationGoalMutationActor, ConversationGoalStatus};
 
 #[test]
 fn ordinary_conversation_has_no_goal_until_explicit_creation() {
@@ -18,6 +18,7 @@ fn ordinary_conversation_has_no_goal_until_explicit_creation() {
 
     let goal = service
         .create_conversation_goal(
+            ConversationGoalMutationActor::User,
             "conversation-goal",
             "Ship the explicitly requested long-running migration.",
             2,
@@ -26,24 +27,35 @@ fn ordinary_conversation_has_no_goal_until_explicit_creation() {
     assert_eq!(goal.status, ConversationGoalStatus::Active);
     assert_eq!(goal.source_message_id, "message-goal");
     assert!(service
-        .create_conversation_goal("conversation-goal", "A second unfinished goal.", 3)
+        .create_conversation_goal(
+            ConversationGoalMutationActor::User,
+            "conversation-goal",
+            "A second unfinished goal.",
+            3,
+        )
         .unwrap_err()
         .contains("仍存在尚未结束的 Goal"));
 }
 
 #[test]
-fn blocked_goal_resumes_only_when_a_new_user_turn_arrives() {
+fn blocked_goal_changes_only_through_an_explicit_actor() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     service
         .save_conversation(conversation("conversation-goal", None, "message-goal"))
         .unwrap();
     service
-        .create_conversation_goal("conversation-goal", "Finish the migration.", 2)
+        .create_conversation_goal(
+            ConversationGoalMutationActor::User,
+            "conversation-goal",
+            "Finish the migration.",
+            2,
+        )
         .unwrap();
 
     let blocked = service
         .update_conversation_goal_status(
+            ConversationGoalMutationActor::Model,
             "conversation-goal",
             ConversationGoalStatus::Blocked,
             Some("Waiting for user input."),
@@ -61,8 +73,13 @@ fn blocked_goal_resumes_only_when_a_new_user_turn_arrives() {
     );
 
     let resumed = service
-        .resume_blocked_conversation_goal_for_user_turn("conversation-goal", 4)
-        .unwrap()
+        .update_conversation_goal_status(
+            ConversationGoalMutationActor::Model,
+            "conversation-goal",
+            ConversationGoalStatus::Active,
+            None,
+            4,
+        )
         .unwrap();
     assert_eq!(resumed.status, ConversationGoalStatus::Active);
     assert_eq!(resumed.stopped_reason, None);
@@ -83,6 +100,7 @@ fn restart_preserves_goal_status_without_reinterpreting_it() {
             .unwrap();
         service
             .create_conversation_goal(
+                ConversationGoalMutationActor::User,
                 "conversation-goal-restart",
                 "Keep the explicit goal across restart.",
                 2,
@@ -90,6 +108,7 @@ fn restart_preserves_goal_status_without_reinterpreting_it() {
             .unwrap();
         service
             .update_conversation_goal_status(
+                ConversationGoalMutationActor::Model,
                 "conversation-goal-restart",
                 ConversationGoalStatus::Blocked,
                 Some("Waiting for a user decision."),
@@ -118,10 +137,16 @@ fn completed_goal_leaves_model_context_and_is_deleted_with_conversation() {
         .save_conversation(conversation("conversation-goal", None, "message-goal"))
         .unwrap();
     service
-        .create_conversation_goal("conversation-goal", "Finish the migration.", 2)
+        .create_conversation_goal(
+            ConversationGoalMutationActor::User,
+            "conversation-goal",
+            "Finish the migration.",
+            2,
+        )
         .unwrap();
     service
         .update_conversation_goal_status(
+            ConversationGoalMutationActor::Model,
             "conversation-goal",
             ConversationGoalStatus::Completed,
             None,
@@ -150,7 +175,7 @@ fn completed_goal_leaves_model_context_and_is_deleted_with_conversation() {
 }
 
 #[test]
-fn fork_copies_only_an_active_goal_whose_source_message_is_included() {
+fn fork_does_not_copy_an_active_goal_without_an_explicit_actor() {
     let fixture = StorageFixture::new();
     let service = fixture.service();
     service
@@ -190,6 +215,7 @@ fn fork_copies_only_an_active_goal_whose_source_message_is_included() {
         .unwrap();
     service
         .create_conversation_goal(
+            ConversationGoalMutationActor::User,
             "conversation-goal-source",
             "Finish the tracked migration.",
             3,
@@ -203,29 +229,22 @@ fn fork_copies_only_an_active_goal_whose_source_message_is_included() {
             through_assistant_message_id: "goal-assistant".to_string(),
         })
         .unwrap();
-    let forked_goal = service
-        .load_visible_conversation_goal(&forked.id)
+    assert!(service
+        .load_conversation_goal(&forked.id)
         .unwrap()
-        .unwrap();
-
-    assert_eq!(forked_goal.objective, "Finish the tracked migration.");
-    assert_eq!(forked_goal.conversation_id, forked.id);
-    assert_ne!(
-        forked_goal.goal_id,
+        .is_none());
+    assert_eq!(
         service
             .load_visible_conversation_goal("conversation-goal-source")
             .unwrap()
             .unwrap()
-            .goal_id
-    );
-    assert_eq!(
-        forked_goal.source_message_id,
-        forked.messages.first().unwrap().id
+            .objective,
+        "Finish the tracked migration."
     );
 }
 
 #[test]
-fn cancelled_and_blocked_goals_do_not_cross_a_fork() {
+fn terminal_and_blocked_goals_do_not_cross_a_fork() {
     for (suffix, status) in [
         ("blocked", ConversationGoalStatus::Blocked),
         ("cancelled", ConversationGoalStatus::Cancelled),
@@ -238,15 +257,27 @@ fn cancelled_and_blocked_goals_do_not_cross_a_fork() {
             .save_conversation(conversation(&conversation_id, None, &message_id))
             .unwrap();
         service
-            .create_conversation_goal(&conversation_id, "Keep the active goal only.", 2)
+            .create_conversation_goal(
+                ConversationGoalMutationActor::User,
+                &conversation_id,
+                "Keep the active goal only.",
+                2,
+            )
             .unwrap();
         if status == ConversationGoalStatus::Cancelled {
             service
-                .cancel_conversation_goal(&conversation_id, 3)
+                .update_conversation_goal_status(
+                    ConversationGoalMutationActor::Model,
+                    &conversation_id,
+                    ConversationGoalStatus::Cancelled,
+                    None,
+                    3,
+                )
                 .unwrap();
         } else {
             service
                 .update_conversation_goal_status(
+                    ConversationGoalMutationActor::Model,
                     &conversation_id,
                     ConversationGoalStatus::Blocked,
                     Some("blocked"),
