@@ -72,7 +72,7 @@ impl ContextAssembler {
         }
 
         let mut items =
-            Vec::with_capacity(normalized.len() + world_state.rendered_item_count() + 5);
+            Vec::with_capacity(normalized.len() + world_state.rendered_item_count() + 4);
         items.push(ContextItem::text(
             LlmMessageRole::System,
             input.system_prompt,
@@ -91,16 +91,6 @@ impl ContextAssembler {
                 ),
                 ContextMetadata::new(
                     ContextSource::ConversationSummary,
-                    ContextScope::Conversation,
-                    ContextRetention::Retained,
-                )
-                .with_origin(origin.clone())
-                .with_group(group.clone()),
-            ));
-            items.push(ContextItem::new(
-                LlmMessage::backend_state(summary.render_continuity_for_context()?),
-                ContextMetadata::new(
-                    ContextSource::ContinuityIndex,
                     ContextScope::Conversation,
                     ContextRetention::Retained,
                 )
@@ -858,23 +848,23 @@ mod tests {
         .unwrap();
 
         let messages = frame.to_messages();
-        assert_eq!(messages.len(), 6);
+        assert_eq!(messages.len(), 5);
         assert_eq!(messages[0].role, LlmMessageRole::System);
         assert!(messages[1].content.contains("semantic summary is lossy"));
+        assert!(messages[2].content.contains("\"recordType\":\"full\""));
         assert!(messages[2]
             .content
-            .contains("BEGIN_UNTRUSTED_CONTINUITY_RECORDS_JSON"));
-        assert!(messages[3].content.contains("\"recordType\":\"full\""));
+            .contains("\"lifetime\":\"conversation\""));
+        assert!(messages[2].content.contains("old-workspace"));
+        assert!(messages[3].content.contains("\"recordType\":\"diff\""));
         assert!(messages[3]
             .content
             .contains("\"lifetime\":\"conversation\""));
-        assert!(messages[3].content.contains("old-workspace"));
-        assert!(messages[4].content.contains("\"recordType\":\"diff\""));
-        assert!(messages[4]
+        assert!(messages[3].content.contains("new-workspace"));
+        assert_eq!(messages[4].content, "continue in the current workspace");
+        assert!(!messages.iter().any(|message| message
             .content
-            .contains("\"lifetime\":\"conversation\""));
-        assert!(messages[4].content.contains("new-workspace"));
-        assert_eq!(messages[5].content, "continue in the current workspace");
+            .contains("BEGIN_UNTRUSTED_CONTINUITY_RECORDS_JSON")));
 
         let rendered = messages
             .iter()
@@ -889,14 +879,14 @@ mod tests {
         assert!(!rendered.contains("world-state-sha256-v1:"));
 
         let manifest = frame.manifest();
-        assert_eq!(manifest.entries[3].sources, vec!["world_state_snapshot"]);
+        assert_eq!(manifest.entries[2].sources, vec!["world_state_snapshot"]);
+        assert_eq!(manifest.entries[2].scope, "conversation");
+        assert_eq!(manifest.entries[2].retention, "retained");
+        assert_eq!(manifest.entries[2].origin_kind, Some("world_state_record"));
+        assert_eq!(manifest.entries[3].sources, vec!["world_state_diff"]);
         assert_eq!(manifest.entries[3].scope, "conversation");
         assert_eq!(manifest.entries[3].retention, "retained");
-        assert_eq!(manifest.entries[3].origin_kind, Some("world_state_record"));
-        assert_eq!(manifest.entries[4].sources, vec!["world_state_diff"]);
-        assert_eq!(manifest.entries[4].scope, "conversation");
-        assert_eq!(manifest.entries[4].retention, "retained");
-        assert_eq!(manifest.entries[5].sources, vec!["current_turn"]);
+        assert_eq!(manifest.entries[4].sources, vec!["current_turn"]);
     }
 
     #[test]
@@ -919,18 +909,18 @@ mod tests {
         .unwrap();
 
         let messages = frame.to_messages();
-        assert_eq!(messages[3].role, LlmMessageRole::System);
+        assert_eq!(messages[2].role, LlmMessageRole::System);
         assert_eq!(
-            messages[3].placement,
+            messages[2].placement,
             LlmMessagePlacement::BackendStateTimeline
         );
-        assert!(messages[3].content.contains("## Explicit Goal"));
-        assert!(messages[3]
+        assert!(messages[2].content.contains("## Explicit Goal"));
+        assert!(messages[2]
             .content
             .contains("Latest user instructions override"));
-        assert_eq!(messages[4].content, "change one detail before continuing");
+        assert_eq!(messages[3].content, "change one detail before continuing");
         assert_eq!(
-            frame.manifest().entries[3].sources,
+            frame.manifest().entries[2].sources,
             vec!["conversation_goal"]
         );
     }
@@ -1385,7 +1375,7 @@ mod tests {
         .unwrap();
 
         let messages = frame.to_messages();
-        assert_eq!(messages.len(), 4);
+        assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, LlmMessageRole::System);
         assert_eq!(messages[1].role, LlmMessageRole::Assistant);
         assert!(messages[1].content.contains("old task"));
@@ -1393,18 +1383,23 @@ mod tests {
         assert!(messages[1]
             .content
             .contains("Newer messages are authoritative"));
-        assert!(messages[2]
+        assert_eq!(messages[2].content, "continue from the summary");
+        assert!(!messages.iter().any(|message| message
             .content
-            .contains("BEGIN_UNTRUSTED_CONTINUITY_RECORDS_JSON"));
-        assert_eq!(messages[3].content, "continue from the summary");
+            .contains("BEGIN_UNTRUSTED_CONTINUITY_RECORDS_JSON")));
         assert_eq!(
             frame.manifest().entries[1].sources,
             vec!["conversation_summary"]
         );
-        assert_eq!(
-            frame.manifest().entries[2].sources,
-            vec!["continuity_index"]
-        );
+        assert!(!frame
+            .manifest()
+            .entries
+            .iter()
+            .any(|entry| entry.sources == vec!["continuity_index"]));
+
+        let persisted = compaction_summary();
+        assert!(persisted.continuity.is_v2());
+        assert!(!persisted.continuity.archived_counts.is_empty());
     }
 
     #[test]
@@ -1422,6 +1417,6 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(frame.to_messages().len(), 3);
+        assert_eq!(frame.to_messages().len(), 2);
     }
 }

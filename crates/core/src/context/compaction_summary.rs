@@ -289,10 +289,6 @@ impl ContextCompactionSummary {
     pub(crate) fn render_summary_for_context(&self) -> AgentResult<String> {
         render_compaction_semantic_summary_for_context(&self.covered_through, &self.content)
     }
-
-    pub(crate) fn render_continuity_for_context(&self) -> AgentResult<String> {
-        render_compaction_continuity_for_context(&self.continuity)
-    }
 }
 
 pub(crate) fn render_compaction_semantic_summary_for_context(
