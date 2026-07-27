@@ -347,9 +347,9 @@ export interface AgentContextWindowSnapshot {
   contextWindowTokens?: number
   reservedOutputTokens: number
   safetyMarginTokens: number
-  /** Total input capacity after output and safety reserves. */
+  /** Conversation-growth capacity after output, safety and non-growing request baseline. */
   inputCapacityTokens?: number
-  /** Fully assembled model input, including the current Agent Loop. */
+  /** Context above the non-growing baseline, including the complete current Agent Loop. */
   inputTokens: number
   costBreakdown: AgentContextCostBreakdown
   remainingInputTokens?: number

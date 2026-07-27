@@ -47,6 +47,8 @@ pub(crate) struct ContextFrameEstimateBreakdown {
     pub(crate) durable: ContextFrameEstimateBucket,
     pub(crate) run_transient: ContextFrameEstimateBucket,
     pub(crate) request_only: ContextFrameEstimateBucket,
+    /// Model-visible request baseline excluded from the user-facing context-growth meter.
+    pub(crate) context_window_baseline_input_tokens: u64,
     pub(crate) semantic: ContextFrameSemanticBreakdown,
 }
 
@@ -55,6 +57,7 @@ impl ContextFrameEstimateBreakdown {
         &mut self,
         class: ContextUsageClass,
         sources: &[ContextSource],
+        is_context_window_baseline: bool,
         estimate: ContextMessageEstimate,
     ) {
         match class {
@@ -62,6 +65,11 @@ impl ContextFrameEstimateBreakdown {
             ContextUsageClass::Durable => self.durable.merge(estimate),
             ContextUsageClass::RunTransient => self.run_transient.merge(estimate),
             ContextUsageClass::RequestOnly => self.request_only.merge(estimate),
+        }
+        if is_context_window_baseline {
+            self.context_window_baseline_input_tokens = self
+                .context_window_baseline_input_tokens
+                .saturating_add(estimate.total_tokens());
         }
         self.semantic.merge(sources, estimate.total_tokens());
     }
@@ -265,9 +273,12 @@ impl ContextFrame {
         }
         if let Some(measurement) = &mut self.measurement {
             let estimate = item.measure(measurement.estimator.as_ref());
-            measurement
-                .breakdown
-                .merge(usage_class, item.metadata.sources(), estimate);
+            measurement.breakdown.merge(
+                usage_class,
+                item.metadata.sources(),
+                item.metadata.is_context_window_baseline(),
+                estimate,
+            );
             measurement.full_recount = None;
         }
         self.items.push(item);
@@ -300,7 +311,12 @@ impl ContextFrame {
             for item in &mut self.items {
                 let usage_class = item.metadata.usage_class();
                 let estimate = item.measure(estimator.as_ref());
-                breakdown.merge(usage_class, item.metadata.sources(), estimate);
+                breakdown.merge(
+                    usage_class,
+                    item.metadata.sources(),
+                    item.metadata.is_context_window_baseline(),
+                    estimate,
+                );
             }
             self.measurement = Some(ContextFrameMeasurementState {
                 estimator,
@@ -709,6 +725,7 @@ impl MeasuredContextBaseline {
                 breakdown.merge(
                     item.metadata.usage_class(),
                     item.metadata.sources(),
+                    item.metadata.is_context_window_baseline(),
                     estimate,
                 );
             }

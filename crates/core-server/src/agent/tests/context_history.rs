@@ -895,7 +895,7 @@ fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail(
 }
 
 #[test]
-fn context_window_snapshot_reports_net_durable_budget() {
+fn empty_context_window_snapshot_starts_at_zero_above_the_request_baseline() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
@@ -935,7 +935,14 @@ fn context_window_snapshot_reports_net_durable_budget() {
     assert_eq!(enabled.model, "model-1");
     assert_eq!(enabled.context_window_tokens, Some(128_000));
     assert!(enabled.input_capacity_tokens.is_some_and(|value| value > 0));
-    assert!(enabled.input_tokens > 0);
+    assert_eq!(
+        enabled.input_tokens, 0,
+        "an empty composer must start with no conversation-growth capacity consumed"
+    );
+    assert!(
+        enabled.cost_breakdown.total_input_tokens > 0,
+        "the physical request must still account for system, Tool and Run baseline costs"
+    );
 }
 
 #[test]

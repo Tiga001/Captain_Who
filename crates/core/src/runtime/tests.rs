@@ -2091,9 +2091,14 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
             .unwrap();
     assert!(baseline_snapshot.input_tokens > 0);
     assert!(changed_snapshot.input_tokens > 0);
+    assert_eq!(
+        baseline_snapshot.input_tokens, changed_snapshot.input_tokens,
+        "run-baseline World State must not make the conversation-growth meter look pre-consumed"
+    );
     assert_ne!(
-        baseline_snapshot.input_tokens,
-        changed_snapshot.input_tokens
+        baseline_snapshot.cost_breakdown.total_input_tokens,
+        changed_snapshot.cost_breakdown.total_input_tokens,
+        "physical request accounting must still include the exact World State projection"
     );
 
     changed_runtime.prompt_preferences = Some(AgentPromptPreferences {

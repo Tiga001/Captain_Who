@@ -423,6 +423,16 @@ impl ContextMetadata {
         }
     }
 
+    /// Non-growing request content that is present before conversation history starts consuming
+    /// the model window. This is a presentation boundary only: capacity enforcement and
+    /// compaction still account for the complete assembled request.
+    pub(crate) fn is_context_window_baseline(&self) -> bool {
+        self.sources.contains(&ContextSource::BackendSystemPrompt)
+            || self.sources.contains(&ContextSource::SkillCatalog)
+            || self.scope == ContextScope::Run
+                && self.sources.contains(&ContextSource::WorldStateSnapshot)
+    }
+
     pub(crate) fn cache_band(&self) -> ContextCacheBand {
         if self.retention == ContextRetention::RequestOnly {
             return ContextCacheBand::RequestTail;
