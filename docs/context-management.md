@@ -57,7 +57,7 @@ raw suffix after cursor
  ModelRequestObservation
         |
         v
- compaction receipt / read-only audit
+ compaction receipt
 ```
 
 `ContextAssembler` 是模型上下文的唯一结构化组装入口。OpenAI 和 Anthropic payload 都由组装后的 provider-neutral `LlmMessage` 生成，不读取前端 `agent_run_json`，也不从 timeline 反推历史。
@@ -308,7 +308,7 @@ planned -> preparing -> generating -> committing -> applied
 任一未提交阶段 -> failed / cancelled / interrupted
 ```
 
-Receipt 保存计划快照、触发压力、软目标、稳定前缀身份、阶段、模型请求观测 ID、实际替换计量和有界错误，不复制摘要正文。应用启动时遗留的 `in_progress` receipt 会被标记为 `interrupted`。
+Receipt 保存计划快照、统一触发阈值、压缩目标、稳定前缀身份、阶段、模型请求观测 ID、实际替换计量和有界错误，不复制摘要正文。应用启动时遗留的 `in_progress` receipt 会被标记为 `interrupted`。
 
 成功提交的事务边界包含四项事实：
 
@@ -319,18 +319,7 @@ Receipt 保存计划快照、触发压力、软目标、稳定前缀身份、阶
 
 任一写入失败时四项一起回滚，原 active head 保持不变。计划过期属于 `refreshed`，不会伪装成失败或成功。软目标未达到只构成验收警告；只要替换块确实小于原前缀，仍可正常提交。
 
-### 只读验收与误差报告
-
-`agent.getContextCompactionAudit` 按 `conversationId` 查询，可选用 `operationId` 精确过滤。该接口只执行 SELECT，不调用 `get_active_summary` 等可能清理失效派生状态的方法。
-
-每个 operation 返回：
-
-- 完整 receipt 与关联的无正文 observation；
-- 摘要当前为 active、被后续摘要接替、脱离 active 链或已被历史变更清理；
-- 硬一致性检查、软目标警告和总体 `pass | warning | fail | in_progress`；
-- 按模型、API 风格和请求用途分组的估算误差。
-
-误差报告使用 `estimated - normalized actual`，正数表示高估，并提供加权有符号误差、加权绝对误差、绝对百分比误差中位数/P95及高估/低估数量。缺少 usage 或受多次重试影响的请求单独计数，不进入可比较样本。当前阶段只观察，不自动校准 estimator，也不改变压缩阈值。
+Receipt 和无正文 `ModelRequestObservation` 继续持久化，用于崩溃恢复、用量核对和离线诊断。它们不进入模型上下文，也不再暴露一套无人消费的专用 Audit RPC。
 
 ## 精确历史按需查询
 
@@ -356,11 +345,9 @@ FTS 表是由消息/trace 触发器和 Archive 写入事务维护的派生索引
 
 这些 timeline 状态只用于展示和恢复 UI，不参与上下文组装，也不是压缩或历史查询的事实来源。
 
-## 模型已见边界与审批恢复
+## 统一模型历史与审批恢复
 
-工具结果必须至少进入一次成功的主模型请求，才能参与压缩。
-
-Runtime 使用 `visible_trace_item_count` 记录当前 run 中主模型已经看到的 trace 前缀。SQLite 可以继续追加后续内容，圆环也可以立即增长，但规划器只接收已见前缀作为 durable 候选。
+模型历史只有“尚未压缩”和“已被摘要替换”两种状态。当前 run 与历史 turn 使用相同的 Model Projection；已经闭合并持久化的工具交换具有稳定日志 origin 后即可进入统一压缩前缀，不维护“模型已见/未见”游标，也不因为属于当前 run 而采用另一套降级规则。
 
 审批暂停前的 `AgentRunCheckpoint` 保存：
 
@@ -368,21 +355,20 @@ Runtime 使用 `visible_trace_item_count` 记录当前 run 中主模型已经看
 - 下一次模型请求序号；
 - 待审批调用和剩余工具队列；
 - Runtime Extension 快照；
-- ConversationTrace recorder；
-- `model_visible_trace_item_count`。
+- ConversationTrace recorder。
 
-最后一项不能根据“当前有多少闭合工具结果”猜测。模型一次发出多个工具调用时，前几个结果可能已经完成，但审批发生前尚未发回模型。恢复时必须使用暂停前的真实已见游标。
+恢复时不会重放已经完成的副作用工具。尚未配对完成的 tool call 和审批 checkpoint 受到绝对保护，不参与压缩。
 
 ## 统一分类与计量
 
 每个 `ContextItem` 都携带来源、scope、retention、稳定 origin 和可选工具原子分组。计量映射为四类：
 
-| 分类          | 含义                                         | 压缩行为                 |
-| ------------- | -------------------------------------------- | ------------------------ |
-| fixed         | 系统提示词、工具定义、provider 协议开销      | 不压缩                   |
-| durable       | 当前摘要、原始消息、模型已见的持久化 trace   | 可按稳定日志前缀压缩     |
-| run_transient | 当前 run 中尚未被主模型成功接收的内容        | 保护，不走第二套压缩路径 |
-| request_only  | Todo、文件事务提示等只服务本次请求的临时内容 | 不写入长期日志           |
+| 分类          | 含义                                         | 压缩行为                             |
+| ------------- | -------------------------------------------- | ------------------------------------ |
+| fixed         | 系统提示词、工具定义、provider 协议开销      | 不压缩                               |
+| durable       | 会话摘要、原始消息和已持久化历史             | 有稳定日志 origin 时进入统一前缀     |
+| run_transient | 当前 run 的模型回复、工具协议和运行覆盖      | 闭环且有稳定日志 origin 时同样可压缩 |
+| request_only  | Todo、文件事务提示等只服务本次请求的临时内容 | 不写入长期日志                       |
 
 计量链只有一套：
 
@@ -442,16 +428,15 @@ fixed + durable + run_transient + request_only <= available_input
 
 当前规则：
 
-- 完整请求或 durable 使用量到达 90% 时都可以触发；触发原因只决定何时开始，不改变后续压缩策略；
-- 任一压力触发后，都统一尝试把 durable 压到净长期容量的约 15%；
+- 完整请求达到可用输入容量的 90% 时触发，运行时没有第二套 durable 压力；
+- 触发后统一尝试把完整请求回落到可用输入容量的约 15%；
 - 15% 是软目标；保护内容导致目标不可达时，仍压缩全部安全可压缩的连续前缀；
 - 规划器的 replacement target 只用于预计回收量和提示模型，不参与 provider 输出截断；压缩没有专用固定上限，本次技术性 `max_tokens` 由统一容量报告、当前 run 输出配置和实际可缩小空间动态确定；
-- fixed、request-only、附件、图片、runtime guard、当前请求首次发送前的用户消息绝对保护；
-- run-transient 内容绝对保护；
+- fixed、request-only、附件、图片、runtime guard、最新用户指令和不可摘要运行状态绝对保护；
 - tool call/result 闭环不可拆；
-- 规划结果只有一个面向统一目标的连续 durable 日志前缀，不再因压力来源不同生成多套回收策略。
+- 规划结果只有一个面向统一目标的最旧闭合日志前缀，不区分历史 turn 和当前 Agent Loop。
 
-单个尚未被模型看到的工具结果如果自身超过窗口，系统不会把它偷偷摘要后再假装模型读过，而是返回结构化容量错误。此类问题应在工具契约层通过分页、分块或合理输出上限解决。
+单个工具结果仍受 Model Projection 动态预算限制，并明确返回截断状态、原始长度、历史引用和可用 cursor。无法一次放入窗口的结果通过分页或 Exact Archive 继续读取，不会静默丢失。
 
 ## 会话状态、缓存和圆环
 
@@ -470,10 +455,10 @@ fixed + durable + run_transient + request_only <= available_input
 圆环不是独立功能实例。它调用同一个会话状态的 `snapshot()`，显示：
 
 ```text
-durable / (available_input - fixed)
+complete_input / available_input
 ```
 
-运行中 narration 或工具闭环成功落库后，状态增量计量并立即发送 `context_window_updated`。因此圆环会随确定的长期日志单调增加；只有显式压缩、删除、回退或配置变化可以让它下降或重算。输入框尚未发送的草稿不参与计算。
+`complete_input` 包含系统契约、工具 Schema、未压缩模型历史和当前 Agent Loop 覆盖，与 provider 发送前的容量判断使用同一个 `ContextBudgetReport`。运行中 narration 或工具闭环成功落库后，状态增量计量并立即发送 `context_window_updated`。只有显式压缩、删除、回退或配置变化可以让它下降或重算。输入框尚未发送的草稿不参与计算。
 
 关闭前端圆环只停止展示和事件，不改变后端状态、容量保护或压缩能力。
 
@@ -520,10 +505,8 @@ Runtime Extension 可以注册工具、贡献 request-only 上下文、处理 ru
 | 任务分叉快照        | `crates/core/src/storage/conversation_fork_repository.rs`              |
 | 请求计量观测        | `crates/core/src/model_request_observation.rs`                         |
 | 压缩 receipt        | `crates/core/src/context_compaction_receipt.rs`                        |
-| 压缩验收报告        | `crates/core/src/context_compaction_audit.rs`                          |
 | Observation 持久化  | `crates/core/src/storage/model_request_observation_repository.rs`      |
 | Receipt 持久化      | `crates/core/src/storage/context_compaction_receipt_repository.rs`     |
-| 只读验收查询        | `crates/core/src/storage/context_compaction_audit_repository.rs`       |
 | SQLite schema       | `crates/core/src/storage/migrations.rs`                                |
 | 会话状态 LRU 与接线 | `crates/core-server/src/agent.rs`                                      |
 | 前端圆环            | `src/renderer/src/features/chat/components/ContextWindowIndicator.tsx` |

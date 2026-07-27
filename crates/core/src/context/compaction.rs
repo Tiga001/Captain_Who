@@ -527,7 +527,6 @@ fn normalize_unified_journal_prefix(
             || unit.sources.contains(&ContextSource::SkillInstructions)
             || unit.sources.contains(&ContextSource::SkillCatalog)
             || unit.sources.contains(&ContextSource::RuntimeTodo)
-            || unit.sources.contains(&ContextSource::RuntimeExtension)
             || unit.sources.contains(&ContextSource::FileTransaction)
             || unit.sources.contains(&ContextSource::RuntimeGuard)
             || unit.sources.contains(&ContextSource::InputAttachment)
@@ -677,7 +676,6 @@ fn empty_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::budget::{ContextTokenBreakdown, ContextTokenCategoryEstimate};
 
     fn item(
         index: usize,
@@ -709,10 +707,6 @@ mod tests {
         run_transient: u64,
         request_only: u64,
     ) -> ContextCompactionQuery {
-        let category = |input_tokens| ContextTokenCategoryEstimate {
-            input_tokens,
-            ..ContextTokenCategoryEstimate::default()
-        };
         let total = fixed
             .saturating_add(durable)
             .saturating_add(run_transient)
@@ -720,22 +714,10 @@ mod tests {
         ContextCompactionQuery {
             status,
             available_input_tokens: available,
-            remaining_input_tokens: available.map(|limit| {
-                i64::try_from(limit).unwrap_or(i64::MAX) - i64::try_from(total).unwrap_or(i64::MAX)
-            }),
             request_input_tokens: total,
             additive_input_tokens: total,
-            persistent_input_tokens: fixed.saturating_add(durable),
             context_revision: 7,
             persistent_revision: 5,
-            breakdown: ContextTokenBreakdown {
-                fixed: category(fixed),
-                durable: category(durable),
-                run_transient: category(run_transient),
-                request_only: category(request_only),
-                total: category(total),
-                semantic: Default::default(),
-            },
         }
     }
 

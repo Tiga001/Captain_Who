@@ -2,7 +2,6 @@ pub mod artifact_runtime;
 mod cancellation;
 pub mod command;
 mod context;
-mod context_compaction_audit;
 mod context_compaction_receipt;
 mod conversation_trace;
 mod conversation_trace_projection;
@@ -37,11 +36,6 @@ pub use context::{
     ContextJournalCursor, ContinuityIndexV2, CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
     CONTEXT_CONTINUITY_HARD_MAX_TOKENS, CONTEXT_CONTINUITY_SCHEMA_VERSION,
     CONTEXT_CONTINUITY_TARGET_TOKENS, CONTEXT_CONTINUITY_V1_SCHEMA_VERSION,
-};
-pub use context_compaction_audit::{
-    ContextCompactionAuditBundle, ContextCompactionAuditCheck, ContextCompactionAuditCheckStatus,
-    ContextCompactionAuditReport, ContextCompactionAuditVerdict, ContextCompactionSummaryEvidence,
-    ContextCompactionSummaryRelation, ModelRequestEstimationErrorGroup,
 };
 pub use context_compaction_receipt::{
     ContextCompactionReceipt, ContextCompactionReceiptError, ContextCompactionReceiptPlan,
@@ -108,20 +102,19 @@ pub use protocol::{
     AgentCommandRuntimeProfile, AgentCommandRuntimeProvider, AgentCommandRuntimeRequest,
     AgentCommandRuntimeResolution, AgentCommandRuntimeResolvedPackage, AgentCommandSafetyPolicy,
     AgentContextCheckpointGroup, AgentContextCheckpointImage, AgentContextCheckpointItem,
-    AgentContextCheckpointOrigin, AgentContextCheckpointToolCall, AgentContextWindowPhase,
-    AgentContextWindowSnapshot, AgentContextWindowStatus, AgentDiffProposal, AgentError,
-    AgentEvent, AgentExtensionSnapshot, AgentFileDraftSnapshot, AgentFileDraftStatus,
-    AgentFileInputBinding, AgentFileInputEvidence, AgentFileInputRef, AgentFileInputSourceKind,
-    AgentFileInputSpec, AgentFileWriteMode, AgentFileWriteProposal, AgentFileWriteResult,
-    AgentFileWriteResultStatus, AgentGitDiffSnapshot, AgentGuidanceStatus,
-    AgentImageGenerationArtifact, AgentImageGenerationArtifactKind, AgentImageGenerationAudit,
-    AgentImageGenerationFailure, AgentImageGenerationOperation, AgentImageGenerationResult,
-    AgentImageGenerationResultStatus, AgentInputAttachment, AgentInputAttachmentEncoding,
-    AgentInputAttachmentKind, AgentOfficeOperationRequest, AgentPatchOperation,
-    AgentPatchPermission, AgentPatchResult, AgentPatchResultStatus, AgentPermissions,
-    AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone, AgentPromptWorkMode,
-    AgentProposedAction, AgentQueuedToolCallCheckpoint, AgentReadPermission, AgentResult,
-    AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentRunToolSetCheckpoint,
+    AgentContextCheckpointOrigin, AgentContextCheckpointToolCall, AgentContextWindowSnapshot,
+    AgentContextWindowStatus, AgentDiffProposal, AgentError, AgentEvent, AgentExtensionSnapshot,
+    AgentFileDraftSnapshot, AgentFileDraftStatus, AgentFileInputBinding, AgentFileInputEvidence,
+    AgentFileInputRef, AgentFileInputSourceKind, AgentFileInputSpec, AgentFileWriteMode,
+    AgentFileWriteProposal, AgentFileWriteResult, AgentFileWriteResultStatus, AgentGitDiffSnapshot,
+    AgentGuidanceStatus, AgentImageGenerationArtifact, AgentImageGenerationArtifactKind,
+    AgentImageGenerationAudit, AgentImageGenerationFailure, AgentImageGenerationOperation,
+    AgentImageGenerationResult, AgentImageGenerationResultStatus, AgentInputAttachment,
+    AgentInputAttachmentEncoding, AgentInputAttachmentKind, AgentOfficeOperationRequest,
+    AgentPatchOperation, AgentPatchPermission, AgentPatchResult, AgentPatchResultStatus,
+    AgentPermissions, AgentPromptDetailLevel, AgentPromptPreferences, AgentPromptTone,
+    AgentPromptWorkMode, AgentProposedAction, AgentQueuedToolCallCheckpoint, AgentReadPermission,
+    AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentRunToolSetCheckpoint,
     AgentSearchConfig, AgentSearchMode, AgentSkillActivation, AgentSkillDependencyCheck,
     AgentSkillDependencyKind, AgentSkillDependencyStatus, AgentSkillMaterializationRequest,
     AgentSkillMaterializationResult, AgentSkillMaterializationResultStatus,

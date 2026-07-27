@@ -22,9 +22,6 @@ pub(crate) use measurement_state::*;
 pub(crate) enum ContextScope {
     Run,
     Conversation,
-    // Reserved for the later project-memory source without enabling it today.
-    #[allow(dead_code)]
-    Project,
 }
 
 impl ContextScope {
@@ -32,7 +29,6 @@ impl ContextScope {
         match self {
             Self::Run => "run",
             Self::Conversation => "conversation",
-            Self::Project => "project",
         }
     }
 
@@ -40,7 +36,6 @@ impl ContextScope {
         match value {
             "run" => Some(Self::Run),
             "conversation" => Some(Self::Conversation),
-            "project" => Some(Self::Project),
             _ => None,
         }
     }
@@ -116,7 +111,9 @@ impl ContextRetention {
 pub(crate) enum ContextSource {
     BackendSystemPrompt,
     ConversationSummary,
-    ContinuityIndex,
+    // Decode-only compatibility for approval checkpoints created before Continuity left the
+    // model context. New assembly and compaction code never constructs this source.
+    LegacyContinuityIndex,
     WorldStateSnapshot,
     WorldStateDiff,
     ConversationGoal,
@@ -131,7 +128,6 @@ pub(crate) enum ContextSource {
     ModelResponse,
     ToolResult,
     RuntimeTodo,
-    RuntimeExtension,
     FileTransaction,
     RuntimeGuard,
     CompactionRequest,
@@ -142,7 +138,7 @@ impl ContextSource {
         match self {
             Self::BackendSystemPrompt => "backend_system_prompt",
             Self::ConversationSummary => "conversation_summary",
-            Self::ContinuityIndex => "continuity_index",
+            Self::LegacyContinuityIndex => "continuity_index",
             Self::WorldStateSnapshot => "world_state_snapshot",
             Self::WorldStateDiff => "world_state_diff",
             Self::ConversationGoal => "conversation_goal",
@@ -157,7 +153,6 @@ impl ContextSource {
             Self::ModelResponse => "model_response",
             Self::ToolResult => "tool_result",
             Self::RuntimeTodo => "runtime_todo",
-            Self::RuntimeExtension => "runtime_extension",
             Self::FileTransaction => "file_transaction",
             Self::RuntimeGuard => "runtime_guard",
             Self::CompactionRequest => "compaction_request",
@@ -168,7 +163,7 @@ impl ContextSource {
         match value {
             "backend_system_prompt" => Some(Self::BackendSystemPrompt),
             "conversation_summary" => Some(Self::ConversationSummary),
-            "continuity_index" => Some(Self::ContinuityIndex),
+            "continuity_index" => Some(Self::LegacyContinuityIndex),
             "world_state_snapshot" => Some(Self::WorldStateSnapshot),
             "world_state_diff" => Some(Self::WorldStateDiff),
             "conversation_goal" => Some(Self::ConversationGoal),
@@ -183,7 +178,6 @@ impl ContextSource {
             "model_response" => Some(Self::ModelResponse),
             "tool_result" => Some(Self::ToolResult),
             "runtime_todo" => Some(Self::RuntimeTodo),
-            "runtime_extension" => Some(Self::RuntimeExtension),
             "file_transaction" => Some(Self::FileTransaction),
             "runtime_guard" => Some(Self::RuntimeGuard),
             "compaction_request" => Some(Self::CompactionRequest),
@@ -424,7 +418,7 @@ impl ContextMetadata {
             return ContextUsageClass::Fixed;
         }
         match self.scope {
-            ContextScope::Conversation | ContextScope::Project => ContextUsageClass::Durable,
+            ContextScope::Conversation => ContextUsageClass::Durable,
             ContextScope::Run => ContextUsageClass::RunTransient,
         }
     }
@@ -437,18 +431,15 @@ impl ContextMetadata {
             return ContextCacheBand::StableContract;
         }
         if self.sources.contains(&ContextSource::ConversationSummary)
-            || self.sources.contains(&ContextSource::ContinuityIndex)
+            || self.sources.contains(&ContextSource::LegacyContinuityIndex)
             || self.sources.contains(&ContextSource::WorldStateSnapshot)
-                && matches!(
-                    self.scope,
-                    ContextScope::Conversation | ContextScope::Project
-                )
+                && matches!(self.scope, ContextScope::Conversation)
             || self.sources.contains(&ContextSource::ConversationGoal)
         {
             return ContextCacheBand::ConversationEpochPrelude;
         }
         match self.scope {
-            ContextScope::Conversation | ContextScope::Project => ContextCacheBand::DurableTimeline,
+            ContextScope::Conversation => ContextCacheBand::DurableTimeline,
             ContextScope::Run => ContextCacheBand::RunTimeline,
         }
     }
@@ -458,9 +449,9 @@ impl ContextMetadata {
             return LlmMessagePlacement::StableSystemPolicy;
         }
         if self.sources.contains(&ContextSource::ConversationSummary)
+            || self.sources.contains(&ContextSource::LegacyContinuityIndex)
             || self.sources.contains(&ContextSource::WorldStateSnapshot)
             || self.sources.contains(&ContextSource::WorldStateDiff)
-            || self.sources.contains(&ContextSource::ContinuityIndex)
             || self.sources.contains(&ContextSource::ConversationGoal)
         {
             return LlmMessagePlacement::BackendStateTimeline;

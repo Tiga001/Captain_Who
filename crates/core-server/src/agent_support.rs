@@ -27,8 +27,8 @@ use mycopilot_core::{
     AgentProposedAction, AgentRunContext, AgentRunStatus, AgentSearchConfig, AgentSearchMode,
     AgentSkillMaterializationRequest, AgentSkillScriptRequest, AgentToolCall, AgentToolResult,
     AgentTurnDiffIdentity, AgentTurnFileChange, AgentTurnFileContent, AgentUsage,
-    AgentWorkspaceContext, ContextCompactionAuditBundle, ContextJournalCursor,
-    ConversationTurnTrace, ConversationTurnTraceTerminalStatus, ModelCapabilities,
+    AgentWorkspaceContext, ContextJournalCursor, ConversationTurnTrace,
+    ConversationTurnTraceTerminalStatus, ModelCapabilities,
 };
 use mycopilot_protocol_rs::{
     ActivatedSkillSummaryDto, SkillActivationErrorData, SkillSelectionDto,
@@ -52,11 +52,9 @@ pub(super) use types::{
     AgentRunUsageContext, AgentRunUsageState, PendingActionRecord,
 };
 pub use types::{
-    AgentActionExecutionOutput, AgentContextCompactionAuditInput,
-    AgentContextCompactionAuditOutput, AgentContextWindowSnapshotInput,
-    AgentContextWindowSnapshotOutput, AgentConversationTurnInput, AgentConversationTurnOutput,
-    AgentFileDraftContentPage, AgentFileWriteDiffPage, AgentServiceError, PendingActionStatus,
-    PendingAgentActionSnapshot,
+    AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
+    AgentConversationTurnInput, AgentConversationTurnOutput, AgentFileDraftContentPage,
+    AgentFileWriteDiffPage, AgentServiceError, PendingActionStatus, PendingAgentActionSnapshot,
 };
 pub(super) use utility::*;
 pub(super) use world_state::*;

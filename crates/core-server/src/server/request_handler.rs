@@ -30,17 +30,6 @@ pub(crate) fn handle_request(
                 Err(error) => agent_service_error_response(request.id, error),
             }
         }
-        AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD => {
-            let input =
-                match parse_params::<agent::AgentContextCompactionAuditInput>(request.params) {
-                    Ok(input) => input,
-                    Err(message) => return response_error(Some(request.id), -32602, message),
-                };
-            match agent_service.get_context_compaction_audit(input) {
-                Ok(output) => response_success(request.id, output),
-                Err(message) => response_error(Some(request.id), -32000, message),
-            }
-        }
         AGENT_CANCEL_RUN_METHOD => {
             handle_agent_cancel_run(agent_service, request.id, request.params)
         }

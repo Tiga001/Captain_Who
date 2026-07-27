@@ -423,7 +423,6 @@ mod tests {
                 available_input_tokens: Some(120),
                 request_trigger_input_tokens: Some(100),
                 request_target_input_tokens: Some(30),
-                request_pressure: true,
                 source_input_tokens: 100,
                 retained_input_tokens: 0,
                 target_replacement_tokens: 30,

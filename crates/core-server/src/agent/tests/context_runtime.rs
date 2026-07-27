@@ -133,7 +133,6 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
         available_input_tokens: Some(6_000),
         request_trigger_input_tokens: Some(5_000),
         request_target_input_tokens: Some(1_000),
-        request_pressure: true,
         source_input_tokens: 5_000,
         retained_input_tokens: 0,
         target_replacement_tokens: 750,
@@ -271,35 +270,6 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
     );
     assert_eq!(active.uncovered_tail_input_tokens, 1_000);
     assert_eq!(active.continuity.schema_version, 2);
-    let audit = service
-        .get_context_compaction_audit(AgentContextCompactionAuditInput {
-            conversation_id: "conversation-compaction-host".to_string(),
-            operation_id: Some("operation-compaction-host".to_string()),
-            limit: Some(1),
-        })
-        .unwrap()
-        .report;
-    assert_eq!(audit.reports.len(), 1);
-    assert_eq!(
-        audit.reports[0].receipt.status,
-        mycopilot_core::ContextCompactionReceiptStatus::Applied
-    );
-    assert_eq!(
-        audit.reports[0]
-            .summary
-            .as_ref()
-            .map(|summary| summary.relation),
-        Some(mycopilot_core::ContextCompactionSummaryRelation::Active)
-    );
-    assert_eq!(
-        audit.reports[0]
-            .summary
-            .as_ref()
-            .and_then(|summary| summary.uncovered_tail_input_tokens),
-        Some(1_000)
-    );
-    assert!(audit.reports[0].generation_observation.is_some());
-    assert_eq!(audit.estimation_error_groups.len(), 1);
     assert_eq!(
         storage
             .load_conversation("conversation-compaction-host")
@@ -322,11 +292,9 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
         context_event["params"]["type"].as_str(),
         Some("context_window_updated")
     );
-    assert!(
-        context_event["params"]["snapshot"]["runTransientInputTokens"]
-            .as_u64()
-            .is_some_and(|tokens| tokens > 0)
-    );
+    assert!(context_event["params"]["snapshot"]["inputTokens"]
+        .as_u64()
+        .is_some_and(|tokens| tokens > 0));
 }
 
 #[test]
@@ -406,13 +374,10 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
 
     observer(ConversationTraceSnapshot::default()).unwrap();
     let initial = receiver.try_recv().unwrap();
-    let initial_tokens = initial["params"]["snapshot"]["durableInputTokens"]
+    let initial_tokens = initial["params"]["snapshot"]["inputTokens"]
         .as_u64()
         .unwrap();
-    let skill_tokens = initial["params"]["snapshot"]["runTransientInputTokens"]
-        .as_u64()
-        .unwrap();
-    assert!(skill_tokens > 0);
+    assert!(initial_tokens > 0);
 
     let narration = ConversationTurnTraceItem::AssistantNarration {
         sequence: 0,
@@ -427,14 +392,10 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
     })
     .unwrap();
     let narrated = receiver.try_recv().unwrap();
-    let narrated_tokens = narrated["params"]["snapshot"]["durableInputTokens"]
+    let narrated_tokens = narrated["params"]["snapshot"]["inputTokens"]
         .as_u64()
         .unwrap();
     assert!(narrated_tokens > initial_tokens);
-    assert_eq!(
-        narrated["params"]["snapshot"]["runTransientInputTokens"],
-        skill_tokens
-    );
     {
         let states = service
             .conversation_context_states
@@ -506,14 +467,10 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
     })
     .unwrap();
     let closed = receiver.try_recv().unwrap();
-    let closed_tokens = closed["params"]["snapshot"]["durableInputTokens"]
+    let closed_tokens = closed["params"]["snapshot"]["inputTokens"]
         .as_u64()
         .unwrap();
     assert!(closed_tokens > narrated_tokens);
-    assert_eq!(
-        closed["params"]["snapshot"]["runTransientInputTokens"],
-        skill_tokens
-    );
 
     let trace = storage
         .get_conversation_turn_trace("assistant-live")
@@ -629,7 +586,7 @@ fn terminal_cache_rebuild_drops_the_completed_run_skill_overlay() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(snapshot.run_transient_input_tokens, 0);
+    assert!(snapshot.input_tokens > 0);
 }
 
 #[test]
@@ -711,7 +668,6 @@ fn disabled_indicator_still_builds_runtime_context_baseline() {
         .context_window_snapshot_with_projection_cache(
             &agent_input,
             "conversation-hidden-indicator",
-            AgentContextWindowPhase::Idle,
             &projection,
         )
         .unwrap()
@@ -771,7 +727,6 @@ fn deleting_messages_invalidates_the_conversation_context_state() {
         .context_window_snapshot_with_projection_cache(
             &input,
             "conversation-delete-context",
-            AgentContextWindowPhase::Idle,
             &projection,
         )
         .unwrap()

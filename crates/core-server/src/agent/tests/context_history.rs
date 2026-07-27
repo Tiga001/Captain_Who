@@ -934,10 +934,8 @@ fn context_window_snapshot_reports_net_durable_budget() {
 
     assert_eq!(enabled.model, "model-1");
     assert_eq!(enabled.context_window_tokens, Some(128_000));
-    assert!(enabled
-        .durable_capacity_tokens
-        .is_some_and(|value| value > 0));
-    assert_eq!(enabled.durable_input_tokens, 0);
+    assert!(enabled.input_capacity_tokens.is_some_and(|value| value > 0));
+    assert!(enabled.input_tokens > 0);
 }
 
 #[test]
@@ -1011,9 +1009,7 @@ fn cached_context_preview_measures_skill_without_polluting_durable_revision() {
         .snapshot
         .unwrap();
 
-    assert_eq!(selected.persistent_revision, plain.persistent_revision);
-    assert!(selected.run_transient_input_tokens > 0);
-    assert!(selected.request_input_tokens > plain.request_input_tokens);
+    assert!(selected.input_tokens > plain.input_tokens);
 }
 
 #[test]
@@ -1085,7 +1081,7 @@ fn committed_test_summary_rebuilds_the_shared_durable_snapshot() {
                 &prefix,
                 "summary-capacity",
                 "The prior request was completed.",
-                before.durable_input_tokens,
+                before.input_tokens,
                 3,
             ),
             "assistant-long",
@@ -1098,7 +1094,7 @@ fn committed_test_summary_rebuilds_the_shared_durable_snapshot() {
         .unwrap()
         .snapshot
         .unwrap();
-    assert!(after.durable_input_tokens < before.durable_input_tokens);
+    assert!(after.input_tokens < before.input_tokens);
     assert_eq!(
         storage
             .load_conversation("conversation-capacity-summary")

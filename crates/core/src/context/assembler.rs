@@ -1372,11 +1372,6 @@ mod tests {
     }
 
     #[test]
-    fn project_scope_is_reserved_in_the_manifest_vocabulary() {
-        assert_eq!(ContextScope::Project.as_str(), "project");
-    }
-
-    #[test]
     fn assembles_compaction_summary_before_uncovered_tail() {
         let frame = ContextAssembler::assemble(ContextAssemblyInput {
             system_prompt: "rules".to_string(),

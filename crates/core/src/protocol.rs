@@ -777,20 +777,12 @@ pub enum AgentContextWindowStatus {
     InvalidConfiguration,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentContextWindowPhase {
-    Idle,
-    DurableCommit,
-}
-
 #[derive(Debug, Default, Deserialize, Serialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentContextCostBreakdown {
     pub system_tokens: u64,
     pub tool_schema_tokens: u64,
     pub summary_tokens: u64,
-    pub continuity_tokens: u64,
     pub world_state_tokens: u64,
     pub goal_tokens: u64,
     pub todo_tokens: u64,
@@ -805,27 +797,20 @@ pub struct AgentContextCostBreakdown {
 pub struct AgentContextWindowSnapshot {
     pub model: String,
     pub status: AgentContextWindowStatus,
-    pub phase: AgentContextWindowPhase,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_window_tokens: Option<u64>,
     pub reserved_output_tokens: u64,
     pub safety_margin_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    /// Input capacity left for durable conversation history after fixed request costs.
-    pub durable_capacity_tokens: Option<u64>,
-    /// Conversation history and trace content that survives into later turns.
-    pub durable_input_tokens: u64,
-    /// Run-scoped context such as activated Skill instructions. This is measured for the current
-    /// preview/request but never contributes to the durable cache revision.
-    pub run_transient_input_tokens: u64,
-    /// Fully assembled input estimate, including fixed, durable and run-scoped context.
-    pub request_input_tokens: u64,
+    /// Total input capacity after output and safety reserves.
+    pub input_capacity_tokens: Option<u64>,
+    /// Fully assembled model input, including fixed contracts, uncompressed history and
+    /// current-run overlays.
+    pub input_tokens: u64,
     #[serde(default)]
     pub cost_breakdown: AgentContextCostBreakdown,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub remaining_durable_tokens: Option<i64>,
-    /// Opaque fingerprint that changes when the fixed or durable assembled context changes.
-    pub persistent_revision: String,
+    pub remaining_input_tokens: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]

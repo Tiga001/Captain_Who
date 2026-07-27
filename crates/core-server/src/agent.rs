@@ -1,10 +1,8 @@
 use crate::agent_support::*;
 pub use crate::agent_support::{
-    AgentActionExecutionOutput, AgentContextCompactionAuditInput,
-    AgentContextCompactionAuditOutput, AgentContextWindowSnapshotInput,
-    AgentContextWindowSnapshotOutput, AgentConversationTurnInput, AgentConversationTurnOutput,
-    AgentFileDraftContentPage, AgentFileWriteDiffPage, AgentServiceError, PendingActionStatus,
-    PendingAgentActionSnapshot,
+    AgentActionExecutionOutput, AgentContextWindowSnapshotInput, AgentContextWindowSnapshotOutput,
+    AgentConversationTurnInput, AgentConversationTurnOutput, AgentFileDraftContentPage,
+    AgentFileWriteDiffPage, AgentServiceError, PendingActionStatus, PendingAgentActionSnapshot,
 };
 use crate::skills_adapter::{
     activate_selected_skills, model_skill_activation_resolver, prepare_enabled_skill_discovery,
@@ -65,8 +63,8 @@ use mycopilot_core::{
     AgentContextBaseline, AgentContextCompactionCommitOutcome, AgentContextCompactionCommitRequest,
     AgentContextCompactionGenerationOutput, AgentContextCompactionGenerationRequest,
     AgentContextCompactionModelGenerator, AgentContextCompactionPrepareOutcome,
-    AgentContextCompactionServices, AgentContextWindowObserver, AgentContextWindowPhase,
-    AgentContextWindowSnapshot, AgentContextWindowToolProjection, AgentConversationContextState,
+    AgentContextCompactionServices, AgentContextWindowObserver, AgentContextWindowSnapshot,
+    AgentContextWindowToolProjection, AgentConversationContextState,
     AgentConversationTraceObserver, AgentError, AgentEvent, AgentEventEmitter, AgentGuidanceStatus,
     AgentHostActionExecutor, AgentModelRequestObserver, AgentPatchResult, AgentProposedAction,
     AgentResult, AgentRunCheckpoint, AgentRunContext, AgentRunStatus, AgentRuntimeHostServices,

@@ -143,13 +143,12 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
         create_conversation_context_state(prepared.agent_input.clone()).unwrap();
     let conservative = conservative_state
         .snapshot_with_skill_overlays(
-            AgentContextWindowPhase::DurableCommit,
             prepared.agent_input.skill_discovery.as_ref(),
             prepared.agent_input.skill_activation.as_ref(),
         )
         .unwrap();
     assert!(
-        expected.run_transient_input_tokens > conservative.run_transient_input_tokens,
+        expected.input_tokens > conservative.input_tokens,
         "the complete Host projection must charge dynamic schemas and its Run World State snapshot"
     );
 
@@ -166,10 +165,10 @@ fn bundled_skill_crosses_the_production_turn_boundary_without_public_instruction
     observer(ConversationTraceSnapshot::default()).unwrap();
     let notification = receiver.try_recv().unwrap();
     assert_eq!(
-        notification["params"]["snapshot"]["runTransientInputTokens"]
+        notification["params"]["snapshot"]["inputTokens"]
             .as_u64()
             .unwrap(),
-        expected.run_transient_input_tokens,
+        expected.input_tokens,
         "active trace fallback must use the same opaque ToolProjection as idle preview"
     );
 }

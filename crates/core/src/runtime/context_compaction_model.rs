@@ -406,15 +406,15 @@ fn estimate_continuity_context_tokens(
     api_style: AgentApiStyle,
     continuity: &crate::ContextContinuitySnapshot,
 ) -> AgentResult<u64> {
-    let content = crate::context::render_compaction_continuity_for_context(continuity)?;
+    let content = continuity.render_json()?;
     estimate_context_items(
         model,
         api_style,
         vec![ContextItem::new(
             LlmMessage::backend_state(content),
             ContextMetadata::new(
-                ContextSource::ContinuityIndex,
-                ContextScope::Conversation,
+                ContextSource::CompactionRequest,
+                ContextScope::Run,
                 ContextRetention::Retained,
             ),
         )],

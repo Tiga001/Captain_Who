@@ -329,13 +329,10 @@ export interface AgentUsage {
 export type AgentContextWindowStatus =
   'unconfigured' | 'within_budget' | 'over_budget' | 'invalid_configuration'
 
-export type AgentContextWindowPhase = 'idle' | 'durable_commit'
-
 export interface AgentContextCostBreakdown {
   systemTokens: number
   toolSchemaTokens: number
   summaryTokens: number
-  continuityTokens: number
   worldStateTokens: number
   goalTokens: number
   todoTokens: number
@@ -347,22 +344,15 @@ export interface AgentContextCostBreakdown {
 export interface AgentContextWindowSnapshot {
   model: string
   status: AgentContextWindowStatus
-  phase: AgentContextWindowPhase
   contextWindowTokens?: number
   reservedOutputTokens: number
   safetyMarginTokens: number
-  /** Input capacity left for durable history after fixed request costs. */
-  durableCapacityTokens?: number
-  /** Conversation history and trace content retained for later turns. */
-  durableInputTokens: number
-  /** Current-run overlays, including activated Skill instructions. */
-  runTransientInputTokens: number
-  /** Total estimated input for the current preview request. */
-  requestInputTokens: number
+  /** Total input capacity after output and safety reserves. */
+  inputCapacityTokens?: number
+  /** Fully assembled model input, including the current Agent Loop. */
+  inputTokens: number
   costBreakdown: AgentContextCostBreakdown
-  remainingDurableTokens?: number
-  /** Opaque fingerprint that changes with fixed or durable context. */
-  persistentRevision: string
+  remainingInputTokens?: number
 }
 
 export type AgentUsageSummaryRange = 'last7Days' | 'last30Days' | 'all' | 'custom'
@@ -577,7 +567,6 @@ export interface ModelRequestEstimate {
   systemTokens: number
   toolSchemaTokens: number
   summaryTokens: number
-  continuityTokens: number
   worldStateTokens: number
   goalTokens: number
   todoTokens: number
@@ -633,7 +622,6 @@ export interface ContextCompactionReceiptPlan {
   availableInputTokens?: number
   requestTriggerInputTokens?: number
   requestTargetInputTokens?: number
-  requestPressure: boolean
   sourceInputTokens: number
   retainedInputTokens: number
   targetReplacementTokens: number
@@ -683,75 +671,6 @@ export interface ContextCompactionReceipt {
   startedAt: number
   updatedAt: number
   completedAt?: number
-}
-
-export type ContextCompactionAuditVerdict = 'pass' | 'warning' | 'fail' | 'in_progress'
-export type ContextCompactionAuditCheckStatus = 'pass' | 'warning' | 'fail'
-export type ContextCompactionSummaryRelation = 'active' | 'superseded' | 'detached' | 'missing'
-
-export interface ContextCompactionSummaryEvidence {
-  summaryId: string
-  relation: ContextCompactionSummaryRelation
-  sourceRevision?: string
-  sourceInputTokens?: number
-  summaryInputTokens?: number
-  continuityInputTokens?: number
-  replacementInputTokens?: number
-}
-
-export interface ContextCompactionAuditCheck {
-  code: string
-  status: ContextCompactionAuditCheckStatus
-  message: string
-  details?: unknown
-}
-
-export interface ContextCompactionAuditReport {
-  operationId: string
-  verdict: ContextCompactionAuditVerdict
-  receipt: ContextCompactionReceipt
-  generationObservation?: ModelRequestObservation
-  summary?: ContextCompactionSummaryEvidence
-  checks: ContextCompactionAuditCheck[]
-}
-
-export interface ModelRequestEstimationErrorGroup {
-  model: string
-  apiStyle: AgentObservedApiStyle
-  purpose: ModelRequestPurpose
-  observationCount: number
-  comparableSampleCount: number
-  estimateUnavailableCount: number
-  actualUsageUnavailableCount: number
-  retryAffectedCount: number
-  estimatedInputTokens: number
-  normalizedActualInputTokens: number
-  /** Sum of estimated minus actual input tokens; positive means overestimation. */
-  estimatedMinusActualTokens: number
-  weightedSignedErrorBasisPoints?: number
-  weightedAbsoluteErrorBasisPoints?: number
-  medianAbsolutePercentageErrorBasisPoints?: number
-  p95AbsolutePercentageErrorBasisPoints?: number
-  underestimationCount: number
-  overestimationCount: number
-  exactCount: number
-}
-
-export interface ContextCompactionAuditBundle {
-  conversationId: string
-  generatedAt: number
-  reports: ContextCompactionAuditReport[]
-  estimationErrorGroups: ModelRequestEstimationErrorGroup[]
-}
-
-export interface AgentContextCompactionAuditInput {
-  conversationId: string
-  operationId?: string
-  limit?: number
-}
-
-export interface AgentContextCompactionAuditOutput {
-  report: ContextCompactionAuditBundle
 }
 
 export interface AgentConversationMessage {

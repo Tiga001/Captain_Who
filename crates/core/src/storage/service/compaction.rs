@@ -29,22 +29,6 @@ impl StorageService {
             .map_err(|error| error.to_string())
     }
 
-    pub fn get_context_compaction_audit(
-        &self,
-        conversation_id: &str,
-        operation_id: Option<&str>,
-        limit: usize,
-    ) -> Result<ContextCompactionAuditBundle, String> {
-        let connection = self.state.connection()?;
-        context_compaction_audit_repository::get_audit_bundle(
-            &connection,
-            conversation_id,
-            operation_id,
-            limit,
-        )
-        .map_err(|error| error.to_string())
-    }
-
     pub fn prepare_context_compaction_prefix(
         &self,
         conversation_id: &str,

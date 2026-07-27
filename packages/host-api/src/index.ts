@@ -5,8 +5,6 @@ import type {
   AgentCancelRunResponse,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
-  AgentContextCompactionAuditInput,
-  AgentContextCompactionAuditOutput,
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
   AgentEvent,
@@ -248,9 +246,6 @@ export interface AgentHostApi {
   getContextWindowSnapshot(
     input: AgentContextWindowSnapshotInput
   ): Promise<HostInvocationResult<AgentContextWindowSnapshotOutput>>
-  getContextCompactionAudit(
-    input: AgentContextCompactionAuditInput
-  ): Promise<AgentContextCompactionAuditOutput>
   steerRun(input: AgentSteerRunInput): Promise<AgentSteerRunOutput>
   cancelRun(input: AgentCancelRunRequest): Promise<AgentCancelRunResponse>
   listPendingActions(): Promise<PendingAgentActionSnapshot[]>

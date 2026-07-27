@@ -38,7 +38,6 @@ fn is_blocking_read_method(method: &str) -> bool {
     matches!(
         method,
         AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD
-            | AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD
             | AGENT_LIST_PENDING_ACTIONS_METHOD
             | AGENT_GET_USAGE_SUMMARY_METHOD
             | AGENT_READ_FILE_DRAFT_METHOD

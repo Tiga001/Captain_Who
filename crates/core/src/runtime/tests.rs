@@ -2089,15 +2089,11 @@ fn run_context_changes_only_world_state_while_prompt_preferences_change_configur
         inspect_context_window_with_tool_projection(changed_runtime.clone(), &changed_projection)
             .unwrap()
             .unwrap();
-    assert_eq!(
-        baseline_snapshot.persistent_revision,
-        changed_snapshot.persistent_revision
-    );
-    assert!(baseline_snapshot.run_transient_input_tokens > 0);
-    assert!(changed_snapshot.run_transient_input_tokens > 0);
+    assert!(baseline_snapshot.input_tokens > 0);
+    assert!(changed_snapshot.input_tokens > 0);
     assert_ne!(
-        baseline_snapshot.request_input_tokens,
-        changed_snapshot.request_input_tokens
+        baseline_snapshot.input_tokens,
+        changed_snapshot.input_tokens
     );
 
     changed_runtime.prompt_preferences = Some(AgentPromptPreferences {
@@ -3336,7 +3332,7 @@ fn full_conversation_context_snapshot(
 ) -> AgentContextWindowSnapshot {
     create_conversation_context_state(conversation_context_input(messages))
         .unwrap()
-        .snapshot(AgentContextWindowPhase::DurableCommit)
+        .snapshot()
 }
 
 #[test]
@@ -3359,7 +3355,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
     let cursor = state.append_trace_items(&narrated_trace, &[], 0).unwrap();
     assert_eq!(cursor, 1);
     assert_eq!(
-        state.snapshot(AgentContextWindowPhase::DurableCommit),
+        state.snapshot(),
         full_conversation_context_snapshot(vec![
             first_user.clone(),
             traced_assistant_message("", narrated_trace.clone()),
@@ -3398,7 +3394,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
         .unwrap();
     assert_eq!(cursor, 3);
     assert_eq!(
-        state.snapshot(AgentContextWindowPhase::DurableCommit),
+        state.snapshot(),
         full_conversation_context_snapshot(vec![
             first_user.clone(),
             traced_assistant_message("", closed_trace.clone()),
@@ -3414,7 +3410,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
         .finalize_conversation_turn(&completed_trace, &[], cursor, final_content, Some(2_000))
         .unwrap();
     assert_eq!(
-        state.snapshot(AgentContextWindowPhase::DurableCommit),
+        state.snapshot(),
         full_conversation_context_snapshot(vec![
             first_user.clone(),
             traced_assistant_message(final_content, completed_trace.clone()),
@@ -3428,7 +3424,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
     let mut follow_up_message = message("user", follow_up);
     follow_up_message.created_at = Some(3_000);
     assert_eq!(
-        state.snapshot(AgentContextWindowPhase::DurableCommit),
+        state.snapshot(),
         full_conversation_context_snapshot(vec![
             first_user,
             traced_assistant_message(final_content, completed_trace),
@@ -3566,12 +3562,7 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
 
     let plain_preview = inspect_context_window(without_skill).unwrap().unwrap();
     let skill_preview = inspect_context_window(input.clone()).unwrap().unwrap();
-    assert_eq!(
-        skill_preview.persistent_revision,
-        plain_preview.persistent_revision
-    );
-    assert!(skill_preview.run_transient_input_tokens > 0);
-    assert!(skill_preview.request_input_tokens > plain_preview.request_input_tokens);
+    assert!(skill_preview.input_tokens > plain_preview.input_tokens);
     let mut dynamic_tool = capabilities
         .tool_definitions
         .iter()
@@ -3609,44 +3600,24 @@ fn activated_skill_is_a_measured_dynamic_overlay_not_a_cache_input() {
         inspect_context_window_with_tool_projection(input.clone(), &dynamic_projection)
             .unwrap()
             .unwrap();
-    assert_eq!(
-        dynamic_preview.persistent_revision,
-        skill_preview.persistent_revision
-    );
-    assert!(dynamic_preview.run_transient_input_tokens > skill_preview.run_transient_input_tokens);
-    assert!(dynamic_preview.request_input_tokens > skill_preview.request_input_tokens);
+    assert!(dynamic_preview.input_tokens > skill_preview.input_tokens);
 
     let mut durable_state = create_conversation_context_state(input.clone()).unwrap();
-    let cached_plain = durable_state.snapshot(AgentContextWindowPhase::Idle);
+    let cached_plain = durable_state.snapshot();
     let cached_skill = durable_state
-        .snapshot_with_skill_activation(
-            AgentContextWindowPhase::Idle,
-            input.skill_activation.as_ref(),
-        )
+        .snapshot_with_skill_activation(input.skill_activation.as_ref())
         .unwrap();
-    let cached_plain_after = durable_state.snapshot(AgentContextWindowPhase::Idle);
+    let cached_plain_after = durable_state.snapshot();
     assert_eq!(cached_plain, cached_plain_after);
-    assert_eq!(
-        cached_skill.persistent_revision,
-        cached_plain.persistent_revision
-    );
-    assert!(cached_skill.run_transient_input_tokens > cached_plain.run_transient_input_tokens);
+    assert!(cached_skill.input_tokens > cached_plain.input_tokens);
     let cached_dynamic_skill = durable_state
         .snapshot_with_skill_overlays_and_tool_projection(
-            AgentContextWindowPhase::Idle,
             input.skill_discovery.as_ref(),
             input.skill_activation.as_ref(),
             &dynamic_projection,
         )
         .unwrap();
-    assert_eq!(
-        cached_dynamic_skill.persistent_revision,
-        cached_plain.persistent_revision
-    );
-    assert!(
-        cached_dynamic_skill.run_transient_input_tokens > cached_skill.run_transient_input_tokens
-    );
-    assert!(cached_dynamic_skill.request_input_tokens > cached_skill.request_input_tokens);
+    assert!(cached_dynamic_skill.input_tokens > cached_skill.input_tokens);
     let baseline = durable_state.shared_baseline().unwrap();
     let shared = build_llm_request(
         input.clone(),
@@ -3727,9 +3698,7 @@ fn context_preview_counts_only_host_verified_initial_dynamic_tools() {
     let exact = inspect_context_window_with_tool_projection(input, &projection)
         .unwrap()
         .unwrap();
-    assert_eq!(exact.persistent_revision, conservative.persistent_revision);
-    assert!(exact.run_transient_input_tokens > conservative.run_transient_input_tokens);
-    assert!(exact.request_input_tokens > conservative.request_input_tokens);
+    assert!(exact.input_tokens > conservative.input_tokens);
 }
 
 #[test]
@@ -4015,14 +3984,8 @@ async fn model_activation_discloses_full_skill_only_after_the_paired_tool_result
         2,
         "the observer must receive one exact aggregate snapshot for each sendable request"
     );
-    assert_eq!(
-        context_window_snapshots[0].persistent_revision,
-        context_window_snapshots[1].persistent_revision,
-        "model activation is a run overlay and must not mutate the cache-stable durable prefix"
-    );
     assert!(
-        context_window_snapshots[1].run_transient_input_tokens
-            > context_window_snapshots[0].run_transient_input_tokens,
+        context_window_snapshots[1].input_tokens > context_window_snapshots[0].input_tokens,
         "the post-activation request must account for the paired ToolResult, full Skill instructions, tools.effective World State diff and unlocked Tool schemas"
     );
     drop(context_window_snapshots);

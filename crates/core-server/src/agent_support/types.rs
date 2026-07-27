@@ -176,20 +176,6 @@ pub struct AgentContextWindowSnapshotOutput {
     pub snapshot: Option<AgentContextWindowSnapshot>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentContextCompactionAuditInput {
-    pub conversation_id: String,
-    pub operation_id: Option<String>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentContextCompactionAuditOutput {
-    pub report: ContextCompactionAuditBundle,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConversationTurnOutput {

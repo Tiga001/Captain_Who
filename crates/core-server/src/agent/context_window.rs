@@ -145,7 +145,6 @@ impl AgentService {
             Some(conversation_id) => self.context_window_snapshot_with_projection_cache(
                 &agent_input,
                 conversation_id,
-                AgentContextWindowPhase::Idle,
                 &tool_projection,
             )?,
             None => inspect_context_window_with_tool_projection(agent_input, &tool_projection)
@@ -227,31 +226,6 @@ impl AgentService {
             .remove(run_id);
     }
 
-    pub fn get_context_compaction_audit(
-        &self,
-        input: AgentContextCompactionAuditInput,
-    ) -> Result<AgentContextCompactionAuditOutput, String> {
-        let conversation_id = input.conversation_id.trim();
-        if conversation_id.is_empty() {
-            return Err("conversationId 不能为空。".to_string());
-        }
-        let operation_id = input
-            .operation_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if input.operation_id.is_some() && operation_id.is_none() {
-            return Err("operationId 不能为空字符串。".to_string());
-        }
-        let limit = input.limit.unwrap_or(20);
-        if !(1..=100).contains(&limit) {
-            return Err("limit 必须在 1 到 100 之间。".to_string());
-        }
-        self.storage
-            .get_context_compaction_audit(conversation_id, operation_id, limit)
-            .map(|report| AgentContextCompactionAuditOutput { report })
-    }
-
     pub(super) fn persisted_conversation_context_state(
         &self,
         agent_input: &AgentChatInput,
@@ -299,7 +273,6 @@ impl AgentService {
         &self,
         agent_input: &AgentChatInput,
         conversation_id: &str,
-        phase: AgentContextWindowPhase,
         tool_projection: &AgentContextWindowToolProjection,
     ) -> Result<Option<AgentContextWindowSnapshot>, String> {
         if !agent_input.context_window_indicator_enabled {
@@ -319,7 +292,6 @@ impl AgentService {
                     return entry
                         .state
                         .snapshot_with_skill_overlays_and_tool_projection(
-                            phase,
                             agent_input.skill_discovery.as_ref(),
                             agent_input.skill_activation.as_ref(),
                             tool_projection,
@@ -333,7 +305,6 @@ impl AgentService {
         self.rebuild_conversation_context_state(
             agent_input,
             conversation_id,
-            phase,
             None,
             agent_input.skill_activation.as_ref(),
             Some(tool_projection),
@@ -345,7 +316,6 @@ impl AgentService {
         &self,
         agent_input: &AgentChatInput,
         conversation_id: &str,
-        phase: AgentContextWindowPhase,
         active_run_id: Option<&str>,
         snapshot_skill_activation: Option<&mycopilot_core::AgentSkillActivation>,
         tool_projection: Option<&AgentContextWindowToolProjection>,
@@ -378,7 +348,6 @@ impl AgentService {
             Some(match tool_projection {
                 Some(tool_projection) => state
                     .snapshot_with_skill_overlays_and_tool_projection(
-                        phase,
                         agent_input.skill_discovery.as_ref(),
                         snapshot_skill_activation,
                         tool_projection,
@@ -386,7 +355,6 @@ impl AgentService {
                     .map_err(|error| error.to_string())?,
                 None => state
                     .snapshot_with_skill_overlays(
-                        phase,
                         agent_input.skill_discovery.as_ref(),
                         snapshot_skill_activation,
                     )
@@ -469,9 +437,9 @@ impl AgentService {
                             .state
                             .shared_baseline()
                             .map_err(|error| error.to_string())?;
-                        return Ok(agent_input.context_window_indicator_enabled.then(|| {
-                            entry.state.snapshot(AgentContextWindowPhase::DurableCommit)
-                        }));
+                        return Ok(agent_input
+                            .context_window_indicator_enabled
+                            .then(|| entry.state.snapshot()));
                     }
                 } else {
                     needs_rebuild = true;
@@ -486,7 +454,6 @@ impl AgentService {
         self.rebuild_conversation_context_state(
             agent_input,
             conversation_id,
-            AgentContextWindowPhase::DurableCommit,
             Some(run_id),
             None,
             None,

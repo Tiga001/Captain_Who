@@ -14,8 +14,8 @@ use super::measurement::{
 };
 use crate::llm::{LlmMessage, LlmToolCall};
 use crate::protocol::{
-    AgentApiStyle, AgentContextCostBreakdown, AgentContextWindowPhase, AgentContextWindowSnapshot,
-    AgentContextWindowStatus, AgentError, AgentResult, AgentToolDefinition,
+    AgentApiStyle, AgentContextCostBreakdown, AgentContextWindowSnapshot, AgentContextWindowStatus,
+    AgentError, AgentResult, AgentToolDefinition,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -182,12 +182,6 @@ impl ContextTokenBreakdown {
             semantic: frame.breakdown.semantic,
         }
     }
-
-    pub(crate) fn persistent_input_tokens(&self) -> u64 {
-        self.fixed
-            .input_tokens
-            .saturating_add(self.durable.input_tokens)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -208,10 +202,6 @@ impl ContextTokenEstimate {
     pub(crate) fn request_input_tokens(&self) -> u64 {
         self.verified_total_input_tokens
             .unwrap_or(self.breakdown.total.input_tokens)
-    }
-
-    pub(crate) fn persistent_input_tokens(&self) -> u64 {
-        self.breakdown.persistent_input_tokens()
     }
 }
 
@@ -239,37 +229,17 @@ impl ContextBudgetReport {
         })
     }
 
-    pub(crate) fn persistent_snapshot(
-        &self,
-        model: &str,
-        phase: AgentContextWindowPhase,
-    ) -> AgentContextWindowSnapshot {
-        let fixed_input_tokens = self.usage.breakdown.fixed.input_tokens;
-        let durable_input_tokens = self.usage.breakdown.durable.input_tokens;
-        let durable_capacity_tokens = self
-            .available_input_tokens
-            .map(|available| available.saturating_sub(fixed_input_tokens));
-        let (status, remaining_durable_tokens) = durable_snapshot_capacity_state(
-            self.context_window_tokens,
-            self.available_input_tokens,
-            fixed_input_tokens,
-            durable_input_tokens,
-        );
-
+    pub(crate) fn snapshot(&self, model: &str) -> AgentContextWindowSnapshot {
         AgentContextWindowSnapshot {
             model: model.to_string(),
-            status,
-            phase,
+            status: context_window_status(self.status),
             context_window_tokens: self.context_window_tokens,
             reserved_output_tokens: self.reserved_output_tokens,
             safety_margin_tokens: self.safety_margin_tokens,
-            durable_capacity_tokens,
-            durable_input_tokens,
-            run_transient_input_tokens: self.usage.breakdown.run_transient.input_tokens,
-            request_input_tokens: self.usage.request_input_tokens(),
+            input_capacity_tokens: self.available_input_tokens,
+            input_tokens: self.usage.request_input_tokens(),
             cost_breakdown: self.context_cost_breakdown(),
-            remaining_durable_tokens,
-            persistent_revision: format!("{:016x}", self.usage.persistent_revision),
+            remaining_input_tokens: self.remaining_input_tokens,
         }
     }
 
@@ -286,7 +256,6 @@ impl ContextBudgetReport {
                 .tool_definition_tokens
                 .saturating_add(self.usage.breakdown.run_transient.tool_definition_tokens),
             summary_tokens: semantic.summary_tokens,
-            continuity_tokens: semantic.continuity_tokens,
             world_state_tokens: semantic.world_state_tokens,
             goal_tokens: semantic.goal_tokens,
             todo_tokens: semantic.todo_tokens,
@@ -299,13 +268,10 @@ impl ContextBudgetReport {
         ContextCompactionQuery {
             status: self.status,
             available_input_tokens: self.available_input_tokens,
-            remaining_input_tokens: self.remaining_input_tokens,
             request_input_tokens: self.usage.request_input_tokens(),
             additive_input_tokens: self.usage.breakdown.total.input_tokens,
-            persistent_input_tokens: self.usage.persistent_input_tokens(),
             context_revision: self.usage.context_revision,
             persistent_revision: self.usage.persistent_revision,
-            breakdown: self.usage.breakdown.clone(),
         }
     }
 }
@@ -317,13 +283,10 @@ impl ContextBudgetReport {
 pub(crate) struct ContextCompactionQuery {
     pub(crate) status: ContextBudgetStatus,
     pub(crate) available_input_tokens: Option<u64>,
-    pub(crate) remaining_input_tokens: Option<i64>,
     pub(crate) request_input_tokens: u64,
     pub(crate) additive_input_tokens: u64,
-    pub(crate) persistent_input_tokens: u64,
     pub(crate) context_revision: u64,
     pub(crate) persistent_revision: u64,
-    pub(crate) breakdown: ContextTokenBreakdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -693,38 +656,12 @@ fn build_budget_report(
     }
 }
 
-fn durable_snapshot_capacity_state(
-    context_window_tokens: Option<u64>,
-    available_input_tokens: Option<u64>,
-    fixed_input_tokens: u64,
-    durable_input_tokens: u64,
-) -> (AgentContextWindowStatus, Option<i64>) {
-    if context_window_tokens.is_none() {
-        return (AgentContextWindowStatus::Unconfigured, None);
-    }
-    let Some(available_input_tokens) = available_input_tokens else {
-        return (AgentContextWindowStatus::Unconfigured, None);
-    };
-    if available_input_tokens == 0 {
-        return (AgentContextWindowStatus::InvalidConfiguration, None);
-    }
-
-    let durable_capacity_tokens = available_input_tokens.saturating_sub(fixed_input_tokens);
-    let remaining_durable_tokens = Some(saturating_signed_difference(
-        durable_capacity_tokens,
-        durable_input_tokens,
-    ));
-    if fixed_input_tokens > available_input_tokens || durable_input_tokens > durable_capacity_tokens
-    {
-        (
-            AgentContextWindowStatus::OverBudget,
-            remaining_durable_tokens,
-        )
-    } else {
-        (
-            AgentContextWindowStatus::WithinBudget,
-            remaining_durable_tokens,
-        )
+fn context_window_status(status: ContextBudgetStatus) -> AgentContextWindowStatus {
+    match status {
+        ContextBudgetStatus::Unconfigured => AgentContextWindowStatus::Unconfigured,
+        ContextBudgetStatus::WithinBudget => AgentContextWindowStatus::WithinBudget,
+        ContextBudgetStatus::OverBudget => AgentContextWindowStatus::OverBudget,
+        ContextBudgetStatus::InvalidConfiguration => AgentContextWindowStatus::InvalidConfiguration,
     }
 }
 
@@ -890,12 +827,11 @@ mod tests {
     }
 
     #[test]
-    fn persistent_snapshot_does_not_follow_run_transient_growth() {
+    fn snapshot_tracks_complete_request_growth() {
         let mut frame = frame(vec![LlmMessage::text(LlmMessageRole::User, "hello")]);
         let detector = detector(&[]);
         let initial = detector.inspect(&mut frame, Some(128_000), 30_000);
-        let initial_snapshot =
-            initial.persistent_snapshot("provider/model", AgentContextWindowPhase::DurableCommit);
+        let initial_snapshot = initial.snapshot("provider/model");
 
         frame.push(ContextItem::text(
             LlmMessageRole::Assistant,
@@ -905,27 +841,15 @@ mod tests {
             ContextRetention::Retained,
         ));
         let expanded = detector.inspect(&mut frame, Some(128_000), 30_000);
-        let expanded_snapshot =
-            expanded.persistent_snapshot("provider/model", AgentContextWindowPhase::DurableCommit);
+        let expanded_snapshot = expanded.snapshot("provider/model");
 
         assert_eq!(initial_snapshot.model, "provider/model");
-        assert_eq!(
-            initial_snapshot.phase,
-            AgentContextWindowPhase::DurableCommit
-        );
-        assert_eq!(
-            expanded_snapshot.durable_input_tokens,
-            initial_snapshot.durable_input_tokens
-        );
-        assert_eq!(
-            expanded_snapshot.persistent_revision,
-            initial_snapshot.persistent_revision
-        );
+        assert!(expanded_snapshot.input_tokens > initial_snapshot.input_tokens);
         assert!(expanded.usage.request_input_tokens() > initial.usage.request_input_tokens());
         assert_eq!(expanded.status, ContextBudgetStatus::OverBudget);
         assert_eq!(
             expanded_snapshot.status,
-            AgentContextWindowStatus::WithinBudget
+            AgentContextWindowStatus::OverBudget
         );
 
         frame.push(ContextItem::text(
@@ -936,17 +860,12 @@ mod tests {
             ContextRetention::Retained,
         ));
         let committed = detector.inspect(&mut frame, Some(128_000), 30_000);
-        let committed_snapshot =
-            committed.persistent_snapshot("provider/model", AgentContextWindowPhase::DurableCommit);
-        assert!(committed_snapshot.durable_input_tokens > expanded_snapshot.durable_input_tokens);
-        assert_ne!(
-            committed_snapshot.persistent_revision,
-            expanded_snapshot.persistent_revision
-        );
+        let committed_snapshot = committed.snapshot("provider/model");
+        assert!(committed_snapshot.input_tokens > expanded_snapshot.input_tokens);
     }
 
     #[test]
-    fn persistent_snapshot_excludes_fixed_costs_from_the_display_ratio() {
+    fn snapshot_reports_the_complete_input_ratio() {
         let mut frame = ContextFrame::new(vec![
             ContextItem::text(
                 LlmMessageRole::System,
@@ -966,21 +885,16 @@ mod tests {
         let detector = detector(&[read_tool()]);
 
         let report = detector.inspect(&mut frame, Some(128_000), 30_000);
-        let snapshot = report.persistent_snapshot("provider/model", AgentContextWindowPhase::Idle);
+        let snapshot = report.snapshot("provider/model");
 
+        assert_eq!(snapshot.input_tokens, report.usage.request_input_tokens());
         assert_eq!(
-            snapshot.durable_input_tokens,
-            report.usage.breakdown.durable.input_tokens
+            snapshot.input_capacity_tokens,
+            report.available_input_tokens
         );
         assert_eq!(
-            snapshot.durable_capacity_tokens,
-            report.available_input_tokens.map(|available| {
-                available.saturating_sub(report.usage.breakdown.fixed.input_tokens)
-            })
-        );
-        assert!(
-            report.usage.persistent_input_tokens() > snapshot.durable_input_tokens,
-            "fixed system and tool costs must not appear as used durable history"
+            snapshot.remaining_input_tokens,
+            report.remaining_input_tokens
         );
     }
 
@@ -1087,23 +1001,10 @@ mod tests {
         assert_eq!(breakdown.request_only.context_item_count, 1);
         assert_eq!(breakdown.total.input_tokens, category_sum);
         assert_eq!(breakdown.total.context_item_count, 5);
-        assert_eq!(
-            report.usage.persistent_input_tokens(),
-            breakdown
-                .fixed
-                .input_tokens
-                .saturating_add(breakdown.durable.input_tokens)
-        );
-
         let compaction = report.compaction_query();
-        assert_eq!(compaction.breakdown, breakdown.clone());
         assert_eq!(
             compaction.request_input_tokens,
             report.usage.request_input_tokens()
-        );
-        assert_eq!(
-            compaction.persistent_input_tokens,
-            report.usage.persistent_input_tokens()
         );
     }
 
@@ -1121,13 +1022,6 @@ mod tests {
                 LlmMessageRole::Assistant,
                 "historical summary",
                 ContextSource::ConversationSummary,
-                ContextScope::Conversation,
-                ContextRetention::Retained,
-            ),
-            ContextItem::text(
-                LlmMessageRole::User,
-                "bounded continuity refs",
-                ContextSource::ContinuityIndex,
                 ContextScope::Conversation,
                 ContextRetention::Retained,
             ),
@@ -1166,7 +1060,6 @@ mod tests {
         assert!(costs.system_tokens > 0);
         assert!(costs.tool_schema_tokens > 0);
         assert!(costs.summary_tokens > 0);
-        assert!(costs.continuity_tokens > 0);
         assert!(costs.world_state_tokens > 0);
         assert!(costs.goal_tokens > 0);
         assert!(costs.todo_tokens > 0);
@@ -1177,7 +1070,6 @@ mod tests {
                 .system_tokens
                 .saturating_add(costs.tool_schema_tokens)
                 .saturating_add(costs.summary_tokens)
-                .saturating_add(costs.continuity_tokens)
                 .saturating_add(costs.world_state_tokens)
                 .saturating_add(costs.goal_tokens)
                 .saturating_add(costs.todo_tokens)
@@ -1219,20 +1111,17 @@ mod tests {
         let plain_detector = detector(&[]);
         let tool_detector = detector(&[read_tool()]);
 
-        let original = plain_detector
-            .inspect(&mut original, Some(128_000), 30_000)
-            .persistent_snapshot("model", AgentContextWindowPhase::Idle);
-        let changed = plain_detector
-            .inspect(&mut changed, Some(128_000), 30_000)
-            .persistent_snapshot("model", AgentContextWindowPhase::Idle);
-        let same_with_tool = tool_detector
-            .inspect(&mut same_with_tool, Some(128_000), 30_000)
-            .persistent_snapshot("model", AgentContextWindowPhase::Idle);
+        let original = plain_detector.inspect(&mut original, Some(128_000), 30_000);
+        let changed = plain_detector.inspect(&mut changed, Some(128_000), 30_000);
+        let same_with_tool = tool_detector.inspect(&mut same_with_tool, Some(128_000), 30_000);
 
-        assert_ne!(original.persistent_revision, changed.persistent_revision);
         assert_ne!(
-            original.persistent_revision,
-            same_with_tool.persistent_revision
+            original.usage.persistent_revision,
+            changed.usage.persistent_revision
+        );
+        assert_ne!(
+            original.usage.persistent_revision,
+            same_with_tool.usage.persistent_revision
         );
     }
 
@@ -1369,7 +1258,7 @@ mod tests {
             request.push(ContextItem::text(
                 LlmMessageRole::User,
                 format!("request-only todo revision {revision}"),
-                ContextSource::RuntimeExtension,
+                ContextSource::RuntimeTodo,
                 ContextScope::Run,
                 ContextRetention::RequestOnly,
             ));
@@ -1448,7 +1337,7 @@ mod tests {
         second_run.push(ContextItem::text(
             LlmMessageRole::System,
             "request-only todo",
-            ContextSource::RuntimeExtension,
+            ContextSource::RuntimeTodo,
             ContextScope::Run,
             ContextRetention::RequestOnly,
         ));

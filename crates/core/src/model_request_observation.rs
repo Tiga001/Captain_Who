@@ -200,8 +200,6 @@ pub struct ModelRequestEstimate {
     #[serde(default)]
     pub summary_tokens: u64,
     #[serde(default)]
-    pub continuity_tokens: u64,
-    #[serde(default)]
     pub world_state_tokens: u64,
     #[serde(default)]
     pub goal_tokens: u64,
@@ -238,7 +236,6 @@ impl ModelRequestEstimate {
             system_tokens: costs.system_tokens,
             tool_schema_tokens: costs.tool_schema_tokens,
             summary_tokens: costs.summary_tokens,
-            continuity_tokens: costs.continuity_tokens,
             world_state_tokens: costs.world_state_tokens,
             goal_tokens: costs.goal_tokens,
             todo_tokens: costs.todo_tokens,
@@ -276,7 +273,6 @@ impl ModelRequestEstimate {
                 .system_tokens
                 .saturating_add(self.tool_schema_tokens)
                 .saturating_add(self.summary_tokens)
-                .saturating_add(self.continuity_tokens)
                 .saturating_add(self.world_state_tokens)
                 .saturating_add(self.goal_tokens)
                 .saturating_add(self.todo_tokens)

@@ -49,12 +49,11 @@ use crate::model_request_observation::{
 use crate::prompts::build_system_prompt;
 use crate::protocol::{
     AgentApprovalStatus, AgentChatInput, AgentChatMessage, AgentChatOutput, AgentCommandPermission,
-    AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowPhase,
-    AgentContextWindowSnapshot, AgentError, AgentEvent, AgentExtensionSnapshot, AgentPermissions,
-    AgentPromptPreferences, AgentProposedAction, AgentReadPermission, AgentResult, AgentRunContext,
-    AgentRunStatus, AgentSkillActivation, AgentSkillScriptPreflightStatus, AgentSteerInput,
-    AgentToolApprovalMode, AgentToolCall, AgentToolDefinition, AgentToolResult,
-    AgentWritePermission,
+    AgentCommandSafetyPolicy, AgentContextCompactionEventOutcome, AgentContextWindowSnapshot,
+    AgentError, AgentEvent, AgentExtensionSnapshot, AgentPermissions, AgentPromptPreferences,
+    AgentProposedAction, AgentReadPermission, AgentResult, AgentRunContext, AgentRunStatus,
+    AgentSkillActivation, AgentSkillScriptPreflightStatus, AgentSteerInput, AgentToolApprovalMode,
+    AgentToolCall, AgentToolDefinition, AgentToolResult, AgentWritePermission,
 };
 use crate::revision::content_revision;
 use crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput;
@@ -685,10 +684,7 @@ impl AgentRuntime {
                             }
                             request_estimate =
                                 Some(ModelRequestEstimate::from_budget_report(&report));
-                            let context_window_snapshot = report.persistent_snapshot(
-                                &llm_request.model,
-                                AgentContextWindowPhase::DurableCommit,
-                            );
+                            let context_window_snapshot = report.snapshot(&llm_request.model);
                             let remaining_tokens = report
                                 .remaining_input_tokens
                                 .map(|remaining| u64::try_from(remaining.max(0)).unwrap_or(0));

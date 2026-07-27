@@ -7,8 +7,6 @@ import type {
   AgentCancelRunResponse,
   AgentConversationTurnInput,
   AgentConversationTurnOutput,
-  AgentContextCompactionAuditInput,
-  AgentContextCompactionAuditOutput,
   AgentContextWindowSnapshotInput,
   AgentContextWindowSnapshotOutput,
   AgentEvent,
@@ -146,7 +144,6 @@ const AGENT_CANCEL_RUN_METHOD = 'agent.cancelRun'
 const AGENT_STEER_RUN_METHOD = 'agent.steerRun'
 const AGENT_START_CONVERSATION_TURN_METHOD = 'agent.startConversationTurn'
 const AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD = 'agent.getContextWindowSnapshot'
-const AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD = 'agent.getContextCompactionAudit'
 const AGENT_LIST_PENDING_ACTIONS_METHOD = 'agent.listPendingActions'
 const AGENT_APPROVE_ACTION_METHOD = 'agent.approveAction'
 const AGENT_REJECT_ACTION_METHOD = 'agent.rejectAction'
@@ -442,15 +439,6 @@ export class CoreServer {
   ): Promise<AgentContextWindowSnapshotOutput> {
     return this.rpc.request<AgentContextWindowSnapshotOutput, AgentContextWindowSnapshotInput>(
       AGENT_GET_CONTEXT_WINDOW_SNAPSHOT_METHOD,
-      input
-    )
-  }
-
-  getContextCompactionAudit(
-    input: AgentContextCompactionAuditInput
-  ): Promise<AgentContextCompactionAuditOutput> {
-    return this.rpc.request<AgentContextCompactionAuditOutput, AgentContextCompactionAuditInput>(
-      AGENT_GET_CONTEXT_COMPACTION_AUDIT_METHOD,
       input
     )
   }

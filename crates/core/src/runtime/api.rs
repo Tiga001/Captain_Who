@@ -465,11 +465,7 @@ pub fn inspect_context_window(
     let skill_activation = input.skill_activation.take();
     let mut state = create_conversation_context_state(input)?;
     state
-        .snapshot_with_skill_overlays(
-            AgentContextWindowPhase::Idle,
-            skill_discovery.as_ref(),
-            skill_activation.as_ref(),
-        )
+        .snapshot_with_skill_overlays(skill_discovery.as_ref(), skill_activation.as_ref())
         .map(Some)
 }
 
@@ -488,7 +484,6 @@ pub fn inspect_context_window_with_tool_projection(
     let mut state = create_conversation_context_state(input)?;
     state
         .snapshot_with_skill_overlays_and_tool_projection(
-            AgentContextWindowPhase::Idle,
             skill_discovery.as_ref(),
             skill_activation.as_ref(),
             projection,

@@ -11,8 +11,7 @@ use super::{
 };
 use crate::llm::LlmMessageRole;
 use crate::protocol::{
-    AgentContextWindowPhase, AgentContextWindowSnapshot, AgentError, AgentResult,
-    AgentSkillActivation, AgentToolDefinition,
+    AgentContextWindowSnapshot, AgentError, AgentResult, AgentSkillActivation, AgentToolDefinition,
 };
 use crate::{ConversationModelContextItem, ConversationTurnTrace, WorldStateSnapshot};
 
@@ -268,14 +267,14 @@ impl AgentConversationContextState {
         })
     }
 
-    pub fn snapshot(&mut self, phase: AgentContextWindowPhase) -> AgentContextWindowSnapshot {
+    pub fn snapshot(&mut self) -> AgentContextWindowSnapshot {
         self.detector
             .inspect(
                 &mut self.frame,
                 self.context_window_tokens,
                 self.reserved_output_tokens,
             )
-            .persistent_snapshot(&self.model, phase)
+            .snapshot(&self.model)
     }
 
     /// Measures a current-run Skill selection on top of the immutable durable cache without
@@ -284,17 +283,15 @@ impl AgentConversationContextState {
     /// stable while accounting for the run-transient token cost.
     pub fn snapshot_with_skill_activation(
         &mut self,
-        phase: AgentContextWindowPhase,
         activation: Option<&AgentSkillActivation>,
     ) -> AgentResult<AgentContextWindowSnapshot> {
-        self.snapshot_with_skill_overlays(phase, None, activation)
+        self.snapshot_with_skill_overlays(None, activation)
     }
 
     /// Measures the current run's discoverable catalog and activated instructions on top of the
     /// immutable durable cache. Neither overlay enters the conversation's persistent revision.
     pub fn snapshot_with_skill_overlays(
         &mut self,
-        phase: AgentContextWindowPhase,
         discovery: Option<&crate::skills::AgentSkillDiscoverySnapshot>,
         activation: Option<&AgentSkillActivation>,
     ) -> AgentResult<AgentContextWindowSnapshot> {
@@ -308,14 +305,13 @@ impl AgentConversationContextState {
                 self.context_window_tokens,
                 self.reserved_output_tokens,
             )
-            .persistent_snapshot(&self.model, phase))
+            .snapshot(&self.model))
     }
 
     /// Measures the complete run-transient projection used by production requests: the exact
     /// backend-owned Run World State snapshot, Skill overlays and provider Tool schemas.
     pub fn snapshot_with_skill_overlays_and_tool_projection(
         &mut self,
-        phase: AgentContextWindowPhase,
         discovery: Option<&crate::skills::AgentSkillDiscoverySnapshot>,
         activation: Option<&AgentSkillActivation>,
         projection: &AgentContextWindowToolProjection,
@@ -335,6 +331,6 @@ impl AgentConversationContextState {
                 self.reserved_output_tokens,
                 projection.dynamic_definitions(),
             )
-            .persistent_snapshot(&self.model, phase))
+            .snapshot(&self.model))
     }
 }

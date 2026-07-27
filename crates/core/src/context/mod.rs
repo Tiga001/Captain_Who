@@ -32,9 +32,7 @@ pub(crate) use compaction::{
 pub(crate) use compaction::{
     ContextCompactionPlan, ContextCompactionPlanStatus, ContextCompactionPlanner,
 };
-pub(crate) use compaction_summary::{
-    render_compaction_continuity_for_context, render_compaction_semantic_summary_for_context,
-};
+pub(crate) use compaction_summary::render_compaction_semantic_summary_for_context;
 pub use compaction_summary::{
     ContextCompactionGeneration, ContextCompactionGenerationKind, ContextCompactionPrefix,
     ContextCompactionSourceItem, ContextCompactionSummary, ContextCompactionSummaryDraft,

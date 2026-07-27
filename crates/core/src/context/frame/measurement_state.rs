@@ -72,7 +72,6 @@ impl ContextFrameEstimateBreakdown {
 pub(crate) struct ContextFrameSemanticBreakdown {
     pub(crate) system_tokens: u64,
     pub(crate) summary_tokens: u64,
-    pub(crate) continuity_tokens: u64,
     pub(crate) world_state_tokens: u64,
     pub(crate) goal_tokens: u64,
     pub(crate) todo_tokens: u64,
@@ -85,8 +84,6 @@ impl ContextFrameSemanticBreakdown {
             &mut self.system_tokens
         } else if sources.contains(&ContextSource::ConversationSummary) {
             &mut self.summary_tokens
-        } else if sources.contains(&ContextSource::ContinuityIndex) {
-            &mut self.continuity_tokens
         } else if sources.contains(&ContextSource::WorldStateSnapshot)
             || sources.contains(&ContextSource::WorldStateDiff)
         {
@@ -106,7 +103,6 @@ impl ContextFrameSemanticBreakdown {
     pub(crate) fn total_tokens(self) -> u64 {
         self.system_tokens
             .saturating_add(self.summary_tokens)
-            .saturating_add(self.continuity_tokens)
             .saturating_add(self.world_state_tokens)
             .saturating_add(self.goal_tokens)
             .saturating_add(self.todo_tokens)

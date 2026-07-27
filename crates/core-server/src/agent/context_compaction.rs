@@ -391,7 +391,6 @@ impl AgentService {
             Some(match tool_projection {
                 Some(tool_projection) => state
                     .snapshot_with_skill_overlays_and_tool_projection(
-                        AgentContextWindowPhase::DurableCommit,
                         agent_input.skill_discovery.as_ref(),
                         agent_input.skill_activation.as_ref(),
                         tool_projection,
@@ -399,7 +398,6 @@ impl AgentService {
                     .map_err(|error| error.to_string())?,
                 None => state
                     .snapshot_with_skill_overlays(
-                        AgentContextWindowPhase::DurableCommit,
                         agent_input.skill_discovery.as_ref(),
                         agent_input.skill_activation.as_ref(),
                     )
@@ -595,7 +593,6 @@ impl AgentService {
                                     Some(tool_projection) => entry
                                         .state
                                         .snapshot_with_skill_overlays_and_tool_projection(
-                                            AgentContextWindowPhase::DurableCommit,
                                             agent_input.skill_discovery.as_ref(),
                                             agent_input.skill_activation.as_ref(),
                                             tool_projection,
@@ -604,7 +601,6 @@ impl AgentService {
                                     None => entry
                                         .state
                                         .snapshot_with_skill_overlays(
-                                            AgentContextWindowPhase::DurableCommit,
                                             agent_input.skill_discovery.as_ref(),
                                             agent_input.skill_activation.as_ref(),
                                         )
@@ -629,7 +625,6 @@ impl AgentService {
         self.rebuild_conversation_context_state(
             agent_input,
             conversation_id,
-            AgentContextWindowPhase::DurableCommit,
             Some(run_id),
             agent_input.skill_activation.as_ref(),
             tool_projection,
