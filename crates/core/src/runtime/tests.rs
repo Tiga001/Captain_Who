@@ -97,6 +97,18 @@ fn exact_history_archive_precedes_bounded_trace_projection() {
     );
     assert_eq!(metadata.archived_completely, Some(true));
     assert!(metadata.truncated_at_source);
+    let observation = build_tool_observation_message_with_projection(
+        &raw,
+        Some(&crate::ContextHistoryRef::trace_item(
+            "assistant-archive",
+            sequence,
+        )),
+        &metadata,
+    );
+    assert!(observation.contains("\"truncated\": true"));
+    assert!(observation.contains("\"truncatedAtSource\": true"));
+    assert!(observation.contains("\"originalBytes\":"));
+    assert!(observation.contains("\"historyRef\":"));
     recorder.record_tool_result_with_archive(&call, &raw, metadata.clone());
     let trace = recorder.finish(
         "run-archive",
@@ -4402,7 +4414,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
     let durable_prefix = Arc::new(ContextCompactionPrefix {
         conversation_id: "conversation-1".to_string(),
         source_revision: "source-runtime".to_string(),
-        covered_through: ContextJournalCursor::message("assistant-old"),
+        covered_through: ContextJournalCursor::message("user-current"),
         previous_summary: None,
         source_items: vec![
             ContextCompactionSourceItem::Message {
@@ -4423,6 +4435,15 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
                 terminal_status: None,
                 terminal_error: None,
             },
+            ContextCompactionSourceItem::Message {
+                cursor: ContextJournalCursor::message("user-current"),
+                role: "user".to_string(),
+                content: "continue".to_string(),
+                created_at: 3,
+                status: Some("sent".to_string()),
+                terminal_status: None,
+                terminal_error: None,
+            },
         ],
     });
     let compacted_continuity = crate::ContextContinuitySnapshot::from_prefix(&durable_prefix)
@@ -4433,7 +4454,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         conversation_id: "conversation-1".to_string(),
         source_revision: "source-runtime".to_string(),
         previous_summary_id: None,
-        covered_through: ContextJournalCursor::message("assistant-old"),
+        covered_through: ContextJournalCursor::message("user-current"),
         content: "COMPACTED_HISTORY_MARKER: the old task was completed.".to_string(),
         continuity: compacted_continuity,
         generation: ContextCompactionGeneration::test(),
@@ -4475,7 +4496,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
             prepare_counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(
                 request.covered_through,
-                ContextJournalCursor::message("assistant-old")
+                ContextJournalCursor::message("user-current")
             );
             assert_eq!(request.visible_trace_item_count, 0);
             let durable_prefix = durable_prefix_for_prepare.clone();

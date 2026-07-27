@@ -236,7 +236,7 @@ fn conversation_world_state_persists_exact_full_and_anchored_diff_across_turns()
 }
 
 #[test]
-fn compaction_cannot_cross_the_model_visible_trace_boundary() {
+fn compaction_accepts_newly_closed_exchange_but_rejects_unsafe_trace_boundaries() {
     let trace = ConversationTurnTrace {
         schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
         run_id: "run-visible-boundary".to_string(),
@@ -275,7 +275,7 @@ fn compaction_cannot_cross_the_model_visible_trace_boundary() {
     };
     let result_cursor = ContextJournalCursor::trace_item("assistant-visible-boundary", 2);
 
-    let unseen = validate_compaction_model_visible_boundary(
+    validate_compaction_model_visible_boundary(
         &result_cursor,
         Some(&trace),
         "run-visible-boundary",
@@ -283,8 +283,7 @@ fn compaction_cannot_cross_the_model_visible_trace_boundary() {
         "assistant-visible-boundary",
         1,
     )
-    .unwrap_err();
-    assert_eq!(unseen.code(), Some("context_compaction_unseen_trace_item"));
+    .unwrap();
 
     let split_exchange = validate_compaction_model_visible_boundary(
         &ContextJournalCursor::trace_item("assistant-visible-boundary", 0),
@@ -309,6 +308,20 @@ fn compaction_cannot_cross_the_model_visible_trace_boundary() {
         3,
     )
     .unwrap();
+
+    let unresolved = validate_compaction_model_visible_boundary(
+        &ContextJournalCursor::trace_item("assistant-visible-boundary", 1),
+        Some(&trace),
+        "run-visible-boundary",
+        "conversation-visible-boundary",
+        "assistant-visible-boundary",
+        3,
+    )
+    .unwrap_err();
+    assert_eq!(
+        unresolved.code(),
+        Some("context_compaction_trace_boundary_missing")
+    );
 }
 
 #[test]
@@ -786,6 +799,125 @@ fn compaction_projection_hides_covered_prefix_but_keeps_raw_conversation_intact(
     assert_eq!(conversation.messages.len(), 3);
     assert_eq!(projected.len(), 1);
     assert_eq!(projected[0].content, "new request");
+}
+
+#[test]
+fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail() {
+    let conversation = ChatConversationRecord {
+        id: "conversation-mid-run".to_string(),
+        project_id: None,
+        model_id: None,
+        title: "Mid run".to_string(),
+        messages: vec![
+            ChatMessageRecord {
+                id: "user-current".to_string(),
+                role: "user".to_string(),
+                content: "LATEST_USER_MARKER".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            },
+            ChatMessageRecord {
+                id: "assistant-current".to_string(),
+                role: "assistant".to_string(),
+                content: THINKING_PLACEHOLDER.to_string(),
+                created_at: 2,
+                status: Some("pending".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            },
+        ],
+        created_at: 1,
+        updated_at: 2,
+        pinned_at: None,
+        archived_at: None,
+        unread_at: None,
+    };
+    let trace = ConversationTurnTrace {
+        schema_version: CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+        run_id: "run-mid-run".to_string(),
+        conversation_id: conversation.id.clone(),
+        assistant_message_id: "assistant-current".to_string(),
+        terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+        terminal_error: None,
+        truncated: false,
+        items: vec![
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 1,
+                call_id: "call-1".to_string(),
+                tool: "read_file".to_string(),
+                operation: json!({ "path": "README.md" }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 2,
+                call_id: "call-1".to_string(),
+                tool: "read_file".to_string(),
+                status: ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: json!({ "content": "COVERED_RESULT" }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                error: None,
+                truncated: false,
+                archive: Default::default(),
+            },
+            ConversationTurnTraceItem::AssistantNarration {
+                sequence: 3,
+                content: "UNCOVERED_TAIL_MARKER".to_string(),
+                truncated: false,
+            },
+        ],
+    };
+    let seed_prefix = ContextCompactionPrefix {
+        conversation_id: conversation.id.clone(),
+        source_revision: "revision-mid-run".to_string(),
+        covered_through: ContextJournalCursor::message("user-current"),
+        previous_summary: None,
+        source_items: vec![ContextCompactionSourceItem::Message {
+            cursor: ContextJournalCursor::message("user-current"),
+            role: "user".to_string(),
+            content: "LATEST_USER_MARKER".to_string(),
+            created_at: 1,
+            status: Some("sent".to_string()),
+            terminal_status: None,
+            terminal_error: None,
+        }],
+    };
+    let summary = ContextCompactionSummary {
+        schema_version: CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION,
+        id: "summary-mid-run".to_string(),
+        conversation_id: conversation.id.clone(),
+        source_revision: seed_prefix.source_revision.clone(),
+        previous_summary_id: None,
+        covered_through: ContextJournalCursor::trace_item("assistant-current", 2),
+        content: "The file was read.".to_string(),
+        continuity: mycopilot_core::ContextContinuitySnapshot::from_prefix(&seed_prefix).unwrap(),
+        generation: ContextCompactionGeneration::test(),
+        source_input_tokens: 100,
+        summary_input_tokens: 10,
+        continuity_input_tokens: 10,
+        uncovered_tail_input_tokens: 10,
+        replacement_input_tokens: 20,
+        created_at: 3,
+    };
+
+    let projected = conversation_history_messages_with_model_context(
+        &conversation,
+        &[trace],
+        &[],
+        Some(&summary),
+        &[],
+    );
+
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[0].content, "LATEST_USER_MARKER");
+    let tail = projected[1].conversation_turn_trace.as_ref().unwrap();
+    assert_eq!(tail.items.len(), 1);
+    assert_eq!(tail.items[0].sequence(), 3);
 }
 
 #[test]

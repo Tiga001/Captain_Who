@@ -186,13 +186,33 @@ impl ContextFrame {
         rebased
     }
 
-    /// Replaces every fixed/durable item with a newly committed authoritative baseline while
-    /// retaining the current run overlay in order. This is used after durable compaction; tool
-    /// observations remain available to the active loop even though older conversation history
-    /// has been replaced by a summary.
+    #[cfg(test)]
     pub(crate) fn replace_persistent_baseline(self, baseline: MeasuredContextBaseline) -> Self {
         let overlay = self
             .iter_items()
+            .filter(|item| !item.metadata.usage_class().is_persistent())
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut replaced = Self::from_measured_baseline(baseline);
+        for item in overlay {
+            replaced.push(item);
+        }
+        replaced
+    }
+
+    /// Replaces the model-visible conversation journal with an authoritative backend baseline
+    /// after compaction. Message, guidance and tool protocol items are reconstructed from durable
+    /// Trace/ModelContext storage; retaining their run overlay would duplicate the exact tail.
+    pub(crate) fn replace_compacted_model_history(self, baseline: MeasuredContextBaseline) -> Self {
+        let overlay = self
+            .iter_items()
+            .filter(|item| {
+                let sources = item.metadata.sources();
+                !sources.contains(&ContextSource::ModelResponse)
+                    && !sources.contains(&ContextSource::ToolResult)
+                    && !sources.contains(&ContextSource::ToolContinuation)
+                    && !sources.contains(&ContextSource::UserGuidance)
+            })
             .filter(|item| !item.metadata.usage_class().is_persistent())
             .cloned()
             .collect::<Vec<_>>();
@@ -428,6 +448,7 @@ impl ContextFrame {
         call: &LlmToolCall,
         observation: String,
         is_error: bool,
+        origin: Option<ContextOrigin>,
     ) -> AgentResult<()> {
         let checkpoint_call = self.validate_pending_tool_call(&call.id)?;
         if checkpoint_call.name != call.name {
@@ -448,17 +469,21 @@ impl ContextFrame {
             .and_then(|item| item.metadata.group().cloned())
             .ok_or_else(|| AgentError::new("待审批工具调用缺少原子工具交换分组。"))?;
 
+        let mut metadata = ContextMetadata::new(
+            ContextSource::ToolContinuation,
+            ContextScope::Run,
+            ContextRetention::Retained,
+        )
+        .with_source(ContextSource::ToolResult)
+        .with_group(group);
+        if let Some(origin) = origin {
+            metadata = metadata.with_origin(origin);
+        }
         self.push(ContextItem::tool_result(
             call.id.clone(),
             observation,
             is_error,
-            ContextMetadata::new(
-                ContextSource::ToolContinuation,
-                ContextScope::Run,
-                ContextRetention::Retained,
-            )
-            .with_source(ContextSource::ToolResult)
-            .with_group(group),
+            metadata,
         ));
         self.validate_complete_tool_protocol()
     }

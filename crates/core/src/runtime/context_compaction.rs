@@ -26,10 +26,12 @@ pub struct AgentContextCompactionPrepareRequest {
     pub assistant_message_id: String,
     pub expected_previous_summary_id: Option<String>,
     pub covered_through: ContextJournalCursor,
-    /// Current-run trace prefix already observed by the main model. Later persisted entries remain
-    /// in the uncommitted overlay and cannot be promoted by a compaction rebuild.
+    /// Trace prefix observed before this request. Retained for checkpoint/audit compatibility;
+    /// compaction eligibility is determined by a closed durable journal boundary, not by whether
+    /// the next model request has already consumed the completed exchange.
     pub visible_trace_item_count: usize,
     pub source_input_tokens: u64,
+    pub retained_input_tokens: u64,
     pub uncovered_tail_input_tokens: u64,
     pub target_replacement_tokens: u64,
 }
@@ -517,9 +519,11 @@ fn prepare_request_from_plan(
         covered_through: prefix.covered_through.clone(),
         visible_trace_item_count,
         source_input_tokens: step.source_input_tokens,
+        retained_input_tokens: step.retained_input_tokens,
+        // The planner now operates on one model timeline, so this audit value is the complete
+        // request remainder rather than the former durable-only remainder.
         uncovered_tail_input_tokens: plan
-            .projected_durable_input_tokens
-            .saturating_add(plan.planned_reclaimed_tokens)
+            .request_input_tokens
             .saturating_sub(step.source_input_tokens),
         target_replacement_tokens: step.target_replacement_tokens,
     })
@@ -550,12 +554,17 @@ fn validate_generated_draft(
     expected_continuity: &crate::ContextContinuitySnapshot,
     draft: &ContextCompactionSummaryDraft,
 ) -> AgentResult<()> {
-    if draft.replacement_input_tokens >= draft.source_input_tokens {
+    if draft
+        .replacement_input_tokens
+        .saturating_add(request.retained_input_tokens)
+        >= draft.source_input_tokens
+    {
         return Err(AgentError::structured(
             "context_compaction_replacement_invalid",
             "上下文压缩替换内容没有实际缩小上下文。",
             serde_json::json!({
                 "replacementInputTokens": draft.replacement_input_tokens,
+                "retainedInputTokens": request.retained_input_tokens,
                 "sourceInputTokens": draft.source_input_tokens,
                 "targetReplacementTokens": request.target_replacement_tokens,
             }),
@@ -647,6 +656,7 @@ mod tests {
                 ranges: Vec::new(),
                 atomic_unit_count: 2,
                 source_input_tokens: 1_000,
+                retained_input_tokens: 0,
                 target_replacement_tokens: 256,
                 expected_reclaimed_tokens: 744,
                 contains_side_effects: false,

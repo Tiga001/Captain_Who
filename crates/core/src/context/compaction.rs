@@ -15,34 +15,8 @@ use crate::protocol::{AgentToolDefinition, AgentToolSafety};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-const DEFAULT_COMPACTION_TRIGGER_PERCENT: u64 = 90;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ContextCompactionPolicy {
-    soft_trigger_percent: u64,
-    base_headroom_percent: u64,
-    run_growth_reserve_percent: u64,
-    maximum_headroom_percent: u64,
-    durable_trigger_percent: u64,
-    durable_target_percent: u64,
-    minimum_reclaim_tokens: u64,
-    maximum_reclaim_floor_tokens: u64,
-}
-
-impl Default for ContextCompactionPolicy {
-    fn default() -> Self {
-        Self {
-            soft_trigger_percent: DEFAULT_COMPACTION_TRIGGER_PERCENT,
-            base_headroom_percent: 25,
-            run_growth_reserve_percent: 50,
-            maximum_headroom_percent: 40,
-            durable_trigger_percent: DEFAULT_COMPACTION_TRIGGER_PERCENT,
-            durable_target_percent: 15,
-            minimum_reclaim_tokens: 512,
-            maximum_reclaim_floor_tokens: 4_096,
-        }
-    }
-}
+const COMPACTION_TRIGGER_PERCENT: u64 = 90;
+const COMPACTION_TARGET_PERCENT: u64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,6 +57,8 @@ pub(crate) struct ContextCompactionStep {
     pub(crate) ranges: Vec<ContextCompactionItemRange>,
     pub(crate) atomic_unit_count: usize,
     pub(crate) source_input_tokens: u64,
+    /// Exact latest-user tokens restored beside the summary after commit.
+    pub(crate) retained_input_tokens: u64,
     /// Aspirational size of the model-visible semantic summary. Backend-only Continuity metadata
     /// is deliberately excluded. This is a planning projection, not an output limit.
     pub(crate) target_replacement_tokens: u64,
@@ -137,14 +113,12 @@ pub(crate) struct ContextCompactionPlan {
 }
 
 pub(crate) struct ContextCompactionPlanner {
-    policy: ContextCompactionPolicy,
     tool_safety: BTreeMap<String, AgentToolSafety>,
 }
 
 impl ContextCompactionPlanner {
     pub(crate) fn for_tools(tools: &[AgentToolDefinition]) -> Self {
         Self {
-            policy: ContextCompactionPolicy::default(),
             tool_safety: tools
                 .iter()
                 .map(|tool| (tool.name.clone(), tool.safety))
@@ -159,38 +133,71 @@ impl ContextCompactionPlanner {
         protect_current_user: bool,
     ) -> ContextCompactionPlan {
         let units = build_atomic_units(items, &self.tool_safety);
-        let last_durable_user_index = items
+        let latest_user_index = items
             .iter()
             .rev()
-            .find(|item| {
-                item.usage_class == ContextUsageClass::Durable && item.role == LlmMessageRole::User
-            })
+            .find(|item| item.role == LlmMessageRole::User)
             .map(|item| item.index);
         let mut protected_reasons = BTreeMap::<String, u64>::new();
         let mut protected_unit_count = 0_usize;
         let mut candidates = Vec::new();
         for unit in units.iter().cloned() {
-            if let Some(reason) =
-                absolute_protection_reason(&unit, last_durable_user_index, protect_current_user)
-            {
+            let contains_latest_user = protect_current_user
+                && latest_user_index.is_some_and(|index| {
+                    unit.start_index <= index && index < unit.end_index_exclusive
+                });
+            // The latest durable user message is a journal bridge: storage may summarize through
+            // it to reach later closed activity, but projection restores the exact message after
+            // the summary. Run-scoped guidance is instead a hard boundary because its attachments
+            // and placement are part of the live run.
+            let retained_after_compaction =
+                contains_latest_user && unit.usage_class == ContextUsageClass::Durable;
+            if contains_latest_user && !retained_after_compaction {
+                protected_unit_count = protected_unit_count.saturating_add(1);
+                merge_reason_tokens(
+                    &mut protected_reasons,
+                    ContextCompactionProtectionReason::CurrentUser,
+                    unit.tokens,
+                );
+                continue;
+            }
+            if let Some(reason) = absolute_protection_reason(&unit) {
                 protected_unit_count = protected_unit_count.saturating_add(1);
                 merge_reason_tokens(&mut protected_reasons, reason, unit.tokens);
                 continue;
             }
             match unit.usage_class {
-                ContextUsageClass::Durable => {}
+                ContextUsageClass::Durable | ContextUsageClass::RunTransient => {}
                 ContextUsageClass::Fixed | ContextUsageClass::RequestOnly => {
                     unreachable!("fixed and request-only units are protected above")
                 }
-                ContextUsageClass::RunTransient => {
-                    unreachable!("run-transient units are protected above")
-                }
             }
-            candidates.push(CompactionCandidate { unit });
+            if unit.origin.is_none() {
+                protected_unit_count = protected_unit_count.saturating_add(1);
+                merge_reason_tokens(
+                    &mut protected_reasons,
+                    ContextCompactionProtectionReason::UncommittedRun,
+                    unit.tokens,
+                );
+                continue;
+            }
+            if retained_after_compaction {
+                protected_unit_count = protected_unit_count.saturating_add(1);
+                merge_reason_tokens(
+                    &mut protected_reasons,
+                    ContextCompactionProtectionReason::CurrentUser,
+                    unit.tokens,
+                );
+            }
+            candidates.push(CompactionCandidate {
+                unit,
+                retained_after_compaction,
+            });
         }
 
         let compactable_input_tokens = candidates
             .iter()
+            .filter(|candidate| !candidate.retained_after_compaction)
             .map(|candidate| candidate.unit.tokens)
             .sum::<u64>();
         let protected_input_tokens = query
@@ -234,31 +241,19 @@ impl ContextCompactionPlanner {
         }
 
         let soft_trigger_input_tokens =
-            percent_ceil(available_input_tokens, self.policy.soft_trigger_percent);
-        let target_input_tokens = self.target_input_tokens(query, available_input_tokens);
+            percent_ceil(available_input_tokens, COMPACTION_TRIGGER_PERCENT);
+        let target_input_tokens = percent_ceil(available_input_tokens, COMPACTION_TARGET_PERCENT);
         let durable_input_tokens = query.breakdown.durable.input_tokens;
-        let durable_capacity_tokens =
-            available_input_tokens.saturating_sub(query.breakdown.fixed.input_tokens);
-        let durable_trigger_input_tokens =
-            percent_ceil(durable_capacity_tokens, self.policy.durable_trigger_percent);
-        let durable_target_input_tokens =
-            percent_ceil(durable_capacity_tokens, self.policy.durable_target_percent);
         let thresholds = ContextCompactionThresholds {
             request_trigger_input_tokens: Some(soft_trigger_input_tokens),
             request_target_input_tokens: Some(target_input_tokens),
-            durable_capacity_tokens: Some(durable_capacity_tokens),
-            durable_trigger_input_tokens: Some(durable_trigger_input_tokens),
-            durable_target_input_tokens: Some(durable_target_input_tokens),
+            durable_capacity_tokens: None,
+            durable_trigger_input_tokens: None,
+            durable_target_input_tokens: None,
         };
         let request_pressure = query.request_input_tokens >= soft_trigger_input_tokens
             || query.status == ContextBudgetStatus::OverBudget;
-        let durable_pressure = if durable_capacity_tokens == 0 {
-            durable_input_tokens > 0
-        } else {
-            durable_input_tokens >= durable_trigger_input_tokens
-        };
-        let compaction_required = request_pressure || durable_pressure;
-        if !compaction_required {
+        if !request_pressure {
             return empty_plan(
                 ContextCompactionPlanStatus::NotRequired,
                 query,
@@ -268,25 +263,9 @@ impl ContextCompactionPlanner {
             );
         }
 
-        let reclaim_floor = percent_ceil(available_input_tokens, 5)
-            .max(self.policy.minimum_reclaim_tokens)
-            .min(self.policy.maximum_reclaim_floor_tokens)
-            .min(query.request_input_tokens);
-        let required_request_reclaimed_tokens = if request_pressure {
-            query
-                .request_input_tokens
-                .saturating_sub(target_input_tokens)
-                .max(reclaim_floor)
-        } else {
-            0
-        };
-        // Trigger sources only decide when compaction starts. Once started, every execution aims
-        // at the same durable target so transient request pressure cannot degrade into a series of
-        // tiny summaries.
-        let required_durable_reclaimed_tokens =
-            durable_input_tokens.saturating_sub(durable_target_input_tokens);
-        let required_reclaimed_tokens =
-            required_request_reclaimed_tokens.max(required_durable_reclaimed_tokens);
+        let required_reclaimed_tokens = query
+            .request_input_tokens
+            .saturating_sub(target_input_tokens);
 
         let mut selected = Vec::<CompactionCandidate>::new();
         for candidate in &candidates {
@@ -295,7 +274,7 @@ impl ContextCompactionPlanner {
             }
             selected.push(candidate.clone());
         }
-        normalize_stable_durable_prefix(&mut selected, &units, &candidates);
+        normalize_unified_journal_prefix(&mut selected, &units, &candidates);
 
         let steps = build_steps(&selected, required_reclaimed_tokens);
         let planned_reclaimed_tokens = steps
@@ -307,11 +286,9 @@ impl ContextCompactionPlanner {
             .saturating_sub(planned_reclaimed_tokens);
         let projected_durable_input_tokens =
             durable_input_tokens.saturating_sub(planned_reclaimed_tokens);
-        let request_target_satisfied =
-            !request_pressure || projected_request_input_tokens <= target_input_tokens;
-        let durable_target_satisfied =
-            projected_durable_input_tokens <= durable_target_input_tokens;
-        let best_effort = !request_target_satisfied || !durable_target_satisfied;
+        let request_target_satisfied = projected_request_input_tokens <= target_input_tokens;
+        let durable_target_satisfied = true;
+        let best_effort = !request_target_satisfied;
         let status = if planned_reclaimed_tokens > 0 {
             ContextCompactionPlanStatus::Required
         } else {
@@ -326,11 +303,11 @@ impl ContextCompactionPlanner {
             available_input_tokens: Some(available_input_tokens),
             soft_trigger_input_tokens: Some(soft_trigger_input_tokens),
             target_input_tokens: Some(target_input_tokens),
-            durable_capacity_tokens: Some(durable_capacity_tokens),
-            durable_trigger_input_tokens: Some(durable_trigger_input_tokens),
-            durable_target_input_tokens: Some(durable_target_input_tokens),
+            durable_capacity_tokens: None,
+            durable_trigger_input_tokens: None,
+            durable_target_input_tokens: None,
             required_reclaimed_tokens,
-            required_durable_reclaimed_tokens,
+            required_durable_reclaimed_tokens: 0,
             planned_reclaimed_tokens,
             projected_request_input_tokens,
             projected_durable_input_tokens,
@@ -341,26 +318,6 @@ impl ContextCompactionPlanner {
             protected,
             steps,
         }
-    }
-
-    fn target_input_tokens(
-        &self,
-        query: &ContextCompactionQuery,
-        available_input_tokens: u64,
-    ) -> u64 {
-        let base_headroom = percent_ceil(available_input_tokens, self.policy.base_headroom_percent);
-        let growth_floor = percent_ceil(available_input_tokens, 20).min(8_192);
-        let run_growth = query
-            .breakdown
-            .run_transient
-            .input_tokens
-            .saturating_mul(self.policy.run_growth_reserve_percent)
-            .div_ceil(100)
-            .max(growth_floor);
-        let maximum_headroom =
-            percent_ceil(available_input_tokens, self.policy.maximum_headroom_percent);
-        let desired_headroom = base_headroom.max(run_growth.min(maximum_headroom));
-        available_input_tokens.saturating_sub(desired_headroom)
     }
 }
 
@@ -383,6 +340,7 @@ struct AtomicContextUnit {
 #[derive(Debug, Clone)]
 struct CompactionCandidate {
     unit: AtomicContextUnit,
+    retained_after_compaction: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -414,25 +372,25 @@ fn build_atomic_units(
     let mut cursor = 0_usize;
     while cursor < items.len() {
         let first = &items[cursor];
-        let end = match (
-            first.usage_class == ContextUsageClass::Durable,
-            first.origin.as_ref(),
-        ) {
-            (true, Some(origin)) => items[cursor..]
+        let end = match first.group_id.as_deref() {
+            Some(group_id) => items[cursor..]
                 .iter()
-                .take_while(|item| {
-                    item.usage_class == ContextUsageClass::Durable
-                        && item.origin.as_ref() == Some(origin)
-                })
+                .take_while(|item| item.group_id.as_deref() == Some(group_id))
                 .count()
                 .saturating_add(cursor),
-            _ => match first.group_id.as_deref() {
-                Some(group_id) => items[cursor..]
+            None => match (
+                first.usage_class == ContextUsageClass::Durable,
+                first.origin.as_ref(),
+            ) {
+                (true, Some(origin)) => items[cursor..]
                     .iter()
-                    .take_while(|item| item.group_id.as_deref() == Some(group_id))
+                    .take_while(|item| {
+                        item.usage_class == ContextUsageClass::Durable
+                            && item.origin.as_ref() == Some(origin)
+                    })
                     .count()
                     .saturating_add(cursor),
-                None => cursor.saturating_add(1),
+                _ => cursor.saturating_add(1),
             },
         };
         let slice = &items[cursor..end];
@@ -461,7 +419,9 @@ fn build_atomic_units(
             contains_errors: slice.iter().any(|item| item.is_error),
             contains_side_effects,
             mixed_usage_classes: slice.iter().any(|item| item.usage_class != usage_class),
-            origin: first.origin.clone(),
+            // A closed atomic exchange is covered through its final journal record (normally the
+            // ToolResult), never through the opening ToolCall.
+            origin: slice.iter().rev().find_map(|item| item.origin.clone()),
             first_role: first.role,
             last_role: slice.last().map_or(first.role, |item| item.role),
         });
@@ -472,8 +432,6 @@ fn build_atomic_units(
 
 fn absolute_protection_reason(
     unit: &AtomicContextUnit,
-    last_durable_user_index: Option<usize>,
-    protect_current_user: bool,
 ) -> Option<ContextCompactionProtectionReason> {
     if unit.mixed_usage_classes {
         return Some(ContextCompactionProtectionReason::MixedAtomicGroup);
@@ -496,19 +454,7 @@ fn absolute_protection_reason(
         ContextUsageClass::RequestOnly => {
             return Some(ContextCompactionProtectionReason::RequestOnly)
         }
-        ContextUsageClass::RunTransient => {
-            return Some(ContextCompactionProtectionReason::UncommittedRun)
-        }
-        ContextUsageClass::Durable => {}
-    }
-    if protect_current_user
-        && last_durable_user_index.is_some_and(|index| {
-            unit.usage_class == ContextUsageClass::Durable
-                && unit.start_index <= index
-                && index < unit.end_index_exclusive
-        })
-    {
-        return Some(ContextCompactionProtectionReason::CurrentUser);
+        ContextUsageClass::RunTransient | ContextUsageClass::Durable => {}
     }
     if unit.sources.contains(&ContextSource::InputAttachment) {
         return Some(ContextCompactionProtectionReason::UserAttachment);
@@ -528,6 +474,7 @@ fn maximum_reclaimable_tokens(selected: &[CompactionCandidate]) -> u64 {
     // summary replacement against the source.
     selected
         .iter()
+        .filter(|candidate| !candidate.retained_after_compaction)
         .map(|candidate| candidate.unit.tokens)
         .sum::<u64>()
 }
@@ -545,8 +492,17 @@ fn build_steps(
         .iter()
         .map(|candidate| candidate.unit.tokens)
         .sum::<u64>();
-    let target_replacement_tokens = source_input_tokens.saturating_sub(required_reclaimed_tokens);
-    let expected_reclaimed_tokens = source_input_tokens.saturating_sub(target_replacement_tokens);
+    let retained_input_tokens = candidates
+        .iter()
+        .filter(|candidate| candidate.retained_after_compaction)
+        .map(|candidate| candidate.unit.tokens)
+        .sum::<u64>();
+    let reclaimable_input_tokens = source_input_tokens.saturating_sub(retained_input_tokens);
+    let expected_reclaimed_tokens = reclaimable_input_tokens.min(required_reclaimed_tokens);
+    // The exact latest user instruction is restored beside the summary after commit, so the
+    // summary budget excludes those retained tokens.
+    let target_replacement_tokens =
+        reclaimable_input_tokens.saturating_sub(expected_reclaimed_tokens);
     if expected_reclaimed_tokens == 0 {
         return Vec::new();
     }
@@ -554,6 +510,7 @@ fn build_steps(
         ranges: merge_candidate_ranges(&candidates),
         atomic_unit_count: candidates.len(),
         source_input_tokens,
+        retained_input_tokens,
         target_replacement_tokens,
         expected_reclaimed_tokens,
         contains_side_effects: candidates
@@ -566,18 +523,11 @@ fn build_steps(
     }]
 }
 
-fn normalize_stable_durable_prefix(
+fn normalize_unified_journal_prefix(
     selected: &mut Vec<CompactionCandidate>,
     units: &[AtomicContextUnit],
     candidates: &[CompactionCandidate],
 ) {
-    let durable_units = units
-        .iter()
-        .filter(|unit| unit.usage_class == ContextUsageClass::Durable)
-        .collect::<Vec<_>>();
-    if durable_units.is_empty() || durable_units.iter().any(|unit| unit.origin.is_none()) {
-        return;
-    }
     let Some(furthest_selected_start) = selected
         .iter()
         .map(|candidate| candidate.unit.start_index)
@@ -592,12 +542,25 @@ fn normalize_stable_durable_prefix(
     let mut prefix = Vec::new();
     let mut last_valid_prefix_len = 0;
     let mut reached_selected_boundary = false;
-    for unit in durable_units {
-        // Conversation World State is an exact side ledger, not part of the message/trace cursor
-        // being summarized. It remains byte-for-byte in the frame while the surrounding durable
-        // message prefix advances, then storage rebases it to the new summary epoch atomically.
+    for unit in units {
+        // These are exact side ledgers or request contracts rather than entries in the
+        // conversation message/trace journal. They survive compaction independently and do not
+        // interrupt chronological prefix selection.
         if unit.sources.contains(&ContextSource::WorldStateSnapshot)
             || unit.sources.contains(&ContextSource::WorldStateDiff)
+            || unit.sources.contains(&ContextSource::ConversationGoal)
+            || unit.sources.contains(&ContextSource::SkillInstructions)
+            || unit.sources.contains(&ContextSource::SkillCatalog)
+            || unit.sources.contains(&ContextSource::RuntimeTodo)
+            || unit.sources.contains(&ContextSource::RuntimeExtension)
+            || unit.sources.contains(&ContextSource::FileTransaction)
+            || unit.sources.contains(&ContextSource::RuntimeGuard)
+            || unit.sources.contains(&ContextSource::InputAttachment)
+            || (unit.origin.is_none()
+                && matches!(
+                    unit.usage_class,
+                    ContextUsageClass::Fixed | ContextUsageClass::RequestOnly
+                ))
         {
             continue;
         }
@@ -852,7 +815,7 @@ mod tests {
         assert_eq!(plan.status, ContextCompactionPlanStatus::NotRequired);
         assert!(plan.steps.is_empty());
         assert_eq!(plan.soft_trigger_input_tokens, Some(900));
-        assert_eq!(plan.durable_trigger_input_tokens, Some(810));
+        assert_eq!(plan.durable_trigger_input_tokens, None);
     }
 
     #[test]
@@ -918,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn request_pressure_alone_uses_the_durable_fifteen_percent_target() {
+    fn one_request_threshold_uses_a_fifteen_percent_post_compaction_target() {
         let items = vec![
             item(
                 0,
@@ -962,8 +925,8 @@ mod tests {
             ),
         ];
 
-        // Durable usage is only 77.8% of its 9,000-token capacity. The full request reaches the
-        // 90% trigger because of protected run-transient content.
+        // The full request reaches the one 90% trigger. The run item has no journal origin, so it
+        // remains protected and this attempt is explicitly best-effort.
         let plan = ContextCompactionPlanner::for_tools(&[]).plan(
             &query(
                 ContextBudgetStatus::WithinBudget,
@@ -978,16 +941,18 @@ mod tests {
         );
 
         assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
-        assert_eq!(plan.durable_trigger_input_tokens, Some(8_100));
-        assert_eq!(plan.durable_target_input_tokens, Some(1_350));
-        assert_eq!(plan.required_durable_reclaimed_tokens, 5_650);
-        assert_eq!(plan.required_reclaimed_tokens, 5_650);
+        assert_eq!(plan.soft_trigger_input_tokens, Some(9_000));
+        assert_eq!(plan.target_input_tokens, Some(1_500));
+        assert_eq!(plan.durable_trigger_input_tokens, None);
+        assert_eq!(plan.durable_target_input_tokens, None);
+        assert_eq!(plan.required_durable_reclaimed_tokens, 0);
+        assert_eq!(plan.required_reclaimed_tokens, 7_500);
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.steps[0].source_input_tokens, 7_000);
-        assert_eq!(plan.steps[0].target_replacement_tokens, 1_350);
-        assert_eq!(plan.projected_durable_input_tokens, 1_350);
+        assert_eq!(plan.steps[0].target_replacement_tokens, 0);
+        assert_eq!(plan.projected_durable_input_tokens, 0);
         assert!(plan.durable_target_satisfied);
-        assert!(!plan.best_effort);
+        assert!(plan.best_effort);
     }
 
     #[test]
@@ -1025,8 +990,8 @@ mod tests {
         );
 
         let step = &plan.steps[0];
-        assert_eq!(step.target_replacement_tokens, 30_000);
-        assert_eq!(step.expected_reclaimed_tokens, 170_000);
+        assert_eq!(step.target_replacement_tokens, 21_500);
+        assert_eq!(step.expected_reclaimed_tokens, 178_500);
     }
 
     #[test]
@@ -1086,7 +1051,7 @@ mod tests {
                 .durable_prefix
                 .as_ref()
                 .map(|prefix| &prefix.covered_through),
-            Some(&ContextJournalCursor::message("assistant-old"))
+            Some(&ContextJournalCursor::message("user-current"))
         );
     }
 
@@ -1168,7 +1133,7 @@ mod tests {
                 },
                 ContextCompactionItemRange {
                     start_index: 4,
-                    end_index_exclusive: 5,
+                    end_index_exclusive: 6,
                 },
             ]
         );
@@ -1177,7 +1142,7 @@ mod tests {
                 .durable_prefix
                 .as_ref()
                 .map(|prefix| &prefix.covered_through),
-            Some(&ContextJournalCursor::message("assistant-old"))
+            Some(&ContextJournalCursor::message("user-current"))
         );
     }
 
@@ -1334,36 +1299,141 @@ mod tests {
     }
 
     #[test]
-    fn current_user_becomes_compactable_only_after_a_successful_model_request() {
-        let items = vec![item(
+    fn latest_user_is_retained_exactly_while_later_closed_run_history_is_compacted() {
+        let mut tool_call = item(
+            2,
+            ContextUsageClass::RunTransient,
+            3_000,
+            LlmMessageRole::Assistant,
+            ContextSource::ModelResponse,
+            Some(ContextOrigin::conversation_trace_item(
+                "assistant-current",
+                0,
+            )),
+        );
+        tool_call.group_id = Some("tool:call-1".to_string());
+        let mut tool_result = item(
+            3,
+            ContextUsageClass::RunTransient,
+            3_000,
+            LlmMessageRole::Tool,
+            ContextSource::ToolResult,
+            Some(ContextOrigin::conversation_trace_item(
+                "assistant-current",
+                1,
+            )),
+        );
+        tool_result.group_id = tool_call.group_id.clone();
+        let items = vec![
+            item(
+                0,
+                ContextUsageClass::Durable,
+                2_000,
+                LlmMessageRole::Assistant,
+                ContextSource::ConversationHistory,
+                Some(ContextOrigin::conversation_message("assistant-old")),
+            ),
+            item(
+                1,
+                ContextUsageClass::Durable,
+                1_000,
+                LlmMessageRole::User,
+                ContextSource::CurrentTurn,
+                Some(ContextOrigin::conversation_message("user-current")),
+            ),
+            tool_call,
+            tool_result,
+        ];
+        let pressure = query(
+            ContextBudgetStatus::OverBudget,
+            Some(8_000),
+            0,
+            3_000,
+            6_000,
+            0,
+        );
+        let planner = ContextCompactionPlanner::for_tools(&[]);
+
+        let plan = planner.plan(&pressure, &items, true);
+
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+        assert_eq!(plan.protected.reasons.get("current_user"), Some(&1_000));
+        assert_eq!(plan.compactable_input_tokens, 8_000);
+        assert_eq!(
+            plan.steps[0]
+                .durable_prefix
+                .as_ref()
+                .map(|prefix| &prefix.covered_through),
+            Some(&ContextJournalCursor::trace_item("assistant-current", 1))
+        );
+    }
+
+    #[test]
+    fn five_hundred_closed_tool_exchanges_remain_one_compactable_prefix() {
+        let mut items = vec![item(
             0,
             ContextUsageClass::Durable,
-            9_000,
+            1_000,
             LlmMessageRole::User,
             ContextSource::CurrentTurn,
             Some(ContextOrigin::conversation_message("user-current")),
         )];
-        let pressure = query(ContextBudgetStatus::OverBudget, Some(8_000), 0, 9_000, 0, 0);
+        for exchange in 0..500_u64 {
+            let call_index = items.len();
+            let group = format!("tool:call-{exchange}");
+            let mut call = item(
+                call_index,
+                ContextUsageClass::RunTransient,
+                100,
+                LlmMessageRole::Assistant,
+                ContextSource::ModelResponse,
+                Some(ContextOrigin::conversation_trace_item(
+                    "assistant-current",
+                    exchange.saturating_mul(2),
+                )),
+            );
+            call.group_id = Some(group.clone());
+            let mut result = item(
+                call_index + 1,
+                ContextUsageClass::RunTransient,
+                100,
+                LlmMessageRole::Tool,
+                ContextSource::ToolResult,
+                Some(ContextOrigin::conversation_trace_item(
+                    "assistant-current",
+                    exchange.saturating_mul(2).saturating_add(1),
+                )),
+            );
+            result.group_id = Some(group);
+            items.push(call);
+            items.push(result);
+        }
+
         let planner = ContextCompactionPlanner::for_tools(&[]);
-
-        let before_first_request = planner.plan(&pressure, &items, true);
-        let after_first_request = planner.plan(&pressure, &items, false);
-
-        assert_eq!(
-            before_first_request.status,
-            ContextCompactionPlanStatus::InsufficientCompactableContext
+        let plan = planner.plan(
+            &query(
+                ContextBudgetStatus::OverBudget,
+                Some(100_000),
+                0,
+                1_000,
+                100_000,
+                0,
+            ),
+            &items,
+            true,
         );
+
+        assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].atomic_unit_count, 431);
         assert_eq!(
-            after_first_request.status,
-            ContextCompactionPlanStatus::Required
-        );
-        assert_eq!(
-            after_first_request.steps[0]
+            plan.steps[0]
                 .durable_prefix
                 .as_ref()
                 .map(|prefix| &prefix.covered_through),
-            Some(&ContextJournalCursor::message("user-current"))
+            Some(&ContextJournalCursor::trace_item("assistant-current", 859))
         );
+        assert!(plan.projected_request_input_tokens <= 15_000);
     }
 
     #[test]

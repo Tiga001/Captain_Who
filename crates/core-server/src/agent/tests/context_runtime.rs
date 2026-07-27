@@ -123,6 +123,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
         covered_through: ContextJournalCursor::message("assistant-old"),
         visible_trace_item_count: 0,
         source_input_tokens: 5_000,
+        retained_input_tokens: 0,
         uncovered_tail_input_tokens: 1_000,
         target_replacement_tokens: 750,
     };
@@ -140,6 +141,7 @@ async fn compaction_host_prepares_generates_commits_and_rebuilds_running_state()
         durable_target_input_tokens: Some(750),
         durable_pressure: true,
         source_input_tokens: 5_000,
+        retained_input_tokens: 0,
         target_replacement_tokens: 750,
         expected_reclaimed_tokens: 4_250,
         planned_reclaimed_tokens: 4_250,

@@ -29,8 +29,8 @@ use crate::context::{
     AgentContextBaseline, AgentContextWindowToolProjection, AgentConversationContextState,
     ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextBudgetReport,
     ContextCapacityDetector, ContextCompactionPlan, ContextCompactionPlanner,
-    ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata, ContextRetention,
-    ContextScope, ContextSource,
+    ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata, ContextOrigin,
+    ContextRetention, ContextScope, ContextSource,
 };
 use crate::conversation_trace::{
     conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref,
@@ -86,12 +86,12 @@ use std::sync::Mutex;
 use tool_failure_guard::ToolFailureGuard;
 use tool_flow::{
     approve_proposed_action, build_tool_observation_message_with_history_ref,
-    cancellation_preempts_tool_result, cancelled_output, done_event,
-    enforce_skill_activation_barrier, execute_host_action_on_blocking_thread,
-    execute_tool_on_blocking_thread, extract_reason_from_args, failed_tool_call_result,
-    file_draft_from_tool_result, generate_run_id, llm_image_message_from_tool_result,
-    redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
-    tool_calls_from_response,
+    build_tool_observation_message_with_projection, cancellation_preempts_tool_result,
+    cancelled_output, done_event, enforce_skill_activation_barrier,
+    execute_host_action_on_blocking_thread, execute_tool_on_blocking_thread,
+    extract_reason_from_args, failed_tool_call_result, file_draft_from_tool_result,
+    generate_run_id, llm_image_message_from_tool_result, redact_tool_result_for_event,
+    sanitize_max_tokens, sanitize_temperature, state_event, tool_calls_from_response,
 };
 use tool_input_stream::ToolInputStreamObservers;
 
@@ -478,6 +478,7 @@ impl AgentRuntime {
                             if !pending.is_empty() {
                                 apply_steer_inputs(
                                     &run_id,
+                                    trace_assistant_message_id.as_deref(),
                                     None,
                                     pending,
                                     &mut active_context,
@@ -562,7 +563,7 @@ impl AgentRuntime {
                             let compaction_plan = context_compaction_planner.plan(
                                     &compaction_query,
                                     &request_context.planning_items()?,
-                                    model_request_index == 0,
+                                    true,
                                 );
                             emit_context_budget_if_enabled(
                                 &run_id,
@@ -634,7 +635,7 @@ impl AgentRuntime {
                                             }) => {
                                                 merge_total_usage(&mut usage, compaction_usage);
                                                 active_context = (*baseline)
-                                                    .replace_persistent_context(active_context);
+                                                    .replace_compacted_model_history(active_context);
                                                 detector.prepare_frame(&mut active_context);
                                                 publish_trace_snapshot(
                                                     &conversation_trace,
@@ -1015,6 +1016,7 @@ impl AgentRuntime {
                                 AgentSteerDrainOrClose::Pending(pending) => {
                                     apply_steer_inputs(
                                         &run_id,
+                                        trace_assistant_message_id.as_deref(),
                                         Some(&llm_response.content),
                                         pending,
                                         &mut active_context,
@@ -1080,16 +1082,7 @@ impl AgentRuntime {
                     }
                     let batch_claim = tool_batch.claim(&queued_tool_call.call);
                     let tool_exchange_group = queued_tool_call.context_group();
-                    active_context.push(ContextItem::assistant(
-                        queued_tool_call.assistant_content,
-                        vec![queued_tool_call.call.clone()],
-                        ContextMetadata::new(
-                            ContextSource::ModelResponse,
-                            ContextScope::Run,
-                            ContextRetention::Retained,
-                        )
-                        .with_group(tool_exchange_group.clone()),
-                    ));
+                    let assistant_tool_content = queued_tool_call.assistant_content;
                     let tool_request = queued_tool_call.call;
                     let reason = extract_reason_from_args(&tool_request.args);
                     // The effective definitions are both the model contract and the execution
@@ -1266,11 +1259,12 @@ impl AgentRuntime {
                         }
                     }
                     let trace_call = tool_registry.trace_call_projection(&call);
-                    {
+                    let call_sequence = {
                         let mut recorder = conversation_trace
                             .lock()
                             .unwrap_or_else(|error| error.into_inner());
-                        if let Some(sequence) = recorder.record_tool_call(&trace_call) {
+                        let sequence = recorder.record_tool_call(&trace_call);
+                        if let Some(sequence) = sequence {
                             recorder.record_model_message(
                                 sequence,
                                 0,
@@ -1284,7 +1278,26 @@ impl AgentRuntime {
                                 ),
                             );
                         }
-                    }
+                        sequence
+                    };
+                    active_context.push(ContextItem::assistant(
+                        assistant_tool_content,
+                        vec![crate::llm::LlmToolCall {
+                            id: call.id.clone(),
+                            name: call.tool.clone(),
+                            args: call.args.clone(),
+                        }],
+                        with_trace_origin(
+                            ContextMetadata::new(
+                                ContextSource::ModelResponse,
+                                ContextScope::Run,
+                                ContextRetention::Retained,
+                            )
+                            .with_group(tool_exchange_group.clone()),
+                            trace_assistant_message_id.as_deref(),
+                            call_sequence,
+                        ),
+                    ));
                     publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     let event_call = tool_registry.event_call_projection(&call);
                     event_stream.emit(AgentEvent::ToolCall {
@@ -1344,13 +1357,13 @@ impl AgentRuntime {
                                             sequence,
                                         )
                                     });
-                                {
+                                let recorded_result_sequence = {
                                     let mut recorder = conversation_trace
                                         .lock()
                                         .unwrap_or_else(|error| error.into_inner());
-                                    if let Some(sequence) =
-                                        recorder.record_tool_result(&call, &checkpoint_result)
-                                    {
+                                    let sequence =
+                                        recorder.record_tool_result(&call, &checkpoint_result);
+                                    if let Some(sequence) = sequence {
                                         recorder.record_model_message(
                                             sequence,
                                             0,
@@ -1364,7 +1377,8 @@ impl AgentRuntime {
                                             ),
                                         );
                                     }
-                                }
+                                    sequence
+                                };
                                 publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
@@ -1382,12 +1396,16 @@ impl AgentRuntime {
                                         history_ref.as_ref(),
                                     ),
                                     true,
-                                    ContextMetadata::new(
-                                        ContextSource::ToolResult,
-                                        ContextScope::Run,
-                                        ContextRetention::Retained,
-                                    )
-                                    .with_group(tool_exchange_group.clone()),
+                                    with_trace_origin(
+                                        ContextMetadata::new(
+                                            ContextSource::ToolResult,
+                                            ContextScope::Run,
+                                            ContextRetention::Retained,
+                                        )
+                                        .with_group(tool_exchange_group.clone()),
+                                        trace_assistant_message_id.as_deref(),
+                                        recorded_result_sequence,
+                                    ),
                                 ));
                                 continue;
                             }
@@ -1568,29 +1586,33 @@ impl AgentRuntime {
                         .map(|(assistant_message_id, sequence)| {
                             crate::ContextHistoryRef::trace_item(assistant_message_id, sequence)
                         });
-                    {
+                    let model_observation = build_tool_observation_message_with_projection(
+                        &llm_result,
+                        history_ref.as_ref(),
+                        &archive_metadata,
+                    );
+                    let recorded_result_sequence = {
                         let mut recorder = conversation_trace
                             .lock()
                             .unwrap_or_else(|error| error.into_inner());
-                        if let Some(sequence) = recorder.record_tool_result_with_archive(
+                        let sequence = recorder.record_tool_result_with_archive(
                             &call,
                             &checkpoint_result,
                             archive_metadata,
-                        ) {
+                        );
+                        if let Some(sequence) = sequence {
                             recorder.record_model_message(
                                 sequence,
                                 0,
                                 &LlmMessage::tool_result(
                                     call.id.clone(),
-                                    build_tool_observation_message_with_history_ref(
-                                        &llm_result,
-                                        history_ref.as_ref(),
-                                    ),
+                                    model_observation.clone(),
                                     !result.ok,
                                 ),
                             );
                         }
-                    }
+                        sequence
+                    };
                     publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     if cancellation_preempts_tool_result(
                         auto_execute_host_action,
@@ -1627,24 +1649,22 @@ impl AgentRuntime {
                     active_context.push(
                         ContextItem::tool_result(
                             call.id.clone(),
-                            build_tool_observation_message_with_history_ref(
-                                &llm_result,
-                                history_ref.as_ref(),
-                            ),
+                            model_observation.clone(),
                             !result.ok,
-                            ContextMetadata::new(
-                                ContextSource::ToolResult,
-                                ContextScope::Run,
-                                ContextRetention::Retained,
-                            )
-                            .with_group(tool_exchange_group.clone()),
+                            with_trace_origin(
+                                ContextMetadata::new(
+                                    ContextSource::ToolResult,
+                                    ContextScope::Run,
+                                    ContextRetention::Retained,
+                                )
+                                .with_group(tool_exchange_group.clone()),
+                                trace_assistant_message_id.as_deref(),
+                                recorded_result_sequence,
+                            ),
                         )
                         .with_checkpoint_tool_result(
                             call.id.clone(),
-                            build_tool_observation_message_with_history_ref(
-                                &checkpoint_result,
-                                history_ref.as_ref(),
-                            ),
+                            model_observation,
                             !result.ok,
                         ),
                     );
@@ -1658,12 +1678,16 @@ impl AgentRuntime {
                         active_context.push(
                             ContextItem::new(
                                 image_message,
-                                ContextMetadata::new(
-                                    ContextSource::ToolResult,
-                                    ContextScope::Run,
-                                    ContextRetention::Retained,
-                                )
-                                .with_group(tool_exchange_group.clone()),
+                                with_trace_origin(
+                                    ContextMetadata::new(
+                                        ContextSource::ToolResult,
+                                        ContextScope::Run,
+                                        ContextRetention::Retained,
+                                    )
+                                    .with_group(tool_exchange_group.clone()),
+                                    trace_assistant_message_id.as_deref(),
+                                    recorded_result_sequence,
+                                ),
                             )
                             .with_checkpoint_message(checkpoint_message),
                         );
@@ -1821,6 +1845,7 @@ fn unavailable_tool_error(tool_set: &EffectiveToolSet, tool_name: &str) -> Agent
 #[allow(clippy::too_many_arguments)]
 fn apply_steer_inputs(
     run_id: &str,
+    trace_assistant_message_id: Option<&str>,
     preceding_assistant_content: Option<&str>,
     inputs: Vec<AgentSteerInput>,
     active_context: &mut ContextFrame,
@@ -1849,13 +1874,14 @@ fn apply_steer_inputs(
         .filter(|content| !content.is_empty())
         .map(ToString::to_string);
     let mut applied = Vec::with_capacity(inputs.len());
+    let preceding_assistant_sequence;
     {
         let mut recorder = conversation_trace
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if let Some(content) = preceding_assistant_content.as_deref() {
-            recorder.record_narration(content);
-        }
+        preceding_assistant_sequence = preceding_assistant_content
+            .as_deref()
+            .and_then(|content| recorder.record_narration(content));
         for input in &inputs {
             let sequence = recorder
                 .record_user_guidance(
@@ -1897,12 +1923,17 @@ fn apply_steer_inputs(
     let baseline = publish_trace_snapshot(conversation_trace, trace_observer)?;
 
     if let Some(content) = preceding_assistant_content {
-        active_context.push(ContextItem::text(
-            LlmMessageRole::Assistant,
-            content,
-            ContextSource::ModelResponse,
-            ContextScope::Run,
-            ContextRetention::Retained,
+        active_context.push(ContextItem::new(
+            LlmMessage::text(LlmMessageRole::Assistant, content),
+            with_trace_origin(
+                ContextMetadata::new(
+                    ContextSource::ModelResponse,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                ),
+                trace_assistant_message_id,
+                preceding_assistant_sequence,
+            ),
         ));
     }
     for ((input, attachments, sequence), attachment_context) in
@@ -1921,10 +1952,14 @@ fn apply_steer_inputs(
         message.images = attachment_context.images;
         active_context.push(ContextItem::new(
             message,
-            ContextMetadata::new(
-                ContextSource::UserGuidance,
-                ContextScope::Run,
-                ContextRetention::Retained,
+            with_trace_origin(
+                ContextMetadata::new(
+                    ContextSource::UserGuidance,
+                    ContextScope::Run,
+                    ContextRetention::Retained,
+                ),
+                trace_assistant_message_id,
+                Some(sequence),
             ),
         ));
         event_stream.emit(AgentEvent::GuidanceApplied {
@@ -1939,6 +1974,19 @@ fn apply_steer_inputs(
     }
 
     Ok(baseline)
+}
+
+fn with_trace_origin(
+    metadata: ContextMetadata,
+    assistant_message_id: Option<&str>,
+    sequence: Option<u64>,
+) -> ContextMetadata {
+    match assistant_message_id.zip(sequence) {
+        Some((assistant_message_id, sequence)) => metadata.with_origin(
+            ContextOrigin::conversation_trace_item(assistant_message_id, sequence),
+        ),
+        None => metadata,
+    }
 }
 
 fn replace_runtime_attachment_library(

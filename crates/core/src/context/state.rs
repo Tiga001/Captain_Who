@@ -98,8 +98,11 @@ impl AgentContextBaseline {
         frame.rebase_onto_measured_baseline(self.frame)
     }
 
-    pub(crate) fn replace_persistent_context(self, frame: ContextFrame) -> ContextFrame {
-        frame.replace_persistent_baseline(self.frame)
+    /// Adopts a backend reconstruction of the complete compacted model timeline. Unlike a normal
+    /// persistent refresh, this drops the runtime's duplicate message/tool overlay while keeping
+    /// exact non-journal run state such as guards and activated runtime extensions.
+    pub(crate) fn replace_compacted_model_history(self, frame: ContextFrame) -> ContextFrame {
+        frame.replace_compacted_model_history(self.frame)
     }
 }
 

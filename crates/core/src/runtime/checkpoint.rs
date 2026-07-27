@@ -9,7 +9,7 @@ use super::tool_failure_guard::semantic_tool_call_fingerprint;
 #[cfg(test)]
 use super::tool_flow::build_tool_observation_message;
 use super::tool_flow::build_tool_observation_message_with_history_ref;
-use crate::context::{ContextFrame, ContextGroup};
+use crate::context::{ContextFrame, ContextGroup, ContextOrigin};
 use crate::conversation_trace::{
     canonical_tool_result_for_context, ConversationTraceRecorder, ConversationTraceSnapshot,
     ConversationTurnTraceItem,
@@ -337,6 +337,12 @@ pub(super) fn restore_run_checkpoint_with_history_ref(
         &continuation_call,
         build_tool_observation_message_with_history_ref(&llm_result, history_ref.as_ref()),
         !continuation.result.ok,
+        assistant_message_id.map(|assistant_message_id| {
+            ContextOrigin::conversation_trace_item(
+                assistant_message_id,
+                continuation_result_sequence,
+            )
+        }),
     )?;
     let call_sequence = conversation_trace.record_tool_call(&continuation.call);
     if let Some(sequence) = call_sequence {

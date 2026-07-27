@@ -430,6 +430,7 @@ mod tests {
                 durable_target_input_tokens: Some(30),
                 durable_pressure: true,
                 source_input_tokens: 100,
+                retained_input_tokens: 0,
                 target_replacement_tokens: 30,
                 expected_reclaimed_tokens: 70,
                 planned_reclaimed_tokens: 70,

@@ -112,6 +112,8 @@ pub struct ContextCompactionReceiptPlan {
     pub durable_target_input_tokens: Option<u64>,
     pub durable_pressure: bool,
     pub source_input_tokens: u64,
+    #[serde(default)]
+    pub retained_input_tokens: u64,
     pub target_replacement_tokens: u64,
     pub expected_reclaimed_tokens: u64,
     pub planned_reclaimed_tokens: u64,
@@ -164,6 +166,7 @@ impl ContextCompactionReceiptPlan {
             durable_target_input_tokens: plan.durable_target_input_tokens,
             durable_pressure,
             source_input_tokens: step.source_input_tokens,
+            retained_input_tokens: step.retained_input_tokens,
             target_replacement_tokens: step.target_replacement_tokens,
             expected_reclaimed_tokens: step.expected_reclaimed_tokens,
             planned_reclaimed_tokens: plan.planned_reclaimed_tokens,
@@ -190,6 +193,11 @@ impl ContextCompactionReceiptPlan {
             || self.target_replacement_tokens >= self.source_input_tokens
             || self.expected_reclaimed_tokens
                 != self
+                    .source_input_tokens
+                    .saturating_sub(self.target_replacement_tokens)
+                    .saturating_sub(self.retained_input_tokens)
+            || self.retained_input_tokens
+                > self
                     .source_input_tokens
                     .saturating_sub(self.target_replacement_tokens)
             || self.atomic_unit_count == 0

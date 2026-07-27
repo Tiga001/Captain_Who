@@ -173,6 +173,18 @@ pub(super) fn build_tool_observation_message_with_history_ref(
     render_tool_observation_with_history_ref(result, history_ref)
 }
 
+pub(super) fn build_tool_observation_message_with_projection(
+    result: &AgentToolResult,
+    history_ref: Option<&crate::ContextHistoryRef>,
+    archive: &crate::ConversationHistoryArchiveTraceMetadata,
+) -> String {
+    crate::conversation_trace::render_tool_observation_with_projection(
+        result,
+        history_ref,
+        Some(archive),
+    )
+}
+
 pub(super) async fn execute_tool_on_blocking_thread(
     registry: Arc<ToolRegistry>,
     context: ToolExecutionContext,

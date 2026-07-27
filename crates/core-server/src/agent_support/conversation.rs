@@ -308,6 +308,21 @@ pub(crate) fn conversation_history_messages_with_model_context(
             .position(|message| message.id == summary.covered_through.message_id())
             .map(|index| (index, &summary.covered_through))
     });
+    // Mid-run compaction may advance through the current user message to summarize later closed
+    // tool exchanges. Keep that latest instruction exact beside the summary while the assistant
+    // trace is still active. On later turns it is no longer special and the normal summary
+    // boundary applies.
+    let retained_active_user_index = covered_boundary.and_then(|(boundary_index, cursor)| {
+        let boundary_is_active_trace = matches!(cursor, ContextJournalCursor::TraceItem { .. })
+            && traces.get(cursor.message_id()).is_some_and(|trace| {
+                trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
+            });
+        boundary_is_active_trace.then(|| {
+            conversation.messages[..boundary_index]
+                .iter()
+                .rposition(|message| message.role == "user")
+        })?
+    });
     conversation
         .messages
         .iter()
@@ -323,7 +338,11 @@ pub(crate) fn conversation_history_messages_with_model_context(
                 return Some((message, trace, model_context_items));
             };
             if index < boundary_index {
-                return None;
+                return (retained_active_user_index == Some(index)).then_some((
+                    message,
+                    trace,
+                    model_context_items,
+                ));
             }
             if index > boundary_index {
                 return Some((message, trace, model_context_items));

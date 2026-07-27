@@ -993,10 +993,10 @@ impl ConversationTraceRecorder {
         self.snapshot().committed_prefix().items.len()
     }
 
-    pub(crate) fn record_narration(&mut self, content: &str) {
+    pub(crate) fn record_narration(&mut self, content: &str) -> Option<u64> {
         let content = content.trim();
         if content.is_empty() {
-            return;
+            return None;
         }
         let (content, redacted) = sanitize_text(content);
         let sequence = self.take_sequence();
@@ -1012,6 +1012,7 @@ impl ConversationTraceRecorder {
             &LlmMessage::text(crate::llm::LlmMessageRole::Assistant, content),
         );
         self.truncated |= redacted;
+        Some(sequence)
     }
 
     pub(crate) fn record_model_message(
@@ -1614,6 +1615,14 @@ pub(crate) fn render_tool_observation_with_history_ref(
     result: &AgentToolResult,
     history_ref: Option<&crate::ContextHistoryRef>,
 ) -> String {
+    render_tool_observation_with_projection(result, history_ref, None)
+}
+
+pub(crate) fn render_tool_observation_with_projection(
+    result: &AgentToolResult,
+    history_ref: Option<&crate::ContextHistoryRef>,
+    archive: Option<&ConversationHistoryArchiveTraceMetadata>,
+) -> String {
     let mut payload = if result.ok {
         json!({
             "type": "tool_result",
@@ -1637,6 +1646,28 @@ pub(crate) fn render_tool_observation_with_history_ref(
             "historyRef".to_string(),
             serde_json::to_value(history_ref).unwrap_or(Value::Null),
         );
+    }
+    if let (Some(archive), Some(object)) = (archive, payload.as_object_mut()) {
+        let truncated = archive.truncated_at_source
+            || archive.model_projection_truncated
+            || archive.archive_projection_truncated;
+        if truncated {
+            let original_bytes = (!archive.archive_projection_truncated)
+                .then_some(archive.archived_bytes)
+                .flatten();
+            object.insert(
+                "projection".to_string(),
+                json!({
+                    "truncated": true,
+                    "truncatedAtSource": archive.truncated_at_source,
+                    "modelProjectionTruncated": archive.model_projection_truncated,
+                    "archiveProjectionTruncated": archive.archive_projection_truncated,
+                    "originalBytes": original_bytes,
+                    "archivedBytes": archive.archived_bytes,
+                    "archivedCompletely": archive.archived_completely.unwrap_or(false),
+                }),
+            );
+        }
     }
     let payload = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string());
     format!(

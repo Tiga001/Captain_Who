@@ -354,35 +354,11 @@ impl AgentService {
             return Err("压缩后重建上下文时，模型可见 trace 游标没有对应日志。".to_string());
         }
 
-        // The runtime already owns the complete current-run projection as an overlay. Its
-        // replacement baseline therefore excludes this assistant turn entirely; otherwise a
-        // mid-run compaction would duplicate every previously observed tool exchange. The server
-        // cache is extended with the full durable turn below for next-run/restart reconstruction.
-        let mut visible_traces = traces.clone();
-        if let Some(trace) = visible_traces
-            .iter_mut()
-            .find(|trace| trace.assistant_message_id == assistant_message_id)
-        {
-            trace.items.clear();
-            trace.terminal_status = ConversationTurnTraceTerminalStatus::InProgress;
-            trace.terminal_error = None;
-            trace
-                .validate()
-                .map_err(|error| format!("压缩后重建上下文时，模型可见 trace 前缀无效：{error}"))?;
-        }
-
         let mut preview_input = agent_input.clone();
-        let mut model_context_logs = full_model_context_logs.clone();
-        if let Some(log) = model_context_logs
-            .iter_mut()
-            .find(|log| log.assistant_message_id == assistant_message_id)
-        {
-            log.items.clear();
-        }
         preview_input.messages = conversation_history_messages_with_model_context(
             &conversation,
-            &visible_traces,
-            &model_context_logs,
+            &traces,
+            &full_model_context_logs,
             summary.as_ref(),
             &[],
         );
@@ -403,9 +379,6 @@ impl AgentService {
 
         let mut state =
             create_conversation_context_state(preview_input).map_err(|error| error.to_string())?;
-        // Freeze the exact persistent prefix that the runtime may adopt without exposing a tool
-        // result to compaction before the main model has observed it once.
-        let runtime_baseline = state.shared_baseline().map_err(|error| error.to_string())?;
         let committed_activity_items = match active_trace {
             Some(trace) => {
                 let model_context_items = full_model_context_logs
@@ -413,14 +386,18 @@ impl AgentService {
                     .find(|log| log.assistant_message_id == assistant_message_id)
                     .map(|log| log.items.as_slice())
                     .unwrap_or_default();
-                state
-                    .append_trace_items(trace, model_context_items, 0)
-                    .map_err(|error| error.to_string())?
+                AgentConversationContextState::rendered_trace_activity_count(
+                    trace,
+                    model_context_items,
+                )
+                .map_err(|error| error.to_string())?
             }
             None => 0,
         };
-        // Measure and freeze the appended trace chunk once for the conversation cache and circle.
-        state.shared_baseline().map_err(|error| error.to_string())?;
+        // The rebuilt baseline is the complete post-compaction model timeline: summary plus the
+        // exact uncovered message/trace tail. Runtime adopts it and discards its duplicate
+        // message/tool overlay while retaining non-journal run state.
+        let runtime_baseline = state.shared_baseline().map_err(|error| error.to_string())?;
         let snapshot = if agent_input.context_window_indicator_enabled {
             Some(match tool_projection {
                 Some(tool_projection) => state
@@ -1077,17 +1054,18 @@ pub(super) fn validate_compaction_model_visible_boundary(
     } = covered_through
     {
         if assistant_message_id == expected_assistant_message_id
-            && !trace.items[..visible_trace_item_count]
+            && !trace
+                .items
                 .iter()
-                .any(|item| item.sequence() == *sequence)
+                .any(|item| item.sequence() == *sequence && item.is_safe_compaction_boundary())
         {
             return Err(AgentError::structured(
-                "context_compaction_unseen_trace_item",
-                "上下文压缩不能覆盖主模型尚未看过的工具轨迹。",
+                "context_compaction_trace_boundary_missing",
+                "上下文压缩边界不是当前运行中已闭合的轨迹项。",
                 serde_json::json!({
                     "assistantMessageId": assistant_message_id,
                     "sequence": sequence,
-                    "visibleTraceItemCount": visible_trace_item_count,
+                    "persistedTraceItemCount": trace.items.len(),
                 }),
             ));
         }
