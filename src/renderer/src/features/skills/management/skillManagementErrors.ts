@@ -70,14 +70,6 @@ export function shouldRefreshSkillsAfterError(details: SkillOperationErrorDetail
   )
 }
 
-export function isExpiredSkillPreviewError(details: SkillOperationErrorDetails): boolean {
-  return (
-    details.code === 'preparationExpired' ||
-    details.code === 'preparationNotFound' ||
-    details.code === 'previewMismatch'
-  )
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }

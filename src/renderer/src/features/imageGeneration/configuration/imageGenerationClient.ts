@@ -4,7 +4,6 @@ import type {
   ImageGenerationGetConfigurationOutput,
   ImageGenerationSetEnabledInput,
   ImageGenerationSetEnabledOutput,
-  ImageGenerationStatus,
   ImageGenerationUpdateConfigurationInput,
   ImageGenerationUpdateConfigurationOutput
 } from '@mycopilot/protocol'
@@ -28,12 +27,6 @@ export async function setImageGenerationEnabled(
   input: ImageGenerationSetEnabledInput
 ): Promise<ImageGenerationSetEnabledOutput> {
   const result = await hostClient.imageGeneration.setEnabled(input)
-  if (!result.ok) throw new HostInvocationError(result.error)
-  return result.value
-}
-
-export async function getImageGenerationStatus(): Promise<ImageGenerationStatus> {
-  const result = await hostClient.imageGeneration.getStatus()
   if (!result.ok) throw new HostInvocationError(result.error)
   return result.value
 }

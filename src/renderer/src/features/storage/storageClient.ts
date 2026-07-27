@@ -128,10 +128,6 @@ export async function revealStoredProjectFile(
   await hostClient.storage.revealProjectFile({ projectId, filePath })
 }
 
-export async function loadConversations(): Promise<ChatConversation[]> {
-  return (await hostClient.storage.loadConversations()).map(mapConversationFromStorage)
-}
-
 export async function loadConversationMetas(): Promise<ChatConversation[]> {
   return (await hostClient.storage.loadConversationMetas()).map(mapConversationMetaFromStorage)
 }

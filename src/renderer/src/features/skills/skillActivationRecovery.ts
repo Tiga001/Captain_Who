@@ -7,9 +7,6 @@ import type {
 } from '@mycopilot/protocol'
 import { mergeSkillSelections, normalizeSkillSelections } from './skillSelection'
 
-export type SkillActivationDraftRecoveryPolicy =
-  'restoreMissing' | 'rejectSelection' | 'discardSubmitted'
-
 export type SkillActivationRecoveryPlan =
   | {
       draftPolicy: 'restoreMissing'

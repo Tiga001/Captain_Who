@@ -1,8 +1,7 @@
 import type {
   TerminalCreateSessionRequest,
   TerminalExitEvent,
-  TerminalOutputEvent,
-  TerminalSessionSnapshot
+  TerminalOutputEvent
 } from '@mycopilot/protocol'
 
 export type TerminalServiceRequest =
@@ -84,5 +83,3 @@ export type TerminalServiceNotification =
     }
 
 export type TerminalServiceOutboundMessage = TerminalServiceNotification | TerminalServiceResponse
-
-export type TerminalCreateSessionResponse = TerminalSessionSnapshot

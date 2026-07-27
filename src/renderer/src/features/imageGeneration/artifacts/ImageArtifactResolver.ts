@@ -1,6 +1,6 @@
 // Renderer Artifact boundary: only a trusted Host-backed resolver may provide preview bytes.
 import type { AgentImageGenerationArtifact } from '@mycopilot/protocol'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 export interface ResolvedImageArtifact {
   /** A Renderer-safe URL such as a Host-created object URL or controlled read-only scheme. */
@@ -76,69 +76,6 @@ export function useImageArtifactResolutions(
   }, [artifacts, resolver])
 
   return resolutions
-}
-
-export function useImageArtifactResolution(
-  artifact: AgentImageGenerationArtifact,
-  resolver?: ImageArtifactResolver
-): ImageArtifactResolution {
-  const stableArtifact = useMemo<AgentImageGenerationArtifact>(
-    () => ({
-      artifactId: artifact.artifactId,
-      uri: artifact.uri,
-      kind: artifact.kind,
-      format: artifact.format,
-      mimeType: artifact.mimeType,
-      width: artifact.width,
-      height: artifact.height,
-      sizeBytes: artifact.sizeBytes,
-      sha256: artifact.sha256
-    }),
-    [
-      artifact.artifactId,
-      artifact.format,
-      artifact.height,
-      artifact.kind,
-      artifact.mimeType,
-      artifact.sha256,
-      artifact.sizeBytes,
-      artifact.uri,
-      artifact.width
-    ]
-  )
-  const [resolution, setResolution] = useState<ImageArtifactResolution>(() =>
-    resolver ? { status: 'loading' } : { status: 'unavailable' }
-  )
-
-  useEffect(() => {
-    if (!resolver) {
-      setResolution({ status: 'unavailable' })
-      return undefined
-    }
-
-    let active = true
-    const abortController = new AbortController()
-    let resolved: ResolvedImageArtifact | undefined
-    setResolution({ status: 'loading' })
-    void resolver
-      .resolve(stableArtifact, { signal: abortController.signal })
-      .then((value) => {
-        resolved = value
-        if (active) setResolution({ status: 'ready', value })
-        else value.release?.()
-      })
-      .catch(() => {
-        if (active) setResolution({ status: 'error' })
-      })
-
-    return () => {
-      active = false
-      abortController.abort()
-      resolved?.release?.()
-    }
-  }, [resolver, stableArtifact])
-
-  return resolution
 }
 
 function initialResolutions(

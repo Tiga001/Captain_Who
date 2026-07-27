@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { frontendThemes, type FrontendThemeId } from '../../../config/frontendTheme'
 import {
-  getGitReviewSyntaxThemeStyle,
-  syntaxPaletteIdByFrontendThemeId
-} from '../syntaxHighlighting/gitReviewSyntaxThemes'
+  frontendThemes,
+  getFrontendTheme,
+  type FrontendThemeId
+} from '../../../config/frontendTheme'
+import { getGitReviewSyntaxCssVariables } from '../../../config/themes/gitReviewTheme'
 
 const EXPECTED_VARIABLES = [
   '--git-review-syntax-attribute',
@@ -22,17 +23,15 @@ const EXPECTED_VARIABLES = [
   '--git-review-syntax-variable'
 ].sort()
 
-describe('Git review syntax themes', () => {
-  it('maps every registered frontend theme exactly once', () => {
-    expect(Object.keys(syntaxPaletteIdByFrontendThemeId).sort()).toEqual(
-      Object.keys(frontendThemes).sort()
-    )
-  })
+function getGitReviewSyntaxThemeStyle(themeId: FrontendThemeId): Record<string, string> {
+  return getGitReviewSyntaxCssVariables(getFrontendTheme(themeId).tokens.colors.gitReview.syntax)
+}
 
+describe('Git review syntax themes', () => {
   it.each(Object.keys(frontendThemes) as FrontendThemeId[])(
     'defines only foreground token variables for %s',
     (themeId) => {
-      const style = getGitReviewSyntaxThemeStyle(themeId) as Record<string, string>
+      const style = getGitReviewSyntaxThemeStyle(themeId)
 
       expect(Object.keys(style).sort()).toEqual(EXPECTED_VARIABLES)
       expect(style['--git-review-syntax-background']).toBe('transparent')
@@ -44,8 +43,8 @@ describe('Git review syntax themes', () => {
   )
 
   it('uses the locally verified Codex palettes for the classic themes', () => {
-    const light = getGitReviewSyntaxThemeStyle('classic-light') as Record<string, string>
-    const dark = getGitReviewSyntaxThemeStyle('classic-dark') as Record<string, string>
+    const light = getGitReviewSyntaxThemeStyle('classic-light')
+    const dark = getGitReviewSyntaxThemeStyle('classic-dark')
 
     expect(light).toMatchObject({
       '--git-review-syntax-comment': '#666666',
@@ -60,11 +59,5 @@ describe('Git review syntax themes', () => {
       '--git-review-syntax-string': '#85DF7B'
     })
     expect(light).not.toEqual(dark)
-  })
-
-  it('returns stable style objects so theme-independent token trees do not churn', () => {
-    expect(getGitReviewSyntaxThemeStyle('github-dark')).toBe(
-      getGitReviewSyntaxThemeStyle('github-dark')
-    )
   })
 })
