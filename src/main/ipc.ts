@@ -402,6 +402,9 @@ export function registerHostIpc(
   ipcMain.handle('host:git.getReviewSummary', (_event, input) =>
     coreServer.getGitReviewSummary(input)
   )
+  ipcMain.handle('host:git.getTurnDiffSummaries', (_event, input) =>
+    coreServer.getGitTurnDiffSummaries(input)
+  )
   ipcMain.handle('host:git.getReviewFileDiff', (_event, input) =>
     coreServer.getGitReviewFileDiff(input)
   )

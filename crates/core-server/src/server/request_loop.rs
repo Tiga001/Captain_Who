@@ -416,9 +416,9 @@ pub(crate) fn enqueue_outbound(
 pub(crate) fn git_request_priority(method: &str) -> Option<GitJobPriority> {
     match method {
         GIT_MUTATE_REVIEW_FILE_METHOD => Some(GitJobPriority::High),
-        GIT_INSPECT_REPOSITORY_METHOD | GIT_GET_REVIEW_SUMMARY_METHOD => {
-            Some(GitJobPriority::Medium)
-        }
+        GIT_INSPECT_REPOSITORY_METHOD
+        | GIT_GET_REVIEW_SUMMARY_METHOD
+        | GIT_GET_TURN_DIFF_SUMMARIES_METHOD => Some(GitJobPriority::Medium),
         GIT_GET_REVIEW_FILE_DIFF_METHOD | GIT_GET_REVIEW_FILE_CONTENT_METHOD => {
             Some(GitJobPriority::Low)
         }

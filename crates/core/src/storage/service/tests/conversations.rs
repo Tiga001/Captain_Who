@@ -388,6 +388,27 @@ fn conversation_fork_clones_all_visible_turn_diffs_and_supports_recursive_forks(
             after: crate::AgentTurnFileContent::Text("after\n".to_string()),
         }]
     );
+    let forked_turns = service
+        .load_agent_turn_diffs_for_messages(
+            &first_fork.id,
+            "project-1",
+            &forked_assistants
+                .iter()
+                .map(|message| message.id.clone())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(forked_turns.len(), 2);
+    assert_eq!(
+        forked_turns[0].identity.assistant_message_id,
+        forked_assistants[0].id
+    );
+    assert_eq!(forked_turns[0].files[0].path, "src/first.rs");
+    assert_eq!(
+        forked_turns[1].identity.assistant_message_id,
+        forked_assistants[1].id
+    );
+    assert_eq!(forked_turns[1].files[0].path, "src/second.rs");
 
     for (message, action_id, change) in [
         (forked_assistants[0], "action-turn-1", &source_turns[0].3),

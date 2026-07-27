@@ -38,6 +38,8 @@ import type {
   GitReviewFileMutationInput,
   GitReviewSummary,
   GitReviewSummaryInput,
+  GitTurnDiffSummaries,
+  GitTurnDiffSummariesInput,
   AgentImageGenerationArtifact,
   ImageGenerationArtifactReadInput,
   ImageGenerationArtifactReadOutput,
@@ -158,6 +160,7 @@ const SEARCH_SEARCH_CHATS_METHOD = 'search.searchChats'
 const SKILLS_LIST_METHOD = 'skills.list'
 const GIT_INSPECT_REPOSITORY_METHOD = 'git.inspectRepository'
 const GIT_GET_REVIEW_SUMMARY_METHOD = 'git.getReviewSummary'
+const GIT_GET_TURN_DIFF_SUMMARIES_METHOD = 'git.getTurnDiffSummaries'
 const GIT_GET_REVIEW_FILE_DIFF_METHOD = 'git.getReviewFileDiff'
 const GIT_GET_REVIEW_FILE_CONTENT_METHOD = 'git.getReviewFileContent'
 const GIT_MUTATE_REVIEW_FILE_METHOD = 'git.mutateReviewFile'
@@ -649,6 +652,13 @@ export class CoreServer {
   getGitReviewSummary(input: GitReviewSummaryInput): Promise<GitReviewSummary> {
     return this.rpc.request<GitReviewSummary, GitReviewSummaryInput>(
       GIT_GET_REVIEW_SUMMARY_METHOD,
+      input
+    )
+  }
+
+  getGitTurnDiffSummaries(input: GitTurnDiffSummariesInput): Promise<GitTurnDiffSummaries> {
+    return this.rpc.request<GitTurnDiffSummaries, GitTurnDiffSummariesInput>(
+      GIT_GET_TURN_DIFF_SUMMARIES_METHOD,
       input
     )
   }

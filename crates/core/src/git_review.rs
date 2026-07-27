@@ -140,6 +140,33 @@ pub struct GitReviewSummary {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitTurnDiffSummaryFile {
+    pub path: String,
+    pub status: GitReviewFileStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<GitReviewFileStats>,
+}
+
+/// Read-only presentation data derived from the durable first-before/final-after
+/// evidence for one agent turn. This projection is intentionally not persisted.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitTurnDiffSummary {
+    pub assistant_message_id: String,
+    pub stats: GitReviewStats,
+    pub files: Vec<GitTurnDiffSummaryFile>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitTurnDiffSummaries {
+    pub conversation_id: String,
+    pub summaries: Vec<GitTurnDiffSummary>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum GitReviewFileDiffStatus {
@@ -372,6 +399,22 @@ impl GitReviewService {
             .map_err(|_| "Last-turn review snapshot cache is unavailable.".to_string())?
             .insert(snapshot);
         Ok(summary)
+    }
+
+    pub fn turn_diff_summaries(
+        &self,
+        conversation_id: &str,
+        project_path: &Path,
+        records: &[crate::AgentTurnDiffRecord],
+    ) -> GitTurnDiffSummaries {
+        GitTurnDiffSummaries {
+            conversation_id: conversation_id.to_string(),
+            summaries: records
+                .iter()
+                .filter(|record| record.identity.conversation_id == conversation_id)
+                .map(|record| build_turn_diff_summary(project_path, record))
+                .collect(),
+        }
     }
 
     pub fn review_file_diff(

@@ -1,18 +1,17 @@
 import { ChevronDown, ChevronUp, FileDiff, Undo2 } from 'lucide-react'
 import { useState, type JSX } from 'react'
+import type { GitTurnDiffSummary } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../config/translationFormat'
-import type { ChatAgentRunView } from '../chatTypes'
-import { getApplyPatchItemView } from './toolActivities/ApplyPatchToolActivity'
 
 interface EditSummaryCardProps {
   onReview?: (filePath?: string) => void
-  run: ChatAgentRunView
+  summary: GitTurnDiffSummary
 }
 
 interface EditSummaryEntry {
-  additions: number
-  deletions: number
+  additions?: number
+  deletions?: number
   filePath: string
   id: string
 }
@@ -30,54 +29,6 @@ function splitFilePath(filePath: string): { directory: string; fileName: string 
     directory: `${normalized.slice(0, separatorIndex + 1)}`,
     fileName: normalized.slice(separatorIndex + 1)
   }
-}
-
-function getAppliedEditEntries(run: ChatAgentRunView): EditSummaryEntry[] {
-  const entries = new Map<string, EditSummaryEntry>()
-
-  const addEntry = (entry: EditSummaryEntry): void => {
-    const existing = entries.get(entry.filePath)
-    if (existing) {
-      existing.additions += entry.additions
-      existing.deletions += entry.deletions
-      return
-    }
-
-    entries.set(entry.filePath, entry)
-  }
-
-  run.toolCalls.forEach((call) => {
-    if (call.tool !== 'apply_patch') return
-
-    const result = run.toolResults.find((candidate) => candidate.callId === call.id)
-    const view = getApplyPatchItemView({
-      call,
-      diff: run.diffs.find((candidate) => candidate.id === call.id),
-      result
-    })
-
-    if (view.status !== 'applied' || !view.filePath) return
-
-    addEntry({
-      additions: view.additions,
-      deletions: view.deletions,
-      filePath: view.filePath,
-      id: call.id
-    })
-  })
-
-  run.fileDrafts?.forEach((draft) => {
-    if (draft.status !== 'applied' || !draft.filePath) return
-
-    addEntry({
-      additions: draft.additions,
-      deletions: draft.deletions,
-      filePath: draft.filePath,
-      id: draft.draftId
-    })
-  })
-
-  return [...entries.values()]
 }
 
 function EditSummaryPath({
@@ -121,22 +72,21 @@ function EditSummaryPath({
   )
 }
 
-export function EditSummaryCard({ onReview, run }: EditSummaryCardProps): JSX.Element | null {
+export function EditSummaryCard({ onReview, summary }: EditSummaryCardProps): JSX.Element | null {
   const { t } = useFrontendConfig()
   const [expanded, setExpanded] = useState(false)
-  const entries = getAppliedEditEntries(run)
+  const entries = summary.files.map((file) => ({
+    additions: file.stats?.additions,
+    deletions: file.stats?.deletions,
+    filePath: file.path,
+    id: file.path
+  }))
 
   if (entries.length === 0) return null
 
   const visibleEntries = expanded ? entries : entries.slice(0, COLLAPSED_FILE_COUNT)
   const hiddenCount = entries.length - visibleEntries.length
-  const totals = entries.reduce(
-    (counts, entry) => ({
-      additions: counts.additions + entry.additions,
-      deletions: counts.deletions + entry.deletions
-    }),
-    { additions: 0, deletions: 0 }
-  )
+  const totals = summary.stats
 
   return (
     <section className="edit-summary-card" aria-label={t('agent.editSummary.title')}>
@@ -174,13 +124,15 @@ export function EditSummaryCard({ onReview, run }: EditSummaryCardProps): JSX.El
         {visibleEntries.map((entry) => (
           <div className="edit-summary-card__file-row" key={entry.id}>
             <EditSummaryPath entry={entry} onReview={onReview} />
-            <span
-              className="edit-summary-card__file-stats"
-              aria-label={t('agent.editSummary.lineStats')}
-            >
-              <span className="edit-summary-card__additions">+{entry.additions}</span>
-              <span className="edit-summary-card__deletions">-{entry.deletions}</span>
-            </span>
+            {entry.additions !== undefined && entry.deletions !== undefined && (
+              <span
+                className="edit-summary-card__file-stats"
+                aria-label={t('agent.editSummary.lineStats')}
+              >
+                <span className="edit-summary-card__additions">+{entry.additions}</span>
+                <span className="edit-summary-card__deletions">-{entry.deletions}</span>
+              </span>
+            )}
           </div>
         ))}
       </div>

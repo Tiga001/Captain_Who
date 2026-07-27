@@ -56,6 +56,32 @@ pub(crate) fn handle_git_request(
                 Err(message) => response_error(Some(request.id), -32000, message),
             }
         }
+        GIT_GET_TURN_DIFF_SUMMARIES_METHOD => {
+            let input = match parse_params::<GitTurnDiffSummariesRequest>(request.params) {
+                Ok(input) => input,
+                Err(message) => return response_error(Some(request.id), -32602, message),
+            };
+            let project_path = match resolve_project_path(storage, &input.project_id) {
+                Ok(path) => path,
+                Err(message) => return response_error(Some(request.id), -32000, message),
+            };
+            let records = match storage.load_agent_turn_diffs_for_messages(
+                &input.conversation_id,
+                &input.project_id,
+                &input.assistant_message_ids,
+            ) {
+                Ok(records) => records,
+                Err(message) => return response_error(Some(request.id), -32000, message),
+            };
+            response_success(
+                request.id,
+                git_review_service.turn_diff_summaries(
+                    &input.conversation_id,
+                    &project_path,
+                    &records,
+                ),
+            )
+        }
         GIT_GET_REVIEW_FILE_DIFF_METHOD => {
             let input = match parse_params::<GitReviewFileDiffRequest>(request.params) {
                 Ok(input) => input,

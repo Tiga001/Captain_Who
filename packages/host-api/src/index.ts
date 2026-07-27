@@ -37,6 +37,8 @@ import type {
   GitReviewFileMutationInput,
   GitReviewSummary,
   GitReviewSummaryInput,
+  GitTurnDiffSummaries,
+  GitTurnDiffSummariesInput,
   AgentImageGenerationArtifact,
   ImageGenerationArtifactReadInput,
   ImageGenerationGetConfigurationOutput,
@@ -208,6 +210,7 @@ export interface SkillsHostApi {
 export interface GitHostApi {
   inspectRepository(input: GitRepositoryInspectInput): Promise<GitRepositoryInspection>
   getReviewSummary(input: GitReviewSummaryInput): Promise<GitReviewSummary>
+  getTurnDiffSummaries(input: GitTurnDiffSummariesInput): Promise<GitTurnDiffSummaries>
   getReviewFileDiff(input: GitReviewFileDiffInput): Promise<GitReviewFileDiff>
   getReviewFileContent(input: GitReviewFileContentInput): Promise<GitReviewFileContent>
   mutateReviewFile(input: GitReviewFileMutationInput): Promise<GitReviewFileMutation>

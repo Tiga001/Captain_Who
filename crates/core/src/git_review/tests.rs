@@ -107,6 +107,43 @@ fn last_turn_review_ignores_records_from_a_different_workspace() {
 }
 
 #[test]
+fn turn_diff_summary_uses_the_exact_same_net_diff_as_last_turn_review() {
+    let Some(repo) = test_repository() else {
+        return;
+    };
+    let workspace_root = repo.path().canonicalize().unwrap();
+    let record = crate::AgentTurnDiffRecord {
+        identity: crate::AgentTurnDiffIdentity {
+            run_id: "run-1".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-1".to_string(),
+            project_id: "project-1".to_string(),
+            workspace_root: workspace_root.to_string_lossy().into_owned(),
+        },
+        files: vec![crate::AgentTurnFileChange {
+            path: "src/main.rs".to_string(),
+            before: crate::AgentTurnFileContent::Text("same\nold\nsame\n".to_string()),
+            after: crate::AgentTurnFileContent::Text("same\nnew\nsame\n".to_string()),
+        }],
+        truncated: false,
+    };
+    let service = GitReviewService::new();
+    let review = service
+        .review_last_turn_summary(repo.path(), Some(&record))
+        .unwrap();
+    let summaries =
+        service.turn_diff_summaries("conversation-1", repo.path(), std::slice::from_ref(&record));
+
+    assert_eq!(summaries.summaries.len(), 1);
+    let summary = &summaries.summaries[0];
+    assert_eq!(summary.assistant_message_id, "assistant-1");
+    assert_eq!(summary.stats.additions, review.stats.additions);
+    assert_eq!(summary.stats.deletions, review.stats.deletions);
+    assert_eq!(summary.stats.file_count, review.stats.file_count);
+    assert_eq!(summary.files[0].stats, review.files[0].stats);
+}
+
+#[test]
 fn diff_patch_budget_rejects_each_dimension_independently() {
     assert!(!exceeds_diff_patch_budget(b"@@ -1 +1 @@\n-old\n+new\n"));
 

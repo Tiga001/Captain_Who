@@ -36,6 +36,7 @@ pub const SKILLS_RESOLVE_INSTALLATION_SOURCE_METHOD: &str = "skills.resolveInsta
 pub const SKILLS_CANCEL_SOURCE_RESOLUTION_METHOD: &str = "skills.cancelSourceResolution";
 pub const GIT_INSPECT_REPOSITORY_METHOD: &str = "git.inspectRepository";
 pub const GIT_GET_REVIEW_SUMMARY_METHOD: &str = "git.getReviewSummary";
+pub const GIT_GET_TURN_DIFF_SUMMARIES_METHOD: &str = "git.getTurnDiffSummaries";
 pub const GIT_GET_REVIEW_FILE_DIFF_METHOD: &str = "git.getReviewFileDiff";
 pub const GIT_GET_REVIEW_FILE_CONTENT_METHOD: &str = "git.getReviewFileContent";
 pub const GIT_MUTATE_REVIEW_FILE_METHOD: &str = "git.mutateReviewFile";

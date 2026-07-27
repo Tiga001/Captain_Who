@@ -4,19 +4,78 @@ use similar::ChangeTag;
 
 pub(super) const LAST_TURN_SNAPSHOT_PREFIX: &str = "last-turn:";
 
+struct TurnReviewProjection<'a> {
+    files: Vec<(&'a crate::AgentTurnFileChange, GitReviewFile)>,
+    stats: GitReviewStats,
+    truncated: bool,
+}
+
 pub(super) fn build_last_turn_review(
     repository: &RepositoryContext,
     project_path: &Path,
     record: Option<&AgentTurnDiffRecord>,
 ) -> (GitReviewSummary, TurnSnapshot) {
+    let projection = project_turn_review(project_path, record);
+    let snapshot_id = format!("{LAST_TURN_SNAPSHOT_PREFIX}{}", Uuid::new_v4());
+    let mut snapshot_files = HashMap::new();
+    for (change, file) in &projection.files {
+        snapshot_files.insert(
+            file.id.clone(),
+            TurnSnapshotFile {
+                path: change.path.clone(),
+                before: change.before.clone(),
+                after: change.after.clone(),
+            },
+        );
+    }
+
+    let summary = GitReviewSummary {
+        repository_id: repository.repository_id.clone(),
+        snapshot_id: snapshot_id.clone(),
+        scope: GitReviewScope::LastTurn,
+        stats: projection.stats,
+        files: projection.files.into_iter().map(|(_, file)| file).collect(),
+        truncated: projection.truncated,
+    };
+    let snapshot = TurnSnapshot {
+        id: snapshot_id,
+        created_at: Instant::now(),
+        files: snapshot_files,
+    };
+    (summary, snapshot)
+}
+
+pub(super) fn build_turn_diff_summary(
+    project_path: &Path,
+    record: &AgentTurnDiffRecord,
+) -> GitTurnDiffSummary {
+    let projection = project_turn_review(project_path, Some(record));
+    GitTurnDiffSummary {
+        assistant_message_id: record.identity.assistant_message_id.clone(),
+        stats: projection.stats,
+        files: projection
+            .files
+            .into_iter()
+            .map(|(_, file)| GitTurnDiffSummaryFile {
+                path: file.path,
+                status: file.status,
+                stats: file.stats,
+            })
+            .collect(),
+        truncated: projection.truncated,
+    }
+}
+
+fn project_turn_review<'a>(
+    project_path: &Path,
+    record: Option<&'a AgentTurnDiffRecord>,
+) -> TurnReviewProjection<'a> {
     let record = record.filter(|record| {
         workspace_paths_match(project_path, Path::new(&record.identity.workspace_root))
     });
     let source_files = record.map(|record| record.files.as_slice()).unwrap_or(&[]);
     let truncated =
         record.is_some_and(|record| record.truncated) || source_files.len() > MAX_REVIEW_FILES;
-    let snapshot_id = format!("{LAST_TURN_SNAPSHOT_PREFIX}{}", Uuid::new_v4());
-    let mut snapshot_files = HashMap::new();
     let mut files = Vec::new();
     let mut totals = GitReviewFileStats::default();
     let mut line_counts_complete = true;
@@ -37,27 +96,19 @@ pub(super) fn build_last_turn_review(
         let id = content_revision(
             format!("{}\0{}\0", GitReviewScope::LastTurn.as_str(), change.path).as_bytes(),
         );
-        snapshot_files.insert(
-            id.clone(),
-            TurnSnapshotFile {
+        files.push((
+            change,
+            GitReviewFile {
+                id,
                 path: change.path.clone(),
-                before: change.before.clone(),
-                after: change.after.clone(),
+                previous_path: None,
+                status,
+                stats,
             },
-        );
-        files.push(GitReviewFile {
-            id,
-            path: change.path.clone(),
-            previous_path: None,
-            status,
-            stats,
-        });
+        ));
     }
 
-    let summary = GitReviewSummary {
-        repository_id: repository.repository_id.clone(),
-        snapshot_id: snapshot_id.clone(),
-        scope: GitReviewScope::LastTurn,
+    TurnReviewProjection {
         stats: GitReviewStats {
             file_count: files.len(),
             additions: totals.additions,
@@ -66,13 +117,7 @@ pub(super) fn build_last_turn_review(
         },
         files,
         truncated,
-    };
-    let snapshot = TurnSnapshot {
-        id: snapshot_id,
-        created_at: Instant::now(),
-        files: snapshot_files,
-    };
-    (summary, snapshot)
+    }
 }
 
 pub(super) fn last_turn_file_diff(

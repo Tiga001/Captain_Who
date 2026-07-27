@@ -2,12 +2,14 @@ use crate::{
     AgentTurnDiffIdentity, AgentTurnDiffRecord, AgentTurnFileChange, AgentTurnFileContent,
     AGENT_TURN_DIFF_SCHEMA_VERSION,
 };
-use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::HashMap;
+use rusqlite::types::Value;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path};
 
 const MAX_TURN_DIFF_FILES: i64 = 500;
 const MAX_TURN_DIFF_TEXT_BYTES: i64 = 32 * 1024 * 1024;
+const LOAD_TURNS_QUERY_CHUNK_SIZE: usize = 200;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AgentTurnDiffForkAction {
@@ -250,6 +252,109 @@ pub fn load_latest_turn(
         files,
         truncated,
     }))
+}
+
+pub fn load_turns_for_messages(
+    connection: &Connection,
+    conversation_id: &str,
+    project_id: &str,
+    assistant_message_ids: &[String],
+) -> rusqlite::Result<Vec<AgentTurnDiffRecord>> {
+    let mut seen_ids = HashSet::new();
+    let requested_ids = assistant_message_ids
+        .iter()
+        .filter(|id| !id.trim().is_empty() && seen_ids.insert((*id).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if requested_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut records = HashMap::<String, AgentTurnDiffRecord>::new();
+    for chunk in requested_ids.chunks(LOAD_TURNS_QUERY_CHUNK_SIZE) {
+        let placeholders = std::iter::repeat_n("?", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "
+            SELECT
+                turn.run_id,
+                turn.conversation_id,
+                turn.assistant_message_id,
+                turn.project_id,
+                turn.workspace_root,
+                turn.truncated,
+                file.path,
+                file.before_kind,
+                file.before_text,
+                file.after_kind,
+                file.after_text
+            FROM agent_turn_diffs AS turn
+            INNER JOIN messages AS message
+                ON message.id = turn.assistant_message_id
+            LEFT JOIN agent_turn_diff_files AS file
+                ON file.assistant_message_id = turn.assistant_message_id
+            WHERE turn.conversation_id = ?
+              AND turn.project_id = ?
+              AND turn.schema_version = ?
+              AND message.conversation_id = ?
+              AND turn.assistant_message_id IN ({placeholders})
+            ORDER BY
+                message.position ASC,
+                file.path COLLATE NOCASE ASC,
+                file.path ASC
+            "
+        );
+        let mut values = vec![
+            Value::Text(conversation_id.to_string()),
+            Value::Text(project_id.to_string()),
+            Value::Integer(i64::from(AGENT_TURN_DIFF_SCHEMA_VERSION)),
+            Value::Text(conversation_id.to_string()),
+        ];
+        values.extend(chunk.iter().cloned().map(Value::Text));
+
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(values.iter()))?;
+        while let Some(row) = rows.next()? {
+            let identity = AgentTurnDiffIdentity {
+                run_id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                assistant_message_id: row.get(2)?,
+                project_id: row.get(3)?,
+                workspace_root: row.get(4)?,
+            };
+            let assistant_message_id = identity.assistant_message_id.clone();
+            let truncated = row.get::<_, bool>(5)?;
+            let record =
+                records
+                    .entry(assistant_message_id)
+                    .or_insert_with(|| AgentTurnDiffRecord {
+                        identity,
+                        files: Vec::new(),
+                        truncated,
+                    });
+
+            let Some(path) = row.get::<_, Option<String>>(6)? else {
+                continue;
+            };
+            let before_kind = row.get::<_, String>(7)?;
+            let before_text = row.get::<_, Option<String>>(8)?;
+            let after_kind = row.get::<_, String>(9)?;
+            let after_text = row.get::<_, Option<String>>(10)?;
+            record.files.push(AgentTurnFileChange {
+                path,
+                before: AgentTurnFileContent::from_storage(&before_kind, before_text)
+                    .map_err(invalid_input)?,
+                after: AgentTurnFileContent::from_storage(&after_kind, after_text)
+                    .map_err(invalid_input)?,
+            });
+        }
+    }
+
+    Ok(requested_ids
+        .into_iter()
+        .filter_map(|assistant_message_id| records.remove(&assistant_message_id))
+        .collect())
 }
 
 pub(crate) fn list_fork_copies_through_message(
@@ -831,6 +936,90 @@ mod tests {
             .unwrap();
         assert_eq!(latest.identity.assistant_message_id, "assistant-2");
         assert!(latest.files.is_empty());
+    }
+
+    #[test]
+    fn loads_turns_in_requested_order_without_duplicate_summaries() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrations::run_migrations(&connection).unwrap();
+        connection
+            .execute(
+                "
+                INSERT INTO projects (id, name, path, created_at, updated_at)
+                VALUES ('project-1', 'Project', '/tmp/project-1', 1, 1)
+                ",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "
+                INSERT INTO conversations (id, project_id, title, created_at, updated_at)
+                VALUES ('conversation-1', 'project-1', 'Conversation', 1, 1)
+                ",
+                [],
+            )
+            .unwrap();
+        for (position, message_id) in [(0, "assistant-1"), (1, "assistant-2")] {
+            connection
+                .execute(
+                    "
+                    INSERT INTO messages (
+                        id, conversation_id, role, content, created_at, position
+                    )
+                    VALUES (?1, 'conversation-1', 'assistant', '', ?2, ?3)
+                    ",
+                    params![message_id, position + 1, position],
+                )
+                .unwrap();
+        }
+
+        for (run_id, message_id, path) in [
+            ("run-1", "assistant-1", "first.txt"),
+            ("run-2", "assistant-2", "second.txt"),
+        ] {
+            let identity = identity(run_id, message_id);
+            initialize_turn(&connection, &identity, 1).unwrap();
+            record_file_change(
+                &mut connection,
+                &identity,
+                &format!("action-{message_id}"),
+                &text_change(path, "before\n", "after\n"),
+                2,
+            )
+            .unwrap();
+        }
+
+        let records = load_turns_for_messages(
+            &connection,
+            "conversation-1",
+            "project-1",
+            &[
+                "assistant-2".to_string(),
+                "missing".to_string(),
+                "assistant-1".to_string(),
+                "assistant-2".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.identity.assistant_message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["assistant-2", "assistant-1"]
+        );
+        assert_eq!(records[0].files[0].path, "second.txt");
+        assert_eq!(records[1].files[0].path, "first.txt");
+        assert!(load_turns_for_messages(
+            &connection,
+            "conversation-1",
+            "missing-project",
+            &["assistant-1".to_string()],
+        )
+        .unwrap()
+        .is_empty());
     }
 
     fn identity(run_id: &str, assistant_message_id: &str) -> AgentTurnDiffIdentity {

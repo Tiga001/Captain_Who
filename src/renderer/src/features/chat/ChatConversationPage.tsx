@@ -9,7 +9,11 @@ import {
   useState
 } from 'react'
 import { Split, X } from 'lucide-react'
-import type { AgentContextWindowSnapshot, AgentProposedAction } from '@mycopilot/protocol'
+import type {
+  AgentContextWindowSnapshot,
+  AgentProposedAction,
+  GitTurnDiffSummary
+} from '@mycopilot/protocol'
 import { ChatComposer } from './components/ChatComposer'
 import { AgentApprovalDialog } from './components/AgentApprovalDialog'
 import { AgentTodoProgress } from './components/AgentTodoProgress'
@@ -26,6 +30,7 @@ import type {
 import { stripAttachmentSummary } from './chatAttachments'
 import { getConversationTurnNavigationItems } from './conversationTurnNavigation'
 import { getLatestAgentTodo } from './todoLifetime'
+import { useTurnDiffSummaries } from './useTurnDiffSummaries'
 import { getAgentActionApprovalStatus } from '../../app/agentActionUtils'
 import { useFrontendConfig } from '../../config/FrontendConfigProvider'
 import './ChatConversationPage.css'
@@ -136,6 +141,7 @@ interface ChatMessageListProps {
   onRejectAgentAction?: (messageId: string, action: AgentProposedAction, message?: string) => void
   onReviewLastTurn?: (filePath?: string) => void
   showTokenUsageDetails: boolean
+  turnDiffSummariesByMessageId?: ReadonlyMap<string, GitTurnDiffSummary>
 }
 
 export const ChatMessageList = memo(function ChatMessageList({
@@ -152,7 +158,8 @@ export const ChatMessageList = memo(function ChatMessageList({
   onMessageUiStateChange,
   onRejectAgentAction,
   onReviewLastTurn,
-  showTokenUsageDetails
+  showTokenUsageDetails,
+  turnDiffSummariesByMessageId
 }: ChatMessageListProps) {
   const continuationOrigin = conversation.continuationOrigin
 
@@ -178,6 +185,7 @@ export const ChatMessageList = memo(function ChatMessageList({
             onUiStateChange={onMessageUiStateChange}
             projectId={conversation.projectId}
             showTokenUsageDetails={showTokenUsageDetails}
+            turnDiffSummary={turnDiffSummariesByMessageId?.get(message.id)}
           />
           {continuationOrigin?.boundaryMessageId === message.id && (
             <ConversationContinuationDivider
@@ -281,6 +289,7 @@ export function ChatConversationPage({
     [conversation.messages]
   )
   const activeTodo = useMemo(() => getLatestAgentTodo(conversation), [conversation])
+  const turnDiffSummariesByMessageId = useTurnDiffSummaries(conversation)
   const hasPendingApproval = Boolean(pendingApprovalTarget)
   const editableLastUserMessageId = hasPendingApproval
     ? null
@@ -385,6 +394,7 @@ export function ChatConversationPage({
             onRejectAgentAction={onRejectAgentAction}
             onReviewLastTurn={onReviewLastTurn}
             showTokenUsageDetails={showTokenUsageDetails}
+            turnDiffSummariesByMessageId={turnDiffSummariesByMessageId}
           />
         </div>
         <ConversationTurnNavigationRail

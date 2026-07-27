@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'vitest-browser-react'
+import type { GitTurnDiffSummary } from '@mycopilot/protocol'
 import type { ChatMessage } from '../../features/chat/chatTypes'
 import { ChatMessageItem } from '../../features/chat/components/ChatMessageItem'
 
@@ -21,6 +22,21 @@ vi.mock('../../host/hostClient', () => ({
 }))
 
 describe('edit summary review navigation', () => {
+  it('renders the authoritative net line counts instead of accumulated draft counts', async () => {
+    const screen = await render(
+      <ChatMessageItem
+        message={assistantMessage('assistant-1', 'run-1', 'src/edited.ts')}
+        projectId="project-1"
+        showTokenUsageDetails={false}
+        turnDiffSummary={turnDiffSummary('assistant-1', 'src/edited.ts')}
+      />
+    )
+
+    const card = screen.container.querySelector('.edit-summary-card')
+    expect(card?.textContent).toContain('+35')
+    expect(card?.textContent).toContain('-1')
+  })
+
   it('routes every review button through the same workspace last-turn callback', async () => {
     const onReviewLastTurn = vi.fn()
     const screen = await render(
@@ -30,12 +46,14 @@ describe('edit summary review navigation', () => {
           onReviewLastTurn={onReviewLastTurn}
           projectId="project-1"
           showTokenUsageDetails={false}
+          turnDiffSummary={turnDiffSummary('assistant-older', 'older.txt')}
         />
         <ChatMessageItem
           message={assistantMessage('assistant-newer', 'run-newer', 'newer.txt')}
           onReviewLastTurn={onReviewLastTurn}
           projectId="project-1"
           showTokenUsageDetails={false}
+          turnDiffSummary={turnDiffSummary('assistant-newer', 'newer.txt')}
         />
       </div>
     )
@@ -58,6 +76,7 @@ describe('edit summary review navigation', () => {
         onReviewLastTurn={onReviewLastTurn}
         projectId="project-1"
         showTokenUsageDetails={false}
+        turnDiffSummary={turnDiffSummary('assistant-1', 'src/edited.ts')}
       />
     )
 
@@ -70,6 +89,29 @@ describe('edit summary review navigation', () => {
     expect(onReviewLastTurn).toHaveBeenCalledWith('src/edited.ts')
   })
 })
+
+function turnDiffSummary(assistantMessageId: string, filePath: string): GitTurnDiffSummary {
+  return {
+    assistantMessageId,
+    files: [
+      {
+        path: filePath,
+        stats: {
+          additions: 35,
+          deletions: 1
+        },
+        status: 'modified'
+      }
+    ],
+    stats: {
+      additions: 35,
+      deletions: 1,
+      fileCount: 1,
+      lineCountsComplete: true
+    },
+    truncated: false
+  }
+}
 
 function assistantMessage(id: string, runId: string, filePath: string): ChatMessage {
   return {

@@ -10,6 +10,14 @@ pub struct GitReviewSummaryRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GitTurnDiffSummariesRequest {
+    pub conversation_id: String,
+    pub project_id: String,
+    pub assistant_message_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitReviewFileDiffRequest {
     pub snapshot_id: String,
     pub file_id: String,

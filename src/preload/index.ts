@@ -86,6 +86,7 @@ const host: HostApi = {
   git: {
     inspectRepository: (input) => ipcRenderer.invoke('host:git.inspectRepository', input),
     getReviewSummary: (input) => ipcRenderer.invoke('host:git.getReviewSummary', input),
+    getTurnDiffSummaries: (input) => ipcRenderer.invoke('host:git.getTurnDiffSummaries', input),
     getReviewFileDiff: (input) => ipcRenderer.invoke('host:git.getReviewFileDiff', input),
     getReviewFileContent: (input) => ipcRenderer.invoke('host:git.getReviewFileContent', input),
     mutateReviewFile: (input) => ipcRenderer.invoke('host:git.mutateReviewFile', input)

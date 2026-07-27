@@ -10,7 +10,7 @@ import {
   Split,
   Star
 } from 'lucide-react'
-import type { AgentProposedAction, AgentUsage } from '@mycopilot/protocol'
+import type { AgentProposedAction, AgentUsage, GitTurnDiffSummary } from '@mycopilot/protocol'
 import { useFrontendConfig } from '../../../config/FrontendConfigProvider'
 import { formatTranslation } from '../../../config/translationFormat'
 import type { ChatAgentRunView, ChatMessage } from '../chatTypes'
@@ -94,6 +94,7 @@ interface ChatMessageItemProps {
   onReviewLastTurn?: (filePath?: string) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   showTokenUsageDetails: boolean
+  turnDiffSummary?: GitTurnDiffSummary
 }
 
 function AgentRunElapsedHeader({
@@ -443,12 +444,14 @@ function AgentRunView({
   message,
   onReviewLastTurn,
   onUiStateChange,
-  projectId
+  projectId,
+  turnDiffSummary
 }: {
   message: ChatMessage
   onReviewLastTurn?: (filePath?: string) => void
   onUiStateChange?: (messageId: string, uiState: ChatMessage['uiState']) => void
   projectId?: string | null
+  turnDiffSummary?: GitTurnDiffSummary
 }) {
   const { t } = useFrontendConfig()
   const run = message.agentRun
@@ -561,7 +564,9 @@ function AgentRunView({
         <ImageGenerationArtifactsCard resolver={hostImageArtifactResolver} run={run} />
       )}
       {isRunSettled(run) && <OfficeArtifactsCard projectId={projectId} run={run} />}
-      {isRunSettled(run) && <EditSummaryCard onReview={onReviewLastTurn} run={run} />}
+      {isRunSettled(run) && turnDiffSummary && (
+        <EditSummaryCard onReview={onReviewLastTurn} summary={turnDiffSummary} />
+      )}
       {isRunSettled(run) && <AssistantSources sources={webSearchSources} />}
       {showTokenLimitNotice && (
         <div className="agent-run__notice" role="status">
@@ -581,7 +586,8 @@ function MessageContent({
   message,
   onReviewLastTurn,
   onUiStateChange,
-  projectId
+  projectId,
+  turnDiffSummary
 }: ChatMessageItemProps) {
   if (message.role === 'assistant') {
     return (
@@ -590,6 +596,7 @@ function MessageContent({
         onReviewLastTurn={onReviewLastTurn}
         onUiStateChange={onUiStateChange}
         projectId={projectId}
+        turnDiffSummary={turnDiffSummary}
       />
     )
   }
@@ -804,7 +811,8 @@ export function ChatMessageItem({
   onReviewLastTurn,
   onUiStateChange,
   projectId,
-  showTokenUsageDetails
+  showTokenUsageDetails,
+  turnDiffSummary
 }: ChatMessageItemProps) {
   const [isEditing, setIsEditing] = useState(false)
   const isAssistantActionsVisible = shouldShowAssistantActions(message)
@@ -876,6 +884,7 @@ export function ChatMessageItem({
             onUiStateChange={onUiStateChange}
             projectId={projectId}
             showTokenUsageDetails={showTokenUsageDetails}
+            turnDiffSummary={turnDiffSummary}
           />
         </div>
       ) : null}

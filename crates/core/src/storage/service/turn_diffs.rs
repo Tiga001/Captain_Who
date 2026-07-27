@@ -36,4 +36,20 @@ impl StorageService {
         turn_diff_repository::load_latest_turn(&connection, conversation_id, project_id)
             .map_err(storage_error)
     }
+
+    pub fn load_agent_turn_diffs_for_messages(
+        &self,
+        conversation_id: &str,
+        project_id: &str,
+        assistant_message_ids: &[String],
+    ) -> Result<Vec<AgentTurnDiffRecord>, String> {
+        let connection = self.state.connection()?;
+        turn_diff_repository::load_turns_for_messages(
+            &connection,
+            conversation_id,
+            project_id,
+            assistant_message_ids,
+        )
+        .map_err(storage_error)
+    }
 }

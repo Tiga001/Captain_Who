@@ -51,6 +51,35 @@ export interface GitReviewSummary {
   truncated: boolean
 }
 
+export interface GitTurnDiffSummariesInput {
+  conversationId: string
+  projectId: string
+  assistantMessageIds: string[]
+}
+
+export interface GitTurnDiffSummaryFile {
+  path: string
+  status: Extract<GitReviewFileStatus, 'modified' | 'added' | 'deleted'>
+  stats?: GitReviewFileStats
+}
+
+/**
+ * A read-only projection of one durable agent turn diff. The backend derives this
+ * from the turn's first before-state and final after-state; it is not persisted
+ * as a second summary and must not be reconstructed from individual tool patches.
+ */
+export interface GitTurnDiffSummary {
+  assistantMessageId: string
+  stats: GitReviewStats
+  files: GitTurnDiffSummaryFile[]
+  truncated: boolean
+}
+
+export interface GitTurnDiffSummaries {
+  conversationId: string
+  summaries: GitTurnDiffSummary[]
+}
+
 export interface GitReviewFileDiffInput {
   snapshotId: string
   fileId: string
