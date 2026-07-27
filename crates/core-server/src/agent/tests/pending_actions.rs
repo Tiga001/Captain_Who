@@ -588,7 +588,6 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     });
     let mut record = PendingActionRecord {
         storage_id: pending_action_storage_id("run-skill-redaction", "action-skill-redaction"),
@@ -803,7 +802,6 @@ fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     });
     service
         .store_pending_action(
@@ -895,7 +893,6 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
         }],
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     });
     // These durable owner rows intentionally do not exist, forcing final trace persistence to
     // fail after the action has first transitioned to cancelled.
@@ -1016,7 +1013,6 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
         }],
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     });
     service
         .store_pending_action(
@@ -1167,7 +1163,6 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
         }],
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     });
     service
         .store_pending_action(

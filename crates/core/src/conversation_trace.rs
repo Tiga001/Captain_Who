@@ -120,6 +120,39 @@ impl ConversationModelContextItem {
     }
 }
 
+pub(crate) fn model_context_item_from_message(
+    sequence: u64,
+    ordinal: u32,
+    message: &LlmMessage,
+) -> Result<(ConversationModelContextItem, bool), String> {
+    let (content, content_redacted) = sanitize_runtime_text(&message.content);
+    let mut tool_calls = Vec::with_capacity(message.tool_calls.len());
+    let mut tool_call_redacted = false;
+    for call in &message.tool_calls {
+        let (args, redacted) = sanitize_runtime_value(&call.args);
+        tool_call_redacted |= redacted;
+        tool_calls.push(AgentContextCheckpointToolCall {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            args,
+        });
+    }
+    let item = ConversationModelContextItem {
+        sequence,
+        ordinal,
+        role: message.role.as_str().to_string(),
+        content,
+        tool_call_id: message.tool_call_id.clone(),
+        tool_calls,
+        is_error: message.is_error,
+    };
+    item.validate()?;
+    Ok((
+        item,
+        content_redacted || tool_call_redacted || !message.images.is_empty(),
+    ))
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationModelContextLog {
@@ -989,6 +1022,7 @@ impl ConversationTraceRecorder {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn committed_item_count(&self) -> usize {
         self.snapshot().committed_prefix().items.len()
     }
@@ -1028,35 +1062,17 @@ impl ConversationTraceRecorder {
         {
             return;
         }
-        let (content, redacted) = sanitize_runtime_text(&message.content);
-        let mut tool_calls = Vec::with_capacity(message.tool_calls.len());
-        let mut tool_call_redacted = false;
-        for call in &message.tool_calls {
-            let (args, redacted) = sanitize_runtime_value(&call.args);
-            tool_call_redacted |= redacted;
-            tool_calls.push(AgentContextCheckpointToolCall {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                args,
-            });
+        match model_context_item_from_message(sequence, ordinal, message) {
+            Ok((item, truncated)) => {
+                self.model_context_items.push(item);
+                self.model_context_items
+                    .sort_by_key(|item| (item.sequence, item.ordinal));
+                self.truncated |= truncated;
+            }
+            Err(_) => {
+                self.truncated = true;
+            }
         }
-        let item = ConversationModelContextItem {
-            sequence,
-            ordinal,
-            role: message.role.as_str().to_string(),
-            content,
-            tool_call_id: message.tool_call_id.clone(),
-            tool_calls,
-            is_error: message.is_error,
-        };
-        if item.validate().is_ok() {
-            self.model_context_items.push(item);
-            self.model_context_items
-                .sort_by_key(|item| (item.sequence, item.ordinal));
-        } else {
-            self.truncated = true;
-        }
-        self.truncated |= redacted || tool_call_redacted || !message.images.is_empty();
     }
 
     pub(crate) fn record_user_guidance(

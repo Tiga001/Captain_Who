@@ -4498,7 +4498,6 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
                 request.covered_through,
                 ContextJournalCursor::message("user-current")
             );
-            assert_eq!(request.visible_trace_item_count, 0);
             let durable_prefix = durable_prefix_for_prepare.clone();
             async move { Ok(AgentContextCompactionPrepareOutcome::Ready(durable_prefix)) }
         },
@@ -4586,7 +4585,6 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
             let baseline = compacted_baseline_for_commit.clone();
             commit_counter.fetch_add(1, Ordering::SeqCst);
             assert_eq!(request.draft.id, "summary-runtime");
-            assert_eq!(request.visible_trace_item_count, 0);
             async move {
                 Ok(AgentContextCompactionCommitOutcome::Applied {
                     summary_id: "summary-runtime".to_string(),

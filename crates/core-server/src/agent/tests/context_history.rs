@@ -275,51 +275,25 @@ fn compaction_accepts_newly_closed_exchange_but_rejects_unsafe_trace_boundaries(
     };
     let result_cursor = ContextJournalCursor::trace_item("assistant-visible-boundary", 2);
 
-    validate_compaction_model_visible_boundary(
+    validate_compaction_trace_boundary(
         &result_cursor,
         Some(&trace),
         "run-visible-boundary",
         "conversation-visible-boundary",
         "assistant-visible-boundary",
-        1,
     )
     .unwrap();
 
-    let split_exchange = validate_compaction_model_visible_boundary(
-        &ContextJournalCursor::trace_item("assistant-visible-boundary", 0),
-        Some(&trace),
-        "run-visible-boundary",
-        "conversation-visible-boundary",
-        "assistant-visible-boundary",
-        2,
-    )
-    .unwrap_err();
-    assert_eq!(
-        split_exchange.code(),
-        Some("context_compaction_visibility_mismatch")
-    );
-
-    validate_compaction_model_visible_boundary(
-        &result_cursor,
-        Some(&trace),
-        "run-visible-boundary",
-        "conversation-visible-boundary",
-        "assistant-visible-boundary",
-        3,
-    )
-    .unwrap();
-
-    let unresolved = validate_compaction_model_visible_boundary(
+    let split_exchange = validate_compaction_trace_boundary(
         &ContextJournalCursor::trace_item("assistant-visible-boundary", 1),
         Some(&trace),
         "run-visible-boundary",
         "conversation-visible-boundary",
         "assistant-visible-boundary",
-        3,
     )
     .unwrap_err();
     assert_eq!(
-        unresolved.code(),
+        split_exchange.code(),
         Some("context_compaction_trace_boundary_missing")
     );
 }

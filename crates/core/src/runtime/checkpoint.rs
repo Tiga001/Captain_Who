@@ -11,8 +11,7 @@ use super::tool_flow::build_tool_observation_message;
 use super::tool_flow::build_tool_observation_message_with_history_ref;
 use crate::context::{ContextFrame, ContextGroup, ContextOrigin};
 use crate::conversation_trace::{
-    canonical_tool_result_for_context, ConversationTraceRecorder, ConversationTraceSnapshot,
-    ConversationTurnTraceItem,
+    canonical_tool_result_for_context, ConversationTraceRecorder, ConversationTurnTraceItem,
 };
 use crate::llm::{validate_model_tool_call_id, LlmToolCall};
 use crate::protocol::{
@@ -128,7 +127,6 @@ pub(super) struct RestoredRunCheckpoint {
     pub(super) tool_batch: ToolCallBatch,
     pub(super) extension_snapshots: Vec<AgentExtensionSnapshot>,
     pub(super) conversation_trace: ConversationTraceRecorder,
-    pub(super) visible_trace_item_count: usize,
     pub(super) tool_set: AgentRunToolSetCheckpoint,
     pub(super) run_context: Option<AgentRunContext>,
     pub(super) model_capabilities: ModelCapabilities,
@@ -140,7 +138,6 @@ pub(super) struct RunCheckpointState<'a> {
     pub(super) next_model_request_index: usize,
     pub(super) tool_batch: &'a ToolCallBatch,
     pub(super) extension_snapshots: Vec<AgentExtensionSnapshot>,
-    pub(super) model_visible_trace_item_count: usize,
     pub(super) pending_tool_call_id: &'a str,
     pub(super) conversation_trace: &'a ConversationTraceRecorder,
     pub(super) tool_set: &'a EffectiveToolSet,
@@ -158,7 +155,6 @@ pub(super) fn create_run_checkpoint(
         next_model_request_index,
         tool_batch,
         extension_snapshots,
-        model_visible_trace_item_count,
         pending_tool_call_id,
         conversation_trace,
         tool_set,
@@ -178,16 +174,6 @@ pub(super) fn create_run_checkpoint(
         conversation_trace_truncated,
     ) = conversation_trace.checkpoint();
     validate_conversation_trace_tool_call_ids(&conversation_trace_items)?;
-    let committed_item_count = conversation_trace.committed_item_count();
-    if model_visible_trace_item_count > committed_item_count
-        || model_visible_trace_item_count > 0
-            && !conversation_trace_items[model_visible_trace_item_count - 1]
-                .is_safe_compaction_boundary()
-    {
-        return Err(AgentError::new(
-            "运行检查点的模型可见 trace 游标不是完整日志边界。",
-        ));
-    }
     let context_items = context.checkpoint_items()?;
     validate_context_checkpoint_tool_call_ids(&context_items)?;
     validate_checkpoint_world_state(run_world_state, model_capabilities)?;
@@ -212,7 +198,6 @@ pub(super) fn create_run_checkpoint(
         conversation_model_context_items,
         next_conversation_trace_sequence,
         conversation_trace_truncated,
-        model_visible_trace_item_count,
     })
 }
 
@@ -275,25 +260,6 @@ pub(super) fn restore_run_checkpoint_with_history_ref(
         ));
     }
 
-    let committed_trace_item_count = ConversationTraceSnapshot {
-        items: checkpoint.conversation_trace_items.clone(),
-        model_context_items: checkpoint.conversation_model_context_items.clone(),
-        next_sequence: checkpoint.next_conversation_trace_sequence,
-        truncated: checkpoint.conversation_trace_truncated,
-    }
-    .committed_prefix()
-    .items
-    .len();
-    if checkpoint.model_visible_trace_item_count > committed_trace_item_count
-        || checkpoint.model_visible_trace_item_count > 0
-            && !checkpoint.conversation_trace_items[checkpoint.model_visible_trace_item_count - 1]
-                .is_safe_compaction_boundary()
-    {
-        return Err(AgentError::new(
-            "无法恢复运行检查点：模型可见 trace 游标不是完整日志边界。",
-        ));
-    }
-    let visible_trace_item_count = checkpoint.model_visible_trace_item_count;
     let continuation_result_sequence =
         checkpoint
             .next_conversation_trace_sequence
@@ -379,7 +345,6 @@ pub(super) fn restore_run_checkpoint_with_history_ref(
         },
         extension_snapshots: checkpoint.extension_snapshots,
         conversation_trace,
-        visible_trace_item_count,
         tool_set,
         run_context: checkpoint.run_context,
         model_capabilities: checkpoint.model_capabilities,
@@ -653,7 +618,6 @@ mod tests {
                 next_model_request_index: 1,
                 tool_batch: &batch,
                 extension_snapshots: Vec::new(),
-                model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
@@ -897,7 +861,6 @@ mod tests {
                 next_model_request_index: 1,
                 tool_batch: &batch,
                 extension_snapshots: Vec::new(),
-                model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &ConversationTraceRecorder::default(),
                 tool_set: &test_tool_set(),
@@ -960,7 +923,6 @@ mod tests {
                 next_model_request_index: 1,
                 tool_batch: &batch,
                 extension_snapshots: Vec::new(),
-                model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
@@ -1005,7 +967,6 @@ mod tests {
                 next_model_request_index: 1,
                 tool_batch: &invalid_queue,
                 extension_snapshots: Vec::new(),
-                model_visible_trace_item_count: 0,
                 pending_tool_call_id: &valid_pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
@@ -1062,7 +1023,6 @@ mod tests {
                 next_model_request_index: 1,
                 tool_batch: &batch,
                 extension_snapshots: Vec::new(),
-                model_visible_trace_item_count: 0,
                 pending_tool_call_id: &valid_pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
@@ -1089,7 +1049,6 @@ mod tests {
                 next_model_request_index: 1,
                 tool_batch: &batch,
                 extension_snapshots: Vec::new(),
-                model_visible_trace_item_count: 0,
                 pending_tool_call_id: &valid_pending.id,
                 conversation_trace: &invalid_trace,
                 tool_set: &test_tool_set(),
@@ -1261,7 +1220,6 @@ mod tests {
                 next_model_request_index: 1,
                 tool_batch: &batch,
                 extension_snapshots: Vec::new(),
-                model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
@@ -1324,7 +1282,6 @@ mod tests {
                 next_model_request_index: 1,
                 tool_batch: &batch,
                 extension_snapshots: Vec::new(),
-                model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
@@ -1457,7 +1414,6 @@ mod tests {
                 next_model_request_index: 2,
                 tool_batch: &tool_batch,
                 extension_snapshots: Vec::new(),
-                model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending.id,
                 conversation_trace: &conversation_trace,
                 tool_set: &test_tool_set(),
@@ -1501,9 +1457,9 @@ mod tests {
     }
 
     #[test]
-    fn approval_resume_preserves_the_actual_model_visible_trace_cursor() {
+    fn approval_resume_preserves_the_complete_committed_trace() {
         let completed_call = AgentToolCall {
-            id: canonical_test_call_id(0, "visible-trace-completed"),
+            id: canonical_test_call_id(0, "completed-trace"),
             tool: "read_file".to_string(),
             args: json!({ "path": "notes.txt" }),
             approval_status: AgentApprovalStatus::NotRequired,
@@ -1513,11 +1469,11 @@ mod tests {
             call_id: completed_call.id.clone(),
             tool: completed_call.tool.clone(),
             ok: true,
-            result: Some(json!({ "content": "unseen result" })),
+            result: Some(json!({ "content": "completed result" })),
             error: None,
         };
         let pending_call = AgentToolCall {
-            id: canonical_test_call_id(1, "visible-trace-pending"),
+            id: canonical_test_call_id(1, "pending-trace"),
             tool: "write_file".to_string(),
             args: json!({ "phase": "finish" }),
             approval_status: AgentApprovalStatus::Required,
@@ -1585,7 +1541,6 @@ mod tests {
                 next_model_request_index: 1,
                 tool_batch: &tool_batch,
                 extension_snapshots: Vec::new(),
-                model_visible_trace_item_count: 0,
                 pending_tool_call_id: &pending_call.id,
                 conversation_trace: &trace,
                 tool_set: &test_tool_set(),
@@ -1612,7 +1567,6 @@ mod tests {
 
         let restored = restore_run_checkpoint(checkpoint, "run-multi-tool", &continuation).unwrap();
 
-        assert_eq!(restored.visible_trace_item_count, 0);
         assert_eq!(restored.conversation_trace.committed_item_count(), 4);
     }
 }

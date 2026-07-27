@@ -777,7 +777,6 @@ mod tests {
                 conversation_model_context_items: Vec::new(),
                 next_conversation_trace_sequence: 0,
                 conversation_trace_truncated: false,
-                model_visible_trace_item_count: 0,
             }),
         };
 

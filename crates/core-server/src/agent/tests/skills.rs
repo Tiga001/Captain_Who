@@ -621,7 +621,6 @@ fn installed_skill_crosses_the_production_turn_boundary_without_instruction_leak
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     });
     let dynamically_restored = service
         .restore_skill_resource_session(&dynamically_activated_input)

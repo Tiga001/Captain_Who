@@ -242,6 +242,25 @@ impl StorageService {
         .map_err(storage_error)
     }
 
+    /// Appends an on-demand reconstruction of the uncompressed model projection for one
+    /// historical trace. Existing items remain an immutable prefix, so legacy repair can never
+    /// rewrite model history that was already recorded exactly.
+    pub fn append_reconstructed_conversation_model_context(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        items: &[ConversationModelContextItem],
+    ) -> Result<bool, String> {
+        let connection = self.state.connection()?;
+        conversation_model_context_repository::commit_items_in_connection(
+            &connection,
+            conversation_id,
+            assistant_message_id,
+            items,
+        )
+        .map_err(storage_error)
+    }
+
     /// Lists durable in-progress traces for process-startup side-effect reconciliation.
     pub fn list_in_progress_conversation_turn_traces(
         &self,

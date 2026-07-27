@@ -174,7 +174,6 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     });
     let mut record = PendingActionRecord {
         storage_id: "pending-backend-bound".to_string(),

@@ -26,10 +26,6 @@ pub struct AgentContextCompactionPrepareRequest {
     pub assistant_message_id: String,
     pub expected_previous_summary_id: Option<String>,
     pub covered_through: ContextJournalCursor,
-    /// Trace prefix observed before this request. Retained for checkpoint/audit compatibility;
-    /// compaction eligibility is determined by a closed durable journal boundary, not by whether
-    /// the next model request has already consumed the completed exchange.
-    pub visible_trace_item_count: usize,
     pub source_input_tokens: u64,
     pub retained_input_tokens: u64,
     pub uncovered_tail_input_tokens: u64,
@@ -68,7 +64,6 @@ pub struct AgentContextCompactionCommitRequest {
     pub run_id: String,
     pub conversation_id: String,
     pub assistant_message_id: String,
-    pub visible_trace_item_count: usize,
     pub prefix: Arc<ContextCompactionPrefix>,
     pub draft: ContextCompactionSummaryDraft,
     pub receipt: ContextCompactionReceipt,
@@ -240,17 +235,12 @@ impl ContextCompactionExecutor {
         attempt_index: u64,
         model: &str,
         api_style: AgentApiStyle,
-        visible_trace_item_count: usize,
         cancellation_token: &AgentCancellationToken,
     ) -> AgentResult<Option<ContextCompactionAttempt>> {
         cancellation_token.check()?;
-        let Some(request) = prepare_request_from_plan(
-            plan,
-            run_id,
-            conversation_id,
-            assistant_message_id,
-            visible_trace_item_count,
-        ) else {
+        let Some(request) =
+            prepare_request_from_plan(plan, run_id, conversation_id, assistant_message_id)
+        else {
             return Ok(None);
         };
         let receipt = ContextCompactionReceipt::begin(
@@ -416,7 +406,6 @@ impl ContextCompactionExecutor {
                     run_id: attempt.request.run_id,
                     conversation_id: attempt.request.conversation_id,
                     assistant_message_id: attempt.request.assistant_message_id,
-                    visible_trace_item_count: attempt.request.visible_trace_item_count,
                     prefix,
                     draft,
                     receipt: applied_receipt,
@@ -499,7 +488,6 @@ fn prepare_request_from_plan(
     run_id: &str,
     conversation_id: Option<&str>,
     assistant_message_id: Option<&str>,
-    visible_trace_item_count: usize,
 ) -> Option<AgentContextCompactionPrepareRequest> {
     if plan.status != ContextCompactionPlanStatus::Required {
         return None;
@@ -517,7 +505,6 @@ fn prepare_request_from_plan(
         assistant_message_id: assistant_message_id.to_string(),
         expected_previous_summary_id: prefix.previous_summary_id.clone(),
         covered_through: prefix.covered_through.clone(),
-        visible_trace_item_count,
         source_input_tokens: step.source_input_tokens,
         retained_input_tokens: step.retained_input_tokens,
         // The planner now operates on one model timeline, so this audit value is the complete
@@ -635,16 +622,10 @@ mod tests {
             available_input_tokens: Some(10_000),
             soft_trigger_input_tokens: Some(9_000),
             target_input_tokens: Some(7_500),
-            durable_capacity_tokens: Some(9_000),
-            durable_trigger_input_tokens: Some(8_100),
-            durable_target_input_tokens: Some(1_350),
             required_reclaimed_tokens: 7_000,
-            required_durable_reclaimed_tokens: 7_000,
             planned_reclaimed_tokens: 744,
             projected_request_input_tokens: 8_256,
-            projected_durable_input_tokens: 8_256,
             request_target_satisfied: false,
-            durable_target_satisfied: false,
             best_effort: true,
             compactable_input_tokens: 1_000,
             protected: ContextCompactionProtectedEstimate {
@@ -764,7 +745,6 @@ mod tests {
                 1,
                 "test-model",
                 AgentApiStyle::OpenAiCompatible,
-                0,
                 cancellation,
             )
             .await

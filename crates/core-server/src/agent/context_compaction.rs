@@ -5,7 +5,6 @@ pub(super) struct RebuildRunningContextAfterCompactionRequest<'a> {
     run_id: &'a str,
     conversation_id: &'a str,
     assistant_message_id: &'a str,
-    visible_trace_item_count: usize,
     notifications: &'a CoreServerNotificationSender,
     tool_projection: Option<&'a AgentContextWindowToolProjection>,
 }
@@ -167,13 +166,12 @@ impl AgentService {
                         .storage
                         .get_conversation_turn_trace(&assistant_message_id)
                         .map_err(AgentError::new)?;
-                    validate_compaction_model_visible_boundary(
+                    validate_compaction_trace_boundary(
                         &request.covered_through,
                         active_trace.as_ref(),
                         &run_id,
                         &conversation_id,
                         &assistant_message_id,
-                        request.visible_trace_item_count,
                     )?;
                     let prefix = service
                         .storage
@@ -194,7 +192,6 @@ impl AgentService {
                                     run_id: &run_id,
                                     conversation_id: &conversation_id,
                                     assistant_message_id: &assistant_message_id,
-                                    visible_trace_item_count: request.visible_trace_item_count,
                                     notifications: &notifications,
                                     tool_projection: tool_set_snapshot.projection().as_ref(),
                                 },
@@ -237,13 +234,12 @@ impl AgentService {
                         .storage
                         .get_conversation_turn_trace(&assistant_message_id)
                         .map_err(AgentError::new)?;
-                    validate_compaction_model_visible_boundary(
+                    validate_compaction_trace_boundary(
                         &request.prefix.covered_through,
                         active_trace.as_ref(),
                         &run_id,
                         &conversation_id,
                         &assistant_message_id,
-                        request.visible_trace_item_count,
                     )?;
                     let committed = service
                         .storage
@@ -261,7 +257,6 @@ impl AgentService {
                             run_id: &run_id,
                             conversation_id: &conversation_id,
                             assistant_message_id: &assistant_message_id,
-                            visible_trace_item_count: request.visible_trace_item_count,
                             notifications: &notifications,
                             tool_projection: tool_set_snapshot.projection().as_ref(),
                         },
@@ -319,7 +314,6 @@ impl AgentService {
             run_id,
             conversation_id,
             assistant_message_id,
-            visible_trace_item_count,
             notifications,
             tool_projection,
         } = request;
@@ -347,11 +341,6 @@ impl AgentService {
             {
                 return Err("压缩后重建上下文时，运行中 trace 身份或状态不一致。".to_string());
             }
-            if visible_trace_item_count > trace.items.len() {
-                return Err("压缩后重建上下文时，模型可见 trace 游标超出日志末尾。".to_string());
-            }
-        } else if visible_trace_item_count != 0 {
-            return Err("压缩后重建上下文时，模型可见 trace 游标没有对应日志。".to_string());
         }
 
         let mut preview_input = agent_input.clone();
@@ -990,32 +979,28 @@ pub(super) fn validate_compaction_request_identity(
     ))
 }
 
-pub(super) fn validate_compaction_model_visible_boundary(
+pub(super) fn validate_compaction_trace_boundary(
     covered_through: &ContextJournalCursor,
     active_trace: Option<&ConversationTurnTrace>,
     expected_run_id: &str,
     expected_conversation_id: &str,
     expected_assistant_message_id: &str,
-    visible_trace_item_count: usize,
 ) -> AgentResult<()> {
     let Some(trace) = active_trace else {
-        if visible_trace_item_count == 0
-            && !matches!(
-                covered_through,
-                ContextJournalCursor::TraceItem {
-                    assistant_message_id,
-                    ..
-                } if assistant_message_id == expected_assistant_message_id
-            )
-        {
+        if !matches!(
+            covered_through,
+            ContextJournalCursor::TraceItem {
+                assistant_message_id,
+                ..
+            } if assistant_message_id == expected_assistant_message_id
+        ) {
             return Ok(());
         }
         return Err(AgentError::structured(
-            "context_compaction_visibility_mismatch",
+            "context_compaction_trace_mismatch",
             "上下文压缩请求缺少当前运行的会话轨迹。",
             serde_json::json!({
                 "assistantMessageId": expected_assistant_message_id,
-                "visibleTraceItemCount": visible_trace_item_count,
             }),
         ));
     };
@@ -1025,26 +1010,13 @@ pub(super) fn validate_compaction_model_visible_boundary(
         || trace.terminal_status != ConversationTurnTraceTerminalStatus::InProgress
     {
         return Err(AgentError::structured(
-            "context_compaction_visibility_mismatch",
+            "context_compaction_trace_mismatch",
             "上下文压缩请求对应的运行中会话轨迹身份无效。",
             serde_json::json!({
                 "runId": trace.run_id,
                 "conversationId": trace.conversation_id,
                 "assistantMessageId": trace.assistant_message_id,
                 "terminalStatus": trace.terminal_status,
-            }),
-        ));
-    }
-    if visible_trace_item_count > trace.items.len()
-        || visible_trace_item_count > 0
-            && !trace.items[visible_trace_item_count - 1].is_safe_compaction_boundary()
-    {
-        return Err(AgentError::structured(
-            "context_compaction_visibility_mismatch",
-            "上下文压缩请求的模型可见轨迹边界无效。",
-            serde_json::json!({
-                "visibleTraceItemCount": visible_trace_item_count,
-                "persistedTraceItemCount": trace.items.len(),
             }),
         ));
     }

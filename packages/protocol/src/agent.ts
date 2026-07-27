@@ -634,17 +634,12 @@ export interface ContextCompactionReceiptPlan {
   requestTriggerInputTokens?: number
   requestTargetInputTokens?: number
   requestPressure: boolean
-  durableInputTokens: number
-  durableCapacityTokens?: number
-  durableTriggerInputTokens?: number
-  durableTargetInputTokens?: number
-  durablePressure: boolean
   sourceInputTokens: number
+  retainedInputTokens: number
   targetReplacementTokens: number
   expectedReclaimedTokens: number
   plannedReclaimedTokens: number
   projectedRequestInputTokens: number
-  projectedDurableInputTokens: number
   bestEffort: boolean
   protectedInputTokens: number
   protectedReasons: Record<string, number>

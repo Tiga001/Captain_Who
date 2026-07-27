@@ -1355,6 +1355,112 @@ mod tests {
     }
 
     #[test]
+    fn opens_eighteen_tool_calls_across_distinct_turn_pages_without_repeating_records() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("history-pages.sqlite")).unwrap());
+        seed_conversation(&storage);
+        let mut items = Vec::new();
+        for index in 0..18_u64 {
+            let call_id = format!("call-{index:02}");
+            items.push(ConversationTurnTraceItem::ToolCall {
+                sequence: index * 2,
+                call_id: call_id.clone(),
+                tool: "read_file".to_string(),
+                operation: json!({ "path": format!("file-{index:02}.txt") }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                truncated: false,
+            });
+            items.push(ConversationTurnTraceItem::ToolResult {
+                sequence: index * 2 + 1,
+                call_id,
+                tool: "read_file".to_string(),
+                status: ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: json!({ "content": format!("result-{index:02}") }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                error: None,
+                truncated: false,
+                archive: Default::default(),
+            });
+        }
+        let trace = ConversationTurnTrace {
+            schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-18-calls".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-1".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: false,
+            items,
+        };
+        let mut in_progress = trace.clone();
+        in_progress.terminal_status = ConversationTurnTraceTerminalStatus::InProgress;
+        storage
+            .append_in_progress_conversation_turn_trace(&in_progress, 2_000, 2_000)
+            .unwrap();
+        storage
+            .replace_conversation_turn_trace(&trace, 2_000, 2_001)
+            .unwrap();
+        let context = context(storage, "conversation-1");
+        let mut registry = ToolRegistry::defaults_with_search(None);
+        registry.register_conversation_history();
+
+        let listed = registry.execute(&context, &call(json!({})));
+        let listed = listed.result.unwrap();
+        let turn = listed["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|turn| turn["facts"]["toolCalls"] == 18)
+            .expect("the seeded 18-call turn must be listed");
+        let open = turn["open"].as_str().unwrap().to_string();
+        let first = registry.execute(&context, &call(json!({ "open": open })));
+        assert!(first.ok, "{:?}", first.error);
+        let first = first.result.unwrap();
+        assert_eq!(first["returnedRecords"], TIMELINE_PAGE_SIZE);
+        let next = first["navigation"]["next"]
+            .as_str()
+            .expect("18 tool exchanges must require a second page")
+            .to_string();
+        let second = registry.execute(&context, &call(json!({ "open": next })));
+        assert!(second.ok, "{:?}", second.error);
+        let second = second.result.unwrap();
+        assert!(second["navigation"]["next"].is_null());
+
+        let records = first["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(second["timeline"].as_array().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 38);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["itemKind"] == "tool_call")
+                .count(),
+            18
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["itemKind"] == "tool_result")
+                .count(),
+            18
+        );
+        let locations = records
+            .iter()
+            .map(|record| record["open"].as_str().unwrap())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            locations.len(),
+            records.len(),
+            "following navigation.next must not repeat the previous page"
+        );
+    }
+
+    #[test]
     fn opaque_locations_remain_scoped_to_the_current_conversation() {
         let fixture = tempdir().unwrap();
         let storage = Arc::new(StorageService::open(&fixture.path().join("scope.sqlite")).unwrap());

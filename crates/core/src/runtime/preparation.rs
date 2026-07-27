@@ -1,5 +1,7 @@
 use super::*;
+use crate::llm::LlmToolCall;
 use crate::tools::AgentToolExposure;
+use sha2::{Digest, Sha256};
 
 pub(super) struct RuntimeCapabilityServices {
     pub(super) host_actions_available: bool,
@@ -128,6 +130,230 @@ pub(super) fn prepare_runtime_capabilities_with_skills(
     })
 }
 
+/// Repairs only the legacy history that is about to enter this model request.
+///
+/// New conversations already carry an append-only `ConversationModelContextLog`. Older
+/// conversations fall back to Durable Trace, but an archived tool result can be projected again
+/// through its owning tool before that lossy fallback is used. The repaired projection is
+/// persisted as an immutable prefix so restarts, approval resumes and later turns see one model
+/// history instead of repeatedly deriving different representations.
+pub(super) fn hydrate_legacy_model_history(
+    input: &mut AgentChatInput,
+    storage: Option<&crate::storage::service::StorageService>,
+    tool_registry: &ToolRegistry,
+) -> AgentResult<bool> {
+    let (Some(storage), Some(conversation_id)) = (
+        storage,
+        input
+            .context
+            .as_ref()
+            .and_then(|context| context.conversation_id.as_deref()),
+    ) else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    for message in &mut input.messages {
+        let Some(trace) = message.conversation_turn_trace.as_ref() else {
+            continue;
+        };
+        if trace.conversation_id != conversation_id
+            || message.message_id.as_deref() != Some(trace.assistant_message_id.as_str())
+        {
+            return Err(AgentError::new(
+                "旧会话模型历史重建时，消息与 Trace 身份不一致。",
+            ));
+        }
+        crate::conversation_trace::validate_model_context_prefix(
+            trace,
+            &message.conversation_model_context_items,
+        )
+        .map_err(AgentError::new)?;
+        let covered_sequence = message
+            .conversation_model_context_items
+            .last()
+            .map(|item| item.sequence);
+        let mut rebuilt = message.conversation_model_context_items.clone();
+        for (index, trace_item) in trace.items.iter().enumerate() {
+            if covered_sequence.is_some_and(|covered| trace_item.sequence() <= covered) {
+                continue;
+            }
+            let model_message = match trace_item {
+                crate::ConversationTurnTraceItem::AssistantNarration { content, .. } => {
+                    Some(LlmMessage::text(LlmMessageRole::Assistant, content.clone()))
+                }
+                crate::ConversationTurnTraceItem::UserGuidance {
+                    content,
+                    attachments,
+                    ..
+                } => Some(LlmMessage::text(
+                    LlmMessageRole::User,
+                    crate::conversation_trace::render_user_guidance_content(content, attachments),
+                )),
+                crate::ConversationTurnTraceItem::ToolCall {
+                    call_id,
+                    tool,
+                    operation,
+                    ..
+                } => {
+                    let paired = trace.items.get(index + 1).is_some_and(|next| {
+                        matches!(
+                            next,
+                            crate::ConversationTurnTraceItem::ToolResult {
+                                call_id: result_call_id,
+                                ..
+                            } if result_call_id == call_id
+                        )
+                    });
+                    if !paired {
+                        break;
+                    }
+                    Some(LlmMessage::assistant(
+                        "",
+                        vec![LlmToolCall {
+                            id: call_id.clone(),
+                            name: tool.clone(),
+                            args: operation.clone(),
+                        }],
+                    ))
+                }
+                crate::ConversationTurnTraceItem::ToolResult {
+                    sequence,
+                    call_id,
+                    tool,
+                    status,
+                    success,
+                    observation,
+                    error,
+                    archive,
+                    ..
+                } => {
+                    let fallback = AgentToolResult {
+                        call_id: call_id.clone(),
+                        tool: tool.clone(),
+                        ok: *success,
+                        result: Some(observation.clone()),
+                        error: error.clone(),
+                    };
+                    let projected = archived_model_projection(
+                        storage,
+                        conversation_id,
+                        trace,
+                        trace_item,
+                        tool_registry,
+                    )
+                    .unwrap_or(fallback);
+                    let history_ref = crate::ContextHistoryRef::trace_item(
+                        &trace.assistant_message_id,
+                        *sequence,
+                    );
+                    Some(LlmMessage::tool_result(
+                        call_id.clone(),
+                        crate::conversation_trace::render_tool_observation_with_projection(
+                            &projected,
+                            Some(&history_ref),
+                            Some(archive),
+                        ),
+                        matches!(
+                            status,
+                            crate::ConversationTraceToolResultStatus::Failed
+                                | crate::ConversationTraceToolResultStatus::Conflict
+                                | crate::ConversationTraceToolResultStatus::Cancelled
+                        ),
+                    ))
+                }
+            };
+            let Some(model_message) = model_message else {
+                continue;
+            };
+            let (item, _) = crate::conversation_trace::model_context_item_from_message(
+                trace_item.sequence(),
+                0,
+                &model_message,
+            )
+            .map_err(AgentError::new)?;
+            rebuilt.push(item);
+        }
+        crate::conversation_trace::validate_model_context_prefix(trace, &rebuilt)
+            .map_err(AgentError::new)?;
+        if rebuilt.len() == message.conversation_model_context_items.len() {
+            continue;
+        }
+        storage
+            .append_reconstructed_conversation_model_context(
+                conversation_id,
+                &trace.assistant_message_id,
+                &rebuilt,
+            )
+            .map_err(AgentError::new)?;
+        message.conversation_model_context_items = rebuilt;
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn archived_model_projection(
+    storage: &crate::storage::service::StorageService,
+    conversation_id: &str,
+    trace: &crate::ConversationTurnTrace,
+    trace_item: &crate::ConversationTurnTraceItem,
+    tool_registry: &ToolRegistry,
+) -> Option<AgentToolResult> {
+    let crate::ConversationTurnTraceItem::ToolResult {
+        sequence,
+        call_id,
+        tool,
+        archive,
+        ..
+    } = trace_item
+    else {
+        return None;
+    };
+    let archive_ref = archive.archive_ref.as_deref()?;
+    if !tool_registry.contains_tool(tool) {
+        return None;
+    }
+    let descriptor = storage
+        .find_conversation_history_archive_by_ref(conversation_id, archive_ref)
+        .ok()??;
+    if !descriptor.archived_completely
+        || descriptor.assistant_message_id != trace.assistant_message_id
+        || descriptor.sequence != *sequence
+        || descriptor.call_id != call_id.as_str()
+        || descriptor.tool != tool.as_str()
+        || descriptor.content_type != "application/vnd.mycopilot.agent-tool-result+json"
+        || archive
+            .content_hash
+            .as_deref()
+            .is_some_and(|hash| hash != descriptor.content_hash)
+        || archive
+            .archived_bytes
+            .is_some_and(|bytes| bytes != descriptor.total_bytes)
+    {
+        return None;
+    }
+    let page = storage
+        .read_conversation_history_archive_page(
+            conversation_id,
+            archive_ref,
+            crate::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Byte,
+            0,
+            descriptor.total_bytes.max(1),
+        )
+        .ok()??;
+    if page.truncated || page.content.len() as u64 != descriptor.total_bytes {
+        return None;
+    }
+    let content_hash = format!("sha256:{:x}", Sha256::digest(page.content.as_bytes()));
+    if content_hash != descriptor.content_hash {
+        return None;
+    }
+    let archived = serde_json::from_str::<AgentToolResult>(&page.content).ok()?;
+    if archived.call_id != call_id.as_str() || archived.tool != tool.as_str() {
+        return None;
+    }
+    Some(tool_registry.model_projection(&archived))
+}
+
 pub(super) fn assemble_context_preview(
     timeline: DurableConversationTimeline,
     skill_discovery: Option<crate::skills::AgentSkillDiscoverySnapshot>,
@@ -203,79 +429,72 @@ pub(super) fn build_llm_request(
     )?;
     let shared_context_baseline = shared_context_baseline
         .filter(|baseline| baseline.matches_configuration(&configuration_revision));
-    let (
-        context,
-        next_model_request_index,
-        tool_batch,
-        conversation_trace,
-        visible_trace_item_count,
-    ) = match restored_checkpoint {
-        Some(restored) => {
-            let context = match shared_context_baseline {
-                Some(baseline) => baseline.rebase_restored_frame(restored.context),
-                None => restored.context,
-            };
-            (
-                context,
-                restored.next_model_request_index,
-                restored.tool_batch,
-                restored.conversation_trace,
-                restored.visible_trace_item_count,
-            )
-        }
-        None => {
-            let attachment_context = build_attachment_context(
-                &input.attachments,
-                input
-                    .context
-                    .as_ref()
-                    .and_then(|context| context.attachment_library.as_ref()),
-            )?;
-            let skill_activation = input.skill_activation;
-            let skill_discovery = input.skill_discovery;
-            let world_state_records = input.world_state_records;
-            let context = match shared_context_baseline {
-                Some(baseline) => {
-                    let mut context = baseline.into_frame();
-                    ContextAssembler::append_initial_run_world_state(
-                        &mut context,
-                        initial_run_world_state.as_ref(),
-                    )?;
-                    append_attachment_context(&mut context, attachment_context);
-                    ContextAssembler::append_skill_overlays(
-                        &mut context,
-                        skill_discovery.as_ref(),
-                        skill_activation.as_ref(),
-                    )?;
-                    context
-                }
-                None => assemble_initial_context_with_skill_overlays(
-                    DurableConversationTimeline {
-                        compaction_summary: input.context_compaction_summary,
-                        world_state_records,
-                        goal: input.goal,
-                        messages: input.messages,
-                    },
-                    initial_run_world_state,
-                    InitialSkillOverlays {
-                        discovery: skill_discovery,
-                        activation: skill_activation,
-                    },
-                    attachment_context,
-                    input.context.as_ref(),
-                    input.prompt_preferences.as_ref(),
-                    tool_definitions,
-                )?,
-            };
-            (
-                context,
-                0,
-                ToolCallBatch::default(),
-                ConversationTraceRecorder::default(),
-                0,
-            )
-        }
-    };
+    let (context, next_model_request_index, tool_batch, conversation_trace) =
+        match restored_checkpoint {
+            Some(restored) => {
+                let context = match shared_context_baseline {
+                    Some(baseline) => baseline.rebase_restored_frame(restored.context),
+                    None => restored.context,
+                };
+                (
+                    context,
+                    restored.next_model_request_index,
+                    restored.tool_batch,
+                    restored.conversation_trace,
+                )
+            }
+            None => {
+                let attachment_context = build_attachment_context(
+                    &input.attachments,
+                    input
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.attachment_library.as_ref()),
+                )?;
+                let skill_activation = input.skill_activation;
+                let skill_discovery = input.skill_discovery;
+                let world_state_records = input.world_state_records;
+                let context = match shared_context_baseline {
+                    Some(baseline) => {
+                        let mut context = baseline.into_frame();
+                        ContextAssembler::append_initial_run_world_state(
+                            &mut context,
+                            initial_run_world_state.as_ref(),
+                        )?;
+                        append_attachment_context(&mut context, attachment_context);
+                        ContextAssembler::append_skill_overlays(
+                            &mut context,
+                            skill_discovery.as_ref(),
+                            skill_activation.as_ref(),
+                        )?;
+                        context
+                    }
+                    None => assemble_initial_context_with_skill_overlays(
+                        DurableConversationTimeline {
+                            compaction_summary: input.context_compaction_summary,
+                            world_state_records,
+                            goal: input.goal,
+                            messages: input.messages,
+                        },
+                        initial_run_world_state,
+                        InitialSkillOverlays {
+                            discovery: skill_discovery,
+                            activation: skill_activation,
+                        },
+                        attachment_context,
+                        input.context.as_ref(),
+                        input.prompt_preferences.as_ref(),
+                        tool_definitions,
+                    )?,
+                };
+                (
+                    context,
+                    0,
+                    ToolCallBatch::default(),
+                    ConversationTraceRecorder::default(),
+                )
+            }
+        };
 
     Ok(PreparedLlmRequest {
         template,
@@ -283,7 +502,6 @@ pub(super) fn build_llm_request(
         next_model_request_index,
         tool_batch,
         conversation_trace,
-        visible_trace_item_count,
     })
 }
 
@@ -488,4 +706,161 @@ fn assemble_initial_context_with_skill_overlays(
             images: attachment_context.images,
         },
     })
+}
+
+#[cfg(test)]
+mod legacy_model_history_tests {
+    use super::*;
+    use crate::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput;
+    use crate::storage::models::{ChatConversationRecord, ChatMessageRecord};
+    use tempfile::tempdir;
+
+    fn message(id: &str, role: &str, content: &str, created_at: i64) -> ChatMessageRecord {
+        ChatMessageRecord {
+            id: id.to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            created_at,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        }
+    }
+
+    #[test]
+    fn legacy_tail_rebuilds_from_exact_archive_once_and_survives_restart() {
+        let fixture = tempdir().unwrap();
+        let database = fixture.path().join("legacy-model-history.sqlite");
+        let storage = crate::storage::service::StorageService::open(&database).unwrap();
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-legacy".to_string(),
+                project_id: None,
+                model_id: Some("model-1".to_string()),
+                title: "Legacy".to_string(),
+                messages: vec![
+                    message("user-legacy", "user", "read the legacy file", 1),
+                    message("assistant-legacy", "assistant", "done", 2),
+                ],
+                created_at: 1,
+                updated_at: 2,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let archived_result = AgentToolResult {
+            call_id: "call-legacy".to_string(),
+            tool: "read_file".to_string(),
+            ok: true,
+            result: Some(json!({
+                "path": "legacy.txt",
+                "content": "EXACT_ARCHIVE_MODEL_HISTORY_MARKER",
+                "truncated": false
+            })),
+            error: None,
+        };
+        let archive = storage
+            .archive_conversation_tool_result(ConversationHistoryArchiveInput {
+                conversation_id: "conversation-legacy".to_string(),
+                assistant_message_id: "assistant-legacy".to_string(),
+                sequence: 1,
+                call_id: "call-legacy".to_string(),
+                tool: "read_file".to_string(),
+                content_type: "application/vnd.mycopilot.agent-tool-result+json".to_string(),
+                content: serde_json::to_string(&archived_result).unwrap(),
+                truncated_at_source: false,
+                model_projection_truncated: true,
+                archive_projection_truncated: false,
+                created_at: 2,
+            })
+            .unwrap();
+        let trace = crate::ConversationTurnTrace {
+            schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-legacy".to_string(),
+            conversation_id: "conversation-legacy".to_string(),
+            assistant_message_id: "assistant-legacy".to_string(),
+            terminal_status: crate::ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: true,
+            items: vec![
+                crate::ConversationTurnTraceItem::ToolCall {
+                    sequence: 0,
+                    call_id: "call-legacy".to_string(),
+                    tool: "read_file".to_string(),
+                    operation: json!({ "path": "legacy.txt" }),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    truncated: false,
+                },
+                crate::ConversationTurnTraceItem::ToolResult {
+                    sequence: 1,
+                    call_id: "call-legacy".to_string(),
+                    tool: "read_file".to_string(),
+                    status: crate::ConversationTraceToolResultStatus::Succeeded,
+                    success: true,
+                    observation: json!({ "summary": "LOSSY_DURABLE_TRACE_MARKER" }),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    error: None,
+                    truncated: true,
+                    archive: crate::ConversationHistoryArchiveTraceMetadata {
+                        archive_ref: Some(archive.archive_ref),
+                        content_hash: Some(archive.content_hash),
+                        archived_bytes: Some(archive.total_bytes),
+                        archived_completely: Some(true),
+                        model_projection_truncated: true,
+                        ..Default::default()
+                    },
+                },
+            ],
+        };
+        let mut in_progress = trace.clone();
+        in_progress.terminal_status = crate::ConversationTurnTraceTerminalStatus::InProgress;
+        storage
+            .append_in_progress_conversation_turn_trace(&in_progress, 2, 2)
+            .unwrap();
+        storage
+            .replace_conversation_turn_trace(&trace, 2, 3)
+            .unwrap();
+
+        let mut input: AgentChatInput = serde_json::from_value(json!({
+            "apiUrl": "https://example.test/v1",
+            "apiToken": "token",
+            "model": "model-1",
+            "apiStyle": "open_ai_compatible",
+            "maxTokens": 1024,
+            "context": { "conversationId": "conversation-legacy" },
+            "messages": [{
+                "messageId": "assistant-legacy",
+                "role": "assistant",
+                "content": "done",
+                "conversationTurnTrace": trace
+            }]
+        }))
+        .unwrap();
+        let registry = ToolRegistry::defaults_with_search(None);
+
+        assert!(hydrate_legacy_model_history(&mut input, Some(&storage), &registry).unwrap());
+        let restored_content = &input.messages[0].conversation_model_context_items[1].content;
+        assert!(restored_content.contains("EXACT_ARCHIVE_MODEL_HISTORY_MARKER"));
+        assert!(!restored_content.contains("LOSSY_DURABLE_TRACE_MARKER"));
+        assert!(
+            !hydrate_legacy_model_history(&mut input, Some(&storage), &registry).unwrap(),
+            "persisted reconstruction must be idempotent"
+        );
+        drop(storage);
+
+        let reopened = crate::storage::service::StorageService::open(&database).unwrap();
+        let persisted = reopened
+            .get_conversation_model_context_log("assistant-legacy")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.items,
+            input.messages[0].conversation_model_context_items
+        );
+        assert!(persisted.items[1]
+            .content
+            .contains("EXACT_ARCHIVE_MODEL_HISTORY_MARKER"));
+    }
 }

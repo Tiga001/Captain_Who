@@ -357,7 +357,6 @@ fn pending_approval_persists_full_run_checkpoint() {
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     };
     let checkpoint = agent_input_with_run_checkpoint(&base_input, &run_checkpoint);
     let action = AgentProposedAction::ToolCall {

@@ -96,16 +96,10 @@ pub(crate) struct ContextCompactionPlan {
     pub(crate) available_input_tokens: Option<u64>,
     pub(crate) soft_trigger_input_tokens: Option<u64>,
     pub(crate) target_input_tokens: Option<u64>,
-    pub(crate) durable_capacity_tokens: Option<u64>,
-    pub(crate) durable_trigger_input_tokens: Option<u64>,
-    pub(crate) durable_target_input_tokens: Option<u64>,
     pub(crate) required_reclaimed_tokens: u64,
-    pub(crate) required_durable_reclaimed_tokens: u64,
     pub(crate) planned_reclaimed_tokens: u64,
     pub(crate) projected_request_input_tokens: u64,
-    pub(crate) projected_durable_input_tokens: u64,
     pub(crate) request_target_satisfied: bool,
-    pub(crate) durable_target_satisfied: bool,
     pub(crate) best_effort: bool,
     pub(crate) compactable_input_tokens: u64,
     pub(crate) protected: ContextCompactionProtectedEstimate,
@@ -243,13 +237,9 @@ impl ContextCompactionPlanner {
         let soft_trigger_input_tokens =
             percent_ceil(available_input_tokens, COMPACTION_TRIGGER_PERCENT);
         let target_input_tokens = percent_ceil(available_input_tokens, COMPACTION_TARGET_PERCENT);
-        let durable_input_tokens = query.breakdown.durable.input_tokens;
         let thresholds = ContextCompactionThresholds {
             request_trigger_input_tokens: Some(soft_trigger_input_tokens),
             request_target_input_tokens: Some(target_input_tokens),
-            durable_capacity_tokens: None,
-            durable_trigger_input_tokens: None,
-            durable_target_input_tokens: None,
         };
         let request_pressure = query.request_input_tokens >= soft_trigger_input_tokens
             || query.status == ContextBudgetStatus::OverBudget;
@@ -284,10 +274,7 @@ impl ContextCompactionPlanner {
         let projected_request_input_tokens = query
             .request_input_tokens
             .saturating_sub(planned_reclaimed_tokens);
-        let projected_durable_input_tokens =
-            durable_input_tokens.saturating_sub(planned_reclaimed_tokens);
         let request_target_satisfied = projected_request_input_tokens <= target_input_tokens;
-        let durable_target_satisfied = true;
         let best_effort = !request_target_satisfied;
         let status = if planned_reclaimed_tokens > 0 {
             ContextCompactionPlanStatus::Required
@@ -303,16 +290,10 @@ impl ContextCompactionPlanner {
             available_input_tokens: Some(available_input_tokens),
             soft_trigger_input_tokens: Some(soft_trigger_input_tokens),
             target_input_tokens: Some(target_input_tokens),
-            durable_capacity_tokens: None,
-            durable_trigger_input_tokens: None,
-            durable_target_input_tokens: None,
             required_reclaimed_tokens,
-            required_durable_reclaimed_tokens: 0,
             planned_reclaimed_tokens,
             projected_request_input_tokens,
-            projected_durable_input_tokens,
             request_target_satisfied,
-            durable_target_satisfied,
             best_effort,
             compactable_input_tokens,
             protected,
@@ -347,9 +328,6 @@ struct CompactionCandidate {
 struct ContextCompactionThresholds {
     request_trigger_input_tokens: Option<u64>,
     request_target_input_tokens: Option<u64>,
-    durable_capacity_tokens: Option<u64>,
-    durable_trigger_input_tokens: Option<u64>,
-    durable_target_input_tokens: Option<u64>,
 }
 
 impl ContextCompactionThresholds {
@@ -357,9 +335,6 @@ impl ContextCompactionThresholds {
         Self {
             request_trigger_input_tokens: Some(0),
             request_target_input_tokens: Some(0),
-            durable_capacity_tokens: Some(0),
-            durable_trigger_input_tokens: Some(0),
-            durable_target_input_tokens: Some(0),
         }
     }
 }
@@ -688,16 +663,10 @@ fn empty_plan(
         available_input_tokens: query.available_input_tokens,
         soft_trigger_input_tokens: thresholds.request_trigger_input_tokens,
         target_input_tokens: thresholds.request_target_input_tokens,
-        durable_capacity_tokens: thresholds.durable_capacity_tokens,
-        durable_trigger_input_tokens: thresholds.durable_trigger_input_tokens,
-        durable_target_input_tokens: thresholds.durable_target_input_tokens,
         required_reclaimed_tokens: 0,
-        required_durable_reclaimed_tokens: 0,
         planned_reclaimed_tokens: 0,
         projected_request_input_tokens: query.request_input_tokens,
-        projected_durable_input_tokens: query.breakdown.durable.input_tokens,
         request_target_satisfied: status == ContextCompactionPlanStatus::NotRequired,
-        durable_target_satisfied: status == ContextCompactionPlanStatus::NotRequired,
         best_effort: false,
         compactable_input_tokens,
         protected,
@@ -815,7 +784,6 @@ mod tests {
         assert_eq!(plan.status, ContextCompactionPlanStatus::NotRequired);
         assert!(plan.steps.is_empty());
         assert_eq!(plan.soft_trigger_input_tokens, Some(900));
-        assert_eq!(plan.durable_trigger_input_tokens, None);
     }
 
     #[test]
@@ -943,15 +911,10 @@ mod tests {
         assert_eq!(plan.status, ContextCompactionPlanStatus::Required);
         assert_eq!(plan.soft_trigger_input_tokens, Some(9_000));
         assert_eq!(plan.target_input_tokens, Some(1_500));
-        assert_eq!(plan.durable_trigger_input_tokens, None);
-        assert_eq!(plan.durable_target_input_tokens, None);
-        assert_eq!(plan.required_durable_reclaimed_tokens, 0);
         assert_eq!(plan.required_reclaimed_tokens, 7_500);
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.steps[0].source_input_tokens, 7_000);
         assert_eq!(plan.steps[0].target_replacement_tokens, 0);
-        assert_eq!(plan.projected_durable_input_tokens, 0);
-        assert!(plan.durable_target_satisfied);
         assert!(plan.best_effort);
     }
 
@@ -1221,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn unseen_run_overlay_is_never_a_compaction_candidate() {
+    fn uncommitted_run_overlay_without_a_history_origin_is_not_compactable() {
         let items = vec![item(
             0,
             ContextUsageClass::RunTransient,

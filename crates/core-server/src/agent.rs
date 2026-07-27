@@ -99,7 +99,7 @@ use pending_action_store::*;
 use run_lifecycle::{DeletionLifecycleState, FileEffectTracker};
 
 #[cfg(test)]
-use context_compaction::validate_compaction_model_visible_boundary;
+use context_compaction::validate_compaction_trace_boundary;
 #[cfg(test)]
 use run_lifecycle::inject_project_deletion_failure;
 

@@ -143,7 +143,6 @@ struct PreparedLlmRequest {
     next_model_request_index: usize,
     tool_batch: ToolCallBatch,
     conversation_trace: ConversationTraceRecorder,
-    visible_trace_item_count: usize,
 }
 
 struct PreparedRuntimeCapabilities {
@@ -244,7 +243,7 @@ impl AgentRuntime {
         let restore_trace_assistant_message_id = input.assistant_message_id.clone();
         let trace_run_id = run_id.clone();
         let setup_conversation_trace = conversation_trace_from_input_checkpoint(&input);
-        let shared_context_baseline =
+        let mut shared_context_baseline =
             publish_trace_recorder_snapshot(&setup_conversation_trace, trace_observer.as_ref())?;
         let restored_checkpoint =
             restore_input_checkpoint(&mut input, &run_id).map_err(|error| {
@@ -311,6 +310,22 @@ impl AgentRuntime {
                 trace_assistant_message_id.as_deref(),
             )
         })?;
+        if restored_checkpoint.is_none()
+            && hydrate_legacy_model_history(&mut input, storage.as_deref(), tool_registry.as_ref())
+                .map_err(|error| {
+                    attach_failed_runtime_trace(
+                        error,
+                        &setup_conversation_trace,
+                        &trace_run_id,
+                        trace_conversation_id.as_deref(),
+                        trace_assistant_message_id.as_deref(),
+                    )
+                })?
+        {
+            // The host baseline was assembled before legacy archive hydration. Rebuild from the
+            // repaired input for this request; subsequent runs load the persisted model history.
+            shared_context_baseline = None;
+        }
         if let Some(restored) = restored_checkpoint.as_ref() {
             initial_tool_set
                 .validate_checkpoint(&restored.tool_set)
@@ -369,7 +384,6 @@ impl AgentRuntime {
             mut next_model_request_index,
             mut tool_batch,
             conversation_trace,
-            mut visible_trace_item_count,
         } = build_llm_request(
             input,
             effective_tool_set.stable_definitions(),
@@ -592,7 +606,6 @@ impl AgentRuntime {
                                                 .unwrap_or(u64::MAX),
                                             &llm_request.model,
                                             llm_request.api_style,
-                                            visible_trace_item_count,
                                             &cancellation_token,
                                         )
                                         .await?;
@@ -905,14 +918,6 @@ impl AgentRuntime {
                     merge_total_usage(&mut usage, llm_response.usage);
                     finish_reason = llm_response.finish_reason;
                     can_drain_steer_input = true;
-
-                    // Successful sampling advances only the observation cursor. The exact bounded
-                    // model projection remains in `active_context` until compaction replaces it;
-                    // Durable Trace is never used to demote already observed tool results.
-                    visible_trace_item_count = conversation_trace
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .committed_item_count();
 
                     let tool_requests = tool_calls_from_response(
                         llm_response.tool_calls,
@@ -1437,7 +1442,6 @@ impl AgentRuntime {
                                     next_model_request_index,
                                     tool_batch: &tool_batch,
                                     extension_snapshots: runtime_extensions.snapshots()?,
-                                    model_visible_trace_item_count: visible_trace_item_count,
                                     pending_tool_call_id: &call.id,
                                     conversation_trace: &trace,
                                     tool_set: &effective_tool_set,

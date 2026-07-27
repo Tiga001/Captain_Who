@@ -166,7 +166,6 @@ fn cancelling_pending_approval_commits_one_paired_cancelled_trace() {
         }],
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     });
     service
         .store_pending_action(
@@ -301,7 +300,6 @@ fn forced_cancellation_uses_backend_runtime_snapshot_instead_of_empty_trace() {
         ],
         next_conversation_trace_sequence: 2,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     };
     service.seed_trace_snapshot_from_checkpoint("run-forced", Some(&checkpoint));
 
@@ -455,7 +453,6 @@ async fn cancelling_immediately_after_approval_prevents_command_side_effects() {
         }],
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     };
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://must-not-be-called.test/v1/chat/completions",
@@ -589,7 +586,6 @@ async fn message_deletion_cancels_a_rejected_actions_pre_spawn_continuation() {
         }],
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     };
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://must-not-be-called.test/v1/chat/completions",
@@ -778,7 +774,6 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         }],
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     };
     let mut agent_input = serde_json::from_value::<AgentChatInput>(json!({
         "apiUrl": "https://should-not-be-called.test/v1/chat/completions",

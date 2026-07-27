@@ -103,14 +103,6 @@ pub struct ContextCompactionReceiptPlan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_target_input_tokens: Option<u64>,
     pub request_pressure: bool,
-    pub durable_input_tokens: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub durable_capacity_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub durable_trigger_input_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub durable_target_input_tokens: Option<u64>,
-    pub durable_pressure: bool,
     pub source_input_tokens: u64,
     #[serde(default)]
     pub retained_input_tokens: u64,
@@ -118,7 +110,6 @@ pub struct ContextCompactionReceiptPlan {
     pub expected_reclaimed_tokens: u64,
     pub planned_reclaimed_tokens: u64,
     pub projected_request_input_tokens: u64,
-    pub projected_durable_input_tokens: u64,
     pub best_effort: bool,
     pub protected_input_tokens: u64,
     pub protected_reasons: BTreeMap<String, u64>,
@@ -143,15 +134,9 @@ impl ContextCompactionReceiptPlan {
             .durable_prefix
             .as_ref()
             .ok_or_else(|| AgentError::new("压缩计划没有稳定 durable 前缀。"))?;
-        let durable_input_tokens = plan
-            .projected_durable_input_tokens
-            .saturating_add(plan.planned_reclaimed_tokens);
         let request_pressure = plan
             .soft_trigger_input_tokens
             .is_some_and(|trigger| plan.request_input_tokens >= trigger);
-        let durable_pressure = plan
-            .durable_trigger_input_tokens
-            .is_some_and(|trigger| durable_input_tokens >= trigger);
         Ok(Self {
             context_revision: format!("{:016x}", plan.context_revision),
             persistent_revision: format!("{:016x}", plan.persistent_revision),
@@ -160,18 +145,12 @@ impl ContextCompactionReceiptPlan {
             request_trigger_input_tokens: plan.soft_trigger_input_tokens,
             request_target_input_tokens: plan.target_input_tokens,
             request_pressure,
-            durable_input_tokens,
-            durable_capacity_tokens: plan.durable_capacity_tokens,
-            durable_trigger_input_tokens: plan.durable_trigger_input_tokens,
-            durable_target_input_tokens: plan.durable_target_input_tokens,
-            durable_pressure,
             source_input_tokens: step.source_input_tokens,
             retained_input_tokens: step.retained_input_tokens,
             target_replacement_tokens: step.target_replacement_tokens,
             expected_reclaimed_tokens: step.expected_reclaimed_tokens,
             planned_reclaimed_tokens: plan.planned_reclaimed_tokens,
             projected_request_input_tokens: plan.projected_request_input_tokens,
-            projected_durable_input_tokens: plan.projected_durable_input_tokens,
             best_effort: plan.best_effort,
             protected_input_tokens: plan.protected.input_tokens,
             protected_reasons: plan.protected.reasons.clone(),
@@ -186,7 +165,7 @@ impl ContextCompactionReceiptPlan {
         if self.context_revision.trim().is_empty() || self.persistent_revision.trim().is_empty() {
             return Err(AgentError::new("压缩 receipt 的上下文 revision 不能为空。"));
         }
-        if !self.request_pressure && !self.durable_pressure {
+        if !self.request_pressure {
             return Err(AgentError::new("压缩 receipt 没有记录有效的触发压力。"));
         }
         if self.source_input_tokens == 0

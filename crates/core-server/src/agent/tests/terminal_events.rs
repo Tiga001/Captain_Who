@@ -1239,7 +1239,6 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
         }],
         next_conversation_trace_sequence: 1,
         conversation_trace_truncated: false,
-        model_visible_trace_item_count: 0,
     };
     let mut agent_input = command_test_input(fixture.path());
     let context = agent_input.context.as_mut().unwrap();
