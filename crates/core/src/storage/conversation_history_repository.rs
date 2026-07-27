@@ -762,6 +762,38 @@ mod tests {
     }
 
     #[test]
+    fn trigram_search_finds_contiguous_cjk_text() {
+        let connection = setup();
+        connection
+            .execute(
+                "UPDATE messages
+                 SET content = '请修复审批结束后的引导问题'
+                 WHERE conversation_id = 'conversation-1' AND id = 'user-1'",
+                [],
+            )
+            .unwrap();
+        let filter = ConversationHistorySearchFilter {
+            include_messages: true,
+            ..Default::default()
+        };
+
+        let hits = search_records(
+            &connection,
+            "conversation-1",
+            "审批结束后的引导",
+            &filter,
+            20,
+        )
+        .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert!(matches!(
+            hits[0].reference,
+            ConversationHistoryRecordRef::Message { ref message_id } if message_id == "user-1"
+        ));
+    }
+
+    #[test]
     fn reads_exact_authoritative_record_and_rejects_cross_conversation_reference() {
         let connection = setup();
         let reference = ConversationHistoryRecordRef::TraceItem {

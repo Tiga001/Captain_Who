@@ -457,7 +457,8 @@ impl ContextMetadata {
         if self.sources.contains(&ContextSource::BackendSystemPrompt) {
             return LlmMessagePlacement::StableSystemPolicy;
         }
-        if self.sources.contains(&ContextSource::WorldStateSnapshot)
+        if self.sources.contains(&ContextSource::ConversationSummary)
+            || self.sources.contains(&ContextSource::WorldStateSnapshot)
             || self.sources.contains(&ContextSource::WorldStateDiff)
             || self.sources.contains(&ContextSource::ContinuityIndex)
             || self.sources.contains(&ContextSource::ConversationGoal)

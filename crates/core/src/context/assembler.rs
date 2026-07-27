@@ -85,10 +85,7 @@ impl ContextAssembler {
             let group = ContextGroup::compaction_replacement(format!("summary:{}", summary.id));
             let origin = ContextOrigin::compaction_summary(&summary.id);
             items.push(ContextItem::new(
-                LlmMessage::text(
-                    LlmMessageRole::Assistant,
-                    summary.render_summary_for_context()?,
-                ),
+                LlmMessage::backend_state(summary.render_summary_for_context()?),
                 ContextMetadata::new(
                     ContextSource::ConversationSummary,
                     ContextScope::Conversation,
@@ -850,7 +847,12 @@ mod tests {
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 5);
         assert_eq!(messages[0].role, LlmMessageRole::System);
-        assert!(messages[1].content.contains("semantic summary is lossy"));
+        assert_eq!(messages[1].role, LlmMessageRole::System);
+        assert_eq!(
+            messages[1].placement,
+            LlmMessagePlacement::BackendStateTimeline
+        );
+        assert!(messages[1].content.contains("较早对话的有损语义摘要"));
         assert!(messages[2].content.contains("\"recordType\":\"full\""));
         assert!(messages[2]
             .content
@@ -1377,12 +1379,15 @@ mod tests {
         let messages = frame.to_messages();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, LlmMessageRole::System);
-        assert_eq!(messages[1].role, LlmMessageRole::Assistant);
+        assert_eq!(messages[1].role, LlmMessageRole::System);
+        assert_eq!(
+            messages[1].placement,
+            LlmMessagePlacement::BackendStateTimeline
+        );
         assert!(messages[1].content.contains("old task"));
-        assert!(messages[1].content.contains("semantic summary is lossy"));
-        assert!(messages[1]
-            .content
-            .contains("Newer messages are authoritative"));
+        assert!(messages[1].content.contains("较早对话的有损语义摘要"));
+        assert!(messages[1].content.contains("当前用户消息在冲突时优先"));
+        assert!(messages[1].content.contains("conversation_history"));
         assert_eq!(messages[2].content, "continue from the summary");
         assert!(!messages.iter().any(|message| message
             .content

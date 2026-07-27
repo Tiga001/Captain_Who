@@ -349,6 +349,28 @@ pub fn read_archive_page(
     }))
 }
 
+/// Finds a case-insensitive text occurrence in one exact-history archive.
+///
+/// The returned offset is measured in Unicode scalar values so it can be passed directly to
+/// `read_archive_page` with `ConversationHistoryArchivePageUnit::Char`. Exact history remains the
+/// source of truth; the FTS index is used only to select the archive candidate.
+pub fn find_archive_match_char_offset(
+    connection: &Connection,
+    conversation_id: &str,
+    archive_ref: &str,
+    query: &str,
+) -> rusqlite::Result<Option<u64>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(invalid_data("history archive match query cannot be empty"));
+    }
+    let Some(descriptor) = find_archive_by_ref(connection, conversation_id, archive_ref)? else {
+        return Ok(None);
+    };
+    let content = read_complete_archive_content(connection, &descriptor)?;
+    Ok(find_case_insensitive_char_offset(&content, query))
+}
+
 pub(crate) fn load_fork_copy(
     connection: &Connection,
     source_conversation_id: &str,
@@ -658,6 +680,30 @@ fn content_hash(content: &[u8]) -> String {
     format!("{CONTENT_HASH_PREFIX}{:x}", Sha256::digest(content))
 }
 
+fn find_case_insensitive_char_offset(content: &str, query: &str) -> Option<u64> {
+    if let Some(offset) = content.find(query) {
+        return Some(content[..offset].chars().count() as u64);
+    }
+    let folded_query = query.to_lowercase();
+    if folded_query.is_empty() {
+        return None;
+    }
+    let folded_content = content.to_lowercase();
+    let folded_byte_offset = folded_content.find(&folded_query)?;
+    let mut current_folded_byte = 0_usize;
+    for (char_offset, character) in content.chars().enumerate() {
+        if current_folded_byte == folded_byte_offset {
+            return Some(char_offset as u64);
+        }
+        current_folded_byte = current_folded_byte
+            .saturating_add(character.to_lowercase().map(char::len_utf8).sum::<usize>());
+        if current_folded_byte > folded_byte_offset {
+            return None;
+        }
+    }
+    None
+}
+
 fn sqlite_integer(value: u64) -> rusqlite::Result<i64> {
     i64::try_from(value).map_err(|_| invalid_data("history archive value exceeds SQLite INTEGER"))
 }
@@ -845,5 +891,52 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn archive_match_returns_the_exact_character_offset_case_insensitively() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        seed_conversation(&connection, "conversation-1", "assistant-1");
+        let content = "甲乙丙 Prefix Exact-Needle 后文".to_string();
+        let archive = store_archive(
+            &mut connection,
+            &ConversationHistoryArchiveInput {
+                conversation_id: "conversation-1".to_string(),
+                assistant_message_id: "assistant-1".to_string(),
+                sequence: 1,
+                call_id: "call-1".to_string(),
+                tool: "web_fetch".to_string(),
+                content_type: "text/plain".to_string(),
+                content: content.clone(),
+                truncated_at_source: false,
+                model_projection_truncated: true,
+                archive_projection_truncated: false,
+                created_at: 2,
+            },
+        )
+        .unwrap();
+
+        let offset = find_archive_match_char_offset(
+            &connection,
+            "conversation-1",
+            &archive.archive_ref,
+            "exact-needle",
+        )
+        .unwrap()
+        .unwrap();
+
+        let expected = content[..content.find("Exact-Needle").unwrap()]
+            .chars()
+            .count() as u64;
+        assert_eq!(offset, expected);
+        assert!(find_archive_match_char_offset(
+            &connection,
+            "conversation-other",
+            &archive.archive_ref,
+            "exact-needle"
+        )
+        .unwrap()
+        .is_none());
     }
 }

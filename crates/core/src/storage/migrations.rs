@@ -1150,6 +1150,181 @@ fn reset_incompatible_context_compaction_schema(connection: &Connection) -> rusq
     )
 }
 
+fn upgrade_context_compaction_model_replacement_schema(
+    connection: &Connection,
+) -> rusqlite::Result<()> {
+    let table_sql = connection.query_row(
+        "SELECT sql
+         FROM sqlite_master
+         WHERE type = 'table' AND name = 'context_compaction_summaries'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    if !table_sql.contains("continuity_input_tokens <= replacement_input_tokens") {
+        return Ok(());
+    }
+
+    // Continuity remains durable backend metadata, but it is no longer sent to the main model.
+    // Rebuild the derived-summary table so its diagnostic token count is independent from the
+    // model-visible replacement budget. Rows and all external references remain intact.
+    if !table_has_column(
+        connection,
+        "context_compaction_summaries",
+        "uncovered_tail_input_tokens",
+    )? {
+        add_column_if_missing(
+            connection,
+            "context_compaction_summaries",
+            "uncovered_tail_input_tokens",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (uncovered_tail_input_tokens >= 0)",
+        )?;
+    }
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let migration = connection.execute_batch(
+        "
+        BEGIN IMMEDIATE;
+        DROP TRIGGER IF EXISTS validate_conversation_world_state_epoch_summary_insert;
+        DROP TRIGGER IF EXISTS validate_conversation_world_state_epoch_summary_update;
+        DROP TRIGGER IF EXISTS delete_context_compaction_summary_with_lineage;
+
+        CREATE TABLE context_compaction_summaries_model_replacement (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+            source_revision TEXT NOT NULL,
+            previous_summary_id TEXT,
+            covered_through_kind TEXT NOT NULL CHECK (
+                covered_through_kind IN ('message', 'trace_item')
+            ),
+            covered_through_message_id TEXT NOT NULL,
+            covered_through_trace_sequence INTEGER CHECK (
+                covered_through_trace_sequence >= 0
+            ),
+            content TEXT NOT NULL CHECK (length(trim(content)) > 0),
+            continuity_schema_version INTEGER NOT NULL CHECK (
+                continuity_schema_version > 0
+            ),
+            continuity_json TEXT NOT NULL CHECK (length(trim(continuity_json)) > 0),
+            generation_kind TEXT NOT NULL CHECK (
+                generation_kind IN ('test', 'model')
+            ),
+            generation_model TEXT,
+            source_input_tokens INTEGER NOT NULL CHECK (source_input_tokens > 0),
+            summary_input_tokens INTEGER NOT NULL CHECK (summary_input_tokens > 0),
+            continuity_input_tokens INTEGER NOT NULL CHECK (
+                continuity_input_tokens > 0
+            ),
+            uncovered_tail_input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (
+                uncovered_tail_input_tokens >= 0
+            ),
+            replacement_input_tokens INTEGER NOT NULL CHECK (
+                replacement_input_tokens > 0
+                AND replacement_input_tokens < source_input_tokens
+                AND summary_input_tokens <= replacement_input_tokens
+            ),
+            created_at INTEGER NOT NULL CHECK (created_at >= 0),
+            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY (previous_summary_id)
+                REFERENCES context_compaction_summaries_model_replacement(id)
+                ON DELETE SET NULL,
+            FOREIGN KEY (covered_through_message_id)
+                REFERENCES messages(id) ON DELETE CASCADE,
+            CHECK (
+                (
+                    covered_through_kind = 'message'
+                    AND covered_through_trace_sequence IS NULL
+                )
+                OR (
+                    covered_through_kind = 'trace_item'
+                    AND covered_through_trace_sequence IS NOT NULL
+                )
+            ),
+            CHECK (
+                (generation_kind = 'test' AND generation_model IS NULL)
+                OR (
+                    generation_kind = 'model'
+                    AND length(trim(generation_model)) > 0
+                )
+            )
+        );
+
+        INSERT INTO context_compaction_summaries_model_replacement (
+            id, conversation_id, schema_version, source_revision, previous_summary_id,
+            covered_through_kind, covered_through_message_id,
+            covered_through_trace_sequence, content, continuity_schema_version,
+            continuity_json, generation_kind, generation_model, source_input_tokens,
+            summary_input_tokens, continuity_input_tokens, uncovered_tail_input_tokens,
+            replacement_input_tokens, created_at
+        )
+        SELECT
+            id, conversation_id, schema_version, source_revision, previous_summary_id,
+            covered_through_kind, covered_through_message_id,
+            covered_through_trace_sequence, content, continuity_schema_version,
+            continuity_json, generation_kind, generation_model, source_input_tokens,
+            summary_input_tokens, continuity_input_tokens, uncovered_tail_input_tokens,
+            replacement_input_tokens, created_at
+        FROM context_compaction_summaries;
+
+        DROP TABLE context_compaction_summaries;
+        ALTER TABLE context_compaction_summaries_model_replacement
+            RENAME TO context_compaction_summaries;
+        CREATE INDEX idx_context_compaction_summaries_conversation_id
+            ON context_compaction_summaries(conversation_id, created_at);
+
+        CREATE TRIGGER validate_conversation_world_state_epoch_summary_insert
+        BEFORE INSERT ON conversation_world_state_epochs
+        WHEN NEW.base_summary_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM context_compaction_summaries
+              WHERE id = NEW.base_summary_id
+                AND conversation_id = NEW.conversation_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'world state epoch summary must belong to the same conversation'
+            );
+        END;
+
+        CREATE TRIGGER validate_conversation_world_state_epoch_summary_update
+        BEFORE UPDATE OF conversation_id, base_summary_id
+        ON conversation_world_state_epochs
+        WHEN NEW.base_summary_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM context_compaction_summaries
+              WHERE id = NEW.base_summary_id
+                AND conversation_id = NEW.conversation_id
+          )
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'world state epoch summary must belong to the same conversation'
+            );
+        END;
+
+        CREATE TRIGGER delete_context_compaction_summary_with_lineage
+        AFTER DELETE ON context_compaction_summary_lineage
+        WHEN EXISTS (
+            SELECT 1 FROM context_compaction_summaries WHERE id = OLD.summary_id
+        )
+        BEGIN
+            DELETE FROM context_compaction_summaries WHERE id = OLD.summary_id;
+        END;
+
+        COMMIT;
+        ",
+    );
+    if let Err(error) = migration {
+        let _ = connection.execute_batch("ROLLBACK;");
+        let _ = connection.execute_batch("PRAGMA foreign_keys = ON;");
+        return Err(error);
+    }
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    Ok(())
+}
+
 fn run_one_time_maintenance(connection: &Connection) -> rusqlite::Result<()> {
     let transaction = connection.unchecked_transaction()?;
     let already_completed = transaction.query_row(
@@ -2153,7 +2328,6 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
                 replacement_input_tokens > 0
                 AND replacement_input_tokens < source_input_tokens
                 AND summary_input_tokens <= replacement_input_tokens
-                AND continuity_input_tokens <= replacement_input_tokens
             ),
             created_at INTEGER NOT NULL CHECK (created_at >= 0),
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
@@ -2343,6 +2517,8 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
 
         ",
     )?;
+
+    upgrade_context_compaction_model_replacement_schema(connection)?;
 
     connection.execute(
         "DELETE FROM context_compaction_summaries WHERE schema_version != ?1",
@@ -3660,6 +3836,165 @@ mod tests {
             )
             .unwrap();
         assert_eq!(active_heads, 0);
+    }
+
+    #[test]
+    fn continuity_tokens_are_independent_from_model_replacement_tokens() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute_batch(
+                "
+                INSERT INTO conversations (
+                    id, project_id, model_id, title, created_at, updated_at,
+                    pinned_at, archived_at, unread_at
+                ) VALUES ('conversation-1', NULL, NULL, 'title', 1, 1, NULL, NULL, NULL);
+                INSERT INTO messages (
+                    id, conversation_id, role, content, status, agent_run_json,
+                    ui_state_json, created_at, position
+                ) VALUES (
+                    'assistant-1', 'conversation-1', 'assistant', 'answer', 'sent',
+                    NULL, NULL, 2, 0
+                );
+                ",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO context_compaction_summaries (
+                    id, conversation_id, schema_version, source_revision,
+                    previous_summary_id, covered_through_kind,
+                    covered_through_message_id, covered_through_trace_sequence, content,
+                    continuity_schema_version, continuity_json,
+                    generation_kind, generation_model, source_input_tokens,
+                    summary_input_tokens, continuity_input_tokens,
+                    replacement_input_tokens, created_at
+                ) VALUES (
+                    'summary-1', 'conversation-1', ?1, 'revision-1', NULL,
+                    'message', 'assistant-1', NULL, 'summary', 2, '{}',
+                    'test', NULL, 100, 10, 40, 10, 3
+                )",
+                [CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION],
+            )
+            .unwrap();
+
+        let table_sql = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'context_compaction_summaries'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert!(!table_sql.contains("continuity_input_tokens <= replacement_input_tokens"));
+    }
+
+    #[test]
+    fn upgrades_the_legacy_continuity_budget_constraint_without_losing_summaries() {
+        let connection = Connection::open_in_memory().unwrap();
+        run_migrations(&connection).unwrap();
+        connection
+            .execute_batch(&format!(
+                "
+                INSERT INTO conversations (
+                    id, project_id, model_id, title, created_at, updated_at,
+                    pinned_at, archived_at, unread_at
+                ) VALUES ('conversation-1', NULL, NULL, 'title', 1, 1, NULL, NULL, NULL);
+                INSERT INTO messages (
+                    id, conversation_id, role, content, status, agent_run_json,
+                    ui_state_json, created_at, position
+                ) VALUES (
+                    'assistant-1', 'conversation-1', 'assistant', 'answer', 'sent',
+                    NULL, NULL, 2, 0
+                );
+                INSERT INTO context_compaction_summaries (
+                    id, conversation_id, schema_version, source_revision,
+                    previous_summary_id, covered_through_kind,
+                    covered_through_message_id, covered_through_trace_sequence, content,
+                    continuity_schema_version, continuity_json,
+                    generation_kind, generation_model, source_input_tokens,
+                    summary_input_tokens, continuity_input_tokens,
+                    replacement_input_tokens, created_at
+                ) VALUES (
+                    'summary-1', 'conversation-1',
+                    {CONTEXT_COMPACTION_SUMMARY_SCHEMA_VERSION}, 'revision-1', NULL,
+                    'message', 'assistant-1', NULL, 'summary', 2, '{{}}',
+                    'test', NULL, 100, 10, 20, 20, 3
+                );
+                INSERT INTO context_compaction_summary_lineage (
+                    summary_id, conversation_id, introduced_by_assistant_message_id,
+                    source_conversation_id, source_summary_id, created_at
+                ) VALUES (
+                    'summary-1', 'conversation-1', 'assistant-1', NULL, NULL, 3
+                );
+
+                PRAGMA foreign_keys = OFF;
+                CREATE TABLE context_compaction_summaries_legacy_budget (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    source_revision TEXT NOT NULL,
+                    previous_summary_id TEXT,
+                    covered_through_kind TEXT NOT NULL,
+                    covered_through_message_id TEXT NOT NULL,
+                    covered_through_trace_sequence INTEGER,
+                    content TEXT NOT NULL,
+                    continuity_schema_version INTEGER NOT NULL,
+                    continuity_json TEXT NOT NULL,
+                    generation_kind TEXT NOT NULL,
+                    generation_model TEXT,
+                    source_input_tokens INTEGER NOT NULL,
+                    summary_input_tokens INTEGER NOT NULL,
+                    continuity_input_tokens INTEGER NOT NULL,
+                    uncovered_tail_input_tokens INTEGER NOT NULL DEFAULT 0,
+                    replacement_input_tokens INTEGER NOT NULL CHECK (
+                        continuity_input_tokens <= replacement_input_tokens
+                    ),
+                    created_at INTEGER NOT NULL
+                );
+                INSERT INTO context_compaction_summaries_legacy_budget
+                SELECT * FROM context_compaction_summaries;
+                DROP TRIGGER IF EXISTS validate_conversation_world_state_epoch_summary_insert;
+                DROP TRIGGER IF EXISTS validate_conversation_world_state_epoch_summary_update;
+                DROP TRIGGER IF EXISTS delete_context_compaction_summary_with_lineage;
+                DROP TABLE context_compaction_summaries;
+                ALTER TABLE context_compaction_summaries_legacy_budget
+                    RENAME TO context_compaction_summaries;
+                PRAGMA foreign_keys = ON;
+                "
+            ))
+            .unwrap();
+
+        run_migrations(&connection).unwrap();
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM context_compaction_summaries
+                     WHERE id = 'summary-1'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        let table_sql = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'context_compaction_summaries'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert!(!table_sql.contains("continuity_input_tokens <= replacement_input_tokens"));
     }
 
     #[test]

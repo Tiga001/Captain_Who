@@ -83,8 +83,8 @@ pub(crate) struct ContextCompactionStep {
     pub(crate) ranges: Vec<ContextCompactionItemRange>,
     pub(crate) atomic_unit_count: usize,
     pub(crate) source_input_tokens: u64,
-    /// Aspirational size of the complete replacement (semantic summary plus deterministic
-    /// continuity data). It is used only for planning projections and is never an output limit.
+    /// Aspirational size of the model-visible semantic summary. Backend-only Continuity metadata
+    /// is deliberately excluded. This is a planning projection, not an output limit.
     pub(crate) target_replacement_tokens: u64,
     pub(crate) expected_reclaimed_tokens: u64,
     pub(crate) contains_side_effects: bool,
@@ -524,8 +524,8 @@ fn absolute_protection_reason(
 
 fn maximum_reclaimable_tokens(selected: &[CompactionCandidate]) -> u64 {
     // The target is deliberately soft. Prefix selection therefore uses the theoretical maximum
-    // reclaim and leaves feasibility to the executor, which knows the exact continuity cost and
-    // validates the generated replacement against the measured source.
+    // reclaim and leaves feasibility to the executor, which validates the measured semantic
+    // summary replacement against the source.
     selected
         .iter()
         .map(|candidate| candidate.unit.tokens)

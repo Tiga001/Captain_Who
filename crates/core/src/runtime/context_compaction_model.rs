@@ -121,11 +121,11 @@ impl AgentContextCompactionModelGenerator {
                 }),
             ));
         }
-        let minimum_replacement_input_tokens = estimate_minimum_replacement_input_tokens(
-            &self.model,
-            self.api_style,
-            &request.continuity,
-        )?;
+        // Continuity is a backend-only retrieval index. It is measured and bounded for
+        // diagnostics, but it is not part of the model-visible replacement and must not reduce
+        // the semantic summary budget.
+        let minimum_replacement_input_tokens =
+            estimate_minimum_replacement_input_tokens(&self.model, self.api_style)?;
         let target_summary_tokens = request
             .target_replacement_tokens
             .saturating_sub(minimum_replacement_input_tokens);
@@ -255,19 +255,9 @@ impl AgentContextCompactionModelGenerator {
                 usage,
             ));
         }
-        let (summary_input_tokens, measured_continuity_tokens, replacement_input_tokens) =
-            estimate_replacement_context_tokens(
-                &self.model,
-                self.api_style,
-                &request.prefix.covered_through,
-                &content,
-                &request.continuity,
-            )?;
-        if measured_continuity_tokens != continuity_input_tokens {
-            return Err(AgentError::new(
-                "上下文压缩 Continuity 计量在同一次生成中不一致。",
-            ));
-        }
+        let summary_input_tokens =
+            estimate_summary_context_tokens(&self.model, self.api_style, &content)?;
+        let replacement_input_tokens = summary_input_tokens;
         if replacement_input_tokens >= request.source_input_tokens {
             return Err(generation_error(
                 "context_compaction_not_smaller",
@@ -432,44 +422,25 @@ fn estimate_continuity_context_tokens(
     .map(|tokens| tokens[0])
 }
 
-fn estimate_replacement_context_tokens(
+fn estimate_summary_context_tokens(
     model: &str,
     api_style: AgentApiStyle,
-    covered_through: &crate::ContextJournalCursor,
     content: &str,
-    continuity: &crate::ContextContinuitySnapshot,
-) -> AgentResult<(u64, u64, u64)> {
-    let summary =
-        crate::context::render_compaction_semantic_summary_for_context(covered_through, content)?;
-    let continuity = crate::context::render_compaction_continuity_for_context(continuity)?;
+) -> AgentResult<u64> {
+    let summary = crate::context::render_compaction_semantic_summary_for_context(content)?;
     let tokens = estimate_context_items(
         model,
         api_style,
-        vec![
-            ContextItem::text(
-                LlmMessageRole::Assistant,
-                summary,
+        vec![ContextItem::new(
+            LlmMessage::backend_state(summary),
+            ContextMetadata::new(
                 ContextSource::ConversationSummary,
                 ContextScope::Conversation,
                 ContextRetention::Retained,
             ),
-            ContextItem::new(
-                LlmMessage::backend_state(continuity),
-                ContextMetadata::new(
-                    ContextSource::ContinuityIndex,
-                    ContextScope::Conversation,
-                    ContextRetention::Retained,
-                ),
-            ),
-        ],
+        )],
     )?;
-    let summary_tokens = tokens[0];
-    let continuity_tokens = tokens[1];
-    Ok((
-        summary_tokens,
-        continuity_tokens,
-        summary_tokens.saturating_add(continuity_tokens),
-    ))
+    Ok(tokens[0])
 }
 
 fn estimate_context_items(
@@ -494,16 +465,8 @@ fn estimate_context_items(
 fn estimate_minimum_replacement_input_tokens(
     model: &str,
     api_style: AgentApiStyle,
-    continuity: &crate::ContextContinuitySnapshot,
 ) -> AgentResult<u64> {
-    estimate_replacement_context_tokens(
-        model,
-        api_style,
-        &continuity.covered_through,
-        MINIMAL_SUMMARY_PROBE,
-        continuity,
-    )
-    .map(|(_, _, total)| total)
+    estimate_summary_context_tokens(model, api_style, MINIMAL_SUMMARY_PROBE)
 }
 
 fn is_truncated_finish_reason(reason: &str) -> bool {
@@ -670,12 +633,8 @@ mod tests {
         request: &AgentContextCompactionGenerationRequest,
         api_style: AgentApiStyle,
     ) -> u32 {
-        let minimum_replacement_input_tokens = estimate_minimum_replacement_input_tokens(
-            "summary-model",
-            api_style,
-            &request.continuity,
-        )
-        .unwrap();
+        let minimum_replacement_input_tokens =
+            estimate_minimum_replacement_input_tokens("summary-model", api_style).unwrap();
         let target_summary_tokens = request
             .target_replacement_tokens
             .saturating_sub(minimum_replacement_input_tokens);
@@ -1095,10 +1054,8 @@ mod tests {
         assert!(output.draft.summary_input_tokens > 0);
         assert_eq!(
             output.draft.replacement_input_tokens,
-            output
-                .draft
-                .summary_input_tokens
-                .saturating_add(output.draft.continuity_input_tokens)
+            output.draft.summary_input_tokens
         );
+        assert!(output.draft.continuity_input_tokens > 0);
     }
 }

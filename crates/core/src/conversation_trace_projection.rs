@@ -210,33 +210,39 @@ pub(crate) fn project_conversation_history_result(value: &Value) -> (Value, bool
         );
     }
     let mut historical_payload_omitted = returned_chars.is_some();
+    for (key, count_key) in [
+        ("turns", "returnedTurns"),
+        ("results", "returnedTurns"),
+        ("timeline", "returnedRecords"),
+    ] {
+        if let Some(items) = metadata
+            .remove(key)
+            .and_then(|value| value.as_array().cloned())
+        {
+            metadata
+                .entry(count_key.to_string())
+                .or_insert_with(|| json!(items.len()));
+            historical_payload_omitted |= !items.is_empty();
+        }
+    }
+    if metadata.remove("turn").is_some() {
+        historical_payload_omitted = true;
+    }
     if let Some(hits) = metadata.get_mut("hits").and_then(Value::as_array_mut) {
         for hit in hits {
             if let Some(hit) = hit.as_object_mut() {
                 historical_payload_omitted |= hit.remove("preview").is_some();
+                historical_payload_omitted |= hit.remove("snippet").is_some();
             }
         }
     }
     if let Some(records) = metadata.get_mut("records").and_then(Value::as_array_mut) {
-        let timeline_records = records.iter().all(|record| {
-            record
-                .as_object()
-                .is_some_and(|record| record.contains_key("ref"))
-        });
-        if timeline_records {
-            for record in records {
-                if let Some(record) = record.as_object_mut() {
-                    historical_payload_omitted |= record.remove("preview").is_some();
-                    historical_payload_omitted |= record.remove("content").is_some();
-                    historical_payload_omitted |= record.remove("item").is_some();
-                }
-            }
-        } else {
-            let returned_records = records.len() as u64;
-            metadata.remove("records");
-            metadata.insert("returnedRecords".to_string(), json!(returned_records));
-            historical_payload_omitted |= returned_records > 0;
-        }
+        let returned_records = records.len() as u64;
+        metadata.remove("records");
+        metadata
+            .entry("returnedRecords".to_string())
+            .or_insert_with(|| json!(returned_records));
+        historical_payload_omitted |= returned_records > 0;
     }
     if historical_payload_omitted {
         metadata.insert(

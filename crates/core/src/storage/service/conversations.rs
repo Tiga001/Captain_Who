@@ -346,6 +346,39 @@ impl StorageService {
         .map_err(storage_error)
     }
 
+    pub fn find_conversation_history_archive_by_ref(
+        &self,
+        conversation_id: &str,
+        archive_ref: &str,
+    ) -> Result<
+        Option<conversation_history_archive_repository::ConversationHistoryArchiveDescriptor>,
+        String,
+    > {
+        let connection = self.state.connection()?;
+        conversation_history_archive_repository::find_archive_by_ref(
+            &connection,
+            conversation_id,
+            archive_ref,
+        )
+        .map_err(storage_error)
+    }
+
+    pub fn find_conversation_history_archive_match_char_offset(
+        &self,
+        conversation_id: &str,
+        archive_ref: &str,
+        query: &str,
+    ) -> Result<Option<u64>, String> {
+        let connection = self.state.connection()?;
+        conversation_history_archive_repository::find_archive_match_char_offset(
+            &connection,
+            conversation_id,
+            archive_ref,
+            query,
+        )
+        .map_err(storage_error)
+    }
+
     pub fn read_conversation_history_archive_page(
         &self,
         conversation_id: &str,
