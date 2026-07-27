@@ -2,7 +2,8 @@
 //!
 //! Runtime observations, approval checkpoints, and presentation events deliberately do not use
 //! these limits. A tool executes once; this module only derives the bounded, provider-neutral view
-//! that later conversation turns may receive.
+//! used by audit/search and as a compatibility fallback when an older turn has no uncompressed
+//! model projection.
 
 use serde_json::{json, Map, Value};
 

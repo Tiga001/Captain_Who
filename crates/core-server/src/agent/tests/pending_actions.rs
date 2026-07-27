@@ -584,6 +584,7 @@ fn terminal_pending_action_persistence_redacts_run_scoped_skill_bodies() {
         model_capabilities: ModelCapabilities::default(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "action-skill-redaction".to_string(),
+        conversation_model_context_items: Vec::new(),
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
         conversation_trace_truncated: false,
@@ -798,6 +799,7 @@ fn invalid_checkpoint_tool_call_never_leaves_pending_on_approval_or_cancellation
         model_capabilities: ModelCapabilities::default(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
+        conversation_model_context_items: Vec::new(),
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
         conversation_trace_truncated: false,
@@ -882,6 +884,7 @@ fn cancel_finalize_failure_atomically_restores_pending_payload() {
         model_capabilities: ModelCapabilities::default(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
+        conversation_model_context_items: Vec::new(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
             call_id: call.id.clone(),
@@ -1002,6 +1005,7 @@ fn cancel_usage_failure_rolls_back_message_trace_and_action_together() {
         model_capabilities: ModelCapabilities::default(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
+        conversation_model_context_items: Vec::new(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
             call_id: call.id.clone(),
@@ -1152,6 +1156,7 @@ fn cancelled_file_write_with_durable_rejection_never_rolls_back_to_pending() {
         model_capabilities: ModelCapabilities::default(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: action_id.to_string(),
+        conversation_model_context_items: Vec::new(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
             call_id: action_id.to_string(),

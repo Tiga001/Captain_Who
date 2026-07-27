@@ -427,6 +427,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
     };
     observer(ConversationTraceSnapshot {
         items: vec![narration.clone()],
+        model_context_items: Vec::new(),
         next_sequence: 1,
         truncated: false,
     })
@@ -446,7 +447,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let entry = states.get("conversation-live").unwrap();
-        assert_eq!(entry.committed_trace_items, 1);
+        assert_eq!(entry.committed_activity_items, 1);
         assert!(!entry.terminal);
     }
 
@@ -464,6 +465,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
     };
     observer(ConversationTraceSnapshot {
         items: vec![narration.clone(), call.clone()],
+        model_context_items: Vec::new(),
         next_sequence: 2,
         truncated: false,
     })
@@ -476,7 +478,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
             .unwrap_or_else(|error| error.into_inner())
             .get("conversation-live")
             .unwrap()
-            .committed_trace_items,
+            .committed_activity_items,
         1
     );
     let durable_open_call = storage
@@ -504,6 +506,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
     };
     observer(ConversationTraceSnapshot {
         items: vec![narration, call, result],
+        model_context_items: Vec::new(),
         next_sequence: 3,
         truncated: false,
     })
@@ -534,7 +537,7 @@ fn running_trace_commits_drive_monotonic_context_window_events() {
             .unwrap_or_else(|error| error.into_inner())
             .get("conversation-live")
             .unwrap()
-            .committed_trace_items,
+            .committed_activity_items,
         3
     );
 }

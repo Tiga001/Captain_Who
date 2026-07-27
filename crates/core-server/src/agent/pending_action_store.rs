@@ -369,6 +369,7 @@ impl AgentService {
         command_result: Option<&AgentCommandExecutionResult>,
         tool_result: &AgentToolResult,
         trace: &mycopilot_core::ConversationTurnTrace,
+        model_context_items: &[mycopilot_core::ConversationModelContextItem],
         completed_at: i64,
     ) -> Result<bool, String> {
         let status = pending_status_label(target_status);
@@ -389,11 +390,12 @@ impl AgentService {
         );
         let outcome = self
             .storage
-            .commit_pending_agent_action_audited_result_trace(
+            .commit_pending_agent_action_audited_result_trace_with_model_context(
                 &audit,
                 pending_status_label(record.snapshot.status),
                 status,
                 trace,
+                model_context_items,
                 completed_at,
             )?;
         #[cfg(test)]
@@ -420,6 +422,7 @@ impl AgentService {
         command_result: Option<&AgentCommandExecutionResult>,
         tool_result: &AgentToolResult,
         trace: &mycopilot_core::ConversationTurnTrace,
+        model_context_items: &[mycopilot_core::ConversationModelContextItem],
         completed_at: i64,
     ) -> Result<AgentPendingActionSettlementInspection, String> {
         let status = pending_status_label(target_status);
@@ -435,11 +438,12 @@ impl AgentService {
             Some(completed_at),
         );
         self.storage
-            .inspect_pending_agent_action_audited_result_trace(
+            .inspect_pending_agent_action_audited_result_trace_with_model_context(
                 &audit,
                 pending_status_label(record.snapshot.status),
                 status,
                 trace,
+                model_context_items,
                 completed_at,
             )
     }

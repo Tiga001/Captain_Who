@@ -121,7 +121,12 @@ impl ContextAssembler {
             let trace = message
                 .conversation_turn_trace
                 .as_ref()
-                .map(ConversationTraceRenderer::render)
+                .map(|trace| {
+                    ConversationTraceRenderer::render_with_model_context(
+                        trace,
+                        &message.conversation_model_context_items,
+                    )
+                })
                 .transpose()?;
 
             if let Some(trace) = &trace {
@@ -546,12 +551,18 @@ fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentC
         let role = message.role.trim();
         let content = message.content.trim();
         let trace = message.conversation_turn_trace;
+        let model_context_items = message.conversation_model_context_items;
         if content.is_empty() && trace.is_none() {
             continue;
         }
         if trace.is_some() && role != "assistant" {
             return Err(AgentError::new(
                 "ConversationTurnTrace 只能附加到 assistant 历史消息。",
+            ));
+        }
+        if !model_context_items.is_empty() && trace.is_none() {
+            return Err(AgentError::new(
+                "模型上下文日志必须附加到对应的 ConversationTurnTrace。",
             ));
         }
 
@@ -562,6 +573,7 @@ fn normalize_messages(messages: Vec<AgentChatMessage>) -> AgentResult<Vec<AgentC
                 content: content.to_string(),
                 created_at: message.created_at,
                 conversation_turn_trace: trace,
+                conversation_model_context_items: model_context_items,
             }),
             _ => return Err(AgentError::new(format!("不支持的消息角色：{role}"))),
         }
@@ -628,6 +640,7 @@ mod tests {
             content: content.to_string(),
             created_at: None,
             conversation_turn_trace: None,
+            conversation_model_context_items: Vec::new(),
         }
     }
 
@@ -638,6 +651,7 @@ mod tests {
             content: content.to_string(),
             created_at: None,
             conversation_turn_trace: None,
+            conversation_model_context_items: Vec::new(),
         }
     }
 
@@ -773,6 +787,7 @@ mod tests {
                     },
                 ],
             }),
+            conversation_model_context_items: Vec::new(),
         }
     }
 

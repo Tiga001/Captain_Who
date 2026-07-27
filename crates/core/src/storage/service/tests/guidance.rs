@@ -79,6 +79,15 @@ fn in_progress_trace_and_guidance_application_commit_atomically() {
         })
         .unwrap();
 
+    let model_context_items = vec![crate::ConversationModelContextItem {
+        sequence: 0,
+        ordinal: 0,
+        role: "user".to_string(),
+        content: "Use the updated constraint.".to_string(),
+        tool_call_id: None,
+        tool_calls: Vec::new(),
+        is_error: false,
+    }];
     assert!(service
         .append_in_progress_conversation_turn_trace_and_apply_guidances(
             &guidance_trace(
@@ -86,6 +95,7 @@ fn in_progress_trace_and_guidance_application_commit_atomically() {
                 "assistant-guidance-atomic",
                 "guidance-atomic",
             ),
+            &model_context_items,
             1,
             3,
         )
@@ -100,6 +110,14 @@ fn in_progress_trace_and_guidance_application_commit_atomically() {
         .get_conversation_turn_trace("assistant-guidance-atomic")
         .unwrap()
         .is_some());
+    assert_eq!(
+        service
+            .get_conversation_model_context_log("assistant-guidance-atomic")
+            .unwrap()
+            .unwrap()
+            .items,
+        model_context_items
+    );
     let conversation = service
         .load_conversation("conversation-guidance-atomic")
         .unwrap()
@@ -140,6 +158,7 @@ fn missing_guidance_journal_rolls_back_the_trace_append() {
                 "assistant-guidance-rollback",
                 "guidance-missing",
             ),
+            &[],
             1,
             3,
         )

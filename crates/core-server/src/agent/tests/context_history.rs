@@ -617,6 +617,80 @@ fn next_turn_keeps_committed_prefix_from_an_interrupted_pending_run() {
 }
 
 #[test]
+fn next_turn_carries_the_uncompressed_model_projection_beside_the_durable_trace() {
+    let trace = completed_trace("conversation-exact-history", "assistant-exact-history");
+    let model_items = vec![
+        mycopilot_core::ConversationModelContextItem {
+            sequence: 0,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: "I am creating the requested file.".to_string(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+        mycopilot_core::ConversationModelContextItem {
+            sequence: 1,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![mycopilot_core::AgentContextCheckpointToolCall {
+                id: "write-history".to_string(),
+                name: "write_file".to_string(),
+                args: json!({
+                    "filePath": "src/history.rs",
+                    "mode": "create",
+                    "content": "EXACT_WRITE_CONTENT"
+                }),
+            }],
+            is_error: false,
+        },
+        mycopilot_core::ConversationModelContextItem {
+            sequence: 2,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: r#"{"ok":true,"result":{"exact":"EXACT_TOOL_RESULT"}}"#.to_string(),
+            tool_call_id: Some("write-history".to_string()),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+    ];
+    let conversation = ChatConversationRecord {
+        id: "conversation-exact-history".to_string(),
+        project_id: None,
+        model_id: None,
+        title: "Exact history".to_string(),
+        messages: vec![ChatMessageRecord {
+            id: "assistant-exact-history".to_string(),
+            role: "assistant".to_string(),
+            content: "Final answer".to_string(),
+            created_at: 1,
+            status: Some("sent".to_string()),
+            attachments: Vec::new(),
+            agent_run_json: None,
+            ui_state_json: None,
+        }],
+        created_at: 1,
+        updated_at: 1,
+        pinned_at: None,
+        archived_at: None,
+        unread_at: None,
+    };
+    let logs = vec![mycopilot_core::ConversationModelContextLog {
+        assistant_message_id: "assistant-exact-history".to_string(),
+        items: model_items.clone(),
+    }];
+
+    let history =
+        conversation_history_messages_with_model_context(&conversation, &[trace], &logs, None, &[]);
+
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].conversation_model_context_items, model_items);
+    assert!(history[0].conversation_turn_trace.is_some());
+}
+
+#[test]
 fn compaction_projection_hides_covered_prefix_but_keeps_raw_conversation_intact() {
     let conversation = ChatConversationRecord {
         id: "conversation-compacted".to_string(),

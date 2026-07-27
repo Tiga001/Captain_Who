@@ -477,6 +477,7 @@ mod tests {
                     archive: Default::default(),
                 },
             ],
+            model_context_items: Vec::new(),
             next_sequence: 4,
             truncated: false,
         };
@@ -524,6 +525,7 @@ mod tests {
                     archive: Default::default(),
                 },
             ],
+            model_context_items: Vec::new(),
             next_sequence: 2,
             truncated: false,
         };

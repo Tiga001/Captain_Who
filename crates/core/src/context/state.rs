@@ -14,7 +14,7 @@ use crate::protocol::{
     AgentContextWindowPhase, AgentContextWindowSnapshot, AgentError, AgentResult,
     AgentSkillActivation, AgentToolDefinition,
 };
-use crate::{ConversationTurnTrace, ConversationTurnTraceTerminalStatus, WorldStateSnapshot};
+use crate::{ConversationModelContextItem, ConversationTurnTrace, WorldStateSnapshot};
 
 #[derive(Clone)]
 pub struct AgentContextWindowToolProjection {
@@ -101,10 +101,6 @@ impl AgentContextBaseline {
     pub(crate) fn replace_persistent_context(self, frame: ContextFrame) -> ContextFrame {
         frame.replace_persistent_baseline(self.frame)
     }
-
-    pub(crate) fn promote_committed_trace(self, frame: ContextFrame) -> ContextFrame {
-        frame.promote_committed_trace(self.frame)
-    }
 }
 
 /// Cached durable state for one conversation and one context configuration.
@@ -175,32 +171,43 @@ impl AgentConversationContextState {
         Ok(())
     }
 
+    /// Number of context items produced by the exact-prefix/trace-suffix renderer.
+    ///
+    /// This is intentionally not the physical trace row count: legacy traces can contain
+    /// run-scoped records (for example Todo) that the compatibility renderer omits.
+    pub fn rendered_trace_activity_count(
+        trace: &ConversationTurnTrace,
+        model_context_items: &[ConversationModelContextItem],
+    ) -> AgentResult<usize> {
+        Ok(
+            ConversationTraceRenderer::render_with_model_context(trace, model_context_items)?
+                .activity_items
+                .len(),
+        )
+    }
+
     pub fn append_trace_items(
         &mut self,
         trace: &ConversationTurnTrace,
+        model_context_items: &[ConversationModelContextItem],
         committed_item_count: usize,
     ) -> AgentResult<usize> {
-        let model_context_item_count = trace.model_context_item_count();
+        let rendered =
+            ConversationTraceRenderer::render_with_model_context(trace, model_context_items)?;
+        let model_context_item_count = rendered.activity_items.len();
         if committed_item_count > model_context_item_count {
             return Err(AgentError::new(
-                "会话上下文状态的 trace 游标超过已持久化项目数量。",
+                "会话上下文状态的模型日志游标超过已持久化项目数量。",
             ));
         }
         if committed_item_count == model_context_item_count {
             return Ok(committed_item_count);
         }
-        let suffix = ConversationTurnTrace {
-            schema_version: trace.schema_version,
-            run_id: trace.run_id.clone(),
-            conversation_id: trace.conversation_id.clone(),
-            assistant_message_id: trace.assistant_message_id.clone(),
-            terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
-            terminal_error: None,
-            truncated: trace.truncated,
-            items: trace.items[committed_item_count..model_context_item_count].to_vec(),
-        };
-        let rendered = ConversationTraceRenderer::render(&suffix)?;
-        for item in rendered.activity_items {
+        for item in rendered
+            .activity_items
+            .into_iter()
+            .skip(committed_item_count)
+        {
             self.frame.push(item);
         }
         Ok(model_context_item_count)
@@ -209,6 +216,7 @@ impl AgentConversationContextState {
     pub fn finalize_conversation_turn(
         &mut self,
         trace: &ConversationTurnTrace,
+        model_context_items: &[ConversationModelContextItem],
         committed_item_count: usize,
         assistant_content: &str,
         assistant_created_at: Option<i64>,
@@ -218,7 +226,8 @@ impl AgentConversationContextState {
         }
         let mut timing = self.timing.clone();
         timing.observe_assistant(assistant_created_at)?;
-        let committed_item_count = self.append_trace_items(trace, committed_item_count)?;
+        let committed_item_count =
+            self.append_trace_items(trace, model_context_items, committed_item_count)?;
         let assistant_content = assistant_content.trim();
         if !assistant_content.is_empty() {
             self.frame.push(ContextItem::new(

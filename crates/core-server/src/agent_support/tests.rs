@@ -170,6 +170,7 @@ fn pending_continuation_uses_original_model_args_not_backend_bound_builder_field
         model_capabilities: ModelCapabilities::default(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: command.id.clone(),
+        conversation_model_context_items: Vec::new(),
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
         conversation_trace_truncated: false,

@@ -67,6 +67,7 @@ impl StorageService {
     pub fn append_in_progress_conversation_turn_trace_and_apply_guidances(
         &self,
         trace: &ConversationTurnTrace,
+        model_context_items: &[ConversationModelContextItem],
         created_at: i64,
         updated_at: i64,
     ) -> Result<bool, String> {
@@ -79,6 +80,14 @@ impl StorageService {
             updated_at,
         )
         .map_err(storage_error)?;
+        let model_context_changed =
+            conversation_model_context_repository::commit_items_in_connection(
+                &transaction,
+                &trace.conversation_id,
+                &trace.assistant_message_id,
+                model_context_items,
+            )
+            .map_err(storage_error)?;
         for item in &trace.items {
             let ConversationTurnTraceItem::UserGuidance {
                 guidance_id,
@@ -112,7 +121,7 @@ impl StorageService {
             }
         }
         transaction.commit().map_err(storage_error)?;
-        Ok(changed)
+        Ok(changed || model_context_changed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -207,6 +216,30 @@ impl StorageService {
         let connection = self.state.connection()?;
         conversation_trace_repository::list_traces_for_conversation(&connection, conversation_id)
             .map_err(storage_error)
+    }
+
+    pub fn get_conversation_model_context_log(
+        &self,
+        assistant_message_id: &str,
+    ) -> Result<Option<ConversationModelContextLog>, String> {
+        let connection = self.state.connection()?;
+        conversation_model_context_repository::get_log_for_message(
+            &connection,
+            assistant_message_id,
+        )
+        .map_err(storage_error)
+    }
+
+    pub fn list_conversation_model_context_logs(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ConversationModelContextLog>, String> {
+        let connection = self.state.connection()?;
+        conversation_model_context_repository::list_logs_for_conversation(
+            &connection,
+            conversation_id,
+        )
+        .map_err(storage_error)
     }
 
     /// Lists durable in-progress traces for process-startup side-effect reconciliation.

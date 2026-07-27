@@ -69,9 +69,13 @@ impl AgentService {
                 let traces = self
                     .storage
                     .list_conversation_turn_traces(&conversation.id)?;
-                conversation_history_messages_with_compaction(
+                let model_context_logs = self
+                    .storage
+                    .list_conversation_model_context_logs(&conversation.id)?;
+                conversation_history_messages_with_model_context(
                     conversation,
                     &traces,
+                    &model_context_logs,
                     context_compaction_summary.as_ref(),
                     &[],
                 )
@@ -261,12 +265,16 @@ impl AgentService {
         let traces = self
             .storage
             .list_conversation_turn_traces(conversation_id)?;
+        let model_context_logs = self
+            .storage
+            .list_conversation_model_context_logs(conversation_id)?;
         let context_compaction_summary = self
             .storage
             .get_active_context_compaction_summary(conversation_id)?;
-        preview_input.messages = conversation_history_messages_with_compaction(
+        preview_input.messages = conversation_history_messages_with_model_context(
             &conversation,
             &traces,
+            &model_context_logs,
             context_compaction_summary.as_ref(),
             &[],
         );
@@ -344,6 +352,25 @@ impl AgentService {
     ) -> Result<ConversationContextStateUpdate, String> {
         let (preview_input, traces) =
             self.persisted_conversation_context_state(agent_input, conversation_id)?;
+        let latest_trace = traces.last();
+        let latest_committed_activity_items = latest_trace
+            .map(|trace| {
+                let model_context_items = preview_input
+                    .messages
+                    .iter()
+                    .find(|message| {
+                        message.message_id.as_deref() == Some(trace.assistant_message_id.as_str())
+                    })
+                    .map(|message| message.conversation_model_context_items.as_slice())
+                    .unwrap_or_default();
+                AgentConversationContextState::rendered_trace_activity_count(
+                    trace,
+                    model_context_items,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .transpose()?
+            .unwrap_or_default();
         let mut state =
             create_conversation_context_state(preview_input).map_err(|error| error.to_string())?;
         let baseline = state.shared_baseline().map_err(|error| error.to_string())?;
@@ -368,7 +395,6 @@ impl AgentService {
         } else {
             None
         };
-        let latest_trace = traces.last();
         let entry = ConversationContextStateEntry {
             configuration_revision: state.configuration_revision().to_string(),
             state,
@@ -378,8 +404,7 @@ impl AgentService {
                 .map(ToString::to_string),
             active_assistant_message_id: latest_trace
                 .map(|trace| trace.assistant_message_id.clone()),
-            committed_trace_items: latest_trace
-                .map_or(0, ConversationTurnTrace::model_context_item_count),
+            committed_activity_items: latest_committed_activity_items,
             terminal: latest_trace.is_none_or(|trace| trace.terminal_status.is_terminal()),
             last_access: self.next_conversation_context_state_access(),
         };
@@ -399,6 +424,11 @@ impl AgentService {
             .storage
             .get_conversation_turn_trace(assistant_message_id)?
             .ok_or_else(|| format!("assistant 终态缺少会话轨迹：{assistant_message_id}"))?;
+        let model_context_items = self
+            .storage
+            .get_conversation_model_context_log(assistant_message_id)?
+            .map(|log| log.items)
+            .unwrap_or_default();
         let assistant_created_at = self
             .storage
             .get_assistant_message_created_at(conversation_id, assistant_message_id)?
@@ -420,12 +450,13 @@ impl AgentService {
                     if !entry.terminal {
                         match entry.state.finalize_conversation_turn(
                             &trace,
-                            entry.committed_trace_items,
+                            &model_context_items,
+                            entry.committed_activity_items,
                             assistant_content,
                             Some(assistant_created_at),
                         ) {
-                            Ok(committed_trace_items) => {
-                                entry.committed_trace_items = committed_trace_items;
+                            Ok(committed_activity_items) => {
+                                entry.committed_activity_items = committed_activity_items;
                                 entry.terminal = true;
                                 entry.active_run_id = None;
                             }

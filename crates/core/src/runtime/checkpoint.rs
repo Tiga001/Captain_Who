@@ -171,8 +171,12 @@ pub(super) fn create_run_checkpoint(
         validate_model_tool_call_id(&queued.call.id)?;
     }
     context.validate_pending_tool_call(pending_tool_call_id)?;
-    let (conversation_trace_items, next_conversation_trace_sequence, conversation_trace_truncated) =
-        conversation_trace.checkpoint();
+    let (
+        conversation_trace_items,
+        conversation_model_context_items,
+        next_conversation_trace_sequence,
+        conversation_trace_truncated,
+    ) = conversation_trace.checkpoint();
     validate_conversation_trace_tool_call_ids(&conversation_trace_items)?;
     let committed_item_count = conversation_trace.committed_item_count();
     if model_visible_trace_item_count > committed_item_count
@@ -205,6 +209,7 @@ pub(super) fn create_run_checkpoint(
         run_world_state: run_world_state.clone(),
         pending_tool_call_id: pending_tool_call_id.to_string(),
         conversation_trace_items,
+        conversation_model_context_items,
         next_conversation_trace_sequence,
         conversation_trace_truncated,
         model_visible_trace_item_count,
@@ -272,6 +277,7 @@ pub(super) fn restore_run_checkpoint_with_history_ref(
 
     let committed_trace_item_count = ConversationTraceSnapshot {
         items: checkpoint.conversation_trace_items.clone(),
+        model_context_items: checkpoint.conversation_model_context_items.clone(),
         next_sequence: checkpoint.next_conversation_trace_sequence,
         truncated: checkpoint.conversation_trace_truncated,
     }
@@ -303,8 +309,9 @@ pub(super) fn restore_run_checkpoint_with_history_ref(
     let tool_set = checkpoint.tool_set;
     let restored_batch_fingerprints =
         restore_batch_fingerprints(&checkpoint.context_items, &checkpoint.pending_tool_call_id)?;
-    let mut conversation_trace = ConversationTraceRecorder::from_checkpoint(
+    let mut conversation_trace = ConversationTraceRecorder::from_checkpoint_with_model_context(
         checkpoint.conversation_trace_items,
+        checkpoint.conversation_model_context_items,
         checkpoint.next_conversation_trace_sequence,
         checkpoint.conversation_trace_truncated,
     );
@@ -331,8 +338,25 @@ pub(super) fn restore_run_checkpoint_with_history_ref(
         build_tool_observation_message_with_history_ref(&llm_result, history_ref.as_ref()),
         !continuation.result.ok,
     )?;
-    conversation_trace.record_tool_call(&continuation.call);
-    conversation_trace.record_tool_result(&continuation.call, &llm_result);
+    let call_sequence = conversation_trace.record_tool_call(&continuation.call);
+    if let Some(sequence) = call_sequence {
+        conversation_trace.record_model_message(
+            sequence,
+            0,
+            &crate::llm::LlmMessage::assistant("", vec![continuation_call.clone()]),
+        );
+    }
+    if let Some(sequence) = conversation_trace.record_tool_result(&continuation.call, &llm_result) {
+        conversation_trace.record_model_message(
+            sequence,
+            0,
+            &crate::llm::LlmMessage::tool_result(
+                continuation.call.id.clone(),
+                build_tool_observation_message_with_history_ref(&llm_result, history_ref.as_ref()),
+                !continuation.result.ok,
+            ),
+        );
+    }
 
     let queue = restore_queued_tool_calls(
         checkpoint.queued_tool_calls,

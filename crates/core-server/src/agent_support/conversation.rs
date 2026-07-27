@@ -114,11 +114,13 @@ pub(crate) fn prepare_conversation_turn(
     conversation.updated_at = timestamp;
 
     let history_traces = storage.list_conversation_turn_traces(&conversation_id)?;
+    let history_model_context = storage.list_conversation_model_context_logs(&conversation_id)?;
     let context_compaction_summary =
         storage.get_active_context_compaction_summary(&conversation_id)?;
-    let history_messages = conversation_history_messages_with_compaction(
+    let history_messages = conversation_history_messages_with_model_context(
         &conversation,
         &history_traces,
+        &history_model_context,
         context_compaction_summary.as_ref(),
         &[user_message_id.as_str(), assistant_message_id.as_str()],
     );
@@ -189,6 +191,7 @@ pub(crate) fn prepare_conversation_turn(
         content,
         created_at: Some(timestamp),
         conversation_turn_trace: None,
+        conversation_model_context_items: Vec::new(),
     });
     let goal = storage.load_visible_conversation_goal(&conversation_id)?;
 
@@ -267,15 +270,36 @@ pub(crate) fn conversation_history_messages(
     conversation_history_messages_with_compaction(conversation, traces, None, excluded_message_ids)
 }
 
+#[cfg(test)]
 pub(crate) fn conversation_history_messages_with_compaction(
     conversation: &ChatConversationRecord,
     traces: &[ConversationTurnTrace],
     compaction_summary: Option<&mycopilot_core::ContextCompactionSummary>,
     excluded_message_ids: &[&str],
 ) -> Vec<AgentChatMessage> {
+    conversation_history_messages_with_model_context(
+        conversation,
+        traces,
+        &[],
+        compaction_summary,
+        excluded_message_ids,
+    )
+}
+
+pub(crate) fn conversation_history_messages_with_model_context(
+    conversation: &ChatConversationRecord,
+    traces: &[ConversationTurnTrace],
+    model_context_logs: &[mycopilot_core::ConversationModelContextLog],
+    compaction_summary: Option<&mycopilot_core::ContextCompactionSummary>,
+    excluded_message_ids: &[&str],
+) -> Vec<AgentChatMessage> {
     let traces = traces
         .iter()
         .map(|trace| (trace.assistant_message_id.as_str(), trace))
+        .collect::<std::collections::HashMap<_, _>>();
+    let model_context_logs = model_context_logs
+        .iter()
+        .map(|log| (log.assistant_message_id.as_str(), log.items.as_slice()))
         .collect::<std::collections::HashMap<_, _>>();
     let covered_boundary = compaction_summary.and_then(|summary| {
         conversation
@@ -290,23 +314,32 @@ pub(crate) fn conversation_history_messages_with_compaction(
         .enumerate()
         .filter_map(|(index, message)| {
             let trace = traces.get(message.id.as_str()).copied().cloned();
+            let mut model_context_items = model_context_logs
+                .get(message.id.as_str())
+                .copied()
+                .unwrap_or_default()
+                .to_vec();
             let Some((boundary_index, cursor)) = covered_boundary else {
-                return Some((message, trace));
+                return Some((message, trace, model_context_items));
             };
             if index < boundary_index {
                 return None;
             }
             if index > boundary_index {
-                return Some((message, trace));
+                return Some((message, trace, model_context_items));
             }
             match cursor {
                 ContextJournalCursor::Message { .. } => None,
                 ContextJournalCursor::TraceItem { sequence, .. } => {
                     let mut trace = trace?;
                     trace.items.retain(|item| item.sequence() > *sequence);
+                    model_context_items.retain(|item| item.sequence > *sequence);
                     let has_uncovered_completion = trace.terminal_status.is_terminal();
-                    (!trace.items.is_empty() || has_uncovered_completion)
-                        .then_some((message, Some(trace)))
+                    (!trace.items.is_empty() || has_uncovered_completion).then_some((
+                        message,
+                        Some(trace),
+                        model_context_items,
+                    ))
                 }
             }
         })
@@ -315,7 +348,7 @@ pub(crate) fn conversation_history_messages_with_compaction(
                 .iter()
                 .any(|excluded_id| message.0.id == *excluded_id)
         })
-        .filter(|(message, trace)| {
+        .filter(|(message, trace, _)| {
             if message.status.as_deref() != Some("pending") {
                 return true;
             }
@@ -323,8 +356,8 @@ pub(crate) fn conversation_history_messages_with_compaction(
                 trace.terminal_status == ConversationTurnTraceTerminalStatus::InProgress
             })
         })
-        .filter(|(message, _)| matches!(message.role.as_str(), "user" | "assistant"))
-        .filter_map(|(message, trace)| {
+        .filter(|(message, _, _)| matches!(message.role.as_str(), "user" | "assistant"))
+        .filter_map(|(message, trace, conversation_model_context_items)| {
             if message.status.as_deref() == Some("error") && trace.is_none() {
                 return None;
             }
@@ -347,6 +380,7 @@ pub(crate) fn conversation_history_messages_with_compaction(
                 content,
                 created_at: Some(message.created_at),
                 conversation_turn_trace: trace,
+                conversation_model_context_items,
             })
         })
         .collect()

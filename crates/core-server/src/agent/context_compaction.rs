@@ -16,6 +16,7 @@ pub(super) struct UpdateRunningConversationContextStateRequest<'a> {
     conversation_id: &'a str,
     assistant_message_id: &'a str,
     trace: &'a ConversationTurnTrace,
+    model_context_items: &'a [ConversationModelContextItem],
     configuration_revision: &'a str,
     tool_projection: Option<&'a AgentContextWindowToolProjection>,
 }
@@ -333,6 +334,9 @@ impl AgentService {
         let summary = self
             .storage
             .get_active_context_compaction_summary(conversation_id)?;
+        let full_model_context_logs = self
+            .storage
+            .list_conversation_model_context_logs(conversation_id)?;
         let active_trace = traces
             .iter()
             .find(|trace| trace.assistant_message_id == assistant_message_id);
@@ -350,14 +354,16 @@ impl AgentService {
             return Err("压缩后重建上下文时，模型可见 trace 游标没有对应日志。".to_string());
         }
 
-        // Build the runtime baseline at the model-visible cursor. The server cache is extended to
-        // the physical log tail below so the context indicator remains an immediate durable view.
+        // The runtime already owns the complete current-run projection as an overlay. Its
+        // replacement baseline therefore excludes this assistant turn entirely; otherwise a
+        // mid-run compaction would duplicate every previously observed tool exchange. The server
+        // cache is extended with the full durable turn below for next-run/restart reconstruction.
         let mut visible_traces = traces.clone();
         if let Some(trace) = visible_traces
             .iter_mut()
             .find(|trace| trace.assistant_message_id == assistant_message_id)
         {
-            trace.items.truncate(visible_trace_item_count);
+            trace.items.clear();
             trace.terminal_status = ConversationTurnTraceTerminalStatus::InProgress;
             trace.terminal_error = None;
             trace
@@ -366,9 +372,17 @@ impl AgentService {
         }
 
         let mut preview_input = agent_input.clone();
-        preview_input.messages = conversation_history_messages_with_compaction(
+        let mut model_context_logs = full_model_context_logs.clone();
+        if let Some(log) = model_context_logs
+            .iter_mut()
+            .find(|log| log.assistant_message_id == assistant_message_id)
+        {
+            log.items.clear();
+        }
+        preview_input.messages = conversation_history_messages_with_model_context(
             &conversation,
             &visible_traces,
+            &model_context_logs,
             summary.as_ref(),
             &[],
         );
@@ -392,10 +406,17 @@ impl AgentService {
         // Freeze the exact persistent prefix that the runtime may adopt without exposing a tool
         // result to compaction before the main model has observed it once.
         let runtime_baseline = state.shared_baseline().map_err(|error| error.to_string())?;
-        let committed_trace_items = match active_trace {
-            Some(trace) => state
-                .append_trace_items(trace, visible_trace_item_count)
-                .map_err(|error| error.to_string())?,
+        let committed_activity_items = match active_trace {
+            Some(trace) => {
+                let model_context_items = full_model_context_logs
+                    .iter()
+                    .find(|log| log.assistant_message_id == assistant_message_id)
+                    .map(|log| log.items.as_slice())
+                    .unwrap_or_default();
+                state
+                    .append_trace_items(trace, model_context_items, 0)
+                    .map_err(|error| error.to_string())?
+            }
             None => 0,
         };
         // Measure and freeze the appended trace chunk once for the conversation cache and circle.
@@ -426,7 +447,7 @@ impl AgentService {
             state,
             active_run_id: Some(run_id.to_string()),
             active_assistant_message_id: Some(assistant_message_id.to_string()),
-            committed_trace_items,
+            committed_activity_items,
             terminal: false,
             last_access: self.next_conversation_context_state_access(),
         };
@@ -451,14 +472,36 @@ impl AgentService {
         // Persist the complete audit view so a crash after an external side effect starts can be
         // correlated with its durable execution journal. Model context still receives only the
         // closed prefix and therefore never sees a half ToolCall/ToolResult exchange.
+        let committed_snapshot = snapshot.committed_prefix();
         let context_trace =
-            snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
+            committed_snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
         let previous_trace = self
             .storage
             .get_conversation_turn_trace(assistant_message_id)?;
-        let model_context_changed = previous_trace.as_ref().is_none_or(|trace| {
-            trace.model_context_item_count() != context_trace.model_context_item_count()
-        });
+        let previous_model_context_items = self
+            .storage
+            .get_conversation_model_context_log(assistant_message_id)?
+            .map(|log| log.items)
+            .unwrap_or_default();
+        let previous_activity_items = previous_trace
+            .as_ref()
+            .map(|trace| {
+                AgentConversationContextState::rendered_trace_activity_count(
+                    trace,
+                    &previous_model_context_items,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let next_activity_items = AgentConversationContextState::rendered_trace_activity_count(
+            &context_trace,
+            &committed_snapshot.model_context_items,
+        )
+        .map_err(|error| error.to_string())?;
+        let model_context_changed = previous_trace.is_none()
+            || previous_activity_items != next_activity_items
+            || previous_model_context_items.len() != committed_snapshot.model_context_items.len();
         // Only tools with an independently durable, non-replayable execution journal retain an
         // open call here. Approval-backed tools may enrich their call snapshot before settlement,
         // so persisting those calls early would violate the trace's append-only contract.
@@ -475,6 +518,7 @@ impl AgentService {
             .storage
             .append_in_progress_conversation_turn_trace_and_apply_guidances(
                 &audit_trace,
+                &committed_snapshot.model_context_items,
                 created_at,
                 now_ms(),
             )?;
@@ -485,6 +529,7 @@ impl AgentService {
                 conversation_id,
                 assistant_message_id,
                 trace: &context_trace,
+                model_context_items: &committed_snapshot.model_context_items,
                 configuration_revision,
                 tool_projection,
             },
@@ -510,6 +555,7 @@ impl AgentService {
             conversation_id,
             assistant_message_id,
             trace,
+            model_context_items,
             configuration_revision,
             tool_projection,
         } = request;
@@ -529,9 +575,11 @@ impl AgentService {
                         && entry.active_assistant_message_id.as_deref()
                             == Some(assistant_message_id)
                     {
-                        entry
-                            .state
-                            .append_trace_items(trace, entry.committed_trace_items)
+                        entry.state.append_trace_items(
+                            trace,
+                            model_context_items,
+                            entry.committed_activity_items,
+                        )
                     } else if entry.terminal
                         && entry.active_assistant_message_id.as_deref()
                             != Some(assistant_message_id)
@@ -558,17 +606,19 @@ impl AgentService {
                             entry.active_run_id = Some(run_id.to_string());
                             entry.active_assistant_message_id =
                                 Some(assistant_message_id.to_string());
-                            entry.committed_trace_items = 0;
+                            entry.committed_activity_items = 0;
                             entry.terminal = false;
-                            entry.state.append_trace_items(trace, 0)
+                            entry
+                                .state
+                                .append_trace_items(trace, model_context_items, 0)
                         })()
                     } else {
                         Err(AgentError::new("会话上下文状态与当前运行身份不一致。"))
                     };
                     match update {
-                        Ok(committed_trace_items) => {
+                        Ok(committed_activity_items) => {
                             entry.active_run_id = Some(run_id.to_string());
-                            entry.committed_trace_items = committed_trace_items;
+                            entry.committed_activity_items = committed_activity_items;
                             entry.last_access = access;
                             let baseline = entry
                                 .state
@@ -634,6 +684,7 @@ impl AgentService {
             .entry(run_id.to_string())
             .or_insert_with(|| ConversationTraceSnapshot {
                 items: checkpoint.conversation_trace_items.clone(),
+                model_context_items: checkpoint.conversation_model_context_items.clone(),
                 next_sequence: checkpoint.next_conversation_trace_sequence,
                 truncated: checkpoint.conversation_trace_truncated,
             });
@@ -654,11 +705,6 @@ impl AgentService {
             .tool_continuation
             .as_ref()
             .ok_or_else(|| "审批续跑缺少工具结果。".to_string())?;
-        let snapshot = conversation_trace_snapshot_from_checkpoint_and_continuation(
-            checkpoint,
-            &continuation.call,
-            &continuation.result,
-        );
         let run_id = &record.snapshot.run_id;
         let conversation_id = record
             .snapshot
@@ -670,6 +716,13 @@ impl AgentService {
             .assistant_message_id
             .as_deref()
             .ok_or_else(|| "审批续跑缺少 assistant message id。".to_string())?;
+        let snapshot =
+            conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
+                checkpoint,
+                &continuation.call,
+                &continuation.result,
+                Some(assistant_message_id),
+            );
         self.trace_snapshots
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -736,11 +789,6 @@ impl AgentService {
             .tool_continuation
             .as_ref()
             .ok_or_else(|| "审批续跑缺少工具结果。".to_string())?;
-        let snapshot = conversation_trace_snapshot_from_checkpoint_and_continuation(
-            checkpoint,
-            &continuation.call,
-            &continuation.result,
-        );
         let run_id = &record.snapshot.run_id;
         let conversation_id = record
             .snapshot
@@ -752,6 +800,13 @@ impl AgentService {
             .assistant_message_id
             .as_deref()
             .ok_or_else(|| "审批续跑缺少 assistant message id。".to_string())?;
+        let snapshot =
+            conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
+                checkpoint,
+                &continuation.call,
+                &continuation.result,
+                Some(assistant_message_id),
+            );
         let configuration_revision =
             conversation_context_configuration_revision(&record.agent_input)
                 .map_err(|error| error.to_string())?;
@@ -761,12 +816,14 @@ impl AgentService {
         let tool_projection =
             self.context_window_tool_projection(&record.agent_input, skill_resources)?;
         let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
+        let model_context_items = snapshot.committed_prefix().model_context_items;
         let trace_changed = self.persist_manual_audited_result_trace(
             record,
             target_status,
             command_result,
             &continuation.result,
             &trace,
+            &model_context_items,
             completed_at,
         )?;
 
@@ -781,6 +838,7 @@ impl AgentService {
                 conversation_id,
                 assistant_message_id,
                 trace: &trace,
+                model_context_items: &model_context_items,
                 configuration_revision: &configuration_revision,
                 tool_projection: Some(&tool_projection),
             },
@@ -839,11 +897,6 @@ impl AgentService {
             .tool_continuation
             .as_ref()
             .ok_or_else(|| "审批续跑缺少工具结果。".to_string())?;
-        let snapshot = conversation_trace_snapshot_from_checkpoint_and_continuation(
-            checkpoint,
-            &continuation.call,
-            &continuation.result,
-        );
         let run_id = &record.snapshot.run_id;
         let conversation_id = record
             .snapshot
@@ -855,13 +908,22 @@ impl AgentService {
             .assistant_message_id
             .as_deref()
             .ok_or_else(|| "审批续跑缺少 assistant message id。".to_string())?;
+        let snapshot =
+            conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
+                checkpoint,
+                &continuation.call,
+                &continuation.result,
+                Some(assistant_message_id),
+            );
         let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
+        let model_context_items = snapshot.committed_prefix().model_context_items;
         let outcome = self.inspect_manual_audited_result_trace(
             record,
             target_status,
             command_result,
             &continuation.result,
             &trace,
+            &model_context_items,
             completed_at,
         )?;
         match outcome {
@@ -889,6 +951,7 @@ impl AgentService {
                                 conversation_id,
                                 assistant_message_id,
                                 trace: &trace,
+                                model_context_items: &model_context_items,
                                 configuration_revision: &configuration_revision,
                                 tool_projection: Some(&tool_projection),
                             },

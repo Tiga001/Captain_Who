@@ -940,15 +940,51 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
     );
     service.store_pending_agent_action(command_pending).unwrap();
     service.upsert_agent_action_audit(command_approved).unwrap();
+    let exact_model_items = vec![
+        crate::ConversationModelContextItem {
+            sequence: 0,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                id: "settled-command".to_string(),
+                name: "run_command".to_string(),
+                args: match &command_trace.items[0] {
+                    ConversationTurnTraceItem::ToolCall { operation, .. } => operation.clone(),
+                    _ => panic!("manual settlement must start with a ToolCall"),
+                },
+            }],
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            sequence: 1,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: r#"{"ok":true,"result":{"stdout":"EXACT_APPROVAL_RESULT"}}"#.to_string(),
+            tool_call_id: Some("settled-command".to_string()),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+    ];
     service
-        .commit_pending_agent_action_audited_result_trace(
+        .commit_pending_agent_action_audited_result_trace_with_model_context(
             &command_terminal,
             "approved",
             "completed",
             &command_trace,
+            &exact_model_items,
             12,
         )
         .unwrap();
+    assert_eq!(
+        service
+            .get_conversation_model_context_log("assistant-settled-command")
+            .unwrap()
+            .unwrap()
+            .items,
+        exact_model_items
+    );
 
     let mut expected_action_ids = vec!["run-1:settled-command".to_string()];
     for effect in ManualNonCommandFileEffect::ALL {
@@ -1007,6 +1043,13 @@ fn startup_reconciliation_excludes_authoritatively_settled_manual_file_effects()
     drop(connection);
     let reopened = StorageService::open(&fixture.root.join("storage.sqlite")).unwrap();
     assert!(reopened.list_unsettled_file_effects().unwrap().is_empty());
+    assert!(reopened
+        .get_conversation_model_context_log("assistant-settled-command")
+        .unwrap()
+        .unwrap()
+        .items[1]
+        .content
+        .contains("EXACT_APPROVAL_RESULT"));
 }
 
 fn attach_manual_file_effect_recovery_checkpoint(

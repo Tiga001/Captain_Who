@@ -180,8 +180,42 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             },
         ],
     };
+    let exact_model_items = vec![
+        crate::ConversationModelContextItem {
+            sequence: 0,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                id: "call-archive-source".to_string(),
+                name: "read_file".to_string(),
+                args: serde_json::json!({ "path": "large.txt" }),
+            }],
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            sequence: 1,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: r#"{"ok":true,"result":{"content":"EXACT_FORK_MODEL_MARKER"}}"#.to_string(),
+            tool_call_id: Some("call-archive-source".to_string()),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+    ];
+    let mut in_progress_trace = trace.clone();
+    in_progress_trace.terminal_status = crate::ConversationTurnTraceTerminalStatus::InProgress;
     service
-        .replace_conversation_turn_trace(&trace, 2, 3)
+        .append_in_progress_conversation_turn_trace_and_apply_guidances(
+            &in_progress_trace,
+            &exact_model_items,
+            2,
+            3,
+        )
+        .unwrap();
+    service
+        .replace_conversation_turn_trace(&trace, 2, 4)
         .unwrap();
 
     let forked = service
@@ -196,6 +230,14 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
         .get_conversation_turn_trace(&forked_assistant.id)
         .unwrap()
         .unwrap();
+    let forked_model_context = service
+        .get_conversation_model_context_log(&forked_assistant.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(forked_model_context.items, exact_model_items);
+    assert!(forked_model_context.items[1]
+        .content
+        .contains("EXACT_FORK_MODEL_MARKER"));
     let ConversationTurnTraceItem::ToolResult {
         archive: forked_archive,
         ..

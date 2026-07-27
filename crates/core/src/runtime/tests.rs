@@ -25,6 +25,7 @@ fn message(role: &str, content: &str) -> AgentChatMessage {
         content: content.to_string(),
         created_at: None,
         conversation_turn_trace: None,
+        conversation_model_context_items: Vec::new(),
     }
 }
 
@@ -3314,6 +3315,7 @@ fn traced_assistant_message(content: &str, trace: ConversationTurnTrace) -> Agen
         content: content.to_string(),
         created_at: Some(2_000),
         conversation_turn_trace: Some(trace),
+        conversation_model_context_items: Vec::new(),
     }
 }
 
@@ -3342,7 +3344,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
         ConversationTurnTraceTerminalStatus::InProgress,
         vec![narration.clone()],
     );
-    let cursor = state.append_trace_items(&narrated_trace, 0).unwrap();
+    let cursor = state.append_trace_items(&narrated_trace, &[], 0).unwrap();
     assert_eq!(cursor, 1);
     assert_eq!(
         state.snapshot(AgentContextWindowPhase::DurableCommit),
@@ -3379,7 +3381,9 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
         ConversationTurnTraceTerminalStatus::InProgress,
         vec![narration, call, result],
     );
-    let cursor = state.append_trace_items(&closed_trace, cursor).unwrap();
+    let cursor = state
+        .append_trace_items(&closed_trace, &[], cursor)
+        .unwrap();
     assert_eq!(cursor, 3);
     assert_eq!(
         state.snapshot(AgentContextWindowPhase::DurableCommit),
@@ -3395,7 +3399,7 @@ fn conversation_context_state_incremental_updates_match_full_rebuilds() {
     };
     let final_content = "I updated the implementation and verified the tests.";
     state
-        .finalize_conversation_turn(&completed_trace, cursor, final_content, Some(2_000))
+        .finalize_conversation_turn(&completed_trace, &[], cursor, final_content, Some(2_000))
         .unwrap();
     assert_eq!(
         state.snapshot(AgentContextWindowPhase::DurableCommit),
@@ -4345,6 +4349,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         content: format!("OLD_USER_MARKER {}", "x".repeat(60_000)),
         created_at: None,
         conversation_turn_trace: None,
+        conversation_model_context_items: Vec::new(),
     };
     let old_assistant = AgentChatMessage {
         message_id: Some("assistant-old".to_string()),
@@ -4352,6 +4357,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         content: format!("OLD_ASSISTANT_MARKER {}", "y".repeat(60_000)),
         created_at: None,
         conversation_turn_trace: None,
+        conversation_model_context_items: Vec::new(),
     };
     let current_user = AgentChatMessage {
         message_id: Some("user-current".to_string()),
@@ -4359,6 +4365,7 @@ async fn durable_compaction_runs_before_capacity_gate_and_then_sends_rebuilt_con
         content: "continue".to_string(),
         created_at: None,
         conversation_turn_trace: None,
+        conversation_model_context_items: Vec::new(),
     };
     let input = AgentChatInput {
         api_url: format!("http://{address}/v1/chat/completions"),
@@ -4716,6 +4723,7 @@ async fn context_capacity_guard_rejects_the_initial_request_before_network_io() 
             content: "x".repeat(90_000),
             created_at: None,
             conversation_turn_trace: None,
+            conversation_model_context_items: Vec::new(),
         }],
     };
 
@@ -4895,6 +4903,97 @@ async fn context_capacity_guard_accepts_budgeted_tool_results_for_the_next_reque
 
     assert_eq!(output.content, "summarized");
     assert!(second_request_seen.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn active_run_keeps_earlier_exact_tool_exchanges_across_later_model_samples() {
+    use tokio::net::TcpListener;
+
+    const FIRST_EXCHANGE_MARKER: &str = "FIRST_TODO_EXACT_MARKER";
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let requests_for_server = Arc::clone(&requests);
+    let server = tokio::spawn(async move {
+        for request_index in 0..3 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_runtime_test_json_request(&mut stream).await;
+            requests_for_server.lock().unwrap().push(request);
+            let response = match request_index {
+                0 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": null,
+                            "tool_calls": [{
+                                "id": "provider-first-todo",
+                                "type": "function",
+                                "function": {
+                                    "name": "todo_update",
+                                    "arguments": serde_json::to_string(&json!({
+                                        "items": [{
+                                            "title": FIRST_EXCHANGE_MARKER,
+                                            "status": "completed"
+                                        }]
+                                    }))
+                                    .unwrap()
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }),
+                1 => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "Checking one more source.",
+                            "tool_calls": [{
+                                "id": "provider-list-attachments",
+                                "type": "function",
+                                "function": {
+                                    "name": "attachments_list",
+                                    "arguments": "{}"
+                                }
+                            }]
+                        },
+                        "finish_reason": "tool_calls"
+                    }]
+                }),
+                _ => json!({
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": "Both exchanges are still available."
+                        },
+                        "finish_reason": "stop"
+                    }]
+                }),
+            };
+            write_runtime_test_json_response(&mut stream, response).await;
+        }
+    });
+
+    let mut input =
+        conversation_context_input(vec![message("user", "Exercise two tools, then answer.")]);
+    input.api_url = format!("http://{address}/v1/chat/completions");
+    input.api_token = "test-token".to_string();
+    input.stream = Some(false);
+    input.assistant_message_id = Some("assistant-active-run-exact".to_string());
+
+    let output = AgentRuntime::default().send_chat(input).await.unwrap();
+    server.await.unwrap();
+
+    assert_eq!(output.content, "Both exchanges are still available.");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let third_request = serde_json::to_string(&requests[2]).unwrap();
+    assert!(
+        third_request.contains(FIRST_EXCHANGE_MARKER),
+        "a successful intermediate sample must not demote an earlier exact tool exchange"
+    );
+    assert!(third_request.contains("attachments_list"));
 }
 
 #[tokio::test]
@@ -5527,6 +5626,10 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             ConversationTurnTraceItem::AssistantNarration { content, .. }
                 if content == "I have the evidence and will prepare the report."
         )));
+    assert!(
+        !checkpoint.conversation_model_context_items.is_empty(),
+        "the approval checkpoint must preserve its exact active-run model projection"
+    );
 
     let mut resume_input = base_input;
     resume_input.messages.clear();
@@ -5557,7 +5660,6 @@ async fn approval_resume_restores_prior_context_and_continues_queued_tools() {
             ),
         },
     });
-
     let completed = AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
             resume_input,
@@ -5896,6 +5998,10 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
     assert!(!serde_json::to_string(&output.events)
         .unwrap()
         .contains(RESOURCE_MARKER));
+    assert!(
+        !checkpoint.conversation_model_context_items.is_empty(),
+        "the approval checkpoint must preserve its exact active-run model projection"
+    );
 
     let mut resume_input = input;
     resume_input.messages.clear();
@@ -5926,6 +6032,15 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
             error: None,
         },
     });
+    let resumed_trace_snapshots = Arc::new(Mutex::new(Vec::new()));
+    let resumed_trace_snapshots_for_observer = Arc::clone(&resumed_trace_snapshots);
+    let resumed_trace_observer: AgentConversationTraceObserver = Arc::new(move |snapshot| {
+        resumed_trace_snapshots_for_observer
+            .lock()
+            .unwrap()
+            .push(snapshot);
+        Ok(None)
+    });
 
     let completed = AgentRuntime::default()
         .send_chat_with_events_and_cancellation(
@@ -5933,7 +6048,11 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
             Some("run-skill-resource-checkpoint".to_string()),
             None,
             AgentCancellationToken::new(),
-            Some(AgentRuntimeHostServices::new().with_skill_resources(resources)),
+            Some(
+                AgentRuntimeHostServices::new()
+                    .with_skill_resources(resources)
+                    .with_trace_observer(resumed_trace_observer),
+            ),
         )
         .await
         .unwrap();
@@ -5941,6 +6060,14 @@ async fn skill_resource_text_survives_approval_checkpoint_but_is_omitted_from_du
 
     assert_eq!(completed.status, AgentRunStatus::Completed);
     assert_eq!(completed.content, "continued after approval");
+    let resumed_trace_snapshots = resumed_trace_snapshots.lock().unwrap();
+    let setup_snapshot = resumed_trace_snapshots
+        .first()
+        .expect("approval resume must publish a setup trace snapshot");
+    assert!(
+        !setup_snapshot.model_context_items.is_empty(),
+        "the setup publication must not discard the checkpoint's exact model projection"
+    );
     let resumed_request = resumed_request.lock().unwrap().clone().unwrap();
     let resumed_messages = serde_json::to_string(&resumed_request["messages"]).unwrap();
     assert!(resumed_messages.contains(&resource_read_call_id));

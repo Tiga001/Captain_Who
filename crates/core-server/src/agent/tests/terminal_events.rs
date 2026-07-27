@@ -1228,6 +1228,7 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
         model_capabilities: ModelCapabilities::default(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: call.id.clone(),
+        conversation_model_context_items: Vec::new(),
         conversation_trace_items: vec![ConversationTurnTraceItem::ToolCall {
             sequence: 0,
             call_id: call.id.clone(),

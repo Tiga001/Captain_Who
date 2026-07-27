@@ -1,18 +1,21 @@
-//! Append-only, provider-neutral records of agent activity that survives into model context.
+//! Append-only, provider-neutral records of agent activity.
 //!
-//! The active tool loop, approval checkpoint, durable trace, and presentation timeline are
-//! deliberately separate views of one execution. The recorder retains the complete run-scoped
-//! checkpoint, while snapshots and terminal traces pass through one bounded durable projection.
-//! Presentation events are independent and are never used to rebuild model context.
+//! The active tool loop, approval checkpoint, durable audit trace, uncompressed bounded model log,
+//! Exact History Archive, and presentation timeline are deliberately separate views of one
+//! execution. The recorder produces both the lossless-within-runtime-budget model projection and
+//! the lossy audit projection from one sequence domain, so persistence and reconstruction can
+//! prove that they describe the same activity without conflating their retention policies.
 
 use crate::conversation_trace_projection::{
     is_repeat_failure_eligible, project_attachment_text, project_narration, project_terminal_error,
     project_tool_call, project_tool_result, project_user_guidance, sanitize_runtime_text,
     sanitize_runtime_value,
 };
+use crate::llm::LlmMessage;
 use crate::protocol::{
-    AgentApprovalStatus, AgentInputAttachment, AgentInputAttachmentKind, AgentProposedAction,
-    AgentRunCheckpoint, AgentToolCall, AgentToolResult,
+    AgentApprovalStatus, AgentContextCheckpointToolCall, AgentInputAttachment,
+    AgentInputAttachmentKind, AgentProposedAction, AgentRunCheckpoint, AgentToolCall,
+    AgentToolResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -52,6 +55,165 @@ pub enum ConversationTraceToolResultStatus {
     Rejected,
     Conflict,
     Cancelled,
+}
+
+/// One provider-neutral message from the uncompressed model-visible conversation timeline.
+///
+/// This is deliberately separate from [`ConversationTurnTraceItem`]. The durable trace is a
+/// bounded audit/search projection, while this record preserves the exact text projection that
+/// was supplied to the model until context compaction covers it. Raw tool output and binary
+/// delivery data never enter this record; those belong to Exact History Archive and transient
+/// provider messages respectively.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationModelContextItem {
+    pub sequence: u64,
+    #[serde(default)]
+    pub ordinal: u32,
+    pub role: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<AgentContextCheckpointToolCall>,
+    #[serde(default)]
+    pub is_error: bool,
+}
+
+impl ConversationModelContextItem {
+    pub fn validate(&self) -> Result<(), String> {
+        ensure_no_binary_text("model context content", &self.content)?;
+        match self.role.as_str() {
+            "user" => {
+                if self.tool_call_id.is_some() || !self.tool_calls.is_empty() || self.is_error {
+                    return Err(
+                        "model context user message contains tool protocol fields".to_string()
+                    );
+                }
+            }
+            "assistant" => {
+                if self.tool_call_id.is_some() || self.is_error {
+                    return Err(
+                        "model context assistant message contains tool-result fields".to_string(),
+                    );
+                }
+                for call in &self.tool_calls {
+                    if call.id.trim().is_empty() || !is_provider_safe_tool_name(&call.name) {
+                        return Err("model context tool call identity is invalid".to_string());
+                    }
+                    ensure_no_binary_value("model context tool call", &call.args)?;
+                }
+            }
+            "tool" => {
+                if self
+                    .tool_call_id
+                    .as_deref()
+                    .is_none_or(|call_id| call_id.trim().is_empty())
+                    || !self.tool_calls.is_empty()
+                {
+                    return Err("model context tool result identity is invalid".to_string());
+                }
+            }
+            _ => return Err("model context message role is invalid".to_string()),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationModelContextLog {
+    pub assistant_message_id: String,
+    #[serde(default)]
+    pub items: Vec<ConversationModelContextItem>,
+}
+
+/// Validates the shared identity and boundary contract between the lossy audit trace and the
+/// uncompressed model projection.
+///
+/// One trace sequence may produce more than one provider-neutral message, hence `ordinal`.
+/// Nevertheless, persisted model items must cover every trace sequence through a safe boundary;
+/// otherwise falling back from the exact prefix to the trace suffix could duplicate or split a
+/// tool exchange.
+pub(crate) fn validate_model_context_prefix(
+    trace: &ConversationTurnTrace,
+    items: &[ConversationModelContextItem],
+) -> Result<(), String> {
+    let mut previous_identity = None;
+    let mut covered_sequences = std::collections::BTreeSet::new();
+    for item in items {
+        item.validate()?;
+        let identity = (item.sequence, item.ordinal);
+        if previous_identity.is_some_and(|previous| identity <= previous) {
+            return Err("model context item identity must be strictly increasing".to_string());
+        }
+        previous_identity = Some(identity);
+        let trace_item = trace
+            .items
+            .iter()
+            .find(|trace_item| trace_item.sequence() == item.sequence)
+            .ok_or_else(|| "model context item references a missing trace sequence".to_string())?;
+        validate_model_item_against_trace(item, trace_item)?;
+        covered_sequences.insert(item.sequence);
+    }
+    let Some(covered_through) = items.last().map(|item| item.sequence) else {
+        return Ok(());
+    };
+    let expected_sequences = trace
+        .items
+        .iter()
+        .take_while(|item| item.sequence() <= covered_through)
+        .map(ConversationTurnTraceItem::sequence)
+        .collect::<std::collections::BTreeSet<_>>();
+    if covered_sequences != expected_sequences {
+        return Err(
+            "model context items must cover a complete contiguous trace prefix".to_string(),
+        );
+    }
+    let boundary = trace
+        .items
+        .iter()
+        .find(|item| item.sequence() == covered_through)
+        .ok_or_else(|| "model context prefix boundary is missing".to_string())?;
+    if !boundary.is_safe_compaction_boundary() {
+        return Err("model context prefix cannot end with an unresolved tool call".to_string());
+    }
+    Ok(())
+}
+
+fn validate_model_item_against_trace(
+    item: &ConversationModelContextItem,
+    trace_item: &ConversationTurnTraceItem,
+) -> Result<(), String> {
+    let valid = match trace_item {
+        ConversationTurnTraceItem::AssistantNarration { .. } => {
+            item.role == "assistant"
+                && item.tool_call_id.is_none()
+                && item.tool_calls.is_empty()
+                && !item.content.trim().is_empty()
+        }
+        ConversationTurnTraceItem::UserGuidance { .. } => {
+            item.role == "user"
+                && item.tool_call_id.is_none()
+                && item.tool_calls.is_empty()
+                && !item.content.trim().is_empty()
+        }
+        ConversationTurnTraceItem::ToolCall { call_id, tool, .. } => {
+            item.role == "assistant"
+                && item.tool_call_id.is_none()
+                && item.tool_calls.len() == 1
+                && item.tool_calls[0].id == *call_id
+                && item.tool_calls[0].name == *tool
+        }
+        ConversationTurnTraceItem::ToolResult { call_id, .. } => {
+            item.role == "tool"
+                && item.tool_call_id.as_deref() == Some(call_id.as_str())
+                && item.tool_calls.is_empty()
+        }
+    };
+    valid.then_some(()).ok_or_else(|| {
+        "model context item identity does not match its durable trace item".to_string()
+    })
 }
 
 impl ConversationTraceToolResultStatus {
@@ -193,6 +355,11 @@ pub struct ConversationTurnTrace {
 #[derive(Debug, Clone, Default)]
 pub struct ConversationTraceSnapshot {
     pub items: Vec<ConversationTurnTraceItem>,
+    /// Exact, length-bounded text messages supplied to the model for the same trace prefix.
+    ///
+    /// The Host persists these in a separate model-context log. They are not serialized into the
+    /// durable trace and therefore cannot enlarge audit rows or history-search projections.
+    pub model_context_items: Vec<ConversationModelContextItem>,
     pub next_sequence: u64,
     pub truncated: bool,
 }
@@ -413,8 +580,16 @@ impl ConversationTraceSnapshot {
         });
         let items = unresolved_call_index
             .map_or_else(|| self.items.clone(), |index| self.items[..index].to_vec());
+        let covered_sequence = items.last().map(ConversationTurnTraceItem::sequence);
+        let model_context_items = self
+            .model_context_items
+            .iter()
+            .filter(|item| covered_sequence.is_some_and(|sequence| item.sequence <= sequence))
+            .cloned()
+            .collect();
         Self {
             items,
+            model_context_items,
             next_sequence: self.next_sequence,
             truncated: self.truncated,
         }
@@ -463,7 +638,7 @@ impl ConversationTraceSnapshot {
 }
 
 /// Closes any process-interrupted ToolCall before an in-progress trace becomes terminal.
-pub(crate) fn terminalize_interrupted_conversation_trace(
+pub fn terminalize_interrupted_conversation_trace(
     trace: ConversationTurnTrace,
     terminal_status: ConversationTurnTraceTerminalStatus,
     reason: &str,
@@ -541,13 +716,13 @@ pub fn cancelled_conversation_trace_from_checkpoint(
     result: &AgentToolResult,
     reason: &str,
 ) -> ConversationTurnTrace {
-    let mut recorder = ConversationTraceRecorder::from_checkpoint(
+    let mut recorder = ConversationTraceRecorder::from_checkpoint_with_model_context(
         checkpoint.conversation_trace_items.clone(),
+        checkpoint.conversation_model_context_items.clone(),
         checkpoint.next_conversation_trace_sequence,
         checkpoint.conversation_trace_truncated,
     );
-    recorder.record_tool_call(call);
-    recorder.record_tool_result(call, result);
+    record_model_tool_exchange(&mut recorder, call, result, None);
     recorder.finish(
         &checkpoint.run_id,
         conversation_id,
@@ -562,14 +737,78 @@ pub fn conversation_trace_snapshot_from_checkpoint_and_continuation(
     call: &AgentToolCall,
     result: &AgentToolResult,
 ) -> ConversationTraceSnapshot {
-    let mut recorder = ConversationTraceRecorder::from_checkpoint(
+    conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
+        checkpoint, call, result, None,
+    )
+}
+
+/// Builds an approval-continuation snapshot using the same backend-generated history reference
+/// that runtime checkpoint restoration will place in the model-visible ToolResult.
+///
+/// Settlement and runtime resume must persist byte-identical model projections. Otherwise the
+/// append-only model log would correctly reject the resumed request as a rewrite.
+pub fn conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
+    checkpoint: &AgentRunCheckpoint,
+    call: &AgentToolCall,
+    result: &AgentToolResult,
+    assistant_message_id: Option<&str>,
+) -> ConversationTraceSnapshot {
+    let mut recorder = ConversationTraceRecorder::from_checkpoint_with_model_context(
         checkpoint.conversation_trace_items.clone(),
+        checkpoint.conversation_model_context_items.clone(),
         checkpoint.next_conversation_trace_sequence,
         checkpoint.conversation_trace_truncated,
     );
-    recorder.record_tool_call(call);
-    recorder.record_tool_result(call, result);
+    let result_sequence = checkpoint
+        .next_conversation_trace_sequence
+        .saturating_add(u64::from(!checkpoint.conversation_trace_items.iter().any(
+            |item| {
+                matches!(
+                    item,
+                    ConversationTurnTraceItem::ToolCall { call_id, .. }
+                        if call_id == &call.id
+                )
+            },
+        )));
+    let history_ref = assistant_message_id.map(|assistant_message_id| {
+        crate::ContextHistoryRef::trace_item(assistant_message_id, result_sequence)
+    });
+    record_model_tool_exchange(&mut recorder, call, result, history_ref.as_ref());
     recorder.snapshot()
+}
+
+fn record_model_tool_exchange(
+    recorder: &mut ConversationTraceRecorder,
+    call: &AgentToolCall,
+    result: &AgentToolResult,
+    history_ref: Option<&crate::ContextHistoryRef>,
+) {
+    let llm_result = canonical_tool_result_for_context(result);
+    if let Some(sequence) = recorder.record_tool_call(call) {
+        recorder.record_model_message(
+            sequence,
+            0,
+            &LlmMessage::assistant(
+                "",
+                vec![crate::llm::LlmToolCall {
+                    id: call.id.clone(),
+                    name: call.tool.clone(),
+                    args: call.args.clone(),
+                }],
+            ),
+        );
+    }
+    if let Some(sequence) = recorder.record_tool_result(call, &llm_result) {
+        recorder.record_model_message(
+            sequence,
+            0,
+            &LlmMessage::tool_result(
+                call.id.clone(),
+                render_tool_observation_with_history_ref(&llm_result, history_ref),
+                !llm_result.ok,
+            ),
+        );
+    }
 }
 
 pub fn cancelled_conversation_trace_from_snapshot(
@@ -663,14 +902,16 @@ fn terminal_trace_without_items(
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ConversationTraceRecorder {
     items: Vec<ConversationTurnTraceItem>,
+    model_context_items: Vec<ConversationModelContextItem>,
     next_sequence: u64,
     truncated: bool,
     items_are_durable: bool,
 }
 
 impl ConversationTraceRecorder {
-    pub(crate) fn from_checkpoint(
+    pub(crate) fn from_checkpoint_with_model_context(
         items: Vec<ConversationTurnTraceItem>,
+        model_context_items: Vec<ConversationModelContextItem>,
         next_sequence: u64,
         truncated: bool,
     ) -> Self {
@@ -682,6 +923,7 @@ impl ConversationTraceRecorder {
             .unwrap_or(0);
         Self {
             items,
+            model_context_items,
             next_sequence: next_sequence.max(inferred_next),
             truncated,
             items_are_durable: false,
@@ -701,19 +943,33 @@ impl ConversationTraceRecorder {
             .unwrap_or(0);
         Self {
             items,
+            model_context_items: Vec::new(),
             next_sequence: next_sequence.max(inferred_next),
             truncated,
             items_are_durable: true,
         }
     }
 
-    pub(crate) fn checkpoint(&self) -> (Vec<ConversationTurnTraceItem>, u64, bool) {
-        (self.items.clone(), self.next_sequence, self.truncated)
+    pub(crate) fn checkpoint(
+        &self,
+    ) -> (
+        Vec<ConversationTurnTraceItem>,
+        Vec<ConversationModelContextItem>,
+        u64,
+        bool,
+    ) {
+        (
+            self.items.clone(),
+            self.model_context_items.clone(),
+            self.next_sequence,
+            self.truncated,
+        )
     }
 
     pub(crate) fn checkpoint_snapshot(&self) -> ConversationTraceSnapshot {
         ConversationTraceSnapshot {
             items: self.items.clone(),
+            model_context_items: self.model_context_items.clone(),
             next_sequence: self.next_sequence,
             truncated: self.truncated,
         }
@@ -727,6 +983,7 @@ impl ConversationTraceRecorder {
         };
         ConversationTraceSnapshot {
             items,
+            model_context_items: self.model_context_items.clone(),
             next_sequence: self.next_sequence,
             truncated: self.truncated || projected_truncated,
         }
@@ -746,10 +1003,59 @@ impl ConversationTraceRecorder {
         self.items
             .push(ConversationTurnTraceItem::AssistantNarration {
                 sequence,
-                content,
+                content: content.clone(),
                 truncated: redacted,
             });
+        self.record_model_message(
+            sequence,
+            0,
+            &LlmMessage::text(crate::llm::LlmMessageRole::Assistant, content),
+        );
         self.truncated |= redacted;
+    }
+
+    pub(crate) fn record_model_message(
+        &mut self,
+        sequence: u64,
+        ordinal: u32,
+        message: &LlmMessage,
+    ) {
+        if self
+            .model_context_items
+            .iter()
+            .any(|item| item.sequence == sequence && item.ordinal == ordinal)
+        {
+            return;
+        }
+        let (content, redacted) = sanitize_runtime_text(&message.content);
+        let mut tool_calls = Vec::with_capacity(message.tool_calls.len());
+        let mut tool_call_redacted = false;
+        for call in &message.tool_calls {
+            let (args, redacted) = sanitize_runtime_value(&call.args);
+            tool_call_redacted |= redacted;
+            tool_calls.push(AgentContextCheckpointToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                args,
+            });
+        }
+        let item = ConversationModelContextItem {
+            sequence,
+            ordinal,
+            role: message.role.as_str().to_string(),
+            content,
+            tool_call_id: message.tool_call_id.clone(),
+            tool_calls,
+            is_error: message.is_error,
+        };
+        if item.validate().is_ok() {
+            self.model_context_items.push(item);
+            self.model_context_items
+                .sort_by_key(|item| (item.sequence, item.ordinal));
+        } else {
+            self.truncated = true;
+        }
+        self.truncated |= redacted || tool_call_redacted || !message.images.is_empty();
     }
 
     pub(crate) fn record_user_guidance(
@@ -785,11 +1091,12 @@ impl ConversationTraceRecorder {
         Some(sequence)
     }
 
-    pub(crate) fn record_tool_call(&mut self, call: &AgentToolCall) {
-        if self.items.iter().any(|item| {
+    pub(crate) fn record_tool_call(&mut self, call: &AgentToolCall) -> Option<u64> {
+        if let Some(sequence) = self.items.iter().find_map(|item| {
             matches!(item, ConversationTurnTraceItem::ToolCall { call_id, .. } if call_id == &call.id)
+                .then(|| item.sequence())
         }) {
-            return;
+            return Some(sequence);
         }
         let (operation, redacted) = sanitize_value(&call.args);
         let sequence = self.take_sequence();
@@ -802,6 +1109,7 @@ impl ConversationTraceRecorder {
             truncated: redacted,
         });
         self.truncated |= redacted;
+        Some(sequence)
     }
 
     /// Approval enriches the state of the original model call; it does not replace the model's
@@ -832,8 +1140,12 @@ impl ConversationTraceRecorder {
         }
     }
 
-    pub(crate) fn record_tool_result(&mut self, call: &AgentToolCall, result: &AgentToolResult) {
-        self.record_tool_result_with_archive(call, result, Default::default());
+    pub(crate) fn record_tool_result(
+        &mut self,
+        call: &AgentToolCall,
+        result: &AgentToolResult,
+    ) -> Option<u64> {
+        self.record_tool_result_with_archive(call, result, Default::default())
     }
 
     pub(crate) fn pending_tool_result_sequence(&self, call_id: &str) -> Option<u64> {
@@ -851,16 +1163,17 @@ impl ConversationTraceRecorder {
         call: &AgentToolCall,
         result: &AgentToolResult,
         archive: ConversationHistoryArchiveTraceMetadata,
-    ) {
-        let Some(call_index) = self.items.iter().rposition(
+    ) -> Option<u64> {
+        let call_index = self.items.iter().rposition(
             |item| matches!(item, ConversationTurnTraceItem::ToolCall { call_id, .. } if call_id == &call.id),
-        ) else {
-            return;
-        };
+        )?;
         if self.items.iter().any(|item| {
             matches!(item, ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id)
         }) {
-            return;
+            return self.items.iter().find_map(|item| {
+                matches!(item, ConversationTurnTraceItem::ToolResult { call_id, .. } if call_id == &call.id)
+                    .then(|| item.sequence())
+            });
         }
         if let ConversationTurnTraceItem::ToolCall {
             approval_status, ..
@@ -890,6 +1203,7 @@ impl ConversationTraceRecorder {
             }
         );
         self.items.push(item);
+        Some(sequence)
     }
 
     pub(crate) fn finish(
@@ -1459,7 +1773,7 @@ mod tests {
             },
         );
 
-        let (checkpoint_items, _, _) = recorder.checkpoint();
+        let (checkpoint_items, _, _, _) = recorder.checkpoint();
         let ConversationTurnTraceItem::ToolResult {
             observation: checkpoint_observation,
             ..
@@ -2063,7 +2377,7 @@ mod tests {
         };
         let mut recorder = ConversationTraceRecorder::default();
         recorder.record_tool_call(&call);
-        let (checkpoint, _, _) = recorder.checkpoint();
+        let (checkpoint, _, _, _) = recorder.checkpoint();
         let ConversationTurnTraceItem::ToolCall {
             operation: checkpoint_operation,
             ..

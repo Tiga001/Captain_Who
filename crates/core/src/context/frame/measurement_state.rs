@@ -203,33 +203,6 @@ impl ContextFrame {
         replaced
     }
 
-    /// Adopts the latest persisted context log after a successful main-model request. Model/tool
-    /// overlay items are now represented canonically by the baseline and are removed; unrelated
-    /// run state such as attachments and protocol guards remains in place.
-    pub(crate) fn promote_committed_trace(self, baseline: MeasuredContextBaseline) -> Self {
-        let overlay = self
-            .iter_items()
-            .filter(|item| {
-                !item.metadata.usage_class().is_persistent()
-                    && !item.metadata.sources().iter().any(|source| {
-                        matches!(
-                            source,
-                            ContextSource::ModelResponse
-                                | ContextSource::UserGuidance
-                                | ContextSource::ToolResult
-                                | ContextSource::ToolContinuation
-                        )
-                    })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut promoted = Self::from_measured_baseline(baseline);
-        for item in overlay {
-            promoted.push(item);
-        }
-        promoted
-    }
-
     /// Freezes all persistent overlay items into a shareable measured baseline. The frame keeps
     /// the same baseline, so subsequent durable appends become a new chunk rather than copying
     /// previously frozen history.

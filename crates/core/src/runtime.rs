@@ -33,6 +33,7 @@ use crate::context::{
     ContextScope, ContextSource,
 };
 use crate::conversation_trace::{
+    conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref,
     trace_attachments_from_input, ConversationHistoryArchiveTraceMetadata,
     ConversationTraceRecorder,
 };
@@ -84,13 +85,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tool_failure_guard::ToolFailureGuard;
 use tool_flow::{
-    approve_proposed_action, build_tool_observation_message,
-    build_tool_observation_message_with_history_ref, cancellation_preempts_tool_result,
-    cancelled_output, done_event, enforce_skill_activation_barrier,
-    execute_host_action_on_blocking_thread, execute_tool_on_blocking_thread,
-    extract_reason_from_args, failed_tool_call_result, file_draft_from_tool_result,
-    generate_run_id, llm_image_message_from_tool_result, redact_tool_result_for_event,
-    sanitize_max_tokens, sanitize_temperature, state_event, tool_calls_from_response,
+    approve_proposed_action, build_tool_observation_message_with_history_ref,
+    cancellation_preempts_tool_result, cancelled_output, done_event,
+    enforce_skill_activation_barrier, execute_host_action_on_blocking_thread,
+    execute_tool_on_blocking_thread, extract_reason_from_args, failed_tool_call_result,
+    file_draft_from_tool_result, generate_run_id, llm_image_message_from_tool_result,
+    redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
+    tool_calls_from_response,
 };
 use tool_input_stream::ToolInputStreamObservers;
 
@@ -394,8 +395,7 @@ impl AgentRuntime {
         let mut tool_failure_guard =
             ToolFailureGuard::from_trace(&conversation_trace.checkpoint_snapshot());
         let conversation_trace = Arc::new(Mutex::new(conversation_trace));
-        let mut pending_trace_baseline =
-            publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
         let capacity_detector = ContextCapacityDetector::for_model(
             &llm_request.model,
             llm_request.api_style,
@@ -476,7 +476,7 @@ impl AgentRuntime {
                         if let Some(steer_input) = &steer_input {
                             let pending = steer_input.drain_pending();
                             if !pending.is_empty() {
-                                pending_trace_baseline = apply_steer_inputs(
+                                apply_steer_inputs(
                                     &run_id,
                                     None,
                                     pending,
@@ -636,11 +636,7 @@ impl AgentRuntime {
                                                 active_context = (*baseline)
                                                     .replace_persistent_context(active_context);
                                                 detector.prepare_frame(&mut active_context);
-                                                // Compaction changes the durable baseline identity.
-                                                // Replace any pending pre-compaction trace baseline
-                                                // before the next successful model response can
-                                                // promote it and resurrect the old full history.
-                                                pending_trace_baseline = publish_trace_snapshot(
+                                                publish_trace_snapshot(
                                                     &conversation_trace,
                                                     trace_observer.as_ref(),
                                                 )?;
@@ -909,18 +905,13 @@ impl AgentRuntime {
                     finish_reason = llm_response.finish_reason;
                     can_drain_steer_input = true;
 
-                    // Every persisted trace item present in this successful request has now been
-                    // observed by the main model and may join the compactable durable baseline.
-                    if let Some(baseline) = pending_trace_baseline.take() {
-                        active_context = baseline.promote_committed_trace(active_context);
-                        visible_trace_item_count = conversation_trace
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .committed_item_count();
-                        if let Some(detector) = &context_capacity_detector {
-                            detector.prepare_frame(&mut active_context);
-                        }
-                    }
+                    // Successful sampling advances only the observation cursor. The exact bounded
+                    // model projection remains in `active_context` until compaction replaces it;
+                    // Durable Trace is never used to demote already observed tool results.
+                    visible_trace_item_count = conversation_trace
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .committed_item_count();
 
                     let tool_requests = tool_calls_from_response(
                         llm_response.tool_calls,
@@ -984,8 +975,7 @@ impl AgentRuntime {
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())
                             .record_narration(&llm_response.content);
-                        pending_trace_baseline =
-                            publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     }
                     if let Some(stream_id) = committed_message_stream_id.take() {
                         event_stream.emit(AgentEvent::MessageStreamCommitted {
@@ -1023,7 +1013,7 @@ impl AgentRuntime {
                         if let Some(steer_input) = &steer_input {
                             match steer_input.take_pending_or_close() {
                                 AgentSteerDrainOrClose::Pending(pending) => {
-                                    pending_trace_baseline = apply_steer_inputs(
+                                    apply_steer_inputs(
                                         &run_id,
                                         Some(&llm_response.content),
                                         pending,
@@ -1276,12 +1266,26 @@ impl AgentRuntime {
                         }
                     }
                     let trace_call = tool_registry.trace_call_projection(&call);
-                    conversation_trace
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .record_tool_call(&trace_call);
-                    pending_trace_baseline =
-                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+                    {
+                        let mut recorder = conversation_trace
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        if let Some(sequence) = recorder.record_tool_call(&trace_call) {
+                            recorder.record_model_message(
+                                sequence,
+                                0,
+                                &LlmMessage::assistant(
+                                    "",
+                                    vec![crate::llm::LlmToolCall {
+                                        id: call.id.clone(),
+                                        name: call.tool.clone(),
+                                        args: call.args.clone(),
+                                    }],
+                                ),
+                            );
+                        }
+                    }
+                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     let event_call = tool_registry.event_call_projection(&call);
                     event_stream.emit(AgentEvent::ToolCall {
                         run_id: run_id.clone(),
@@ -1315,7 +1319,7 @@ impl AgentRuntime {
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
                                     .enrich_tool_call(&action);
-                                pending_trace_baseline = publish_trace_snapshot(
+                                publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                 )?;
@@ -1327,11 +1331,41 @@ impl AgentRuntime {
                                 let llm_result = tool_registry.model_projection(&result);
                                 let checkpoint_result =
                                     tool_registry.checkpoint_projection(&result);
-                                conversation_trace
+                                let result_sequence = conversation_trace
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
-                                    .record_tool_result(&call, &checkpoint_result);
-                                pending_trace_baseline = publish_trace_snapshot(
+                                    .pending_tool_result_sequence(&call.id);
+                                let history_ref = trace_assistant_message_id
+                                    .as_deref()
+                                    .zip(result_sequence)
+                                    .map(|(assistant_message_id, sequence)| {
+                                        crate::ContextHistoryRef::trace_item(
+                                            assistant_message_id,
+                                            sequence,
+                                        )
+                                    });
+                                {
+                                    let mut recorder = conversation_trace
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner());
+                                    if let Some(sequence) =
+                                        recorder.record_tool_result(&call, &checkpoint_result)
+                                    {
+                                        recorder.record_model_message(
+                                            sequence,
+                                            0,
+                                            &LlmMessage::tool_result(
+                                                call.id.clone(),
+                                                build_tool_observation_message_with_history_ref(
+                                                    &llm_result,
+                                                    history_ref.as_ref(),
+                                                ),
+                                                true,
+                                            ),
+                                        );
+                                    }
+                                }
+                                publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                 )?;
@@ -1343,7 +1377,10 @@ impl AgentRuntime {
                                 });
                                 active_context.push(ContextItem::tool_result(
                                     call.id.clone(),
-                                    build_tool_observation_message(&llm_result),
+                                    build_tool_observation_message_with_history_ref(
+                                        &llm_result,
+                                        history_ref.as_ref(),
+                                    ),
                                     true,
                                     ContextMetadata::new(
                                         ContextSource::ToolResult,
@@ -1448,7 +1485,7 @@ impl AgentRuntime {
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
                                     .enrich_tool_call(&action);
-                                pending_trace_baseline = publish_trace_snapshot(
+                                publish_trace_snapshot(
                                     &conversation_trace,
                                     trace_observer.as_ref(),
                                 )?;
@@ -1525,16 +1562,36 @@ impl AgentRuntime {
                     };
                     let trace_result = tool_registry.trace_projection(&result);
                     let checkpoint_result = tool_registry.checkpoint_projection(&result);
-                    conversation_trace
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .record_tool_result_with_archive(
+                    let history_ref = trace_assistant_message_id
+                        .as_deref()
+                        .zip(result_sequence)
+                        .map(|(assistant_message_id, sequence)| {
+                            crate::ContextHistoryRef::trace_item(assistant_message_id, sequence)
+                        });
+                    {
+                        let mut recorder = conversation_trace
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        if let Some(sequence) = recorder.record_tool_result_with_archive(
                             &call,
                             &checkpoint_result,
                             archive_metadata,
-                        );
-                    pending_trace_baseline =
-                        publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
+                        ) {
+                            recorder.record_model_message(
+                                sequence,
+                                0,
+                                &LlmMessage::tool_result(
+                                    call.id.clone(),
+                                    build_tool_observation_message_with_history_ref(
+                                        &llm_result,
+                                        history_ref.as_ref(),
+                                    ),
+                                    !result.ok,
+                                ),
+                            );
+                        }
+                    }
+                    publish_trace_snapshot(&conversation_trace, trace_observer.as_ref())?;
                     if cancellation_preempts_tool_result(
                         auto_execute_host_action,
                         if authoritative_tool_settlement {
@@ -1567,12 +1624,6 @@ impl AgentRuntime {
                         });
                     }
 
-                    let history_ref = trace_assistant_message_id
-                        .as_deref()
-                        .zip(result_sequence)
-                        .map(|(assistant_message_id, sequence)| {
-                            crate::ContextHistoryRef::trace_item(assistant_message_id, sequence)
-                        });
                     active_context.push(
                         ContextItem::tool_result(
                             call.id.clone(),
@@ -1823,6 +1874,24 @@ fn apply_steer_inputs(
                 })?;
             let (attachments, _) = trace_attachments_from_input(&input.attachments);
             applied.push((input.clone(), attachments, sequence));
+        }
+    }
+    {
+        let mut recorder = conversation_trace
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for ((input, _, sequence), attachment_context) in
+            applied.iter().zip(attachment_contexts.iter())
+        {
+            let content = input.content.trim();
+            let context_content = if attachment_context.text.trim().is_empty() {
+                content.to_string()
+            } else {
+                format!("{content}\n\n{}", attachment_context.text)
+            };
+            let mut message = LlmMessage::text(LlmMessageRole::User, context_content);
+            message.images = attachment_context.images.clone();
+            recorder.record_model_message(*sequence, 0, &message);
         }
     }
     let baseline = publish_trace_snapshot(conversation_trace, trace_observer)?;

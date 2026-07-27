@@ -3426,14 +3426,33 @@ impl AgentService {
                     record.snapshot.assistant_message_id.as_deref(),
                 ) {
                     (Some(trace), _, _) => Some(trace),
-                    (None, Some(conversation_id), Some(assistant_message_id)) => {
-                        Some(failed_conversation_trace_without_items(
-                            &run_id,
-                            conversation_id,
-                            assistant_message_id,
-                            &message,
-                        ))
-                    }
+                    (None, Some(conversation_id), Some(assistant_message_id)) => Some(
+                        self.storage
+                            .get_conversation_turn_trace(assistant_message_id)
+                            .ok()
+                            .flatten()
+                            .filter(|trace| {
+                                trace.run_id == run_id
+                                    && trace.conversation_id == conversation_id
+                                    && trace.terminal_status
+                                        == ConversationTurnTraceTerminalStatus::InProgress
+                            })
+                            .map(|trace| {
+                                terminalize_interrupted_conversation_trace(
+                                    trace,
+                                    ConversationTurnTraceTerminalStatus::Failed,
+                                    &message,
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                failed_conversation_trace_without_items(
+                                    &run_id,
+                                    conversation_id,
+                                    assistant_message_id,
+                                    &message,
+                                )
+                            }),
+                    ),
                     _ => None,
                 };
                 let persisted = if let (Some(conversation_id), Some(assistant_message_id)) = (

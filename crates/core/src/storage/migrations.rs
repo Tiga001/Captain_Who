@@ -2011,6 +2011,23 @@ pub fn run_migrations(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY (assistant_message_id) REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS conversation_model_context_items (
+            assistant_message_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL CHECK (sequence >= 0),
+            ordinal INTEGER NOT NULL DEFAULT 0 CHECK (ordinal >= 0),
+            content_hash TEXT NOT NULL CHECK (
+                length(content_hash) = 71
+                AND substr(content_hash, 1, 7) = 'sha256:'
+                AND substr(content_hash, 8) NOT GLOB '*[^0-9a-f]*'
+            ),
+            uncompressed_bytes INTEGER NOT NULL CHECK (uncompressed_bytes >= 0),
+            compression TEXT NOT NULL CHECK (compression = 'zstd'),
+            payload BLOB NOT NULL,
+            PRIMARY KEY (assistant_message_id, sequence, ordinal),
+            FOREIGN KEY (assistant_message_id)
+                REFERENCES conversation_turn_traces(assistant_message_id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS conversation_history_blobs (
             archive_ref TEXT PRIMARY KEY CHECK (
                 typeof(archive_ref) = 'text'

@@ -19,8 +19,8 @@ use crate::storage::{
     context_compaction_audit_repository, context_compaction_receipt_repository,
     context_compaction_repository, conversation_fork_repository, conversation_goal_repository,
     conversation_history_archive_repository, conversation_history_repository,
-    conversation_trace_repository, file_draft_repository, guidance_repository,
-    image_generation_repository, legacy_task_state_repository,
+    conversation_model_context_repository, conversation_trace_repository, file_draft_repository,
+    guidance_repository, image_generation_repository, legacy_task_state_repository,
     model_request_observation_repository, now_ms, pending_action_repository,
     preferences_repository, project_repository, skill_enablement_repository, storage_error,
     turn_diff_repository, usage_repository, world_state_repository, StorageState,
@@ -33,8 +33,8 @@ use crate::{
     ContextCompactionAuditBundle, ContextCompactionPrefix, ContextCompactionReceipt,
     ContextCompactionSummary, ContextCompactionSummaryDraft, ContextJournalCursor,
     ConversationGoal, ConversationGoalMutationActor, ConversationGoalRevision,
-    ConversationGoalStatus, ConversationTurnTrace, ConversationTurnTraceItem,
-    ModelRequestObservation, WorldStateRecord,
+    ConversationGoalStatus, ConversationModelContextItem, ConversationModelContextLog,
+    ConversationTurnTrace, ConversationTurnTraceItem, ModelRequestObservation, WorldStateRecord,
 };
 use base64::Engine;
 use rusqlite::OptionalExtension;

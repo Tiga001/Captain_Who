@@ -1,6 +1,7 @@
 use crate::context::ContextCompactionSummary;
 use crate::conversation_trace::{
-    ConversationTraceAttachment, ConversationTurnTrace, ConversationTurnTraceItem,
+    ConversationModelContextItem, ConversationTraceAttachment, ConversationTurnTrace,
+    ConversationTurnTraceItem,
 };
 use crate::world_state::{AnchoredWorldStateRecord, WorldStateSnapshot};
 use serde::{Deserialize, Serialize};
@@ -211,6 +212,12 @@ pub struct AgentRunCheckpoint {
     pub pending_tool_call_id: String,
     #[serde(default)]
     pub conversation_trace_items: Vec<ConversationTurnTraceItem>,
+    /// Exact bounded text projection of the active run's uncompressed model timeline.
+    ///
+    /// Older checkpoints omit this field and remain readable; their durable trace is used as the
+    /// compatibility fallback.
+    #[serde(default)]
+    pub conversation_model_context_items: Vec<ConversationModelContextItem>,
     #[serde(default)]
     pub next_conversation_trace_sequence: u64,
     #[serde(default)]
@@ -308,6 +315,10 @@ pub struct AgentChatMessage {
     pub created_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_turn_trace: Option<ConversationTurnTrace>,
+    /// Backend-only uncompressed model projection for this assistant turn. Renderer clients never
+    /// author this field; Core validates it against the durable trace before use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conversation_model_context_items: Vec<ConversationModelContextItem>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -2457,6 +2468,7 @@ mod tests {
                 "conversation-1",
                 "assistant-1",
             )),
+            conversation_model_context_items: Vec::new(),
         };
         let serialized = serde_json::to_string(&message).unwrap();
 

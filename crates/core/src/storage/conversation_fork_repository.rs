@@ -8,10 +8,13 @@ use crate::storage::models::{
 };
 use crate::storage::{
     attachment_repository, chat_repository, context_compaction_repository,
-    conversation_history_archive_repository, conversation_trace_repository, file_draft_repository,
-    guidance_repository, turn_diff_repository, world_state_repository,
+    conversation_history_archive_repository, conversation_model_context_repository,
+    conversation_trace_repository, file_draft_repository, guidance_repository,
+    turn_diff_repository, world_state_repository,
 };
-use crate::{AgentGuidanceStatus, ConversationTurnTrace, WorldStateRecord};
+use crate::{
+    AgentGuidanceStatus, ConversationModelContextItem, ConversationTurnTrace, WorldStateRecord,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -26,6 +29,7 @@ pub(crate) struct ForkAttachmentCopy {
 #[derive(Debug)]
 struct ForkTrace {
     trace: ConversationTurnTrace,
+    model_context_items: Vec<ConversationModelContextItem>,
     created_at: i64,
     committed_at: i64,
 }
@@ -167,6 +171,11 @@ pub(crate) fn build_fork_plan(
             let new_run_id = new_id("run");
             run_id_map.insert(trace.run_id.clone(), new_run_id.clone());
             let (trace_created_at, committed_at) = trace_times(connection, &message.id)?;
+            let model_context_items =
+                conversation_model_context_repository::get_log_for_message(connection, &message.id)
+                    .map_err(database_error)?
+                    .map(|log| log.items)
+                    .unwrap_or_default();
             traces.push(ForkTrace {
                 trace: ConversationTurnTrace {
                     schema_version: trace.schema_version,
@@ -178,6 +187,7 @@ pub(crate) fn build_fork_plan(
                     truncated: trace.truncated,
                     items: trace.items,
                 },
+                model_context_items,
                 created_at: trace_created_at,
                 committed_at,
             });
@@ -338,6 +348,7 @@ pub(crate) fn build_fork_plan(
     replacements.insert(source.id.clone(), target_conversation_id.clone());
     for fork_trace in &mut traces {
         rewrite_trace_items(&mut fork_trace.trace, &replacements)?;
+        rewrite_model_context_items(&mut fork_trace.model_context_items, &replacements)?;
     }
     let target_messages = source_messages
         .iter()
@@ -435,6 +446,13 @@ pub(crate) fn commit_fork_plan(
             &trace.trace,
             trace.created_at,
             trace.committed_at,
+        )
+        .map_err(database_error)?;
+        conversation_model_context_repository::commit_items_in_connection(
+            &transaction,
+            &trace.trace.conversation_id,
+            &trace.trace.assistant_message_id,
+            &trace.model_context_items,
         )
         .map_err(database_error)?;
     }
@@ -1065,6 +1083,22 @@ fn rewrite_trace_items(
     trace.items = serde_json::from_value(value)
         .map_err(|error| format!("无法重建复制后的历史工具轨迹：{error}"))?;
     trace.validate().map_err(|error| error.to_string())
+}
+
+fn rewrite_model_context_items(
+    items: &mut Vec<ConversationModelContextItem>,
+    replacements: &HashMap<String, String>,
+) -> Result<(), String> {
+    let mut value = serde_json::to_value(&*items)
+        .map_err(|error| format!("无法序列化历史模型上下文：{error}"))?;
+    rewrite_exact_ids(&mut value, replacements);
+    *items = serde_json::from_value(value)
+        .map_err(|error| format!("无法重建复制后的历史模型上下文：{error}"))?;
+    for item in items {
+        item.validate()
+            .map_err(|error| format!("复制后的历史模型上下文无效：{error}"))?;
+    }
+    Ok(())
 }
 
 fn rewritten_value(value: &Value, replacements: &HashMap<String, String>) -> Value {

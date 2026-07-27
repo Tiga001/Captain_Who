@@ -353,6 +353,7 @@ fn pending_approval_persists_full_run_checkpoint() {
         model_capabilities: ModelCapabilities::default(),
         run_world_state: crate::test_run_world_state(),
         pending_tool_call_id: "call-checkpoint".to_string(),
+        conversation_model_context_items: Vec::new(),
         conversation_trace_items: Vec::new(),
         next_conversation_trace_sequence: 0,
         conversation_trace_truncated: false,

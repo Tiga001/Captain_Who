@@ -356,11 +356,6 @@ fn recovered_manual_file_effect_trace(
         approval_status: crate::AgentApprovalStatus::Approved,
         reason,
     };
-    let snapshot = crate::conversation_trace_snapshot_from_checkpoint_and_continuation(
-        checkpoint,
-        &call,
-        tool_result,
-    );
     let conversation_id = pending.conversation_id.as_deref().ok_or_else(|| {
         format!(
             "启动对账无法恢复人工命令 {}：缺少 conversation id。",
@@ -373,6 +368,13 @@ fn recovered_manual_file_effect_trace(
             pending.action_id
         )
     })?;
+    let snapshot =
+        crate::conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
+            checkpoint,
+            &call,
+            tool_result,
+            Some(assistant_message_id),
+        );
     Ok(snapshot.in_progress_trace(&pending.run_id, conversation_id, assistant_message_id))
 }
 
@@ -1051,6 +1053,31 @@ impl StorageService {
         trace: &ConversationTurnTrace,
         committed_at: i64,
     ) -> Result<AgentPendingActionResultCommitOutcome, String> {
+        self.commit_pending_agent_action_audited_result_trace_with_model_context(
+            terminal_audit,
+            expected_pending_status,
+            target_status,
+            trace,
+            &[],
+            committed_at,
+        )
+    }
+
+    /// Same settlement boundary as [`Self::commit_pending_agent_action_audited_result_trace`],
+    /// additionally committing the exact bounded model projection in the same transaction.
+    ///
+    /// The compatibility wrapper above remains for callers that have no model projection (for
+    /// example, legacy data tests). New runtime settlement paths must use this method so a crash
+    /// cannot leave an approved ToolResult visible only through the lossy trace fallback.
+    pub fn commit_pending_agent_action_audited_result_trace_with_model_context(
+        &self,
+        terminal_audit: &AgentActionAuditRecord,
+        expected_pending_status: &str,
+        target_status: &str,
+        trace: &ConversationTurnTrace,
+        model_context_items: &[ConversationModelContextItem],
+        committed_at: i64,
+    ) -> Result<AgentPendingActionResultCommitOutcome, String> {
         validate_manual_file_effect_settlement_request(
             terminal_audit,
             expected_pending_status,
@@ -1058,6 +1085,8 @@ impl StorageService {
             trace,
             committed_at,
         )?;
+        crate::conversation_trace::validate_model_context_prefix(trace, model_context_items)
+            .map_err(|error| format!("manual file-effect model context is invalid: {error}"))?;
 
         let mut connection = self.state.connection()?;
         let transaction = connection
@@ -1121,6 +1150,14 @@ impl StorageService {
             committed_at,
         )
         .map_err(storage_error)?;
+        let model_context_changed =
+            conversation_model_context_repository::commit_items_in_connection(
+                &transaction,
+                &trace.conversation_id,
+                &trace.assistant_message_id,
+                model_context_items,
+            )
+            .map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
 
         Ok(
@@ -1129,6 +1166,7 @@ impl StorageService {
                 agent_action_audit_repository::ManualTerminalActionAuditOutcome::Idempotent
             ) && target_was_already_committed
                 && !trace_changed
+                && !model_context_changed
             {
                 AgentPendingActionResultCommitOutcome::Idempotent
             } else {
@@ -1151,6 +1189,27 @@ impl StorageService {
         expected_trace: &ConversationTurnTrace,
         committed_at: i64,
     ) -> Result<AgentPendingActionSettlementInspection, String> {
+        self.inspect_pending_agent_action_audited_result_trace_with_model_context(
+            terminal_audit,
+            expected_pending_status,
+            target_status,
+            expected_trace,
+            &[],
+            committed_at,
+        )
+    }
+
+    /// Inspects the audit, pending target, trace, and exact model projection from one SQLite
+    /// snapshot after a commit-unknown response.
+    pub fn inspect_pending_agent_action_audited_result_trace_with_model_context(
+        &self,
+        terminal_audit: &AgentActionAuditRecord,
+        expected_pending_status: &str,
+        target_status: &str,
+        expected_trace: &ConversationTurnTrace,
+        expected_model_context_items: &[ConversationModelContextItem],
+        committed_at: i64,
+    ) -> Result<AgentPendingActionSettlementInspection, String> {
         validate_manual_file_effect_settlement_request(
             terminal_audit,
             expected_pending_status,
@@ -1158,6 +1217,11 @@ impl StorageService {
             expected_trace,
             committed_at,
         )?;
+        crate::conversation_trace::validate_model_context_prefix(
+            expected_trace,
+            expected_model_context_items,
+        )
+        .map_err(|error| format!("manual file-effect model context is invalid: {error}"))?;
 
         let mut connection = self.state.connection()?;
         let transaction = connection.transaction().map_err(storage_error)?;
@@ -1191,6 +1255,22 @@ impl StorageService {
         )
         .map_err(storage_error)?;
         let trace_state = manual_settlement_trace_state(durable_trace.as_ref(), expected_trace);
+        let durable_model_context_items =
+            conversation_model_context_repository::get_log_for_message(
+                &transaction,
+                &expected_trace.assistant_message_id,
+            )
+            .map_err(storage_error)?
+            .map(|log| log.items)
+            .unwrap_or_default();
+        let model_context_at_or_after_boundary = expected_model_context_items.is_empty()
+            || (expected_model_context_items.len() <= durable_model_context_items.len()
+                && expected_model_context_items
+                    == &durable_model_context_items[..expected_model_context_items.len()]);
+        let model_context_before_boundary = expected_model_context_items.is_empty()
+            || (durable_model_context_items.len() < expected_model_context_items.len()
+                && durable_model_context_items
+                    == expected_model_context_items[..durable_model_context_items.len()]);
         let target_is_committed = pending.target_status.as_deref() == Some(target_status);
         let target_is_uncommitted = pending.target_status.is_none();
         let audit_is_terminal = audit.as_ref().is_some_and(|audit| {
@@ -1207,6 +1287,12 @@ impl StorageService {
         });
 
         if target_is_committed && audit_is_terminal {
+            if !model_context_at_or_after_boundary {
+                return Ok(settlement_diverged(
+                    "conversationModelContext",
+                    "the audit and trace committed without their exact model projection",
+                ));
+            }
             return Ok(match trace_state {
                 ManualSettlementTraceState::AtBoundary => {
                     AgentPendingActionSettlementInspection::CommittedAtBoundary
@@ -1227,6 +1313,12 @@ impl StorageService {
         }
 
         if target_is_uncommitted && audit_is_preterminal {
+            if !model_context_before_boundary {
+                return Ok(settlement_diverged(
+                    "conversationModelContext",
+                    "the exact model projection advanced without its audit and pending target",
+                ));
+            }
             return Ok(match trace_state {
                 ManualSettlementTraceState::Absent | ManualSettlementTraceState::BeforeBoundary => {
                     AgentPendingActionSettlementInspection::DefinitelyUncommitted

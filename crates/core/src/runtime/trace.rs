@@ -84,16 +84,28 @@ pub(super) fn conversation_trace_from_input_checkpoint(
     let Some(checkpoint) = input.resume_checkpoint.as_ref() else {
         return ConversationTraceRecorder::default();
     };
-    let mut recorder = ConversationTraceRecorder::from_checkpoint(
-        checkpoint.conversation_trace_items.clone(),
-        checkpoint.next_conversation_trace_sequence,
-        checkpoint.conversation_trace_truncated,
-    );
-    if let Some(continuation) = input.tool_continuation.as_ref() {
-        recorder.record_tool_call(&continuation.call);
-        recorder.record_tool_result(&continuation.call, &continuation.result);
-    }
-    recorder
+    let snapshot = match input.tool_continuation.as_ref() {
+        Some(continuation) => {
+            conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
+                checkpoint,
+                &continuation.call,
+                &continuation.result,
+                input.assistant_message_id.as_deref(),
+            )
+        }
+        None => ConversationTraceSnapshot {
+            items: checkpoint.conversation_trace_items.clone(),
+            model_context_items: checkpoint.conversation_model_context_items.clone(),
+            next_sequence: checkpoint.next_conversation_trace_sequence,
+            truncated: checkpoint.conversation_trace_truncated,
+        },
+    };
+    ConversationTraceRecorder::from_checkpoint_with_model_context(
+        snapshot.items,
+        snapshot.model_context_items,
+        snapshot.next_sequence,
+        snapshot.truncated,
+    )
 }
 
 pub(super) fn attach_failed_runtime_trace(

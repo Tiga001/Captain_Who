@@ -114,6 +114,7 @@ fn chat_message(role: &str, content: &str) -> AgentChatMessage {
         content: content.to_string(),
         created_at: None,
         conversation_turn_trace: None,
+        conversation_model_context_items: Vec::new(),
     }
 }
 
@@ -165,6 +166,7 @@ fn traced_chat_message(content: &str) -> AgentChatMessage {
                 },
             ],
         }),
+        conversation_model_context_items: Vec::new(),
     }
 }
 

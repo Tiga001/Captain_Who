@@ -3,8 +3,9 @@ use super::{
     ContextSource,
 };
 use crate::conversation_trace::{
-    render_tool_observation, render_user_guidance_content, ConversationTraceToolResultStatus,
-    ConversationTurnTrace, ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
+    render_tool_observation, render_user_guidance_content, validate_model_context_prefix,
+    ConversationModelContextItem, ConversationTraceToolResultStatus, ConversationTurnTrace,
+    ConversationTurnTraceItem, ConversationTurnTraceTerminalStatus,
 };
 use crate::llm::{validate_model_tool_call_id, LlmMessageRole, LlmToolCall};
 use crate::protocol::{AgentError, AgentResult, AgentToolResult};
@@ -18,6 +19,50 @@ pub(crate) struct RenderedConversationTrace {
 pub(crate) struct ConversationTraceRenderer;
 
 impl ConversationTraceRenderer {
+    pub(crate) fn render_with_model_context(
+        trace: &ConversationTurnTrace,
+        model_context_items: &[ConversationModelContextItem],
+    ) -> AgentResult<RenderedConversationTrace> {
+        if model_context_items.is_empty() {
+            return Self::render(trace);
+        }
+        trace
+            .validate()
+            .map_err(|error| AgentError::new(format!("ConversationTurnTrace 无效：{error}")))?;
+        validate_model_context_prefix(trace, model_context_items)
+            .map_err(|error| AgentError::new(format!("模型上下文日志无效：{error}")))?;
+
+        let covered_sequence = model_context_items
+            .last()
+            .map(|item| item.sequence)
+            .expect("non-empty model context prefix");
+        let mut activity_items = model_context_items
+            .iter()
+            .map(|item| model_context_item(item, &trace.assistant_message_id))
+            .collect::<AgentResult<Vec<_>>>()?;
+        let suffix = ConversationTurnTrace {
+            schema_version: trace.schema_version,
+            run_id: trace.run_id.clone(),
+            conversation_id: trace.conversation_id.clone(),
+            assistant_message_id: trace.assistant_message_id.clone(),
+            terminal_status: trace.terminal_status,
+            terminal_error: trace.terminal_error.clone(),
+            truncated: trace.truncated,
+            items: trace
+                .items
+                .iter()
+                .filter(|item| item.sequence() > covered_sequence)
+                .cloned()
+                .collect(),
+        };
+        let rendered_suffix = Self::render(&suffix)?;
+        activity_items.extend(rendered_suffix.activity_items);
+        Ok(RenderedConversationTrace {
+            activity_items,
+            terminal_item: rendered_suffix.terminal_item,
+        })
+    }
+
     pub(crate) fn render(trace: &ConversationTurnTrace) -> AgentResult<RenderedConversationTrace> {
         trace
             .validate()
@@ -183,6 +228,50 @@ impl ConversationTraceRenderer {
     }
 }
 
+fn model_context_item(
+    item: &ConversationModelContextItem,
+    assistant_message_id: &str,
+) -> AgentResult<ContextItem> {
+    let metadata = trace_item_metadata(assistant_message_id, item.sequence);
+    match item.role.as_str() {
+        "user" => Ok(ContextItem::new(
+            crate::llm::LlmMessage::text(LlmMessageRole::User, item.content.clone()),
+            metadata,
+        )),
+        "assistant" if item.tool_calls.is_empty() => Ok(ContextItem::new(
+            crate::llm::LlmMessage::text(LlmMessageRole::Assistant, item.content.clone()),
+            metadata,
+        )),
+        "assistant" => {
+            let call = &item.tool_calls[0];
+            let group = ContextGroup::tool_exchange(format!("conversation-trace:{}", call.id));
+            Ok(ContextItem::assistant(
+                item.content.clone(),
+                vec![LlmToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    args: call.args.clone(),
+                }],
+                metadata.with_group(group),
+            ))
+        }
+        "tool" => {
+            let call_id = item
+                .tool_call_id
+                .as_deref()
+                .ok_or_else(|| AgentError::new("模型上下文 tool 消息缺少 call id。"))?;
+            let group = ContextGroup::tool_exchange(format!("conversation-trace:{call_id}"));
+            Ok(ContextItem::tool_result(
+                call_id,
+                item.content.clone(),
+                item.is_error,
+                metadata.with_group(group),
+            ))
+        }
+        _ => Err(AgentError::new("模型上下文日志包含未知消息角色。")),
+    }
+}
+
 #[derive(Debug)]
 struct PendingExchange {
     call_id: String,
@@ -214,7 +303,7 @@ mod tests {
         CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
     };
     use crate::llm::{model_response_tool_call_id, LlmMessageRole};
-    use crate::protocol::AgentApprovalStatus;
+    use crate::protocol::{AgentApprovalStatus, AgentContextCheckpointToolCall};
 
     fn trace() -> ConversationTurnTrace {
         let call_id = model_response_tool_call_id("run/with spaces", 0, 0, "provider-call-1");
@@ -335,6 +424,120 @@ mod tests {
             .join("\n");
         assert!(!context.contains("todo_update"));
         assert!(!context.contains("Do not carry me"));
+    }
+
+    #[test]
+    fn exact_model_prefix_wins_over_lossy_trace_projection() {
+        let trace = trace();
+        let (call_id, tool, args) = match &trace.items[1] {
+            ConversationTurnTraceItem::ToolCall {
+                call_id,
+                tool,
+                operation,
+                ..
+            } => (call_id.clone(), tool.clone(), operation.clone()),
+            _ => panic!("expected tool call"),
+        };
+        let exact_marker = "EXACT_RESULT_BODY_OMITTED_FROM_DURABLE_TRACE";
+        let model_items = vec![
+            ConversationModelContextItem {
+                sequence: 3,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: "I will inspect the file.".to_string(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence: 4,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: vec![AgentContextCheckpointToolCall {
+                    id: call_id.clone(),
+                    name: tool,
+                    args,
+                }],
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence: 5,
+                ordinal: 0,
+                role: "tool".to_string(),
+                content: format!(r#"{{"ok":true,"content":"{exact_marker}"}}"#),
+                tool_call_id: Some(call_id),
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+        ];
+
+        let rendered =
+            ConversationTraceRenderer::render_with_model_context(&trace, &model_items).unwrap();
+        let mut items = rendered.activity_items;
+        items.extend(rendered.terminal_item);
+        let frame = ContextFrame::new(items);
+        frame.validate_complete_tool_protocol().unwrap();
+        let messages = frame.to_messages();
+
+        assert!(messages
+            .iter()
+            .any(|message| message.content.contains(exact_marker)));
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.content.matches(exact_marker).count())
+                .sum::<usize>(),
+            1
+        );
+    }
+
+    #[test]
+    fn exact_model_prefix_cannot_split_a_tool_exchange() {
+        let trace = trace();
+        let (call_id, tool, args) = match &trace.items[1] {
+            ConversationTurnTraceItem::ToolCall {
+                call_id,
+                tool,
+                operation,
+                ..
+            } => (call_id.clone(), tool.clone(), operation.clone()),
+            _ => panic!("expected tool call"),
+        };
+        let model_items = vec![
+            ConversationModelContextItem {
+                sequence: 3,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: "I will inspect the file.".to_string(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                is_error: false,
+            },
+            ConversationModelContextItem {
+                sequence: 4,
+                ordinal: 0,
+                role: "assistant".to_string(),
+                content: String::new(),
+                tool_call_id: None,
+                tool_calls: vec![AgentContextCheckpointToolCall {
+                    id: call_id,
+                    name: tool,
+                    args,
+                }],
+                is_error: false,
+            },
+        ];
+
+        let error = match ConversationTraceRenderer::render_with_model_context(&trace, &model_items)
+        {
+            Ok(_) => panic!("a model prefix must not split a tool exchange"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("cannot end with an unresolved tool call"));
     }
 
     #[test]
