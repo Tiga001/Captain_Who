@@ -802,10 +802,10 @@ pub struct AgentContextWindowSnapshot {
     pub reserved_output_tokens: u64,
     pub safety_margin_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    /// Conversation-growth capacity after output, safety and non-growing request baseline.
+    /// Total input capacity after output and safety reserves.
     pub input_capacity_tokens: Option<u64>,
-    /// Model-visible context above the non-growing request baseline. Includes summaries,
-    /// uncompressed history and the complete current Agent Loop.
+    /// Fully assembled model input after the conversation starts, including fixed contracts,
+    /// uncompressed history and current-run overlays. An unstarted conversation publishes zero.
     pub input_tokens: u64,
     #[serde(default)]
     pub cost_breakdown: AgentContextCostBreakdown,

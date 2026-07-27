@@ -769,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn starts_compaction_at_the_ninety_percent_request_threshold() {
+    fn starts_compaction_exactly_when_the_full_request_ring_reaches_ninety_percent() {
         let planner = ContextCompactionPlanner::for_tools(&[]);
         let below_items = vec![
             item(
@@ -827,7 +827,16 @@ mod tests {
         );
 
         assert_eq!(below.status, ContextCompactionPlanStatus::NotRequired);
+        assert_eq!(
+            below.request_input_tokens.saturating_mul(100) / below.available_input_tokens.unwrap(),
+            89
+        );
         assert_eq!(at_threshold.status, ContextCompactionPlanStatus::Required);
+        assert_eq!(
+            at_threshold.request_input_tokens.saturating_mul(100)
+                / at_threshold.available_input_tokens.unwrap(),
+            COMPACTION_TRIGGER_PERCENT
+        );
     }
 
     #[test]

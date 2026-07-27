@@ -140,8 +140,6 @@ pub(crate) struct ContextTokenBreakdown {
     pub(crate) run_transient: ContextTokenCategoryEstimate,
     pub(crate) request_only: ContextTokenCategoryEstimate,
     pub(crate) total: ContextTokenCategoryEstimate,
-    /// Non-growing request baseline excluded only from the user-facing context meter.
-    pub(crate) context_window_baseline_input_tokens: u64,
     pub(crate) semantic: ContextFrameSemanticBreakdown,
 }
 
@@ -175,18 +173,12 @@ impl ContextTokenBreakdown {
         for category in [&fixed_category, &durable, &run_transient, &request_only] {
             total.merge(category);
         }
-        let context_window_baseline_input_tokens = frame
-            .breakdown
-            .context_window_baseline_input_tokens
-            .saturating_add(fixed.tool_definition_tokens)
-            .saturating_add(fixed.request_structure_tokens);
         Self {
             fixed: fixed_category,
             durable,
             run_transient,
             request_only,
             total,
-            context_window_baseline_input_tokens,
             semantic: frame.breakdown.semantic,
         }
     }
@@ -238,20 +230,14 @@ impl ContextBudgetReport {
     }
 
     pub(crate) fn snapshot(&self, model: &str) -> AgentContextWindowSnapshot {
-        let baseline_input_tokens = self.usage.breakdown.context_window_baseline_input_tokens;
         AgentContextWindowSnapshot {
             model: model.to_string(),
             status: context_window_status(self.status),
             context_window_tokens: self.context_window_tokens,
             reserved_output_tokens: self.reserved_output_tokens,
             safety_margin_tokens: self.safety_margin_tokens,
-            input_capacity_tokens: self
-                .available_input_tokens
-                .map(|capacity| capacity.saturating_sub(baseline_input_tokens)),
-            input_tokens: self
-                .usage
-                .request_input_tokens()
-                .saturating_sub(baseline_input_tokens),
+            input_capacity_tokens: self.available_input_tokens,
+            input_tokens: self.usage.request_input_tokens(),
             cost_breakdown: self.context_cost_breakdown(),
             remaining_input_tokens: self.remaining_input_tokens,
         }
@@ -879,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_reports_context_growth_above_the_non_growing_baseline() {
+    fn snapshot_reports_the_complete_input_ratio() {
         let mut frame = ContextFrame::new(vec![
             ContextItem::text(
                 LlmMessageRole::System,
@@ -900,21 +886,11 @@ mod tests {
 
         let report = detector.inspect(&mut frame, Some(128_000), 30_000);
         let snapshot = report.snapshot("provider/model");
-        let baseline_input_tokens = report.usage.breakdown.context_window_baseline_input_tokens;
 
-        assert!(baseline_input_tokens > 0);
-        assert_eq!(
-            snapshot.input_tokens,
-            report
-                .usage
-                .request_input_tokens()
-                .saturating_sub(baseline_input_tokens)
-        );
+        assert_eq!(snapshot.input_tokens, report.usage.request_input_tokens());
         assert_eq!(
             snapshot.input_capacity_tokens,
-            report
-                .available_input_tokens
-                .map(|capacity| capacity.saturating_sub(baseline_input_tokens))
+            report.available_input_tokens
         );
         assert_eq!(
             snapshot.remaining_input_tokens,
@@ -925,49 +901,6 @@ mod tests {
             report.usage.request_input_tokens()
         );
         assert!(snapshot.input_tokens > 0);
-    }
-
-    #[test]
-    fn blank_context_snapshot_starts_at_zero_after_run_baseline_is_removed() {
-        let mut frame = ContextFrame::new(vec![
-            ContextItem::text(
-                LlmMessageRole::System,
-                "fixed system rules",
-                ContextSource::BackendSystemPrompt,
-                ContextScope::Run,
-                ContextRetention::Retained,
-            ),
-            ContextItem::text(
-                LlmMessageRole::User,
-                "available skills",
-                ContextSource::SkillCatalog,
-                ContextScope::Run,
-                ContextRetention::Retained,
-            ),
-            ContextItem::text(
-                LlmMessageRole::User,
-                "initial permissions and workspace",
-                ContextSource::WorldStateSnapshot,
-                ContextScope::Run,
-                ContextRetention::Retained,
-            ),
-        ]);
-        let detector = detector(&[read_tool()]);
-
-        let report = detector.inspect(&mut frame, Some(128_000), 30_000);
-        let snapshot = report.snapshot("provider/model");
-
-        assert_eq!(snapshot.input_tokens, 0);
-        assert_eq!(
-            snapshot.cost_breakdown.total_input_tokens,
-            report.usage.request_input_tokens()
-        );
-        assert_eq!(
-            snapshot.remaining_input_tokens,
-            snapshot
-                .input_capacity_tokens
-                .map(|capacity| capacity as i64)
-        );
     }
 
     #[test]

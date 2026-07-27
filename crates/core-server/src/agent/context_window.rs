@@ -30,6 +30,12 @@ impl AgentService {
             Some(conversation_id) => self.storage.load_conversation(conversation_id)?,
             None => None,
         };
+        let conversation_started = conversation.as_ref().is_some_and(|conversation| {
+            conversation.messages.iter().any(|message| {
+                message.role.trim().eq_ignore_ascii_case("user")
+                    && (!message.content.trim().is_empty() || !message.attachments.is_empty())
+            })
+        });
         let project_id = resolve_conversation_project_id(
             conversation.as_ref(),
             normalized_optional(input.project_id.as_deref()),
@@ -141,7 +147,7 @@ impl AgentService {
             prepared_skills.resources.as_ref().map(Arc::clone),
         )?;
 
-        let snapshot = match conversation_id.as_deref() {
+        let mut snapshot = match conversation_id.as_deref() {
             Some(conversation_id) => self.context_window_snapshot_with_projection_cache(
                 &agent_input,
                 conversation_id,
@@ -150,6 +156,15 @@ impl AgentService {
             None => inspect_context_window_with_tool_projection(agent_input, &tool_projection)
                 .map_err(|error| error.to_string())?,
         };
+        if !conversation_started {
+            if let Some(snapshot) = snapshot.as_mut() {
+                snapshot.input_tokens = 0;
+                snapshot.cost_breakdown = Default::default();
+                snapshot.remaining_input_tokens = snapshot
+                    .input_capacity_tokens
+                    .map(|capacity| i64::try_from(capacity).unwrap_or(i64::MAX));
+            }
+        }
         Ok(AgentContextWindowSnapshotOutput { snapshot })
     }
 

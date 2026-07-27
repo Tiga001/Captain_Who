@@ -21,7 +21,9 @@ export function ContextWindowIndicator({ snapshot }: ContextWindowIndicatorProps
 
   const rawPercent = (snapshot.inputTokens / totalTokens) * 100
   const progressPercent = Math.min(100, Math.max(0, rawPercent))
-  const usedPercent = Math.round(progressPercent)
+  // Keep the visible threshold aligned with backend Compaction: 89.x% must never be presented
+  // as 90% before the complete request actually reaches the trigger.
+  const usedPercent = Math.floor(progressPercent)
   const remainingPercent = Math.max(0, 100 - usedPercent)
   const level = rawPercent >= 90 ? 'critical' : rawPercent >= 75 ? 'warning' : 'normal'
   const usedTokens = formatTokens(snapshot.inputTokens, language)

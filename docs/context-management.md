@@ -455,14 +455,12 @@ fixed + durable + run_transient + request_only <= available_input
 圆环不是独立功能实例。它调用同一个会话状态的 `snapshot()`，显示：
 
 ```text
-context_growth = complete_input - non_growing_baseline
-growth_capacity = available_input - non_growing_baseline
-context_growth / growth_capacity
+complete_input / available_input
 ```
 
-`non_growing_baseline` 包含系统契约、稳定工具 Schema、请求结构、初始 Run World State 和 Skill 目录，因此空白输入框从 0% 开始。未压缩模型历史、摘要、附件、Skill 指令和当前 Agent Loop 都计入 `context_growth`。
+尚未发送第一条用户消息时，对话并未建立实际模型上下文，Core Server 明确发布 0 用量。第一条消息发送后，`complete_input` 立即包含系统契约、工具 Schema、初始 Run World State、Skill 目录、用户消息和当前 Agent Loop；固定内容不再扣除。
 
-容量拒绝和 Compaction 仍然使用完整的 `complete_input / available_input`，不会因为展示扣除了基线而漏算真实请求成本。完整输入继续保存在 `costBreakdown.totalInputTokens`。运行中 narration 或工具闭环成功落库后，状态增量计量并立即发送 `context_window_updated`。只有显式压缩、删除、回退或配置变化可以让它下降或重算。输入框尚未发送的草稿不参与计算。
+圆环与 Compaction 使用同一个 `ContextBudgetReport` 和相同的完整请求比例：低于 90% 不触发，达到 90% 时触发。前端百分比向下取整，避免 89.x% 提前显示为 90%。运行中 narration 或工具闭环成功落库后，状态增量计量并立即发送 `context_window_updated`。只有显式压缩、删除、回退或配置变化可以让它下降或重算。输入框尚未发送的草稿不参与计算。
 
 关闭前端圆环只停止展示和事件，不改变后端状态、容量保护或压缩能力。
 

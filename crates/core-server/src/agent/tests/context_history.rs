@@ -895,7 +895,7 @@ fn mid_run_projection_keeps_latest_user_exact_and_only_the_uncovered_trace_tail(
 }
 
 #[test]
-fn empty_context_window_snapshot_starts_at_zero_above_the_request_baseline() {
+fn context_window_snapshot_is_zero_until_first_user_message_then_counts_complete_request() {
     let fixture = tempdir().unwrap();
     let storage = Arc::new(StorageService::open(&fixture.path().join("storage.sqlite")).unwrap());
     storage
@@ -917,7 +917,7 @@ fn empty_context_window_snapshot_starts_at_zero_above_the_request_baseline() {
             }],
         })
         .unwrap();
-    let service = AgentService::new(storage);
+    let service = AgentService::new(storage.clone());
     let enabled = service
         .get_context_window_snapshot(AgentContextWindowSnapshotInput {
             conversation_id: None,
@@ -937,11 +937,59 @@ fn empty_context_window_snapshot_starts_at_zero_above_the_request_baseline() {
     assert!(enabled.input_capacity_tokens.is_some_and(|value| value > 0));
     assert_eq!(
         enabled.input_tokens, 0,
-        "an empty composer must start with no conversation-growth capacity consumed"
+        "an unstarted composer must publish zero even though its model contract can be previewed"
+    );
+    assert_eq!(
+        enabled.cost_breakdown.total_input_tokens, 0,
+        "an unstarted conversation has no actual model request to present"
+    );
+    assert_eq!(enabled.cost_breakdown.system_tokens, 0);
+    assert_eq!(enabled.cost_breakdown.tool_schema_tokens, 0);
+
+    storage
+        .save_conversation(ChatConversationRecord {
+            id: "conversation-started-window".to_string(),
+            project_id: None,
+            model_id: Some("model-1".to_string()),
+            title: "Started window".to_string(),
+            messages: vec![ChatMessageRecord {
+                id: "user-started-window".to_string(),
+                role: "user".to_string(),
+                content: "你好".to_string(),
+                created_at: 1,
+                status: Some("sent".to_string()),
+                attachments: Vec::new(),
+                agent_run_json: None,
+                ui_state_json: None,
+            }],
+            created_at: 1,
+            updated_at: 1,
+            pinned_at: None,
+            archived_at: None,
+            unread_at: None,
+        })
+        .unwrap();
+    let started = service
+        .get_context_window_snapshot(AgentContextWindowSnapshotInput {
+            conversation_id: Some("conversation-started-window".to_string()),
+            project_id: None,
+            model_id: "model-1".to_string(),
+            max_tokens: Some(30_000),
+            prompt_preferences: None,
+            permissions: AgentPermissions::default(),
+            skills: Vec::new(),
+        })
+        .unwrap()
+        .snapshot
+        .unwrap();
+
+    assert!(started.input_tokens > 0);
+    assert_eq!(
+        started.input_tokens, started.cost_breakdown.total_input_tokens,
+        "the first user message starts full-request accounting, including fixed contracts"
     );
     assert!(
-        enabled.cost_breakdown.total_input_tokens > 0,
-        "the physical request must still account for system, Tool and Run baseline costs"
+        started.cost_breakdown.system_tokens > 0 && started.cost_breakdown.tool_schema_tokens > 0
     );
 }
 
