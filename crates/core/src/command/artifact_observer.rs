@@ -353,10 +353,30 @@ impl CommandArtifactObserver {
         } else {
             AgentCommandArtifactObservationStatus::Complete
         };
+        let partial = status != AgentCommandArtifactObservationStatus::Complete;
+        let mut stop_reasons =
+            artifact_observation_stop_reasons(&coverage, &warnings, changes_truncated);
+        if no_observable_roots
+            && !stop_reasons
+                .iter()
+                .any(|reason| reason == "no_observable_roots")
+        {
+            stop_reasons.push("no_observable_roots".to_string());
+        }
+        let scanned = coverage
+            .before
+            .office_files_seen
+            .saturating_add(coverage.after.office_files_seen);
+        let returned = u64::try_from(changes.len()).unwrap_or(u64::MAX);
 
         AgentCommandArtifactObservation {
             schema_version: AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION,
             status,
+            partial: Some(partial),
+            stop_reasons,
+            scanned: Some(scanned),
+            returned: Some(returned),
+            omitted: Some(changes_omitted),
             coverage,
             changes,
             changes_truncated,
@@ -1896,6 +1916,47 @@ fn snapshot_coverage_is_partial(coverage: &AgentCommandArtifactSnapshotCoverage)
     coverage.truncated || coverage.files_unhashed > 0 || coverage.symlinks_skipped > 0
 }
 
+fn artifact_observation_stop_reasons(
+    coverage: &AgentCommandArtifactObservationCoverage,
+    warnings: &[AgentCommandArtifactObservationWarning],
+    changes_truncated: bool,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let mut push = |reason: &str| {
+        if !reasons.iter().any(|existing| existing == reason) {
+            reasons.push(reason.to_string());
+        }
+    };
+
+    for (phase, snapshot) in [("before", &coverage.before), ("after", &coverage.after)] {
+        if snapshot.cancelled {
+            push(&format!("{phase}_cancelled"));
+        }
+        if snapshot.time_budget_exceeded {
+            push(&format!("{phase}_time_budget"));
+        }
+        if snapshot.truncated && !snapshot.cancelled && !snapshot.time_budget_exceeded {
+            push(&format!("{phase}_scan_limit"));
+        }
+        if snapshot.files_unhashed > 0 {
+            push(&format!("{phase}_unhashed_files"));
+        }
+        if snapshot.symlinks_skipped > 0 {
+            push(&format!("{phase}_symlinks_skipped"));
+        }
+    }
+    if changes_truncated {
+        push("change_report_limit");
+    }
+    for warning in warnings
+        .iter()
+        .filter(|warning| warning_impairs_observation(warning))
+    {
+        push(&warning.code);
+    }
+    reasons
+}
+
 fn warning_impairs_observation(warning: &AgentCommandArtifactObservationWarning) -> bool {
     !matches!(
         warning.code.as_str(),
@@ -2513,6 +2574,18 @@ mod tests {
             result.status,
             AgentCommandArtifactObservationStatus::Partial
         );
+        assert_eq!(result.partial, Some(true));
+        assert_eq!(result.scanned, Some(4));
+        assert_eq!(result.returned, Some(result.changes.len() as u64));
+        assert_eq!(result.omitted, Some(result.changes_omitted));
+        assert!(result
+            .stop_reasons
+            .iter()
+            .any(|reason| reason == "before_scan_limit"));
+        assert!(result
+            .stop_reasons
+            .iter()
+            .any(|reason| reason == "after_scan_limit"));
 
         let mut hash_limited = CommandArtifactObserver::prepare(
             Some(&workspace),

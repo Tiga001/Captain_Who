@@ -317,6 +317,10 @@ impl ToolExecutionContext {
             .ok_or_else(|| AgentError::new("当前运行缺少 conversationId，无法访问会话级能力。"))
     }
 
+    pub(super) fn conversation_id_optional(&self) -> Option<&str> {
+        self.conversation_id.as_deref()
+    }
+
     pub(super) fn project_id(&self) -> Option<&str> {
         self.project_id.as_deref()
     }

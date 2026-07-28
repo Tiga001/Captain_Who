@@ -22,6 +22,7 @@ mod read_word;
 mod run_command;
 pub(crate) mod schema;
 mod search_code;
+mod search_cursor;
 mod search_files;
 mod skills_list_resources;
 mod skills_materialize_resource;
@@ -839,6 +840,50 @@ mod tests {
         }
     }
 
+    /// Exercises the contract used by runtime extensions and MCP-style adapters: the provider
+    /// payload remains canonical for Exact Archive while the common model gate owns length
+    /// control and must retain opaque provider continuation capabilities.
+    struct ProviderBackedExtensionTool;
+
+    impl AgentTool for ProviderBackedExtensionTool {
+        fn exposure(&self) -> AgentToolExposure {
+            AgentToolExposure::Stable
+        }
+
+        fn permission_policy(&self) -> AgentToolPermissionPolicy {
+            AgentToolPermissionPolicy::Default
+        }
+
+        fn definition(&self) -> AgentToolDefinition {
+            AgentToolDefinition {
+                name: "provider_backed_extension".to_string(),
+                description: "test".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+                safety: AgentToolSafety::ReadOnly,
+                requires_workspace: false,
+                requires_approval: false,
+                approval_mode: crate::protocol::AgentToolApprovalMode::Never,
+            }
+        }
+
+        fn execute(&self, _context: &ToolExecutionContext, _args: Value) -> AgentResult<Value> {
+            Ok(json!({
+                "content": "provider payload ".repeat(20_000),
+                "sourceCompleteness": "unknown",
+                "cursor": "provider-cursor-1",
+                "next": "provider-cursor-2",
+                "continueWith": {
+                    "provider": "example",
+                    "cursor": "provider-cursor-1"
+                }
+            }))
+        }
+    }
+
     #[test]
     fn rejects_paths_outside_workspace() {
         let fixture = TestWorkspace::new();
@@ -933,6 +978,66 @@ mod tests {
         assert!(error.to_string().contains("invalid_schema"));
         assert!(error.to_string().contains("anyOf"));
         assert!(!registry.contains_tool("invalid_schema"));
+    }
+
+    #[test]
+    fn provider_backed_extension_keeps_exact_payload_and_opaque_recovery_through_10k_gate() {
+        let mut registry = ToolRegistry::defaults_with_search(None);
+        registry
+            .register_extension_tool("provider-test", Box::new(ProviderBackedExtensionTool))
+            .unwrap();
+        let call = AgentToolCall {
+            id: "provider-call".to_string(),
+            tool: "provider_backed_extension".to_string(),
+            args: json!({}),
+            approval_status: crate::protocol::AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+
+        let raw = registry.execute(&ToolExecutionContext::from_run_context(None), &call);
+        assert!(registry.archives_result(&call.tool));
+        let archive = registry.archive_projection(&raw);
+        assert_eq!(archive.result, raw.result);
+        assert_eq!(
+            archive.result.as_ref().unwrap()["cursor"],
+            "provider-cursor-1"
+        );
+        assert_eq!(
+            archive.result.as_ref().unwrap()["next"],
+            "provider-cursor-2"
+        );
+        assert_eq!(
+            archive.result.as_ref().unwrap()["continueWith"]["cursor"],
+            "provider-cursor-1"
+        );
+        assert_eq!(
+            archive.result.as_ref().unwrap()["sourceCompleteness"],
+            "unknown"
+        );
+        assert!(archive.result.as_ref().unwrap()["truncatedAtSource"].is_null());
+
+        let model = registry.model_projection(&raw);
+        let gate = crate::context::ContextCapacityDetector::for_model(
+            "test-model",
+            crate::protocol::AgentApiStyle::OpenAiCompatible,
+            &[],
+        )
+        .model_tool_result_gate();
+        let observation = crate::runtime::finalize_model_tool_observation(
+            &gate,
+            &call.id,
+            false,
+            &model,
+            &Default::default(),
+        )
+        .unwrap();
+        let projected: Value = serde_json::from_str(&observation).unwrap();
+
+        assert_eq!(projected["truncated"], true);
+        assert_eq!(projected["cursor"], "provider-cursor-1");
+        assert_eq!(projected["next"], "provider-cursor-2");
+        assert_eq!(projected["continueWith"]["cursor"], "provider-cursor-1");
+        assert_eq!(projected["sourceCompleteness"], "unknown");
     }
 
     #[test]

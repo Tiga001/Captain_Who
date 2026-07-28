@@ -82,8 +82,10 @@ pub(crate) struct ModelToolResultRecovery {
     pub(crate) continue_with: Option<Value>,
     pub(crate) history_open: Option<Value>,
     pub(crate) recovery: Option<Value>,
-    /// Authoritative source-truncation state from the Archive/Tool boundary.
+    /// Observed source-truncation state from the Archive/Tool boundary.
     ///
+    /// `Some(true)` is authoritative. `Some(false)` means no truncation was observed by the
+    /// backend, but must not override a Provider's explicit `sourceCompleteness: "unknown"`.
     /// `None` falls back to inspecting conventional fields in the semantic model result.
     pub(crate) truncated_at_source: Option<bool>,
 }
@@ -148,10 +150,8 @@ impl ModelToolResultGate {
         require_recovery_marker: bool,
     ) -> ModelToolResultGateOutput {
         let mut payload = semantic_payload(model_result, is_error);
-        let truncated_at_source = recovery
-            .and_then(|recovery| recovery.truncated_at_source)
-            .unwrap_or_else(|| source_was_truncated(&payload));
-        if truncated_at_source {
+        let truncated_at_source = source_truncation_state(&payload, recovery);
+        if truncated_at_source == Some(true) {
             payload = mark_source_truncation(payload);
         }
         let original_content = serialize_value(&payload).unwrap_or_else(|| "{}".to_string());
@@ -227,19 +227,38 @@ impl ModelToolResultGate {
             }
         }
 
-        let final_payload = json!({
-            "truncated": true,
-            "truncatedAtSource": truncated_at_source,
-            "originalBytes": original_bytes,
-            "estimatedOriginalTokens": original_estimated_tokens,
-            "status": "result_omitted",
-            "error": if is_error {
-                "Tool result exceeded the model context budget."
-            } else {
-                "Tool result omitted from the model projection because it exceeded the context budget."
-            },
-        });
-        if let Some(output) = self.output_if_fits(call_id, is_error, final_payload, true) {
+        let mut final_payload = Map::from_iter([
+            ("truncated".to_string(), Value::Bool(true)),
+            (
+                "originalBytes".to_string(),
+                Value::Number(original_bytes.into()),
+            ),
+            (
+                "estimatedOriginalTokens".to_string(),
+                Value::Number(original_estimated_tokens.into()),
+            ),
+            ("status".to_string(), json!("result_omitted")),
+            (
+                "error".to_string(),
+                Value::String(
+                    if is_error {
+                        "Tool result exceeded the model context budget."
+                    } else {
+                        "Tool result omitted from the model projection because it exceeded the context budget."
+                    }
+                    .to_string(),
+                ),
+            ),
+        ]);
+        if let Some(truncated_at_source) = truncated_at_source {
+            final_payload.insert(
+                "truncatedAtSource".to_string(),
+                Value::Bool(truncated_at_source),
+            );
+        }
+        if let Some(output) =
+            self.output_if_fits(call_id, is_error, Value::Object(final_payload), true)
+        {
             return output;
         }
 
@@ -363,7 +382,7 @@ fn marked_truncated_payload(
     payload: Value,
     original_bytes: u64,
     original_estimated_tokens: u64,
-    truncated_at_source: bool,
+    truncated_at_source: Option<bool>,
     recovery: Option<&ModelToolResultRecovery>,
 ) -> Value {
     let mut object = match payload {
@@ -383,10 +402,12 @@ fn marked_truncated_payload(
         "estimatedOriginalTokens".to_string(),
         Value::Number(original_estimated_tokens.into()),
     );
-    object.insert(
-        "truncatedAtSource".to_string(),
-        Value::Bool(truncated_at_source),
-    );
+    if let Some(truncated_at_source) = truncated_at_source {
+        object.insert(
+            "truncatedAtSource".to_string(),
+            Value::Bool(truncated_at_source),
+        );
+    }
     if let Some(recovery) = recovery {
         if let Some(value) = &recovery.continue_with {
             object
@@ -405,6 +426,58 @@ fn marked_truncated_payload(
 
 fn source_was_truncated(value: &Value) -> bool {
     crate::tools::value_contains_unrecoverable_source_truncation(value)
+}
+
+fn source_truncation_state(
+    payload: &Value,
+    recovery: Option<&ModelToolResultRecovery>,
+) -> Option<bool> {
+    let recovery_state = recovery.and_then(|recovery| recovery.truncated_at_source);
+    if recovery_state == Some(true) || contains_explicit_source_truncation(payload) {
+        return Some(true);
+    }
+    if contains_unknown_source_completeness(payload) {
+        return None;
+    }
+    if recovery_state == Some(false) {
+        return Some(false);
+    }
+    Some(source_was_truncated(payload))
+}
+
+fn contains_unknown_source_completeness(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            let key = key
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
+            (key == "sourcecompleteness"
+                && value
+                    .as_str()
+                    .is_some_and(|state| state.eq_ignore_ascii_case("unknown")))
+                || contains_unknown_source_completeness(value)
+        }),
+        Value::Array(values) => values.iter().any(contains_unknown_source_completeness),
+        _ => false,
+    }
+}
+
+fn contains_explicit_source_truncation(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            let key = key
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>();
+            (key == "truncatedatsource" && value.as_bool() == Some(true))
+                || contains_explicit_source_truncation(value)
+        }),
+        Value::Array(values) => values.iter().any(contains_explicit_source_truncation),
+        _ => false,
+    }
 }
 
 fn compact_value(value: &Value, factor: u64, depth: usize, protected_subtree: bool) -> Value {
@@ -780,6 +853,52 @@ mod tests {
         assert_eq!(payload["truncatedAtSource"], false);
         assert_eq!(payload["estimatedOriginalTokens"], 10_001);
         assert!(payload["originalBytes"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn provider_unknown_completeness_is_not_rewritten_as_source_complete() {
+        let gate = gate();
+        let result = successful_result(json!({
+            "sourceCompleteness": "unknown",
+            "content": "provider result ".repeat(20_000),
+            "cursor": "provider-next"
+        }));
+        let recovery = ModelToolResultRecovery {
+            // Legacy Archive metadata records only observed source truncation. Its false value
+            // must not override the richer Provider-level unknown state in the canonical result.
+            truncated_at_source: Some(false),
+            ..Default::default()
+        };
+
+        let output = gate.project("provider-unknown", false, &result, Some(&recovery));
+        let payload: Value = serde_json::from_str(&output.content).unwrap();
+
+        assert!(output.truncated);
+        assert!(output.estimated_tokens <= MODEL_TOOL_RESULT_MAX_TOKENS);
+        assert_eq!(payload["sourceCompleteness"], "unknown");
+        assert!(payload.get("truncatedAtSource").is_none());
+        assert_eq!(payload["cursor"], "provider-next");
+    }
+
+    #[test]
+    fn archive_source_state_overrides_model_only_truncated_marker() {
+        let gate = gate();
+        let result = successful_result(json!({
+            "truncated": true,
+            "partialReason": "model_result_count_limit",
+            "content": "bounded semantic projection"
+        }));
+        let recovery = ModelToolResultRecovery {
+            truncated_at_source: Some(false),
+            ..Default::default()
+        };
+
+        let output = gate.project("model-only-limit", false, &result, Some(&recovery));
+        let payload: Value = serde_json::from_str(&output.content).unwrap();
+
+        assert!(!output.truncated);
+        assert_eq!(payload["truncated"], true);
+        assert!(payload.get("truncatedAtSource").is_none());
     }
 
     #[test]

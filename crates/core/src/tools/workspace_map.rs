@@ -114,6 +114,12 @@ impl AgentTool for WorkspaceMapTool {
             &cancellation_token,
         )?;
 
+        let walk_partial = walk.truncated;
+        let tree_partial = tree.omitted > 0;
+        let refine = (walk_partial || tree_partial).then_some(
+            "Narrow focusPath or reduce maxDepth, then call workspace_map again for a more focused summary.",
+        );
+
         Ok(json!({
             "workspace": {
                 "focusPath": focus_path,
@@ -124,9 +130,25 @@ impl AgentTool for WorkspaceMapTool {
             "summary": summary,
             "tree": tree.entries,
             "treeText": tree.text,
+            "coverage": {
+                "walk": {
+                    "scanned": walk.entries.len(),
+                    "limit": super::MAX_WALK_ENTRIES,
+                    "partial": walk_partial,
+                    "stopReason": walk_partial.then_some("walk_entry_limit")
+                },
+                "tree": {
+                    "total": tree.total,
+                    "returned": tree.returned,
+                    "omitted": tree.omitted,
+                    "partial": tree_partial,
+                    "stopReason": tree_partial.then_some("depth_or_entry_limit")
+                }
+            },
+            "refine": refine,
             "truncated": {
-                "walk": walk.truncated,
-                "tree": tree.truncated
+                "walk": walk_partial,
+                "tree": tree_partial
             }
         }))
     }
@@ -135,7 +157,7 @@ impl AgentTool for WorkspaceMapTool {
         let projected = result.result.as_ref().and_then(|value| {
             super::model_projection::retain_object_fields(
                 value,
-                &["summary", "treeText", "truncated"],
+                &["summary", "treeText", "coverage", "refine", "truncated"],
             )
         });
         super::model_projection::compact_model_result(result, projected)
@@ -154,7 +176,9 @@ struct WorkspaceMapArgs {
 struct TreeOutput {
     entries: Vec<Value>,
     text: String,
-    truncated: bool,
+    total: usize,
+    returned: usize,
+    omitted: usize,
 }
 
 #[derive(Default)]
@@ -337,7 +361,7 @@ fn build_tree(
 ) -> AgentResult<TreeOutput> {
     let mut output_entries = Vec::new();
     let mut lines = Vec::new();
-    let mut truncated = false;
+    let mut total = 0usize;
 
     for entry in entries {
         cancellation_token.check()?;
@@ -346,13 +370,15 @@ fn build_tree(
         }
 
         let depth = depth_relative_to(focus_root, &entry.path);
-        if depth == 0 || depth > max_depth {
-            truncated = true;
+        if depth == 0 {
+            continue;
+        }
+        total = total.saturating_add(1);
+        if depth > max_depth {
             continue;
         }
         if output_entries.len() >= max_entries {
-            truncated = true;
-            break;
+            continue;
         }
 
         let path = relative_display(workspace_root, &entry.path);
@@ -376,10 +402,13 @@ fn build_tree(
         lines.push(format!("{indent}{name}{suffix}"));
     }
 
+    let returned = output_entries.len();
     Ok(TreeOutput {
         entries: output_entries,
         text: lines.join("\n"),
-        truncated,
+        total,
+        returned,
+        omitted: total.saturating_sub(returned),
     })
 }
 
@@ -737,6 +766,11 @@ mod tests {
             value["summary"]["testCandidates"][0]["path"],
             "src/App.test.tsx"
         );
+        assert_eq!(value["coverage"]["walk"]["partial"], false);
+        assert_eq!(value["coverage"]["tree"]["returned"], 5);
+        assert_eq!(value["coverage"]["tree"]["total"], 5);
+        assert_eq!(value["coverage"]["tree"]["omitted"], 0);
+        assert!(value["refine"].is_null());
 
         let coverage = &value["summary"]["collectionCoverage"];
         for collection in [
@@ -763,6 +797,28 @@ mod tests {
             model_value["summary"]["collectionCoverage"],
             value["summary"]["collectionCoverage"]
         );
+        assert_eq!(
+            model_value["coverage"]["walk"]["scanned"],
+            value["coverage"]["walk"]["scanned"]
+        );
+        assert_eq!(
+            model_value["coverage"]["walk"]["partial"],
+            value["coverage"]["walk"]["partial"]
+        );
+        assert_eq!(
+            model_value["coverage"]["tree"]["total"],
+            value["coverage"]["tree"]["total"]
+        );
+        assert_eq!(
+            model_value["coverage"]["tree"]["returned"],
+            value["coverage"]["tree"]["returned"]
+        );
+        assert_eq!(
+            model_value["coverage"]["tree"]["omitted"],
+            value["coverage"]["tree"]["omitted"]
+        );
+        assert!(model_value["coverage"]["walk"].get("stopReason").is_none());
+        assert!(model_value["coverage"]["tree"].get("stopReason").is_none());
 
         let event = registry.event_projection(&result);
         assert_eq!(
@@ -802,6 +858,43 @@ mod tests {
         assert_eq!(value["workspace"]["focusPath"], "agent");
         assert!(value["treeText"].as_str().unwrap().contains("rust/"));
         assert!(!value["treeText"].as_str().unwrap().contains("desktop"));
+    }
+
+    #[test]
+    fn workspace_map_tree_limit_is_explicit_and_recommends_refinement() {
+        let fixture = TestWorkspace::new();
+        fixture.write_file("src/a.rs", "a");
+        fixture.write_file("src/b.rs", "b");
+        fixture.write_file("src/nested/c.rs", "c");
+        let context = fixture.context();
+        let registry = ToolRegistry::defaults_with_search(None);
+
+        let result = registry.execute(
+            &context,
+            &AgentToolCall {
+                id: "call-tree-coverage".to_string(),
+                tool: "workspace_map".to_string(),
+                args: json!({ "maxDepth": 1, "maxEntries": 1 }),
+                approval_status: AgentApprovalStatus::NotRequired,
+                reason: None,
+            },
+        );
+
+        assert!(result.ok, "{:?}", result.error);
+        let value = result.result.as_ref().unwrap();
+        assert_eq!(value["coverage"]["tree"]["returned"], 1);
+        assert_eq!(value["coverage"]["tree"]["total"], 5);
+        assert_eq!(value["coverage"]["tree"]["omitted"], 4);
+        assert_eq!(value["coverage"]["tree"]["partial"], true);
+        assert_eq!(
+            value["coverage"]["tree"]["stopReason"],
+            "depth_or_entry_limit"
+        );
+        assert!(value["refine"]
+            .as_str()
+            .unwrap()
+            .contains("Narrow focusPath"));
+        assert_eq!(value["truncated"]["tree"], true);
     }
 
     #[test]

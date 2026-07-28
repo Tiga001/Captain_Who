@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 
 use super::skills_list_resources::{map_resource_error, resource_error};
 
+const MAX_MATERIALIZATION_REASON_CHARS: usize = 2_000;
+
 /// Approval-gated bridge from an immutable Skill package to the mutable run
 /// workspace. The tool only prepares a logical action; the host owns the
 /// filesystem transaction and revalidates the exact revision at execution.
@@ -37,7 +39,7 @@ impl AgentTool for SkillsMaterializeResourceTool {
                     "sourceUri": { "type": "string", "description": "For one file, use its exact skill:// resource URI. For a template tree, use the exact skill:// package root URI." },
                     "sourcePrefix": { "type": "string", "description": "Optional templates/... package path. When present, sourceUri must be the package root and the complete subtree is copied." },
                     "destination": { "type": "string", "description": "New workspace-relative file or directory path. Existing destinations are never overwritten or merged." },
-                    "reason": { "type": "string", "maxLength": 2000, "description": "Short explanation of why the resource is needed." }
+                    "reason": { "type": "string", "maxLength": MAX_MATERIALIZATION_REASON_CHARS, "description": "Short explanation of why the resource is needed." }
                 },
                 "required": ["sourceUri", "destination"],
                 "additionalProperties": false
@@ -82,9 +84,9 @@ impl AgentTool for SkillsMaterializeResourceTool {
             Some(prefix) => validate_template_tree(context, source_uri, prefix)?,
         }
 
-        let reason = non_empty(args.reason.as_deref())
-            .map(|reason| truncate_chars(reason, 2_000))
-            .or_else(|| call.reason.clone());
+        let reason = validate_materialization_reason(
+            non_empty(args.reason.as_deref()).or_else(|| non_empty(call.reason.as_deref())),
+        )?;
         Ok(AgentProposedAction::SkillMaterialization {
             materialization: AgentSkillMaterializationRequest {
                 id: call.id.clone(),
@@ -145,7 +147,8 @@ pub(crate) fn validate_frozen_materialization_trace_args(
         .map_err(|_| "materialization destination is denied".to_string())?;
     let source_prefix = non_empty(args.source_prefix.as_deref()).map(ToString::to_string);
     let reason_was_present = args.reason.is_some();
-    let reason = non_empty(args.reason.as_deref()).map(|reason| truncate_chars(reason, 2_000));
+    let reason = validate_materialization_reason(args.reason.as_deref())
+        .map_err(|_| "materialization reason is invalid".to_string())?;
 
     if source_uri != frozen.source_uri
         || source_prefix != frozen.source_prefix
@@ -283,8 +286,14 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-fn truncate_chars(value: &str, max: usize) -> String {
-    value.chars().take(max).collect()
+fn validate_materialization_reason(value: Option<&str>) -> AgentResult<Option<String>> {
+    let value = non_empty(value);
+    if value.is_some_and(|value| value.chars().count() > MAX_MATERIALIZATION_REASON_CHARS) {
+        return Err(AgentError::new(format!(
+            "skills_materialize_resource.reason cannot exceed {MAX_MATERIALIZATION_REASON_CHARS} characters."
+        )));
+    }
+    Ok(value.map(ToString::to_string))
 }
 
 fn materialization_error(code: &str, recovery: &str, message: &str) -> AgentError {
@@ -320,5 +329,19 @@ mod tests {
             "overwrite": true,
         }))
         .is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_reason_without_silently_changing_it() {
+        let exact = "界".repeat(MAX_MATERIALIZATION_REASON_CHARS);
+        assert_eq!(
+            validate_materialization_reason(Some(&exact)).unwrap(),
+            Some(exact)
+        );
+        let error = validate_materialization_reason(Some(
+            &"界".repeat(MAX_MATERIALIZATION_REASON_CHARS + 1),
+        ))
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot exceed"));
     }
 }

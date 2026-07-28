@@ -12,8 +12,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 const TAVILY_EXTRACT_ENDPOINT: &str = "https://api.tavily.com/extract";
-const DEFAULT_MAX_CHARS: usize = 40_000;
-const MAX_CONTENT_CHARS: usize = 120_000;
+const DEFAULT_EVENT_CONTENT_CHARS: usize = 40_000;
+const MAX_EVENT_CONTENT_CHARS: usize = 120_000;
 const DEFAULT_TIMEOUT_SECONDS: f64 = 30.0;
 const MAX_TIMEOUT_SECONDS: f64 = 60.0;
 const DEFAULT_CHUNKS_PER_SOURCE: usize = 3;
@@ -58,7 +58,7 @@ impl AgentTool for WebFetchTool {
                     "maxChars": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": MAX_CONTENT_CHARS,
+                        "maximum": MAX_EVENT_CONTENT_CHARS,
                         "description": "Compatibility limit for presentation/checkpoint consumers. It does not limit Exact History capture or replace the fixed 10K model-result budget."
                     }
                 },
@@ -141,7 +141,7 @@ struct TavilyExtractRequest {
     include_images: bool,
     include_favicon: bool,
     timeout_seconds: f64,
-    max_chars: usize,
+    event_content_chars: usize,
 }
 
 impl TavilyExtractRequest {
@@ -186,10 +186,10 @@ impl TavilyExtractRequest {
                 .timeout_seconds
                 .unwrap_or(DEFAULT_TIMEOUT_SECONDS)
                 .clamp(1.0, MAX_TIMEOUT_SECONDS),
-            max_chars: args
+            event_content_chars: args
                 .max_chars
-                .unwrap_or(DEFAULT_MAX_CHARS)
-                .clamp(1, MAX_CONTENT_CHARS),
+                .unwrap_or(DEFAULT_EVENT_CONTENT_CHARS)
+                .clamp(1, MAX_EVENT_CONTENT_CHARS),
         })
     }
 
@@ -431,7 +431,7 @@ fn format_tavily_extract_response(
         "failedResults": failed_results,
         "failedResultsCoverage": failed_results_coverage,
         "responseTime": response_time,
-        "requestedMaxChars": request.max_chars,
+        "requestedMaxChars": request.event_content_chars,
         "truncated": source_completeness.truncated
             || all_images.len() > images.len()
             || all_failed_results.len() > failed_results.len()
@@ -607,8 +607,8 @@ fn web_fetch_bounded_consumer_projection(result: &AgentToolResult) -> AgentToolR
         .remove("requestedMaxChars")
         .and_then(|value| value.as_u64())
         .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(DEFAULT_MAX_CHARS)
-        .clamp(1, MAX_CONTENT_CHARS);
+        .unwrap_or(DEFAULT_EVENT_CONTENT_CHARS)
+        .clamp(1, MAX_EVENT_CONTENT_CHARS);
     let Some(content) = payload.get("content").and_then(Value::as_str) else {
         return projected;
     };
@@ -735,7 +735,7 @@ mod tests {
         let payload = request.to_payload();
 
         assert_eq!(request.chunks_per_source, Some(MAX_CHUNKS_PER_SOURCE));
-        assert_eq!(request.max_chars, MAX_CONTENT_CHARS);
+        assert_eq!(request.event_content_chars, MAX_EVENT_CONTENT_CHARS);
         assert_eq!(payload["urls"][0], "https://example.com/docs");
         assert_eq!(payload["query"], "rust");
         assert_eq!(payload["chunks_per_source"], MAX_CHUNKS_PER_SOURCE);

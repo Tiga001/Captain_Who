@@ -10,6 +10,9 @@
         "result": {
           "query": "Rust projection contracts",
           "provider": "tavily",
+          "contentKind": "provider_search_summary",
+          "fullContentTool": "web_fetch",
+          "sourceCompleteness": "unknown",
           "answer": "A projection separates consumer-specific views.",
           "results": [
             {
@@ -30,6 +33,9 @@
         "model": {
           "required": {
             "/result/answer": "A projection separates consumer-specific views.",
+            "/result/contentKind": "provider_search_summary",
+            "/result/fullContentTool": "web_fetch",
+            "/result/sourceCompleteness": "unknown",
             "/result/results/0/title": "Projection contracts",
             "/result/results/0/url": "https://example.com/contracts",
             "/result/results/0/content": "A concise source excerpt.",
@@ -49,6 +55,9 @@
           "required": {
             "/result/query": "Rust projection contracts",
             "/result/provider": "tavily",
+            "/result/contentKind": "provider_search_summary",
+            "/result/fullContentTool": "web_fetch",
+            "/result/sourceCompleteness": "unknown",
             "/result/answer": "A projection separates consumer-specific views.",
             "/result/results/0/title": "Projection contracts",
             "/result/results/0/url": "https://example.com/contracts",
@@ -284,6 +293,22 @@
             }
           ],
           "treeText": "src/\n  main.rs",
+          "coverage": {
+            "walk": {
+              "scanned": 2,
+              "limit": 20000,
+              "partial": false,
+              "stopReason": null
+            },
+            "tree": {
+              "total": 2,
+              "returned": 2,
+              "omitted": 0,
+              "partial": false,
+              "stopReason": null
+            }
+          },
+          "refine": null,
           "truncated": {
             "walk": false,
             "tree": false
@@ -295,7 +320,8 @@
           "required": {
             "/result/summary/fileCount": 1,
             "/result/summary/collectionCoverage/languages/returned": 0,
-            "/result/treeText": "src/\n  main.rs"
+            "/result/treeText": "src/\n  main.rs",
+            "/result/coverage/tree/omitted": 0
           },
           "absent": ["/result/workspace", "/result/tree"]
         },
@@ -328,8 +354,13 @@
             "findings": []
           },
           "artifactObservation": {
-            "schemaVersion": 1,
+            "schemaVersion": 3,
             "status": "complete",
+            "partial": false,
+            "stopReasons": [],
+            "scanned": 2,
+            "returned": 1,
+            "omitted": 0,
             "coverage": {
               "workspaceIncluded": true
             },
@@ -370,6 +401,10 @@
             "/result/stdout": "created report.xlsx",
             "/result/policy/decision": "allow",
             "/result/artifacts/status": "complete",
+            "/result/artifacts/partial": false,
+            "/result/artifacts/scanned": 2,
+            "/result/artifacts/returned": 1,
+            "/result/artifacts/omitted": 0,
             "/result/artifacts/changes/0/path": "report.xlsx",
             "/result/artifacts/changes/0/validation/status": "valid"
           },
@@ -386,6 +421,7 @@
           "equalsRaw": true,
           "required": {
             "/result/artifactObservation/status": "complete",
+            "/result/artifactObservation/partial": false,
             "/result/artifactObservation/changes/0/kind": "created",
             "/result/artifactObservation/changes/0/artifactKind": "spreadsheet",
             "/result/artifactObservation/changes/0/path": "report.xlsx",

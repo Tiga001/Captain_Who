@@ -216,7 +216,16 @@ fn project_command_execution(value: &Value) -> Option<Value> {
 
 fn project_artifact_observation(value: &Value) -> Option<Value> {
     let mut output = Map::new();
-    for field in ["status", "changesTruncated", "changesOmitted"] {
+    for field in [
+        "status",
+        "partial",
+        "stopReasons",
+        "scanned",
+        "returned",
+        "omitted",
+        "changesTruncated",
+        "changesOmitted",
+    ] {
         super::model_projection::insert_field(&mut output, value, field);
     }
     if let Some(changes) = value.get("changes").and_then(Value::as_array) {

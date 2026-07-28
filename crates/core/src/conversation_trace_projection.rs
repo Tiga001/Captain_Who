@@ -528,6 +528,38 @@ fn project_web_search_result(value: &Value) -> (Value, bool) {
         ("message", DurableTraceProjectionLimits::TOOL_ERROR_CHARS),
         ("recovery", DurableTraceProjectionLimits::TITLE_CHARS),
         ("answer", DurableTraceProjectionLimits::SUMMARY_CHARS),
+        ("contentKind", DurableTraceProjectionLimits::TITLE_CHARS),
+        ("fullContentTool", DurableTraceProjectionLimits::TITLE_CHARS),
+        (
+            "sourceCompleteness",
+            DurableTraceProjectionLimits::TITLE_CHARS,
+        ),
+        (
+            "requestedMaxResults",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        ("cursor", DurableTraceProjectionLimits::GENERIC_STRING_CHARS),
+        ("next", DurableTraceProjectionLimits::GENERIC_STRING_CHARS),
+        (
+            "nextCursor",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        (
+            "continueWith",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        (
+            "truncatedAtSource",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        (
+            "omittedBytes",
+            DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
+        ),
+        (
+            "sourceStopReason",
+            DurableTraceProjectionLimits::TITLE_CHARS,
+        ),
         (
             "responseTime",
             DurableTraceProjectionLimits::GENERIC_STRING_CHARS,
@@ -546,13 +578,26 @@ fn project_web_search_result(value: &Value) -> (Value, bool) {
             })
             .collect::<Vec<_>>();
         truncated |= selected.len() < results.len();
+        output.insert(
+            "resultCoverage".into(),
+            json!({
+                "total": results.len(),
+                "returned": selected.len(),
+                "omitted": results.len().saturating_sub(selected.len())
+            }),
+        );
         output.insert("results".into(), Value::Array(selected));
     }
     let source_truncated = input
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    output.insert("truncated".into(), json!(source_truncated || truncated));
+        .get("truncatedAtSource")
+        .or_else(|| input.get("truncated"))
+        .and_then(Value::as_bool);
+    if source_truncated.is_some() || truncated {
+        output.insert(
+            "truncated".into(),
+            json!(source_truncated.unwrap_or(false) || truncated),
+        );
+    }
     (Value::Object(output), truncated)
 }
 

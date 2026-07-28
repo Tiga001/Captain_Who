@@ -12,8 +12,8 @@ use std::time::Duration;
 const TAVILY_SEARCH_ENDPOINT: &str = "https://api.tavily.com/search";
 const DEFAULT_MAX_RESULTS: usize = 5;
 const MAX_RESULTS: usize = 8;
-const DEFAULT_RESULT_CONTENT_CHARS: usize = 600;
-const DEFAULT_ANSWER_CHARS: usize = 1_200;
+const TAVILY_MAX_CHUNKS_PER_SOURCE: usize = 3;
+const TAVILY_CHUNK_MAX_CHARS: usize = 500;
 
 pub(super) struct WebSearchTool {
     api_key: String,
@@ -62,7 +62,8 @@ impl AgentTool for WebSearchTool {
     fn execute(&self, context: &ToolExecutionContext, args: Value) -> AgentResult<Value> {
         let args: WebSearchArgs = serde_json::from_value(args)
             .map_err(|error| AgentError::new(format!("web_search 参数无效：{error}")))?;
-        let request = TavilySearchRequest::from_args(args)?;
+        let request = TavilySearchRequest::from_args(args)?
+            .with_model_output_budget(context.text_output_budget());
         let cancellation_token = context.cancellation_token();
         cancellation_token.check()?;
         let response = block_on_tool_future(
@@ -77,9 +78,20 @@ impl AgentTool for WebSearchTool {
         let projected = result.result.as_ref().and_then(|value| {
             let mut output = serde_json::Map::new();
             super::model_projection::insert_field(&mut output, value, "answer");
+            super::model_projection::insert_field(&mut output, value, "contentKind");
+            super::model_projection::insert_field(&mut output, value, "fullContentTool");
+            super::model_projection::insert_field(&mut output, value, "sourceCompleteness");
+            let mut result_limit_applied = false;
             if let Some(results) = value.get("results").and_then(Value::as_array) {
+                let requested_max_results = value
+                    .get("requestedMaxResults")
+                    .and_then(Value::as_u64)
+                    .and_then(|limit| usize::try_from(limit).ok())
+                    .unwrap_or(MAX_RESULTS)
+                    .clamp(1, MAX_RESULTS);
                 let results = results
                     .iter()
+                    .take(requested_max_results)
                     .filter_map(|item| {
                         super::model_projection::retain_object_fields(
                             item,
@@ -87,11 +99,50 @@ impl AgentTool for WebSearchTool {
                         )
                     })
                     .collect::<Vec<_>>();
+                let returned = results.len();
+                let omitted = value
+                    .get("results")
+                    .and_then(Value::as_array)
+                    .map_or(0, |source| source.len().saturating_sub(returned));
+                output.insert(
+                    "resultCoverage".to_string(),
+                    json!({
+                        "total": returned.saturating_add(omitted),
+                        "returned": returned,
+                        "omitted": omitted
+                    }),
+                );
+                result_limit_applied = omitted > 0;
                 if !results.is_empty() {
                     output.insert("results".to_string(), Value::Array(results));
                 }
             }
             super::model_projection::insert_field(&mut output, value, "images");
+            for key in [
+                "cursor",
+                "next",
+                "nextCursor",
+                "continueWith",
+                "truncatedAtSource",
+                "omittedBytes",
+                "sourceStopReason",
+            ] {
+                super::model_projection::insert_field(&mut output, value, key);
+            }
+            if result_limit_applied {
+                output.insert("partial".to_string(), Value::Bool(true));
+                output.insert(
+                    "partialReason".to_string(),
+                    Value::String("model_result_count_limit".to_string()),
+                );
+                output.insert(
+                    "refine".to_string(),
+                    Value::String(
+                        "Narrow the web_search query for different results, or use web_fetch on a returned URL for exact page content."
+                            .to_string(),
+                    ),
+                );
+            }
             super::model_projection::insert_field(&mut output, value, "truncated");
             (!output.is_empty()).then_some(Value::Object(output))
         });
@@ -122,6 +173,7 @@ struct TavilySearchRequest {
     include_answer: bool,
     include_domains: Vec<String>,
     exclude_domains: Vec<String>,
+    chunks_per_source: Option<usize>,
 }
 
 impl TavilySearchRequest {
@@ -159,7 +211,28 @@ impl TavilySearchRequest {
             include_answer: args.include_answer.unwrap_or(true),
             include_domains: clean_domains(args.include_domains.unwrap_or_default()),
             exclude_domains: clean_domains(args.exclude_domains.unwrap_or_default()),
+            chunks_per_source: None,
         })
+    }
+
+    /// Tavily has no generic `max_output_tokens` option. Advanced Search does expose
+    /// `chunks_per_source`, so translate the current run's model-result allowance into the
+    /// closest provider-native bound instead of applying another local character limit.
+    fn with_model_output_budget(mut self, budget: &crate::context::ContextTextBudget) -> Self {
+        if self.search_depth == "advanced" {
+            let tokens_per_chunk = budget.estimate(&"x".repeat(TAVILY_CHUNK_MAX_CHARS)).max(1);
+            let tokens_per_source = budget
+                .max_tokens()
+                .checked_div(self.max_results as u64)
+                .unwrap_or(1)
+                .max(1);
+            self.chunks_per_source = Some(
+                usize::try_from(tokens_per_source / tokens_per_chunk)
+                    .unwrap_or(TAVILY_MAX_CHUNKS_PER_SOURCE)
+                    .clamp(1, TAVILY_MAX_CHUNKS_PER_SOURCE),
+            );
+        }
+        self
     }
 
     fn to_payload(&self) -> Value {
@@ -182,6 +255,9 @@ impl TavilySearchRequest {
         }
         if !self.exclude_domains.is_empty() {
             payload["exclude_domains"] = json!(self.exclude_domains);
+        }
+        if let Some(chunks_per_source) = self.chunks_per_source {
+            payload["chunks_per_source"] = json!(chunks_per_source);
         }
 
         payload
@@ -259,30 +335,19 @@ fn format_tavily_response(
     cancellation_token: &AgentCancellationToken,
 ) -> AgentResult<Value> {
     cancellation_token.check()?;
-    let (answer, answer_truncated) = response
+    let answer = response
         .get("answer")
         .and_then(Value::as_str)
-        .map(|answer| truncate_chars(answer, DEFAULT_ANSWER_CHARS))
-        .map(|(answer, truncated)| (Some(answer), truncated))
-        .unwrap_or((None, false));
-    let raw_results_len = response
-        .get("results")
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0);
-    let mut truncated = answer_truncated || raw_results_len > request.max_results;
+        .map(str::to_string);
     let results = response
         .get("results")
         .and_then(Value::as_array)
         .map(|results| {
             results
                 .iter()
-                .take(request.max_results)
                 .map(|result| {
                     cancellation_token.check()?;
-                    let (result, result_truncated) = format_tavily_result(result);
-                    truncated |= result_truncated;
-                    Ok(result)
+                    Ok(format_tavily_result(result))
                 })
                 .collect::<AgentResult<Vec<_>>>()
         })
@@ -293,39 +358,84 @@ fn format_tavily_response(
         .get("response_time")
         .or_else(|| response.get("responseTime"))
         .cloned();
+    let source_completeness = response
+        .get("truncated_at_source")
+        .or_else(|| response.get("truncatedAtSource"))
+        .and_then(Value::as_bool)
+        .map_or("unknown", |truncated| {
+            if truncated {
+                "provider_declared_truncated"
+            } else {
+                "provider_declared_complete"
+            }
+        });
 
-    Ok(json!({
-        "query": request.query,
-        "provider": "tavily",
-        "answer": answer,
-        "results": results,
-        "images": images,
-        "responseTime": response_time,
-        "truncated": truncated
-    }))
+    let mut output = serde_json::Map::from_iter([
+        ("query".to_string(), json!(request.query)),
+        ("provider".to_string(), json!("tavily")),
+        ("answer".to_string(), json!(answer)),
+        ("contentKind".to_string(), json!("provider_search_summary")),
+        ("fullContentTool".to_string(), json!("web_fetch")),
+        ("sourceCompleteness".to_string(), json!(source_completeness)),
+        (
+            "requestedMaxResults".to_string(),
+            json!(request.max_results),
+        ),
+        ("results".to_string(), json!(results)),
+        ("images".to_string(), images),
+        ("responseTime".to_string(), json!(response_time)),
+    ]);
+    copy_provider_navigation_and_source_metadata(&response, &mut output);
+    Ok(Value::Object(output))
 }
 
-fn format_tavily_result(result: &Value) -> (Value, bool) {
-    let (content, content_truncated) = result
+fn format_tavily_result(result: &Value) -> Value {
+    let content = result
         .get("content")
         .and_then(Value::as_str)
-        .map(|content| truncate_chars(content, DEFAULT_RESULT_CONTENT_CHARS))
-        .map(|(content, truncated)| (Some(content), truncated))
-        .unwrap_or((None, false));
-    (
-        json!({
-            "title": result.get("title").and_then(Value::as_str),
-            "url": result.get("url").and_then(Value::as_str),
-            "content": content,
-            "score": result.get("score").cloned(),
-            "publishedDate": result
-                .get("published_date")
-                .or_else(|| result.get("publishedDate"))
-                .and_then(Value::as_str),
-            "favicon": result.get("favicon").and_then(Value::as_str)
-        }),
-        content_truncated,
-    )
+        .map(str::to_string);
+    json!({
+        "title": result.get("title").and_then(Value::as_str),
+        "url": result.get("url").and_then(Value::as_str),
+        "content": content,
+        "score": result.get("score").cloned(),
+        "publishedDate": result
+            .get("published_date")
+            .or_else(|| result.get("publishedDate"))
+            .and_then(Value::as_str),
+        "favicon": result.get("favicon").and_then(Value::as_str)
+    })
+}
+
+/// Retains provider-owned pagination and source-integrity declarations without fabricating
+/// completeness when the provider does not expose them.
+fn copy_provider_navigation_and_source_metadata(
+    response: &Value,
+    output: &mut serde_json::Map<String, Value>,
+) {
+    for (canonical, candidates) in [
+        ("cursor", &["cursor"][..]),
+        ("next", &["next"][..]),
+        ("nextCursor", &["next_cursor", "nextCursor"][..]),
+        ("continueWith", &["continue_with", "continueWith"][..]),
+        (
+            "truncatedAtSource",
+            &["truncated_at_source", "truncatedAtSource"][..],
+        ),
+        ("truncated", &["truncated"][..]),
+        ("omittedBytes", &["omitted_bytes", "omittedBytes"][..]),
+        (
+            "sourceStopReason",
+            &["source_stop_reason", "sourceStopReason"][..],
+        ),
+    ] {
+        if let Some(value) = candidates
+            .iter()
+            .find_map(|candidate| response.get(*candidate))
+        {
+            output.insert(canonical.to_string(), value.clone());
+        }
+    }
 }
 
 fn clean_domains(domains: Vec<String>) -> Vec<String> {
@@ -353,7 +463,8 @@ mod tests {
             include_domains: Some(vec![" docs.rs ".to_string(), "".to_string()]),
             exclude_domains: None,
         })
-        .unwrap();
+        .unwrap()
+        .with_model_output_budget(&crate::context::ContextTextBudget::heuristic(10_000));
         let payload = request.to_payload();
 
         assert_eq!(request.max_results, MAX_RESULTS);
@@ -362,6 +473,7 @@ mod tests {
         assert_eq!(payload["include_answer"], true);
         assert_eq!(payload["include_raw_content"], false);
         assert_eq!(payload["include_domains"][0], "docs.rs");
+        assert_eq!(payload["chunks_per_source"], TAVILY_MAX_CHUNKS_PER_SOURCE);
     }
 
     #[test]
@@ -416,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn bounds_answer_and_result_content_for_model_context() {
+    fn preserves_provider_search_summaries_until_the_central_model_gate() {
         let request = TavilySearchRequest::from_args(WebSearchArgs {
             query: "rust".to_string(),
             max_results: Some(MAX_RESULTS),
@@ -428,34 +540,172 @@ mod tests {
             exclude_domains: None,
         })
         .unwrap();
+        let answer = "a".repeat(12_345);
+        let result_content = "b".repeat(6_789);
         let response = json!({
-            "answer": "a".repeat(DEFAULT_ANSWER_CHARS + 100),
+            "answer": answer,
             "results": (0..MAX_RESULTS)
                 .map(|index| json!({
                     "title": format!("Result {index}"),
                     "url": format!("https://example.com/{index}"),
-                    "content": "b".repeat(DEFAULT_RESULT_CONTENT_CHARS + 100)
+                    "content": result_content
                 }))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            "cursor": "provider-page-2",
+            "next": { "cursor": "provider-page-2" },
+            "continue_with": {
+                "provider": "tavily",
+                "cursor": "provider-page-2"
+            }
         });
 
         let formatted =
             format_tavily_response(request, response, &AgentCancellationToken::new()).unwrap();
-        let truncation_suffix_chars = "\n...[truncated]".chars().count();
 
         assert_eq!(formatted["results"].as_array().unwrap().len(), MAX_RESULTS);
-        assert_eq!(
-            formatted["answer"].as_str().unwrap().chars().count(),
-            DEFAULT_ANSWER_CHARS + truncation_suffix_chars
-        );
+        assert_eq!(formatted["answer"], answer);
         assert!(formatted["results"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|result| {
-                result["content"].as_str().unwrap().chars().count()
-                    == DEFAULT_RESULT_CONTENT_CHARS + truncation_suffix_chars
-            }));
-        assert_eq!(formatted["truncated"], true);
+            .all(|result| result["content"] == result_content));
+        assert_eq!(formatted["contentKind"], "provider_search_summary");
+        assert_eq!(formatted["fullContentTool"], "web_fetch");
+        assert_eq!(formatted["sourceCompleteness"], "unknown");
+        assert_eq!(formatted["cursor"], "provider-page-2");
+        assert_eq!(formatted["next"]["cursor"], "provider-page-2");
+        assert_eq!(formatted["continueWith"]["cursor"], "provider-page-2");
+        assert!(
+            formatted.get("truncatedAtSource").is_none(),
+            "provider silence must not be converted into a completeness claim"
+        );
+    }
+
+    #[test]
+    fn translates_small_advanced_search_budget_to_provider_chunk_limit() {
+        let request = TavilySearchRequest::from_args(WebSearchArgs {
+            query: "rust".to_string(),
+            max_results: Some(MAX_RESULTS),
+            search_depth: Some("advanced".to_string()),
+            topic: None,
+            time_range: None,
+            include_answer: None,
+            include_domains: None,
+            exclude_domains: None,
+        })
+        .unwrap()
+        .with_model_output_budget(&crate::context::ContextTextBudget::heuristic(1));
+
+        assert_eq!(request.to_payload()["chunks_per_source"], 1);
+    }
+
+    #[test]
+    fn basic_search_does_not_send_unsupported_chunk_parameter() {
+        let request = TavilySearchRequest::from_args(WebSearchArgs {
+            query: "rust".to_string(),
+            max_results: None,
+            search_depth: Some("basic".to_string()),
+            topic: None,
+            time_range: None,
+            include_answer: None,
+            include_domains: None,
+            exclude_domains: None,
+        })
+        .unwrap()
+        .with_model_output_budget(&crate::context::ContextTextBudget::heuristic(10_000));
+
+        assert!(request.to_payload().get("chunks_per_source").is_none());
+    }
+
+    #[test]
+    fn provider_pagination_is_not_misreported_as_unrecoverable_source_truncation() {
+        let request = TavilySearchRequest::from_args(WebSearchArgs {
+            query: "rust".to_string(),
+            max_results: None,
+            search_depth: None,
+            topic: None,
+            time_range: None,
+            include_answer: None,
+            include_domains: None,
+            exclude_domains: None,
+        })
+        .unwrap();
+        let formatted = format_tavily_response(
+            request,
+            json!({
+                "results": [],
+                "truncated": true,
+                "cursor": "provider-next-page"
+            }),
+            &AgentCancellationToken::new(),
+        )
+        .unwrap();
+        let result = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "web-search-page".to_string(),
+            tool: "web_search".to_string(),
+            ok: true,
+            result: Some(formatted),
+            error: None,
+        };
+
+        assert!(!crate::tools::tool_result_truncated_at_source(&result));
+    }
+
+    #[test]
+    fn model_projection_defensively_enforces_eight_results_without_losing_provider_archive() {
+        let raw = AgentToolResult {
+            exact_archive_file: None,
+            call_id: "web-search-provider-overflow".to_string(),
+            tool: "web_search".to_string(),
+            ok: true,
+            result: Some(json!({
+                "requestedMaxResults": MAX_RESULTS,
+                "contentKind": "provider_search_summary",
+                "fullContentTool": "web_fetch",
+                "sourceCompleteness": "unknown",
+                "results": (0..(MAX_RESULTS + 3))
+                    .map(|index| json!({
+                        "title": format!("Result {index}"),
+                        "url": format!("https://example.com/{index}"),
+                        "content": format!("summary {index}")
+                    }))
+                    .collect::<Vec<_>>()
+            })),
+            error: None,
+        };
+
+        let model = WebSearchTool::new(String::new()).model_projection(&raw);
+        let model_value = model.result.as_ref().unwrap();
+        assert_eq!(
+            model_value["results"].as_array().unwrap().len(),
+            MAX_RESULTS
+        );
+        assert_eq!(model_value["resultCoverage"]["total"], MAX_RESULTS + 3);
+        assert_eq!(model_value["resultCoverage"]["returned"], MAX_RESULTS);
+        assert_eq!(model_value["resultCoverage"]["omitted"], 3);
+        assert_eq!(model_value["partial"], true);
+        assert_eq!(model_value["partialReason"], "model_result_count_limit");
+        assert!(model_value.get("truncatedAtSource").is_none());
+        assert!(model_value.get("refine").is_some());
+        let gate = crate::context::ContextCapacityDetector::for_model(
+            "test-model",
+            crate::protocol::AgentApiStyle::OpenAiCompatible,
+            &[],
+        )
+        .model_tool_result_gate();
+        let gated = gate.project(&raw.call_id, false, &model, None);
+        let gated_value: Value = serde_json::from_str(&gated.content).unwrap();
+        assert!(!gated.truncated);
+        assert!(gated_value.get("truncatedAtSource").is_none());
+
+        let archive = WebSearchTool::new(String::new()).archive_projection(&raw);
+        assert_eq!(
+            archive.result.as_ref().unwrap()["results"]
+                .as_array()
+                .unwrap()
+                .len(),
+            MAX_RESULTS + 3
+        );
     }
 }

@@ -2729,6 +2729,11 @@ fn tampered_command_execution_evidence_restores_the_durable_blocker() {
             command_result.artifact_observation = Some(crate::AgentCommandArtifactObservation {
                 schema_version: 1,
                 status: crate::AgentCommandArtifactObservationStatus::Complete,
+                partial: None,
+                stop_reasons: Vec::new(),
+                scanned: None,
+                returned: None,
+                omitted: None,
                 coverage: crate::AgentCommandArtifactObservationCoverage {
                     workspace_included: true,
                     expected_output_count: 0,

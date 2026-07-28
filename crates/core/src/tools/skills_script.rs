@@ -12,6 +12,8 @@ use crate::skills::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+const MAX_SKILL_SCRIPT_REASON_CHARS: usize = 2_000;
+
 pub(super) struct SkillsPreflightScriptTool;
 pub(super) struct SkillsRunScriptTool;
 
@@ -150,9 +152,9 @@ impl AgentTool for SkillsRunScriptTool {
                         .clamp(1, MAX_SKILL_SCRIPT_TIMEOUT_MS),
                 ),
                 approval_status: call.approval_status,
-                reason: non_empty(args.reason.as_deref())
-                    .map(|reason| reason.chars().take(2_000).collect())
-                    .or_else(|| call.reason.clone()),
+                reason: validate_script_reason(
+                    non_empty(args.reason.as_deref()).or_else(|| non_empty(call.reason.as_deref())),
+                )?,
             }),
         })
     }
@@ -270,8 +272,8 @@ pub(crate) fn validate_frozen_skill_script_trace_args(
             .clamp(1, MAX_SKILL_SCRIPT_TIMEOUT_MS),
     );
     let reason_was_present = args.reason.is_some();
-    let reason = non_empty(args.reason.as_deref())
-        .map(|reason| reason.chars().take(2_000).collect::<String>());
+    let reason = validate_script_reason(non_empty(args.reason.as_deref()))
+        .map_err(|_| "skills_run_script frozen reason is invalid".to_string())?;
 
     if uri.as_str() != frozen.script_uri
         || args.interpreter != frozen.interpreter
@@ -357,6 +359,24 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+fn validate_script_reason(value: Option<&str>) -> AgentResult<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.chars().count() > MAX_SKILL_SCRIPT_REASON_CHARS {
+        return Err(AgentError::structured(
+            "skill_script.reason_too_long",
+            "skills_run_script reason exceeds its bounded size limit.",
+            json!({
+                "type": "skill_script",
+                "code": "reasonTooLong",
+                "maxReasonChars": MAX_SKILL_SCRIPT_REASON_CHARS,
+            }),
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
 fn require_unrestricted_script_runtime(context: &ToolExecutionContext) -> AgentResult<()> {
     let permissions = context.permissions();
     if permissions.read == AgentReadPermission::All
@@ -409,7 +429,7 @@ fn script_input_schema(include_execution: bool) -> Value {
         );
         properties.insert(
             "reason".to_string(),
-            json!({ "type": "string", "maxLength": 2000 }),
+            json!({ "type": "string", "maxLength": MAX_SKILL_SCRIPT_REASON_CHARS }),
         );
     }
     schema
@@ -424,6 +444,20 @@ mod tests {
     fn rejects_oversized_and_nul_argv_before_preflight() {
         assert!(validate_argv(&vec!["x".to_string(); MAX_SKILL_SCRIPT_ARGUMENTS + 1]).is_err());
         assert!(validate_argv(&["bad\0argument".to_string()]).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_reason_instead_of_silently_truncating_it() {
+        let max_reason = "x".repeat(MAX_SKILL_SCRIPT_REASON_CHARS);
+        assert_eq!(
+            validate_script_reason(Some(&max_reason))
+                .unwrap()
+                .as_deref(),
+            Some(max_reason.as_str())
+        );
+        let error = validate_script_reason(Some(&"x".repeat(MAX_SKILL_SCRIPT_REASON_CHARS + 1)))
+            .unwrap_err();
+        assert_eq!(error.code(), Some("skill_script.reason_too_long"));
     }
 
     #[test]

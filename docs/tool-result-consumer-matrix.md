@@ -1,10 +1,12 @@
 # Tool Result 消费者矩阵与投影契约
 
-状态：Round 2 已实施
+状态：Round 3 已实施
 
 日期：2026-07-28
 
-约束：原始结果及 E/R/T/A/C 契约保持不变；M 使用专属语义投影。
+约束：E/R/T/A/C 保持独立消费者契约；M 使用专属语义投影并统一经过固定 10K
+Gate。来源捕获、分页、安全硬限和恢复路径见
+[Tool Result 上限、投影与恢复契约](tool-result-limits.md)。
 
 ## 1. 范围和术语
 
@@ -29,13 +31,13 @@
 
 `AgentToolResult` 公共信封字段的消费者固定如下：
 
-| 字段     | 消费者      | 信息归属             |
-| -------- | ----------- | -------------------- |
-| `callId` | 协议/E/R/T/A/C | 恢复、幂等、调用关联；模型 provider 协议携带，不重复写入 observation |
-| `tool`   | 协议/E/R/T/A/C | 路由、展示、审计；模型 provider 协议携带，不重复写入 observation     |
+| 字段     | 消费者         | 信息归属                                                               |
+| -------- | -------------- | ---------------------------------------------------------------------- |
+| `callId` | 协议/E/R/T/A/C | 恢复、幂等、调用关联；模型 provider 协议携带，不重复写入 observation   |
+| `tool`   | 协议/E/R/T/A/C | 路由、展示、审计；模型 provider 协议携带，不重复写入 observation       |
 | `ok`     | 协议/E/R/T/A/C | 行动、UI、审计、恢复；模型失败语义由 provider error 标记和精简负载表达 |
-| `error`  | M/E/R/T/A/C | 行动、UI、审计、恢复 |
-| `result` | 见下方矩阵  | Tool 自有负载        |
+| `error`  | M/E/R/T/A/C    | 行动、UI、审计、恢复                                                   |
+| `result` | 见下方矩阵     | Tool 自有负载                                                          |
 
 矩阵中的 `x.*` 表示该对象当前的全部嵌套字段。字段组用于压缩文档篇幅，不授权删除其中任何字段。
 
@@ -95,88 +97,93 @@ Tool observation 文本现在只序列化精简后的 `result`/`error`，不再�
 
 ### 4.1 附件与读取
 
-| Tool                | 字段                                                                                       | 消费者                | 归属和约束                                                   |
-| ------------------- | ------------------------------------------------------------------------------------------ | --------------------- | ------------------------------------------------------------ |
-| `attachments_list*` | `scope`、`scopeNote`、`library.*`、`total`、`truncated`                                    | M/E/T/A/C             | 行动、UI、审计；`total` 是 UI 计数                           |
-| `attachments_list*` | `attachments[].id`、`messageId`                                                            | E/T/A/C，当前也进入 M | UI、恢复；Renderer 用于定位 timeline 附件                    |
-| `attachments_list*` | `conversationId`、`projectId`、`createdAt`                                                 | T/A/C，当前也进入 M/E | 审计、恢复；仅是模型投影候选                                 |
-| `attachments_list*` | `name`、`kind`、`mimeType`、`sizeBytes`、`readPath`                                        | M/E/T/A/C             | 行动、UI、恢复；`readPath` 是权威读取路由                    |
-| `read_file`         | `path`、`revision`                                                                         | M/E/T/A/C             | 行动、一致性、恢复                                           |
-| `read_file`         | `startLine`、`startColumn`、`startByte`、`endLine`、`endColumn`、`endByteExclusive`        | M/T/A/C，当前也进入 E | 行动、分页、审计                                             |
-| `read_file`         | `totalLines`、`totalBytes`、`returnedBytes`、`estimatedContentTokens`、`outputTokenBudget` | M/T/A/C，当前也进入 E | 行动、审计；token 计量可从 M 精简                            |
-| `read_file`         | `truncated`、`truncatedReason`、`nextStartByte`、`nextStartLine`、`nextStartColumn`        | M/E/T/A/C             | 行动、恢复；禁止静默截断                                     |
-| `read_file`         | `content`                                                                                  | M/T/A/C，当前也进入 E | 行动、正文                                                   |
-| `read_pdf`          | `path`、`format`、`sizeBytes`、`pageCount`、`truncated`                                    | M/E/T/A/C             | 行动、UI、审计                                               |
-| `read_pdf`          | `text`                                                                                     | M/T/A/C，当前也进入 E | 行动、正文                                                   |
-| `read_word`         | `path`、`format`、`sizeBytes`、`extractor`、`partCount`、`truncated`                       | M/E/T/A/C             | 行动、审计                                                   |
-| `read_word`         | `text`                                                                                     | M/T/A/C，当前也进入 E | 行动、正文                                                   |
-| `read_presentation` | `path`、`format`、`sizeBytes`、`extractor`、`slideCount`、`truncated`                      | M/E/T/A/C             | 行动、审计                                                   |
-| `read_presentation` | `text`                                                                                     | M/T/A/C，当前也进入 E | 行动、正文                                                   |
-| `read_spreadsheet`  | `path`、`format`、`sizeBytes`、`extractor`、`sheetCount`、`truncated`                      | M/E/T/A/C             | 行动、审计                                                   |
-| `read_spreadsheet`  | `text`                                                                                     | M/T/A/C，当前也进入 E | 行动、正文                                                   |
-| `read_image`        | `path`、`source.*`、`format`、`mimeType`、`sizeBytes`、`sha256`                            | M/E/T/A/C             | 行动、UI、审计、恢复                                         |
-| `read_image`        | `image.mimeType`、`image.dataBase64`                                                       | 原始 Runtime          | 原生多模态输入；不进入文本、事件、Trace、Archive、Checkpoint |
-| `read_image`        | `thumbnailDataUrl`                                                                         | E                     | 有界 UI 缩略图                                               |
-| `read_image`        | `binaryOmittedFromHistory`、`thumbnailOmittedFromEvent`                                    | T/A/C 或 E            | 审计；明确二进制投影省略                                     |
+| Tool                | 字段                                                                                       | 消费者       | 归属和约束                                                          |
+| ------------------- | ------------------------------------------------------------------------------------------ | ------------ | ------------------------------------------------------------------- |
+| `attachments_list*` | `scope`、`total/returned/omitted`、`truncated/nextCursor`                                  | M/E/T/A/C    | 行动、UI、审计、稳定分页；cursor 绑定 conversation/project 权限范围 |
+| `attachments_list*` | `scopeNote`、`library.*`、`attachments[].id/messageId`                                     | E/T/A/C      | UI、恢复；Renderer 用于定位 timeline 附件                           |
+| `attachments_list*` | `conversationId`、`projectId`、`createdAt`                                                 | E/T/A/C      | 审计、恢复；默认不进入模型                                          |
+| `attachments_list*` | `name`、`kind`、`mimeType`、`sizeBytes`、`readPath`                                        | M/E/T/A/C    | 行动、UI、恢复；`readPath` 是权威读取路由                           |
+| `read_file`         | `path`、`revision`                                                                         | M/E/T/A/C    | 行动、一致性、恢复                                                  |
+| `read_file`         | `startLine`、`startByte`、`endLine`、`endByteExclusive`                                    | M/E/T/A/C    | 行动、分页、审计                                                    |
+| `read_file`         | `startColumn`、`endColumn`、`returnedBytes`、`estimatedContentTokens`、`outputTokenBudget` | E/T/A/C      | UI、审计；默认模型投影不携带内部预算                                |
+| `read_file`         | `totalLines`、`totalBytes`                                                                 | M/E/T/A/C    | 行动、分页、审计                                                    |
+| `read_file`         | `truncated`、`truncatedReason`、`nextStartByte`、`nextStartLine`                           | M/E/T/A/C    | 行动、恢复；禁止静默截断                                            |
+| `read_file`         | `nextStartColumn`                                                                          | E/T/A/C      | 兼容 UI/审计；模型续读使用权威 byte cursor                          |
+| `read_file`         | `content`                                                                                  | M/E/T/A/C    | 行动、正文                                                          |
+| 文档读取            | `path`、`format`、页/部件/工作表/幻灯片数量、捕获完整性字段、`truncated`                   | M/E/T/A/C    | 行动、UI、审计                                                      |
+| 文档读取            | `sizeBytes`、`extractor`                                                                   | E/T/A/C      | UI、解析审计；不进入默认模型投影                                    |
+| 文档读取            | `text`                                                                                     | M/E/T/A/C    | 行动、正文；超限后由 Archive `historyOpen` 恢复                     |
+| `read_image`        | `path`、`format`、`mimeType`、`sizeBytes`                                                  | M/E/T/A/C    | 行动、UI、审计、恢复                                                |
+| `read_image`        | `source.*`、`sha256`                                                                       | E/T/A/C      | 来源身份与审计；不重复进入模型文本                                  |
+| `read_image`        | `image.mimeType`、`image.dataBase64`                                                       | 原始 Runtime | 原生多模态输入；不进入文本、事件、Trace、Archive、Checkpoint        |
+| `read_image`        | `thumbnailDataUrl`                                                                         | E            | 有界 UI 缩略图                                                      |
+| `read_image`        | `binaryOmittedFromHistory`、`thumbnailOmittedFromEvent`                                    | T/A/C 或 E   | 审计；明确二进制投影省略                                            |
 
 ### 4.2 工作区检索
 
-| Tool            | 字段                                                   | 消费者    | 归属和约束                               |
-| --------------- | ------------------------------------------------------ | --------- | ---------------------------------------- |
-| `workspace_map` | `workspace.*`、`summary.*`                             | M/E/T/A/C | 行动、UI、审计                           |
-| `workspace_map` | `tree[]`、`treeText`                                   | M/E/T/A/C | 行动、正文；两种表示重复，是明确精简候选 |
-| `workspace_map` | `truncated.walk`、`truncated.tree`                     | M/E/T/A/C | 完整性边界                               |
-| `search_files`  | `query`、`matches[].path/kind/sizeBytes`、`truncated`  | M/E/T/A/C | 行动、审计                               |
-| `search_code`   | `query`、`matches[].path/lineNumber/line`、`truncated` | M/E/T/A/C | 行动、正文                               |
-| `git_diff`      | `path`、`patch`、`truncated`                           | M/E/T/A/C | 行动、UI、正文                           |
+| Tool            | 字段                                                                                             | 消费者    | 归属和约束                                              |
+| --------------- | ------------------------------------------------------------------------------------------------ | --------- | ------------------------------------------------------- |
+| `workspace_map` | `summary.*`、`treeText`                                                                          | M/E/T/A/C | 行动、UI、审计                                          |
+| `workspace_map` | `workspace.*`、`tree[]`                                                                          | E/T/A/C   | UI、审计；模型只接收紧凑 `treeText`                     |
+| `workspace_map` | `coverage.*`、`refine`、`truncated.walk/tree`                                                    | M/E/T/A/C | 完整性边界；缩小 focusPath 恢复，不提供 cursor          |
+| `search_files`  | `matches[].path/kind/sizeBytes`、`total/returned/omitted`、`truncated/nextCursor`                | M/E/T/A/C | 行动、审计、opaque cursor 分页                          |
+| `search_code`   | `matches[].path/lineNumber/line`、单行省略说明、`total/returned/omitted`、`truncated/nextCursor` | M/E/T/A/C | 行动、正文、opaque cursor 分页；超长行用 read_file 恢复 |
+| 搜索工具        | `query`                                                                                          | E/T/A/C   | UI、审计；ToolCall 已携带 query，模型结果不重复         |
+| `git_diff`      | `path`、`patch`、`truncated`                                                                     | M/E/T/A/C | 行动、UI、正文                                          |
 
 ### 4.3 Web
 
-| Tool         | 字段                                                                        | 消费者                | 归属和约束                       |
-| ------------ | --------------------------------------------------------------------------- | --------------------- | -------------------------------- |
-| `web_search` | `query`、`answer`、`results[].title/url/content/publishedDate`、`truncated` | M/E/T/A/C             | 行动、UI、正文                   |
-| `web_search` | `results[].score`                                                           | E/T/A/C，当前也进入 M | UI 相关性排序、审计              |
-| `web_search` | `results[].favicon`                                                         | E/T/A/C，当前也进入 M | UI；Renderer 来源卡片消费        |
-| `web_search` | `provider`、`responseTime`                                                  | E/T/A/C，当前也进入 M | UI、审计                         |
-| `web_search` | `images[]`                                                                  | M/E/T/A/C             | 行动、UI、证据；用途确认前不删除 |
-| `web_fetch`  | `url`、`requestedUrl`、`content`、`truncated`                               | M/E/T/A/C             | 行动、UI、正文                   |
-| `web_fetch`  | `favicon`                                                                   | E/T/A/C，当前也进入 M | UI；Renderer 来源卡片消费        |
-| `web_fetch`  | `provider`、`format`、`extractDepth`、`responseTime`                        | E/T/A/C，当前也进入 M | UI、审计                         |
-| `web_fetch`  | `images[]`、`failedResults[]`                                               | M/E/T/A/C             | 页面证据、失败诊断               |
+| Tool         | 字段                                                                                      | 消费者    | 归属和约束                                                       |
+| ------------ | ----------------------------------------------------------------------------------------- | --------- | ---------------------------------------------------------------- |
+| `web_search` | `answer`、`results[].title/url/content/publishedDate`、`contentKind/fullContentTool`      | M/E/T/A/C | Provider 搜索摘要；不是网页全文                                  |
+| `web_search` | `query`                                                                                   | E/T/A/C   | UI、审计；ToolCall 已携带 query                                  |
+| `web_search` | Provider `cursor/next/nextCursor/continueWith`、`sourceCompleteness` 与显式来源完整性字段 | M/E/T/A/C | 原样保留；未声明时写 `unknown`，不伪造 `truncatedAtSource=false` |
+| `web_search` | `results[].score`                                                                         | E/T/A/C   | UI 相关性排序、审计                                              |
+| `web_search` | `results[].favicon`                                                                       | E/T/A/C   | UI；Renderer 来源卡片消费                                        |
+| `web_search` | `provider`、`responseTime`                                                                | E/T/A/C   | UI、审计                                                         |
+| `web_search` | `images[]`                                                                                | M/E/T/A/C | 行动、UI、证据；用途确认前不删除                                 |
+| `web_fetch`  | `url`、`content`、coverage、`truncated` 与来源完整性字段                                  | M/E/T/A/C | 行动、UI、正文                                                   |
+| `web_fetch`  | `requestedUrl`、`favicon`                                                                 | E/T/A/C   | UI；Renderer 来源卡片消费                                        |
+| `web_fetch`  | `provider`、`format`、`extractDepth`、`responseTime`                                      | E/T/A/C   | UI、审计                                                         |
+| `web_fetch`  | `images[]`、`failedResults[]`                                                             | M/E/T/A/C | 页面证据、失败诊断                                               |
 
 `favicon` 的真实消费者位于 `agentWebSearch.ts` 和 `WebSearchSources.tsx`。它不是无效字段，只是不需要默认进入模型文本。
 
 ### 4.4 Todo、Goal 与历史
 
-| Tool                               | 字段                                                                                                        | 消费者            | 归属和约束                                           |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------- | ----------------- | ---------------------------------------------------- |
-| `todo_update`                      | `revision`、`updatedAt`                                                                                     | M/E/R/T/A/C       | UI、审计、恢复                                       |
-| `todo_update`                      | `items[].id/title/status/note/createdAt/updatedAt`                                                          | M/E/R/T/A/C       | 行动、UI、恢复；R 生成 Todo context 和 `TodoUpdated` |
-| Goal 原始结果                      | `goal.objective/status`、`created`、`updated`                                                               | M，当前也进入 E/C | 行动、恢复                                           |
-| Goal Trace                         | `goalPresent`、`created`、`updated`、`status`、`goalStatePersisted`                                         | T/E               | 审计；不进入 Exact Archive                           |
-| `conversation_history` Model       | `view`、turn/result/timeline/record、`content`、`navigation.*`、`open`、范围、hash、完整性标记、instruction | M/C               | 行动、正文、恢复                                     |
-| `conversation_history` Trace/Event | query/open ref、读取范围、hash、返回数量、状态                                                              | T/E               | 审计；不重复保存取回正文，不再次归档                 |
+| Tool                               | 字段                                                                                           | 消费者            | 归属和约束                                           |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------- | ---------------------------------------------------- |
+| `todo_update` Model                | `accepted/revision/itemCount/completedCount`                                                   | M                 | 简短确认；不重复整份 Todo                            |
+| `todo_update` Canonical            | `revision/updatedAt`、`items[].id/title/status/note/createdAt/updatedAt`                       | E/R/T/A/C         | UI、审计、恢复；R 生成 Todo context 和 `TodoUpdated` |
+| Goal 原始结果                      | `goal.objective/status`、`created`、`updated`                                                  | M，当前也进入 E/C | 行动、恢复                                           |
+| Goal Trace                         | `goalPresent`、`created`、`updated`、`status`、`goalStatePersisted`                            | T/E               | 审计；不进入 Exact Archive                           |
+| `conversation_history` Model       | `view`、turn/result/timeline/record、`content`、`navigation.*`、`open`、范围、hash、完整性标记 | M/C               | 行动、正文、恢复；固定 instruction 不进入结果        |
+| `conversation_history` Trace/Event | query/open ref、读取范围、hash、返回数量、状态                                                 | T/E               | 审计；不重复保存取回正文，不再次归档                 |
 
-Todo 的完整状态不能从 E/R 删除。以后可只收敛 M 为确认回执，因为 Extension 会注入权威 Todo snapshot；这属于下一轮行为变更。
+Todo 的完整状态不能从 E/R 删除；当前 M 已经只接收确认回执，权威 Todo snapshot
+继续由 Extension 注入。
 
 ### 4.5 文件、Patch 与命令
 
-| Tool                   | 字段                                                                                                                                                                                                               | 消费者                | 归属和约束                                     |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------- | ---------------------------------------------- |
-| `apply_patch`          | `status`、`operation`、`filePath`、`appliedFilePaths[]`                                                                                                                                                            | M/E/T/A/C             | 行动、UI、审计、恢复                           |
-| `apply_patch`          | `gitDiff.patch/truncated`                                                                                                                                                                                          | M/E/T/A/C             | 行动、UI、正文                                 |
-| `apply_patch`          | `gitDiffError`、`error`、`message`                                                                                                                                                                                 | M/E/T/A/C             | 冲突诊断、恢复                                 |
-| `write_file` 草稿      | `draft.draftId/conversationId/projectId/filePath/mode/status/baseRevision/additions/deletions/lineCount/byteCount/chunkCount/nextChunkIndex/statsFinal/summary/createdAt/updatedAt`                                | M/E/R/T/A/C           | 行动、UI、审计、恢复；`draftId` 是权威后续路由 |
-| `write_file` 草稿      | `tail`                                                                                                                                                                                                             | M/T/A/C               | 私有草稿正文；事件明确删除                     |
-| `write_file` 草稿      | `maxDraftBytes`、`transactionState`、`requiresFinishBeforeResponse`、`nextAction`                                                                                                                                  | M/T/A/C，当前也进入 E | 行动、恢复                                     |
-| `write_file` Host 终态 | `status`、`draftId`、`mode`、`filePath`、统计、`revision`、`error`、`message`                                                                                                                                      | M/E/T/A/C             | 权威写入回执                                   |
-| `run_command`          | `command`、`cwd`                                                                                                                                                                                                   | M/E/T/A/C             | 行动、审计；与 ToolCall 重复，是 M 精简候选    |
-| `run_command`          | `exitCode`、`stdout`、`stderr`、`timedOut`、`cancelled`、截断和 `error`                                                                                                                                            | M/E/T/A/C             | 行动、UI、审计、正文                           |
-| `run_command`          | `durationMs`                                                                                                                                                                                                       | E/T/A/C，当前也进入 M | UI、审计                                       |
-| `run_command`          | `policyEvaluation.*`                                                                                                                                                                                               | T/A/C，当前也进入 M/E | 安全审计、恢复                                 |
-| `run_command`          | `artifactObservation.schemaVersion/status/coverage.*`、`expectedOutputs[]`、`changes[].kind/artifactKind/path/scope/previousPath/previousScope/before/after.*`、`changesTruncated`、`changesOmitted`、`warnings[]` | M/E/T/A/C             | 行动、UI、审计、恢复                           |
-| `run_command`          | `inputFiles[].mountPath/sourceKind/sizeBytes/sha256`、`runtime.*`                                                                                                                                                  | M/E/T/A/C             | 审计、恢复；冻结输入和托管 runtime 证据        |
-| Host 审计失败包装      | `type/code/recovery/phase`、执行与副作用不确定性、`auditError`、`reconciliationError`、`execution.*`                                                                                                               | M/E/T/A/C             | 行动、审计、恢复；防止有副作用后盲目重试       |
+| Tool                        | 字段                                                                                                  | 消费者                               | 归属和约束                                         |
+| --------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------ | -------------------------------------------------- |
+| `apply_patch`               | `status`、`operation`、`filePath`、`appliedFilePaths[]`                                               | M/E/T/A/C                            | 行动、UI、审计、恢复                               |
+| `apply_patch`               | `gitDiff.patch/truncated`                                                                             | M/E/T/A/C                            | 行动、UI、正文                                     |
+| `apply_patch`               | `gitDiffError`、`error`、`message`                                                                    | M/E/T/A/C                            | 冲突诊断、恢复                                     |
+| `write_file` Model 草稿     | `draft.draftId/filePath/mode/status/lineCount/byteCount/chunkCount/nextChunkIndex/statsFinal/summary` | M                                    | 行动；`draftId` 是权威后续路由                     |
+| `write_file` Canonical 草稿 | conversation/project/baseRevision/additions/deletions/时间等完整 `draft.*`                            | E/R/T/A/C                            | UI、审计、恢复                                     |
+| `write_file` 草稿           | `tail`                                                                                                | M/T/A/C                              | 私有草稿正文；事件明确删除                         |
+| `write_file` 草稿           | `transactionState`、`requiresFinishBeforeResponse`、`nextAction`                                      | M/E/T/A/C                            | 行动、恢复                                         |
+| `write_file` 草稿           | `maxDraftBytes`                                                                                       | E/T/A/C                              | UI/后端预算审计；不进入模型                        |
+| `write_file` Host 终态      | `status`、`draftId`、`mode`、`filePath`、统计、`revision`、`error`、`message`                         | M/E/T/A/C                            | 权威写入回执                                       |
+| `run_command`               | `command`、`cwd`                                                                                      | E/T/A/C                              | UI、审计；ToolCall 已携带，不在结果中重复给模型    |
+| `run_command`               | `exitCode`、`stdout`、`stderr`、`timedOut`、`cancelled`、截断和 `error`                               | M/E/T/A/C                            | 行动、UI、审计、正文                               |
+| `run_command`               | `durationMs`                                                                                          | E/T/A/C                              | UI、审计                                           |
+| `run_command`               | `policyEvaluation.*`                                                                                  | E/T/A/C；M 仅 `decision/code/reason` | 安全审计、恢复                                     |
+| `run_command`               | `artifactObservation.status/partial/stopReasons/scanned/returned/omitted` 与精简 `changes[]`          | M/E/T/A/C                            | 行动、UI、审计、恢复；partial 结果不能作为完整证据 |
+| `run_command`               | `artifactObservation.schemaVersion/coverage.*`、`expectedOutputs[]`、`warnings[]`、完整变更详情       | E/T/A/C                              | UI、审计、恢复；模型不承担底层扫描细节             |
+| `run_command`               | `inputFiles[].mountPath/sourceKind/sizeBytes/sha256`、`runtime.*`                                     | E/T/A/C                              | 审计、恢复；冻结输入和托管 runtime 证据            |
+| Host 审计失败包装           | `type/code/recovery/phase`、执行与副作用不确定性、`auditError`、`reconciliationError`、`execution.*`  | M/E/T/A/C                            | 行动、审计、恢复；防止有副作用后盲目重试           |
 
 Renderer 使用 `artifactObservation` 构建 Office Artifact 卡片；失败 observation 仍保留作审计，但不能变成成功卡片。
 
@@ -184,67 +191,65 @@ Renderer 使用 `artifactObservation` 构建 Office Artifact 卡片；失败 obs
 
 三个 Office Tool 共用 `OfficeExecutionResult`：
 
-| 字段组                                                                                                           | 消费者                | 归属和约束                  |
-| ---------------------------------------------------------------------------------------------------------------- | --------------------- | --------------------------- |
-| `providerId`、`engineRevision`、`documentKind`、`operation`                                                      | M/E/T/A/C             | 行动、审计、恢复、幂等      |
-| `argv`、`cwd`                                                                                                    | T/A/C，当前也进入 M/E | 审计、恢复；M 精简候选      |
-| `exitCode`、`stdout`、`stderr`、超时/取消/耗时/截断/错误字段                                                     | M/E/T/A/C             | 行动、UI、审计、正文        |
-| `outputs[].role/kind/mimeType/source/readPath/scope/readableByAgent/sizeBytes/sha256/width/height/pageSelection` | M/E/T/A/C             | 后续读取、UI Artifact、恢复 |
-| 审计失败包装 `execution.*` 和不确定性字段                                                                        | M/E/T/A/C             | 行动、审计、恢复            |
+| 字段组                                                                                             | 消费者    | 归属和约束                  |
+| -------------------------------------------------------------------------------------------------- | --------- | --------------------------- |
+| `documentKind`、`operation`                                                                        | M/E/T/A/C | 行动、审计、恢复            |
+| `providerId`、`engineRevision`、`argv`、`cwd`                                                      | E/T/A/C   | UI、审计、恢复、幂等        |
+| `exitCode`、`stdout`、`stderr`、超时/取消/截断/错误与捕获完整性字段                                | M/E/T/A/C | 行动、UI、审计、正文        |
+| `durationMs`                                                                                       | E/T/A/C   | UI、审计                    |
+| `outputs[].role/kind/mimeType/readPath/scope/readableByAgent/sizeBytes/width/height/pageSelection` | M/E/T/A/C | 后续读取、UI Artifact、恢复 |
+| `outputs[].source/sha256`                                                                          | E/T/A/C   | 审计、恢复                  |
+| 审计失败包装 `execution.*` 和不确定性字段                                                          | M/E/T/A/C | 行动、审计、恢复            |
 
 `skillOfficeActivity.ts` 同时消费 Office 输出和 Command Artifact Observation，E 投影必须兼容。
 
 ### 4.7 Skill 资源和脚本
 
-| Tool                          | 字段                                                                                                                   | 消费者      | 归属和约束                                                                                                                |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `skills_activate`             | `schemaVersion`、`status`、`activatedBy`、`activationRevision`、`reason`、`skill.id/name/revision/source/hasResources` | M/E/R/T/A/C | 行动、UI、恢复；R 用 `status` 和 `skill.id` 提交待激活 context、更新 ToolSet，并另发不含 instructions 的 `SkillActivated` |
-| `skills_list_resources`       | `rootUri`、`resources[].uri/path/kind/byteLength/contentDigest`、`truncated`、`nextAfterPath`                          | M/E/T/A/C   | 行动、审计、恢复                                                                                                          |
-| `skills_read_resource`        | `uri`、byte 范围、长度、`truncated`、`nextStartByte`                                                                   | M/E/T/A/C   | 行动、分页、恢复                                                                                                          |
-| `skills_read_resource`        | `content`                                                                                                              | M/A/C       | 行动、正文；T/E 用 `contentOmittedFromHistory`                                                                            |
-| `skills_materialize_resource` | `status/sourceUri/sourcePrefix/destination/sourceRevision/fileCount/byteCount/planDigest/error/message`                | M/E/T/A/C   | 行动、UI、审计、幂等                                                                                                      |
-| `skills_preflight_script`     | script/skill/resource 身份、`ready`、`resourceDigest`、`preflight.*`                                                   | M/E/T/A/C   | 行动、审计、恢复                                                                                                          |
-| `skills_run_script`           | script/skill/revision/digest、`preflight.*`、进程结果和截断/错误字段                                                   | M/E/T/A/C   | 行动、UI、审计、正文、恢复                                                                                                |
+| Tool                          | 字段                                                                                                    | 消费者    | 归属和约束                                         |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------- | --------- | -------------------------------------------------- |
+| `skills_activate` Model       | `status`、`skill.name/hasResources`                                                                     | M         | 简短确认，不重复后端身份                           |
+| `skills_activate` Canonical   | `schemaVersion/status/activatedBy/activationRevision/reason`、完整 `skill.*`                            | E/R/T/A/C | UI、恢复；R 用 `status` 和 `skill.id` 更新 ToolSet |
+| `skills_list_resources`       | `rootUri`、`resources[].uri/path/kind/byteLength/contentDigest`、`truncated`、`nextAfterPath`           | M/E/T/A/C | 行动、审计、恢复                                   |
+| `skills_read_resource`        | `uri`、byte 范围、长度、`truncated`、`nextStartByte`                                                    | M/E/T/A/C | 行动、分页、恢复                                   |
+| `skills_read_resource`        | `content`                                                                                               | M/A/C     | 行动、正文；T/E 用 `contentOmittedFromHistory`     |
+| `skills_materialize_resource` | `status/sourceUri/sourcePrefix/destination/sourceRevision/fileCount/byteCount/planDigest/error/message` | M/E/T/A/C | 行动、UI、审计、幂等                               |
+| `skills_preflight_script`     | script/skill/resource 身份、`ready`、`resourceDigest`、`preflight.*`                                    | M/E/T/A/C | 行动、审计、恢复                                   |
+| `skills_run_script`           | script/skill/revision/digest、`preflight.*`、进程结果和截断/错误字段                                    | M/E/T/A/C | 行动、UI、审计、正文、恢复                         |
 
 ### 4.8 图片生成
 
-| 字段                                                                                                                                                     | 消费者                | 归属和约束                       |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | -------------------------------- |
-| `schemaVersion`、`status`、`operation`                                                                                                                   | M/E/T/A/C             | 行动、UI、审计、恢复             |
-| `artifact.artifactId/uri/kind/format/mimeType/width/height/sizeBytes/sha256`                                                                             | M/E/T/A/C             | 行动、UI、审计、恢复             |
-| `audit.executionId/requestFingerprint/providerProfileId/adapterId/profileRevision/modelId/providerRequestId/httpStatus/createdAt/completedAt/durationMs` | E/T/A/C，当前也进入 M | UI、审计、恢复、幂等             |
-| `failure.code/phase/message/recovery/retryable` 与三个不确定性布尔值                                                                                     | M/E/T/A/C             | 行动、UI、审计、恢复             |
-| `savedPath`、`visualInputStatus`                                                                                                                         | M/T/A/C               | 当前 Run 投递状态；E 明确去除    |
-| `image.mimeType/dataBase64`                                                                                                                              | 原始 Runtime          | 原生多模态输入；所有文本投影去除 |
-| `binaryOmittedFromHistory`                                                                                                                               | T/A/C                 | 二进制历史省略审计               |
+| 字段                                                                                                                                                     | 消费者       | 归属和约束                       |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | -------------------------------- |
+| `schemaVersion`、`status`、`operation`                                                                                                                   | M/E/T/A/C    | 行动、UI、审计、恢复             |
+| `artifact.artifactId/uri/kind/format/mimeType/width/height/sizeBytes/sha256`                                                                             | M/E/T/A/C    | 行动、UI、审计、恢复             |
+| `audit.executionId/requestFingerprint/providerProfileId/adapterId/profileRevision/modelId/providerRequestId/httpStatus/createdAt/completedAt/durationMs` | E/T/A/C      | UI、审计、恢复、幂等             |
+| `failure.code/phase/message/recovery/retryable` 与三个不确定性布尔值                                                                                     | M/E/T/A/C    | 行动、UI、审计、恢复             |
+| `savedPath`、`visualInputStatus`                                                                                                                         | M/T/A/C      | 当前 Run 投递状态；E 明确去除    |
+| `image.mimeType/dataBase64`                                                                                                                              | 原始 Runtime | 原生多模态输入；所有文本投影去除 |
+| `binaryOmittedFromHistory`                                                                                                                               | T/A/C        | 二进制历史省略审计               |
 
 图片 audit 被 Core Server action audit、启动恢复和 Renderer 图片活动共同消费，不能从原始/持久结果删除。
 
-## 5. 下一轮精简候选
+## 5. Round 3 收敛结果
 
-本轮不执行下列改动。每项均只建议收敛 **M 投影**，保留原始结果及其他消费者：
+已删除或收敛：
 
-| 优先级 | Tool                | 建议                                                                                        |
-| ------ | ------------------- | ------------------------------------------------------------------------------------------- |
-| P0     | `web_search`        | M 保留 query/answer/title/url/content/date/truncated；E 完整保留 favicon/score/responseTime |
-| P0     | `web_fetch`         | M 保留 canonical URL/content/truncated/有效失败摘要；E 保留 favicon                         |
-| P0     | `attachments_list*` | M 保留 name/kind/mime/size/readPath；E 保留 id/messageId/name                               |
-| P0     | `workspace_map`     | M 只保留 `tree[]` 或 `treeText` 一种表达                                                    |
-| P0     | `todo_update`       | M 返回 revision/accepted；R/E 保留完整 `AgentTodoState`                                     |
-| P0     | `run_command`       | M 保留进程终态、输出、截断、错误和简明 Artifact 变更；T/A/C 保留 policy 与完整 observation  |
-| P0     | `image_generation`  | M 保留终态、artifact、失败恢复和 visual delivery；E/T/A/C 保留 audit                        |
-| P1     | `write_file`        | M 按 phase 返回最小下一步回执；E/R 保留 draft snapshot，C/T/A 保留身份和正文                |
-| P1     | Office              | M 成功时保留结果/输出引用/验证，失败时保留必要诊断；审计和恢复字段不动                      |
-| P1     | 文档读取            | M 保留 path、分页/截断、正文和最小结构；A 保留完整正文与元数据                              |
-| P1     | `skills_run_script` | M 成功时收敛重复 preflight；C/T/A 保留 digest/preflight                                     |
+- `web_search` 的 answer 1,200 字符和 result content 600 字符本地模型裁剪；
+- 文档读取在 Exact Archive 前的 40K/120K 字符裁剪；
+- `web_fetch` 旧“模型正文字符上限”语义；保留的 `maxChars` 仅是
+  Event/Checkpoint 兼容投影；
+- `git_diff` 在 Archive 前的约 200 KiB 裁剪；
+- Command、Office CLI、Skill Script 各自捕获 stdout/stderr 的重复实现；
+- 搜索和附件列表各自暴露内部 offset/path 的继续参数；统一为 opaque cursor；
+- 仅凭 `truncated` 猜测来源丢失的逻辑；Source、分页、消费者投影和 Model Gate
+  截断分别记录。
 
-明确不是删除候选：
+继续保留：
 
-- `callId`、审批 action id、draft id、attachment id、revision、digest、hash；
-- 截断标记、原始长度、cursor 和所有 `next*`；
-- `artifactObservation`、图片 `audit`、审批不确定性和 effects-may-have-occurred；
-- Exact Archive 的安全清洗后正文；
-- Renderer 已消费的 favicon、Todo、附件定位、草稿统计和 Artifact 字段。
+- 文件大小、解压、媒体、解析、传输、进程内存、walk、哈希和时间安全限；
+- Renderer favicon、Todo、附件定位、文件草稿和 Artifact Observation 字段；
+- Trace/Archive/Checkpoint 的审计、恢复和幂等身份；
+- 旧会话缺少新 coverage/cursor 字段时的读取兼容。
 
 ## 6. 契约测试
 
@@ -266,28 +271,28 @@ Renderer 使用 `artifactObservation` 构建 Office Artifact 卡片；失败 obs
 
 若后续有意修改投影，必须先更新本矩阵，再只修改对应 stage 的夹具断言。未同步更新契约的字段删除应由测试阻止。
 
-## 7. Round 2 模型语义投影
+## 7. Round 3 模型语义投影
 
 第 4 节记录 Raw Result 的完整消费者归属；下表是当前实际送入 M 的白名单。未列出的同组字段仍只属于 E/R/T/A/C。
 
-| Tool | 当前 M 投影 |
-| --- | --- |
-| `attachments_list*` | scope/total/truncated、returned、附件 name/kind/mimeType/sizeBytes/readPath |
-| `read_file` | path、行/总量、content、truncated/reason、next cursor |
-| `read_pdf/word/presentation/spreadsheet` | path/format、页/部件/幻灯片/工作表计数、text、truncated |
-| `read_image` | path/format/mimeType/sizeBytes；像素另走原生多模态消息 |
-| `workspace_map` | summary、treeText、truncated；不重复发送 tree/workspace 参数 |
-| `search_code` | matchCount、matches、truncated；不重复发送 query |
-| `web_search` | answer、title/url/content/publishedDate、images、truncated |
-| `web_fetch` | url、content、images、失败摘要、truncated |
-| `write_file` | 可行动 draft 摘要、tail、transactionState、requiresFinish、nextAction；Host 终态只保留状态/路径/统计/错误 |
-| `run_command` | exit/stdout/stderr/真实截断与失败状态、精简 policy、精简 Artifact changes/expected outputs/warnings |
-| 三个 Office Tool | documentKind/operation、可复用 outputs、进程结果与失败不确定性 |
-| Skill 资源/脚本 Tool | URI/游标/正文或执行结果、精简 preflight；去除 revision/digest/runtime fingerprint |
-| `skills_activate` | status、Skill name/hasResources；完整激活记录由 Extension 消费 |
-| `image_generation` | status/operation、可复用 Artifact、failure、savedPath/visualInputStatus；去除 audit/hash/后端 ID |
-| `conversation_history` | view、语义目录/正文、open/navigation、范围和截断；去除固定说明、计数重复、后端 ID/hash/时间戳 |
-| `todo_update` | accepted、revision、itemCount、completedCount；完整 Todo 由 request-only context 和 Renderer event 消费 |
+| Tool                                     | 当前 M 投影                                                                                                                        |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `attachments_list*`                      | scope、total/returned/omitted、truncated/nextCursor、附件 name/kind/mimeType/sizeBytes/readPath                                    |
+| `read_file`                              | path、行/总量、content、truncated/reason、next cursor                                                                              |
+| `read_pdf/word/presentation/spreadsheet` | path/format、页/部件/幻灯片/工作表计数、text、truncated                                                                            |
+| `read_image`                             | path/format/mimeType/sizeBytes；像素另走原生多模态消息                                                                             |
+| `workspace_map`                          | summary、treeText、coverage/refine、truncated；不重复发送 tree/workspace 参数                                                      |
+| `search_files/search_code`               | total/returned/omitted、matches、truncated/nextCursor、来源遗漏说明；不重复发送 query                                              |
+| `web_search`                             | Provider answer/snippets、title/url/publishedDate、images、contentKind/fullContentTool 和 Provider 恢复字段                        |
+| `web_fetch`                              | url、content、images、失败摘要、truncated                                                                                          |
+| `write_file`                             | 可行动 draft 摘要、tail、transactionState、requiresFinish、nextAction；Host 终态只保留状态/路径/统计/错误                          |
+| `run_command`                            | exit/stdout/stderr/真实截断与失败状态、精简 policy、Artifact partial/stopReasons/scanned/returned/omitted/changes/expected outputs |
+| 三个 Office Tool                         | documentKind/operation、可复用 outputs、进程结果与失败不确定性                                                                     |
+| Skill 资源/脚本 Tool                     | URI/游标/正文或执行结果、精简 preflight；去除 revision/digest/runtime fingerprint                                                  |
+| `skills_activate`                        | status、Skill name/hasResources；完整激活记录由 Extension 消费                                                                     |
+| `image_generation`                       | status/operation、可复用 Artifact、failure、savedPath/visualInputStatus；去除 audit/hash/后端 ID                                   |
+| `conversation_history`                   | view、语义目录/正文、open/navigation、范围和截断；去除固定说明、计数重复、后端 ID/hash/时间戳                                      |
+| `todo_update`                            | accepted、revision、itemCount、completedCount；完整 Todo 由 request-only context 和 Renderer event 消费                            |
 
 所有失败投影还会统一保留 `code/errorCode/recovery/phase`、权限/能力要求和副作用不确定性；重复的 `message/error` 只保留一份。
 

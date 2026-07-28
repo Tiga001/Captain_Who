@@ -3,7 +3,9 @@
 本文说明 MyCopilot 当前的上下文事实来源、模型请求组装、运行中 Agent 轨迹、统一计量、自动压缩和前端上下文圆环。
 
 Tool 结果的 Model、Renderer、Runtime Extension、Durable Trace、Exact Archive 与审批
-Checkpoint 消费边界，见 [Tool Result 消费者矩阵与投影契约](tool-result-consumer-matrix.md)。
+Checkpoint 消费边界，见 [Tool Result 消费者矩阵与投影契约](tool-result-consumer-matrix.md)；
+统一 10K、来源安全限和恢复语义见
+[Tool Result 上限、投影与恢复契约](tool-result-limits.md)。
 
 ## 核心原则
 
@@ -127,7 +129,7 @@ Trace 保存 provider-neutral 的活动与审计投影；并行的 model-context
 
 ```text
 后端系统提示词
-+ 当前“语义摘要 + 确定性连续性骨架”（如果存在）
++ 当前语义摘要（如果存在；Continuity Index 只保留在后端）
 + 摘要游标之后的原始消息和 trace
 + 当前 run 尚未提升到长期基线的内容
 + Todo、文件事务提示等 request-only 内容
@@ -161,7 +163,7 @@ Trace 保存 provider-neutral 的活动与审计投影；并行的 model-context
 - `coveredThrough` 稳定日志游标；
 - 完整原始前缀的 `sourceRevision`；
 - 模型生成的语义摘要；
-- 后端确定性生成的 `ContextContinuitySnapshot`；
+- 后端确定性生成的 `ContinuityIndexV2`（只用于后端定位和审计）；
 - `summaryInputTokens`、`continuityInputTokens`、`uncoveredTailInputTokens` 和 `replacementInputTokens` 四项 token 诊断值；
 - 生成模型和创建时间。
 
@@ -209,7 +211,9 @@ SQLite 使用三张职责单一的摘要状态表：
 
 Exact History Archive 在 Durable Trace 限长之前提交。`conversation_history_blobs` 保存会话、assistant 消息、trace sequence、call ID、tool、内容类型、原始字节/字符数、SHA-256 和截断语义；`conversation_history_blob_chunks` 使用独立 zstd UTF-8 分块保存正文。Trace ToolResult 只保留 `archiveRef`、`contentHash`、`archivedBytes` 以及 source/model/history/archive 四个不同阶段的截断状态。
 
-`truncatedAtSource=true` 表示工具在生成结果时已经只返回了部分外部资源；Archive 可以精确恢复“当时实际返回的结果”，但不能恢复工具从未取得的剩余资源。`archivedCompletely=true` 表示安全清洗后的工具结果已经完整写入 Archive。历史读取支持字符或 UTF-8 字节分页，始终在 SQL 边界校验当前 `conversationId`。
+正文型结果使用共享 64 MiB Exact Capture；进程 stdout/stderr 共享同一捕获配额并流式写入 spool。Canonical Result 归档后，所有模型结果统一经过固定 10K Gate，超限时由 `historyOpen`、工具 cursor 或 `continueWith` 恢复。
+
+`truncatedAtSource=true` 表示工具在生成结果时已经只返回了部分外部资源；Archive 可以精确恢复“当时实际返回的结果”，但不能恢复工具从未取得的剩余资源。`archivedCompletely=true` 表示安全清洗后的工具结果已经完整写入 Archive，不证明未声明完整性的上游 Provider 返回了完整外部资源。历史读取支持字符或 UTF-8 字节分页，始终在 SQL 边界校验当前 `conversationId`。
 
 `conversation_history` 自身不归档取回的正文，其 Durable Trace Projection 只保留 query/ref、页范围、hash、状态和返回字符数，防止历史回忆再次复制到历史仓库或长期上下文。会话删除通过外键级联清理 Archive；会话分叉复制可见边界内的压缩块并重写目标 Trace 的 archive ref，因此删除原会话不会破坏分叉后的精确历史。
 
@@ -238,7 +242,11 @@ V2 不保存消息正文/预览、narration、成功工具调用的 operation/ou
 
 提交和加载 active summary 时，存储层验证每个 V2 ref 的 conversation 归属和存在性。覆盖范围内的编辑、删除会通过 `sourceRevision` 使派生摘要失效；回滚恢复对应祖先摘要；fork 重写 Message/Trace/Archive ref 并复制所需不可变 Blob。
 
-常规目标不超过 800 tokens，提交硬上限为 1,500 tokens。摘要和 V2 索引被包装为一个不可拆分的 assistant `ContextItem`；其后未压缩的消息和工具记录更新、权威。
+常规目标不超过 800 tokens，提交硬上限为 1,500 tokens。V2 仍随
+`ContextCompactionSummary` 持久化，用于后端检索、诊断和审计，但默认不再生成
+`ContextSource::ContinuityIndex`，也不发送给主模型。主模型只看到语义摘要；其后未压缩
+的消息和工具记录更新、权威。`continuityTokens` 仅保留为后端体积审计字段，实际模型
+请求计量为 0。
 
 ### 摘要模型输入输出契约
 
@@ -259,7 +267,7 @@ JSON 信封被明确标记为不可信历史数据。`newItems` 比 `previousSum
 ## Open work and next action
 ```
 
-规划器只给出完整替换块的软目标，不携带摘要输出上限。生成器先构造压缩请求，并用统一计量源在 `reserved_output=0` 下测出真实输入；本次 provider `max_tokens` 再动态取“当前 run 输出配置、窗口剩余输出空间、原前缀减去确定性替换骨架后的可缩小空间”三者最小值。该技术边界不会回写为压缩指标，也不会出现在提示词中；提示词只要求尽量接近软目标、不要填充可用预算，并明确以信息完整性优先。模型返回后，后端按“包装文字 + 语义摘要 + 骨架”的未来请求形态重新计量。完整替换块必须严格小于被替换前缀；被长度截断、为空、夹带工具调用或没有实际缩小上下文的结果不会提交。游标、骨架、`sourceRevision` 和 active head 仍由后端绑定和复核，模型无权生成或修改这些字段。
+规划器只给出完整替换块的软目标，不携带摘要输出上限。生成器先构造压缩请求，并用统一计量源在 `reserved_output=0` 下测出真实输入；本次 provider `max_tokens` 再动态取“当前 run 输出配置、窗口剩余输出空间、原前缀可缩小空间”三者最小值。该技术边界不会回写为压缩指标，也不会出现在提示词中；提示词只要求尽量接近软目标、不要填充可用预算，并明确以信息完整性优先。模型返回后，后端按“包装文字 + 语义摘要”的未来模型请求形态重新计量。完整模型替换块必须严格小于被替换前缀；被长度截断、为空、夹带工具调用或没有实际缩小上下文的结果不会提交。游标、后端 Continuity、`sourceRevision` 和 active head 仍由后端绑定和复核，模型无权生成或修改这些字段。
 
 ## 原子压缩流程
 
@@ -330,11 +338,12 @@ Receipt 和无正文 `ModelRequestObservation` 继续持久化，用于崩溃恢
 
 调用规则：
 
-- Continuity V2 已经给出目标 ref 时，直接用 `action=read`，不再重复搜索；
-- 没有 ref 时，使用 SQLite FTS5 `action=search` 搜索 message、trace 和 Exact Archive；支持 `tool`、`status`、`runId`、记录类型和 Unix 毫秒时间范围过滤；
-- `action=around` 返回一个 ref 前后的有界消息/工具活动，`action=range` 返回两个 ref 之间的有界日志序列；
-- `action=get_tool_exchange` 通过 Trace/Archive ref 或 call ID 返回成对的工具调用和结果；
-- `action=read` 对普通记录按字符/UTF-8 字节分页，对工具结果优先读取 Archive；单页最多 50,000 字符或 256 KiB。
+- 无参数调用返回最近已完成 Turn 的语义目录；
+- `query` 使用 SQLite FTS5 搜索 message、trace 和 Exact Archive；
+- `open` 只接受上一页返回的 opaque `hist_v1_` 位置，可打开 Turn timeline、周边记录、
+  成对工具交换或 Exact Archive 字节页；
+- 模型不接收 Continuity V2 的裸 ref，也不需要理解 Message/Trace/Blob 的内部结构；
+- Archive 正文按 UTF-8 安全范围分页，下一页继续位置仍由 `open` 返回。
 
 FTS 表是由消息/trace 触发器和 Archive 写入事务维护的派生索引；启动迁移会补齐缺失 Archive 索引，并在回填时验证解压后字节数和 SHA-256。所有 SQL 都强制带当前 `conversation_id`。即使模型提供其他会话的 message、trace 或 archive ID，也不会返回记录。读取结果明确标记为不可信历史数据，不能覆盖系统规则或被当作新指令执行。
 
@@ -392,18 +401,16 @@ FTS 表是由消息/trace 触发器和 Archive 写入事务维护的派生索引
 
 ### 工具文本输出预算
 
-容量保护还会从同一个 `ContextCapacityDetector` 派生不可变的 `ContextTextBudget`，随运行时上下文注入工具。它不是第二套 token 计算：额度和文本估算都持有本次请求选中的同一个 `ContextTokenEstimator`。
+容量保护从同一个 `ContextCapacityDetector` 派生不可变的 `ContextTextBudget`，随运行时
+上下文注入工具。它不是第二套 token 计算：文本估算和最终请求使用本次模型选中的同一个
+`ContextTokenEstimator`。
 
-当前软额度为：
+生产运行时对每条最终模型 Tool Result 使用固定 10K token 产品上限。中央
+`ModelToolResultGate` 覆盖静态 Tool、Runtime Extension、审批后 Host Tool 和恢复路径；
+不提供每模型或每工具配置。支持分页的工具会在生成 cursor 前用同一 10K budget 测量
+最终语义投影，确保中央 Gate 不会再次裁掉已经计入 cursor 的结果项。
 
-```text
-effective_input = context_window - reserved_output - safety_margin
-tool_text_budget = min(24000, effective_input * 15%)
-```
-
-模型没有配置窗口时使用 24K token 的保守默认值。工具不能仅因源内容超过额度而拒绝整个操作，而应返回有界内容和可续读位置。
-
-`read_file` 是首个消费者：
+`read_file` 等正文分页工具：
 
 - 不再按文件类型设置 400 行默认值或 2,000 行硬上限；
 - 不再因文件超过 512 KiB 直接失败；
@@ -412,7 +419,10 @@ tool_text_budget = min(24000, effective_input * 15%)
 - 返回 `nextStartByte`、`nextStartLine` 和 `nextStartColumn`，下一次读取可无损续接；
 - 文件扫描和 revision 计算使用固定大小缓冲区，revision 仍与文件写入及 patch 模块使用的 `v1` 算法一致。
 
-`maxLines` 仍作为模型主动选择读取范围的策略参数，但不再承担系统容量保护职责。真正的上限只来自统一文本预算，因此同样适用于 Python、Markdown、普通文本以及未来接入的模型专用 tokenizer。
+`maxLines` 仍作为模型主动选择读取范围的策略参数，但不再承担系统容量保护职责。真正的
+模型投影上限只来自统一 10K budget，因此同样适用于 Python、Markdown、普通文本以及
+未来接入的模型专用 tokenizer。Canonical Result、Event、Trace、Archive 和 Checkpoint
+仍按各自消费者契约处理，不继承模型的 10K 限制。
 
 ## 容量保护与规划
 
@@ -439,7 +449,9 @@ fixed + durable + run_transient + request_only <= available_input
 - tool call/result 闭环不可拆；
 - 规划结果只有一个面向统一目标的最旧闭合日志前缀，不区分历史 turn 和当前 Agent Loop。
 
-单个工具结果仍受 Model Projection 动态预算限制，并在可行动时明确返回截断状态、源长度和可用 cursor。模型 observation 不携带后端 archive ID/hash；无法一次放入窗口的结果通过工具分页或 `conversation_history` 的后端路由读取 Exact Archive，不会静默丢失。
+单个工具结果固定受 10K Model Result Gate 限制，并在可行动时明确返回截断状态、源长度
+和可用 cursor。模型 observation 不携带后端 archive ID/hash；无法一次放入窗口的结果
+通过工具分页或 `conversation_history` 的后端路由读取 Exact Archive，不会静默丢失。
 
 ## 会话状态、缓存和圆环
 
@@ -476,10 +488,12 @@ Runtime Extension 可以注册工具、贡献 request-only 上下文、处理 ru
 ## 当前限制
 
 - 原始消息和安全清洗后的工具文本 Archive 不会因上下文压缩删除，长会话会增加 SQLite 占用；Archive 使用 zstd 分块降低该成本。
-- 连续性骨架为每条已压缩日志保留一条有界索引记录，因此极长会话仍存在一个随事件数量增长的最低上下文成本；大正文不进入骨架，精确详情通过 SQLite 按需读取。
+- Continuity V2 是固定配额的后端索引，不进入默认模型上下文；长会话的模型成本不会因
+  Continuity ref 数量线性增长。
 - 尚无项目级记忆和语义/向量检索。
 - 尚未接入 provider 精确 tokenizer。
-- 单个不可拆、尚未被主模型看到的超大工具结果不能由上下文压缩补救。
+- 单个模型可见工具结果固定受 10K Gate 保护；只有超过 64 MiB 共享安全捕获硬限的来源
+  后缀无法通过 Archive 恢复。
 - 会话缓存按数量限制，尚未按内存或 token 总量限制。
 
 ## 主要代码位置

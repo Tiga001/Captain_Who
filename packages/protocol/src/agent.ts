@@ -983,6 +983,16 @@ export interface AgentCommandArtifactObservationWarning {
 export interface AgentCommandArtifactObservation {
   schemaVersion: number
   status: AgentCommandArtifactObservationStatus
+  /** False only when both snapshots and the bounded change report are complete. */
+  partial?: boolean
+  /** Stable backend reason codes explaining incomplete observation evidence. */
+  stopReasons?: string[]
+  /** Office files considered across the before and after snapshots. */
+  scanned?: number
+  /** Change records included in this observation. */
+  returned?: number
+  /** Known change records omitted from the bounded report. */
+  omitted?: number
   coverage: AgentCommandArtifactObservationCoverage
   changes: AgentCommandArtifactChange[]
   changesTruncated: boolean

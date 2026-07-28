@@ -1450,7 +1450,7 @@ pub struct AgentGitDiffSnapshot {
 ///
 /// Observation is telemetry, not an authorization capability. The host still authorizes and
 /// executes the command exclusively through the existing command permission and safety policy.
-pub const AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION: u32 = 2;
+pub const AGENT_COMMAND_ARTIFACT_OBSERVATION_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -1633,6 +1633,28 @@ pub struct AgentCommandArtifactObservationWarning {
 pub struct AgentCommandArtifactObservation {
     pub schema_version: u32,
     pub status: AgentCommandArtifactObservationStatus,
+    /// Unified completeness flag for model, UI, audit, and checkpoint consumers.
+    ///
+    /// This remains redundant with `status` on purpose. It is absent on schema versions before
+    /// v3, so old persisted partial observations cannot be reserialized with a conflicting
+    /// `partial=false` default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<bool>,
+    /// Stable backend reason codes explaining why `partial` is true.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_reasons: Vec<String>,
+    /// Office files considered across the before and after snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scanned: Option<u64>,
+    /// Change records included in this observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returned: Option<u64>,
+    /// Known change records omitted by the bounded report projection.
+    ///
+    /// A partial snapshot can additionally have an unknown unobserved suffix; `partial` and
+    /// `stopReasons` prevent this known count from being mistaken for complete coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<u64>,
     pub coverage: AgentCommandArtifactObservationCoverage,
     pub changes: Vec<AgentCommandArtifactChange>,
     #[serde(default)]
