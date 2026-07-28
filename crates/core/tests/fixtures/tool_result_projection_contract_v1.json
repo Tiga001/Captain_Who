@@ -215,7 +215,20 @@
             "importantFiles": [],
             "entrypointCandidates": [],
             "testCandidates": [],
-            "documentationFiles": []
+            "documentationFiles": [],
+            "collectionCoverage": {
+              "languages": { "returned": 0, "total": 0, "omitted": 0, "truncated": false },
+              "topDirectories": { "returned": 0, "total": 0, "omitted": 0, "truncated": false },
+              "importantFiles": { "returned": 0, "total": 0, "omitted": 0, "truncated": false },
+              "entrypointCandidates": {
+                "returned": 0,
+                "total": 0,
+                "omitted": 0,
+                "truncated": false
+              },
+              "testCandidates": { "returned": 0, "total": 0, "omitted": 0, "truncated": false },
+              "documentationFiles": { "returned": 0, "total": 0, "omitted": 0, "truncated": false }
+            }
           },
           "tree": [
             {
@@ -237,6 +250,7 @@
         "model": {
           "required": {
             "/result/summary/fileCount": 1,
+            "/result/summary/collectionCoverage/languages/returned": 0,
             "/result/treeText": "src/\n  main.rs"
           },
           "absent": ["/result/workspace", "/result/tree"]
@@ -379,6 +393,9 @@
             "updatedAt": 1785200000100
           },
           "tail": "private generated content",
+          "totalChars": 25,
+          "tailStart": 0,
+          "tailTruncated": false,
           "maxDraftBytes": 8388608,
           "transactionState": "dirty",
           "requiresFinishBeforeResponse": true,
@@ -389,6 +406,9 @@
         "model": {
           "required": {
             "/result/tail": "private generated content",
+            "/result/totalChars": 25,
+            "/result/tailStart": 0,
+            "/result/tailTruncated": false,
             "/result/draft/draftId": "draft-1",
             "/result/nextAction": "append_or_finish"
           },
@@ -409,7 +429,10 @@
             "/result/draft/additions": 2,
             "/result/draft/deletions": 0,
             "/result/draft/lineCount": 2,
-            "/result/draft/byteCount": 20
+            "/result/draft/byteCount": 20,
+            "/result/totalChars": 25,
+            "/result/tailStart": 0,
+            "/result/tailTruncated": false
           },
           "absent": ["/result/tail"]
         },

@@ -179,6 +179,23 @@ struct FileCandidate {
     reason: Option<&'static str>,
 }
 
+struct BoundedCollection {
+    items: Vec<Value>,
+    total: usize,
+}
+
+impl BoundedCollection {
+    fn coverage(&self) -> Value {
+        let omitted = self.total.saturating_sub(self.items.len());
+        json!({
+            "returned": self.items.len(),
+            "total": self.total,
+            "omitted": omitted,
+            "truncated": omitted > 0
+        })
+    }
+}
+
 fn resolve_focus_root(
     context: &ToolExecutionContext,
     workspace_root: Option<&Path>,
@@ -280,16 +297,32 @@ fn build_summary(
         }
     }
 
+    let languages = language_stats_json(language_stats);
+    let top_directories = top_directories_json(directory_stats);
+    let important_files = candidates_json(important_files, MAX_IMPORTANT_FILES);
+    let entrypoint_candidates = candidates_json(entrypoint_candidates, MAX_CANDIDATES);
+    let test_candidates = candidates_json(test_candidates, MAX_CANDIDATES);
+    let documentation_files = candidates_json(documentation_files, MAX_CANDIDATES);
+    let collection_coverage = json!({
+        "languages": languages.coverage(),
+        "topDirectories": top_directories.coverage(),
+        "importantFiles": important_files.coverage(),
+        "entrypointCandidates": entrypoint_candidates.coverage(),
+        "testCandidates": test_candidates.coverage(),
+        "documentationFiles": documentation_files.coverage()
+    });
+
     Ok(json!({
         "fileCount": file_count,
         "directoryCount": directory_count,
         "totalFileBytes": total_file_bytes,
-        "languages": language_stats_json(language_stats),
-        "topDirectories": top_directories_json(directory_stats),
-        "importantFiles": candidates_json(important_files, MAX_IMPORTANT_FILES),
-        "entrypointCandidates": candidates_json(entrypoint_candidates, MAX_CANDIDATES),
-        "testCandidates": candidates_json(test_candidates, MAX_CANDIDATES),
-        "documentationFiles": candidates_json(documentation_files, MAX_CANDIDATES)
+        "languages": languages.items,
+        "topDirectories": top_directories.items,
+        "importantFiles": important_files.items,
+        "entrypointCandidates": entrypoint_candidates.items,
+        "testCandidates": test_candidates.items,
+        "documentationFiles": documentation_files.items,
+        "collectionCoverage": collection_coverage
     }))
 }
 
@@ -393,11 +426,12 @@ fn bump_top_directory(
     }
 }
 
-fn language_stats_json(language_stats: BTreeMap<String, LanguageStat>) -> Vec<Value> {
+fn language_stats_json(language_stats: BTreeMap<String, LanguageStat>) -> BoundedCollection {
     let mut stats = language_stats.into_iter().collect::<Vec<_>>();
     stats.sort_by_key(|(name, stat)| (Reverse(stat.files), Reverse(stat.bytes), name.clone()));
+    let total = stats.len();
 
-    stats
+    let items = stats
         .into_iter()
         .take(MAX_LANGUAGE_STATS)
         .map(|(language, stat)| {
@@ -408,10 +442,12 @@ fn language_stats_json(language_stats: BTreeMap<String, LanguageStat>) -> Vec<Va
                 "extensions": stat.extensions.into_iter().collect::<Vec<_>>()
             })
         })
-        .collect()
+        .collect();
+
+    BoundedCollection { items, total }
 }
 
-fn top_directories_json(directory_stats: BTreeMap<String, DirectoryStat>) -> Vec<Value> {
+fn top_directories_json(directory_stats: BTreeMap<String, DirectoryStat>) -> BoundedCollection {
     let mut stats = directory_stats.into_iter().collect::<Vec<_>>();
     stats.sort_by_key(|(path, stat)| {
         (
@@ -420,8 +456,9 @@ fn top_directories_json(directory_stats: BTreeMap<String, DirectoryStat>) -> Vec
             path.clone(),
         )
     });
+    let total = stats.len();
 
-    stats
+    let items = stats
         .into_iter()
         .take(MAX_TOP_DIRECTORIES)
         .map(|(path, stat)| {
@@ -432,12 +469,15 @@ fn top_directories_json(directory_stats: BTreeMap<String, DirectoryStat>) -> Vec
                 "bytes": stat.bytes
             })
         })
-        .collect()
+        .collect();
+
+    BoundedCollection { items, total }
 }
 
-fn candidates_json(mut candidates: Vec<FileCandidate>, limit: usize) -> Vec<Value> {
+fn candidates_json(mut candidates: Vec<FileCandidate>, limit: usize) -> BoundedCollection {
     candidates.sort_by(|left, right| left.path.cmp(&right.path));
-    candidates
+    let total = candidates.len();
+    let items = candidates
         .into_iter()
         .take(limit)
         .map(|candidate| {
@@ -453,7 +493,9 @@ fn candidates_json(mut candidates: Vec<FileCandidate>, limit: usize) -> Vec<Valu
             }
             value
         })
-        .collect()
+        .collect();
+
+    BoundedCollection { items, total }
 }
 
 fn depth_relative_to(root: &Path, path: &Path) -> usize {
@@ -644,13 +686,17 @@ fn file_name_lower(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ToolExecutionContext, ToolRegistry};
+    use super::super::{ToolExecutionContext, ToolRegistry, WalkEntry};
+    use super::{
+        build_summary, MAX_CANDIDATES, MAX_IMPORTANT_FILES, MAX_LANGUAGE_STATS, MAX_TOP_DIRECTORIES,
+    };
+    use crate::cancellation::AgentCancellationToken;
     use crate::protocol::{
         AgentApprovalStatus, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
     };
     use serde_json::json;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -691,6 +737,45 @@ mod tests {
             value["summary"]["testCandidates"][0]["path"],
             "src/App.test.tsx"
         );
+
+        let coverage = &value["summary"]["collectionCoverage"];
+        for collection in [
+            "languages",
+            "topDirectories",
+            "importantFiles",
+            "entrypointCandidates",
+            "testCandidates",
+            "documentationFiles",
+        ] {
+            assert_eq!(
+                coverage[collection]["returned"],
+                coverage[collection]["total"]
+            );
+            assert_eq!(coverage[collection]["omitted"], 0);
+            assert_eq!(coverage[collection]["truncated"], false);
+        }
+        assert!(!crate::tools::tool_result_truncated_at_source(&result));
+
+        let model = registry.model_projection(&result);
+        let model_value = model.result.as_ref().unwrap();
+        assert!(model_value.get("workspace").is_none());
+        assert_eq!(
+            model_value["summary"]["collectionCoverage"],
+            value["summary"]["collectionCoverage"]
+        );
+
+        let event = registry.event_projection(&result);
+        assert_eq!(
+            event.result.as_ref().unwrap()["summary"]["collectionCoverage"],
+            value["summary"]["collectionCoverage"]
+        );
+        assert!(event.result.as_ref().unwrap().get("workspace").is_some());
+
+        let trace = registry.trace_projection(&result);
+        assert_eq!(
+            trace.result.as_ref().unwrap()["summary"]["collectionCoverage"],
+            value["summary"]["collectionCoverage"]
+        );
     }
 
     #[test]
@@ -717,6 +802,107 @@ mod tests {
         assert_eq!(value["workspace"]["focusPath"], "agent");
         assert!(value["treeText"].as_str().unwrap().contains("rust/"));
         assert!(!value["treeText"].as_str().unwrap().contains("desktop"));
+    }
+
+    #[test]
+    fn workspace_map_reports_coverage_for_every_bounded_summary_collection() {
+        let workspace_root = Path::new("/workspace");
+        let mut entries = Vec::new();
+
+        for index in 0..(MAX_IMPORTANT_FILES + 5) {
+            entries.push(file_entry(format!(
+                "/workspace/config-{index}/package.json"
+            )));
+        }
+        for index in 0..(MAX_CANDIDATES + 5) {
+            entries.push(file_entry(format!(
+                "/workspace/entrypoints/{index}/main.go"
+            )));
+            entries.push(file_entry(format!("/workspace/tests/case-{index}.test.ts")));
+            entries.push(file_entry(format!("/workspace/docs/page-{index}.md")));
+        }
+        for (index, extension) in [
+            "rs", "ts", "js", "py", "go", "java", "kt", "swift", "c", "cs", "rb", "php", "sh",
+            "ps1", "html", "css", "vue", "svelte", "astro", "json", "yaml", "toml", "xml", "md",
+            "sql", "gql", "proto", "prisma", "tf", "csv", "pdf", "doc", "ppt", "lock", "bin",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            entries.push(file_entry(format!(
+                "/workspace/languages/sample-{index}.{extension}"
+            )));
+        }
+
+        let summary = build_summary(
+            workspace_root,
+            workspace_root,
+            &entries,
+            &AgentCancellationToken::new(),
+        )
+        .unwrap();
+        let coverage = &summary["collectionCoverage"];
+
+        assert_eq!(
+            coverage["importantFiles"],
+            json!({
+                "returned": MAX_IMPORTANT_FILES,
+                "total": MAX_IMPORTANT_FILES + 5,
+                "omitted": 5,
+                "truncated": true
+            })
+        );
+        for collection in [
+            "entrypointCandidates",
+            "testCandidates",
+            "documentationFiles",
+        ] {
+            assert_eq!(
+                coverage[collection],
+                json!({
+                    "returned": MAX_CANDIDATES,
+                    "total": MAX_CANDIDATES + 5,
+                    "omitted": 5,
+                    "truncated": true
+                })
+            );
+        }
+
+        assert_eq!(
+            coverage["topDirectories"],
+            json!({
+                "returned": MAX_TOP_DIRECTORIES,
+                "total": MAX_IMPORTANT_FILES + 9,
+                "omitted": MAX_IMPORTANT_FILES + 9 - MAX_TOP_DIRECTORIES,
+                "truncated": true
+            })
+        );
+
+        let language_total = coverage["languages"]["total"].as_u64().unwrap() as usize;
+        assert!(language_total > MAX_LANGUAGE_STATS);
+        assert_eq!(coverage["languages"]["returned"], json!(MAX_LANGUAGE_STATS));
+        assert_eq!(
+            coverage["languages"]["omitted"],
+            json!(language_total - MAX_LANGUAGE_STATS)
+        );
+        assert_eq!(coverage["languages"]["truncated"], true);
+
+        let raw = crate::protocol::AgentToolResult {
+            call_id: "call-workspace-map-coverage".to_string(),
+            tool: "workspace_map".to_string(),
+            ok: true,
+            result: Some(json!({ "summary": summary })),
+            error: None,
+        };
+        assert!(crate::tools::tool_result_truncated_at_source(&raw));
+    }
+
+    fn file_entry(path: String) -> WalkEntry {
+        WalkEntry {
+            path: PathBuf::from(path),
+            is_dir: false,
+            size_bytes: 1,
+        }
     }
 
     struct TestWorkspace {

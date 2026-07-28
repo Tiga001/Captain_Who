@@ -44,6 +44,10 @@ pub struct ConversationHistoryArchiveDescriptor {
     pub chunk_count: u64,
     pub compression: String,
     pub truncated_at_source: bool,
+    /// Complete persistence of the payload supplied to this archive, not source completeness.
+    ///
+    /// A descriptor may validly have both `archived_completely` and `truncated_at_source` set:
+    /// the backend then preserved all bytes it received while the upstream source omitted some.
     pub archived_completely: bool,
     pub model_projection_truncated: bool,
     pub archive_projection_truncated: bool,
@@ -867,6 +871,10 @@ mod tests {
         }
         assert_eq!(restored, content);
         assert!(archive.truncated_at_source);
+        assert!(
+            archive.archived_completely,
+            "source truncation must not imply that persistence lost bytes from the received payload"
+        );
 
         connection
             .execute("DELETE FROM conversations WHERE id = 'conversation-1'", [])

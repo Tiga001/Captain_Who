@@ -132,6 +132,9 @@ pub(super) fn write_file_model_projection(result: &AgentToolResult) -> AgentTool
             }
             for field in [
                 "tail",
+                "totalChars",
+                "tailStart",
+                "tailTruncated",
                 "transactionState",
                 "requiresFinishBeforeResponse",
                 "nextAction",
@@ -609,9 +612,13 @@ fn draft_result(draft: &AgentFileDraftRecord) -> Value {
         created_at: draft.created_at,
         updated_at: draft.updated_at,
     });
+    let (tail, total_chars, tail_start) = tail_preview(&draft.content, RESULT_TAIL_CHARS);
     json!({
         "draft": snapshot,
-        "tail": tail_chars(&draft.content, RESULT_TAIL_CHARS),
+        "tail": tail,
+        "totalChars": total_chars,
+        "tailStart": tail_start,
+        "tailTruncated": tail_start > 0,
         "maxDraftBytes": MAX_DRAFT_BYTES,
         "transactionState": if matches!(draft.status.as_str(), "drafting" | "ready") { "dirty" } else { "settled" },
         "requiresFinishBeforeResponse": matches!(draft.status.as_str(), "drafting" | "ready"),
@@ -765,9 +772,14 @@ fn reject_nul(content: &str) -> AgentResult<()> {
     }
 }
 
-fn tail_chars(content: &str, limit: usize) -> String {
-    let chars = content.chars().count();
-    content.chars().skip(chars.saturating_sub(limit)).collect()
+fn tail_preview(content: &str, limit: usize) -> (String, usize, usize) {
+    let total_chars = content.chars().count();
+    let tail_start = total_chars.saturating_sub(limit);
+    (
+        content.chars().skip(tail_start).collect(),
+        total_chars,
+        tail_start,
+    )
 }
 
 #[cfg(test)]
@@ -786,6 +798,72 @@ mod tests {
     fn diff_counts_create_and_replace() {
         assert_eq!(diff_counts("", "a\nb\n"), (2, 0));
         assert_eq!(diff_counts("a\nb\n", "a\nc\n"), (1, 1));
+    }
+
+    #[test]
+    fn draft_tail_reports_the_exact_preview_range_to_every_result_consumer() {
+        let content = "你".repeat(RESULT_TAIL_CHARS + 7);
+        let draft = AgentFileDraftRecord {
+            id: "draft-tail".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            project_id: None,
+            run_id: "run-1".to_string(),
+            file_path: "report.md".to_string(),
+            mode: "create".to_string(),
+            status: "drafting".to_string(),
+            base_revision: None,
+            base_content: String::new(),
+            content: content.clone(),
+            additions: 1,
+            deletions: 0,
+            line_count: 1,
+            byte_count: content.len() as u64,
+            chunk_count: 1,
+            next_chunk_index: 1,
+            stats_final: true,
+            summary: None,
+            final_action_id: None,
+            created_at: 1,
+            updated_at: 2,
+            expires_at: i64::MAX,
+        };
+        let value = draft_result(&draft);
+        assert_eq!(value["totalChars"], RESULT_TAIL_CHARS + 7);
+        assert_eq!(value["tailStart"], 7);
+        assert_eq!(value["tailTruncated"], true);
+        assert_eq!(
+            value["tail"].as_str().unwrap().chars().count(),
+            RESULT_TAIL_CHARS
+        );
+
+        let canonical = AgentToolResult {
+            call_id: "write-tail".to_string(),
+            tool: "write_file".to_string(),
+            ok: true,
+            result: Some(value.clone()),
+            error: None,
+        };
+        let model = write_file_model_projection(&canonical);
+        assert_eq!(
+            model.result.as_ref().unwrap()["totalChars"],
+            value["totalChars"]
+        );
+        assert_eq!(
+            model.result.as_ref().unwrap()["tailStart"],
+            value["tailStart"]
+        );
+        assert_eq!(
+            model.result.as_ref().unwrap()["tailTruncated"],
+            value["tailTruncated"]
+        );
+        for projection in [
+            WriteFileTool.event_projection(&canonical),
+            WriteFileTool.trace_projection(&canonical),
+            WriteFileTool.archive_projection(&canonical),
+            WriteFileTool.checkpoint_projection(&canonical),
+        ] {
+            assert_eq!(projection.result.as_ref(), Some(&value));
+        }
     }
 
     #[test]

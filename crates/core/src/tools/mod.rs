@@ -138,7 +138,38 @@ pub(crate) fn tool_result_truncated_at_source(result: &AgentToolResult) -> bool 
         .is_some_and(value_contains_unrecoverable_source_truncation)
 }
 
-fn value_contains_unrecoverable_source_truncation(value: &Value) -> bool {
+// `truncated` is intentionally not in this list: it is the shared page/projection marker and can
+// describe Semantic Pagination when a usable continuation is present. These dedicated flags say
+// that capture itself omitted source material and therefore remain authoritative.
+const DEDICATED_SOURCE_TRUNCATION_FIELDS: &[&str] = &[
+    "stdoutTruncated",
+    "stdout_truncated",
+    "stderrTruncated",
+    "stderr_truncated",
+    "changesTruncated",
+    "changes_truncated",
+];
+
+const SOURCE_TRUNCATION_DECLARATION_FIELDS: &[&str] = &["truncatedAtSource", "truncated_at_source"];
+
+const SEMANTIC_RECOVERY_FIELDS: &[&str] = &[
+    "continueWith",
+    "continue_with",
+    "cursor",
+    "next",
+    "nextCursor",
+    "next_cursor",
+    "nextStartByte",
+    "next_start_byte",
+    "nextStartLine",
+    "next_start_line",
+    "nextAfterPath",
+    "next_after_path",
+    "historyOpen",
+    "history_open",
+];
+
+pub(crate) fn value_contains_unrecoverable_source_truncation(value: &Value) -> bool {
     let Value::Object(object) = value else {
         return match value {
             Value::Array(values) => values
@@ -148,44 +179,57 @@ fn value_contains_unrecoverable_source_truncation(value: &Value) -> bool {
         };
     };
 
-    if let Some(truncated_at_source) = object
+    let declared_source_truncation = object
         .get("truncatedAtSource")
         .or_else(|| object.get("truncated_at_source"))
-        .and_then(Value::as_bool)
-    {
-        return truncated_at_source;
+        .and_then(Value::as_bool);
+    if declared_source_truncation == Some(true) {
+        // An explicit source-truncation declaration is authoritative. A history archive or other
+        // continuation can recover the payload that reached this process, but cannot make bytes
+        // omitted by the source complete.
+        return true;
     }
 
-    let has_recovery = [
-        "continueWith",
-        "continue_with",
-        "cursor",
-        "next",
-        "nextCursor",
-        "next_cursor",
-        "nextStartByte",
-        "nextStartLine",
-        "nextAfterPath",
-        "historyOpen",
-        "history_open",
-    ]
-    .iter()
-    .any(|key| object.get(*key).is_some_and(|value| !value.is_null()))
+    // Dedicated capture flags describe bytes or observations the Tool already discarded. A
+    // cursor or Exact History route can recover the received payload, not the omitted source
+    // content, so these flags remain source truncation even when a recovery route is present.
+    if DEDICATED_SOURCE_TRUNCATION_FIELDS
+        .iter()
+        .any(|key| object.get(*key).is_some_and(value_contains_true))
+    {
+        return true;
+    }
+
+    let has_recovery = SEMANTIC_RECOVERY_FIELDS
+        .iter()
+        .any(|key| object.get(*key).is_some_and(valid_recovery_value))
         || object
             .get("navigation")
             .and_then(Value::as_object)
-            .is_some_and(|navigation| navigation.values().any(|value| !value.is_null()));
-    let locally_truncated = object.get("truncated").is_some_and(value_contains_true);
-    if locally_truncated && !has_recovery {
+            .is_some_and(|navigation| navigation.values().any(valid_recovery_value));
+    let generically_truncated = object.get("truncated").is_some_and(value_contains_true);
+    if declared_source_truncation != Some(false) && generically_truncated && !has_recovery {
         return true;
     }
 
     object.iter().any(|(key, value)| {
-        !matches!(
-            key.as_str(),
-            "truncated" | "truncatedAtSource" | "truncated_at_source"
-        ) && value_contains_unrecoverable_source_truncation(value)
+        key != "truncated"
+            && !DEDICATED_SOURCE_TRUNCATION_FIELDS.contains(&key.as_str())
+            && !SOURCE_TRUNCATION_DECLARATION_FIELDS.contains(&key.as_str())
+            && !SEMANTIC_RECOVERY_FIELDS.contains(&key.as_str())
+            && key != "navigation"
+            && value_contains_unrecoverable_source_truncation(value)
     })
+}
+
+fn valid_recovery_value(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) => false,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Number(_) => true,
+        Value::Array(values) => values.iter().any(valid_recovery_value),
+        Value::Object(values) => values.values().any(valid_recovery_value),
+    }
 }
 
 fn value_contains_true(value: &Value) -> bool {
@@ -1457,6 +1501,168 @@ mod tests {
             &explicitly_complete_source
         ));
         assert!(tool_result_truncated_at_source(&unrecoverable));
+    }
+
+    #[test]
+    fn source_truncation_recognizes_stream_and_artifact_flags_at_any_depth() {
+        for (call_id, result) in [
+            (
+                "stdout",
+                json!({
+                    "status": "completed",
+                    "stdoutTruncated": true,
+                    "stderrTruncated": false
+                }),
+            ),
+            (
+                "stderr",
+                json!({
+                    "execution": {
+                        "stderr_truncated": true
+                    }
+                }),
+            ),
+            (
+                "changes",
+                json!({
+                    "observation": {
+                        "coverage": {
+                            "changesTruncated": true
+                        }
+                    }
+                }),
+            ),
+        ] {
+            let result = AgentToolResult {
+                call_id: call_id.to_string(),
+                tool: "custom".to_string(),
+                ok: true,
+                result: Some(result),
+                error: None,
+            };
+            assert!(
+                tool_result_truncated_at_source(&result),
+                "{call_id} truncation must be recognized"
+            );
+        }
+    }
+
+    #[test]
+    fn source_truncation_accepts_only_non_empty_semantic_recovery_routes() {
+        for (call_id, recovery) in [
+            ("cursor", json!({ "cursor": "page-2" })),
+            (
+                "continue-with",
+                json!({
+                    "continueWith": {
+                        "tool": "read_file",
+                        "args": { "startByte": 1024 }
+                    }
+                }),
+            ),
+            ("history-open", json!({ "historyOpen": "hist_v1_page_2" })),
+            (
+                "navigation",
+                json!({ "navigation": { "older": "hist_v1_older" } }),
+            ),
+        ] {
+            let mut object = recovery.as_object().unwrap().clone();
+            object.insert("truncated".to_string(), Value::Bool(true));
+            let result = AgentToolResult {
+                call_id: call_id.to_string(),
+                tool: "custom".to_string(),
+                ok: true,
+                result: Some(Value::Object(object)),
+                error: None,
+            };
+            assert!(
+                !tool_result_truncated_at_source(&result),
+                "{call_id} must make the bounded page recoverable"
+            );
+        }
+
+        for (call_id, recovery) in [
+            ("null-cursor", json!({ "cursor": null })),
+            ("empty-cursor", json!({ "nextCursor": "   " })),
+            ("empty-continuation", json!({ "continueWith": {} })),
+            (
+                "empty-navigation",
+                json!({ "navigation": { "older": null, "newer": "" } }),
+            ),
+        ] {
+            let mut object = recovery.as_object().unwrap().clone();
+            object.insert("truncated".to_string(), Value::Bool(true));
+            let result = AgentToolResult {
+                call_id: call_id.to_string(),
+                tool: "custom".to_string(),
+                ok: true,
+                result: Some(Value::Object(object)),
+                error: None,
+            };
+            assert!(
+                tool_result_truncated_at_source(&result),
+                "{call_id} is not a usable recovery route"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_source_declarations_are_scoped_and_authoritative() {
+        let explicit_true_with_recovery = AgentToolResult {
+            call_id: "explicit-true".to_string(),
+            tool: "custom".to_string(),
+            ok: true,
+            result: Some(json!({
+                "truncatedAtSource": true,
+                "historyOpen": "hist_v1_received_payload"
+            })),
+            error: None,
+        };
+        let dedicated_cut_under_explicitly_complete_parent = AgentToolResult {
+            call_id: "explicit-false".to_string(),
+            tool: "custom".to_string(),
+            ok: true,
+            result: Some(json!({
+                "truncatedAtSource": false,
+                "stdoutTruncated": true
+            })),
+            error: None,
+        };
+        let nested_source_cut_under_explicitly_complete_parent = AgentToolResult {
+            call_id: "nested-source".to_string(),
+            tool: "custom".to_string(),
+            ok: true,
+            result: Some(json!({
+                "truncatedAtSource": false,
+                "nested": {
+                    "stderrTruncated": true
+                }
+            })),
+            error: None,
+        };
+        let dedicated_cut_with_history_recovery = AgentToolResult {
+            call_id: "dedicated-with-history".to_string(),
+            tool: "custom".to_string(),
+            ok: true,
+            result: Some(json!({
+                "stdoutTruncated": true,
+                "historyOpen": "hist_v1_received_payload"
+            })),
+            error: None,
+        };
+
+        assert!(tool_result_truncated_at_source(
+            &explicit_true_with_recovery
+        ));
+        assert!(tool_result_truncated_at_source(
+            &dedicated_cut_under_explicitly_complete_parent
+        ));
+        assert!(tool_result_truncated_at_source(
+            &nested_source_cut_under_explicitly_complete_parent
+        ));
+        assert!(tool_result_truncated_at_source(
+            &dedicated_cut_with_history_recovery
+        ));
     }
 
     struct TestWorkspace {

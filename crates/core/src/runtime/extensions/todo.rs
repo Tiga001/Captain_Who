@@ -215,9 +215,24 @@ impl TodoStateStore {
         let now = now_ms();
         let mut used_ids = BTreeSet::new();
         let mut next_items = Vec::with_capacity(args.items.len());
+        let mut next_item_id = self.next_item_id;
 
         for item in args.items {
             let title = normalize_required_text(&item.title, "todo_update.items[].title")?;
+            if title.chars().count() > MAX_TODO_TITLE_CHARS {
+                return Err(AgentError::new(format!(
+                    "todo_update item title cannot exceed {MAX_TODO_TITLE_CHARS} characters."
+                )));
+            }
+            let note = item.note.as_deref().and_then(normalize_optional_text);
+            if note
+                .as_deref()
+                .is_some_and(|value| value.chars().count() > MAX_TODO_NOTE_CHARS)
+            {
+                return Err(AgentError::new(format!(
+                    "todo_update item note cannot exceed {MAX_TODO_NOTE_CHARS} characters."
+                )));
+            }
             let id = match item.id.and_then(|id| normalize_optional_text(&id)) {
                 Some(id) if id.chars().count() <= MAX_TODO_ID_CHARS => id,
                 Some(_) => {
@@ -225,7 +240,7 @@ impl TodoStateStore {
                         "todo_update item id cannot exceed {MAX_TODO_ID_CHARS} characters."
                     )))
                 }
-                None => self.allocate_item_id(&used_ids, &previous),
+                None => Self::allocate_item_id(&mut next_item_id, &used_ids, &previous),
             };
             if !used_ids.insert(id.clone()) {
                 return Err(AgentError::new(format!(
@@ -238,13 +253,9 @@ impl TodoStateStore {
                 .unwrap_or(now);
             next_items.push(AgentTodoItem {
                 id: id.clone(),
-                title: truncate_chars(&title, MAX_TODO_TITLE_CHARS),
+                title,
                 status: item.status,
-                note: item
-                    .note
-                    .as_deref()
-                    .and_then(normalize_optional_text)
-                    .map(|note| truncate_chars(&note, MAX_TODO_NOTE_CHARS)),
+                note,
                 created_at,
                 updated_at: now,
             });
@@ -256,18 +267,19 @@ impl TodoStateStore {
             updated_at: now,
         };
         validate_todo_context_budget(&next_state)?;
+        self.next_item_id = next_item_id;
         self.state = next_state;
         Ok(self.state.clone())
     }
 
     fn allocate_item_id(
-        &mut self,
+        next_item_id: &mut u64,
         used_ids: &BTreeSet<String>,
         previous: &BTreeMap<String, AgentTodoItem>,
     ) -> String {
         loop {
-            let id = format!("todo-{}", self.next_item_id);
-            self.next_item_id += 1;
+            let id = format!("todo-{next_item_id}");
+            *next_item_id += 1;
             if !used_ids.contains(&id) && !previous.contains_key(&id) {
                 return id;
             }
@@ -426,15 +438,6 @@ fn normalize_optional_text(value: &str) -> Option<String> {
     } else {
         Some(value.to_string())
     }
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
-    let mut output = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        output.push_str("...");
-    }
-    output
 }
 
 fn render_todo_state(state: &AgentTodoState) -> String {
@@ -753,9 +756,9 @@ mod tests {
         let oversized = (0..MAX_TODO_ITEMS)
             .map(|index| {
                 json!({
-                    "title": format!("{index}-{}", "long todo item ".repeat(20)),
+                    "title": format!("{index}-{}", "x".repeat(MAX_TODO_TITLE_CHARS - 3)),
                     "status": "pending",
-                    "note": "long progress note ".repeat(20)
+                    "note": "y".repeat(MAX_TODO_NOTE_CHARS)
                 })
             })
             .collect::<Vec<_>>();
@@ -766,6 +769,69 @@ mod tests {
             .as_deref()
             .is_some_and(|error| error.contains("500-token Todo context budget")));
         assert!(handle.state().items.is_empty());
+    }
+
+    #[test]
+    fn todo_rejects_oversized_text_atomically_instead_of_truncating() {
+        let (_extension, handle) = TodoExtension::new("run-1".to_string());
+        let tool = TodoTool {
+            state: handle.clone(),
+        };
+
+        let oversized_title = execute(
+            &tool,
+            json!({
+                "items": [{
+                    "title": "x".repeat(MAX_TODO_TITLE_CHARS + 1),
+                    "status": "pending"
+                }]
+            }),
+        );
+        assert!(!oversized_title.ok);
+        assert!(oversized_title
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("title cannot exceed 120 characters")));
+        assert_eq!(handle.state().revision, 0);
+        assert!(handle.state().items.is_empty());
+
+        let oversized_note = execute(
+            &tool,
+            json!({
+                "items": [{
+                    "title": "Keep this whole title",
+                    "status": "pending",
+                    "note": "n".repeat(MAX_TODO_NOTE_CHARS + 1)
+                }]
+            }),
+        );
+        assert!(!oversized_note.ok);
+        assert!(oversized_note
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("note cannot exceed 240 characters")));
+        assert_eq!(handle.state().revision, 0);
+        assert!(handle.state().items.is_empty());
+
+        let accepted = execute(
+            &tool,
+            json!({
+                "items": [{
+                    "title": "Preserved exactly",
+                    "status": "pending",
+                    "note": "Also preserved exactly"
+                }]
+            }),
+        );
+        assert!(accepted.ok, "{:?}", accepted.error);
+        let state = handle.state();
+        assert_eq!(state.revision, 1);
+        assert_eq!(state.items[0].id, "todo-1");
+        assert_eq!(state.items[0].title, "Preserved exactly");
+        assert_eq!(
+            state.items[0].note.as_deref(),
+            Some("Also preserved exactly")
+        );
     }
 
     #[test]

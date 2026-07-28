@@ -371,36 +371,7 @@ fn marked_truncated_payload(
 }
 
 fn source_was_truncated(value: &Value) -> bool {
-    fn visit(value: &Value, depth: usize) -> bool {
-        if depth >= MAX_STRUCTURAL_DEPTH {
-            return false;
-        }
-        match value {
-            Value::Object(object) => {
-                if object
-                    .get("truncatedAtSource")
-                    .or_else(|| object.get("truncated_at_source"))
-                    .and_then(Value::as_bool)
-                    == Some(true)
-                {
-                    return true;
-                }
-                if object
-                    .get("source")
-                    .and_then(Value::as_object)
-                    .and_then(|source| source.get("truncated"))
-                    .and_then(Value::as_bool)
-                    == Some(true)
-                {
-                    return true;
-                }
-                object.values().any(|value| visit(value, depth + 1))
-            }
-            Value::Array(values) => values.iter().any(|value| visit(value, depth + 1)),
-            _ => false,
-        }
-    }
-    visit(value, 0)
+    crate::tools::value_contains_unrecoverable_source_truncation(value)
 }
 
 fn compact_value(value: &Value, factor: u64, depth: usize, protected_subtree: bool) -> Value {
@@ -933,6 +904,35 @@ mod tests {
 
         assert!(output.truncated);
         assert_eq!(payload["truncatedAtSource"], true);
+    }
+
+    #[test]
+    fn stream_source_truncation_and_paginated_projection_are_distinguished_without_archive() {
+        let gate = gate();
+        let source_cut = successful_result(json!({
+            "status": "completed",
+            "execution": {
+                "stdoutTruncated": true
+            }
+        }));
+        let source_output = gate.project("source-stream", false, &source_cut, None);
+        let source_payload: Value = serde_json::from_str(&source_output.content).unwrap();
+
+        assert!(!source_output.truncated);
+        assert_eq!(source_payload["truncatedAtSource"], true);
+
+        let page = successful_result(json!({
+            "status": "completed",
+            "truncated": true,
+            "content": "bounded page",
+            "nextStartByte": 12
+        }));
+        let page_output = gate.project("semantic-page", false, &page, None);
+        let page_payload: Value = serde_json::from_str(&page_output.content).unwrap();
+
+        assert!(!page_output.truncated);
+        assert!(page_payload.get("truncatedAtSource").is_none());
+        assert_eq!(page_payload["nextStartByte"], 12);
     }
 
     #[test]

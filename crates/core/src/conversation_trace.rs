@@ -319,8 +319,13 @@ pub struct ConversationHistoryArchiveTraceMetadata {
     pub content_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_bytes: Option<u64>,
+    /// Whether every byte of the archive projection received by the backend was persisted.
+    ///
+    /// This deliberately says nothing about bytes an upstream Tool or Provider omitted before
+    /// producing that projection; [`Self::truncated_at_source`] records that independent fact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_completely: Option<bool>,
+    /// Whether the Tool or Provider irrecoverably omitted content before backend archival.
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated_at_source: bool,
     #[serde(default, skip_serializing_if = "is_false")]
