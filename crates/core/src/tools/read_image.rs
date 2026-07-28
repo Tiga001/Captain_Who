@@ -168,7 +168,7 @@ fn read_image_model_projection(result: &AgentToolResult) -> AgentToolResult {
     super::model_projection::compact_model_result(result, projected)
 }
 
-fn read_image_history_projection(result: &AgentToolResult) -> AgentToolResult {
+pub(super) fn read_image_history_projection(result: &AgentToolResult) -> AgentToolResult {
     let mut projected = result.clone();
     if let Some(object) = projected.result.as_mut().and_then(Value::as_object_mut) {
         let thumbnail_omitted = object.remove("thumbnailDataUrl").is_some();

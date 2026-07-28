@@ -6,7 +6,6 @@ use super::{
 use crate::cancellation::AgentCancellationToken;
 #[cfg(test)]
 use crate::conversation_trace::render_tool_observation;
-use crate::conversation_trace::render_tool_observation_with_history_ref;
 use crate::llm::{model_response_tool_call_id, LlmImage, LlmMessage, LlmMessageRole, LlmToolCall};
 use crate::protocol::{
     AgentApprovalStatus, AgentChatOutput, AgentError, AgentEvent, AgentProposedAction, AgentResult,
@@ -164,25 +163,6 @@ fn strip_json_code_fence(content: &str) -> Option<&str> {
 #[cfg(test)]
 pub(super) fn build_tool_observation_message(result: &AgentToolResult) -> String {
     render_tool_observation(result)
-}
-
-pub(super) fn build_tool_observation_message_with_history_ref(
-    result: &AgentToolResult,
-    history_ref: Option<&crate::ContextHistoryRef>,
-) -> String {
-    render_tool_observation_with_history_ref(result, history_ref)
-}
-
-pub(super) fn build_tool_observation_message_with_projection(
-    result: &AgentToolResult,
-    history_ref: Option<&crate::ContextHistoryRef>,
-    archive: &crate::ConversationHistoryArchiveTraceMetadata,
-) -> String {
-    crate::conversation_trace::render_tool_observation_with_projection(
-        result,
-        history_ref,
-        Some(archive),
-    )
 }
 
 pub(super) async fn execute_tool_on_blocking_thread(

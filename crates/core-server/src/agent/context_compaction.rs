@@ -677,13 +677,14 @@ impl AgentService {
             .assistant_message_id
             .as_deref()
             .ok_or_else(|| "审批续跑缺少 assistant message id。".to_string())?;
-        let snapshot =
-            conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
-                checkpoint,
-                &continuation.call,
-                &continuation.result,
-                Some(assistant_message_id),
-            );
+        let snapshot = self.archived_continuation_trace_snapshot(
+            conversation_id,
+            assistant_message_id,
+            agent_input,
+            checkpoint,
+            continuation,
+            mycopilot_core::storage::now_ms(),
+        )?;
         self.trace_snapshots
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -761,13 +762,14 @@ impl AgentService {
             .assistant_message_id
             .as_deref()
             .ok_or_else(|| "审批续跑缺少 assistant message id。".to_string())?;
-        let snapshot =
-            conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
-                checkpoint,
-                &continuation.call,
-                &continuation.result,
-                Some(assistant_message_id),
-            );
+        let snapshot = self.archived_continuation_trace_snapshot(
+            conversation_id,
+            assistant_message_id,
+            agent_input,
+            checkpoint,
+            continuation,
+            completed_at,
+        )?;
         let configuration_revision =
             conversation_context_configuration_revision(&record.agent_input)
                 .map_err(|error| error.to_string())?;
@@ -869,13 +871,14 @@ impl AgentService {
             .assistant_message_id
             .as_deref()
             .ok_or_else(|| "审批续跑缺少 assistant message id。".to_string())?;
-        let snapshot =
-            conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
-                checkpoint,
-                &continuation.call,
-                &continuation.result,
-                Some(assistant_message_id),
-            );
+        let snapshot = self.archived_continuation_trace_snapshot(
+            conversation_id,
+            assistant_message_id,
+            agent_input,
+            checkpoint,
+            continuation,
+            completed_at,
+        )?;
         let trace = snapshot.in_progress_trace(run_id, conversation_id, assistant_message_id);
         let model_context_items = snapshot.committed_prefix().model_context_items;
         let outcome = self.inspect_manual_audited_result_trace(
@@ -941,11 +944,130 @@ impl AgentService {
         Ok(outcome)
     }
 
+    /// Stores the exact Host result before constructing any model-visible continuation state.
+    ///
+    /// Approval execution happens outside the live tool registry and may be retried after a
+    /// commit-unknown failure or process restart. The archive's trace-item identity makes this
+    /// operation idempotent: the same continuation reuses the immutable blob, while a different
+    /// result for the same call/sequence fails closed before Trace or model context can advance.
+    fn archived_continuation_trace_snapshot(
+        &self,
+        conversation_id: &str,
+        assistant_message_id: &str,
+        agent_input: &AgentChatInput,
+        checkpoint: &AgentRunCheckpoint,
+        continuation: &AgentToolContinuation,
+        created_at: i64,
+    ) -> Result<ConversationTraceSnapshot, String> {
+        validate_continuation_result_identity(&continuation.call, &continuation.result)?;
+        let sequence = continuation_result_sequence(checkpoint, &continuation.call);
+        let archive_result = project_persisted_continuation_for_archive(&continuation.result);
+        let model_result = project_persisted_continuation_for_model(&continuation.result);
+        let model_gate_truncates =
+            mycopilot_core::persisted_continuation_model_projection_would_truncate(
+                &agent_input.model,
+                &agent_input.api_url,
+                agent_input.api_style,
+                &continuation.result,
+            );
+        let content = serde_json::to_string(&archive_result)
+            .map_err(|error| format!("无法序列化审批工具的精确历史结果：{error}"))?;
+        let archive = self
+            .storage
+            .archive_conversation_tool_result(
+                mycopilot_core::storage::conversation_history_archive_repository::ConversationHistoryArchiveInput {
+                    conversation_id: conversation_id.to_string(),
+                    assistant_message_id: assistant_message_id.to_string(),
+                    sequence,
+                    call_id: archive_result.call_id.clone(),
+                    tool: archive_result.tool.clone(),
+                    content_type:
+                        "application/vnd.mycopilot.agent-tool-result+json".to_string(),
+                    content,
+                    truncated_at_source: mycopilot_core::tool_result_truncated_at_source(
+                        &continuation.result,
+                    ),
+                    model_projection_truncated: tool_result_projection_differs(
+                        &archive_result,
+                        &model_result,
+                    ) || model_gate_truncates,
+                    archive_projection_truncated: tool_result_projection_differs(
+                        &continuation.result,
+                        &archive_result,
+                    ),
+                    created_at,
+                },
+            )
+            .map_err(|error| format!("无法归档审批工具的精确历史结果：{error}"))?;
+        let archive_metadata = mycopilot_core::ConversationHistoryArchiveTraceMetadata {
+            archive_ref: Some(archive.archive_ref),
+            content_hash: Some(archive.content_hash),
+            archived_bytes: Some(archive.total_bytes),
+            archived_completely: Some(archive.archived_completely),
+            truncated_at_source: archive.truncated_at_source,
+            model_projection_truncated: archive.model_projection_truncated,
+            history_projection_truncated: false,
+            archive_projection_truncated: archive.archive_projection_truncated,
+        };
+
+        let model_observation = project_persisted_continuation_observation(
+            &agent_input.model,
+            &agent_input.api_url,
+            agent_input.api_style,
+            &continuation.result,
+            &archive_metadata,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(
+            conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection(
+                checkpoint,
+                &continuation.call,
+                &continuation.result,
+                Some(assistant_message_id),
+                &model_observation,
+                archive_metadata,
+            ),
+        )
+    }
+
     pub(super) fn discard_trace_snapshot(&self, run_id: &str) {
         self.trace_snapshots
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(run_id);
+    }
+}
+
+fn validate_continuation_result_identity(
+    call: &AgentToolCall,
+    result: &AgentToolResult,
+) -> Result<(), String> {
+    if result.call_id == call.id && result.tool == call.tool {
+        return Ok(());
+    }
+    Err(format!(
+        "审批工具结果身份不匹配：callId={}，tool={}，resultCallId={}，resultTool={}",
+        call.id, call.tool, result.call_id, result.tool
+    ))
+}
+
+fn continuation_result_sequence(checkpoint: &AgentRunCheckpoint, call: &AgentToolCall) -> u64 {
+    checkpoint
+        .next_conversation_trace_sequence
+        .saturating_add(u64::from(!checkpoint.conversation_trace_items.iter().any(
+            |item| {
+                matches!(
+                    item,
+                    ConversationTurnTraceItem::ToolCall { call_id, .. } if call_id == &call.id
+                )
+            },
+        )))
+}
+
+fn tool_result_projection_differs(left: &AgentToolResult, right: &AgentToolResult) -> bool {
+    match (serde_json::to_vec(left), serde_json::to_vec(right)) {
+        (Ok(left), Ok(right)) => left != right,
+        _ => true,
     }
 }
 

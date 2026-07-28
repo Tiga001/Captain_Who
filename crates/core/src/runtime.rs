@@ -30,10 +30,11 @@ use crate::context::{
     ContextAssembler, ContextAssemblyInput, ContextAttachments, ContextBudgetReport,
     ContextCapacityDetector, ContextCompactionPlan, ContextCompactionPlanner,
     ContextCompactionQuery, ContextFrame, ContextItem, ContextMetadata, ContextOrigin,
-    ContextRetention, ContextScope, ContextSource,
+    ContextRetention, ContextScope, ContextSource, ModelToolResultGate, ModelToolResultRecovery,
+    MODEL_TOOL_RESULT_MAX_TOKENS,
 };
 use crate::conversation_trace::{
-    conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref,
+    conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection,
     trace_attachments_from_input, ConversationHistoryArchiveTraceMetadata,
     ConversationTraceRecorder,
 };
@@ -66,8 +67,9 @@ use crate::{
 };
 use attachments::{build_attachment_context, AttachmentContext};
 use checkpoint::{
-    create_run_checkpoint, restore_run_checkpoint_with_history_ref, RestoredRunCheckpoint,
-    RunCheckpointState, ToolCallBatch, ToolCallBatchClaim,
+    continuation_result_sequence, create_run_checkpoint,
+    restore_run_checkpoint_with_model_projection, RestoredRunCheckpoint, RunCheckpointState,
+    ToolCallBatch, ToolCallBatchClaim,
 };
 use context_compaction::{ContextCompactionExecution, ContextCompactionExecutor};
 use extensions::{
@@ -84,13 +86,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tool_failure_guard::ToolFailureGuard;
 use tool_flow::{
-    approve_proposed_action, build_tool_observation_message_with_history_ref,
-    build_tool_observation_message_with_projection, cancellation_preempts_tool_result,
-    cancelled_output, done_event, enforce_skill_activation_barrier,
-    execute_host_action_on_blocking_thread, execute_tool_on_blocking_thread,
-    extract_reason_from_args, failed_tool_call_result, file_draft_from_tool_result,
-    generate_run_id, llm_image_message_from_tool_result, redact_tool_result_for_event,
-    sanitize_max_tokens, sanitize_temperature, state_event, tool_calls_from_response,
+    approve_proposed_action, cancellation_preempts_tool_result, cancelled_output, done_event,
+    enforce_skill_activation_barrier, execute_host_action_on_blocking_thread,
+    execute_tool_on_blocking_thread, extract_reason_from_args, failed_tool_call_result,
+    file_draft_from_tool_result, generate_run_id, llm_image_message_from_tool_result,
+    redact_tool_result_for_event, sanitize_max_tokens, sanitize_temperature, state_event,
+    tool_calls_from_response,
 };
 use tool_input_stream::ToolInputStreamObservers;
 
@@ -241,19 +242,54 @@ impl AgentRuntime {
             .and_then(|context| context.conversation_id.clone());
         let restore_trace_assistant_message_id = input.assistant_message_id.clone();
         let trace_run_id = run_id.clone();
-        let setup_conversation_trace = conversation_trace_from_input_checkpoint(&input);
-        let mut shared_context_baseline =
-            publish_trace_recorder_snapshot(&setup_conversation_trace, trace_observer.as_ref())?;
-        let restored_checkpoint =
-            restore_input_checkpoint(&mut input, &run_id).map_err(|error| {
+        let checkpoint_api_style = input
+            .api_style
+            .unwrap_or_else(|| detect_api_style(input.api_url.trim()));
+        let checkpoint_model_tool_result_gate =
+            ContextCapacityDetector::for_model(input.model.trim(), checkpoint_api_style, &[])
+                .model_tool_result_gate();
+        let checkpoint_prefix_trace = conversation_trace_checkpoint_prefix_from_input(&input);
+        let continuation_archive_metadata =
+            load_continuation_archive_metadata(&input, storage.as_deref()).map_err(|error| {
                 attach_failed_runtime_trace(
                     error,
-                    &setup_conversation_trace,
+                    &checkpoint_prefix_trace,
                     &trace_run_id,
                     restore_trace_conversation_id.as_deref(),
                     restore_trace_assistant_message_id.as_deref(),
                 )
             })?;
+        let setup_conversation_trace = conversation_trace_from_input_checkpoint(
+            &input,
+            &checkpoint_model_tool_result_gate,
+            &continuation_archive_metadata,
+        )
+        .map_err(|error| {
+            attach_failed_runtime_trace(
+                error,
+                &checkpoint_prefix_trace,
+                &trace_run_id,
+                restore_trace_conversation_id.as_deref(),
+                restore_trace_assistant_message_id.as_deref(),
+            )
+        })?;
+        let mut shared_context_baseline =
+            publish_trace_recorder_snapshot(&setup_conversation_trace, trace_observer.as_ref())?;
+        let restored_checkpoint = restore_input_checkpoint(
+            &mut input,
+            &run_id,
+            &checkpoint_model_tool_result_gate,
+            &continuation_archive_metadata,
+        )
+        .map_err(|error| {
+            attach_failed_runtime_trace(
+                error,
+                &setup_conversation_trace,
+                &trace_run_id,
+                restore_trace_conversation_id.as_deref(),
+                restore_trace_assistant_message_id.as_deref(),
+            )
+        })?;
         if let Some(restored) = restored_checkpoint.as_ref() {
             // Approval resume continues the backend authority frozen in schema-v5 checkpoint.
             // Newer UI/settings payloads cannot silently change permissions, workspace,
@@ -414,8 +450,8 @@ impl AgentRuntime {
             llm_request.api_style,
             &llm_request.stable_tools,
         );
-        let tool_output_budget = capacity_detector
-            .tool_output_text_budget(llm_request.context_window_tokens, llm_request.max_tokens);
+        let model_tool_result_gate = capacity_detector.model_tool_result_gate();
+        let tool_output_budget = capacity_detector.text_budget(MODEL_TOOL_RESULT_MAX_TOKENS);
         let exact_history_storage = storage.clone();
         let mut tool_context = ToolExecutionContext::from_run_context(run_context.as_ref())
             .with_cancellation(cancellation_token.clone())
@@ -706,6 +742,8 @@ impl AgentRuntime {
                         } else {
                             None
                         };
+                        request_context
+                            .ensure_model_tool_results_fit(&model_tool_result_gate)?;
                         runtime_extensions.update_model_input_capacity(model_input_capacity);
                         break (request_context, request_estimate);
                     };
@@ -1349,31 +1387,46 @@ impl AgentRuntime {
                                     .lock()
                                     .unwrap_or_else(|error| error.into_inner())
                                     .pending_tool_result_sequence(&call.id);
-                                let history_ref = trace_assistant_message_id
-                                    .as_deref()
-                                    .zip(result_sequence)
-                                    .map(|(assistant_message_id, sequence)| {
-                                        crate::ContextHistoryRef::trace_item(
-                                            assistant_message_id,
-                                            sequence,
-                                        )
-                                    });
+                                let archive_result = tool_registry.archive_projection(&result);
+                                let archive_metadata =
+                                    if tool_registry.archives_result(&call.tool) {
+                                        archive_tool_result(ToolResultArchiveRequest {
+                                            storage: exact_history_storage.as_ref(),
+                                            conversation_id: trace_conversation_id.as_deref(),
+                                            assistant_message_id:
+                                                trace_assistant_message_id.as_deref(),
+                                            sequence: result_sequence,
+                                            raw_result: &result,
+                                            archive_result: &archive_result,
+                                            model_result: &llm_result,
+                                            model_tool_result_gate: &model_tool_result_gate,
+                                        })
+                                    } else {
+                                        ConversationHistoryArchiveTraceMetadata::default()
+                                    };
+                                let model_observation = finalize_model_tool_observation(
+                                    &model_tool_result_gate,
+                                    &call.id,
+                                    true,
+                                    &llm_result,
+                                    &archive_metadata,
+                                )?;
                                 let recorded_result_sequence = {
                                     let mut recorder = conversation_trace
                                         .lock()
                                         .unwrap_or_else(|error| error.into_inner());
-                                    let sequence =
-                                        recorder.record_tool_result(&call, &checkpoint_result);
+                                    let sequence = recorder.record_tool_result_with_archive(
+                                        &call,
+                                        &checkpoint_result,
+                                        archive_metadata,
+                                    );
                                     if let Some(sequence) = sequence {
                                         recorder.record_model_message(
                                             sequence,
                                             0,
                                             &LlmMessage::tool_result(
                                                 call.id.clone(),
-                                                build_tool_observation_message_with_history_ref(
-                                                    &llm_result,
-                                                    history_ref.as_ref(),
-                                                ),
+                                                model_observation.clone(),
                                                 true,
                                             ),
                                         );
@@ -1392,10 +1445,7 @@ impl AgentRuntime {
                                 });
                                 active_context.push(ContextItem::tool_result(
                                     call.id.clone(),
-                                    build_tool_observation_message_with_history_ref(
-                                        &llm_result,
-                                        history_ref.as_ref(),
-                                    ),
+                                    model_observation,
                                     true,
                                     with_trace_origin(
                                         ContextMetadata::new(
@@ -1566,31 +1616,28 @@ impl AgentRuntime {
                     let archive_result = tool_registry.archive_projection(&result);
                     let llm_result = tool_registry.model_projection(&result);
                     let archive_metadata = if tool_registry.archives_result(&call.tool) {
-                        archive_tool_result(
-                            exact_history_storage.as_ref(),
-                            trace_conversation_id.as_deref(),
-                            trace_assistant_message_id.as_deref(),
-                            result_sequence,
-                            &result,
-                            &archive_result,
-                            &llm_result,
-                        )
+                        archive_tool_result(ToolResultArchiveRequest {
+                            storage: exact_history_storage.as_ref(),
+                            conversation_id: trace_conversation_id.as_deref(),
+                            assistant_message_id: trace_assistant_message_id.as_deref(),
+                            sequence: result_sequence,
+                            raw_result: &result,
+                            archive_result: &archive_result,
+                            model_result: &llm_result,
+                            model_tool_result_gate: &model_tool_result_gate,
+                        })
                     } else {
                         ConversationHistoryArchiveTraceMetadata::default()
                     };
                     let trace_result = tool_registry.trace_projection(&result);
                     let checkpoint_result = tool_registry.checkpoint_projection(&result);
-                    let history_ref = trace_assistant_message_id
-                        .as_deref()
-                        .zip(result_sequence)
-                        .map(|(assistant_message_id, sequence)| {
-                            crate::ContextHistoryRef::trace_item(assistant_message_id, sequence)
-                        });
-                    let model_observation = build_tool_observation_message_with_projection(
+                    let model_observation = finalize_model_tool_observation(
+                        &model_tool_result_gate,
+                        &call.id,
+                        !result.ok,
                         &llm_result,
-                        history_ref.as_ref(),
                         &archive_metadata,
-                    );
+                    )?;
                     let recorded_result_sequence = {
                         let mut recorder = conversation_trace
                             .lock()
@@ -2027,27 +2074,48 @@ fn clear_deferred_tool_input_preview(
     });
 }
 
-fn archive_tool_result(
-    storage: Option<&Arc<StorageService>>,
-    conversation_id: Option<&str>,
-    assistant_message_id: Option<&str>,
+struct ToolResultArchiveRequest<'a> {
+    storage: Option<&'a Arc<StorageService>>,
+    conversation_id: Option<&'a str>,
+    assistant_message_id: Option<&'a str>,
     sequence: Option<u64>,
-    raw_result: &AgentToolResult,
-    archive_result: &AgentToolResult,
-    model_result: &AgentToolResult,
+    raw_result: &'a AgentToolResult,
+    archive_result: &'a AgentToolResult,
+    model_result: &'a AgentToolResult,
+    model_tool_result_gate: &'a ModelToolResultGate,
+}
+
+fn archive_tool_result(
+    request: ToolResultArchiveRequest<'_>,
 ) -> ConversationHistoryArchiveTraceMetadata {
+    let truncated_at_source = crate::tools::tool_result_truncated_at_source(request.raw_result);
+    let gate_truncates = request.model_tool_result_gate.would_truncate_with_source(
+        &request.model_result.call_id,
+        !request.model_result.ok,
+        request.model_result,
+        truncated_at_source,
+    );
     let mut metadata = ConversationHistoryArchiveTraceMetadata {
-        truncated_at_source: tool_result_truncated_at_source(raw_result),
-        model_projection_truncated: projection_differs(archive_result, model_result),
-        archive_projection_truncated: projection_differs(raw_result, archive_result),
+        truncated_at_source,
+        model_projection_truncated: projection_differs(
+            request.archive_result,
+            request.model_result,
+        ) || gate_truncates,
+        archive_projection_truncated: projection_differs(
+            request.raw_result,
+            request.archive_result,
+        ),
         ..Default::default()
     };
-    let (Some(storage), Some(conversation_id), Some(assistant_message_id), Some(sequence)) =
-        (storage, conversation_id, assistant_message_id, sequence)
-    else {
+    let (Some(storage), Some(conversation_id), Some(assistant_message_id), Some(sequence)) = (
+        request.storage,
+        request.conversation_id,
+        request.assistant_message_id,
+        request.sequence,
+    ) else {
         return metadata;
     };
-    let content = match serde_json::to_string(archive_result) {
+    let content = match serde_json::to_string(request.archive_result) {
         Ok(content) => content,
         Err(error) => {
             eprintln!("failed to serialize exact history tool result: {error}");
@@ -2058,8 +2126,8 @@ fn archive_tool_result(
         conversation_id: conversation_id.to_string(),
         assistant_message_id: assistant_message_id.to_string(),
         sequence,
-        call_id: archive_result.call_id.clone(),
-        tool: archive_result.tool.clone(),
+        call_id: request.archive_result.call_id.clone(),
+        tool: request.archive_result.tool.clone(),
         content_type: "application/vnd.mycopilot.agent-tool-result+json".to_string(),
         content,
         truncated_at_source: metadata.truncated_at_source,
@@ -2084,33 +2152,133 @@ fn archive_tool_result(
     metadata
 }
 
+pub(crate) fn finalize_model_tool_observation(
+    gate: &ModelToolResultGate,
+    call_id: &str,
+    is_error: bool,
+    model_result: &AgentToolResult,
+    archive: &ConversationHistoryArchiveTraceMetadata,
+) -> AgentResult<String> {
+    let recovery = model_tool_result_recovery(archive)?;
+    let output = gate.project(call_id, is_error, model_result, recovery.as_ref());
+    if output.truncated && !model_observation_has_recovery(&output.content) {
+        return Err(AgentError::new(format!(
+            "工具 `{}` 的模型结果超过 10K token，但没有可用的分页游标或 Exact History 恢复位置。",
+            model_result.tool
+        )));
+    }
+    Ok(output.content)
+}
+
+fn load_continuation_archive_metadata(
+    input: &AgentChatInput,
+    storage: Option<&StorageService>,
+) -> AgentResult<ConversationHistoryArchiveTraceMetadata> {
+    let (
+        Some(storage),
+        Some(checkpoint),
+        Some(continuation),
+        Some(conversation_id),
+        Some(assistant_message_id),
+    ) = (
+        storage,
+        input.resume_checkpoint.as_ref(),
+        input.tool_continuation.as_ref(),
+        input
+            .context
+            .as_ref()
+            .and_then(|context| context.conversation_id.as_deref()),
+        input.assistant_message_id.as_deref(),
+    )
+    else {
+        return Ok(ConversationHistoryArchiveTraceMetadata::default());
+    };
+    let sequence = continuation_result_sequence(checkpoint, &continuation.call.id);
+    let Some(archive) = storage
+        .find_conversation_history_archive_for_trace_item(
+            conversation_id,
+            assistant_message_id,
+            sequence,
+        )
+        .map_err(AgentError::new)?
+    else {
+        return Ok(ConversationHistoryArchiveTraceMetadata::default());
+    };
+    if archive.call_id != continuation.call.id
+        || archive.call_id != continuation.result.call_id
+        || archive.tool != continuation.call.tool
+        || archive.tool != continuation.result.tool
+        || archive.assistant_message_id != assistant_message_id
+        || archive.sequence != sequence
+    {
+        return Err(AgentError::new(
+            "审批续跑的 Exact History Archive 与冻结的工具结果身份不匹配。",
+        ));
+    }
+    Ok(ConversationHistoryArchiveTraceMetadata {
+        archive_ref: Some(archive.archive_ref),
+        content_hash: Some(archive.content_hash),
+        archived_bytes: Some(archive.total_bytes),
+        archived_completely: Some(archive.archived_completely),
+        truncated_at_source: archive.truncated_at_source,
+        model_projection_truncated: archive.model_projection_truncated,
+        history_projection_truncated: false,
+        archive_projection_truncated: archive.archive_projection_truncated,
+    })
+}
+
+fn model_tool_result_recovery(
+    archive: &ConversationHistoryArchiveTraceMetadata,
+) -> AgentResult<Option<ModelToolResultRecovery>> {
+    let mut recovery = ModelToolResultRecovery {
+        truncated_at_source: Some(archive.truncated_at_source),
+        ..Default::default()
+    };
+    if archive.archived_completely == Some(true) {
+        let archive_ref = archive.archive_ref.as_deref().ok_or_else(|| {
+            AgentError::new("完整的工具历史归档缺少 archive ref，无法生成模型续读位置。")
+        })?;
+        let open =
+            crate::storage::conversation_history_open::encode_archive_history_open(archive_ref, 0)
+                .map_err(AgentError::new)?;
+        recovery.history_open = Some(Value::String(open.clone()));
+        recovery.continue_with = Some(json!({
+            "tool": "conversation_history",
+            "args": {
+                "open": open
+            }
+        }));
+    }
+    Ok(Some(recovery))
+}
+
+fn model_observation_has_recovery(content: &str) -> bool {
+    let Ok(Value::Object(object)) = serde_json::from_str::<Value>(content) else {
+        return false;
+    };
+    for field in [
+        "continueWith",
+        "historyOpen",
+        "cursor",
+        "nextCursor",
+        "nextStartByte",
+        "nextStartLine",
+        "nextAfterPath",
+    ] {
+        if object.get(field).is_some_and(|value| !value.is_null()) {
+            return true;
+        }
+    }
+    object
+        .get("navigation")
+        .and_then(Value::as_object)
+        .is_some_and(|navigation| navigation.values().any(|value| !value.is_null()))
+}
+
 fn projection_differs(left: &AgentToolResult, right: &AgentToolResult) -> bool {
     match (serde_json::to_vec(left), serde_json::to_vec(right)) {
         (Ok(left), Ok(right)) => left != right,
         _ => true,
-    }
-}
-
-fn tool_result_truncated_at_source(result: &AgentToolResult) -> bool {
-    result
-        .result
-        .as_ref()
-        .is_some_and(value_contains_source_truncation)
-}
-
-fn value_contains_source_truncation(value: &Value) -> bool {
-    match value {
-        Value::Array(values) => values.iter().any(value_contains_source_truncation),
-        Value::Object(values) => values.iter().any(|(key, value)| {
-            let canonical_key = key
-                .chars()
-                .filter(|character| character.is_ascii_alphanumeric())
-                .flat_map(char::to_lowercase)
-                .collect::<String>();
-            (canonical_key.contains("truncated") && value.as_bool() == Some(true))
-                || value_contains_source_truncation(value)
-        }),
-        _ => false,
     }
 }
 

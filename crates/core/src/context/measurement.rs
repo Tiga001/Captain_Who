@@ -180,6 +180,10 @@ impl ContextTextBudget {
         self.max_tokens
     }
 
+    pub(crate) fn with_max_tokens(&self, max_tokens: u64) -> Self {
+        Self::new(self.estimator.clone(), max_tokens)
+    }
+
     pub(crate) fn estimate(&self, value: &str) -> u64 {
         self.estimator.estimate_text(value)
     }

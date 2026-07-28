@@ -368,12 +368,31 @@ fn recovered_manual_file_effect_trace(
             pending.action_id
         )
     })?;
+    // Legacy split recovery has no pre-existing Exact Archive. Small results can still be rebuilt
+    // through the central Gate byte-for-byte; an oversized result fails closed here and remains
+    // `Unverifiable` rather than reintroducing an unbounded model-context item.
+    let archive = crate::ConversationHistoryArchiveTraceMetadata::default();
+    let model_observation = crate::project_persisted_continuation_observation(
+        &input.model,
+        &input.api_url,
+        input.api_style,
+        tool_result,
+        &archive,
+    )
+    .map_err(|error| {
+        format!(
+            "启动对账无法安全恢复人工命令 {} 的模型结果：{error}",
+            pending.action_id
+        )
+    })?;
     let snapshot =
-        crate::conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
+        crate::conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection(
             checkpoint,
             &call,
             tool_result,
             Some(assistant_message_id),
+            &model_observation,
+            archive,
         );
     Ok(snapshot.in_progress_trace(&pending.run_id, conversation_id, assistant_message_id))
 }

@@ -2932,49 +2932,55 @@ impl AgentService {
                 }));
             }
             let mut cancelled_usage = None;
-            let persisted = if let (
-                Some(conversation_id),
-                Some(assistant_message_id),
-                Some(checkpoint),
-                Some(continuation),
-            ) = (
-                record.snapshot.conversation_id.as_deref(),
-                record.snapshot.assistant_message_id.as_deref(),
-                record.agent_input.resume_checkpoint.as_ref(),
-                agent_input.tool_continuation.as_ref(),
-            ) {
-                let trace = cancelled_conversation_trace_from_checkpoint(
-                    checkpoint,
-                    conversation_id,
-                    assistant_message_id,
-                    &continuation.call,
-                    &continuation.result,
-                    REASON,
-                );
-                let mut output = AgentChatOutput {
-                    content: String::new(),
-                    status: AgentRunStatus::Cancelled,
-                    run_id: run_id.clone(),
-                    events: Vec::new(),
-                    tool_definitions: Vec::new(),
-                    todo: None,
-                    usage: None,
-                    finish_reason: Some(REASON.to_string()),
-                    proposed_actions: Vec::new(),
-                    conversation_turn_trace: Some(trace),
+            let continuation_snapshot = self
+                .trace_snapshots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&run_id)
+                .cloned();
+            let persisted =
+                if let (Some(conversation_id), Some(assistant_message_id), Some(snapshot)) = (
+                    record.snapshot.conversation_id.as_deref(),
+                    record.snapshot.assistant_message_id.as_deref(),
+                    continuation_snapshot,
+                ) {
+                    // Settlement already committed the exact Archive pointer and the central-gated
+                    // model observation into this authoritative snapshot. Terminalize that snapshot
+                    // instead of rebuilding the same ToolResult through the legacy ungated helper.
+                    let trace = cancelled_conversation_trace_from_snapshot(
+                        snapshot,
+                        &run_id,
+                        conversation_id,
+                        assistant_message_id,
+                        REASON,
+                    );
+                    let mut output = AgentChatOutput {
+                        content: String::new(),
+                        status: AgentRunStatus::Cancelled,
+                        run_id: run_id.clone(),
+                        events: Vec::new(),
+                        tool_definitions: Vec::new(),
+                        todo: None,
+                        usage: None,
+                        finish_reason: Some(REASON.to_string()),
+                        proposed_actions: Vec::new(),
+                        conversation_turn_trace: Some(trace),
+                    };
+                    let persisted = self.persist_final_assistant_output(
+                        conversation_id,
+                        assistant_message_id,
+                        &mut output,
+                    );
+                    if persisted.is_ok() {
+                        cancelled_usage = output.usage.clone();
+                    }
+                    persisted
+                } else {
+                    Err(
+                        "cancelled command is missing its settled conversation trace snapshot"
+                            .to_string(),
+                    )
                 };
-                let persisted = self.persist_final_assistant_output(
-                    conversation_id,
-                    assistant_message_id,
-                    &mut output,
-                );
-                if persisted.is_ok() {
-                    cancelled_usage = output.usage.clone();
-                }
-                persisted
-            } else {
-                Err("cancelled command is missing its conversation trace checkpoint".to_string())
-            };
             if let Err(error) = persisted {
                 self.unregister_cancellation(&run_id);
                 let _ = notifications.send(agent_event_notification(AgentEvent::Error {

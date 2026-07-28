@@ -10,6 +10,7 @@ pub mod context_compaction_repository;
 pub mod conversation_fork_repository;
 pub mod conversation_goal_repository;
 pub mod conversation_history_archive_repository;
+pub(crate) mod conversation_history_open;
 pub mod conversation_history_repository;
 pub mod conversation_model_context_repository;
 pub mod conversation_trace_repository;

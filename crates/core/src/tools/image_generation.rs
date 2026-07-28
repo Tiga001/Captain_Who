@@ -436,7 +436,7 @@ pub(super) fn image_generation_model_projection(result: &AgentToolResult) -> Age
     super::model_projection::compact_model_result(result, projected)
 }
 
-fn image_generation_history_projection(result: &AgentToolResult) -> AgentToolResult {
+pub(super) fn image_generation_history_projection(result: &AgentToolResult) -> AgentToolResult {
     remove_runtime_image(result, true)
 }
 

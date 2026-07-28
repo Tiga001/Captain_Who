@@ -78,19 +78,46 @@ pub(super) fn finalize_runtime_trace(
     }
 }
 
-pub(super) fn conversation_trace_from_input_checkpoint(
+pub(super) fn conversation_trace_checkpoint_prefix_from_input(
     input: &AgentChatInput,
 ) -> ConversationTraceRecorder {
     let Some(checkpoint) = input.resume_checkpoint.as_ref() else {
         return ConversationTraceRecorder::default();
     };
+    ConversationTraceRecorder::from_checkpoint_with_model_context(
+        checkpoint.conversation_trace_items.clone(),
+        checkpoint.conversation_model_context_items.clone(),
+        checkpoint.next_conversation_trace_sequence,
+        checkpoint.conversation_trace_truncated,
+    )
+}
+
+pub(super) fn conversation_trace_from_input_checkpoint(
+    input: &AgentChatInput,
+    model_tool_result_gate: &ModelToolResultGate,
+    archive_metadata: &ConversationHistoryArchiveTraceMetadata,
+) -> AgentResult<ConversationTraceRecorder> {
+    let Some(checkpoint) = input.resume_checkpoint.as_ref() else {
+        return Ok(ConversationTraceRecorder::default());
+    };
     let snapshot = match input.tool_continuation.as_ref() {
         Some(continuation) => {
-            conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
+            let projected =
+                crate::tools::model_projection_for_persisted_continuation(&continuation.result);
+            let model_observation = finalize_model_tool_observation(
+                model_tool_result_gate,
+                &continuation.call.id,
+                !continuation.result.ok,
+                &projected,
+                archive_metadata,
+            )?;
+            conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection(
                 checkpoint,
                 &continuation.call,
                 &continuation.result,
                 input.assistant_message_id.as_deref(),
+                &model_observation,
+                archive_metadata.clone(),
             )
         }
         None => ConversationTraceSnapshot {
@@ -100,11 +127,13 @@ pub(super) fn conversation_trace_from_input_checkpoint(
             truncated: checkpoint.conversation_trace_truncated,
         },
     };
-    ConversationTraceRecorder::from_checkpoint_with_model_context(
-        snapshot.items,
-        snapshot.model_context_items,
-        snapshot.next_sequence,
-        snapshot.truncated,
+    Ok(
+        ConversationTraceRecorder::from_checkpoint_with_model_context(
+            snapshot.items,
+            snapshot.model_context_items,
+            snapshot.next_sequence,
+            snapshot.truncated,
+        ),
     )
 }
 

@@ -87,29 +87,40 @@ fn exact_history_archive_precedes_bounded_trace_projection() {
     let mut recorder = ConversationTraceRecorder::default();
     recorder.record_tool_call(&call);
     let sequence = recorder.pending_tool_result_sequence(&call.id).unwrap();
-    let metadata = super::archive_tool_result(
-        Some(&storage),
-        Some("conversation-archive"),
-        Some("assistant-archive"),
-        Some(sequence),
-        &raw,
-        &raw,
-        &raw,
-    );
+    let gate = ContextCapacityDetector::for_model(
+        "test-model",
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &[],
+    )
+    .model_tool_result_gate();
+    let metadata = super::archive_tool_result(super::ToolResultArchiveRequest {
+        storage: Some(&storage),
+        conversation_id: Some("conversation-archive"),
+        assistant_message_id: Some("assistant-archive"),
+        sequence: Some(sequence),
+        raw_result: &raw,
+        archive_result: &raw,
+        model_result: &raw,
+        model_tool_result_gate: &gate,
+    });
     assert_eq!(metadata.archived_completely, Some(true));
     assert!(metadata.truncated_at_source);
-    let observation = build_tool_observation_message_with_projection(
-        &raw,
-        Some(&crate::ContextHistoryRef::trace_item(
-            "assistant-archive",
-            sequence,
-        )),
-        &metadata,
+    assert!(metadata.model_projection_truncated);
+    let observation =
+        finalize_model_tool_observation(&gate, &call.id, false, &raw, &metadata).unwrap();
+    let projected: Value = serde_json::from_str(&observation).unwrap();
+    assert_eq!(projected["truncated"], true);
+    assert_eq!(projected["truncatedAtSource"], true);
+    assert!(projected["originalBytes"].as_u64().unwrap() > 0);
+    assert_eq!(projected["continueWith"]["tool"], "conversation_history");
+    assert!(projected["historyOpen"]
+        .as_str()
+        .unwrap()
+        .starts_with("hist_v1_"));
+    assert!(
+        gate.would_truncate(&call.id, false, &raw),
+        "the fixture must exercise the central length gate"
     );
-    assert!(observation.contains("\"truncated\":true"));
-    assert!(!observation.contains("truncatedAtSource"));
-    assert!(!observation.contains("originalBytes"));
-    assert!(!observation.contains("historyRef"));
     recorder.record_tool_result_with_archive(&call, &raw, metadata.clone());
     let trace = recorder.finish(
         "run-archive",

@@ -59,8 +59,10 @@ pub struct ConversationHistorySearchFilter {
     pub include_trace_items: bool,
     pub include_archives: bool,
     pub tool: Option<String>,
+    pub exclude_tool: Option<String>,
     pub status: Option<String>,
     pub run_id: Option<String>,
+    pub exclude_run_id: Option<String>,
     pub created_at_from: Option<i64>,
     pub created_at_to: Option<i64>,
 }
@@ -122,8 +124,20 @@ pub fn search_records(
     }
     append_record_type_filter(&mut sql, &mut values, filter);
     append_optional_filter(&mut sql, &mut values, "tool", filter.tool.as_deref());
+    append_optional_exclusion(
+        &mut sql,
+        &mut values,
+        "tool",
+        filter.exclude_tool.as_deref(),
+    );
     append_optional_filter(&mut sql, &mut values, "status", filter.status.as_deref());
     append_optional_filter(&mut sql, &mut values, "run_id", filter.run_id.as_deref());
+    append_optional_exclusion(
+        &mut sql,
+        &mut values,
+        "run_id",
+        filter.exclude_run_id.as_deref(),
+    );
     if let Some(from) = filter.created_at_from {
         sql.push_str(" AND created_at >= ?");
         values.push(from.into());
@@ -215,6 +229,22 @@ fn append_optional_filter(
         sql.push_str(" AND ");
         sql.push_str(column);
         sql.push_str(" = ?");
+        values.push(value.to_string().into());
+    }
+}
+
+fn append_optional_exclusion(
+    sql: &mut String,
+    values: &mut Vec<rusqlite::types::Value>,
+    column: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        sql.push_str(" AND (");
+        sql.push_str(column);
+        sql.push_str(" IS NULL OR ");
+        sql.push_str(column);
+        sql.push_str(" != ?)");
         values.push(value.to_string().into());
     }
 }
@@ -759,6 +789,51 @@ mod tests {
         let trace = search_records(&connection, "conversation-1", "v1-exact", &filter, 20).unwrap();
         assert_eq!(trace.len(), 1);
         assert_eq!(trace[0].tool.as_deref(), Some("read_file"));
+    }
+
+    #[test]
+    fn search_exclusions_are_applied_before_the_result_limit() {
+        let connection = setup();
+        let exclude_tool = ConversationHistorySearchFilter {
+            include_trace_items: true,
+            exclude_tool: Some("read_file".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            search_records(&connection, "conversation-1", "v1-exact", &exclude_tool, 1)
+                .unwrap()
+                .is_empty()
+        );
+
+        let exclude_run = ConversationHistorySearchFilter {
+            include_trace_items: true,
+            exclude_run_id: Some("run-1".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            search_records(&connection, "conversation-1", "v1-exact", &exclude_run, 1)
+                .unwrap()
+                .is_empty()
+        );
+
+        let messages_remain_visible = ConversationHistorySearchFilter {
+            include_messages: true,
+            exclude_tool: Some("conversation_history".to_string()),
+            exclude_run_id: Some("run-1".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            search_records(
+                &connection,
+                "conversation-1",
+                "first exact request",
+                &messages_remain_visible,
+                1
+            )
+            .unwrap()
+            .len(),
+            1
+        );
     }
 
     #[test]

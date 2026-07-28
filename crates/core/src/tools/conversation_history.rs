@@ -3,12 +3,19 @@ use crate::context::format_message_created_at;
 use crate::conversation_trace::{
     ConversationTraceToolResultStatus, ConversationTurnTrace, ConversationTurnTraceItem,
 };
+use crate::llm::LlmMessage;
 use crate::protocol::{
     AgentApprovalStatus, AgentError, AgentResult, AgentToolDefinition, AgentToolResult,
     AgentToolSafety,
 };
 use crate::storage::conversation_history_archive_repository::{
     ConversationHistoryArchivePage, ConversationHistoryArchivePageUnit,
+};
+#[cfg(test)]
+use crate::storage::conversation_history_open::HISTORY_OPEN_PREFIX as OPEN_PREFIX;
+use crate::storage::conversation_history_open::{
+    decode_history_open, encode_archive_history_open, encode_history_open, HistoryOpenRoute,
+    HistoryTurnPageDirection as TurnPageDirection, HISTORY_OPEN_MAX_BYTES, HISTORY_QUERY_MAX_CHARS,
 };
 use crate::storage::conversation_history_repository::{
     ConversationHistoryRecord, ConversationHistoryRecordRef, ConversationHistorySearchFilter,
@@ -17,14 +24,12 @@ use crate::storage::conversation_history_repository::{
 use crate::storage::models::{
     ChatConversationRecord, ChatMessageAttachmentRecord, ChatMessageRecord,
 };
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-const OPEN_PREFIX: &str = "hist_v1_";
-const MAX_QUERY_CHARS: usize = 500;
-const MAX_OPEN_BYTES: usize = 8 * 1024;
+const MAX_QUERY_CHARS: usize = HISTORY_QUERY_MAX_CHARS;
+const MAX_OPEN_BYTES: usize = HISTORY_OPEN_MAX_BYTES;
 const TURN_PAGE_SIZE: usize = 20;
 const SEARCH_GROUP_LIMIT: usize = 10;
 const SEARCH_MATCHES_PER_TURN: usize = 3;
@@ -33,9 +38,9 @@ const SEARCH_VARIANT_LIMIT: usize = 6;
 const TIMELINE_PAGE_SIZE: usize = 30;
 const AROUND_BEFORE: usize = 5;
 const AROUND_AFTER: usize = 5;
-const RECORD_PAGE_CHARS: u64 = 12_000;
-const ARCHIVE_PAGE_CHARS: u64 = 16_000;
 const ARCHIVE_MATCH_CONTEXT_BEFORE_CHARS: u64 = 1_000;
+const PAGE_PROBE_CHARS_PER_TOKEN: u64 = 4;
+const PAGE_PROTOCOL_RESERVE_TOKENS: u64 = 128;
 
 pub(super) struct ConversationHistoryTool;
 
@@ -84,7 +89,7 @@ impl AgentTool for ConversationHistoryTool {
             normalize_optional(input.open),
         ) {
             (None, None) => list_turns(context, None, TurnPageDirection::Latest),
-            (Some(query), None) => search_history(context, &query),
+            (Some(query), None) => search_history(context, &query, None),
             (None, Some(open)) => open_history(context, &open),
             (Some(_), Some(_)) => Err(AgentError::new(
                 "conversation_history 的 query 和 open 不能同时提供。",
@@ -165,50 +170,6 @@ struct ConversationHistoryInput {
     open: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum TurnPageDirection {
-    Latest,
-    Older,
-    Newer,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(
-    tag = "type",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-enum HistoryOpenRoute {
-    TurnPage {
-        anchor_turn_id: Option<String>,
-        direction: TurnPageDirection,
-    },
-    Turn {
-        turn_id: String,
-        after: Option<ConversationHistoryRecordRef>,
-    },
-    Around {
-        reference: ConversationHistoryRecordRef,
-    },
-    Record {
-        reference: ConversationHistoryRecordRef,
-        start_char: u64,
-    },
-    ToolExchange {
-        reference: ConversationHistoryRecordRef,
-    },
-    Archive {
-        archive_ref: String,
-        start_char: u64,
-    },
-    ArchiveMatch {
-        archive_ref: String,
-        query: String,
-    },
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HistoryTurnFacts {
@@ -258,13 +219,25 @@ fn open_history(context: &ToolExecutionContext, open: &str) -> AgentResult<Value
             anchor_turn_id,
             direction,
         } => list_turns(context, anchor_turn_id.as_deref(), direction),
+        HistoryOpenRoute::Search {
+            query,
+            after_turn_id,
+        } => search_history(context, &query, after_turn_id.as_deref()),
         HistoryOpenRoute::Turn { turn_id, after } => open_turn(context, &turn_id, after.as_ref()),
-        HistoryOpenRoute::Around { reference } => open_around(context, &reference),
+        HistoryOpenRoute::Around { reference } => open_around(context, &reference, None),
+        HistoryOpenRoute::AroundPage { reference, after } => {
+            open_around(context, &reference, after.as_ref())
+        }
         HistoryOpenRoute::Record {
             reference,
             start_char,
         } => open_record(context, &reference, start_char),
-        HistoryOpenRoute::ToolExchange { reference } => open_tool_exchange(context, &reference),
+        HistoryOpenRoute::ToolExchange { reference } => {
+            open_tool_exchange(context, &reference, None)
+        }
+        HistoryOpenRoute::ToolExchangePage { reference, after } => {
+            open_tool_exchange(context, &reference, after.as_ref())
+        }
         HistoryOpenRoute::Archive {
             archive_ref,
             start_char,
@@ -291,6 +264,74 @@ fn open_history(context: &ToolExecutionContext, open: &str) -> AgentResult<Value
     }
 }
 
+fn history_page_admitted_tokens(context: &ToolExecutionContext) -> u64 {
+    let maximum = context.text_output_budget().max_tokens();
+    maximum.saturating_sub(PAGE_PROTOCOL_RESERVE_TOKENS.min(maximum / 4))
+}
+
+fn history_page_probe_chars(context: &ToolExecutionContext) -> u64 {
+    context
+        .text_output_budget()
+        .max_tokens()
+        .saturating_mul(PAGE_PROBE_CHARS_PER_TOKEN)
+        .max(1)
+}
+
+fn history_result_estimated_tokens(
+    context: &ToolExecutionContext,
+    value: &Value,
+) -> AgentResult<u64> {
+    let raw = AgentToolResult {
+        call_id: context.tool_call_id()?.to_string(),
+        tool: "conversation_history".to_string(),
+        ok: true,
+        result: Some(value.clone()),
+        error: None,
+    };
+    let projected = ConversationHistoryTool.model_projection(&raw);
+    let content = crate::conversation_trace::render_tool_observation(&projected);
+    Ok(context
+        .text_output_budget()
+        .estimate_message(&LlmMessage::tool_result(raw.call_id, content, false)))
+}
+
+fn history_result_fits(context: &ToolExecutionContext, value: &Value) -> AgentResult<bool> {
+    Ok(history_result_estimated_tokens(context, value)? <= history_page_admitted_tokens(context))
+}
+
+fn fit_text_page_to_model_budget(
+    context: &ToolExecutionContext,
+    maximum_characters: usize,
+    render_prefix: impl Fn(usize) -> AgentResult<Value>,
+    label: &str,
+) -> AgentResult<Value> {
+    let empty = render_prefix(0)?;
+    if !history_result_fits(context, &empty)? {
+        return Err(history_page_too_large(&format!("{label}协议元数据")));
+    }
+
+    let mut fitting = 0_usize;
+    let mut rejected = maximum_characters.saturating_add(1);
+    while fitting.saturating_add(1) < rejected {
+        let candidate = fitting + (rejected - fitting) / 2;
+        if history_result_fits(context, &render_prefix(candidate)?)? {
+            fitting = candidate;
+        } else {
+            rejected = candidate;
+        }
+    }
+    if fitting == 0 && maximum_characters > 0 {
+        return Err(history_page_too_large(&format!("{label}的一个字符")));
+    }
+    render_prefix(fitting)
+}
+
+fn history_page_too_large(label: &str) -> AgentError {
+    AgentError::new(format!(
+        "conversation_history 无法在当前模型结果预算内安全返回{label}。"
+    ))
+}
+
 fn list_turns(
     context: &ToolExecutionContext,
     anchor_turn_id: Option<&str>,
@@ -301,11 +342,49 @@ fn list_turns(
         .filter(|turn| turn.status != "in_progress")
         .collect::<Vec<_>>();
     let (start, end) = turn_page_bounds(&turns, anchor_turn_id, direction)?;
+    let maximum = end.saturating_sub(start);
+    if maximum == 0 {
+        return render_turn_list_page(&turns, start, end, false);
+    }
+
+    for count in (1..=maximum).rev() {
+        let (page_start, page_end) = match direction {
+            TurnPageDirection::Newer => (start, start.saturating_add(count)),
+            TurnPageDirection::Latest | TurnPageDirection::Older => {
+                (end.saturating_sub(count), end)
+            }
+        };
+        let page = render_turn_list_page(&turns, page_start, page_end, false)?;
+        if history_result_fits(context, &page)? {
+            return Ok(page);
+        }
+    }
+    for count in (1..=maximum).rev() {
+        let (page_start, page_end) = match direction {
+            TurnPageDirection::Newer => (start, start.saturating_add(count)),
+            TurnPageDirection::Latest | TurnPageDirection::Older => {
+                (end.saturating_sub(count), end)
+            }
+        };
+        let page = render_turn_list_page(&turns, page_start, page_end, true)?;
+        if history_result_fits(context, &page)? {
+            return Ok(page);
+        }
+    }
+    Err(history_page_too_large("一个历史 Turn 摘要"))
+}
+
+fn render_turn_list_page(
+    turns: &[HistoryTurn],
+    start: usize,
+    end: usize,
+    compact_summaries: bool,
+) -> AgentResult<Value> {
     let mut rendered = Vec::with_capacity(end.saturating_sub(start));
     for turn in turns[start..end].iter().rev() {
-        rendered.push(render_turn_summary(turn)?);
+        rendered.push(render_turn_summary_with_detail(turn, compact_summaries)?);
     }
-    let older = if start > 0 {
+    let older = if start > 0 && start < turns.len() {
         Some(encode_route(&HistoryOpenRoute::TurnPage {
             anchor_turn_id: Some(turns[start].turn_id.clone()),
             direction: TurnPageDirection::Older,
@@ -313,7 +392,7 @@ fn list_turns(
     } else {
         None
     };
-    let newer = if end < turns.len() {
+    let newer = if end > 0 && end < turns.len() {
         Some(encode_route(&HistoryOpenRoute::TurnPage {
             anchor_turn_id: Some(turns[end - 1].turn_id.clone()),
             direction: TurnPageDirection::Newer,
@@ -367,7 +446,11 @@ fn required_turn_index(turns: &[HistoryTurn], anchor: Option<&str>) -> AgentResu
         .ok_or_else(|| AgentError::new("历史分页位置已经失效，请重新浏览历史目录。"))
 }
 
-fn search_history(context: &ToolExecutionContext, query: &str) -> AgentResult<Value> {
+fn search_history(
+    context: &ToolExecutionContext,
+    query: &str,
+    after_turn_id: Option<&str>,
+) -> AgentResult<Value> {
     if query.chars().count() > MAX_QUERY_CHARS {
         return Err(AgentError::new(format!(
             "conversation_history.query 不能超过 {MAX_QUERY_CHARS} 个字符。"
@@ -377,6 +460,11 @@ fn search_history(context: &ToolExecutionContext, query: &str) -> AgentResult<Va
         include_messages: true,
         include_trace_items: true,
         include_archives: true,
+        // A history query is persisted before this read executes. Without excluding recall
+        // activity at the SQL boundary, the query can find itself and eventually crowd genuine
+        // historical matches out of the bounded candidate set.
+        exclude_tool: Some("conversation_history".to_string()),
+        exclude_run_id: Some(context.run_id()?.to_string()),
         ..Default::default()
     };
     let mut candidates = Vec::new();
@@ -414,9 +502,6 @@ fn search_history(context: &ToolExecutionContext, query: &str) -> AgentResult<Va
         let group_index = if let Some(index) = group_by_turn.get(&turn_id).copied() {
             index
         } else {
-            if grouped.len() >= SEARCH_GROUP_LIMIT {
-                continue;
-            }
             let index = grouped.len();
             group_by_turn.insert(turn_id, index);
             grouped.push((turn_index, Vec::new()));
@@ -427,19 +512,67 @@ fn search_history(context: &ToolExecutionContext, query: &str) -> AgentResult<Va
         }
     }
 
-    let mut results = Vec::with_capacity(grouped.len());
+    let start = match after_turn_id {
+        None => 0,
+        Some(after_turn_id) => grouped
+            .iter()
+            .position(|(turn_index, _)| turns[*turn_index].turn_id == after_turn_id)
+            .map(|index| index.saturating_add(1))
+            .ok_or_else(|| {
+                AgentError::new("历史搜索分页位置已经失效，请使用原 query 重新搜索。")
+            })?,
+    };
+    let maximum = grouped.len().saturating_sub(start).min(SEARCH_GROUP_LIMIT);
+    if maximum == 0 {
+        return render_search_page(query, &variants, &turns, &grouped, start, 0, false);
+    }
+    for count in (1..=maximum).rev() {
+        let page = render_search_page(query, &variants, &turns, &grouped, start, count, false)?;
+        if history_result_fits(context, &page)? {
+            return Ok(page);
+        }
+    }
+    for count in (1..=maximum).rev() {
+        let page = render_search_page(query, &variants, &turns, &grouped, start, count, true)?;
+        if history_result_fits(context, &page)? {
+            return Ok(page);
+        }
+    }
+    Err(history_page_too_large("一个历史搜索结果"))
+}
+
+fn render_search_page(
+    query: &str,
+    variants: &[String],
+    turns: &[HistoryTurn],
+    grouped: &[(usize, Vec<SearchCandidate>)],
+    start: usize,
+    count: usize,
+    compact_summaries: bool,
+) -> AgentResult<Value> {
+    let end = start.saturating_add(count).min(grouped.len());
+    let mut results = Vec::with_capacity(end.saturating_sub(start));
     let mut returned_matches = 0_usize;
-    for (turn_index, matches) in grouped {
+    for (turn_index, matches) in &grouped[start..end] {
         returned_matches = returned_matches.saturating_add(matches.len());
         let mut rendered_matches = Vec::with_capacity(matches.len());
         for candidate in matches {
-            rendered_matches.push(render_search_match(&candidate)?);
+            rendered_matches.push(render_search_match(candidate)?);
         }
         results.push(json!({
-            "turn": render_turn_summary(&turns[turn_index])?,
+            "turn": render_turn_summary_with_detail(&turns[*turn_index], compact_summaries)?,
             "matches": rendered_matches
         }));
     }
+    let next = if end < grouped.len() && end > start {
+        let last_turn_index = grouped[end - 1].0;
+        Some(encode_route(&HistoryOpenRoute::Search {
+            query: query.to_string(),
+            after_turn_id: Some(turns[last_turn_index].turn_id.clone()),
+        })?)
+    } else {
+        None
+    };
 
     Ok(json!({
         "view": "search_results",
@@ -449,6 +582,7 @@ fn search_history(context: &ToolExecutionContext, query: &str) -> AgentResult<Va
         "returnedTurns": results.len(),
         "returnedMatches": returned_matches,
         "navigation": {
+            "next": next,
             "browse": encode_route(&HistoryOpenRoute::TurnPage {
                 anchor_turn_id: None,
                 direction: TurnPageDirection::Latest
@@ -527,10 +661,46 @@ fn open_turn(
     {
         records.remove(0);
     }
-    let has_more = records.len() > TIMELINE_PAGE_SIZE;
+    let has_more_after_loaded = records.len() > TIMELINE_PAGE_SIZE;
     records.truncate(TIMELINE_PAGE_SIZE);
+    if records.is_empty() {
+        let page = render_turn_page(turn, &records, 0, false, false)?;
+        if history_result_fits(context, &page)? {
+            return Ok(page);
+        }
+        let page = render_turn_page(turn, &records, 0, false, true)?;
+        if history_result_fits(context, &page)? {
+            return Ok(page);
+        }
+        return Err(history_page_too_large("一个历史 Turn 摘要"));
+    }
+    for count in (1..=records.len()).rev() {
+        let has_more = count < records.len() || has_more_after_loaded;
+        let page = render_turn_page(turn, &records, count, has_more, false)?;
+        if history_result_fits(context, &page)? {
+            return Ok(page);
+        }
+    }
+    for count in (1..=records.len()).rev() {
+        let has_more = count < records.len() || has_more_after_loaded;
+        let page = render_turn_page(turn, &records, count, has_more, true)?;
+        if history_result_fits(context, &page)? {
+            return Ok(page);
+        }
+    }
+    Err(history_page_too_large("一条历史 Timeline 记录"))
+}
+
+fn render_turn_page(
+    turn: &HistoryTurn,
+    records: &[ConversationHistoryTimelineRecord],
+    count: usize,
+    has_more: bool,
+    compact_summary: bool,
+) -> AgentResult<Value> {
+    let selected = &records[..count.min(records.len())];
     let next = if has_more {
-        records
+        selected
             .last()
             .map(|record| {
                 encode_route(&HistoryOpenRoute::Turn {
@@ -542,13 +712,13 @@ fn open_turn(
     } else {
         None
     };
-    let timeline = records
+    let timeline = selected
         .iter()
         .map(render_timeline_record)
         .collect::<AgentResult<Vec<_>>>()?;
     Ok(json!({
         "view": "turn",
-        "turn": render_turn_summary(turn)?,
+        "turn": render_turn_summary_with_detail(turn, compact_summary)?,
         "timeline": timeline,
         "returnedRecords": timeline.len(),
         "navigation": {
@@ -562,8 +732,15 @@ fn open_turn(
 fn open_around(
     context: &ToolExecutionContext,
     reference: &ConversationHistoryRecordRef,
+    after: Option<&ConversationHistoryRecordRef>,
 ) -> AgentResult<Value> {
-    let records = context
+    let recallable_message_ids = recallable_turn_message_ids(context)?;
+    if !reference_belongs_to_recallable_turn(reference, &recallable_message_ids) {
+        return Err(AgentError::new(
+            "当前运行中的记录已经在模型上下文中，不能作为历史位置读取。",
+        ));
+    }
+    let mut records = context
         .storage()?
         .conversation_history_around(
             context.conversation_id()?,
@@ -573,15 +750,56 @@ fn open_around(
         )
         .map_err(AgentError::new)?
         .ok_or_else(|| AgentError::new("指定的历史位置已经不存在。"))?;
-    let rendered = records
+    records.retain(|record| {
+        reference_belongs_to_recallable_turn(&record.reference, &recallable_message_ids)
+    });
+    let start = match after {
+        None => 0,
+        Some(after) => records
+            .iter()
+            .position(|record| &record.reference == after)
+            .map(|index| index.saturating_add(1))
+            .ok_or_else(|| AgentError::new("历史附近记录分页位置已经失效，请重新搜索。"))?,
+    };
+    let remaining = records.len().saturating_sub(start);
+    if remaining == 0 {
+        return render_around_page(reference, &records, start, 0);
+    }
+    for count in (1..=remaining).rev() {
+        let page = render_around_page(reference, &records, start, count)?;
+        if history_result_fits(context, &page)? {
+            return Ok(page);
+        }
+    }
+    Err(history_page_too_large("一条历史附近记录"))
+}
+
+fn render_around_page(
+    reference: &ConversationHistoryRecordRef,
+    records: &[ConversationHistoryTimelineRecord],
+    start: usize,
+    count: usize,
+) -> AgentResult<Value> {
+    let end = start.saturating_add(count).min(records.len());
+    let selected = &records[start..end];
+    let rendered = selected
         .iter()
         .map(render_timeline_record)
         .collect::<AgentResult<Vec<_>>>()?;
+    let next = if end < records.len() && end > start {
+        Some(encode_route(&HistoryOpenRoute::AroundPage {
+            reference: reference.clone(),
+            after: Some(records[end - 1].reference.clone()),
+        })?)
+    } else {
+        None
+    };
     Ok(json!({
         "view": "around",
         "records": rendered,
         "returnedRecords": rendered.len(),
         "navigation": {
+            "next": next,
             "exact": encode_route(&HistoryOpenRoute::Record {
                 reference: reference.clone(),
                 start_char: 0
@@ -649,29 +867,57 @@ fn open_record(
         .read_conversation_history_record(context.conversation_id()?, reference)
         .map_err(AgentError::new)?
         .ok_or_else(|| AgentError::new("指定的历史记录已经不存在。"))?;
-    render_record_page(record, start_char)
+    render_record_page(context, record, start_char)
 }
 
-fn render_record_page(record: ConversationHistoryRecord, start_char: u64) -> AgentResult<Value> {
+fn render_record_page(
+    context: &ToolExecutionContext,
+    record: ConversationHistoryRecord,
+    start_char: u64,
+) -> AgentResult<Value> {
     let total_chars = record.serialized_json.chars().count() as u64;
     if start_char > total_chars {
         return Err(AgentError::new("历史记录分页位置超过正文长度。"));
     }
+    let probe_chars = history_page_probe_chars(context);
     let content = record
         .serialized_json
         .chars()
         .skip(start_char as usize)
-        .take(RECORD_PAGE_CHARS as usize)
+        .take(usize::try_from(probe_chars).unwrap_or(usize::MAX))
         .collect::<String>();
-    let end_char = start_char.saturating_add(content.chars().count() as u64);
-    let next = if end_char < total_chars {
-        Some(encode_route(&HistoryOpenRoute::Record {
-            reference: record.reference.clone(),
-            start_char: end_char,
-        })?)
-    } else {
-        None
+    let mut boundaries = Vec::with_capacity(content.chars().count().saturating_add(1));
+    boundaries.push(0);
+    boundaries.extend(content.char_indices().skip(1).map(|(index, _)| index));
+    boundaries.push(content.len());
+    let render_prefix = |character_count: usize| -> AgentResult<Value> {
+        let returned = &content[..boundaries[character_count]];
+        let end_char = start_char.saturating_add(character_count as u64);
+        render_record_page_value(&record, start_char, end_char, total_chars, returned)
     };
+    fit_text_page_to_model_budget(
+        context,
+        boundaries.len().saturating_sub(1),
+        render_prefix,
+        "历史记录",
+    )
+}
+
+fn render_record_page_value(
+    record: &ConversationHistoryRecord,
+    start_char: u64,
+    end_char: u64,
+    total_chars: u64,
+    content: &str,
+) -> AgentResult<Value> {
+    let next = (end_char < total_chars)
+        .then(|| {
+            encode_route(&HistoryOpenRoute::Record {
+                reference: record.reference.clone(),
+                start_char: end_char,
+            })
+        })
+        .transpose()?;
     Ok(json!({
         "view": "record",
         "createdAt": record.created_at,
@@ -695,26 +941,31 @@ fn render_record_page(record: ConversationHistoryRecord, start_char: u64) -> Age
 fn open_tool_exchange(
     context: &ToolExecutionContext,
     reference: &ConversationHistoryRecordRef,
+    after: Option<&ConversationHistoryRecordRef>,
 ) -> AgentResult<Value> {
     let records = context
         .storage()?
         .conversation_history_tool_exchange(context.conversation_id()?, Some(reference), None, None)
         .map_err(AgentError::new)?
         .ok_or_else(|| AgentError::new("指定的历史工具调用已经不存在。"))?;
-    let records = records
-        .into_iter()
-        .map(|record| {
-            serde_json::from_str::<Value>(&record.serialized_json)
-                .map_err(|error| AgentError::new(format!("无法解析历史工具交换：{error}")))
-        })
-        .collect::<AgentResult<Vec<_>>>()?;
+    let start = match after {
+        None => 0,
+        Some(after) => records
+            .iter()
+            .position(|record| &record.reference == after)
+            .map(|index| index.saturating_add(1))
+            .ok_or_else(|| AgentError::new("历史工具交换分页位置已经失效，请重新打开。"))?,
+    };
     let archive_ref = records.iter().find_map(|record| {
-        record
+        serde_json::from_str::<Value>(&record.serialized_json)
+            .ok()?
             .get("item")
             .and_then(|item| item.get("archiveRef"))
             .and_then(Value::as_str)
+            .map(str::to_string)
     });
     let exact = archive_ref
+        .as_deref()
         .map(|archive_ref| {
             encode_route(&HistoryOpenRoute::Archive {
                 archive_ref: archive_ref.to_string(),
@@ -722,15 +973,75 @@ fn open_tool_exchange(
             })
         })
         .transpose()?;
+    let remaining = records.len().saturating_sub(start);
+    if remaining == 0 {
+        return render_tool_exchange_page(reference, &records, start, 0, exact.as_deref(), false);
+    }
+    for count in (1..=remaining).rev() {
+        let page =
+            render_tool_exchange_page(reference, &records, start, count, exact.as_deref(), false)?;
+        if history_result_fits(context, &page)? {
+            return Ok(page);
+        }
+    }
+
+    let deferred =
+        render_tool_exchange_page(reference, &records, start, 1, exact.as_deref(), true)?;
+    if history_result_fits(context, &deferred)? {
+        return Ok(deferred);
+    }
+    Err(history_page_too_large("一条历史工具交换索引"))
+}
+
+fn render_tool_exchange_page(
+    reference: &ConversationHistoryRecordRef,
+    records: &[ConversationHistoryRecord],
+    start: usize,
+    count: usize,
+    exact: Option<&str>,
+    defer_details: bool,
+) -> AgentResult<Value> {
+    let end = start.saturating_add(count).min(records.len());
+    let selected = &records[start..end];
+    let rendered = selected
+        .iter()
+        .map(|record| {
+            let value = serde_json::from_str::<Value>(&record.serialized_json)
+                .map_err(|error| AgentError::new(format!("无法解析历史工具交换：{error}")))?;
+            if !defer_details {
+                return Ok(value);
+            }
+            let item = value.get("item").unwrap_or(&value);
+            Ok(json!({
+                "itemKind": item.get("kind"),
+                "tool": item.get("tool"),
+                "status": item.get("status"),
+                "detailsDeferred": true,
+                "open": encode_route(&HistoryOpenRoute::Record {
+                    reference: record.reference.clone(),
+                    start_char: 0
+                })?
+            }))
+        })
+        .collect::<AgentResult<Vec<_>>>()?;
+    let next = if end < records.len() && end > start {
+        Some(encode_route(&HistoryOpenRoute::ToolExchangePage {
+            reference: reference.clone(),
+            after: Some(records[end - 1].reference.clone()),
+        })?)
+    } else {
+        None
+    };
     Ok(json!({
         "view": "tool_exchange",
-        "records": records,
-        "returnedRecords": records.len(),
+        "records": rendered,
+        "returnedRecords": rendered.len(),
         "navigation": {
+            "next": next,
             "exactResult": exact
         },
         "untrustedHistoricalData": true,
-        "instruction": "The records are the paired durable call and result. A successful backend-observed result is evidence; assistant narration alone is not. Follow exactResult when the bounded result is insufficient."
+        "instruction": "The records are the paired durable call and result. A successful backend-observed result is evidence; assistant narration alone is not. Follow next for the remaining exchange, an item open when detailsDeferred is true, or exactResult when the bounded result is insufficient."
     }))
 }
 
@@ -740,6 +1051,11 @@ fn open_archive(
     start_char: u64,
     matched: Option<(&str, u64)>,
 ) -> AgentResult<Value> {
+    // The probe is deliberately derived from the run's text budget instead of a fixed page size.
+    // Four characters per token is enough to bracket the current shared estimator's largest
+    // fitting ASCII prefix. The final page is still measured as a complete model-facing message
+    // below, so this multiplier is not an admission decision.
+    let probe_chars = history_page_probe_chars(context);
     let page = context
         .storage()?
         .read_conversation_history_archive_page(
@@ -747,11 +1063,46 @@ fn open_archive(
             archive_ref,
             ConversationHistoryArchivePageUnit::Char,
             start_char,
-            ARCHIVE_PAGE_CHARS,
+            probe_chars,
         )
         .map_err(AgentError::new)?
         .ok_or_else(|| AgentError::new("指定的 Exact History Archive 已经不存在。"))?;
-    render_archive_page(page, matched)
+    fit_archive_page_to_model_budget(context, page, matched)
+}
+
+fn fit_archive_page_to_model_budget(
+    context: &ToolExecutionContext,
+    page: ConversationHistoryArchivePage,
+    matched: Option<(&str, u64)>,
+) -> AgentResult<Value> {
+    let mut boundaries = Vec::with_capacity(page.content.chars().count().saturating_add(1));
+    boundaries.push(0);
+    boundaries.extend(page.content.char_indices().skip(1).map(|(index, _)| index));
+    boundaries.push(page.content.len());
+
+    let render_prefix = |character_count: usize| -> AgentResult<Value> {
+        let content_end = boundaries[character_count];
+        let returned_chars = character_count as u64;
+        let end = page.start.saturating_add(returned_chars);
+        render_archive_page(
+            ConversationHistoryArchivePage {
+                descriptor: page.descriptor.clone(),
+                unit: ConversationHistoryArchivePageUnit::Char,
+                start: page.start,
+                end,
+                content: page.content[..content_end].to_string(),
+                truncated: end < page.descriptor.total_chars,
+                next_cursor: (end < page.descriptor.total_chars).then_some(end),
+            },
+            matched,
+        )
+    };
+    fit_text_page_to_model_budget(
+        context,
+        boundaries.len().saturating_sub(1),
+        render_prefix,
+        "Archive",
+    )
 }
 
 fn render_archive_page(
@@ -761,10 +1112,8 @@ fn render_archive_page(
     let next = page
         .next_cursor
         .map(|start_char| {
-            encode_route(&HistoryOpenRoute::Archive {
-                archive_ref: page.descriptor.archive_ref.clone(),
-                start_char,
-            })
+            encode_archive_history_open(page.descriptor.archive_ref.clone(), start_char)
+                .map_err(AgentError::new)
         })
         .transpose()?;
     let source = encode_route(&HistoryOpenRoute::ToolExchange {
@@ -814,7 +1163,43 @@ fn load_history_turns(context: &ToolExecutionContext) -> AgentResult<Vec<History
         .storage()?
         .list_conversation_turn_traces(conversation_id)
         .map_err(AgentError::new)?;
-    build_history_turns(&conversation, traces)
+    let current_run_id = context.run_id()?;
+    let current_assistant_message_ids = traces
+        .iter()
+        .filter(|trace| trace.run_id == current_run_id)
+        .map(|trace| trace.assistant_message_id.clone())
+        .collect::<HashSet<_>>();
+    let mut turns = build_history_turns(&conversation, traces)?;
+    turns.retain(|turn| {
+        !turn
+            .assistant_message_ids
+            .iter()
+            .any(|assistant_message_id| {
+                current_assistant_message_ids.contains(assistant_message_id)
+            })
+    });
+    Ok(turns)
+}
+
+fn recallable_turn_message_ids(context: &ToolExecutionContext) -> AgentResult<HashSet<String>> {
+    Ok(load_history_turns(context)?
+        .into_iter()
+        .flat_map(|turn| std::iter::once(turn.user_message_id).chain(turn.assistant_message_ids))
+        .collect())
+}
+
+fn reference_belongs_to_recallable_turn(
+    reference: &ConversationHistoryRecordRef,
+    message_ids: &HashSet<String>,
+) -> bool {
+    match reference {
+        ConversationHistoryRecordRef::Message { message_id } => message_ids.contains(message_id),
+        ConversationHistoryRecordRef::TraceItem {
+            assistant_message_id,
+            ..
+        } => message_ids.contains(assistant_message_id),
+        ConversationHistoryRecordRef::Archive { .. } => false,
+    }
 }
 
 fn build_history_turns(
@@ -1005,7 +1390,25 @@ fn message_is_favorited(message: &ChatMessageRecord) -> bool {
         .unwrap_or(false)
 }
 
-fn render_turn_summary(turn: &HistoryTurn) -> AgentResult<Value> {
+fn render_turn_summary_with_detail(turn: &HistoryTurn, compact: bool) -> AgentResult<Value> {
+    if compact {
+        return Ok(json!({
+            "createdAt": turn.created_at,
+            "requestPreview": normalize_preview(&turn.request_preview, 96),
+            "latestGuidancePreview": turn.latest_guidance_preview
+                .as_deref()
+                .map(|value| normalize_preview(value, 64)),
+            "responsePreview": normalize_preview(&turn.response_preview, 96),
+            "status": turn.status,
+            "facts": turn.facts,
+            "attachmentCount": turn.attachments.len(),
+            "summaryTruncated": true,
+            "open": encode_route(&HistoryOpenRoute::Turn {
+                turn_id: turn.turn_id.clone(),
+                after: None
+            })?
+        }));
+    }
     Ok(json!({
         "turnId": turn.turn_id,
         "createdAt": turn.created_at,
@@ -1146,64 +1549,11 @@ fn record_key(reference: &ConversationHistoryRecordRef) -> String {
 }
 
 fn encode_route(route: &HistoryOpenRoute) -> AgentResult<String> {
-    let bytes = serde_json::to_vec(route)
-        .map_err(|error| AgentError::new(format!("无法生成历史位置：{error}")))?;
-    Ok(format!(
-        "{OPEN_PREFIX}{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-    ))
+    encode_history_open(route).map_err(AgentError::new)
 }
 
 fn decode_route(value: &str) -> AgentResult<HistoryOpenRoute> {
-    if value.len() > MAX_OPEN_BYTES {
-        return Err(AgentError::new("conversation_history.open 过长。"));
-    }
-    let encoded = value
-        .strip_prefix(OPEN_PREFIX)
-        .ok_or_else(|| AgentError::new("conversation_history.open 不是有效的 hist_v1_ 位置。"))?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(encoded)
-        .map_err(|_| AgentError::new("conversation_history.open 无法解码。"))?;
-    let route = serde_json::from_slice::<HistoryOpenRoute>(&bytes)
-        .map_err(|_| AgentError::new("conversation_history.open 内容无效。"))?;
-    validate_route(&route)?;
-    Ok(route)
-}
-
-fn validate_route(route: &HistoryOpenRoute) -> AgentResult<()> {
-    let valid_identity = |value: &str| !value.trim().is_empty() && value.len() <= 1_024;
-    let valid_ref = |reference: &ConversationHistoryRecordRef| match reference {
-        ConversationHistoryRecordRef::Message { message_id } => valid_identity(message_id),
-        ConversationHistoryRecordRef::TraceItem {
-            assistant_message_id,
-            ..
-        } => valid_identity(assistant_message_id),
-        ConversationHistoryRecordRef::Archive { archive_ref } => valid_identity(archive_ref),
-    };
-    let valid = match route {
-        HistoryOpenRoute::TurnPage { anchor_turn_id, .. } => {
-            anchor_turn_id.as_deref().is_none_or(valid_identity)
-        }
-        HistoryOpenRoute::Turn { turn_id, after, .. } => {
-            valid_identity(turn_id) && after.as_ref().is_none_or(valid_ref)
-        }
-        HistoryOpenRoute::Around { reference }
-        | HistoryOpenRoute::Record { reference, .. }
-        | HistoryOpenRoute::ToolExchange { reference } => valid_ref(reference),
-        HistoryOpenRoute::Archive { archive_ref, .. } => valid_identity(archive_ref),
-        HistoryOpenRoute::ArchiveMatch { archive_ref, query } => {
-            valid_identity(archive_ref)
-                && !query.trim().is_empty()
-                && query.chars().count() <= MAX_QUERY_CHARS
-        }
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(AgentError::new(
-            "conversation_history.open 包含无效或过长的历史身份。",
-        ))
-    }
+    decode_history_open(value).map_err(AgentError::new)
 }
 
 #[cfg(test)]
@@ -1252,6 +1602,40 @@ mod tests {
             args,
             approval_status: AgentApprovalStatus::NotRequired,
             reason: None,
+        }
+    }
+
+    fn assert_model_page_fits(
+        registry: &ToolRegistry,
+        context: &ToolExecutionContext,
+        result: &AgentToolResult,
+    ) {
+        let projected = registry.model_projection(result);
+        let content = crate::conversation_trace::render_tool_observation(&projected);
+        let message = LlmMessage::tool_result(result.call_id.clone(), content, false);
+        assert!(
+            context.text_output_budget().estimate_message(&message)
+                <= history_page_admitted_tokens(context),
+            "conversation_history returned a model page above its admitted budget"
+        );
+    }
+
+    fn assert_opaque_locations_decode(value: &Value) {
+        match value {
+            Value::String(value) if value.starts_with(OPEN_PREFIX) => {
+                decode_history_open(value).expect("opaque history location must remain byte-exact");
+            }
+            Value::Array(values) => {
+                for value in values {
+                    assert_opaque_locations_decode(value);
+                }
+            }
+            Value::Object(values) => {
+                for value in values.values() {
+                    assert_opaque_locations_decode(value);
+                }
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
     }
 
@@ -1424,6 +1808,97 @@ mod tests {
     }
 
     #[test]
+    fn current_recall_run_cannot_search_or_list_itself() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("self-recall.sqlite")).unwrap());
+        seed_conversation(&storage);
+        let mut conversation = storage
+            .load_conversation("conversation-1")
+            .unwrap()
+            .unwrap();
+        conversation.messages.push(message(
+            "user-current",
+            "user",
+            "再次查找审批结束后的引导",
+            5_000,
+        ));
+        let mut current_assistant = message("assistant-current", "assistant", "", 6_000);
+        current_assistant.status = Some("pending".to_string());
+        conversation.messages.push(current_assistant);
+        conversation.updated_at = 6_000;
+        storage.save_conversation(conversation).unwrap();
+        storage
+            .append_in_progress_conversation_turn_trace(
+                &ConversationTurnTrace {
+                    schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+                    run_id: "run-history".to_string(),
+                    conversation_id: "conversation-1".to_string(),
+                    assistant_message_id: "assistant-current".to_string(),
+                    terminal_status: ConversationTurnTraceTerminalStatus::InProgress,
+                    terminal_error: None,
+                    truncated: false,
+                    items: vec![ConversationTurnTraceItem::ToolCall {
+                        sequence: 0,
+                        call_id: "history-current".to_string(),
+                        tool: "conversation_history".to_string(),
+                        operation: json!({ "query": "审批结束后的引导" }),
+                        approval_status: AgentApprovalStatus::NotRequired,
+                        truncated: false,
+                    }],
+                },
+                6_000,
+                6_000,
+            )
+            .unwrap();
+        let context = context(storage, "conversation-1");
+        let mut registry = ToolRegistry::defaults_with_search(None);
+        registry.register_conversation_history();
+
+        let listed = registry.execute(&context, &call(json!({})));
+        assert!(listed.ok, "{:?}", listed.error);
+        let listed = listed.result.unwrap();
+        assert_eq!(listed["returnedTurns"], 2);
+        assert!(listed["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|turn| turn["turnId"] != "user-current"));
+
+        let searched = registry.execute(&context, &call(json!({ "query": "审批结束后的引导" })));
+        assert!(searched.ok, "{:?}", searched.error);
+        let searched = searched.result.unwrap();
+        assert_eq!(searched["returnedTurns"], 1);
+        assert_eq!(searched["results"][0]["turn"]["turnId"], "user-1");
+        assert!(searched["results"][0]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|matched| matched["tool"] != "conversation_history"));
+
+        let around = registry.execute(
+            &context,
+            &call(json!({
+                "open": encode_route(&HistoryOpenRoute::Around {
+                    reference: ConversationHistoryRecordRef::Message {
+                        message_id: "assistant-2".to_string()
+                    }
+                }).unwrap()
+            })),
+        );
+        assert!(around.ok, "{:?}", around.error);
+        let around = around.result.unwrap();
+        assert!(around["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| !record["preview"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("再次查找审批结束后的引导")));
+    }
+
+    #[test]
     fn opens_eighteen_tool_calls_across_distinct_turn_pages_without_repeating_records() {
         let fixture = tempdir().unwrap();
         let storage =
@@ -1471,11 +1946,14 @@ mod tests {
         storage
             .replace_conversation_turn_trace(&trace, 2_000, 2_001)
             .unwrap();
-        let context = context(storage, "conversation-1");
+        let context = context(storage, "conversation-1")
+            .with_text_output_budget(crate::context::ContextTextBudget::heuristic(1_200));
         let mut registry = ToolRegistry::defaults_with_search(None);
         registry.register_conversation_history();
 
         let listed = registry.execute(&context, &call(json!({})));
+        assert_model_page_fits(&registry, &context, &listed);
+        assert_opaque_locations_decode(listed.result.as_ref().unwrap());
         let listed = listed.result.unwrap();
         let turn = listed["turns"]
             .as_array()
@@ -1483,26 +1961,20 @@ mod tests {
             .iter()
             .find(|turn| turn["facts"]["toolCalls"] == 18)
             .expect("the seeded 18-call turn must be listed");
-        let open = turn["open"].as_str().unwrap().to_string();
-        let first = registry.execute(&context, &call(json!({ "open": open })));
-        assert!(first.ok, "{:?}", first.error);
-        let first = first.result.unwrap();
-        assert_eq!(first["returnedRecords"], TIMELINE_PAGE_SIZE);
-        let next = first["navigation"]["next"]
-            .as_str()
-            .expect("18 tool exchanges must require a second page")
-            .to_string();
-        let second = registry.execute(&context, &call(json!({ "open": next })));
-        assert!(second.ok, "{:?}", second.error);
-        let second = second.result.unwrap();
-        assert!(second["navigation"]["next"].is_null());
-
-        let records = first["timeline"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .chain(second["timeline"].as_array().unwrap())
-            .collect::<Vec<_>>();
+        let mut open = turn["open"].as_str().unwrap().to_string();
+        let mut records = Vec::new();
+        for _ in 0..64 {
+            let page = registry.execute(&context, &call(json!({ "open": open })));
+            assert!(page.ok, "{:?}", page.error);
+            assert_model_page_fits(&registry, &context, &page);
+            assert_opaque_locations_decode(page.result.as_ref().unwrap());
+            let page = page.result.unwrap();
+            records.extend(page["timeline"].as_array().unwrap().iter().cloned());
+            let Some(next) = page["navigation"]["next"].as_str() else {
+                break;
+            };
+            open = next.to_string();
+        }
         assert_eq!(records.len(), 38);
         assert_eq!(
             records
@@ -1526,6 +1998,324 @@ mod tests {
             locations.len(),
             records.len(),
             "following navigation.next must not repeat the previous page"
+        );
+    }
+
+    #[test]
+    fn budgeted_turn_directory_preserves_every_open_without_skips_or_duplicates() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("turn-budget.sqlite")).unwrap());
+        let mut messages = Vec::new();
+        for index in 0..45_i64 {
+            messages.push(message(
+                &format!("user-{index:02}"),
+                "user",
+                &format!("{index:02} {}", "历史请求内容".repeat(80)),
+                index * 2 + 1,
+            ));
+            messages.push(message(
+                &format!("assistant-{index:02}"),
+                "assistant",
+                &format!("{index:02} {}", "历史回复内容".repeat(120)),
+                index * 2 + 2,
+            ));
+        }
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-turn-budget".to_string(),
+                project_id: None,
+                model_id: None,
+                title: "Budgeted turns".to_string(),
+                messages,
+                created_at: 1,
+                updated_at: 100,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let context = context(storage, "conversation-turn-budget")
+            .with_text_output_budget(crate::context::ContextTextBudget::heuristic(1_600));
+        let mut registry = ToolRegistry::defaults_with_search(None);
+        registry.register_conversation_history();
+
+        let mut args = json!({});
+        let mut seen = HashSet::new();
+        for _ in 0..64 {
+            let page = registry.execute(&context, &call(args));
+            assert!(page.ok, "{:?}", page.error);
+            assert_model_page_fits(&registry, &context, &page);
+            assert_opaque_locations_decode(page.result.as_ref().unwrap());
+            let page = page.result.unwrap();
+            for turn in page["turns"].as_array().unwrap() {
+                let open = turn["open"].as_str().unwrap();
+                let HistoryOpenRoute::Turn { turn_id, after } = decode_history_open(open).unwrap()
+                else {
+                    panic!("turn directory entry must open one turn");
+                };
+                assert!(after.is_none());
+                assert!(seen.insert(turn_id), "turn directory repeated an entry");
+            }
+            let Some(older) = page["navigation"]["older"].as_str() else {
+                break;
+            };
+            args = json!({ "open": older });
+        }
+        assert_eq!(seen.len(), 45, "turn pagination skipped historical turns");
+    }
+
+    #[test]
+    fn bounded_record_pages_resume_at_the_exact_returned_character() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("record-budget.sqlite")).unwrap());
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-record-budget".to_string(),
+                project_id: None,
+                model_id: None,
+                title: "Budgeted record".to_string(),
+                messages: vec![
+                    message(
+                        "record-user",
+                        "user",
+                        &format!("{}{}", "甲乙丙丁".repeat(2_000), "\"\\\n".repeat(2_000)),
+                        1,
+                    ),
+                    message("record-assistant", "assistant", "done", 2),
+                ],
+                created_at: 1,
+                updated_at: 2,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let reference = ConversationHistoryRecordRef::Message {
+            message_id: "record-user".to_string(),
+        };
+        let exact = storage
+            .read_conversation_history_record("conversation-record-budget", &reference)
+            .unwrap()
+            .unwrap()
+            .serialized_json;
+        let context = context(storage, "conversation-record-budget")
+            .with_text_output_budget(crate::context::ContextTextBudget::heuristic(512));
+        let mut registry = ToolRegistry::defaults_with_search(None);
+        registry.register_conversation_history();
+        let mut open = encode_route(&HistoryOpenRoute::Record {
+            reference,
+            start_char: 0,
+        })
+        .unwrap();
+        let mut restored = String::new();
+        for _ in 0..512 {
+            let page = registry.execute(&context, &call(json!({ "open": open })));
+            assert!(page.ok, "{:?}", page.error);
+            assert_model_page_fits(&registry, &context, &page);
+            assert_opaque_locations_decode(page.result.as_ref().unwrap());
+            let page = page.result.unwrap();
+            assert_eq!(
+                page["range"]["startChar"].as_u64(),
+                Some(restored.chars().count() as u64)
+            );
+            restored.push_str(page["content"].as_str().unwrap());
+            let Some(next) = page["navigation"]["next"].as_str() else {
+                break;
+            };
+            let HistoryOpenRoute::Record { start_char, .. } = decode_history_open(next).unwrap()
+            else {
+                panic!("record continuation must remain a record route");
+            };
+            assert_eq!(start_char, restored.chars().count() as u64);
+            open = next.to_string();
+        }
+        assert_eq!(restored, exact, "record pages skipped or repeated text");
+    }
+
+    #[test]
+    fn budgeted_search_pages_resume_after_the_last_returned_turn() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("search-budget.sqlite")).unwrap());
+        let mut messages = Vec::new();
+        for index in 0..20_i64 {
+            messages.push(message(
+                &format!("search-user-{index:02}"),
+                "user",
+                &format!(
+                    "分页检索共同短语 {index:02} {}",
+                    "需要保留的上下文".repeat(50)
+                ),
+                index * 2 + 1,
+            ));
+            messages.push(message(
+                &format!("search-assistant-{index:02}"),
+                "assistant",
+                "已完成该项历史工作。",
+                index * 2 + 2,
+            ));
+        }
+        storage
+            .save_conversation(ChatConversationRecord {
+                id: "conversation-search-budget".to_string(),
+                project_id: None,
+                model_id: None,
+                title: "Budgeted search".to_string(),
+                messages,
+                created_at: 1,
+                updated_at: 50,
+                pinned_at: None,
+                archived_at: None,
+                unread_at: None,
+            })
+            .unwrap();
+        let context = context(storage, "conversation-search-budget")
+            .with_text_output_budget(crate::context::ContextTextBudget::heuristic(1_600));
+        let mut registry = ToolRegistry::defaults_with_search(None);
+        registry.register_conversation_history();
+
+        let mut args = json!({ "query": "分页检索共同短语" });
+        let mut seen = HashSet::new();
+        for _ in 0..32 {
+            let page = registry.execute(&context, &call(args));
+            assert!(page.ok, "{:?}", page.error);
+            assert_model_page_fits(&registry, &context, &page);
+            assert_opaque_locations_decode(page.result.as_ref().unwrap());
+            let page = page.result.unwrap();
+            for result in page["results"].as_array().unwrap() {
+                let open = result["turn"]["open"].as_str().unwrap();
+                let HistoryOpenRoute::Turn { turn_id, .. } = decode_history_open(open).unwrap()
+                else {
+                    panic!("search group must retain its turn open");
+                };
+                assert!(seen.insert(turn_id), "search pagination repeated a turn");
+            }
+            let Some(next) = page["navigation"]["next"].as_str() else {
+                break;
+            };
+            let HistoryOpenRoute::Search { .. } = decode_history_open(next).unwrap() else {
+                panic!("search continuation must remain an opaque search route");
+            };
+            args = json!({ "open": next });
+        }
+        assert_eq!(seen.len(), 20, "search pagination skipped matching turns");
+    }
+
+    #[test]
+    fn around_and_tool_exchange_views_keep_exact_routes_when_details_exceed_budget() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("exchange-budget.sqlite")).unwrap());
+        seed_conversation(&storage);
+        let trace = ConversationTurnTrace {
+            schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
+            run_id: "run-large-exchange".to_string(),
+            conversation_id: "conversation-1".to_string(),
+            assistant_message_id: "assistant-1".to_string(),
+            terminal_status: ConversationTurnTraceTerminalStatus::Completed,
+            terminal_error: None,
+            truncated: false,
+            items: vec![
+                ConversationTurnTraceItem::ToolCall {
+                    sequence: 0,
+                    call_id: "large-call".to_string(),
+                    tool: "read_file".to_string(),
+                    operation: json!({ "path": "large.txt", "query": "调用参数".repeat(4_000) }),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    truncated: false,
+                },
+                ConversationTurnTraceItem::ToolResult {
+                    sequence: 1,
+                    call_id: "large-call".to_string(),
+                    tool: "read_file".to_string(),
+                    status: ConversationTraceToolResultStatus::Succeeded,
+                    success: true,
+                    observation: json!({ "content": "工具结果".repeat(4_000) }),
+                    approval_status: AgentApprovalStatus::NotRequired,
+                    error: None,
+                    truncated: false,
+                    archive: Default::default(),
+                },
+            ],
+        };
+        let mut in_progress = trace.clone();
+        in_progress.terminal_status = ConversationTurnTraceTerminalStatus::InProgress;
+        storage
+            .append_in_progress_conversation_turn_trace(&in_progress, 2_000, 2_000)
+            .unwrap();
+        storage
+            .replace_conversation_turn_trace(&trace, 2_000, 2_001)
+            .unwrap();
+        let call_reference = ConversationHistoryRecordRef::TraceItem {
+            assistant_message_id: "assistant-1".to_string(),
+            sequence: 0,
+        };
+        let expected_around_records = storage
+            .conversation_history_around(
+                "conversation-1",
+                &call_reference,
+                AROUND_BEFORE,
+                AROUND_AFTER,
+            )
+            .unwrap()
+            .unwrap()
+            .len();
+        let context = context(storage, "conversation-1")
+            .with_text_output_budget(crate::context::ContextTextBudget::heuristic(1_200));
+        let mut registry = ToolRegistry::defaults_with_search(None);
+        registry.register_conversation_history();
+
+        let mut exchange_open = encode_route(&HistoryOpenRoute::ToolExchange {
+            reference: call_reference.clone(),
+        })
+        .unwrap();
+        let mut exchange_records = HashSet::new();
+        for _ in 0..4 {
+            let page = registry.execute(&context, &call(json!({ "open": exchange_open })));
+            assert!(page.ok, "{:?}", page.error);
+            assert_model_page_fits(&registry, &context, &page);
+            assert_opaque_locations_decode(page.result.as_ref().unwrap());
+            let page = page.result.unwrap();
+            for record in page["records"].as_array().unwrap() {
+                assert_eq!(record["detailsDeferred"], true);
+                assert!(exchange_records.insert(record["open"].as_str().unwrap().to_string()));
+            }
+            let Some(next) = page["navigation"]["next"].as_str() else {
+                break;
+            };
+            exchange_open = next.to_string();
+        }
+        assert_eq!(
+            exchange_records.len(),
+            2,
+            "tool exchange pagination skipped or repeated a paired record"
+        );
+
+        let mut around_open = encode_route(&HistoryOpenRoute::Around {
+            reference: call_reference,
+        })
+        .unwrap();
+        let mut around_records = HashSet::new();
+        for _ in 0..16 {
+            let page = registry.execute(&context, &call(json!({ "open": around_open })));
+            assert!(page.ok, "{:?}", page.error);
+            assert_model_page_fits(&registry, &context, &page);
+            assert_opaque_locations_decode(page.result.as_ref().unwrap());
+            let page = page.result.unwrap();
+            for record in page["records"].as_array().unwrap() {
+                assert!(around_records.insert(record["open"].as_str().unwrap().to_string()));
+            }
+            let Some(next) = page["navigation"]["next"].as_str() else {
+                break;
+            };
+            around_open = next.to_string();
+        }
+        assert_eq!(
+            around_records.len(),
+            expected_around_records,
+            "around pagination skipped or repeated nearby records"
         );
     }
 
@@ -1644,6 +2434,85 @@ mod tests {
         assert!(trace.contains("UNIQUE_ARCHIVE_NEEDLE"));
         assert!(!trace.contains("前文前文"));
         assert!(!trace.contains("后文后文"));
+    }
+
+    #[test]
+    fn exact_archive_pages_fit_the_run_budget_and_continue_from_the_returned_end() {
+        let fixture = tempdir().unwrap();
+        let storage =
+            Arc::new(StorageService::open(&fixture.path().join("archive-budget.sqlite")).unwrap());
+        seed_conversation(&storage);
+        let exact = (0..30_000)
+            .map(|index| char::from(b'a' + (index % 26) as u8))
+            .collect::<String>();
+        let archive = storage
+            .archive_conversation_tool_result(ConversationHistoryArchiveInput {
+                conversation_id: "conversation-1".to_string(),
+                assistant_message_id: "assistant-1".to_string(),
+                sequence: 9,
+                call_id: "call-budget".to_string(),
+                tool: "web_fetch".to_string(),
+                content_type: "text/plain".to_string(),
+                content: exact.clone(),
+                truncated_at_source: false,
+                model_projection_truncated: true,
+                archive_projection_truncated: false,
+                created_at: 2_000,
+            })
+            .unwrap();
+        let context = context(storage, "conversation-1")
+            .with_text_output_budget(crate::context::ContextTextBudget::heuristic(512));
+        let mut registry = ToolRegistry::defaults_with_search(None);
+        registry.register_conversation_history();
+        let first_open = encode_archive_history_open(&archive.archive_ref, 0).unwrap();
+
+        let first = registry.execute(&context, &call(json!({ "open": first_open })));
+        assert!(first.ok, "{:?}", first.error);
+        let first_value = first.result.as_ref().unwrap();
+        let first_end = first_value["range"]["endChar"].as_u64().unwrap();
+        assert!(first_end > 0);
+        assert!(first_end < archive.total_chars);
+        assert_eq!(
+            first_value["content"].as_str().unwrap().chars().count() as u64,
+            first_end
+        );
+        let next = first_value["navigation"]["next"]
+            .as_str()
+            .expect("a bounded archive page must expose a continuation");
+        assert_eq!(
+            decode_history_open(next).unwrap(),
+            HistoryOpenRoute::Archive {
+                archive_ref: archive.archive_ref.clone(),
+                start_char: first_end,
+            }
+        );
+
+        let projected = registry.model_projection(&first);
+        let projected_content = crate::conversation_trace::render_tool_observation(&projected);
+        let projected_message =
+            LlmMessage::tool_result(first.call_id.clone(), projected_content, false);
+        assert!(
+            context
+                .text_output_budget()
+                .estimate_message(&projected_message)
+                <= context.text_output_budget().max_tokens()
+        );
+
+        let second = registry.execute(&context, &call(json!({ "open": next })));
+        assert!(second.ok, "{:?}", second.error);
+        let second_value = second.result.as_ref().unwrap();
+        assert_eq!(second_value["range"]["startChar"].as_u64(), Some(first_end));
+        let second_end = second_value["range"]["endChar"].as_u64().unwrap();
+        let returned = format!(
+            "{}{}",
+            first_value["content"].as_str().unwrap(),
+            second_value["content"].as_str().unwrap()
+        );
+        assert_eq!(
+            returned,
+            exact.chars().take(second_end as usize).collect::<String>(),
+            "following navigation.next must neither skip nor repeat archive text"
+        );
     }
 
     #[test]

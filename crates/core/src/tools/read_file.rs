@@ -1,4 +1,5 @@
 use super::{AgentTool, ToolExecutionContext};
+use crate::llm::LlmMessage;
 use crate::protocol::{
     AgentError, AgentResult, AgentToolDefinition, AgentToolResult, AgentToolSafety,
 };
@@ -10,6 +11,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::time::SystemTime;
 
 const STREAM_BUFFER_BYTES: usize = 64 * 1024;
+const MODEL_RESULT_METADATA_RESERVE_TOKENS: u64 = 2_000;
 
 pub(super) struct ReadFileTool;
 
@@ -33,6 +35,7 @@ impl AgentTool for ReadFileTool {
                     "path": { "type": "string", "description": "Workspace-relative path, absolute local path, @home/@desktop/@documents/@downloads, or an exact @attachments/... readPath. Availability depends on the current read permission." },
                     "startLine": { "type": "integer", "minimum": 1, "description": "Optional 1-based first line. Omit to start at the beginning." },
                     "startByte": { "type": "integer", "minimum": 0, "description": "Continuation cursor. Pass nextStartByte from a previous truncated result; do not combine with startLine." },
+                    "expectedRevision": { "type": "string", "description": "Optional continuation guard. Pass the exact revision from the previous page so a changed file cannot be silently spliced into the same read." },
                     "maxLines": { "type": "integer", "minimum": 1, "description": "Optional soft strategy bound. There is no fixed maximum; the output token budget still applies." }
                 },
                 "required": ["path"]
@@ -68,6 +71,13 @@ impl AgentTool for ReadFileTool {
             requested_start_line,
             args.start_byte,
         )?;
+        if let Some(expected_revision) = args.expected_revision.as_deref() {
+            if expected_revision != inspection.revision {
+                return Err(AgentError::new(
+                    "read_file 续读失败：文件 revision 已变化，请从开头重新读取。",
+                ));
+            }
+        }
         let fragment = read_fragment(
             &mut file,
             context,
@@ -77,58 +87,20 @@ impl AgentTool for ReadFileTool {
         )?;
         ensure_file_unchanged(&file, &inspection.identity)?;
 
-        let positions = measure_positions(
-            inspection.start.line,
-            inspection.start.column,
+        fit_read_file_page_to_model_budget(
+            context,
+            context.display_path(path, &file_path)?,
+            &inspection,
             &fragment.content,
-        );
-        let next_byte = inspection
-            .start
-            .byte
-            .saturating_add(u64::try_from(fragment.content.len()).unwrap_or(u64::MAX));
-        let truncated = next_byte < inspection.total_bytes;
-        let truncated_reason = truncated.then(|| fragment.stop_reason.as_str());
-
-        Ok(json!({
-            "path": context.display_path(path, &file_path)?,
-            "revision": inspection.revision,
-            "startLine": inspection.start.line,
-            "startColumn": inspection.start.column,
-            "startByte": inspection.start.byte,
-            "endLine": positions.end_line,
-            "endColumn": positions.end_column,
-            "endByteExclusive": next_byte,
-            "totalLines": inspection.total_lines,
-            "totalBytes": inspection.total_bytes,
-            "returnedBytes": fragment.content.len(),
-            "estimatedContentTokens": context.text_output_budget().estimate(&fragment.content),
-            "outputTokenBudget": context.text_output_budget().max_tokens(),
-            "truncated": truncated,
-            "truncatedReason": truncated_reason,
-            "nextStartByte": truncated.then_some(next_byte),
-            "nextStartLine": truncated.then_some(positions.next_line),
-            "nextStartColumn": truncated.then_some(positions.next_column),
-            "content": fragment.content
-        }))
+            fragment.stop_reason,
+        )
     }
 
     fn model_projection(&self, result: &AgentToolResult) -> AgentToolResult {
-        let projected = super::model_projection::retain_fields(
-            result.result.as_ref(),
-            &[
-                "path",
-                "startLine",
-                "endLine",
-                "totalLines",
-                "totalBytes",
-                "content",
-                "truncated",
-                "truncatedReason",
-                "nextStartByte",
-                "nextStartLine",
-            ],
-        );
-        super::model_projection::compact_model_result(result, projected)
+        super::model_projection::compact_model_result(
+            result,
+            read_file_model_projection(result.result.as_ref()),
+        )
     }
 }
 
@@ -139,6 +111,7 @@ struct ReadFileArgs {
     file_path: Option<String>,
     start_line: Option<usize>,
     start_byte: Option<u64>,
+    expected_revision: Option<String>,
     max_lines: Option<usize>,
 }
 
@@ -165,6 +138,176 @@ impl ReadFileArgs {
         }
         Ok(())
     }
+}
+
+fn read_file_model_projection(source: Option<&Value>) -> Option<Value> {
+    let mut projected = super::model_projection::retain_fields(
+        source,
+        &[
+            "path",
+            "revision",
+            "startLine",
+            "startByte",
+            "endLine",
+            "endByteExclusive",
+            "totalLines",
+            "totalBytes",
+            "content",
+            "truncated",
+            "truncatedReason",
+            "nextStartByte",
+            "nextStartLine",
+        ],
+    );
+    if let (Some(Value::Object(output)), Some(source)) = (projected.as_mut(), source) {
+        let path = source.get("path").and_then(Value::as_str);
+        let revision = source.get("revision").and_then(Value::as_str);
+        let next_start_byte = source.get("nextStartByte").and_then(Value::as_u64);
+        if source.get("truncated").and_then(Value::as_bool) == Some(true) {
+            if let (Some(path), Some(revision), Some(next_start_byte)) =
+                (path, revision, next_start_byte)
+            {
+                output.insert(
+                    "continueWith".to_string(),
+                    json!({
+                        "tool": "read_file",
+                        "args": {
+                            "path": path,
+                            "startByte": next_start_byte,
+                            "expectedRevision": revision
+                        }
+                    }),
+                );
+            }
+        }
+    }
+    projected
+}
+
+fn fit_read_file_page_to_model_budget(
+    context: &ToolExecutionContext,
+    display_path: String,
+    inspection: &TextFileInspection,
+    content: &str,
+    stop_reason: FragmentStopReason,
+) -> AgentResult<Value> {
+    let full = build_read_file_page(context, &display_path, inspection, content, stop_reason);
+    // Production runtime always supplies the fixed 10K result budget. Smaller budgets are used
+    // only by focused pagination tests and embedded callers as a content-page strategy; treating
+    // them as a complete provider-message ceiling would leave no room for even the cursor.
+    if context.text_output_budget().max_tokens()
+        < MODEL_RESULT_METADATA_RESERVE_TOKENS.saturating_mul(2)
+    {
+        return Ok(full);
+    }
+    if read_file_page_fits_model_budget(context, &full)? {
+        return Ok(full);
+    }
+
+    let mut boundaries = content
+        .char_indices()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if boundaries.first().copied() != Some(0) {
+        boundaries.insert(0, 0);
+    }
+    boundaries.push(content.len());
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut lower = 0_usize;
+    let mut upper = boundaries.len().saturating_sub(1);
+    while lower < upper {
+        let middle = lower + (upper - lower).div_ceil(2);
+        let candidate = build_read_file_page(
+            context,
+            &display_path,
+            inspection,
+            &content[..boundaries[middle]],
+            FragmentStopReason::OutputBudget,
+        );
+        if read_file_page_fits_model_budget(context, &candidate)? {
+            lower = middle;
+        } else {
+            upper = middle.saturating_sub(1);
+        }
+    }
+
+    if lower == 0 && !content.is_empty() {
+        let first_character_end = boundaries.get(1).copied().unwrap_or(content.len());
+        let smallest_progressing_page = build_read_file_page(
+            context,
+            &display_path,
+            inspection,
+            &content[..first_character_end],
+            FragmentStopReason::OutputBudget,
+        );
+        if !read_file_page_fits_model_budget(context, &smallest_progressing_page)? {
+            return Err(AgentError::new(
+                "read_file 无法在 10K 模型结果预算内同时返回一个字符和安全续读游标。",
+            ));
+        }
+        return Ok(smallest_progressing_page);
+    }
+
+    Ok(build_read_file_page(
+        context,
+        &display_path,
+        inspection,
+        &content[..boundaries[lower]],
+        FragmentStopReason::OutputBudget,
+    ))
+}
+
+fn build_read_file_page(
+    context: &ToolExecutionContext,
+    display_path: &str,
+    inspection: &TextFileInspection,
+    content: &str,
+    stop_reason: FragmentStopReason,
+) -> Value {
+    let positions = measure_positions(inspection.start.line, inspection.start.column, content);
+    let next_byte = inspection
+        .start
+        .byte
+        .saturating_add(u64::try_from(content.len()).unwrap_or(u64::MAX));
+    let truncated = next_byte < inspection.total_bytes;
+    let truncated_reason = truncated.then(|| stop_reason.as_str());
+
+    json!({
+        "path": display_path,
+        "revision": inspection.revision,
+        "startLine": inspection.start.line,
+        "startColumn": inspection.start.column,
+        "startByte": inspection.start.byte,
+        "endLine": positions.end_line,
+        "endColumn": positions.end_column,
+        "endByteExclusive": next_byte,
+        "totalLines": inspection.total_lines,
+        "totalBytes": inspection.total_bytes,
+        "returnedBytes": content.len(),
+        "estimatedContentTokens": context.text_output_budget().estimate(content),
+        "outputTokenBudget": context.text_output_budget().max_tokens(),
+        "truncated": truncated,
+        "truncatedReason": truncated_reason,
+        "nextStartByte": truncated.then_some(next_byte),
+        "nextStartLine": truncated.then_some(positions.next_line),
+        "nextStartColumn": truncated.then_some(positions.next_column),
+        "content": content
+    })
+}
+
+fn read_file_page_fits_model_budget(
+    context: &ToolExecutionContext,
+    source: &Value,
+) -> AgentResult<bool> {
+    let projected = read_file_model_projection(Some(source))
+        .ok_or_else(|| AgentError::new("read_file 无法构建模型结果投影。"))?;
+    let content = serde_json::to_string(&projected)
+        .map_err(|error| AgentError::new(format!("read_file 无法序列化模型结果：{error}")))?;
+    let message = LlmMessage::tool_result(context.tool_call_id()?, content, false);
+    Ok(context.text_output_budget().estimate_message(&message)
+        <= context.text_output_budget().max_tokens())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -384,7 +527,19 @@ fn read_fragment(
 
     file.seek(SeekFrom::Start(inspection.start.byte))
         .map_err(|error| AgentError::new(format!("定位读取起点失败：{error}")))?;
-    let budget = context.text_output_budget();
+    let result_budget = context.text_output_budget();
+    // `read_file` owns a lossless source cursor, so keep enough room for the path, byte/line
+    // ranges and executable continuation that surround `content` in the final model message.
+    // Tiny synthetic test budgets retain their full allowance so every page still makes progress.
+    let content_token_limit =
+        if result_budget.max_tokens() > MODEL_RESULT_METADATA_RESERVE_TOKENS.saturating_mul(2) {
+            result_budget
+                .max_tokens()
+                .saturating_sub(MODEL_RESULT_METADATA_RESERVE_TOKENS)
+        } else {
+            result_budget.max_tokens()
+        };
+    let content_budget = result_budget.with_max_tokens(content_token_limit);
     let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
     let mut utf8_carry = Vec::with_capacity(4);
     let mut content = String::new();
@@ -432,8 +587,8 @@ fn read_fragment(
         );
         content.push_str(segment);
 
-        if !budget.fits(&content) {
-            let mut fitting = budget.fitting_prefix_len(&content);
+        if !content_budget.fits(&content) {
+            let mut fitting = content_budget.fitting_prefix_len(&content);
             if fitting == 0 {
                 fitting = content.chars().next().map_or(0, char::len_utf8);
             }
@@ -599,9 +754,9 @@ fn file_changed_error() -> AgentError {
 mod tests {
     use super::super::{ToolExecutionContext, ToolRegistry};
     use super::STREAM_BUFFER_BYTES;
-    use crate::context::ContextTextBudget;
+    use crate::context::{ContextCapacityDetector, ContextTextBudget};
     use crate::protocol::{
-        AgentApprovalStatus, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
+        AgentApiStyle, AgentApprovalStatus, AgentRunContext, AgentToolCall, AgentWorkspaceContext,
     };
     use crate::revision::content_revision;
     use serde_json::{json, Value};
@@ -723,6 +878,132 @@ mod tests {
             content
         );
         assert_eq!(second["truncated"], false);
+    }
+
+    #[test]
+    fn model_projection_exposes_an_executable_continuation() {
+        let fixture = TestWorkspace::new();
+        fixture.write_file(
+            "notes.txt",
+            &"one\ntwo\nthree\nfour\nfive\nsix\n".repeat(1_000),
+        );
+        let context = fixture
+            .context()
+            .with_text_output_budget(ContextTextBudget::heuristic(6));
+        let registry = ToolRegistry::defaults_with_search(None);
+        let call = AgentToolCall {
+            id: "call-model-continuation".to_string(),
+            tool: "read_file".to_string(),
+            args: json!({ "path": "notes.txt" }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+
+        let raw = registry.execute(&context, &call);
+        let next_start_byte = raw.result.as_ref().unwrap()["nextStartByte"]
+            .as_u64()
+            .unwrap();
+        let model = registry.model_projection(&raw);
+        let projected = model.result.unwrap();
+
+        assert_eq!(projected["truncated"], true);
+        assert_eq!(projected["endByteExclusive"], next_start_byte);
+        assert_eq!(projected["continueWith"]["tool"], "read_file");
+        assert_eq!(
+            projected["continueWith"]["args"],
+            json!({
+                "path": projected["path"],
+                "startByte": next_start_byte,
+                "expectedRevision": projected["revision"]
+            })
+        );
+    }
+
+    #[test]
+    fn escaped_unicode_pages_fit_the_complete_10k_message_and_continue_without_a_gap() {
+        let fixture = TestWorkspace::new();
+        let content = "\"\\\\\u{0001}天地🙂\n".repeat(20_000);
+        fixture.write_file("escaped.txt", &content);
+        let budget = ContextTextBudget::heuristic(10_000);
+        let context = fixture.context().with_text_output_budget(budget);
+        let registry = ToolRegistry::defaults_with_search(None);
+        let first_call = AgentToolCall {
+            id: "call-read-escaped-1".to_string(),
+            tool: "read_file".to_string(),
+            args: json!({ "path": "escaped.txt" }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+
+        let first_raw = registry.execute(&context, &first_call);
+        assert!(first_raw.ok, "{:?}", first_raw.error);
+        assert!(
+            !crate::tools::tool_result_truncated_at_source(&first_raw),
+            "a losslessly pageable read is not an unrecoverable source truncation"
+        );
+        let first_model = registry.model_projection(&first_raw);
+        let gate =
+            ContextCapacityDetector::for_model("test-model", AgentApiStyle::OpenAiCompatible, &[])
+                .model_tool_result_gate();
+        assert!(!gate.would_truncate(&first_call.id, false, &first_model));
+        let first = first_raw.result.as_ref().unwrap();
+        let first_text = first["content"].as_str().unwrap();
+        let next_byte = first["nextStartByte"].as_u64().unwrap();
+        assert_eq!(next_byte, u64::try_from(first_text.len()).unwrap());
+        assert_eq!(
+            &content.as_bytes()[..first_text.len()],
+            first_text.as_bytes()
+        );
+
+        let second_call = AgentToolCall {
+            id: "call-read-escaped-2".to_string(),
+            tool: "read_file".to_string(),
+            args: first_model.result.as_ref().unwrap()["continueWith"]["args"].clone(),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let second_raw = registry.execute(&context, &second_call);
+        assert!(second_raw.ok, "{:?}", second_raw.error);
+        let second = second_raw.result.as_ref().unwrap();
+        let second_text = second["content"].as_str().unwrap();
+        let start = usize::try_from(next_byte).unwrap();
+        assert_eq!(
+            &content.as_bytes()[start..start + second_text.len()],
+            second_text.as_bytes()
+        );
+    }
+
+    #[test]
+    fn continuation_revision_rejects_a_changed_file() {
+        let fixture = TestWorkspace::new();
+        fixture.write_file("changing.txt", &"old\n".repeat(20_000));
+        let context = fixture
+            .context()
+            .with_text_output_budget(ContextTextBudget::heuristic(1_000));
+        let registry = ToolRegistry::defaults_with_search(None);
+        let first_call = AgentToolCall {
+            id: "call-read-changing-1".to_string(),
+            tool: "read_file".to_string(),
+            args: json!({ "path": "changing.txt" }),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+        let first = registry.execute(&context, &first_call);
+        assert!(first.ok, "{:?}", first.error);
+        let projected = registry.model_projection(&first);
+        fixture.write_file("changing.txt", &"new\n".repeat(20_000));
+        let continuation = AgentToolCall {
+            id: "call-read-changing-2".to_string(),
+            tool: "read_file".to_string(),
+            args: projected.result.unwrap()["continueWith"]["args"].clone(),
+            approval_status: AgentApprovalStatus::NotRequired,
+            reason: None,
+        };
+
+        let result = registry.execute(&context, &continuation);
+
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("revision 已变化"));
     }
 
     #[test]

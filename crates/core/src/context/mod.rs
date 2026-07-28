@@ -14,6 +14,7 @@ mod continuity;
 mod frame;
 mod measurement;
 mod message_time;
+pub(crate) mod model_tool_result_gate;
 mod state;
 mod trace_renderer;
 
@@ -49,6 +50,9 @@ pub(crate) use frame::{
 };
 pub(crate) use measurement::ContextTextBudget;
 pub(crate) use message_time::{format_message_created_at, ConversationTimingTracker};
+pub(crate) use model_tool_result_gate::{
+    ModelToolResultGate, ModelToolResultRecovery, MODEL_TOOL_RESULT_MAX_TOKENS,
+};
 pub use state::{
     AgentContextBaseline, AgentContextWindowToolProjection, AgentConversationContextState,
 };

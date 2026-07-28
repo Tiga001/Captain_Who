@@ -142,6 +142,22 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             },
         )
         .unwrap();
+    let source_archive_open =
+        crate::storage::conversation_history_open::encode_archive_history_open(
+            archive.archive_ref.clone(),
+            37,
+        )
+        .unwrap();
+    let source_tool_exchange_open =
+        crate::storage::conversation_history_open::encode_history_open(
+            &crate::storage::conversation_history_open::HistoryOpenRoute::ToolExchange {
+                reference: crate::storage::conversation_history_repository::ConversationHistoryRecordRef::TraceItem {
+                    assistant_message_id: "assistant-archive-source".to_string(),
+                    sequence: 1,
+                },
+            },
+        )
+        .unwrap();
     let trace = ConversationTurnTrace {
         schema_version: crate::CONVERSATION_TURN_TRACE_SCHEMA_VERSION,
         run_id: "run-archive-source".to_string(),
@@ -178,6 +194,32 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
                     ..Default::default()
                 },
             },
+            ConversationTurnTraceItem::ToolCall {
+                sequence: 2,
+                call_id: "call-history-source".to_string(),
+                tool: "conversation_history".to_string(),
+                operation: serde_json::json!({ "open": source_archive_open }),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                truncated: false,
+            },
+            ConversationTurnTraceItem::ToolResult {
+                sequence: 3,
+                call_id: "call-history-source".to_string(),
+                tool: "conversation_history".to_string(),
+                status: crate::ConversationTraceToolResultStatus::Succeeded,
+                success: true,
+                observation: serde_json::json!({
+                    "view": "exact_tool_result",
+                    "navigation": {
+                        "next": source_archive_open,
+                        "toolExchange": source_tool_exchange_open
+                    }
+                }),
+                approval_status: crate::AgentApprovalStatus::NotRequired,
+                error: None,
+                truncated: false,
+                archive: Default::default(),
+            },
         ],
     };
     let exact_model_items = vec![
@@ -200,6 +242,35 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
             role: "tool".to_string(),
             content: r#"{"ok":true,"result":{"content":"EXACT_FORK_MODEL_MARKER"}}"#.to_string(),
             tool_call_id: Some("call-archive-source".to_string()),
+            tool_calls: Vec::new(),
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            sequence: 2,
+            ordinal: 0,
+            role: "assistant".to_string(),
+            content: String::new(),
+            tool_call_id: None,
+            tool_calls: vec![crate::AgentContextCheckpointToolCall {
+                id: "call-history-source".to_string(),
+                name: "conversation_history".to_string(),
+                args: serde_json::json!({ "open": source_archive_open }),
+            }],
+            is_error: false,
+        },
+        crate::ConversationModelContextItem {
+            sequence: 3,
+            ordinal: 0,
+            role: "tool".to_string(),
+            content: serde_json::json!({
+                "view": "exact_tool_result",
+                "navigation": {
+                    "next": source_archive_open,
+                    "toolExchange": source_tool_exchange_open
+                }
+            })
+            .to_string(),
+            tool_call_id: Some("call-history-source".to_string()),
             tool_calls: Vec::new(),
             is_error: false,
         },
@@ -234,7 +305,7 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
         .get_conversation_model_context_log(&forked_assistant.id)
         .unwrap()
         .unwrap();
-    assert_eq!(forked_model_context.items, exact_model_items);
+    assert_eq!(forked_model_context.items.len(), exact_model_items.len());
     assert!(forked_model_context.items[1]
         .content
         .contains("EXACT_FORK_MODEL_MARKER"));
@@ -245,15 +316,67 @@ fn conversation_fork_clones_exact_history_archives_and_rewrites_trace_refs() {
     else {
         panic!("forked trace must retain the result");
     };
-    assert_ne!(forked_archive.archive_ref, Some(archive.archive_ref));
+    assert_ne!(
+        forked_archive.archive_ref.as_deref(),
+        Some(archive.archive_ref.as_str())
+    );
     assert_eq!(
         forked_archive.content_hash.as_deref(),
         Some(archive.content_hash.as_str())
     );
+    let forked_archive_ref = forked_archive.archive_ref.as_deref().unwrap();
+    let ConversationTurnTraceItem::ToolResult {
+        observation: forked_history_observation,
+        ..
+    } = &forked_trace.items[3]
+    else {
+        panic!("forked trace must retain the conversation_history result");
+    };
+    let forked_trace_next = forked_history_observation["navigation"]["next"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        crate::storage::conversation_history_open::decode_history_open(forked_trace_next).unwrap(),
+        crate::storage::conversation_history_open::HistoryOpenRoute::Archive {
+            archive_ref: forked_archive_ref.to_string(),
+            start_char: 37,
+        }
+    );
+    let forked_trace_source = forked_history_observation["navigation"]["toolExchange"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        crate::storage::conversation_history_open::decode_history_open(forked_trace_source)
+            .unwrap(),
+        crate::storage::conversation_history_open::HistoryOpenRoute::ToolExchange {
+            reference: crate::storage::conversation_history_repository::ConversationHistoryRecordRef::TraceItem {
+                assistant_message_id: forked_assistant.id.clone(),
+                sequence: 1,
+            },
+        }
+    );
+    let forked_model_history =
+        serde_json::from_str::<serde_json::Value>(&forked_model_context.items[3].content).unwrap();
+    assert_eq!(
+        crate::storage::conversation_history_open::decode_history_open(
+            forked_model_history["navigation"]["next"].as_str().unwrap()
+        )
+        .unwrap(),
+        crate::storage::conversation_history_open::HistoryOpenRoute::Archive {
+            archive_ref: forked_archive_ref.to_string(),
+            start_char: 37,
+        }
+    );
+    assert!(
+        !forked_model_context.items[3]
+            .content
+            .contains(&archive.archive_ref),
+        "forked model history must not retain the source archive identity inside an opaque open"
+    );
     let page = service
         .read_conversation_history_archive_page(
             &forked.id,
-            forked_archive.archive_ref.as_deref().unwrap(),
+            forked_archive_ref,
             crate::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Char,
             0,
             u64::MAX,

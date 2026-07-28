@@ -8,10 +8,12 @@
 use super::tool_failure_guard::semantic_tool_call_fingerprint;
 #[cfg(test)]
 use super::tool_flow::build_tool_observation_message;
-use super::tool_flow::build_tool_observation_message_with_history_ref;
-use crate::context::{ContextFrame, ContextGroup, ContextOrigin};
+#[cfg(test)]
+use crate::context::ContextCapacityDetector;
+use crate::context::{ContextFrame, ContextGroup, ContextOrigin, ModelToolResultGate};
 use crate::conversation_trace::{
-    canonical_tool_result_for_context, ConversationTraceRecorder, ConversationTurnTraceItem,
+    canonical_tool_result_for_context, ConversationHistoryArchiveTraceMetadata,
+    ConversationTraceRecorder, ConversationTurnTraceItem,
 };
 use crate::llm::{validate_model_tool_call_id, LlmToolCall};
 use crate::protocol::{
@@ -202,6 +204,7 @@ pub(super) fn create_run_checkpoint(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 pub(super) fn restore_run_checkpoint(
     checkpoint: AgentRunCheckpoint,
     run_id: &str,
@@ -210,11 +213,36 @@ pub(super) fn restore_run_checkpoint(
     restore_run_checkpoint_with_history_ref(checkpoint, run_id, continuation, None)
 }
 
+#[cfg(test)]
 pub(super) fn restore_run_checkpoint_with_history_ref(
     checkpoint: AgentRunCheckpoint,
     run_id: &str,
     continuation: &AgentToolContinuation,
     assistant_message_id: Option<&str>,
+) -> AgentResult<RestoredRunCheckpoint> {
+    let gate = ContextCapacityDetector::for_model(
+        "checkpoint-compatibility",
+        crate::protocol::AgentApiStyle::OpenAiCompatible,
+        &[],
+    )
+    .model_tool_result_gate();
+    restore_run_checkpoint_with_model_projection(
+        checkpoint,
+        run_id,
+        continuation,
+        assistant_message_id,
+        &gate,
+        &ConversationHistoryArchiveTraceMetadata::default(),
+    )
+}
+
+pub(super) fn restore_run_checkpoint_with_model_projection(
+    checkpoint: AgentRunCheckpoint,
+    run_id: &str,
+    continuation: &AgentToolContinuation,
+    assistant_message_id: Option<&str>,
+    model_tool_result_gate: &ModelToolResultGate,
+    archive_metadata: &ConversationHistoryArchiveTraceMetadata,
 ) -> AgentResult<RestoredRunCheckpoint> {
     if checkpoint.version != AGENT_RUN_CHECKPOINT_SCHEMA_VERSION {
         return Err(AgentError::new(format!(
@@ -261,17 +289,7 @@ pub(super) fn restore_run_checkpoint_with_history_ref(
     }
 
     let continuation_result_sequence =
-        checkpoint
-            .next_conversation_trace_sequence
-            .saturating_add(u64::from(!checkpoint.conversation_trace_items.iter().any(
-                |item| {
-                    matches!(
-                        item,
-                        ConversationTurnTraceItem::ToolCall { call_id, .. }
-                            if call_id == &continuation.call.id
-                    )
-                },
-            )));
+        continuation_result_sequence(&checkpoint, &continuation.call.id);
     let tool_set = checkpoint.tool_set;
     let restored_batch_fingerprints =
         restore_batch_fingerprints(&checkpoint.context_items, &checkpoint.pending_tool_call_id)?;
@@ -298,12 +316,16 @@ pub(super) fn restore_run_checkpoint_with_history_ref(
     let durable_result = canonical_tool_result_for_context(&continuation.result);
     let llm_result =
         crate::tools::model_projection_for_persisted_continuation(&continuation.result);
-    let history_ref = assistant_message_id.map(|assistant_message_id| {
-        crate::ContextHistoryRef::trace_item(assistant_message_id, continuation_result_sequence)
-    });
+    let model_observation = super::finalize_model_tool_observation(
+        model_tool_result_gate,
+        &continuation.call.id,
+        !continuation.result.ok,
+        &llm_result,
+        archive_metadata,
+    )?;
     context.append_tool_continuation(
         &continuation_call,
-        build_tool_observation_message_with_history_ref(&llm_result, history_ref.as_ref()),
+        model_observation.clone(),
         !continuation.result.ok,
         assistant_message_id.map(|assistant_message_id| {
             ContextOrigin::conversation_trace_item(
@@ -320,15 +342,17 @@ pub(super) fn restore_run_checkpoint_with_history_ref(
             &crate::llm::LlmMessage::assistant("", vec![continuation_call.clone()]),
         );
     }
-    if let Some(sequence) =
-        conversation_trace.record_tool_result(&continuation.call, &durable_result)
-    {
+    if let Some(sequence) = conversation_trace.record_tool_result_with_archive(
+        &continuation.call,
+        &durable_result,
+        archive_metadata.clone(),
+    ) {
         conversation_trace.record_model_message(
             sequence,
             0,
             &crate::llm::LlmMessage::tool_result(
                 continuation.call.id.clone(),
-                build_tool_observation_message_with_history_ref(&llm_result, history_ref.as_ref()),
+                model_observation,
                 !continuation.result.ok,
             ),
         );
@@ -498,6 +522,22 @@ fn validate_conversation_trace_tool_call_ids(
         }
     }
     Ok(())
+}
+
+pub(super) fn continuation_result_sequence(checkpoint: &AgentRunCheckpoint, call_id: &str) -> u64 {
+    checkpoint
+        .next_conversation_trace_sequence
+        .saturating_add(u64::from(!checkpoint.conversation_trace_items.iter().any(
+            |item| {
+                matches!(
+                    item,
+                    ConversationTurnTraceItem::ToolCall {
+                        call_id: recorded_call_id,
+                        ..
+                    } if recorded_call_id == call_id
+                )
+            },
+        )))
 }
 
 fn restore_queued_tool_calls(

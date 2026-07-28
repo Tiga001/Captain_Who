@@ -747,6 +747,7 @@ pub fn cancelled_conversation_trace_from_checkpoint(
     assistant_message_id: &str,
     call: &AgentToolCall,
     result: &AgentToolResult,
+    model_observation: &str,
     reason: &str,
 ) -> ConversationTurnTrace {
     let mut recorder = ConversationTraceRecorder::from_checkpoint_with_model_context(
@@ -755,7 +756,14 @@ pub fn cancelled_conversation_trace_from_checkpoint(
         checkpoint.next_conversation_trace_sequence,
         checkpoint.conversation_trace_truncated,
     );
-    record_model_tool_exchange(&mut recorder, call, result, None);
+    record_model_tool_exchange_with_projection(
+        &mut recorder,
+        call,
+        result,
+        None,
+        Some(model_observation),
+        ConversationHistoryArchiveTraceMetadata::default(),
+    );
     recorder.finish(
         &checkpoint.run_id,
         conversation_id,
@@ -765,26 +773,18 @@ pub fn cancelled_conversation_trace_from_checkpoint(
     )
 }
 
-pub fn conversation_trace_snapshot_from_checkpoint_and_continuation(
-    checkpoint: &AgentRunCheckpoint,
-    call: &AgentToolCall,
-    result: &AgentToolResult,
-) -> ConversationTraceSnapshot {
-    conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
-        checkpoint, call, result, None,
-    )
-}
-
-/// Builds an approval-continuation snapshot using the same model-only projection that runtime
-/// checkpoint restoration will place in the model-visible ToolResult.
+/// Builds the Host-side approval snapshot with a model observation already finalized by the
+/// request's central Tool-result budget gate.
 ///
-/// Settlement and runtime resume must persist byte-identical model projections. Otherwise the
-/// append-only model log would correctly reject the resumed request as a rewrite.
-pub fn conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref(
+/// The Archive pointer and model text enter the append-only snapshot together, preventing a
+/// restart from observing a bounded result without its exact recovery route.
+pub fn conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection(
     checkpoint: &AgentRunCheckpoint,
     call: &AgentToolCall,
     result: &AgentToolResult,
     assistant_message_id: Option<&str>,
+    model_observation: &str,
+    archive: ConversationHistoryArchiveTraceMetadata,
 ) -> ConversationTraceSnapshot {
     let mut recorder = ConversationTraceRecorder::from_checkpoint_with_model_context(
         checkpoint.conversation_trace_items.clone(),
@@ -792,32 +792,36 @@ pub fn conversation_trace_snapshot_from_checkpoint_and_continuation_with_history
         checkpoint.next_conversation_trace_sequence,
         checkpoint.conversation_trace_truncated,
     );
-    let result_sequence = checkpoint
-        .next_conversation_trace_sequence
-        .saturating_add(u64::from(!checkpoint.conversation_trace_items.iter().any(
-            |item| {
-                matches!(
-                    item,
-                    ConversationTurnTraceItem::ToolCall { call_id, .. }
-                        if call_id == &call.id
-                )
-            },
-        )));
     let history_ref = assistant_message_id.map(|assistant_message_id| {
-        crate::ContextHistoryRef::trace_item(assistant_message_id, result_sequence)
+        crate::ContextHistoryRef::trace_item(
+            assistant_message_id,
+            continuation_result_sequence(checkpoint, call),
+        )
     });
-    record_model_tool_exchange(&mut recorder, call, result, history_ref.as_ref());
+    record_model_tool_exchange_with_projection(
+        &mut recorder,
+        call,
+        result,
+        history_ref.as_ref(),
+        Some(model_observation),
+        archive,
+    );
     recorder.snapshot()
 }
 
-fn record_model_tool_exchange(
+fn record_model_tool_exchange_with_projection(
     recorder: &mut ConversationTraceRecorder,
     call: &AgentToolCall,
     result: &AgentToolResult,
     history_ref: Option<&crate::ContextHistoryRef>,
+    model_observation: Option<&str>,
+    archive: ConversationHistoryArchiveTraceMetadata,
 ) {
     let durable_result = canonical_tool_result_for_context(result);
     let llm_result = crate::tools::model_projection_for_persisted_continuation(result);
+    let model_observation = model_observation
+        .map(ToString::to_string)
+        .unwrap_or_else(|| render_tool_observation_with_history_ref(&llm_result, history_ref));
     if let Some(sequence) = recorder.record_tool_call(call) {
         recorder.record_model_message(
             sequence,
@@ -832,17 +836,28 @@ fn record_model_tool_exchange(
             ),
         );
     }
-    if let Some(sequence) = recorder.record_tool_result(call, &durable_result) {
+    if let Some(sequence) = recorder.record_tool_result_with_archive(call, &durable_result, archive)
+    {
         recorder.record_model_message(
             sequence,
             0,
-            &LlmMessage::tool_result(
-                call.id.clone(),
-                render_tool_observation_with_history_ref(&llm_result, history_ref),
-                !llm_result.ok,
-            ),
+            &LlmMessage::tool_result(call.id.clone(), model_observation, !llm_result.ok),
         );
     }
+}
+
+fn continuation_result_sequence(checkpoint: &AgentRunCheckpoint, call: &AgentToolCall) -> u64 {
+    checkpoint
+        .next_conversation_trace_sequence
+        .saturating_add(u64::from(!checkpoint.conversation_trace_items.iter().any(
+            |item| {
+                matches!(
+                    item,
+                    ConversationTurnTraceItem::ToolCall { call_id, .. }
+                        if call_id == &call.id
+                )
+            },
+        )))
 }
 
 pub fn cancelled_conversation_trace_from_snapshot(

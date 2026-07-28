@@ -154,6 +154,26 @@ impl ContextFrame {
         }
     }
 
+    /// Final provider-bound invariant for the product-wide single Tool-result limit.
+    ///
+    /// Normal execution, approval recovery and legacy hydration all apply the semantic gate before
+    /// constructing the frame. This last check prevents an old checkpoint or pre-gate persisted
+    /// model log from bypassing that contract.
+    pub(crate) fn ensure_model_tool_results_fit(
+        &self,
+        gate: &crate::context::ModelToolResultGate,
+    ) -> AgentResult<()> {
+        for item in self.iter_items() {
+            if item.message.role == LlmMessageRole::Tool && !gate.admits_message(&item.message) {
+                return Err(AgentError::new(format!(
+                    "模型上下文中的工具结果 `{}` 超过统一 10K token 上限，且无法在发送前安全重建。",
+                    item.message.tool_call_id.as_deref().unwrap_or("unknown")
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn from_measured_baseline(baseline: MeasuredContextBaseline) -> Self {
         Self {
             revision: baseline.revision,

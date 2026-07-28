@@ -1276,10 +1276,13 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
             None,
         )
         .unwrap();
-    let command_result =
+    let mut command_result =
         run_explicitly_approved_command_from_snapshot(&record, AgentCancellationToken::new(), None)
             .unwrap();
     assert_eq!(command_result.exit_code, Some(0));
+    // A Host continuation can carry substantially more output than the model projection. Keep
+    // the fixture deterministic while proving the approval boundary archives the exact result.
+    command_result.stdout = "approval-stdout-evidence\n".repeat(4_096);
     let successful_tool_result = command_tool_result(call_id, &command_result);
     let mut continuation_input = record.agent_input.clone();
     continuation_input.approval_decision = Some(AgentApprovalDecision {
@@ -1377,14 +1380,138 @@ fn manually_approved_command_reconciles_two_post_commit_errors_and_keeps_observa
         .unwrap()
         .unwrap();
     trace.validate().unwrap();
-    assert!(matches!(
-        trace.items.last(),
+    let (result_sequence, archive_ref, content_hash, archived_bytes) = match trace.items.last() {
         Some(ConversationTurnTraceItem::ToolResult {
+            sequence,
             call_id,
             success: true,
+            archive,
             ..
-        }) if call_id == "manual-command-audit-failure"
+        }) if call_id == "manual-command-audit-failure" => (
+            *sequence,
+            archive
+                .archive_ref
+                .clone()
+                .expect("approved Host result must carry an exact-history ref"),
+            archive
+                .content_hash
+                .clone()
+                .expect("approved Host result must carry an exact-history hash"),
+            archive
+                .archived_bytes
+                .expect("approved Host result must carry its archived size"),
+        ),
+        other => panic!("unexpected terminal trace item: {other:?}"),
+    };
+    assert!(archived_bytes > 64 * 1_024);
+    let archive = storage
+        .find_conversation_history_archive_for_trace_item(
+            "conversation-manual-command",
+            "assistant-manual-command",
+            result_sequence,
+        )
+        .unwrap()
+        .expect("approved Host result archive");
+    assert_eq!(archive.archive_ref, archive_ref);
+    assert_eq!(archive.content_hash, content_hash);
+    assert_eq!(archive.total_bytes, archived_bytes);
+    assert!(
+        archive.model_projection_truncated,
+        "the immutable Archive descriptor must record central-gate projection loss"
+    );
+    let archived_page = storage
+        .read_conversation_history_archive_page(
+            "conversation-manual-command",
+            &archive_ref,
+            mycopilot_core::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Char,
+            0,
+            archive.total_chars,
+        )
+        .unwrap()
+        .expect("approved Host result archive page");
+    assert_eq!(
+        serde_json::from_str::<Value>(&archived_page.content).unwrap(),
+        serde_json::to_value(&successful_tool_result).unwrap()
+    );
+    let archive_metadata = mycopilot_core::ConversationHistoryArchiveTraceMetadata {
+        archive_ref: Some(archive.archive_ref.clone()),
+        content_hash: Some(archive.content_hash.clone()),
+        archived_bytes: Some(archive.total_bytes),
+        archived_completely: Some(archive.archived_completely),
+        truncated_at_source: archive.truncated_at_source,
+        model_projection_truncated: archive.model_projection_truncated,
+        history_projection_truncated: false,
+        archive_projection_truncated: archive.archive_projection_truncated,
+    };
+    let expected_model_observation = project_persisted_continuation_observation(
+        &continuation_input.model,
+        &continuation_input.api_url,
+        continuation_input.api_style,
+        &successful_tool_result,
+        &archive_metadata,
+    )
+    .unwrap();
+    let model_log = storage
+        .get_conversation_model_context_log("assistant-manual-command")
+        .unwrap()
+        .expect("approved Host model log");
+    let persisted_model_observation = model_log
+        .items
+        .iter()
+        .find(|item| item.tool_call_id.as_deref() == Some(successful_tool_result.call_id.as_str()))
+        .expect("approved Host ToolResult model item")
+        .content
+        .clone();
+    assert_eq!(persisted_model_observation, expected_model_observation);
+    let bounded: Value = serde_json::from_str(&persisted_model_observation).unwrap();
+    assert_eq!(bounded["truncated"], true);
+    assert_eq!(bounded["continueWith"]["tool"], "conversation_history");
+    assert_eq!(
+        bounded["historyOpen"].as_str(),
+        bounded["continueWith"]["args"]["open"].as_str()
+    );
+
+    // The archive and its Trace pointer survive a process boundary and remain directly readable.
+    drop(service);
+    drop(storage);
+    let restarted =
+        StorageService::open(&fixture.path().join("storage.sqlite")).expect("restart storage");
+    let restarted_trace = restarted
+        .get_conversation_turn_trace("assistant-manual-command")
+        .unwrap()
+        .expect("trace after restart");
+    assert!(matches!(
+        restarted_trace.items.last(),
+        Some(ConversationTurnTraceItem::ToolResult { archive, .. })
+            if archive.archive_ref.as_deref() == Some(archive_ref.as_str())
+                && archive.content_hash.as_deref() == Some(content_hash.as_str())
     ));
+    let restarted_page = restarted
+        .read_conversation_history_archive_page(
+            "conversation-manual-command",
+            &archive_ref,
+            mycopilot_core::storage::conversation_history_archive_repository::ConversationHistoryArchivePageUnit::Char,
+            0,
+            archive.total_chars,
+        )
+        .unwrap()
+        .expect("archive page after restart");
+    assert_eq!(restarted_page.content, archived_page.content);
+    let restarted_model_log = restarted
+        .get_conversation_model_context_log("assistant-manual-command")
+        .unwrap()
+        .expect("model log after restart");
+    assert_eq!(
+        restarted_model_log
+            .items
+            .iter()
+            .find(|item| {
+                item.tool_call_id.as_deref() == Some(successful_tool_result.call_id.as_str())
+            })
+            .expect("restarted approved Host ToolResult")
+            .content,
+        persisted_model_observation
+    );
 }
 
 #[test]

@@ -8,9 +8,9 @@ use crate::storage::models::{
 };
 use crate::storage::{
     attachment_repository, chat_repository, context_compaction_repository,
-    conversation_history_archive_repository, conversation_model_context_repository,
-    conversation_trace_repository, file_draft_repository, guidance_repository,
-    turn_diff_repository, world_state_repository,
+    conversation_history_archive_repository, conversation_history_open,
+    conversation_model_context_repository, conversation_trace_repository, file_draft_repository,
+    guidance_repository, turn_diff_repository, world_state_repository,
 };
 use crate::{
     AgentGuidanceStatus, ConversationModelContextItem, ConversationTurnTrace, WorldStateRecord,
@@ -1080,6 +1080,7 @@ fn rewrite_trace_items(
     let mut value = serde_json::to_value(&trace.items)
         .map_err(|error| format!("无法序列化历史工具轨迹：{error}"))?;
     rewrite_exact_ids(&mut value, replacements);
+    rewrite_history_open_tokens(&mut value, replacements)?;
     trace.items = serde_json::from_value(value)
         .map_err(|error| format!("无法重建复制后的历史工具轨迹：{error}"))?;
     trace.validate().map_err(|error| error.to_string())
@@ -1092,6 +1093,7 @@ fn rewrite_model_context_items(
     let mut value = serde_json::to_value(&*items)
         .map_err(|error| format!("无法序列化历史模型上下文：{error}"))?;
     rewrite_exact_ids(&mut value, replacements);
+    rewrite_history_open_tokens(&mut value, replacements)?;
     *items = serde_json::from_value(value)
         .map_err(|error| format!("无法重建复制后的历史模型上下文：{error}"))?;
     for item in items {
@@ -1105,6 +1107,70 @@ fn rewritten_value(value: &Value, replacements: &HashMap<String, String>) -> Val
     let mut value = value.clone();
     rewrite_exact_ids(&mut value, replacements);
     value
+}
+
+fn rewrite_history_open_tokens(
+    value: &mut Value,
+    replacements: &HashMap<String, String>,
+) -> Result<(), String> {
+    match value {
+        Value::String(current) => {
+            *current = rewritten_history_open_tokens(current, replacements)?;
+        }
+        Value::Array(values) => {
+            for value in values {
+                rewrite_history_open_tokens(value, replacements)?;
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                rewrite_history_open_tokens(value, replacements)?;
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+    Ok(())
+}
+
+fn rewritten_history_open_tokens(
+    value: &str,
+    replacements: &HashMap<String, String>,
+) -> Result<String, String> {
+    let prefix = conversation_history_open::HISTORY_OPEN_PREFIX;
+    let Some(first_match) = value.find(prefix) else {
+        return Ok(value.to_string());
+    };
+    let mut rewritten = String::with_capacity(value.len());
+    rewritten.push_str(&value[..first_match]);
+    let mut cursor = first_match;
+    while cursor < value.len() {
+        let Some(relative_start) = value[cursor..].find(prefix) else {
+            rewritten.push_str(&value[cursor..]);
+            break;
+        };
+        let start = cursor.saturating_add(relative_start);
+        rewritten.push_str(&value[cursor..start]);
+        let encoded_start = start.saturating_add(prefix.len());
+        let encoded_len = value[encoded_start..]
+            .bytes()
+            .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            .count();
+        if encoded_len == 0 {
+            rewritten.push_str(prefix);
+            cursor = encoded_start;
+            continue;
+        }
+        let end = encoded_start.saturating_add(encoded_len);
+        let token = &value[start..end];
+        if let Some(remapped) = conversation_history_open::remap_history_open(token, replacements)?
+        {
+            rewritten.push_str(&remapped);
+        } else {
+            rewritten.push_str(token);
+        }
+        cursor = end;
+    }
+    Ok(rewritten)
 }
 
 fn remap_cursor(

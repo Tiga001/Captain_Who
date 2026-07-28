@@ -45,8 +45,7 @@ pub use context_compaction_receipt::{
 pub use conversation_trace::{
     cancelled_conversation_trace_from_checkpoint, cancelled_conversation_trace_from_snapshot,
     cancelled_conversation_trace_without_items, completed_conversation_trace_without_items,
-    conversation_trace_snapshot_from_checkpoint_and_continuation,
-    conversation_trace_snapshot_from_checkpoint_and_continuation_with_history_ref,
+    conversation_trace_snapshot_from_checkpoint_and_continuation_with_projection,
     conversation_trace_with_recovered_tool_result, failed_conversation_trace_without_items,
     terminalize_interrupted_conversation_trace, ConversationHistoryArchiveTraceMetadata,
     ConversationModelContextItem, ConversationModelContextLog, ConversationTraceAttachment,
@@ -67,6 +66,71 @@ pub use model_request_observation::{
     ProviderCacheTopology, MODEL_REQUEST_OBSERVATION_SCHEMA_VERSION,
 };
 pub use protocol::is_valid_agent_office_reason;
+
+/// Rebuilds the model-only projection for a result restored from an approval checkpoint.
+///
+/// Core Server uses this when it must settle a Host continuation before resuming the model.
+/// Keeping the tool-owned projection in Core avoids duplicating per-tool field contracts in the
+/// Host boundary.
+pub fn project_persisted_continuation_for_model(result: &AgentToolResult) -> AgentToolResult {
+    tools::model_projection_for_persisted_continuation(result)
+}
+
+/// Rebuilds the security-sanitized, non-length-bounded exact-history projection for a result
+/// restored from an approval checkpoint.
+pub fn project_persisted_continuation_for_archive(result: &AgentToolResult) -> AgentToolResult {
+    tools::archive_projection_for_persisted_continuation(result)
+}
+
+/// Distinguishes an unrecoverable source-side cut from an ordinary paginated Tool result.
+pub fn tool_result_truncated_at_source(result: &AgentToolResult) -> bool {
+    tools::tool_result_truncated_at_source(result)
+}
+
+/// Produces the exact bounded Tool-result text that an approval continuation may append to the
+/// model timeline. Core Server calls this before its append-only trace/model-context commit, and
+/// runtime restore calls the same gate again from the persisted Archive metadata.
+pub fn project_persisted_continuation_observation(
+    model: &str,
+    api_url: &str,
+    api_style: Option<protocol::AgentApiStyle>,
+    result: &AgentToolResult,
+    archive: &ConversationHistoryArchiveTraceMetadata,
+) -> AgentResult<String> {
+    let api_style = api_style.unwrap_or_else(|| llm::detect_api_style(api_url.trim()));
+    let gate =
+        context::ContextCapacityDetector::for_model(model, api_style, &[]).model_tool_result_gate();
+    let projected = tools::model_projection_for_persisted_continuation(result);
+    runtime::finalize_model_tool_observation(
+        &gate,
+        &result.call_id,
+        !result.ok,
+        &projected,
+        archive,
+    )
+}
+
+/// Reports whether the central 10K gate will length-truncate an approval continuation's semantic
+/// model projection. Hosts use this before storing the immutable Archive descriptor so its
+/// projection-loss metadata agrees with the model message committed immediately afterward.
+pub fn persisted_continuation_model_projection_would_truncate(
+    model: &str,
+    api_url: &str,
+    api_style: Option<protocol::AgentApiStyle>,
+    result: &AgentToolResult,
+) -> bool {
+    let api_style = api_style.unwrap_or_else(|| llm::detect_api_style(api_url.trim()));
+    let gate =
+        context::ContextCapacityDetector::for_model(model, api_style, &[]).model_tool_result_gate();
+    let projected = tools::model_projection_for_persisted_continuation(result);
+    gate.would_truncate_with_source(
+        &result.call_id,
+        !result.ok,
+        &projected,
+        tools::tool_result_truncated_at_source(result),
+    )
+}
+
 /// Re-parse and recompile a frozen Office semantic request, proving that it
 /// still matches the canonical request authorized by the Host.
 pub fn validate_frozen_agent_office_semantic_args(

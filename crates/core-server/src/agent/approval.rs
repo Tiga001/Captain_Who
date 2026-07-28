@@ -236,12 +236,21 @@ impl AgentService {
             record.snapshot.assistant_message_id.as_deref(),
             record.agent_input.resume_checkpoint.as_ref(),
         ) {
+            let model_observation = project_persisted_continuation_observation(
+                &record.agent_input.model,
+                &record.agent_input.api_url,
+                record.agent_input.api_style,
+                &execution.tool_result,
+                &Default::default(),
+            )
+            .map_err(|error| error.to_string())?;
             let trace = cancelled_conversation_trace_from_checkpoint(
                 checkpoint,
                 conversation_id,
                 assistant_message_id,
                 &call,
                 &execution.tool_result,
+                &model_observation,
                 REASON,
             );
             let usage_record = self.prepare_run_usage_record(

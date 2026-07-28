@@ -116,6 +116,87 @@ pub(crate) fn model_projection_for_persisted_continuation(
     }
 }
 
+/// Rebuilds the exact-history projection for a host result restored after approval.
+///
+/// Most approval-capable tools persist their canonical result. Keeping this dispatcher beside
+/// the model dispatcher prevents a future tool-specific archive projection from being bypassed
+/// solely because the tool completed in the Host rather than the live runtime registry.
+pub(crate) fn archive_projection_for_persisted_continuation(
+    result: &AgentToolResult,
+) -> AgentToolResult {
+    match result.tool.as_str() {
+        "image_generation" => image_generation::image_generation_history_projection(result),
+        "read_image" => read_image::read_image_history_projection(result),
+        _ => canonical_tool_result_for_context(result),
+    }
+}
+
+pub(crate) fn tool_result_truncated_at_source(result: &AgentToolResult) -> bool {
+    result
+        .result
+        .as_ref()
+        .is_some_and(value_contains_unrecoverable_source_truncation)
+}
+
+fn value_contains_unrecoverable_source_truncation(value: &Value) -> bool {
+    let Value::Object(object) = value else {
+        return match value {
+            Value::Array(values) => values
+                .iter()
+                .any(value_contains_unrecoverable_source_truncation),
+            _ => false,
+        };
+    };
+
+    if let Some(truncated_at_source) = object
+        .get("truncatedAtSource")
+        .or_else(|| object.get("truncated_at_source"))
+        .and_then(Value::as_bool)
+    {
+        return truncated_at_source;
+    }
+
+    let has_recovery = [
+        "continueWith",
+        "continue_with",
+        "cursor",
+        "next",
+        "nextCursor",
+        "next_cursor",
+        "nextStartByte",
+        "nextStartLine",
+        "nextAfterPath",
+        "historyOpen",
+        "history_open",
+    ]
+    .iter()
+    .any(|key| object.get(*key).is_some_and(|value| !value.is_null()))
+        || object
+            .get("navigation")
+            .and_then(Value::as_object)
+            .is_some_and(|navigation| navigation.values().any(|value| !value.is_null()));
+    let locally_truncated = object.get("truncated").is_some_and(value_contains_true);
+    if locally_truncated && !has_recovery {
+        return true;
+    }
+
+    object.iter().any(|(key, value)| {
+        !matches!(
+            key.as_str(),
+            "truncated" | "truncatedAtSource" | "truncated_at_source"
+        ) && value_contains_unrecoverable_source_truncation(value)
+    })
+}
+
+fn value_contains_true(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => *value,
+        Value::Array(values) => values.iter().any(value_contains_true),
+        Value::Object(values) => values.values().any(value_contains_true),
+        _ => false,
+    }
+}
+
 pub struct ToolRegistry {
     tools: BTreeMap<String, Box<dyn AgentTool>>,
     owners: BTreeMap<String, String>,
@@ -1322,6 +1403,60 @@ mod tests {
         let result = structured_error_result(&error).unwrap();
         assert_eq!(result["missing"], json!(["openpyxl"]));
         assert_eq!(result["errorCode"], "skill_script.dependency_missing");
+    }
+
+    #[test]
+    fn source_truncation_distinguishes_lossless_pages_from_unrecoverable_cuts() {
+        let pageable = AgentToolResult {
+            call_id: "pageable".to_string(),
+            tool: "read_file".to_string(),
+            ok: true,
+            result: Some(json!({
+                "content": "prefix",
+                "truncated": true,
+                "nextStartByte": 6
+            })),
+            error: None,
+        };
+        let unrecoverable = AgentToolResult {
+            call_id: "unrecoverable".to_string(),
+            tool: "web_fetch".to_string(),
+            ok: true,
+            result: Some(json!({
+                "content": "prefix",
+                "truncated": true
+            })),
+            error: None,
+        };
+        let skill_page = AgentToolResult {
+            call_id: "skills-page".to_string(),
+            tool: "skills_list_resources".to_string(),
+            ok: true,
+            result: Some(json!({
+                "resources": [],
+                "truncated": true,
+                "nextAfterPath": "references/next.md"
+            })),
+            error: None,
+        };
+        let explicitly_complete_source = AgentToolResult {
+            call_id: "explicit-source".to_string(),
+            tool: "custom".to_string(),
+            ok: true,
+            result: Some(json!({
+                "content": "bounded local projection",
+                "truncated": true,
+                "truncatedAtSource": false
+            })),
+            error: None,
+        };
+
+        assert!(!tool_result_truncated_at_source(&pageable));
+        assert!(!tool_result_truncated_at_source(&skill_page));
+        assert!(!tool_result_truncated_at_source(
+            &explicitly_complete_source
+        ));
+        assert!(tool_result_truncated_at_source(&unrecoverable));
     }
 
     struct TestWorkspace {

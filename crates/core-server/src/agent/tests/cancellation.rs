@@ -856,7 +856,17 @@ async fn cancelling_run_during_approved_command_finishes_cancelled_without_resum
         trace.items.last(),
         Some(ConversationTurnTraceItem::ToolResult {
             status: ConversationTraceToolResultStatus::Cancelled,
+            archive,
             ..
-        })
+        }) if archive.archived_completely == Some(true)
+            && archive.archive_ref.is_some()
     ));
+    let model_log = storage
+        .get_conversation_model_context_log("assistant-command-cancel")
+        .unwrap()
+        .expect("cancelled approved command model log");
+    assert!(model_log
+        .items
+        .iter()
+        .any(|item| item.tool_call_id.as_deref() == Some("command-cancel")));
 }
